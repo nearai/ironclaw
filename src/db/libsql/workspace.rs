@@ -824,10 +824,10 @@ mod tests {
 
     /// Helper: create a file-backed backend with migrations applied.
     async fn setup_backend() -> (LibSqlBackend, tempfile::TempDir) {
-        let dir = tempfile::tempdir().expect("tempdir"); // safety: test-only
+        let dir = tempfile::tempdir().expect("tempdir");
         let db_path = dir.path().join("test_vector.db");
-        let backend = LibSqlBackend::new_local(&db_path).await.expect("new_local"); // safety: test-only
-        backend.run_migrations().await.expect("migrations"); // safety: test-only
+        let backend = LibSqlBackend::new_local(&db_path).await.expect("new_local");
+        backend.run_migrations().await.expect("migrations");
         (backend, dir)
     }
 
@@ -839,7 +839,7 @@ mod tests {
         content: &str,
         embedding: Option<&[f32]>,
     ) -> (Uuid, Uuid) {
-        let conn = backend.connect().await.expect("connect"); // safety: test-only
+        let conn = backend.connect().await.expect("connect");
         let doc_id = Uuid::new_v4();
         let now = super::fmt_ts(&Utc::now());
         conn.execute(
@@ -848,13 +848,11 @@ mod tests {
             params![doc_id.to_string(), user_id, path, now],
         )
         .await
-        .expect("insert doc"); // safety: test-only
-
+        .expect("insert doc");
         let chunk_id = backend
             .insert_chunk(doc_id, 0, content, embedding)
             .await
-            .expect("insert chunk"); // safety: test-only
-
+            .expect("insert chunk");
         (doc_id, chunk_id)
     }
 
@@ -863,8 +861,7 @@ mod tests {
         let (backend, _dir) = setup_backend().await;
 
         // Create vector index with dim=4
-        backend.ensure_vector_index(4).await.expect("ensure dim=4"); // safety: test-only
-
+        backend.ensure_vector_index(4).await.expect("ensure dim=4");
         // Insert a chunk with a 4-dim embedding
         let embedding = [1.0_f32, 0.0, 0.0, 0.0];
         let (_doc_id, _chunk_id) = insert_test_chunk(
@@ -877,7 +874,7 @@ mod tests {
         .await;
 
         // Query using vector_top_k — should find the chunk
-        let conn = backend.connect().await.expect("connect"); // safety: test-only
+        let conn = backend.connect().await.expect("connect");
         let mut rows = conn
             .query(
                 r#"SELECT c.id
@@ -886,15 +883,14 @@ mod tests {
                 (),
             )
             .await
-            .expect("vector_top_k query"); // safety: test-only
-
+            .expect("vector_top_k query");
         let row = rows
             .next()
             .await
-            .expect("row fetch") // safety: test-only
-            .expect("expected a result row"); // safety: test-only
-        let id: String = row.get(0).expect("get id"); // safety: test-only
-        assert!(!id.is_empty(), "vector search should return the chunk"); // safety: test-only assertion
+            .expect("row fetch")
+            .expect("expected a result row");
+        let id: String = row.get(0).expect("get id");
+        assert!(!id.is_empty(), "vector search should return the chunk");
     }
 
     #[tokio::test]
@@ -902,31 +898,28 @@ mod tests {
         let (backend, _dir) = setup_backend().await;
 
         // Create with dim=4 and insert data
-        backend.ensure_vector_index(4).await.expect("ensure dim=4"); // safety: test-only
+        backend.ensure_vector_index(4).await.expect("ensure dim=4");
         let embedding_4d = [1.0_f32, 2.0, 3.0, 4.0];
         insert_test_chunk(&backend, "test", "a.md", "content a", Some(&embedding_4d)).await;
 
         // Recreate with dim=8 — old 4-dim embeddings should be NULLed
-        backend.ensure_vector_index(8).await.expect("ensure dim=8"); // safety: test-only
-
+        backend.ensure_vector_index(8).await.expect("ensure dim=8");
         // Verify metadata updated
-        let conn = backend.connect().await.expect("connect"); // safety: test-only
+        let conn = backend.connect().await.expect("connect");
         let mut rows = conn
             .query("SELECT name FROM _migrations WHERE version = 0", ())
             .await
-            .expect("query metadata"); // safety: test-only
-        let row = rows.next().await.expect("fetch").expect("metadata row"); // safety: test-only
-        let dim_str: String = row.get(0).expect("get name"); // safety: test-only
-        assert_eq!(dim_str, "8"); // safety: test-only assertion
-
+            .expect("query metadata");
+        let row = rows.next().await.expect("fetch").expect("metadata row");
+        let dim_str: String = row.get(0).expect("get name");
+        assert_eq!(dim_str, "8");
         // Verify old embedding was NULLed (wrong byte length for dim=8)
         let mut rows = conn
             .query("SELECT embedding IS NULL FROM memory_chunks LIMIT 1", ())
             .await
-            .expect("query embedding"); // safety: test-only
-        let row = rows.next().await.expect("fetch").expect("chunk row"); // safety: test-only
-        let is_null: i64 = row.get(0).expect("get is_null"); // safety: test-only
-        // safety: test-only assertion
+            .expect("query embedding");
+        let row = rows.next().await.expect("fetch").expect("chunk row");
+        let is_null: i64 = row.get(0).expect("get is_null");
         assert_eq!(
             is_null, 1,
             "old 4-dim embedding should be NULLed after dim change to 8"
@@ -938,7 +931,7 @@ mod tests {
         let (backend, _dir) = setup_backend().await;
 
         // Create with dim=4 and insert data
-        backend.ensure_vector_index(4).await.expect("ensure dim=4"); // safety: test-only
+        backend.ensure_vector_index(4).await.expect("ensure dim=4");
         let embedding = [1.0_f32, 0.0, 0.0, 0.0];
         insert_test_chunk(&backend, "test", "b.md", "content b", Some(&embedding)).await;
 
@@ -946,20 +939,18 @@ mod tests {
         backend
             .ensure_vector_index(4)
             .await
-            .expect("ensure dim=4 again"); // safety: test-only
-
+            .expect("ensure dim=4 again");
         // Verify data is untouched (embedding not NULLed)
-        let conn = backend.connect().await.expect("connect"); // safety: test-only
+        let conn = backend.connect().await.expect("connect");
         let mut rows = conn
             .query(
                 "SELECT embedding IS NOT NULL FROM memory_chunks LIMIT 1",
                 (),
             )
             .await
-            .expect("query embedding"); // safety: test-only
-        let row = rows.next().await.expect("fetch").expect("chunk row"); // safety: test-only
-        let has_embedding: i64 = row.get(0).expect("get"); // safety: test-only
-        // safety: test-only assertion
+            .expect("query embedding");
+        let row = rows.next().await.expect("fetch").expect("chunk row");
+        let has_embedding: i64 = row.get(0).expect("get");
         assert_eq!(
             has_embedding, 1,
             "embedding should be preserved on no-op call"
@@ -971,8 +962,7 @@ mod tests {
         let (backend, _dir) = setup_backend().await;
 
         // Create vector index with dim=4
-        backend.ensure_vector_index(4).await.expect("ensure dim=4"); // safety: test-only
-
+        backend.ensure_vector_index(4).await.expect("ensure dim=4");
         // Insert chunk with embedding and searchable content
         let embedding = [0.5_f32, 0.5, 0.0, 0.0];
         insert_test_chunk(
@@ -990,15 +980,13 @@ mod tests {
         let results = backend
             .hybrid_search("user1", None, "quantum", Some(&query_emb), &config)
             .await
-            .expect("hybrid_search"); // safety: test-only
-
-        assert!(!results.is_empty(), "hybrid search should return results"); // safety: test-only assertion
+            .expect("hybrid_search");
+        assert!(!results.is_empty(), "hybrid search should return results");
         let first = &results[0];
-        // safety: test-only assertion
         assert!(
             first.vector_rank.is_some(),
             "result should have a vector_rank"
         );
-        assert_eq!(first.content, "quantum computing research"); // safety: test-only assertion
+        assert_eq!(first.content, "quantum computing research");
     }
 }
