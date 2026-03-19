@@ -178,17 +178,24 @@ impl EmbeddingProvider for CachedEmbeddingProvider {
 
         let embedding = self.inner.embed(text).await?;
 
-        // Store result
+        // Store result. Re-check under lock: another concurrent caller may
+        // have inserted this key while the lock was released for the HTTP call.
         {
             let mut guard = self.cache.lock().unwrap_or_else(|e| e.into_inner());
-            Self::evict_lru(&mut guard, self.config.max_entries);
-            guard.insert(
-                key,
-                CacheEntry {
-                    embedding: embedding.clone(),
-                    last_accessed: Instant::now(),
-                },
-            );
+            if let Some(entry) = guard.get_mut(&key) {
+                // Key already present (thundering herd) — just update, no eviction needed.
+                entry.embedding = embedding.clone();
+                entry.last_accessed = Instant::now();
+            } else {
+                Self::evict_lru(&mut guard, self.config.max_entries);
+                guard.insert(
+                    key,
+                    CacheEntry {
+                        embedding: embedding.clone(),
+                        last_accessed: Instant::now(),
+                    },
+                );
+            }
         }
 
         tracing::trace!("embedding cache miss");
