@@ -225,6 +225,41 @@ impl CreateJobTool {
         }
     }
 
+    /// Transition a sandbox job's state in the ContextManager (awaited).
+    ///
+    /// Best-effort: logs on failure (job may have been cleaned up already).
+    async fn update_context_state_async(
+        &self,
+        job_id: Uuid,
+        state: JobState,
+        reason: Option<String>,
+    ) {
+        if let Err(e) = self
+            .context_manager
+            .update_context(job_id, |ctx| {
+                let _ = ctx.transition_to(state, reason);
+            })
+            .await
+        {
+            tracing::debug!(job_id = %job_id, "sandbox context update skipped: {}", e);
+        }
+    }
+
+    /// Fire-and-forget variant for use in sync contexts (e.g. `.map_err()` closures).
+    fn update_context_state(&self, job_id: Uuid, state: JobState, reason: Option<String>) {
+        let cm = self.context_manager.clone();
+        tokio::spawn(async move {
+            if let Err(e) = cm
+                .update_context(job_id, |ctx| {
+                    let _ = ctx.transition_to(state, reason);
+                })
+                .await
+            {
+                tracing::debug!(job_id = %job_id, "sandbox context update skipped: {}", e);
+            }
+        });
+    }
+
     /// Update sandbox job status in DB (fire-and-forget).
     fn update_status(
         &self,
@@ -354,6 +389,16 @@ impl CreateJobTool {
             }
         };
 
+        // Register in ContextManager so query tools (list_jobs, job_status,
+        // job_events, cancel_job) can find sandbox jobs. Without this, sandbox
+        // jobs exist only in the DB and are invisible to the agent.
+        self.context_manager
+            .register_sandbox_job(job_id, &ctx.user_id, task, task)
+            .await
+            .map_err(|e| {
+                ToolError::ExecutionFailed(format!("failed to register sandbox job: {}", e))
+            })?;
+
         // Persist the job to DB before creating the container.
         self.persist_job(SandboxJobRecord {
             id: job_id,
@@ -397,6 +442,7 @@ impl CreateJobTool {
                     None,
                     Some(Utc::now()),
                 );
+                self.update_context_state(job_id, JobState::Failed, Some(e.to_string()));
                 ToolError::ExecutionFailed(format!("failed to create container: {}", e))
             })?;
 
@@ -416,16 +462,20 @@ impl CreateJobTool {
             // monitor terminates. No JoinHandle is retained.
             if let (Some(etx), Some(itx)) = (&self.event_tx, &self.inject_tx) {
                 if let Some(route) = monitor_route_from_ctx(ctx) {
-                    crate::agent::job_monitor::spawn_job_monitor(
+                    crate::agent::job_monitor::spawn_job_monitor_with_context(
                         job_id,
                         etx.subscribe(),
                         itx.clone(),
                         route,
+                        Some(self.context_manager.clone()),
                     );
                 } else {
-                    tracing::debug!(
-                        job_id = %job_id,
-                        "Skipping job monitor injection due to missing route metadata"
+                    // No routing metadata — can't inject messages, but still
+                    // need to transition the job out of InProgress when done.
+                    crate::agent::job_monitor::spawn_completion_watcher(
+                        job_id,
+                        etx.subscribe(),
+                        self.context_manager.clone(),
                     );
                 }
             }
@@ -457,6 +507,12 @@ impl CreateJobTool {
                     None,
                     Some(Utc::now()),
                 );
+                self.update_context_state_async(
+                    job_id,
+                    JobState::Failed,
+                    Some("Timed out (10 minutes)".to_string()),
+                )
+                .await;
                 return Err(ToolError::ExecutionFailed(
                     "container execution timed out (10 minutes)".to_string(),
                 ));
@@ -491,6 +547,8 @@ impl CreateJobTool {
                                 None,
                                 Some(finished_at),
                             );
+                            self.update_context_state_async(job_id, JobState::Completed, None)
+                                .await;
                             let result = serde_json::json!({
                                 "job_id": job_id.to_string(),
                                 "status": "completed",
@@ -508,6 +566,12 @@ impl CreateJobTool {
                                 None,
                                 Some(finished_at),
                             );
+                            self.update_context_state_async(
+                                job_id,
+                                JobState::Failed,
+                                Some(message.clone()),
+                            )
+                            .await;
                             return Err(ToolError::ExecutionFailed(format!(
                                 "container job failed: {}",
                                 message
@@ -529,6 +593,12 @@ impl CreateJobTool {
                             None,
                             Some(Utc::now()),
                         );
+                        self.update_context_state_async(
+                            job_id,
+                            JobState::Failed,
+                            Some(message.clone()),
+                        )
+                        .await;
                         return Err(ToolError::ExecutionFailed(format!(
                             "container job failed: {}",
                             message
@@ -544,6 +614,8 @@ impl CreateJobTool {
                         None,
                         Some(Utc::now()),
                     );
+                    self.update_context_state_async(job_id, JobState::Completed, None)
+                        .await;
                     let result = serde_json::json!({
                         "job_id": job_id.to_string(),
                         "status": "completed",
@@ -1024,13 +1096,34 @@ impl Tool for JobStatusTool {
 }
 
 /// Tool for canceling a job.
+///
+/// For sandbox jobs (registered via `register_sandbox_job`), cancellation also
+/// stops the Docker container and updates the DB status — matching the behavior
+/// of the web cancellation handler in `channels/web/handlers/jobs.rs`.
 pub struct CancelJobTool {
     context_manager: Arc<ContextManager>,
+    job_manager: Option<Arc<ContainerJobManager>>,
+    store: Option<Arc<dyn Database>>,
 }
 
 impl CancelJobTool {
     pub fn new(context_manager: Arc<ContextManager>) -> Self {
-        Self { context_manager }
+        Self {
+            context_manager,
+            job_manager: None,
+            store: None,
+        }
+    }
+
+    /// Inject sandbox dependencies so cancellation also stops containers.
+    pub fn with_sandbox(
+        mut self,
+        job_manager: Arc<ContainerJobManager>,
+        store: Option<Arc<dyn Database>>,
+    ) -> Self {
+        self.job_manager = Some(job_manager);
+        self.store = store;
+        self
     }
 }
 
@@ -1080,6 +1173,41 @@ impl Tool for CancelJobTool {
             .await
         {
             Ok(Ok(())) => {
+                // Stop the sandbox container if one exists for this job.
+                if let Some(ref jm) = self.job_manager
+                    && let Err(e) = jm.stop_job(job_id).await
+                {
+                    tracing::warn!(
+                        job_id = %job_id,
+                        "Failed to stop container during cancellation: {}", e
+                    );
+                }
+
+                // Update DB status for sandbox jobs. Uses "failed" (not
+                // "cancelled") to match the web cancel handler convention —
+                // the sandbox DB schema treats cancellation as a failure variant.
+                if let Some(ref store) = self.store {
+                    let store = store.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = store
+                            .update_sandbox_job_status(
+                                job_id,
+                                "failed",
+                                Some(false),
+                                Some("Cancelled by user"),
+                                None,
+                                Some(Utc::now()),
+                            )
+                            .await
+                        {
+                            tracing::warn!(
+                                job_id = %job_id,
+                                "Failed to update sandbox job status on cancel: {}", e
+                            );
+                        }
+                    });
+                }
+
                 let result = serde_json::json!({
                     "job_id": job_id.to_string(),
                     "status": "cancelled",
