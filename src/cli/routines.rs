@@ -100,7 +100,7 @@ pub enum RoutinesCommand {
         cooldown: Option<u64>,
 
         /// Enable/disable tool access
-        #[arg(long)]
+        #[arg(long, num_args = 0..=1, default_missing_value = "true")]
         use_tools: Option<bool>,
 
         /// New max tool call rounds
