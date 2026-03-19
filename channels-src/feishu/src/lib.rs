@@ -211,15 +211,13 @@ struct FeishuApiResponse<T> {
 /// Unlike most Feishu APIs that nest results under `data`, the
 /// `/auth/v3/tenant_access_token/internal` endpoint returns `code`, `msg`,
 /// `tenant_access_token`, and `expire` at the top level.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Deserialize)]
 struct TenantAccessTokenResponse {
     #[serde(default)]
     code: i32,
     #[serde(default)]
     msg: String,
-    #[serde(default)]
     tenant_access_token: String,
-    #[serde(default)]
     expire: i64,
 }
 
@@ -794,9 +792,16 @@ fn obtain_tenant_token(api_base: &str) -> Result<String, String> {
                 return Err("Token response missing tenant_access_token".to_string());
             }
 
+            if token_resp.expire <= 0 {
+                return Err(format!(
+                    "Token response has invalid expire value: {}",
+                    token_resp.expire
+                ));
+            }
+
             // Cache the token with expiry.
             let now = channel_host::now_millis();
-            let expiry = now + (token_resp.expire as u64) * 1000;
+            let expiry = now.saturating_add((token_resp.expire as u64).saturating_mul(1000));
 
             let _ = channel_host::workspace_write(TOKEN_PATH, &token_resp.tenant_access_token);
             let _ = channel_host::workspace_write(TOKEN_EXPIRY_PATH, &expiry.to_string());
@@ -829,5 +834,62 @@ fn json_response(status: u16, body: serde_json::Value) -> OutgoingHttpResponse {
         })
         .to_string(),
         body: body_bytes,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_flat_token_response() {
+        let json = r#"{
+            "code": 0,
+            "msg": "ok",
+            "tenant_access_token": "t-abc123",
+            "expire": 7200
+        }"#;
+        let resp: TenantAccessTokenResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.code, 0);
+        assert_eq!(resp.msg, "ok");
+        assert_eq!(resp.tenant_access_token, "t-abc123");
+        assert_eq!(resp.expire, 7200);
+    }
+
+    #[test]
+    fn parse_token_response_rejects_missing_token() {
+        let json = r#"{"code": 0, "msg": "ok", "expire": 7200}"#;
+        let result: Result<TenantAccessTokenResponse, _> = serde_json::from_str(json);
+        assert!(result.is_err(), "should fail when tenant_access_token is missing");
+    }
+
+    #[test]
+    fn parse_token_response_rejects_missing_expire() {
+        let json = r#"{"code": 0, "msg": "ok", "tenant_access_token": "t-abc"}"#;
+        let result: Result<TenantAccessTokenResponse, _> = serde_json::from_str(json);
+        assert!(result.is_err(), "should fail when expire is missing");
+    }
+
+    #[test]
+    fn parse_token_response_defaults_code_and_msg() {
+        let json = r#"{"tenant_access_token": "t-abc", "expire": 3600}"#;
+        let resp: TenantAccessTokenResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.code, 0);
+        assert_eq!(resp.msg, "");
+        assert_eq!(resp.tenant_access_token, "t-abc");
+        assert_eq!(resp.expire, 3600);
+    }
+
+    #[test]
+    fn parse_token_error_response() {
+        let json = r#"{
+            "code": 10003,
+            "msg": "invalid app_id",
+            "tenant_access_token": "",
+            "expire": 0
+        }"#;
+        let resp: TenantAccessTokenResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.code, 10003);
+        assert!(resp.tenant_access_token.is_empty());
     }
 }
