@@ -932,6 +932,12 @@ impl ExtensionManager {
         tracing::info!(extension = %name, url = ?sanitized_url, kind = ?kind_hint, "Installing extension");
         Self::validate_extension_name(name)?;
 
+        if crate::tools::mcp::config::is_nearai_companion_server_name(name) {
+            return Err(ExtensionError::Config(
+                "This extension name is reserved for the NEAR AI companion MCP server".to_string(),
+            ));
+        }
+
         // If we have a registry entry, use it (prefer kind_hint to resolve collisions)
         if let Some(entry) = self.registry.get_with_kind(name, kind_hint).await {
             return self.install_from_entry(&entry).await.map_err(|e| {
@@ -5631,6 +5637,30 @@ mod tests {
         assert!(
             msg.contains("WASM runtime not available"),
             "Expected runtime not available error, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_install_rejects_reserved_nearai_companion_name() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let manager = make_test_manager(None, dir.path().to_path_buf());
+
+        let err = manager
+            .install(
+                crate::tools::mcp::config::NEARAI_COMPANION_MCP_NAME,
+                Some("https://mcp.example.com"),
+                Some(ExtensionKind::McpServer),
+            )
+            .await
+            .expect_err("reserved companion name should be rejected");
+
+        assert!(
+            matches!(err, ExtensionError::Config(_)),
+            "Expected config error, got: {err:?}"
+        );
+        assert!(
+            err.to_string().contains("reserved"),
+            "Expected reserved-name message, got: {err}"
         );
     }
 

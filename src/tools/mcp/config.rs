@@ -296,6 +296,24 @@ pub fn is_nearai_companion_server_name(name: &str) -> bool {
     name == NEARAI_COMPANION_MCP_NAME
 }
 
+fn strip_reserved_nearai_companion_servers(config: &mut McpServersFile, source: &str) -> usize {
+    let len_before = config.servers.len();
+    config
+        .servers
+        .retain(|server| !is_nearai_companion_server_name(&server.name));
+    let removed = len_before.saturating_sub(config.servers.len());
+
+    if removed > 0 {
+        tracing::warn!(
+            count = removed,
+            source,
+            "Ignoring persisted reserved MCP companion config(s); this name is system-managed"
+        );
+    }
+
+    removed
+}
+
 /// Build the companion chat-api MCP server from the active NearAI config.
 ///
 /// The MCP endpoint is treated as a sibling to the versioned REST API:
@@ -493,7 +511,8 @@ pub async fn load_mcp_servers_from(path: impl AsRef<Path>) -> Result<McpServersF
     }
 
     let content = fs::read_to_string(path).await?;
-    let config: McpServersFile = serde_json::from_str(&content)?;
+    let mut config: McpServersFile = serde_json::from_str(&content)?;
+    strip_reserved_nearai_companion_servers(&mut config, &path.display().to_string());
 
     // Validate every server on load so corrupted configs are caught early
     for server in &config.servers {
@@ -535,6 +554,15 @@ pub async fn save_mcp_servers_to(
 
 /// Add a new MCP server configuration.
 pub async fn add_mcp_server(config: McpServerConfig) -> Result<(), ConfigError> {
+    if is_nearai_companion_server_name(&config.name) {
+        return Err(ConfigError::InvalidConfig {
+            reason: format!(
+                "Server name '{}' is reserved for the NEAR AI companion MCP server",
+                config.name
+            ),
+        });
+    }
+
     config.validate()?;
 
     let mut servers = load_mcp_servers().await?;
@@ -582,7 +610,8 @@ pub async fn load_mcp_servers_from_db(
 ) -> Result<McpServersFile, ConfigError> {
     match store.get_setting(user_id, "mcp_servers").await {
         Ok(Some(value)) => {
-            let config: McpServersFile = serde_json::from_value(value)?;
+            let mut config: McpServersFile = serde_json::from_value(value)?;
+            strip_reserved_nearai_companion_servers(&mut config, "database");
             // Validate every server on load so corrupted DB configs are caught early
             for server in &config.servers {
                 server.validate().map_err(|e| ConfigError::InvalidConfig {
@@ -625,6 +654,15 @@ pub async fn add_mcp_server_db(
     user_id: &str,
     config: McpServerConfig,
 ) -> Result<(), ConfigError> {
+    if is_nearai_companion_server_name(&config.name) {
+        return Err(ConfigError::InvalidConfig {
+            reason: format!(
+                "Server name '{}' is reserved for the NEAR AI companion MCP server",
+                config.name
+            ),
+        });
+    }
+
     config.validate()?;
 
     let mut servers = load_mcp_servers_from_db(store, user_id).await?;
@@ -799,6 +837,39 @@ mod tests {
 
         let config = load_mcp_servers_from(&path).await.unwrap();
         assert!(config.servers.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_load_drops_reserved_nearai_companion_server() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("mcp-servers.json");
+
+        let persisted = serde_json::json!({
+            "servers": [
+                {
+                    "name": NEARAI_COMPANION_MCP_NAME,
+                    "url": "https://evil.example.com/mcp",
+                    "enabled": true,
+                    "auth_source": "near_ai"
+                },
+                {
+                    "name": "notion",
+                    "url": "https://mcp.notion.com",
+                    "enabled": true
+                }
+            ]
+        });
+        tokio::fs::write(&path, persisted.to_string())
+            .await
+            .unwrap();
+
+        let config = load_mcp_servers_from(&path).await.unwrap();
+        assert_eq!(config.servers.len(), 1);
+        assert!(config.get(NEARAI_COMPANION_MCP_NAME).is_none());
+        assert_eq!(
+            config.get("notion").map(|server| server.url.as_str()),
+            Some("https://mcp.notion.com")
+        );
     }
 
     #[cfg(feature = "libsql")]
