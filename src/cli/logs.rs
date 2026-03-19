@@ -2,6 +2,12 @@
 //!
 //! Provides `ironclaw logs --lines N` to tail the application log file.
 //!
+//! # Note
+//!
+//! This command reads from `$IRONCLAW_BASE_DIR/logs/ironclaw.log`.
+//! By default, IronClaw logs to stderr only. To use this command,
+//! configure a file appender in your tracing setup or set the log file
+//! path via environment variable if supported by your deployment.
 use anyhow::{Context, Result};
 use clap::Args;
 use std::collections::VecDeque;

@@ -1,9 +1,9 @@
 //! IronClaw - Main entry point.
 
-use ironclaw::cli::run_logs_command;
 use std::sync::Arc;
 
 use clap::Parser;
+use ironclaw::cli::run_logs_command;
 use tracing_subscriber::EnvFilter;
 
 use ironclaw::{
