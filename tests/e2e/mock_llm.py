@@ -276,7 +276,7 @@ async def oauth_exchange(request: web.Request) -> web.Response:
     access_token_field = data.get("access_token_field", "access_token")
 
     if code == "mock_mcp_code":
-        if data.get("token_url", "").endswith("/oauth/token") is False:
+        if not data.get("token_url", "").endswith("/oauth/token"):
             return web.json_response({"error": "missing_token_url"}, status=400)
         if not data.get("client_id"):
             return web.json_response({"error": "missing_client_id"}, status=400)

@@ -71,14 +71,10 @@ fn hosted_proxy_client_secret(
 
 fn normalize_oauth_callback_path(path: &str) -> String {
     let trimmed_path = path.trim_end_matches('/');
-    if trimmed_path.ends_with("/oauth/callback") {
-        if trimmed_path.is_empty() {
-            "/oauth/callback".to_string()
-        } else {
-            trimmed_path.to_string()
-        }
-    } else if trimmed_path.is_empty() {
+    if trimmed_path.is_empty() {
         "/oauth/callback".to_string()
+    } else if trimmed_path.ends_with("/oauth/callback") {
+        trimmed_path.to_string()
     } else {
         format!("{trimmed_path}/oauth/callback")
     }
@@ -949,10 +945,38 @@ impl ExtensionManager {
             return auth_url;
         }
 
-        auth_url.replace(
-            &format!("state={}", urlencoding::encode(expected_state)),
-            &format!("state={}", urlencoding::encode(hosted_state)),
-        )
+        let Ok(mut parsed) = url::Url::parse(&auth_url) else {
+            return auth_url.replace(
+                &format!("state={}", urlencoding::encode(expected_state)),
+                &format!("state={}", urlencoding::encode(hosted_state)),
+            );
+        };
+
+        let mut replaced = false;
+        let pairs: Vec<(String, String)> = parsed
+            .query_pairs()
+            .map(|(key, value)| {
+                if key == "state" {
+                    replaced = true;
+                    (key.into_owned(), hosted_state.to_string())
+                } else {
+                    (key.into_owned(), value.into_owned())
+                }
+            })
+            .collect();
+
+        {
+            let mut query_pairs = parsed.query_pairs_mut();
+            query_pairs.clear();
+            for (key, value) in pairs {
+                query_pairs.append_pair(&key, &value);
+            }
+            if !replaced {
+                query_pairs.append_pair("state", hosted_state);
+            }
+        }
+
+        parsed.to_string()
     }
 
     async fn start_gateway_oauth_flow(&self, request: HostedOAuthFlowStart) -> AuthResult {
@@ -6951,6 +6975,20 @@ mod tests {
                 "https://oauth.test.example/oauth/callback?source=hosted"
             ),
             "https://oauth.test.example/oauth/callback?source=hosted"
+        );
+    }
+
+    #[test]
+    fn rewrite_oauth_state_param_updates_only_state_query_param() {
+        let auth_url =
+            "https://auth.example.com/authorize?client_id=abc&state=old-state&hint=state%3Dkeep";
+        assert_eq!(
+            ExtensionManager::rewrite_oauth_state_param(
+                auth_url.to_string(),
+                "old-state",
+                "new-hosted-state",
+            ),
+            "https://auth.example.com/authorize?client_id=abc&state=new-hosted-state&hint=state%3Dkeep"
         );
     }
 
