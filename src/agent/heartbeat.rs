@@ -175,6 +175,7 @@ fn duration_until_next_fire(fire_at: chrono::NaiveTime, tz: Tz) -> Duration {
 pub struct HeartbeatRunner {
     config: HeartbeatConfig,
     hygiene_config: HygieneConfig,
+    snapshot_config: crate::workspace::snapshot::SnapshotConfig,
     workspace: Arc<Workspace>,
     llm: Arc<dyn LlmProvider>,
     response_tx: Option<mpsc::Sender<OutgoingResponse>>,
@@ -187,12 +188,14 @@ impl HeartbeatRunner {
     pub fn new(
         config: HeartbeatConfig,
         hygiene_config: HygieneConfig,
+        snapshot_config: crate::workspace::snapshot::SnapshotConfig,
         workspace: Arc<Workspace>,
         llm: Arc<dyn LlmProvider>,
     ) -> Self {
         Self {
             config,
             hygiene_config,
+            snapshot_config,
             workspace,
             llm,
             response_tx: None,
@@ -262,11 +265,15 @@ impl HeartbeatRunner {
                 continue;
             }
 
-            // Run memory hygiene in the background so it never delays the
-            // heartbeat checklist. Failures are logged inside run_if_due.
+            // Run memory hygiene and workspace snapshot in the background.
+            // Sequential: hygiene cleans stale docs first, then snapshot
+            // captures clean state. Snapshot has its own cadence/guard and
+            // runs regardless of hygiene outcome.
             let hygiene_workspace = Arc::clone(&self.workspace);
             let hygiene_config = self.hygiene_config.clone();
+            let snap_config = self.snapshot_config.clone();
             tokio::spawn(async move {
+                // 1. Hygiene: best-effort cleanup (failures logged inside run_if_due).
                 let report =
                     crate::workspace::hygiene::run_if_due(&hygiene_workspace, &hygiene_config)
                         .await;
@@ -276,6 +283,23 @@ impl HeartbeatRunner {
                         conversation_docs_deleted = report.conversation_docs_deleted,
                         "heartbeat: memory hygiene deleted stale documents"
                     );
+                }
+
+                // 2. Snapshot: independent cadence/guard, runs regardless of hygiene outcome.
+                match crate::workspace::snapshot::snapshot_if_due(&hygiene_workspace, &snap_config)
+                    .await
+                {
+                    Ok(r) if !r.skipped => {
+                        tracing::info!(
+                            documents_exported = r.documents_exported,
+                            path = ?r.snapshot_path,
+                            "heartbeat: workspace snapshot exported"
+                        );
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::warn!("heartbeat: workspace snapshot failed: {e}");
+                    }
                 }
             });
 
@@ -490,12 +514,13 @@ fn strip_html_comments(content: &str) -> String {
 pub fn spawn_heartbeat(
     config: HeartbeatConfig,
     hygiene_config: HygieneConfig,
+    snapshot_config: crate::workspace::snapshot::SnapshotConfig,
     workspace: Arc<Workspace>,
     llm: Arc<dyn LlmProvider>,
     response_tx: Option<mpsc::Sender<OutgoingResponse>>,
     store: Option<Arc<dyn Database>>,
 ) -> tokio::task::JoinHandle<()> {
-    let mut runner = HeartbeatRunner::new(config, hygiene_config, workspace, llm);
+    let mut runner = HeartbeatRunner::new(config, hygiene_config, snapshot_config, workspace, llm);
     if let Some(tx) = response_tx {
         runner = runner.with_response_channel(tx);
     }
@@ -723,6 +748,7 @@ mod tests {
         let _fn_ptr: fn(
             HeartbeatConfig,
             HygieneConfig,
+            crate::workspace::snapshot::SnapshotConfig,
             Arc<crate::workspace::Workspace>,
             Arc<dyn crate::llm::LlmProvider>,
             Option<tokio::sync::mpsc::Sender<crate::channels::OutgoingResponse>>,
