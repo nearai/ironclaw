@@ -642,8 +642,8 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn check_nearai_session_skips_for_non_nearai_backend() {
+    #[test]
+    fn check_nearai_session_skips_for_non_nearai_backend() {
         struct EnvGuard(&'static str, Option<String>);
         impl Drop for EnvGuard {
             fn drop(&mut self) {
@@ -666,7 +666,8 @@ mod tests {
         let _env_guard = EnvGuard("LLM_BACKEND", prev);
 
         let settings = Settings::default();
-        let result = check_nearai_session(&settings).await;
+        let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+        let result = rt.block_on(check_nearai_session(&settings));
         match result {
             CheckResult::Skip(msg) => {
                 assert!(
