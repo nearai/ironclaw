@@ -182,20 +182,23 @@ impl EmbeddingProvider for CachedEmbeddingProvider {
 
         let embedding = self.inner.embed(text).await?;
 
+        // Clone + wrap outside the lock so the mutex is held only for the insert.
+        let cached = Arc::new(embedding.clone());
+
         // Store result. Re-check under lock: another concurrent caller may
         // have inserted this key while the lock was released for the HTTP call.
         {
             let mut guard = self.cache.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(entry) = guard.get_mut(&key) {
                 // Key already present (thundering herd) — just update, no eviction needed.
-                entry.embedding = Arc::new(embedding.clone());
+                entry.embedding = cached;
                 entry.last_accessed = Instant::now();
             } else {
                 Self::evict_lru(&mut guard, self.config.max_entries);
                 guard.insert(
                     key,
                     CacheEntry {
-                        embedding: Arc::new(embedding.clone()),
+                        embedding: cached,
                         last_accessed: Instant::now(),
                     },
                 );
