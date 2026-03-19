@@ -129,6 +129,8 @@ const OWNER_ID_PATH: &str = "state/owner_id";
 const DM_POLICY_PATH: &str = "state/dm_policy";
 /// Workspace path for persisting allow_from (JSON array) across WASM callbacks.
 const ALLOW_FROM_PATH: &str = "state/allow_from";
+/// Workspace prefix for tracking threads the bot has participated in.
+const ACTIVE_THREADS_PREFIX: &str = "state/threads/";
 /// Channel name for pairing store (used by pairing host APIs).
 const CHANNEL_NAME: &str = "slack";
 
@@ -265,6 +267,11 @@ impl Guest for SlackChannel {
 
         // Add thread_ts for threaded replies
         if let Some(thread_ts) = response.thread_id.or(metadata.thread_ts) {
+            // Track that we've participated in this thread so we can respond
+            // to follow-up messages without requiring @mention
+            let thread_key = format!("{}{}/{}", ACTIVE_THREADS_PREFIX, metadata.channel, thread_ts);
+            let _ = channel_host::workspace_write(&thread_key, "1");
+
             payload["thread_ts"] = serde_json::Value::String(thread_ts);
         }
 
@@ -483,7 +490,7 @@ fn handle_slack_event(event: SlackEvent, team_id: Option<String>, _event_id: Opt
             }
         }
 
-        // Direct message to the bot
+        // Direct message or thread follow-up to the bot
         "message" => {
             // Skip messages from bots (including ourselves)
             if event.bot_id.is_some() || event.subtype.is_some() {
@@ -496,9 +503,18 @@ fn handle_slack_event(event: SlackEvent, team_id: Option<String>, _event_id: Opt
                 event.text,
                 event.ts.clone(),
             ) {
-                // Only process DMs (channel IDs starting with D)
-                if channel.starts_with('D') {
-                    if !check_sender_permission(&user, &channel, true) {
+                let is_dm = channel.starts_with('D');
+
+                // Check if this is a reply in a thread where we previously participated
+                let is_active_thread = !is_dm
+                    && event.thread_ts.as_ref().is_some_and(|thread_ts| {
+                        let thread_key =
+                            format!("{}{}/{}", ACTIVE_THREADS_PREFIX, channel, thread_ts);
+                        channel_host::workspace_read(&thread_key).is_some()
+                    });
+
+                if is_dm || is_active_thread {
+                    if !check_sender_permission(&user, &channel, is_dm) {
                         return;
                     }
                     emit_message(
