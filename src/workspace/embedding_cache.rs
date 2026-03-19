@@ -295,8 +295,7 @@ impl EmbeddingProvider for CachedEmbeddingProvider {
         // Assemble results: try_unwrap avoids a clone when the Arc is sole-owned
         // (i.e., when the embedding was skipped during caching due to capacity).
         for (orig_idx, emb) in miss_indices.iter().copied().zip(new_embeddings) {
-            results[orig_idx] =
-                Some(Arc::try_unwrap(emb).unwrap_or_else(|arc| (*arc).clone()));
+            results[orig_idx] = Some(Arc::try_unwrap(emb).unwrap_or_else(|arc| (*arc).clone()));
         }
 
         results
