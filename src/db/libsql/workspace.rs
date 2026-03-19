@@ -11,13 +11,212 @@ use super::{
     row_to_memory_document,
 };
 use crate::db::WorkspaceStore;
-use crate::error::WorkspaceError;
+use crate::error::{DatabaseError, WorkspaceError};
 use crate::workspace::{
     MemoryChunk, MemoryDocument, RankedResult, SearchConfig, SearchResult, WorkspaceEntry,
     fuse_results,
 };
 
 use chrono::Utc;
+
+/// Resolve the embedding dimension from environment variables.
+///
+/// Mirrors the logic in `config/embeddings.rs`: checks `EMBEDDING_ENABLED`,
+/// reads `EMBEDDING_DIMENSION` or infers from `EMBEDDING_MODEL`.
+/// Returns `None` if embeddings are disabled or not configured.
+pub(crate) fn resolve_embedding_dimension() -> Option<usize> {
+    let enabled = std::env::var("EMBEDDING_ENABLED")
+        .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
+        .unwrap_or(false);
+
+    if !enabled {
+        return None;
+    }
+
+    if let Ok(dim_str) = std::env::var("EMBEDDING_DIMENSION")
+        && let Ok(dim) = dim_str.parse::<usize>()
+        && dim > 0
+    {
+        return Some(dim);
+    }
+
+    let model =
+        std::env::var("EMBEDDING_MODEL").unwrap_or_else(|_| "text-embedding-3-small".to_string());
+
+    let dim = match model.as_str() {
+        "text-embedding-3-small" => 1536,
+        "text-embedding-3-large" => 3072,
+        "text-embedding-ada-002" => 1536,
+        "nomic-embed-text" => 768,
+        "mxbai-embed-large" => 1024,
+        "all-minilm" => 384,
+        _ => 1536,
+    };
+
+    Some(dim)
+}
+
+impl LibSqlBackend {
+    /// Ensure the `libsql_vector_idx` on `memory_chunks.embedding` matches the
+    /// configured embedding dimension.
+    ///
+    /// The V9 migration dropped the vector index (and changed `F32_BLOB(1536)`
+    /// to `BLOB`) to support flexible dimensions. This method restores a
+    /// properly-typed `F32_BLOB(N)` column and creates the vector index.
+    ///
+    /// Uses `_migrations` version `0` (a reserved metadata row) to track the
+    /// current dimension. If the dimension is unchanged, this is a no-op.
+    pub async fn ensure_vector_index(&self, dimension: usize) -> Result<(), DatabaseError> {
+        let conn = self.connect().await?;
+
+        // Check current dimension from _migrations version=0 (reserved metadata row).
+        let current_dim = {
+            let mut rows = conn
+                .query("SELECT name FROM _migrations WHERE version = 0", ())
+                .await
+                .map_err(|e| {
+                    DatabaseError::Migration(format!("Failed to check vector index metadata: {e}"))
+                })?;
+
+            rows.next().await.ok().flatten().and_then(|row| {
+                row.get::<String>(0)
+                    .ok()
+                    .and_then(|s| s.parse::<usize>().ok())
+            })
+        };
+
+        if current_dim == Some(dimension) {
+            tracing::debug!(
+                dimension,
+                "Vector index already matches configured dimension"
+            );
+            return Ok(());
+        }
+
+        tracing::info!(
+            old_dimension = ?current_dim,
+            new_dimension = dimension,
+            "Rebuilding memory_chunks table for vector index"
+        );
+
+        let tx = conn.transaction().await.map_err(|e| {
+            DatabaseError::Migration(format!(
+                "ensure_vector_index: failed to start transaction: {e}"
+            ))
+        })?;
+
+        // 1. Drop FTS triggers that reference the old table
+        tx.execute_batch(
+            "DROP TRIGGER IF EXISTS memory_chunks_fts_insert;
+             DROP TRIGGER IF EXISTS memory_chunks_fts_delete;
+             DROP TRIGGER IF EXISTS memory_chunks_fts_update;",
+        )
+        .await
+        .map_err(|e| DatabaseError::Migration(format!("Failed to drop FTS triggers: {e}")))?;
+
+        // 2. Drop old vector index
+        tx.execute_batch("DROP INDEX IF EXISTS idx_memory_chunks_embedding;")
+            .await
+            .map_err(|e| {
+                DatabaseError::Migration(format!("Failed to drop old vector index: {e}"))
+            })?;
+
+        // 3. Create new table with F32_BLOB(dim)
+        let create_sql = format!(
+            "CREATE TABLE IF NOT EXISTS memory_chunks_new (
+                _rowid INTEGER PRIMARY KEY AUTOINCREMENT,
+                id TEXT NOT NULL UNIQUE,
+                document_id TEXT NOT NULL REFERENCES memory_documents(id) ON DELETE CASCADE,
+                chunk_index INTEGER NOT NULL,
+                content TEXT NOT NULL,
+                embedding F32_BLOB({dimension}),
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                UNIQUE (document_id, chunk_index)
+            )"
+        );
+        tx.execute_batch(&create_sql).await.map_err(|e| {
+            DatabaseError::Migration(format!(
+                "Failed to create memory_chunks_new with F32_BLOB({dimension}): {e}"
+            ))
+        })?;
+
+        // 4. Copy data — embeddings with wrong byte length get NULLed
+        //    (they will be re-embedded on next background pass)
+        let expected_bytes = dimension * 4;
+        let copy_sql = format!(
+            "INSERT OR IGNORE INTO memory_chunks_new
+                (_rowid, id, document_id, chunk_index, content, embedding, created_at)
+             SELECT _rowid, id, document_id, chunk_index, content,
+                    CASE WHEN length(embedding) = {expected_bytes} THEN embedding ELSE NULL END,
+                    created_at
+             FROM memory_chunks"
+        );
+        tx.execute_batch(&copy_sql).await.map_err(|e| {
+            DatabaseError::Migration(format!("Failed to copy data to memory_chunks_new: {e}"))
+        })?;
+
+        // 5. Swap tables
+        tx.execute_batch(
+            "DROP TABLE memory_chunks;
+             ALTER TABLE memory_chunks_new RENAME TO memory_chunks;",
+        )
+        .await
+        .map_err(|e| {
+            DatabaseError::Migration(format!("Failed to swap memory_chunks tables: {e}"))
+        })?;
+
+        // 6. Recreate document index + vector index
+        tx.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_memory_chunks_document ON memory_chunks(document_id);
+             CREATE INDEX IF NOT EXISTS idx_memory_chunks_embedding ON memory_chunks(libsql_vector_idx(embedding));",
+        )
+        .await
+        .map_err(|e| {
+            DatabaseError::Migration(format!("Failed to create indexes: {e}"))
+        })?;
+
+        // 7. Recreate FTS triggers
+        tx.execute_batch(
+            "CREATE TRIGGER IF NOT EXISTS memory_chunks_fts_insert AFTER INSERT ON memory_chunks BEGIN
+                INSERT INTO memory_chunks_fts(rowid, content) VALUES (new._rowid, new.content);
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS memory_chunks_fts_delete AFTER DELETE ON memory_chunks BEGIN
+                INSERT INTO memory_chunks_fts(memory_chunks_fts, rowid, content)
+                    VALUES ('delete', old._rowid, old.content);
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS memory_chunks_fts_update AFTER UPDATE ON memory_chunks BEGIN
+                INSERT INTO memory_chunks_fts(memory_chunks_fts, rowid, content)
+                    VALUES ('delete', old._rowid, old.content);
+                INSERT INTO memory_chunks_fts(rowid, content) VALUES (new._rowid, new.content);
+            END;",
+        )
+        .await
+        .map_err(|e| {
+            DatabaseError::Migration(format!("Failed to recreate FTS triggers: {e}"))
+        })?;
+
+        // 8. Upsert dimension into _migrations(version=0)
+        tx.execute(
+            "INSERT INTO _migrations (version, name) VALUES (0, ?1)
+             ON CONFLICT(version) DO UPDATE SET name = ?1,
+                applied_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
+            params![dimension.to_string()],
+        )
+        .await
+        .map_err(|e| {
+            DatabaseError::Migration(format!("Failed to record vector index dimension: {e}"))
+        })?;
+
+        tx.commit().await.map_err(|e| {
+            DatabaseError::Migration(format!("ensure_vector_index: commit failed: {e}"))
+        })?;
+
+        tracing::info!(dimension, "Vector index created successfully");
+        Ok(())
+    }
+}
 
 #[async_trait]
 impl WorkspaceStore for LibSqlBackend {
@@ -561,9 +760,9 @@ impl WorkspaceStore for LibSqlBackend {
                     .join(",")
             );
 
-            // vector_top_k requires a libsql_vector_idx index. After the V9
-            // migration the index is dropped (to support flexible embedding
-            // dimensions), so this query may fail. Fall back to FTS-only.
+            // vector_top_k requires a libsql_vector_idx index created by
+            // ensure_vector_index(). If the index is missing (embeddings not
+            // configured or dimension mismatch), fall back to FTS-only.
             match conn
                 .query(
                     r#"
@@ -597,9 +796,9 @@ impl WorkspaceStore for LibSqlBackend {
                     results
                 }
                 Err(e) => {
-                    tracing::debug!(
-                        "Vector index query failed (expected after V9 migration), \
-                         falling back to FTS-only: {e}"
+                    tracing::warn!(
+                        "Vector index query failed (ensure_vector_index may not have run \
+                         or dimension mismatch), falling back to FTS-only: {e}"
                     );
                     Vec::new()
                 }
@@ -615,5 +814,188 @@ impl WorkspaceStore for LibSqlBackend {
         }
 
         Ok(fuse_results(fts_results, vector_results, config))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::Database;
+
+    /// Helper: create a file-backed backend with migrations applied.
+    async fn setup_backend() -> (LibSqlBackend, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir"); // safety: test-only
+        let db_path = dir.path().join("test_vector.db");
+        let backend = LibSqlBackend::new_local(&db_path).await.expect("new_local"); // safety: test-only
+        backend.run_migrations().await.expect("migrations"); // safety: test-only
+        (backend, dir)
+    }
+
+    /// Helper: insert a document and chunk with an optional embedding.
+    async fn insert_test_chunk(
+        backend: &LibSqlBackend,
+        user_id: &str,
+        path: &str,
+        content: &str,
+        embedding: Option<&[f32]>,
+    ) -> (Uuid, Uuid) {
+        let conn = backend.connect().await.expect("connect"); // safety: test-only
+        let doc_id = Uuid::new_v4();
+        let now = super::fmt_ts(&Utc::now());
+        conn.execute(
+            "INSERT INTO memory_documents (id, user_id, path, content, created_at, updated_at, metadata)
+             VALUES (?1, ?2, ?3, '', ?4, ?4, '{}')",
+            params![doc_id.to_string(), user_id, path, now],
+        )
+        .await
+        .expect("insert doc"); // safety: test-only
+
+        let chunk_id = backend
+            .insert_chunk(doc_id, 0, content, embedding)
+            .await
+            .expect("insert chunk"); // safety: test-only
+
+        (doc_id, chunk_id)
+    }
+
+    #[tokio::test]
+    async fn test_ensure_vector_index_enables_vector_search() {
+        let (backend, _dir) = setup_backend().await;
+
+        // Create vector index with dim=4
+        backend.ensure_vector_index(4).await.expect("ensure dim=4"); // safety: test-only
+
+        // Insert a chunk with a 4-dim embedding
+        let embedding = [1.0_f32, 0.0, 0.0, 0.0];
+        let (_doc_id, _chunk_id) = insert_test_chunk(
+            &backend,
+            "test",
+            "notes.md",
+            "hello world",
+            Some(&embedding),
+        )
+        .await;
+
+        // Query using vector_top_k — should find the chunk
+        let conn = backend.connect().await.expect("connect"); // safety: test-only
+        let mut rows = conn
+            .query(
+                r#"SELECT c.id
+                   FROM vector_top_k('idx_memory_chunks_embedding', vector('[1,0,0,0]'), 5) AS top_k
+                   JOIN memory_chunks c ON c._rowid = top_k.id"#,
+                (),
+            )
+            .await
+            .expect("vector_top_k query"); // safety: test-only
+
+        let row = rows
+            .next()
+            .await
+            .expect("row fetch") // safety: test-only
+            .expect("expected a result row"); // safety: test-only
+        let id: String = row.get(0).expect("get id"); // safety: test-only
+        assert!(!id.is_empty(), "vector search should return the chunk"); // safety: test-only assertion
+    }
+
+    #[tokio::test]
+    async fn test_ensure_vector_index_dimension_change() {
+        let (backend, _dir) = setup_backend().await;
+
+        // Create with dim=4 and insert data
+        backend.ensure_vector_index(4).await.expect("ensure dim=4"); // safety: test-only
+        let embedding_4d = [1.0_f32, 2.0, 3.0, 4.0];
+        insert_test_chunk(&backend, "test", "a.md", "content a", Some(&embedding_4d)).await;
+
+        // Recreate with dim=8 — old 4-dim embeddings should be NULLed
+        backend.ensure_vector_index(8).await.expect("ensure dim=8"); // safety: test-only
+
+        // Verify metadata updated
+        let conn = backend.connect().await.expect("connect"); // safety: test-only
+        let mut rows = conn
+            .query("SELECT name FROM _migrations WHERE version = 0", ())
+            .await
+            .expect("query metadata"); // safety: test-only
+        let row = rows.next().await.expect("fetch").expect("metadata row"); // safety: test-only
+        let dim_str: String = row.get(0).expect("get name"); // safety: test-only
+        assert_eq!(dim_str, "8"); // safety: test-only assertion
+
+        // Verify old embedding was NULLed (wrong byte length for dim=8)
+        let mut rows = conn
+            .query("SELECT embedding IS NULL FROM memory_chunks LIMIT 1", ())
+            .await
+            .expect("query embedding"); // safety: test-only
+        let row = rows.next().await.expect("fetch").expect("chunk row"); // safety: test-only
+        let is_null: i64 = row.get(0).expect("get is_null"); // safety: test-only
+        assert_eq!( // safety: test-only assertion
+            is_null, 1,
+            "old 4-dim embedding should be NULLed after dim change to 8"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_ensure_vector_index_noop_when_unchanged() {
+        let (backend, _dir) = setup_backend().await;
+
+        // Create with dim=4 and insert data
+        backend.ensure_vector_index(4).await.expect("ensure dim=4"); // safety: test-only
+        let embedding = [1.0_f32, 0.0, 0.0, 0.0];
+        insert_test_chunk(&backend, "test", "b.md", "content b", Some(&embedding)).await;
+
+        // Run again with same dimension — should be a no-op
+        backend
+            .ensure_vector_index(4)
+            .await
+            .expect("ensure dim=4 again"); // safety: test-only
+
+        // Verify data is untouched (embedding not NULLed)
+        let conn = backend.connect().await.expect("connect"); // safety: test-only
+        let mut rows = conn
+            .query(
+                "SELECT embedding IS NOT NULL FROM memory_chunks LIMIT 1",
+                (),
+            )
+            .await
+            .expect("query embedding"); // safety: test-only
+        let row = rows.next().await.expect("fetch").expect("chunk row"); // safety: test-only
+        let has_embedding: i64 = row.get(0).expect("get"); // safety: test-only
+        assert_eq!( // safety: test-only assertion
+            has_embedding, 1,
+            "embedding should be preserved on no-op call"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_hybrid_search_returns_vector_results() {
+        let (backend, _dir) = setup_backend().await;
+
+        // Create vector index with dim=4
+        backend.ensure_vector_index(4).await.expect("ensure dim=4"); // safety: test-only
+
+        // Insert chunk with embedding and searchable content
+        let embedding = [0.5_f32, 0.5, 0.0, 0.0];
+        insert_test_chunk(
+            &backend,
+            "user1",
+            "notes.md",
+            "quantum computing research",
+            Some(&embedding),
+        )
+        .await;
+
+        // Search via the WorkspaceStore trait with vector enabled
+        let query_emb = [0.5_f32, 0.5, 0.0, 0.0];
+        let config = SearchConfig::default().with_limit(5);
+        let results = backend
+            .hybrid_search("user1", None, "quantum", Some(&query_emb), &config)
+            .await
+            .expect("hybrid_search"); // safety: test-only
+
+        assert!(!results.is_empty(), "hybrid search should return results"); // safety: test-only assertion
+        let first = &results[0];
+        assert!( // safety: test-only assertion
+            first.vector_rank.is_some(),
+            "result should have a vector_rank"
+        );
+        assert_eq!(first.content, "quantum computing research"); // safety: test-only assertion
     }
 }

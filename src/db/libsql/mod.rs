@@ -341,6 +341,14 @@ impl Database for LibSqlBackend {
             .map_err(|e| DatabaseError::Migration(format!("libSQL migration failed: {}", e)))?;
         // Apply incremental migrations (V9+) tracked in _migrations table.
         libsql_migrations::run_incremental(&conn).await?;
+
+        // Set up vector index if embeddings are configured.
+        // This dynamically creates a libsql_vector_idx on memory_chunks.embedding
+        // with the correct F32_BLOB(N) dimension inferred from env vars.
+        if let Some(dimension) = workspace::resolve_embedding_dimension() {
+            self.ensure_vector_index(dimension).await?;
+        }
+
         Ok(())
     }
 }
