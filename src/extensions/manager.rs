@@ -2949,12 +2949,28 @@ impl ExtensionManager {
             .unwrap_or_else(|| name.to_string());
 
         if self.should_use_gateway_mode() {
+            // When an exchange proxy is configured, omit the client_secret if it
+            // was resolved from built-in defaults (desktop app credentials). The
+            // proxy holds the correct web-app secret for platform-registered OAuth
+            // apps. Sending the desktop secret would cause a client_id/secret
+            // mismatch because the container's GOOGLE_OAUTH_CLIENT_ID is the web
+            // app, not the desktop app.
+            let proxy_client_secret = if oauth_defaults::use_gateway_callback() {
+                let builtin_secret = builtin.as_ref().map(|c| c.client_secret);
+                match (&client_secret, builtin_secret) {
+                    (Some(resolved), Some(baked_in)) if resolved == baked_in => None,
+                    _ => client_secret.clone(),
+                }
+            } else {
+                client_secret.clone()
+            };
+
             let flow = oauth_defaults::PendingOAuthFlow {
                 extension_name: name.to_string(),
                 display_name: display_name.clone(),
                 token_url: oauth.token_url.clone(),
                 client_id: client_id.clone(),
-                client_secret: client_secret.clone(),
+                client_secret: proxy_client_secret,
                 redirect_uri: redirect_uri.clone(),
                 code_verifier,
                 access_token_field: oauth.access_token_field.clone(),
@@ -7238,5 +7254,87 @@ mod tests {
         if !url.contains("123456789:AABBccDDeeFFgg_Test-Token") {
             panic!("URL missing token: {url}"); // safety: test assertion
         }
+    }
+
+    // ── proxy_client_secret suppression ─────────────────────────────
+
+    /// Replicate the proxy_client_secret logic from `start_wasm_oauth` for testing.
+    /// In production this is inline; extracted here so we can verify all branches.
+    fn compute_proxy_client_secret(
+        client_secret: &Option<String>,
+        builtin: Option<&crate::cli::oauth_defaults::OAuthCredentials>,
+        gateway_callback: bool,
+    ) -> Option<String> {
+        if gateway_callback {
+            let builtin_secret = builtin.map(|c| c.client_secret);
+            match (client_secret, builtin_secret) {
+                (Some(resolved), Some(baked_in)) if resolved == baked_in => None,
+                _ => client_secret.clone(),
+            }
+        } else {
+            client_secret.clone()
+        }
+    }
+
+    #[test]
+    fn test_proxy_client_secret_suppressed_when_builtin_matches_in_gateway_mode() {
+        let builtin = crate::cli::oauth_defaults::builtin_credentials("google_oauth_token");
+        let builtin_ref = builtin.as_ref();
+        let secret = Some(builtin_ref.unwrap().client_secret.to_string());
+
+        let result = compute_proxy_client_secret(&secret, builtin_ref, true);
+        assert_eq!(
+            result, None,
+            "built-in desktop secret must be suppressed in gateway mode"
+        );
+    }
+
+    #[test]
+    fn test_proxy_client_secret_kept_when_not_builtin_in_gateway_mode() {
+        let builtin = crate::cli::oauth_defaults::builtin_credentials("google_oauth_token");
+        let secret = Some("user-entered-custom-secret".to_string());
+
+        let result = compute_proxy_client_secret(&secret, builtin.as_ref(), true);
+        assert_eq!(
+            result,
+            Some("user-entered-custom-secret".to_string()),
+            "non-builtin secret must be kept even in gateway mode"
+        );
+    }
+
+    #[test]
+    fn test_proxy_client_secret_kept_in_local_mode() {
+        let builtin = crate::cli::oauth_defaults::builtin_credentials("google_oauth_token");
+        let builtin_ref = builtin.as_ref();
+        let secret = Some(builtin_ref.unwrap().client_secret.to_string());
+
+        let result = compute_proxy_client_secret(&secret, builtin_ref, false);
+        assert_eq!(
+            result, secret,
+            "built-in secret must be kept in local (non-gateway) mode"
+        );
+    }
+
+    #[test]
+    fn test_proxy_client_secret_none_stays_none() {
+        let builtin = crate::cli::oauth_defaults::builtin_credentials("google_oauth_token");
+
+        let result = compute_proxy_client_secret(&None, builtin.as_ref(), true);
+        assert_eq!(result, None, "None secret stays None in gateway mode");
+    }
+
+    #[test]
+    fn test_proxy_client_secret_no_builtin_provider() {
+        // MCP/non-Google providers have no builtin credentials
+        let builtin = crate::cli::oauth_defaults::builtin_credentials("mcp_notion_access_token");
+        assert!(builtin.is_none());
+
+        let secret = Some("dcr-secret".to_string());
+        let result = compute_proxy_client_secret(&secret, builtin.as_ref(), true);
+        assert_eq!(
+            result,
+            Some("dcr-secret".to_string()),
+            "non-builtin provider secret must be kept"
+        );
     }
 }
