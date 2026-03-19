@@ -209,8 +209,7 @@ mod tests {
 
     #[test]
     fn embeddings_disabled_not_overridden_by_openai_key() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned"); // safety: test
-
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
         clear_embedding_env();
         // SAFETY: Under ENV_MUTEX, no concurrent env access.
         unsafe {
@@ -225,9 +224,8 @@ mod tests {
             ..Default::default()
         };
 
-        let config = EmbeddingsConfig::resolve(&settings).expect("resolve should succeed"); // safety: test
+        let config = EmbeddingsConfig::resolve(&settings).expect("resolve should succeed");
         assert!(
-            // safety: test
             !config.enabled,
             "embeddings should remain disabled when settings.embeddings.enabled=false, \
              even when OPENAI_API_KEY is set (issue #129)"
@@ -241,7 +239,7 @@ mod tests {
 
     #[test]
     fn embeddings_enabled_from_settings() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned"); // safety: test
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
         clear_embedding_env();
 
         let settings = Settings {
@@ -252,9 +250,8 @@ mod tests {
             ..Default::default()
         };
 
-        let config = EmbeddingsConfig::resolve(&settings).expect("resolve should succeed"); // safety: test
+        let config = EmbeddingsConfig::resolve(&settings).expect("resolve should succeed");
         assert!(
-            // safety: test
             config.enabled,
             "embeddings should be enabled when settings say so"
         );
@@ -262,8 +259,7 @@ mod tests {
 
     #[test]
     fn embeddings_env_override_takes_precedence() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned"); // safety: test
-
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
         clear_embedding_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
@@ -278,9 +274,8 @@ mod tests {
             ..Default::default()
         };
 
-        let config = EmbeddingsConfig::resolve(&settings).expect("resolve should succeed"); // safety: test
+        let config = EmbeddingsConfig::resolve(&settings).expect("resolve should succeed");
         assert!(
-            // safety: test
             config.enabled,
             "EMBEDDING_ENABLED=true env var should override settings"
         );
@@ -293,7 +288,7 @@ mod tests {
 
     #[test]
     fn embedding_base_url_parsed_from_env() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned"); // safety: test
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
         clear_embedding_env();
 
         // SAFETY: Under ENV_MUTEX, no concurrent env access.
@@ -302,10 +297,11 @@ mod tests {
         }
 
         let settings = Settings::default();
-        let config = EmbeddingsConfig::resolve(&settings).expect("resolve should succeed"); // safety: test
-        let base_url = config.openai_base_url.as_deref(); // safety: test
-        assert_eq!(base_url, Some("https://custom.example.com")); // safety: test
-
+        let config = EmbeddingsConfig::resolve(&settings).expect("resolve should succeed");
+        assert_eq!(
+            config.openai_base_url.as_deref(),
+            Some("https://custom.example.com")
+        );
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("EMBEDDING_BASE_URL");
@@ -314,18 +310,20 @@ mod tests {
 
     #[test]
     fn embedding_base_url_defaults_to_none() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned"); // safety: test
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
         clear_embedding_env();
 
         let settings = Settings::default();
-        let config = EmbeddingsConfig::resolve(&settings).expect("resolve should succeed"); // safety: test
-        assert!(config.openai_base_url.is_none(), "base_url should be None"); // safety: test
+        let config = EmbeddingsConfig::resolve(&settings).expect("resolve should succeed");
+        assert!(
+            config.openai_base_url.is_none(),
+            "openai_base_url should be None when EMBEDDING_BASE_URL is not set"
+        );
     }
 
     #[test]
     fn cache_size_zero_rejected() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned"); // safety: test
-
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
         clear_embedding_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
@@ -334,11 +332,9 @@ mod tests {
 
         let settings = Settings::default();
         let result = EmbeddingsConfig::resolve(&settings);
-        assert!(result.is_err(), "cache_size=0 should be rejected"); // safety: test
-
-        let err = result.unwrap_err().to_string(); // safety: test
-        assert!(err.contains("at least 1"), "should mention minimum: {err}"); // safety: test
-
+        assert!(result.is_err(), "cache_size=0 should be rejected");
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("at least 1"), "should mention minimum: {err}");
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("EMBEDDING_CACHE_SIZE");

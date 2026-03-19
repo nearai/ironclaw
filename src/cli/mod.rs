@@ -336,7 +336,10 @@ pub async fn run_memory_command(mem_cmd: &MemoryCommand) -> anyhow::Result<()> {
         .await
         .map_err(|e| anyhow::anyhow!("{}", e))?;
 
-    run_memory_command_with_db(mem_cmd.clone(), db, embeddings).await
+    let cache_config = crate::workspace::EmbeddingCacheConfig {
+        max_entries: config.embeddings.cache_size,
+    };
+    run_memory_command_with_db(mem_cmd.clone(), db, embeddings, cache_config).await
 }
 
 #[cfg(test)]

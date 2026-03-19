@@ -67,7 +67,7 @@ impl CachedEmbeddingProvider {
         }
         Self {
             inner,
-            cache: Mutex::new(HashMap::with_capacity(config.max_entries)),
+            cache: Mutex::new(HashMap::with_capacity(config.max_entries.min(1024))),
             config,
         }
     }
@@ -280,7 +280,7 @@ impl EmbeddingProvider for CachedEmbeddingProvider {
             }
         }
 
-        Ok(results
+        results
             .into_iter()
             .enumerate()
             .map(|(i, slot)| {
@@ -288,7 +288,7 @@ impl EmbeddingProvider for CachedEmbeddingProvider {
                     EmbeddingError::InvalidResponse(format!("embedding slot {i} was not populated"))
                 })
             })
-            .collect::<Result<Vec<_>, _>>()?)
+            .collect()
     }
 }
 
@@ -359,14 +359,14 @@ mod tests {
         let cached =
             CachedEmbeddingProvider::new(inner.clone(), EmbeddingCacheConfig { max_entries: 100 });
 
-        let r1 = cached.embed("hello").await.unwrap(); // safety: test
-        assert_eq!(inner.embed_calls(), 1); // safety: test
+        let r1 = cached.embed("hello").await.unwrap();
+        assert_eq!(inner.embed_calls(), 1);
 
-        let r2 = cached.embed("hello").await.unwrap(); // safety: test
-        assert_eq!(inner.embed_calls(), 1); // still 1 -- cache hit // safety: test
-        assert_eq!(r1, r2); // safety: test
+        let r2 = cached.embed("hello").await.unwrap();
+        assert_eq!(inner.embed_calls(), 1); // still 1 -- cache hit
+        assert_eq!(r1, r2);
 
-        assert_eq!(cached.len(), 1); // safety: test
+        assert_eq!(cached.len(), 1);
     }
 
     #[tokio::test]
@@ -375,10 +375,10 @@ mod tests {
         let cached =
             CachedEmbeddingProvider::new(inner.clone(), EmbeddingCacheConfig { max_entries: 100 });
 
-        cached.embed("hello").await.unwrap(); // safety: test
-        cached.embed("world").await.unwrap(); // safety: test
-        assert_eq!(inner.embed_calls(), 2); // safety: test
-        assert_eq!(cached.len(), 2); // safety: test
+        cached.embed("hello").await.unwrap();
+        cached.embed("world").await.unwrap();
+        assert_eq!(inner.embed_calls(), 2);
+        assert_eq!(cached.len(), 2);
     }
 
     #[tokio::test]
@@ -398,7 +398,7 @@ mod tests {
         // Same text, different models -> different cache keys
         let key_a = cached_a.cache_key("hello");
         let key_b = cached_b.cache_key("hello");
-        assert_ne!(key_a, key_b); // safety: test
+        assert_ne!(key_a, key_b);
     }
 
     #[tokio::test]
@@ -407,18 +407,18 @@ mod tests {
         let cached =
             CachedEmbeddingProvider::new(inner.clone(), EmbeddingCacheConfig { max_entries: 2 });
 
-        cached.embed("first").await.unwrap(); // safety: test
-        cached.embed("second").await.unwrap(); // safety: test
-        assert_eq!(cached.len(), 2); // safety: test
+        cached.embed("first").await.unwrap();
+        cached.embed("second").await.unwrap();
+        assert_eq!(cached.len(), 2);
 
         // Third entry should evict the oldest ("first")
-        cached.embed("third").await.unwrap(); // safety: test
-        assert_eq!(cached.len(), 2); // safety: test
-        assert_eq!(inner.embed_calls(), 3); // safety: test
+        cached.embed("third").await.unwrap();
+        assert_eq!(cached.len(), 2);
+        assert_eq!(inner.embed_calls(), 3);
 
         // "first" should be a cache miss now
-        cached.embed("first").await.unwrap(); // safety: test
-        assert_eq!(inner.embed_calls(), 4); // safety: test
+        cached.embed("first").await.unwrap();
+        assert_eq!(inner.embed_calls(), 4);
     }
 
     #[tokio::test]
@@ -428,8 +428,8 @@ mod tests {
             CachedEmbeddingProvider::new(inner.clone(), EmbeddingCacheConfig { max_entries: 100 });
 
         // Pre-cache one text
-        cached.embed("cached").await.unwrap(); // safety: test
-        assert_eq!(inner.embed_calls(), 1); // safety: test
+        cached.embed("cached").await.unwrap();
+        assert_eq!(inner.embed_calls(), 1);
 
         // Batch with 1 cached + 2 new
         let texts = vec![
@@ -437,12 +437,12 @@ mod tests {
             "new_one".to_string(),
             "new_two".to_string(),
         ];
-        let results = cached.embed_batch(&texts).await.unwrap(); // safety: test
+        let results = cached.embed_batch(&texts).await.unwrap();
 
         // Should have called embed_batch on inner for 2 misses
-        assert_eq!(inner.batch_calls(), 1); // safety: test
-        assert_eq!(results.len(), 3); // safety: test
-        assert_eq!(cached.len(), 3); // all three now cached // safety: test
+        assert_eq!(inner.batch_calls(), 1);
+        assert_eq!(results.len(), 3);
+        assert_eq!(cached.len(), 3);
     }
 
     #[tokio::test]
@@ -452,22 +452,19 @@ mod tests {
             CachedEmbeddingProvider::new(inner.clone(), EmbeddingCacheConfig { max_entries: 100 });
 
         // Pre-cache "bb" (len 2)
-        cached.embed("bb").await.unwrap(); // safety: test
+        cached.embed("bb").await.unwrap();
 
         // Batch: "a" (miss, len 1), "bb" (hit, len 2), "ccc" (miss, len 3)
-        // Different lengths ensure distinct embeddings from CountingMock.
         let texts = vec!["a".to_string(), "bb".to_string(), "ccc".to_string()];
-        let results = cached.embed_batch(&texts).await.unwrap(); // safety: test
+        let results = cached.embed_batch(&texts).await.unwrap();
 
-        assert_eq!(results.len(), 3); // safety: test
-        // CountingMock produces val = text.len() / 100.0, so each input
-        // with a different length yields a distinct embedding.
+        assert_eq!(results.len(), 3);
         let expected_a = vec![1.0_f32 / 100.0; 4];
         let expected_bb = vec![2.0_f32 / 100.0; 4];
         let expected_ccc = vec![3.0_f32 / 100.0; 4];
-        assert_eq!(results[0], expected_a); // safety: test
-        assert_eq!(results[1], expected_bb); // safety: test
-        assert_eq!(results[2], expected_ccc); // safety: test
+        assert_eq!(results[0], expected_a);
+        assert_eq!(results[1], expected_bb);
+        assert_eq!(results[2], expected_ccc);
     }
 
     #[tokio::test]
@@ -478,13 +475,11 @@ mod tests {
 
         // Batch with 5 misses but cache capacity is 3
         let texts: Vec<String> = (0..5).map(|i| format!("text_{i}")).collect();
-        let results = cached.embed_batch(&texts).await.unwrap(); // safety: test
+        let results = cached.embed_batch(&texts).await.unwrap();
 
-        // All 5 results should be returned correctly
-        assert_eq!(results.len(), 5); // safety: test
-        // But cache should not exceed max_entries
-        let len = cached.len(); // safety: test
-        assert!(len <= 3, "cache len {len} exceeds max 3"); // safety: test
+        assert_eq!(results.len(), 5);
+        let len = cached.len();
+        assert!(len <= 3, "cache len {len} exceeds max 3");
     }
 
     /// Mock embedding provider that fails the first N calls, then succeeds.
@@ -516,18 +511,24 @@ mod tests {
             10_000
         }
         async fn embed(&self, text: &str) -> Result<Vec<f32>, EmbeddingError> {
-            let prev = self.remaining_failures.load(Ordering::SeqCst);
-            if prev > 0 {
-                self.remaining_failures.store(prev - 1, Ordering::SeqCst);
+            let prev =
+                self.remaining_failures
+                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
+                        if v > 0 { Some(v - 1) } else { None }
+                    });
+            if prev.is_ok() {
                 return Err(EmbeddingError::HttpError("simulated failure".to_string()));
             }
             let val = text.len() as f32 / 100.0;
             Ok(vec![val; self.dimension])
         }
         async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, EmbeddingError> {
-            let prev = self.remaining_failures.load(Ordering::SeqCst);
-            if prev > 0 {
-                self.remaining_failures.store(prev - 1, Ordering::SeqCst);
+            let prev =
+                self.remaining_failures
+                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
+                        if v > 0 { Some(v - 1) } else { None }
+                    });
+            if prev.is_ok() {
                 return Err(EmbeddingError::HttpError("simulated failure".to_string()));
             }
             texts
@@ -548,13 +549,13 @@ mod tests {
 
         // First call fails
         let err = cached.embed("hello").await;
-        assert!(err.is_err()); // safety: test
-        assert!(cached.is_empty(), "cache should be empty after error"); // safety: test
+        assert!(err.is_err());
+        assert!(cached.is_empty(), "cache should be empty after error");
 
         // Second call succeeds and should call the inner provider (not serve stale error)
         let result = cached.embed("hello").await;
-        assert!(result.is_ok()); // safety: test
-        assert_eq!(cached.len(), 1); // safety: test
+        assert!(result.is_ok());
+        assert_eq!(cached.len(), 1);
     }
 
     #[tokio::test]
@@ -563,10 +564,9 @@ mod tests {
         let cached =
             CachedEmbeddingProvider::new(inner.clone(), EmbeddingCacheConfig { max_entries: 100 });
 
-        let results = cached.embed_batch(&[]).await.unwrap(); // safety: test
-        assert!(results.is_empty()); // safety: test
-        // Inner provider should not have been called
-        assert_eq!(inner.batch_calls(), 0); // safety: test
+        let results = cached.embed_batch(&[]).await.unwrap();
+        assert!(results.is_empty());
+        assert_eq!(inner.batch_calls(), 0);
     }
 
     #[tokio::test]
@@ -577,15 +577,15 @@ mod tests {
 
         // Nothing cached — every text is a miss
         let texts: Vec<String> = vec!["alpha".into(), "beta".into(), "gamma".into()];
-        let results = cached.embed_batch(&texts).await.unwrap(); // safety: test
-        assert_eq!(results.len(), 3); // safety: test
-        assert_eq!(inner.batch_calls(), 1, "inner called once for misses"); // safety: test
-        assert_eq!(cached.len(), 3, "all results should be cached"); // safety: test
+        let results = cached.embed_batch(&texts).await.unwrap();
+        assert_eq!(results.len(), 3);
+        assert_eq!(inner.batch_calls(), 1, "inner called once for misses");
+        assert_eq!(cached.len(), 3, "all results should be cached");
 
         // Second call should be all hits — no new inner calls
-        let results2 = cached.embed_batch(&texts).await.unwrap(); // safety: test
-        assert_eq!(results2.len(), 3); // safety: test
-        assert_eq!(inner.batch_calls(), 1, "no new inner calls"); // safety: test
+        let results2 = cached.embed_batch(&texts).await.unwrap();
+        assert_eq!(results2.len(), 3);
+        assert_eq!(inner.batch_calls(), 1, "no new inner calls");
     }
 
     #[tokio::test]
@@ -595,12 +595,12 @@ mod tests {
             CachedEmbeddingProvider::new(inner.clone(), EmbeddingCacheConfig { max_entries: 0 });
 
         // Should behave as max_entries=1 (clamped in constructor)
-        cached.embed("hello").await.unwrap(); // safety: test
-        assert_eq!(cached.len(), 1); // safety: test
+        cached.embed("hello").await.unwrap();
+        assert_eq!(cached.len(), 1);
 
         // Second entry evicts the first
-        cached.embed("world").await.unwrap(); // safety: test
-        assert_eq!(cached.len(), 1); // safety: test
-        assert_eq!(inner.embed_calls(), 2); // safety: test
+        cached.embed("world").await.unwrap();
+        assert_eq!(cached.len(), 1);
+        assert_eq!(inner.embed_calls(), 2);
     }
 }
