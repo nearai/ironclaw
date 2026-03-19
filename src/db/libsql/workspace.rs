@@ -926,7 +926,8 @@ mod tests {
             .expect("query embedding"); // safety: test-only
         let row = rows.next().await.expect("fetch").expect("chunk row"); // safety: test-only
         let is_null: i64 = row.get(0).expect("get is_null"); // safety: test-only
-        assert_eq!( // safety: test-only assertion
+        // safety: test-only assertion
+        assert_eq!(
             is_null, 1,
             "old 4-dim embedding should be NULLed after dim change to 8"
         );
@@ -958,7 +959,8 @@ mod tests {
             .expect("query embedding"); // safety: test-only
         let row = rows.next().await.expect("fetch").expect("chunk row"); // safety: test-only
         let has_embedding: i64 = row.get(0).expect("get"); // safety: test-only
-        assert_eq!( // safety: test-only assertion
+        // safety: test-only assertion
+        assert_eq!(
             has_embedding, 1,
             "embedding should be preserved on no-op call"
         );
@@ -992,7 +994,8 @@ mod tests {
 
         assert!(!results.is_empty(), "hybrid search should return results"); // safety: test-only assertion
         let first = &results[0];
-        assert!( // safety: test-only assertion
+        // safety: test-only assertion
+        assert!(
             first.vector_rank.is_some(),
             "result should have a vector_rank"
         );
