@@ -19,9 +19,11 @@
 //! ```
 
 pub mod credentials;
+pub mod fault_injection;
 
 use std::sync::Arc;
 use std::sync::Mutex;
+
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use async_trait::async_trait;
@@ -84,6 +86,9 @@ pub struct StubLlm {
     call_count: AtomicU32,
     should_fail: AtomicBool,
     error_kind: StubErrorKind,
+    /// Optional fault injector for fine-grained failure control.
+    /// When set, takes precedence over the `should_fail` / `error_kind` fields.
+    fault_injector: Option<Arc<fault_injection::FaultInjector>>,
 }
 
 impl StubLlm {
@@ -95,6 +100,7 @@ impl StubLlm {
             call_count: AtomicU32::new(0),
             should_fail: AtomicBool::new(false),
             error_kind: StubErrorKind::Transient,
+            fault_injector: None,
         }
     }
 
@@ -106,6 +112,7 @@ impl StubLlm {
             call_count: AtomicU32::new(0),
             should_fail: AtomicBool::new(true),
             error_kind: StubErrorKind::Transient,
+            fault_injector: None,
         }
     }
 
@@ -117,6 +124,7 @@ impl StubLlm {
             call_count: AtomicU32::new(0),
             should_fail: AtomicBool::new(true),
             error_kind: StubErrorKind::NonTransient,
+            fault_injector: None,
         }
     }
 
@@ -131,9 +139,37 @@ impl StubLlm {
         self.call_count.load(Ordering::Relaxed)
     }
 
+    /// Attach a fault injector for fine-grained failure control.
+    ///
+    /// When set, the injector's `next_action()` is consulted on every call,
+    /// taking precedence over the `should_fail` / `error_kind` fields.
+    pub fn with_fault_injector(mut self, injector: Arc<fault_injection::FaultInjector>) -> Self {
+        self.fault_injector = Some(injector);
+        self
+    }
+
     /// Toggle whether calls should fail at runtime.
     pub fn set_failing(&self, fail: bool) {
         self.should_fail.store(fail, Ordering::Relaxed);
+    }
+
+    /// Check the fault injector or should_fail flag, returning an error if
+    /// the call should fail, or None if it should succeed.
+    async fn check_faults(&self) -> Option<LlmError> {
+        if let Some(ref injector) = self.fault_injector {
+            match injector.next_action() {
+                fault_injection::FaultAction::Fail(fault) => {
+                    return Some(fault.to_llm_error(&self.model_name));
+                }
+                fault_injection::FaultAction::Delay(duration) => {
+                    tokio::time::sleep(duration).await;
+                }
+                fault_injection::FaultAction::Succeed => {}
+            }
+        } else if self.should_fail.load(Ordering::Relaxed) {
+            return Some(self.make_error());
+        }
+        None
     }
 
     fn make_error(&self) -> LlmError {
@@ -168,8 +204,8 @@ impl LlmProvider for StubLlm {
 
     async fn complete(&self, _request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
         self.call_count.fetch_add(1, Ordering::Relaxed);
-        if self.should_fail.load(Ordering::Relaxed) {
-            return Err(self.make_error());
+        if let Some(err) = self.check_faults().await {
+            return Err(err);
         }
         Ok(CompletionResponse {
             content: self.response.clone(),
@@ -186,8 +222,8 @@ impl LlmProvider for StubLlm {
         _request: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, LlmError> {
         self.call_count.fetch_add(1, Ordering::Relaxed);
-        if self.should_fail.load(Ordering::Relaxed) {
-            return Err(self.make_error());
+        if let Some(err) = self.check_faults().await {
+            return Err(err);
         }
         Ok(ToolCompletionResponse {
             content: Some(self.response.clone()),
@@ -1507,5 +1543,30 @@ mod tests {
         )
         .await
         .expect("update actuals");
+    }
+
+    #[tokio::test]
+    async fn stub_llm_fault_injector_sequence() {
+        use crate::llm::LlmProvider;
+        use crate::testing::fault_injection::{FaultAction, FaultInjector, FaultType};
+
+        let injector = Arc::new(FaultInjector::sequence([
+            FaultAction::Fail(FaultType::RateLimited { retry_after: None }),
+            FaultAction::Succeed,
+        ]));
+
+        let stub = StubLlm::new("hello").with_fault_injector(injector);
+
+        let req = crate::llm::CompletionRequest::new(vec![crate::llm::ChatMessage::user("hi")]);
+
+        // First call should fail with RateLimited
+        let result = stub.complete(req.clone()).await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), LlmError::RateLimited { .. }));
+
+        // Second call should succeed
+        let result = stub.complete(req).await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().content, "hello");
     }
 }
