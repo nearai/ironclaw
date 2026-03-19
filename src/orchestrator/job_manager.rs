@@ -16,6 +16,9 @@ use crate::error::OrchestratorError;
 use crate::orchestrator::auth::{CredentialGrant, TokenStore};
 use crate::sandbox::connect_docker;
 
+/// Path to the master worker MCP config on the host.
+const WORKER_MCP_CONFIG_PATH: &str = "/opt/ironclaw/config/worker/mcp-servers.json";
+
 /// Which mode a sandbox container runs in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JobMode {
@@ -348,15 +351,16 @@ impl ContainerJobManager {
             env_vec.push("IRONCLAW_WORKSPACE=/workspace".to_string());
         }
 
-        // Inject max_iterations if specified.
-        if let Some(iters) = max_iterations {
+        // Inject max_iterations if specified (only for Worker mode — ClaudeCode uses max_turns).
+        if let Some(iters) = max_iterations
+            && mode == JobMode::Worker
+        {
             env_vec.push(format!("IRONCLAW_MAX_ITERATIONS={}", iters));
         }
 
         // Mount per-job MCP config when the feature is enabled.
         if self.config.mcp_per_job_enabled {
-            let mcp_config_host =
-                std::path::Path::new("/opt/ironclaw/config/worker/mcp-servers.json");
+            let mcp_config_host = std::path::Path::new(WORKER_MCP_CONFIG_PATH);
             match generate_worker_mcp_config(mcp_config_host, mcp_servers.as_deref(), job_id)? {
                 Some(config_path) => {
                     binds.push(format!(
@@ -627,17 +631,20 @@ impl ContainerJobManager {
     /// Remove a completed job handle from memory (called after result is read).
     pub async fn cleanup_job(&self, job_id: Uuid) {
         // Clean up per-job MCP config temp file if one was written.
+        // Use remove_file directly — avoids TOCTOU race with exists() check.
         let tmp_path = std::env::temp_dir()
             .join("ironclaw-mcp-configs")
             .join(format!("{}.json", job_id));
-        if tmp_path.exists()
-            && let Err(e) = std::fs::remove_file(&tmp_path)
-        {
-            tracing::warn!(
-                job_id = %job_id,
-                error = %e,
-                "Failed to remove per-job MCP config temp file"
-            );
+        match std::fs::remove_file(&tmp_path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {} // No temp file — normal
+            Err(e) => {
+                tracing::warn!(
+                    job_id = %job_id,
+                    error = %e,
+                    "Failed to remove per-job MCP config temp file"
+                );
+            }
         }
 
         self.containers.write().await.remove(&job_id);
@@ -739,7 +746,7 @@ fn generate_worker_mcp_config(
             let schema_version = master
                 .get("schema_version")
                 .cloned()
-                .unwrap_or(serde_json::json!(0));
+                .unwrap_or(serde_json::json!(1));
             let filtered = serde_json::json!({
                 "servers": servers,
                 "schema_version": schema_version
@@ -754,13 +761,17 @@ fn generate_worker_mcp_config(
             })?;
 
             let tmp_path = tmp_dir.join(format!("{}.json", job_id));
-            std::fs::write(
-                &tmp_path,
-                serde_json::to_string_pretty(&filtered).unwrap_or_else(|_| "{}".to_string()),
-            )
-            .map_err(|e| OrchestratorError::ContainerCreationFailed {
-                job_id,
-                reason: format!("failed to write per-job MCP config: {e}"),
+            let config_json = serde_json::to_string_pretty(&filtered).map_err(|e| {
+                OrchestratorError::ContainerCreationFailed {
+                    job_id,
+                    reason: format!("failed to serialize filtered MCP config: {e}"),
+                }
+            })?;
+            std::fs::write(&tmp_path, config_json).map_err(|e| {
+                OrchestratorError::ContainerCreationFailed {
+                    job_id,
+                    reason: format!("failed to write per-job MCP config: {e}"),
+                }
             })?;
 
             Ok(Some(tmp_path))
