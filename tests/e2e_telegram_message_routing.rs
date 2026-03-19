@@ -198,6 +198,7 @@ mod tests {
             http_interceptor: None,
             transcription: None,
             document_extraction: None,
+            builder: None,
         };
 
         let gateway = Arc::new(TestChannel::new());

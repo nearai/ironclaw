@@ -15,7 +15,7 @@ the most common configurations.
 | io.net | `ionet` | `IONET_API_KEY` | Intelligence API |
 | Mistral | `mistral` | `MISTRAL_API_KEY` | Mistral models |
 | Yandex AI Studio | `yandex` | `YANDEX_API_KEY` | YandexGPT models |
-| MiniMax | `minimax` | `MINIMAX_API_KEY` | MiniMax-M2.5 models |
+| MiniMax | `minimax` | `MINIMAX_API_KEY` | MiniMax-M2.7 models |
 | Cloudflare Workers AI | `cloudflare` | `CLOUDFLARE_API_KEY` | Access to Workers AI |
 | Ollama | `ollama` | No | Local inference |
 | AWS Bedrock | `bedrock` | AWS credentials | Native Converse API |
@@ -129,7 +129,7 @@ LLM_BACKEND=minimax
 MINIMAX_API_KEY=...
 ```
 
-Available models: `MiniMax-M2.5` (default), `MiniMax-M2.5-highspeed`
+Available models: `MiniMax-M2.7` (default), `MiniMax-M2.7-highspeed`, `MiniMax-M2.5`, `MiniMax-M2.5-highspeed`
 
 To use the China mainland endpoint, set:
 

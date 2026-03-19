@@ -231,6 +231,19 @@ impl ToolSchema {
     }
 }
 
+/// Curated discovery guidance surfaced by `tool_info(detail: "summary")`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ToolDiscoverySummary {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub always_required: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conditional_requirements: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub examples: Vec<serde_json::Value>,
+}
+
 /// Trait for tools that the agent can use.
 #[async_trait]
 pub trait Tool: Send + Sync {
@@ -347,12 +360,32 @@ pub trait Tool: Send + Sync {
         self.parameters_schema()
     }
 
+    /// Curated discovery guidance used by `tool_info(detail: "summary")`.
+    ///
+    /// Default: no custom summary; callers may derive a minimal fallback from
+    /// `discovery_schema()`.
+    fn discovery_summary(&self) -> Option<ToolDiscoverySummary> {
+        None
+    }
+
     /// Get the tool schema for LLM function calling.
     fn schema(&self) -> ToolSchema {
+        let parameters = self.parameters_schema();
+        let has_discovery_hint =
+            self.discovery_summary().is_some() || self.discovery_schema() != parameters;
+        let description = if has_discovery_hint {
+            format!(
+                "{} (call tool_info(name: \"{}\", detail: \"summary\") for rules/examples or detail: \"schema\" for the full discovery schema)",
+                self.description(),
+                self.name()
+            )
+        } else {
+            self.description().to_string()
+        };
         ToolSchema {
             name: self.name().to_string(),
-            description: self.description().to_string(),
-            parameters: self.parameters_schema(),
+            description,
+            parameters,
         }
     }
 }
