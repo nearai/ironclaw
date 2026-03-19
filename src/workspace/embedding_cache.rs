@@ -36,8 +36,10 @@ impl Default for EmbeddingCacheConfig {
 }
 
 struct CacheEntry {
-    /// Stored as `Arc` so that cache insertions (miss path) can share the
-    /// allocation with the return value instead of cloning the entire vector.
+    /// Stored as `Arc` so that the underlying allocation can be shared between
+    /// cache entries and, in cases where we can `Arc::try_unwrap` (e.g. when an
+    /// embedding is not retained in the cache), reused for the returned `Vec<f32>`.
+    /// Normal cache hit/miss paths still clone into a fresh `Vec<f32>` for callers.
     embedding: Arc<Vec<f32>>,
     last_accessed: Instant,
 }
@@ -201,8 +203,8 @@ impl EmbeddingProvider for CachedEmbeddingProvider {
         }
 
         tracing::trace!("embedding cache miss");
-        // Unwrap the Arc if we're the sole owner (avoids a clone on the miss path).
-        Ok(Arc::try_unwrap(embedding).unwrap_or_else(|arc| (*arc).clone()))
+        // Return a cloned embedding; the cache holds its own `Arc` reference.
+        Ok((*embedding).clone())
     }
 
     async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, EmbeddingError> {
