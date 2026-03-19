@@ -17,6 +17,7 @@
 mod channels;
 mod completion;
 mod config;
+mod did;
 mod doctor;
 #[cfg(feature = "import")]
 pub mod import;
@@ -35,6 +36,7 @@ mod tool;
 pub use channels::{ChannelsCommand, run_channels_command};
 pub use completion::Completion;
 pub use config::{ConfigCommand, run_config_command};
+pub use did::{DidCommand, run_did_command};
 pub use doctor::run_doctor_command;
 #[cfg(feature = "import")]
 pub use import::{ImportCommand, run_import_command};
@@ -222,6 +224,14 @@ pub enum Command {
         long_about = "Displays health and diagnostics info.\nExample: ironclaw status"
     )]
     Status,
+
+    /// Show the instance DID and DID document
+    #[command(
+        subcommand,
+        about = "Manage instance DID",
+        long_about = "Inspect the local instance DID and DID document.\nExamples:\n  ironclaw did show\n  ironclaw did document"
+    )]
+    Did(DidCommand),
 
     /// Generate shell completion scripts
     #[command(
