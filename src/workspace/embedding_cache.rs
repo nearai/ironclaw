@@ -36,7 +36,9 @@ impl Default for EmbeddingCacheConfig {
 }
 
 struct CacheEntry {
-    embedding: Vec<f32>,
+    /// Stored as `Arc` so that cache insertions (miss path) can share the
+    /// allocation with the return value instead of cloning the entire vector.
+    embedding: Arc<Vec<f32>>,
     last_accessed: Instant,
 }
 
@@ -168,7 +170,7 @@ impl EmbeddingProvider for CachedEmbeddingProvider {
             if let Some(entry) = guard.get_mut(&key) {
                 entry.last_accessed = Instant::now();
                 tracing::trace!("embedding cache hit");
-                return Ok(entry.embedding.clone());
+                return Ok((*entry.embedding).clone());
             }
         }
         // Lock released before HTTP call.
@@ -176,7 +178,7 @@ impl EmbeddingProvider for CachedEmbeddingProvider {
         // uncached key will each call the inner provider. This is acceptable:
         // embeddings are idempotent and the last writer wins in the HashMap.
 
-        let embedding = self.inner.embed(text).await?;
+        let embedding = Arc::new(self.inner.embed(text).await?);
 
         // Store result. Re-check under lock: another concurrent caller may
         // have inserted this key while the lock was released for the HTTP call.
@@ -184,14 +186,14 @@ impl EmbeddingProvider for CachedEmbeddingProvider {
             let mut guard = self.cache.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(entry) = guard.get_mut(&key) {
                 // Key already present (thundering herd) — just update, no eviction needed.
-                entry.embedding = embedding.clone();
+                entry.embedding = Arc::clone(&embedding);
                 entry.last_accessed = Instant::now();
             } else {
                 Self::evict_lru(&mut guard, self.config.max_entries);
                 guard.insert(
                     key,
                     CacheEntry {
-                        embedding: embedding.clone(),
+                        embedding: Arc::clone(&embedding),
                         last_accessed: Instant::now(),
                     },
                 );
@@ -199,7 +201,8 @@ impl EmbeddingProvider for CachedEmbeddingProvider {
         }
 
         tracing::trace!("embedding cache miss");
-        Ok(embedding)
+        // Unwrap the Arc if we're the sole owner (avoids a clone on the miss path).
+        Ok(Arc::try_unwrap(embedding).unwrap_or_else(|arc| (*arc).clone()))
     }
 
     async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, EmbeddingError> {
@@ -218,7 +221,7 @@ impl EmbeddingProvider for CachedEmbeddingProvider {
             for (i, key) in keys.iter().enumerate() {
                 if let Some(entry) = guard.get_mut(key) {
                     entry.last_accessed = now;
-                    results[i] = Some(entry.embedding.clone());
+                    results[i] = Some((*entry.embedding).clone());
                 } else {
                     miss_indices.push(i);
                 }
@@ -244,7 +247,13 @@ impl EmbeddingProvider for CachedEmbeddingProvider {
 
         // Fetch missing embeddings
         let miss_texts: Vec<String> = miss_indices.iter().map(|&i| texts[i].clone()).collect();
-        let new_embeddings = self.inner.embed_batch(&miss_texts).await?;
+        let new_embeddings: Vec<Arc<Vec<f32>>> = self
+            .inner
+            .embed_batch(&miss_texts)
+            .await?
+            .into_iter()
+            .map(Arc::new)
+            .collect();
 
         if new_embeddings.len() != miss_indices.len() {
             return Err(EmbeddingError::InvalidResponse(format!(
@@ -260,15 +269,11 @@ impl EmbeddingProvider for CachedEmbeddingProvider {
             "embedding batch: partial cache"
         );
 
-        // Assemble results first (all misses, regardless of cache capacity).
-        for (orig_idx, emb) in miss_indices.iter().copied().zip(&new_embeddings) {
-            results[orig_idx] = Some(emb.clone());
-        }
-
         // Cache the new embeddings, respecting max_entries.
+        // Done BEFORE assembling results so that Arc::try_unwrap can
+        // avoid a clone when the cache doesn't keep a copy.
         {
             let mut guard = self.cache.lock().unwrap_or_else(|e| e.into_inner());
-            // When misses exceed capacity, clear and only cache the tail.
             let cacheable = miss_indices.len().min(self.config.max_entries);
             let skip = miss_indices.len() - cacheable;
             let need_to_evict = (guard.len() + cacheable).saturating_sub(self.config.max_entries);
@@ -280,11 +285,18 @@ impl EmbeddingProvider for CachedEmbeddingProvider {
                 guard.insert(
                     keys[orig_idx],
                     CacheEntry {
-                        embedding: emb.clone(),
+                        embedding: Arc::clone(emb),
                         last_accessed: now,
                     },
                 );
             }
+        }
+
+        // Assemble results: try_unwrap avoids a clone when the Arc is sole-owned
+        // (i.e., when the embedding was skipped during caching due to capacity).
+        for (orig_idx, emb) in miss_indices.iter().copied().zip(new_embeddings) {
+            results[orig_idx] =
+                Some(Arc::try_unwrap(emb).unwrap_or_else(|arc| (*arc).clone()));
         }
 
         results
