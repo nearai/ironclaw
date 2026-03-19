@@ -19,6 +19,12 @@ use crate::llm::provider::{
     ToolCompletionResponse,
 };
 
+/// Upper bound for provider-suggested `Retry-After` delays.
+///
+/// This prevents malicious or malformed headers from turning a retryable
+/// response into an effectively unbounded sleep.
+pub(crate) const MAX_RETRY_AFTER_SECS: u64 = 3600;
+
 /// Returns `true` if the `LlmError` is transient and the request should be retried.
 ///
 /// Used by `RetryProvider` (retry the same provider) and `FailoverProvider`
@@ -65,6 +71,11 @@ pub(crate) fn retry_backoff_delay(attempt: u32) -> Duration {
     };
     let delay_ms = (base_ms as i64 + jitter).max(100) as u64;
     Duration::from_millis(delay_ms)
+}
+
+/// Clamp a provider-suggested retry delay to a safe maximum.
+pub(crate) fn cap_retry_after(duration: Duration) -> Duration {
+    duration.min(Duration::from_secs(MAX_RETRY_AFTER_SECS))
 }
 
 /// Configuration for the retry decorator.
@@ -420,5 +431,17 @@ mod tests {
         } else {
             panic!("Expected RateLimited error");
         }
+    }
+
+    #[test]
+    fn cap_retry_after_clamps_huge_delays() {
+        assert_eq!(
+            cap_retry_after(Duration::from_secs(u64::MAX)),
+            Duration::from_secs(MAX_RETRY_AFTER_SECS)
+        );
+        assert_eq!(
+            cap_retry_after(Duration::from_secs(0)),
+            Duration::from_secs(0)
+        );
     }
 }

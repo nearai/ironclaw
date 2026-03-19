@@ -108,6 +108,8 @@ mod tests {
         assert!(has_native_thinking("nanbeige-4.1-3b"));
         assert!(has_native_thinking("step-3.5-flash-197b"));
         assert!(has_native_thinking("minimax-m2.5-139b"));
+        assert!(has_native_thinking("MiniMax-M2.7"));
+        assert!(has_native_thinking("MiniMax-M2.7-highspeed"));
     }
 
     #[test]

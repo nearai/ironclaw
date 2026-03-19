@@ -146,6 +146,8 @@ pub struct AgentDeps {
     pub transcription: Option<Arc<crate::transcription::TranscriptionMiddleware>>,
     /// Document text extraction middleware for PDF, DOCX, PPTX, etc.
     pub document_extraction: Option<Arc<crate::document_extraction::DocumentExtractionMiddleware>>,
+    /// Software builder for self-repair tool rebuilding.
+    pub builder: Option<Arc<dyn crate::tools::SoftwareBuilder>>,
 }
 
 /// The main agent that coordinates all components.
@@ -161,9 +163,10 @@ pub struct Agent {
     pub(super) heartbeat_config: Option<HeartbeatConfig>,
     pub(super) hygiene_config: Option<crate::config::HygieneConfig>,
     pub(super) routine_config: Option<RoutineConfig>,
-    /// Optional slot to expose the routine engine to the gateway for manual triggering.
+    /// Shared routine-engine slot used for internal event matching and for exposing
+    /// the engine to gateway/manual trigger entry points.
     pub(super) routine_engine_slot:
-        Option<Arc<tokio::sync::RwLock<Option<Arc<crate::agent::routine_engine::RoutineEngine>>>>>,
+        Arc<tokio::sync::RwLock<Option<Arc<crate::agent::routine_engine::RoutineEngine>>>>,
 }
 
 impl Agent {
@@ -228,16 +231,21 @@ impl Agent {
             heartbeat_config,
             hygiene_config,
             routine_config,
-            routine_engine_slot: None,
+            routine_engine_slot: Arc::new(tokio::sync::RwLock::new(None)),
         }
     }
 
-    /// Set the routine engine slot for exposing the engine to the gateway.
+    /// Replace the routine-engine slot with a shared one so the gateway and
+    /// agent reference the same engine.
     pub fn set_routine_engine_slot(
         &mut self,
         slot: Arc<tokio::sync::RwLock<Option<Arc<crate::agent::routine_engine::RoutineEngine>>>>,
     ) {
-        self.routine_engine_slot = Some(slot);
+        self.routine_engine_slot = slot;
+    }
+
+    async fn routine_engine(&self) -> Option<Arc<crate::agent::routine_engine::RoutineEngine>> {
+        self.routine_engine_slot.read().await.clone()
     }
 
     // Convenience accessors
@@ -334,11 +342,18 @@ impl Agent {
         let mut message_stream = self.channels.start_all().await?;
 
         // Start self-repair task with notification forwarding
-        let repair = Arc::new(DefaultSelfRepair::new(
+        let mut self_repair = DefaultSelfRepair::new(
             self.context_manager.clone(),
             self.config.stuck_threshold,
             self.config.max_repair_attempts,
-        ));
+        );
+        if let Some(ref store) = self.deps.store {
+            self_repair = self_repair.with_store(Arc::clone(store));
+        }
+        if let Some(ref builder) = self.deps.builder {
+            self_repair = self_repair.with_builder(Arc::clone(builder), Arc::clone(self.tools()));
+        }
+        let repair = Arc::new(self_repair);
         let repair_interval = self.config.repair_check_interval;
         let repair_channels = self.channels.clone();
         let repair_owner_id = self.owner_id().to_string();
@@ -633,9 +648,7 @@ impl Agent {
                     // via a local to use in the message loop below.
 
                     // Expose engine to gateway for manual triggering
-                    if let Some(ref slot) = self.routine_engine_slot {
-                        *slot.write().await = Some(Arc::clone(&engine));
-                    }
+                    *self.routine_engine_slot.write().await = Some(Arc::clone(&engine));
 
                     tracing::debug!(
                         "Routines enabled: cron ticker every {}s, max {} concurrent",
@@ -654,9 +667,6 @@ impl Agent {
         } else {
             None
         };
-
-        // Extract engine ref for use in message loop
-        let routine_engine_for_loop = routine_handle.as_ref().map(|(_, e)| Arc::clone(e));
 
         // Main message loop
         tracing::debug!("Agent {} ready and listening", self.config.name);
@@ -692,29 +702,6 @@ impl Agent {
 
             // Store successfully extracted document text in workspace for indexing
             self.store_extracted_documents(&message).await;
-
-            // Event-triggered routines consume plain user input before it enters
-            // the normal chat/tool pipeline. This avoids a duplicate turn where
-            // the main agent responds and the routine also fires on the same
-            // inbound message.
-            if !message.is_internal
-                && matches!(
-                    SubmissionParser::parse(&message.content),
-                    Submission::UserInput { .. }
-                )
-                && let Some(ref engine) = routine_engine_for_loop
-            {
-                let fired = engine.check_event_triggers(&message).await;
-                if fired > 0 {
-                    tracing::debug!(
-                        channel = %message.channel,
-                        user = %message.user_id,
-                        fired,
-                        "Consumed inbound user message with matching event-triggered routine(s)"
-                    );
-                    continue;
-                }
-            }
 
             match self.handle_message(&message).await {
                 Ok(Some(response)) if !response.is_empty() => {
@@ -1031,6 +1018,24 @@ impl Agent {
             message.channel,
             message.content.len()
         );
+
+        if !message.is_internal
+            && let Submission::UserInput { ref content } = submission
+            && let Some(engine) = self.routine_engine().await
+        {
+            let fired = engine
+                .check_event_triggers(&message.user_id, &message.channel, content)
+                .await;
+            if fired > 0 {
+                tracing::debug!(
+                    channel = %message.channel,
+                    user = %message.user_id,
+                    fired,
+                    "Consumed inbound user message with matching event-triggered routine(s)"
+                );
+                return Ok(Some(String::new()));
+            }
+        }
 
         // Process based on submission type
         let result = match submission {
