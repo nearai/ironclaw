@@ -4,7 +4,9 @@ use std::path::PathBuf;
 use secrecy::SecretString;
 
 use crate::bootstrap::ironclaw_base_dir;
-use crate::config::helpers::{optional_env, parse_bool_env, parse_optional_env};
+use crate::config::helpers::{
+    optional_env, parse_bool_env, parse_optional_env, warn_if_env_shadows,
+};
 use crate::error::ConfigError;
 use crate::settings::Settings;
 
@@ -96,6 +98,23 @@ impl ChannelsConfig {
 
         let http_enabled_by_env =
             optional_env("HTTP_PORT")?.is_some() || optional_env("HTTP_HOST")?.is_some();
+        if http_enabled_by_env && !cs.http_enabled {
+            tracing::warn!(
+                "HTTP channel implicitly enabled by HTTP_PORT/HTTP_HOST env var, \
+                 but http_enabled is false in settings"
+            );
+        }
+        let cs_defaults = crate::settings::ChannelSettings::default();
+        if let Some(ref sp) = cs.http_port {
+            warn_if_env_shadows("HTTP_PORT", sp, &cs_defaults.http_port.unwrap_or(8080));
+        }
+        if let Some(ref gp) = cs.gateway_port {
+            warn_if_env_shadows(
+                "GATEWAY_PORT",
+                gp,
+                &cs_defaults.gateway_port.unwrap_or(DEFAULT_GATEWAY_PORT),
+            );
+        }
         let http = if http_enabled_by_env || cs.http_enabled {
             Some(HttpConfig {
                 host: optional_env("HTTP_HOST")?

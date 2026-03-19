@@ -53,6 +53,15 @@ impl HeartbeatConfig {
             })
             .transpose()?;
 
+        let interval_secs_set = optional_env("HEARTBEAT_INTERVAL_SECS")?.is_some()
+            || settings.heartbeat.interval_secs != 1800;
+        if fire_at.is_some() && interval_secs_set {
+            tracing::warn!(
+                "both heartbeat fire_at and interval_secs are configured; \
+                 interval_secs is ignored when fire_at is active"
+            );
+        }
+
         Ok(Self {
             enabled: parse_bool_env("HEARTBEAT_ENABLED", settings.heartbeat.enabled)?,
             interval_secs: parse_optional_env(

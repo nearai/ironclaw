@@ -176,6 +176,32 @@ pub(crate) fn parse_string_env(
     Ok(optional_env(key)?.unwrap_or_else(|| default.into()))
 }
 
+/// Log a warning when an env var overrides a user-configured setting.
+///
+/// Only warns when `settings_val != default_val` (user explicitly changed it)
+/// AND the env var is set to a different value. This avoids false positives
+/// on fields the user never touched via `config set` or TOML.
+pub(crate) fn warn_if_env_shadows<T: PartialEq + std::fmt::Display>(
+    env_key: &str,
+    settings_val: &T,
+    default_val: &T,
+) {
+    if settings_val == default_val {
+        return;
+    }
+    if let Ok(Some(ref env_str)) = optional_env(env_key) {
+        let settings_str = settings_val.to_string();
+        if *env_str != settings_str {
+            tracing::warn!(
+                env_var = env_key,
+                env_value = %env_str,
+                setting_value = %settings_val,
+                "environment variable overrides user-configured setting"
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
