@@ -487,9 +487,7 @@ pub fn new_pending_oauth_registry() -> PendingOAuthRegistry {
 /// URL, meaning the user's browser will redirect to a hosted gateway rather than
 /// localhost.
 pub fn use_gateway_callback() -> bool {
-    std::env::var("IRONCLAW_OAUTH_CALLBACK_URL")
-        .ok()
-        .filter(|v| !v.is_empty())
+    crate::config::helpers::env_or_override("IRONCLAW_OAUTH_CALLBACK_URL")
         .map(|raw| {
             url::Url::parse(&raw)
                 .ok()
@@ -502,8 +500,7 @@ pub fn use_gateway_callback() -> bool {
 
 /// Returns the configured OAuth token-exchange proxy URL, if any.
 pub fn exchange_proxy_url() -> Option<String> {
-    std::env::var("IRONCLAW_OAUTH_EXCHANGE_URL")
-        .ok()
+    crate::config::helpers::env_or_override("IRONCLAW_OAUTH_EXCHANGE_URL")
         .map(|url| url.trim().to_string())
         .filter(|url| !url.is_empty())
 }
@@ -541,9 +538,8 @@ struct HostedOAuthStatePayload {
 }
 
 fn current_instance_name() -> Option<String> {
-    std::env::var("IRONCLAW_INSTANCE_NAME")
-        .or_else(|_| std::env::var("OPENCLAW_INSTANCE_NAME"))
-        .ok()
+    crate::config::helpers::env_or_override("IRONCLAW_INSTANCE_NAME")
+        .or_else(|| crate::config::helpers::env_or_override("OPENCLAW_INSTANCE_NAME"))
         .filter(|v| !v.is_empty())
 }
 

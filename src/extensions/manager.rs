@@ -69,6 +69,36 @@ fn hosted_proxy_client_secret(
     }
 }
 
+fn normalize_oauth_callback_path(path: &str) -> String {
+    let trimmed_path = path.trim_end_matches('/');
+    if trimmed_path.ends_with("/oauth/callback") {
+        if trimmed_path.is_empty() {
+            "/oauth/callback".to_string()
+        } else {
+            trimmed_path.to_string()
+        }
+    } else if trimmed_path.is_empty() {
+        "/oauth/callback".to_string()
+    } else {
+        format!("{trimmed_path}/oauth/callback")
+    }
+}
+
+fn normalize_hosted_callback_url(callback_url: &str) -> String {
+    if let Ok(mut parsed) = url::Url::parse(callback_url) {
+        let normalized_path = normalize_oauth_callback_path(parsed.path());
+        parsed.set_path(&normalized_path);
+        return parsed.to_string();
+    }
+
+    let normalized_callback_url = callback_url.trim_end_matches('/');
+    if normalized_callback_url.ends_with("/oauth/callback") {
+        normalized_callback_url.to_string()
+    } else {
+        format!("{normalized_callback_url}/oauth/callback")
+    }
+}
+
 /// Runtime infrastructure needed for hot-activating WASM channels.
 ///
 /// Set after construction via [`ExtensionManager::set_channel_runtime`] once the
@@ -557,13 +587,9 @@ impl ExtensionManager {
     async fn gateway_callback_redirect_uri(&self) -> Option<String> {
         use crate::cli::oauth_defaults;
         if oauth_defaults::use_gateway_callback() {
-            let callback_url = oauth_defaults::callback_url();
-            let normalized_callback_url = callback_url.trim_end_matches('/');
-            return Some(if normalized_callback_url.ends_with("/oauth/callback") {
-                normalized_callback_url.to_string()
-            } else {
-                format!("{normalized_callback_url}/oauth/callback")
-            });
+            return Some(normalize_hosted_callback_url(
+                &oauth_defaults::callback_url(),
+            ));
         }
         // Use gateway_base_url from enable_gateway_mode()
         if let Some(ref base) = *self.gateway_base_url.read().await {
@@ -5250,7 +5276,8 @@ mod tests {
         ChannelRuntimeState, FallbackDecision, TelegramBindingData, TelegramBindingResult,
         TelegramOwnerBindingState, build_wasm_channel_runtime_config_updates,
         combine_install_errors, fallback_decision, hosted_proxy_client_secret, infer_kind_from_url,
-        send_telegram_text_message, telegram_message_matches_verification_code,
+        normalize_hosted_callback_url, send_telegram_text_message,
+        telegram_message_matches_verification_code,
     };
     use crate::extensions::{
         ExtensionError, ExtensionKind, ExtensionSource, InstallResult, VerificationChallenge,
@@ -6911,6 +6938,20 @@ mod tests {
                 std::env::remove_var("IRONCLAW_OAUTH_CALLBACK_URL");
             }
         }
+    }
+
+    #[test]
+    fn normalize_hosted_callback_url_preserves_query_params() {
+        assert_eq!(
+            normalize_hosted_callback_url("https://oauth.test.example?source=hosted"),
+            "https://oauth.test.example/oauth/callback?source=hosted"
+        );
+        assert_eq!(
+            normalize_hosted_callback_url(
+                "https://oauth.test.example/oauth/callback?source=hosted"
+            ),
+            "https://oauth.test.example/oauth/callback?source=hosted"
+        );
     }
 
     #[tokio::test]

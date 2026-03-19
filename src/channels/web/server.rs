@@ -19,6 +19,7 @@ use axum::{
     routing::{get, post},
 };
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::StreamExt;
 use tower_http::cors::{AllowHeaders, CorsLayer};
@@ -62,6 +63,16 @@ pub type PromptQueue = Arc<
 /// Slot for the routine engine, filled at runtime after the agent starts.
 pub type RoutineEngineSlot =
     Arc<tokio::sync::RwLock<Option<Arc<crate::agent::routine_engine::RoutineEngine>>>>;
+
+fn redact_oauth_state_for_logs(state: &str) -> String {
+    let digest = Sha256::digest(state.as_bytes());
+    let mut short_hash = String::with_capacity(12);
+    for byte in &digest[..6] {
+        use std::fmt::Write as _;
+        let _ = write!(&mut short_hash, "{byte:02x}");
+    }
+    format!("sha256:{short_hash}:len={}", state.len())
+}
 
 /// Simple sliding-window rate limiter.
 ///
@@ -558,8 +569,9 @@ async fn oauth_callback_handler(
     let decoded_state = match oauth_defaults::decode_hosted_oauth_state(&state_param) {
         Ok(decoded) => decoded,
         Err(error) => {
+            let redacted_state = redact_oauth_state_for_logs(&state_param);
             tracing::warn!(
-                state = %state_param,
+                state = %redacted_state,
                 error = %error,
                 "OAuth callback received with malformed state"
             );
@@ -578,9 +590,11 @@ async fn oauth_callback_handler(
     let flow = match flow {
         Some(f) => f,
         None => {
+            let redacted_state = redact_oauth_state_for_logs(&state_param);
+            let redacted_lookup_key = redact_oauth_state_for_logs(&lookup_key);
             tracing::warn!(
-                state = %state_param,
-                lookup_key = %lookup_key,
+                state = %redacted_state,
+                lookup_key = %redacted_lookup_key,
                 "OAuth callback received with unknown or expired state"
             );
             clear_auth_mode(&state).await;
