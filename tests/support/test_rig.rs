@@ -23,7 +23,7 @@ use crate::support::metrics::{ToolInvocation, TraceMetrics};
 use crate::support::test_channel::{TestChannel, TestChannelHandle};
 use crate::support::trace_llm::{LlmTrace, TraceLlm};
 
-use ironclaw::llm::recording::{HttpExchange, ReplayingHttpInterceptor};
+use ironclaw::llm::recording::{HttpExchange, HttpInterceptor, ReplayingHttpInterceptor};
 
 // ---------------------------------------------------------------------------
 // TestRig
@@ -343,6 +343,13 @@ impl Drop for TestRig {
 // TestRigBuilder
 // ---------------------------------------------------------------------------
 
+/// Specification for loading a real WASM tool in the test rig.
+pub struct WasmToolSpec {
+    pub name: String,
+    pub wasm_path: std::path::PathBuf,
+    pub capabilities_path: Option<std::path::PathBuf>,
+}
+
 /// Builder for constructing a `TestRig`.
 pub struct TestRigBuilder {
     trace: Option<LlmTrace>,
@@ -354,6 +361,7 @@ pub struct TestRigBuilder {
     enable_routines: bool,
     http_exchanges: Vec<HttpExchange>,
     extra_tools: Vec<Arc<dyn Tool>>,
+    wasm_tools: Vec<WasmToolSpec>,
 }
 
 impl TestRigBuilder {
@@ -369,7 +377,30 @@ impl TestRigBuilder {
             enable_routines: false,
             http_exchanges: Vec::new(),
             extra_tools: Vec::new(),
+            wasm_tools: Vec::new(),
         }
+    }
+
+    /// Load a real WASM tool binary into the test rig.
+    ///
+    /// The tool will be compiled, registered, and wired with the same HTTP
+    /// interceptor used for `with_http_exchanges()`, so `http_exchanges` in
+    /// the trace can specify expected requests/responses for WASM tool HTTP calls.
+    ///
+    /// Gracefully skips if the WASM binary does not exist (returns the builder
+    /// unchanged so tests can use `if !rig.has_tool("name") { return; }`).
+    pub fn with_wasm_tool(
+        mut self,
+        name: impl Into<String>,
+        wasm_path: impl Into<std::path::PathBuf>,
+        capabilities_path: Option<impl Into<std::path::PathBuf>>,
+    ) -> Self {
+        self.wasm_tools.push(WasmToolSpec {
+            name: name.into(),
+            wasm_path: wasm_path.into(),
+            capabilities_path: capabilities_path.map(Into::into),
+        });
+        self
     }
 
     /// Set the LLM trace to replay.
@@ -457,6 +488,7 @@ impl TestRigBuilder {
             enable_routines,
             http_exchanges: explicit_http_exchanges,
             extra_tools,
+            wasm_tools,
         } = self;
 
         // 1. Create temp dir + libSQL database + run migrations.
@@ -545,6 +577,23 @@ impl TestRigBuilder {
         let scheduler_slot: ironclaw::tools::builtin::SchedulerSlot =
             Arc::new(tokio::sync::RwLock::new(None));
 
+        // Build HTTP interceptor once — shared by both AgentDeps and WASM tools.
+        let http_interceptor: Option<Arc<dyn HttpInterceptor>> = {
+            let exchanges = if explicit_http_exchanges.is_empty() {
+                trace_http_exchanges
+            } else {
+                explicit_http_exchanges
+            };
+            if exchanges.is_empty() {
+                None
+            } else {
+                Some(
+                    Arc::new(ReplayingHttpInterceptor::new(exchanges))
+                        as Arc<dyn HttpInterceptor>,
+                )
+            }
+        };
+
         // 6. Register job tools, routine tools, and extra tools.
         {
             // Ensure filesystem/shell dev tools are always available in the
@@ -603,6 +652,70 @@ impl TestRigBuilder {
             for tool in extra_tools {
                 components.tools.register(tool).await;
             }
+
+            // Register WASM tools with the shared HTTP interceptor.
+            if !wasm_tools.is_empty() {
+                use ironclaw::tools::wasm::{
+                    CapabilitiesFile, Capabilities, WasmRuntimeConfig,
+                    WasmToolRuntime, WasmToolWrapper,
+                };
+
+                let runtime = Arc::new(
+                    WasmToolRuntime::new(WasmRuntimeConfig::default())
+                        .expect("create WASM runtime for test rig"),
+                );
+
+                for spec in wasm_tools {
+                    if !spec.wasm_path.exists() {
+                        tracing::warn!(
+                            name = %spec.name,
+                            path = %spec.wasm_path.display(),
+                            "WASM tool binary not found, skipping"
+                        );
+                        continue;
+                    }
+                    let wasm_bytes = std::fs::read(&spec.wasm_path)
+                        .unwrap_or_else(|e| panic!("read {}: {e}", spec.wasm_path.display()));
+                    let (capabilities, description, schema) =
+                        if let Some(cap_path) = &spec.capabilities_path {
+                            if cap_path.exists() {
+                                let cap_bytes = std::fs::read(cap_path).unwrap_or_else(|e| {
+                                    panic!("read {}: {e}", cap_path.display())
+                                });
+                                let cap_file = CapabilitiesFile::from_bytes(&cap_bytes)
+                                    .expect("parse capabilities.json");
+                                (
+                                    cap_file.to_capabilities(),
+                                    cap_file.description.clone(),
+                                    cap_file.parameters.clone(),
+                                )
+                            } else {
+                                (Capabilities::default(), None, None)
+                            }
+                        } else {
+                            (Capabilities::default(), None, None)
+                        };
+
+                    let prepared = runtime
+                        .prepare(&spec.name, &wasm_bytes, None)
+                        .await
+                        .unwrap_or_else(|e| {
+                            panic!("prepare WASM tool '{}': {e}", spec.name)
+                        });
+                    let mut wrapper =
+                        WasmToolWrapper::new(Arc::clone(&runtime), prepared, capabilities);
+                    if let Some(desc) = description {
+                        wrapper = wrapper.with_description(desc);
+                    }
+                    if let Some(s) = schema {
+                        wrapper = wrapper.with_schema(s);
+                    }
+                    if let Some(interceptor) = &http_interceptor {
+                        wrapper = wrapper.with_http_interceptor(Arc::clone(interceptor));
+                    }
+                    components.tools.register(Arc::new(wrapper)).await;
+                }
+            }
         }
 
         // Save references for test accessors.
@@ -626,20 +739,7 @@ impl TestRigBuilder {
             hooks: components.hooks,
             cost_guard: components.cost_guard,
             sse_tx: None,
-            http_interceptor: {
-                // Prefer explicit exchanges from with_http_exchanges(), fall back to trace.
-                let exchanges = if explicit_http_exchanges.is_empty() {
-                    trace_http_exchanges
-                } else {
-                    explicit_http_exchanges
-                };
-                if exchanges.is_empty() {
-                    None
-                } else {
-                    Some(Arc::new(ReplayingHttpInterceptor::new(exchanges))
-                        as Arc<dyn ironclaw::llm::recording::HttpInterceptor>)
-                }
-            },
+            http_interceptor,
             transcription: None,
             document_extraction: None,
         };
