@@ -1961,6 +1961,7 @@ mod tests {
             context_messages: vec![],
             deferred_tool_calls: vec![],
             user_timezone: None,
+            allow_always: false,
         };
         thread.await_approval(pending);
 
