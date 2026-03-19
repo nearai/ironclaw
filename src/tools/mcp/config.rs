@@ -55,7 +55,10 @@ pub struct McpServerConfig {
     ///
     /// This is used for companion MCP servers that should reuse an existing
     /// provider identity instead of running their own MCP OAuth flow.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ///
+    /// Security: this field is runtime-only. Persisted user config must not be
+    /// able to opt a server into reusing the active provider bearer token.
+    #[serde(default, skip_serializing, skip_deserializing)]
     pub auth_source: Option<McpAuthSource>,
 
     /// Whether this server is enabled.
@@ -175,6 +178,15 @@ impl McpServerConfig {
         if self.name.is_empty() {
             return Err(ConfigError::InvalidConfig {
                 reason: "Server name cannot be empty".to_string(),
+            });
+        }
+
+        if self.uses_runtime_auth_source() && !is_nearai_companion_server_name(&self.name) {
+            return Err(ConfigError::InvalidConfig {
+                reason: format!(
+                    "Runtime auth source is only allowed for reserved server '{}'",
+                    NEARAI_COMPANION_MCP_NAME
+                ),
             });
         }
 
@@ -872,6 +884,19 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_deserialize_ignores_persisted_auth_source() {
+        let raw = serde_json::json!({
+            "name": "user-managed",
+            "url": "https://mcp.example.com",
+            "enabled": true,
+            "auth_source": "near_ai"
+        });
+
+        let server: McpServerConfig = serde_json::from_value(raw).expect("server");
+        assert_eq!(server.auth_source, None);
+    }
+
     #[cfg(feature = "libsql")]
     #[test]
     fn test_derive_nearai_companion_mcp_server_strips_trailing_v1() {
@@ -932,6 +957,20 @@ mod tests {
         let config = McpServerConfig::new("notion", "https://mcp.notion.com")
             .with_oauth(OAuthConfig::new("client-123"));
         assert!(config.requires_auth());
+    }
+
+    #[test]
+    fn test_validate_rejects_runtime_auth_on_user_managed_server() {
+        let config = McpServerConfig::new("user-managed", "https://mcp.example.com")
+            .with_auth_source(McpAuthSource::NearAi);
+
+        let err = config
+            .validate()
+            .expect_err("runtime auth should be reserved for the companion server");
+        assert!(
+            err.to_string().contains(NEARAI_COMPANION_MCP_NAME),
+            "expected reserved-name validation message, got: {err}"
+        );
     }
 
     #[test]

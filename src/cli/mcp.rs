@@ -11,7 +11,6 @@ use clap::{Args, Subcommand};
 use crate::config::{Config, LlmConfig};
 use crate::db::Database;
 use crate::secrets::SecretsStore;
-use crate::settings::Settings;
 use crate::tools::mcp::{
     McpClient, McpProcessManager, McpServerConfig, McpSessionManager, OAuthConfig,
     auth::{authorize_mcp_server, is_authenticated},
@@ -728,7 +727,8 @@ async fn get_secrets_store() -> anyhow::Result<Arc<dyn SecretsStore + Send + Syn
 }
 
 fn resolve_llm_from_env() -> Result<LlmConfig, crate::error::ConfigError> {
-    LlmConfig::resolve(&Settings::default())
+    let settings = crate::config::load_bootstrap_settings(None)?;
+    LlmConfig::resolve(&settings)
 }
 
 #[cfg(test)]
