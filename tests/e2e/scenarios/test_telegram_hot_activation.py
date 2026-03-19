@@ -46,7 +46,15 @@ async def go_to_channels(page):
     )
 
 
-async def mock_extension_lists(page, ext_handler):
+async def _default_gateway_status_handler(route):
+    await route.fulfill(
+        status=200,
+        content_type="application/json",
+        body=json.dumps({"enabled_channels": [], "sse_connections": 0, "ws_connections": 0}),
+    )
+
+
+async def mock_extension_lists(page, ext_handler, *, gateway_status_handler=None):
     async def handle_ext_list(route):
         path = route.request.url.split("?")[0]
         if path.endswith("/api/extensions"):
@@ -68,18 +76,14 @@ async def mock_extension_lists(page, ext_handler):
             body=json.dumps({"entries": []}),
         )
 
-    async def handle_gateway_status(route):
-        await route.fulfill(
-            status=200,
-            content_type="application/json",
-            body=json.dumps({"enabled_channels": [], "sse_connections": 0, "ws_connections": 0}),
-        )
-
     # Register the broad route first so the specific endpoints below win.
     await page.route("**/api/extensions*", handle_ext_list)
     await page.route("**/api/extensions/tools", handle_tools)
     await page.route("**/api/extensions/registry", handle_registry)
-    await page.route("**/api/gateway/status", handle_gateway_status)
+    await page.route(
+        "**/api/gateway/status",
+        gateway_status_handler or _default_gateway_status_handler,
+    )
 
 
 async def wait_for_toast(page, text: str, *, timeout: int = 5000):
