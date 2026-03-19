@@ -180,7 +180,7 @@ impl EmbeddingProvider for CachedEmbeddingProvider {
         // uncached key will each call the inner provider. This is acceptable:
         // embeddings are idempotent and the last writer wins in the HashMap.
 
-        let embedding = Arc::new(self.inner.embed(text).await?);
+        let embedding = self.inner.embed(text).await?;
 
         // Store result. Re-check under lock: another concurrent caller may
         // have inserted this key while the lock was released for the HTTP call.
@@ -188,14 +188,14 @@ impl EmbeddingProvider for CachedEmbeddingProvider {
             let mut guard = self.cache.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(entry) = guard.get_mut(&key) {
                 // Key already present (thundering herd) — just update, no eviction needed.
-                entry.embedding = Arc::clone(&embedding);
+                entry.embedding = Arc::new(embedding.clone());
                 entry.last_accessed = Instant::now();
             } else {
                 Self::evict_lru(&mut guard, self.config.max_entries);
                 guard.insert(
                     key,
                     CacheEntry {
-                        embedding: Arc::clone(&embedding),
+                        embedding: Arc::new(embedding.clone()),
                         last_accessed: Instant::now(),
                     },
                 );
@@ -203,8 +203,7 @@ impl EmbeddingProvider for CachedEmbeddingProvider {
         }
 
         tracing::trace!("embedding cache miss");
-        // Return a cloned embedding; the cache holds its own `Arc` reference.
-        Ok((*embedding).clone())
+        Ok(embedding)
     }
 
     async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, EmbeddingError> {
