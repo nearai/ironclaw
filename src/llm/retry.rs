@@ -78,6 +78,31 @@ pub(crate) fn cap_retry_after(duration: Duration) -> Duration {
     duration.min(Duration::from_secs(MAX_RETRY_AFTER_SECS))
 }
 
+/// Parse a `Retry-After` header value into a capped `Duration`.
+///
+/// Supports both delay-seconds (RFC 7231 §7.1.3) and HTTP-date (RFC 2822) formats.
+/// Returns `DEFAULT_RETRY_AFTER` (60 s) if the header is missing or unparseable.
+pub(crate) fn parse_retry_after(header: Option<&reqwest::header::HeaderValue>) -> Option<Duration> {
+    header
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| {
+            if let Ok(secs) = v.trim().parse::<u64>() {
+                return Some(cap_retry_after(Duration::from_secs(secs)));
+            }
+            if let Ok(dt) = chrono::DateTime::parse_from_rfc2822(v.trim()) {
+                let now = chrono::Utc::now();
+                let delta = dt.signed_duration_since(now);
+                return Some(cap_retry_after(Duration::from_secs(
+                    delta.num_seconds().max(0) as u64,
+                )));
+            }
+            None
+        })
+        .or(Some(Duration::from_secs(DEFAULT_RETRY_AFTER_SECS)))
+}
+
+const DEFAULT_RETRY_AFTER_SECS: u64 = 60;
+
 /// Configuration for the retry decorator.
 #[derive(Debug, Clone)]
 pub struct RetryConfig {
@@ -442,6 +467,38 @@ mod tests {
         assert_eq!(
             cap_retry_after(Duration::from_secs(0)),
             Duration::from_secs(0)
+        );
+    }
+
+    #[test]
+    fn parse_retry_after_delay_seconds() {
+        let val = reqwest::header::HeaderValue::from_static("30");
+        assert_eq!(parse_retry_after(Some(&val)), Some(Duration::from_secs(30)));
+    }
+
+    #[test]
+    fn parse_retry_after_missing_header() {
+        assert_eq!(
+            parse_retry_after(None),
+            Some(Duration::from_secs(DEFAULT_RETRY_AFTER_SECS))
+        );
+    }
+
+    #[test]
+    fn parse_retry_after_unparseable() {
+        let val = reqwest::header::HeaderValue::from_static("not-a-number");
+        assert_eq!(
+            parse_retry_after(Some(&val)),
+            Some(Duration::from_secs(DEFAULT_RETRY_AFTER_SECS))
+        );
+    }
+
+    #[test]
+    fn parse_retry_after_clamps_large_value() {
+        let val = reqwest::header::HeaderValue::from_static("999999");
+        assert_eq!(
+            parse_retry_after(Some(&val)),
+            Some(Duration::from_secs(MAX_RETRY_AFTER_SECS))
         );
     }
 }

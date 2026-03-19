@@ -22,6 +22,8 @@ use crate::llm::provider::{
     ToolCompletionRequest, ToolCompletionResponse, strip_unsupported_completion_params,
     strip_unsupported_tool_params,
 };
+// cap_retry_after is used in test helpers below
+#[cfg(test)]
 use crate::llm::retry::cap_retry_after;
 
 const ANTHROPIC_API_URL: &str = "https://api.anthropic.com/v1/messages";
@@ -144,15 +146,8 @@ impl AnthropicOAuthProvider {
 
         if !status.is_success() {
             // Parse Retry-After header before consuming the body.
-            // Falls back to 60s if header is missing or unparseable (prevents "retry after None" errors).
-            let retry_after = response
-                .headers()
-                .get("retry-after")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.parse::<u64>().ok())
-                .map(std::time::Duration::from_secs)
-                .map(cap_retry_after)
-                .or(Some(std::time::Duration::from_secs(60)));
+            let retry_after =
+                crate::llm::retry::parse_retry_after(response.headers().get("retry-after"));
 
             let response_text = response
                 .text()

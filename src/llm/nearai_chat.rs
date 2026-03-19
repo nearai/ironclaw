@@ -22,7 +22,10 @@ use crate::llm::provider::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider, Role, ToolCall,
     ToolCompletionRequest, ToolCompletionResponse,
 };
-use crate::llm::{costs, retry::cap_retry_after, session::SessionManager};
+use crate::llm::{costs, session::SessionManager};
+// cap_retry_after is used in test helpers below
+#[cfg(test)]
+use crate::llm::retry::cap_retry_after;
 
 /// Information about an available model from NEAR AI API.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -243,30 +246,8 @@ impl NearAiChatProvider {
 
         let status = response.status();
         // Extract Retry-After header before consuming the response body.
-        // Supports both delay-seconds (RFC 7231 §7.1.3) and HTTP-date formats.
-        // Falls back to 60s if header is missing or unparseable (prevents "retry after None" errors).
-        let retry_after_header = response
-            .headers()
-            .get("retry-after")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| {
-                // Try delay-seconds first (most common from API providers)
-                if let Ok(secs) = v.trim().parse::<u64>() {
-                    return Some(cap_retry_after(std::time::Duration::from_secs(secs)));
-                }
-                // Try HTTP-date (e.g. "Mon, 02 Mar 2026 18:00:00 GMT")
-                if let Ok(dt) = chrono::DateTime::parse_from_rfc2822(v.trim()) {
-                    let now = chrono::Utc::now();
-                    let delta = dt.signed_duration_since(now);
-                    // Use max(0) so past/present dates yield Duration::ZERO
-                    // rather than None (which would cause an immediate retry).
-                    return Some(cap_retry_after(std::time::Duration::from_secs(
-                        delta.num_seconds().max(0) as u64,
-                    )));
-                }
-                None
-            })
-            .or(Some(std::time::Duration::from_secs(60)));
+        let retry_after_header =
+            crate::llm::retry::parse_retry_after(response.headers().get("retry-after"));
         let response_text = response.text().await.map_err(|e| LlmError::RequestFailed {
             provider: "nearai_chat".to_string(),
             reason: format!("Failed to read response body: {}", e),

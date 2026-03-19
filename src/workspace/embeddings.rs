@@ -6,6 +6,8 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
+// cap_retry_after is used in test helpers below
+#[cfg(test)]
 use crate::llm::retry::cap_retry_after;
 
 /// Error type for embedding operations.
@@ -228,14 +230,8 @@ impl EmbeddingProvider for OpenAiEmbeddings {
         }
 
         if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            let retry_after = response
-                .headers()
-                .get("retry-after")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|s| s.parse::<u64>().ok())
-                .map(std::time::Duration::from_secs)
-                .map(cap_retry_after)
-                .or(Some(std::time::Duration::from_secs(60)));
+            let retry_after =
+                crate::llm::retry::parse_retry_after(response.headers().get("retry-after"));
             return Err(EmbeddingError::RateLimited { retry_after });
         }
 
@@ -371,14 +367,8 @@ impl EmbeddingProvider for NearAiEmbeddings {
         }
 
         if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            let retry_after = response
-                .headers()
-                .get("retry-after")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|s| s.parse::<u64>().ok())
-                .map(std::time::Duration::from_secs)
-                .map(cap_retry_after)
-                .or(Some(std::time::Duration::from_secs(60)));
+            let retry_after =
+                crate::llm::retry::parse_retry_after(response.headers().get("retry-after"));
             return Err(EmbeddingError::RateLimited { retry_after });
         }
 

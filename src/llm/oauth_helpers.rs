@@ -361,7 +361,12 @@ pub fn landing_html(provider_name: &str, success: bool) -> String {
 
 #[cfg(test)]
 mod tests {
+    use tokio::sync::Mutex;
+
     use super::*;
+
+    /// Serializes env-mutating tests to prevent parallel races on `OAUTH_CALLBACK_HOST`.
+    static ENV_MUTEX: Mutex<()> = Mutex::const_new(());
 
     #[test]
     fn loopback_detection() {
@@ -388,10 +393,18 @@ mod tests {
 
     #[tokio::test]
     async fn bind_rejects_wildcard_ipv4() {
-        // SAFETY: test is single-threaded; env var is restored immediately after.
+        let _guard = ENV_MUTEX.lock().await;
+        let original = std::env::var("OAUTH_CALLBACK_HOST").ok();
+        // SAFETY: Under ENV_MUTEX, no concurrent env access.
         unsafe { std::env::set_var("OAUTH_CALLBACK_HOST", "0.0.0.0") };
         let result = bind_callback_listener().await;
-        unsafe { std::env::remove_var("OAUTH_CALLBACK_HOST") };
+        // SAFETY: Under ENV_MUTEX, no concurrent env access.
+        unsafe {
+            match &original {
+                Some(v) => std::env::set_var("OAUTH_CALLBACK_HOST", v),
+                None => std::env::remove_var("OAUTH_CALLBACK_HOST"),
+            }
+        }
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
@@ -402,10 +415,18 @@ mod tests {
 
     #[tokio::test]
     async fn bind_rejects_wildcard_ipv6() {
-        // SAFETY: test is single-threaded; env var is restored immediately after.
+        let _guard = ENV_MUTEX.lock().await;
+        let original = std::env::var("OAUTH_CALLBACK_HOST").ok();
+        // SAFETY: Under ENV_MUTEX, no concurrent env access.
         unsafe { std::env::set_var("OAUTH_CALLBACK_HOST", "::") };
         let result = bind_callback_listener().await;
-        unsafe { std::env::remove_var("OAUTH_CALLBACK_HOST") };
+        // SAFETY: Under ENV_MUTEX, no concurrent env access.
+        unsafe {
+            match &original {
+                Some(v) => std::env::set_var("OAUTH_CALLBACK_HOST", v),
+                None => std::env::remove_var("OAUTH_CALLBACK_HOST"),
+            }
+        }
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
