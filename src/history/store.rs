@@ -227,6 +227,7 @@ impl Store {
                     job_id: row.get("id"),
                     state,
                     user_id: row.get::<_, String>("user_id"),
+                    requester_id: None,
                     conversation_id: row.get("conversation_id"),
                     title: row.get("title"),
                     description: row.get("description"),
@@ -1346,6 +1347,18 @@ impl Store {
         )
         .await?;
         Ok(())
+    }
+
+    /// List routine runs dispatched as full_job that have not yet been finalized.
+    pub async fn list_dispatched_routine_runs(&self) -> Result<Vec<RoutineRun>, DatabaseError> {
+        let conn = self.conn().await?;
+        let rows = conn
+            .query(
+                "SELECT * FROM routine_runs WHERE status = 'running' AND job_id IS NOT NULL",
+                &[],
+            )
+            .await?;
+        rows.iter().map(row_to_routine_run).collect()
     }
 }
 

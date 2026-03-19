@@ -29,7 +29,7 @@ pub(super) enum AgenticLoopResult {
     /// A tool requires approval before continuing.
     NeedApproval {
         /// The pending approval request to store.
-        pending: PendingApproval,
+        pending: Box<PendingApproval>,
     },
 }
 
@@ -140,13 +140,15 @@ impl Agent {
 
         // Create a JobContext for tool execution (chat doesn't have a real job)
         let mut job_ctx =
-            JobContext::with_user(&message.user_id, "chat", "Interactive chat session");
+            JobContext::with_user(&message.user_id, "chat", "Interactive chat session")
+                .with_requester_id(&message.sender_id);
         job_ctx.http_interceptor = self.deps.http_interceptor.clone();
         job_ctx.user_timezone = user_tz.name().to_string();
         job_ctx.metadata = serde_json::json!({
             "notify_channel": message.channel,
             "notify_user": message.user_id,
             "notify_thread_id": message.thread_id,
+            "notify_metadata": message.metadata,
         });
 
         // Build system prompts once for this turn. Two variants: with tools
@@ -215,9 +217,7 @@ impl Agent {
                 reason: format!("Exceeded maximum tool iterations ({max_tool_iterations})"),
             }
             .into()),
-            LoopOutcome::NeedApproval(pending) => {
-                Ok(AgenticLoopResult::NeedApproval { pending: *pending })
-            }
+            LoopOutcome::NeedApproval(pending) => Ok(AgenticLoopResult::NeedApproval { pending }),
         }
     }
 
@@ -480,6 +480,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
             usize,
             crate::llm::ToolCall,
             Arc<dyn crate::tools::Tool>,
+            bool, // allow_always
         )> = None;
 
         for (idx, original_tc) in tool_calls.iter().enumerate() {
@@ -549,7 +550,8 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                 && let Some(tool) = tool_opt
             {
                 use crate::tools::ApprovalRequirement;
-                let needs_approval = match tool.requires_approval(&tc.arguments) {
+                let requirement = tool.requires_approval(&tc.arguments);
+                let needs_approval = match requirement {
                     ApprovalRequirement::Never => false,
                     ApprovalRequirement::UnlessAutoApproved => {
                         let sess = self.session.lock().await;
@@ -584,7 +586,8 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                         continue;
                     }
 
-                    approval_needed = Some((idx, tc, tool));
+                    let allow_always = !matches!(requirement, ApprovalRequirement::Always);
+                    approval_needed = Some((idx, tc, tool, allow_always));
                     break;
                 }
             }
@@ -885,7 +888,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
         }
 
         // Handle approval if a tool needed it
-        if let Some((approval_idx, tc, tool)) = approval_needed {
+        if let Some((approval_idx, tc, tool, allow_always)) = approval_needed {
             let display_params = redact_params(&tc.arguments, tool.sensitive_params());
             let pending = PendingApproval {
                 request_id: Uuid::new_v4(),
@@ -897,6 +900,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                 context_messages: reason_ctx.messages.clone(),
                 deferred_tool_calls: tool_calls[approval_idx + 1..].to_vec(),
                 user_timezone: Some(self.user_tz.name().to_string()),
+                allow_always,
             };
 
             return Ok(Some(LoopOutcome::NeedApproval(Box::new(pending))));
@@ -1175,6 +1179,7 @@ mod tests {
     /// Build a minimal `Agent` for unit testing (no DB, no workspace, no extensions).
     fn make_test_agent() -> Agent {
         let deps = AgentDeps {
+            owner_id: "default".to_string(),
             store: None,
             llm: Arc::new(StaticLlmProvider),
             cheap_llm: None,
@@ -1194,6 +1199,7 @@ mod tests {
             http_interceptor: None,
             transcription: None,
             document_extraction: None,
+            builder: None,
         };
 
         Agent::new(
@@ -1361,6 +1367,35 @@ mod tests {
         assert!(always_needs, "Always must always require approval");
     }
 
+    /// Regression test: `allow_always` must be `false` for `Always` and
+    /// `true` for `UnlessAutoApproved`, so the UI hides the "always" button
+    /// for tools that truly cannot be auto-approved.
+    #[test]
+    fn test_allow_always_matches_approval_requirement() {
+        use crate::tools::ApprovalRequirement;
+
+        // Mirrors the expression used in dispatcher.rs and thread_ops.rs:
+        //   let allow_always = !matches!(requirement, ApprovalRequirement::Always);
+
+        // UnlessAutoApproved → allow_always = true
+        let req = ApprovalRequirement::UnlessAutoApproved;
+        let allow_always = !matches!(req, ApprovalRequirement::Always);
+        assert!(
+            allow_always,
+            "UnlessAutoApproved should set allow_always = true"
+        );
+
+        // Always → allow_always = false
+        let req = ApprovalRequirement::Always;
+        let allow_always = !matches!(req, ApprovalRequirement::Always);
+        assert!(!allow_always, "Always should set allow_always = false");
+
+        // Never → allow_always = true (approval is never needed, but if it were, always would be ok)
+        let req = ApprovalRequirement::Never;
+        let allow_always = !matches!(req, ApprovalRequirement::Always);
+        assert!(allow_always, "Never should set allow_always = true");
+    }
+
     #[test]
     fn test_pending_approval_serialization_backcompat_without_deferred_calls() {
         // PendingApproval from before the deferred_tool_calls field was added
@@ -1406,6 +1441,7 @@ mod tests {
                 },
             ],
             user_timezone: None,
+            allow_always: true,
         };
 
         let json = serde_json::to_string(&pending).expect("serialize");
@@ -2014,6 +2050,7 @@ mod tests {
     /// `max_tool_iterations` override.
     fn make_test_agent_with_llm(llm: Arc<dyn LlmProvider>, max_tool_iterations: usize) -> Agent {
         let deps = AgentDeps {
+            owner_id: "default".to_string(),
             store: None,
             llm,
             cheap_llm: None,
@@ -2033,6 +2070,7 @@ mod tests {
             http_interceptor: None,
             transcription: None,
             document_extraction: None,
+            builder: None,
         };
 
         Agent::new(
@@ -2127,6 +2165,7 @@ mod tests {
         let max_iter = 3;
         let agent = {
             let deps = AgentDeps {
+                owner_id: "default".to_string(),
                 store: None,
                 llm,
                 cheap_llm: None,
@@ -2150,6 +2189,7 @@ mod tests {
                 http_interceptor: None,
                 transcription: None,
                 document_extraction: None,
+                builder: None,
             };
 
             Agent::new(

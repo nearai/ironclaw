@@ -153,7 +153,8 @@ async fn async_main() -> anyhow::Result<()> {
                     provider_only: *provider_only,
                     quick: *quick,
                 };
-                let mut wizard = SetupWizard::with_config(config);
+                let mut wizard =
+                    SetupWizard::try_with_config_and_toml(config, cli.config.as_deref())?;
                 wizard.run().await?;
             }
             #[cfg(not(any(feature = "postgres", feature = "libsql")))]
@@ -195,10 +196,13 @@ async fn async_main() -> anyhow::Result<()> {
     {
         println!("Onboarding needed: {}", reason);
         println!();
-        let mut wizard = SetupWizard::with_config(SetupConfig {
-            quick: true,
-            ..Default::default()
-        });
+        let mut wizard = SetupWizard::try_with_config_and_toml(
+            SetupConfig {
+                quick: true,
+                ..Default::default()
+            },
+            cli.config.as_deref(),
+        )?;
         wizard.run().await?;
     }
 
@@ -282,9 +286,12 @@ async fn async_main() -> anyhow::Result<()> {
 
     // Create CLI channel
     let repl_channel = if let Some(ref msg) = cli.message {
-        Some(ReplChannel::with_message(msg.clone()))
+        Some(ReplChannel::with_message_for_user(
+            config.owner_id.clone(),
+            msg.clone(),
+        ))
     } else if config.channels.cli.enabled {
-        let repl = ReplChannel::new();
+        let repl = ReplChannel::with_user_id(config.owner_id.clone());
         repl.suppress_banner();
         Some(repl)
     } else {
@@ -311,16 +318,22 @@ async fn async_main() -> anyhow::Result<()> {
     webhook_routes.push(webhooks::routes(ToolWebhookState {
         tools: Arc::clone(&components.tools),
         routine_engine: Arc::clone(&shared_routine_engine_slot),
-        user_id: config
-            .channels
-            .gateway
-            .as_ref()
-            .map(|g| g.user_id.clone())
-            .unwrap_or_else(|| "default".to_string()),
+        user_id: config.owner_id.clone(),
         secrets_store: components.secrets_store.clone(),
     }));
 
     // Load WASM channels and register their webhook routes.
+    // Ensure the channels directory exists so the WASM runtime initializes even when
+    // no channels are installed yet — hot-activation needs the runtime to be available.
+    if config.channels.wasm_channels_enabled
+        && let Err(e) = std::fs::create_dir_all(&config.channels.wasm_channels_dir)
+    {
+        tracing::warn!(
+            path = %config.channels.wasm_channels_dir.display(),
+            error = %e,
+            "Failed to create WASM channels directory"
+        );
+    }
     if config.channels.wasm_channels_enabled && config.channels.wasm_channels_dir.exists() {
         let wasm_result = ironclaw::channels::wasm::setup_wasm_channels(
             &config,
@@ -509,6 +522,16 @@ async fn async_main() -> anyhow::Result<()> {
             gw = gw.with_skill_catalog(Arc::clone(sc));
         }
         gw = gw.with_cost_guard(Arc::clone(&components.cost_guard));
+        {
+            let active_model = components.llm.model_name().to_string();
+            let mut enabled = channel_names.clone();
+            enabled.push("gateway".into());
+            gw = gw.with_active_config(ironclaw::channels::web::server::ActiveConfigSnapshot {
+                llm_backend: config.llm.backend.to_string(),
+                llm_model: active_model,
+                enabled_channels: enabled,
+            });
+        }
         if config.sandbox.enabled {
             gw = gw.with_prompt_queue(Arc::clone(&prompt_queue));
 
@@ -618,7 +641,7 @@ async fn async_main() -> anyhow::Result<()> {
     // Register message tool for sending messages to connected channels
     components
         .tools
-        .register_message_tools(Arc::clone(&channels))
+        .register_message_tools(Arc::clone(&channels), components.extension_manager.clone())
         .await;
 
     // Wire up channel runtime for hot-activation of WASM channels.
@@ -703,6 +726,7 @@ async fn async_main() -> anyhow::Result<()> {
         .map(|db| Arc::clone(db) as Arc<dyn ironclaw::db::SettingsStore>);
 
     let deps = AgentDeps {
+        owner_id: config.owner_id.clone(),
         store: components.db,
         llm: components.llm,
         cheap_llm: components.cheap_llm,
@@ -724,6 +748,7 @@ async fn async_main() -> anyhow::Result<()> {
         document_extraction: Some(Arc::new(
             ironclaw::document_extraction::DocumentExtractionMiddleware::new(),
         )),
+        builder: components.builder,
     };
 
     let mut agent = Agent::new(
@@ -775,6 +800,7 @@ async fn async_main() -> anyhow::Result<()> {
         let sighup_webhook_server = webhook_server.clone();
         let sighup_settings_store_clone = sighup_settings_store.clone();
         let sighup_secrets_store = components.secrets_store.clone();
+        let sighup_owner_id = config.owner_id.clone();
         let mut shutdown_rx = shutdown_tx.subscribe();
 
         tokio::spawn(async move {
@@ -805,7 +831,7 @@ async fn async_main() -> anyhow::Result<()> {
                 if let Some(ref secrets_store) = sighup_secrets_store {
                     // Inject HTTP webhook secret from encrypted store
                     if let Ok(webhook_secret) = secrets_store
-                        .get_decrypted("default", "http_webhook_secret")
+                        .get_decrypted(&sighup_owner_id, "http_webhook_secret")
                         .await
                     {
                         // Thread-safe: Uses INJECTED_VARS mutex instead of unsafe std::env::set_var
@@ -821,7 +847,7 @@ async fn async_main() -> anyhow::Result<()> {
                 // Reload config (now with secrets injected into environment)
                 let new_config = match &sighup_settings_store_clone {
                     Some(store) => {
-                        ironclaw::config::Config::from_db(store.as_ref(), "default").await
+                        ironclaw::config::Config::from_db(store.as_ref(), &sighup_owner_id).await
                     }
                     None => ironclaw::config::Config::from_env().await,
                 };

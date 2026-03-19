@@ -27,6 +27,7 @@ pub struct WasmChannelLoader {
     pairing_store: Arc<PairingStore>,
     settings_store: Option<Arc<dyn SettingsStore>>,
     secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
+    owner_scope_id: String,
 }
 
 impl WasmChannelLoader {
@@ -35,12 +36,14 @@ impl WasmChannelLoader {
         runtime: Arc<WasmChannelRuntime>,
         pairing_store: Arc<PairingStore>,
         settings_store: Option<Arc<dyn SettingsStore>>,
+        owner_scope_id: impl Into<String>,
     ) -> Self {
         Self {
             runtime,
             pairing_store,
             settings_store,
             secrets_store: None,
+            owner_scope_id: owner_scope_id.into(),
         }
     }
 
@@ -149,6 +152,7 @@ impl WasmChannelLoader {
             self.runtime.clone(),
             prepared,
             capabilities,
+            self.owner_scope_id.clone(),
             config_json,
             self.pairing_store.clone(),
             self.settings_store.clone(),
@@ -487,7 +491,8 @@ mod tests {
     async fn test_loader_invalid_name() {
         let config = WasmChannelRuntimeConfig::for_testing();
         let runtime = Arc::new(WasmChannelRuntime::new(config).unwrap());
-        let loader = WasmChannelLoader::new(runtime, Arc::new(PairingStore::new()), None);
+        let loader =
+            WasmChannelLoader::new(runtime, Arc::new(PairingStore::new()), None, "default");
 
         let dir = TempDir::new().unwrap();
         let wasm_path = dir.path().join("test.wasm");
@@ -505,7 +510,8 @@ mod tests {
     async fn load_from_dir_returns_empty_when_dir_missing() {
         let config = WasmChannelRuntimeConfig::for_testing();
         let runtime = Arc::new(WasmChannelRuntime::new(config).unwrap());
-        let loader = WasmChannelLoader::new(runtime, Arc::new(PairingStore::new()), None);
+        let loader =
+            WasmChannelLoader::new(runtime, Arc::new(PairingStore::new()), None, "default");
 
         let dir = TempDir::new().unwrap();
         let missing = dir.path().join("nonexistent_channels_dir");

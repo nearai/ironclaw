@@ -177,6 +177,8 @@ pub enum SseEvent {
         parameters: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         thread_id: Option<String>,
+        /// Whether the "always" auto-approve option should be shown.
+        allow_always: bool,
     },
     #[serde(rename = "auth_required")]
     AuthRequired {
@@ -1080,6 +1082,7 @@ mod tests {
             description: "Run ls".to_string(),
             parameters: "{}".to_string(),
             thread_id: Some("t1".to_string()),
+            allow_always: true,
         };
         let ws = WsServerMessage::from_sse_event(&sse);
         match ws {

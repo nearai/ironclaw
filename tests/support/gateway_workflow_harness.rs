@@ -234,11 +234,13 @@ impl GatewayWorkflowHarness {
             cost_guard: Some(Arc::clone(&components.cost_guard)),
             routine_engine: Arc::clone(&routine_slot),
             startup_time: Instant::now(),
+            active_config: ironclaw::channels::web::server::ActiveConfigSnapshot::default(),
         });
 
         let mut agent = Agent::new(
             components.config.agent.clone(),
             AgentDeps {
+                owner_id: components.config.owner_id.clone(),
                 store: components.db,
                 llm: components.llm,
                 cheap_llm: components.cheap_llm,
@@ -255,6 +257,7 @@ impl GatewayWorkflowHarness {
                 http_interceptor: None,
                 transcription: None,
                 document_extraction: None,
+                builder: None,
             },
             channels,
             None,
