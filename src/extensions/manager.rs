@@ -5872,18 +5872,12 @@ mod tests {
                 .contains_key(crate::tools::mcp::config::NEARAI_COMPANION_MCP_NAME)
         );
         assert!(
-            manager
-                .tool_registry
-                .list()
-                .await
-                .into_iter()
-                .any(|name| {
-                    name
-                        == format!(
-                            "{}_echo",
-                            crate::tools::mcp::config::NEARAI_COMPANION_MCP_NAME
-                        )
-                }),
+            manager.tool_registry.list().await.into_iter().any(|name| {
+                name == format!(
+                    "{}_echo",
+                    crate::tools::mcp::config::NEARAI_COMPANION_MCP_NAME
+                )
+            }),
             "expected companion tool to be registered after delayed activation"
         );
 
