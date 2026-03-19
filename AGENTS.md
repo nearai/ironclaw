@@ -46,7 +46,6 @@
 - Keep clippy clean with zero warnings.
 - Prefer `crate::` imports for cross-module references.
 - Use strong types and enums over stringly-typed control flow when the shape is known.
-- Keep changes scoped; avoid broad refactors unless the task truly requires them.
 
 ## Database, Setup, and Config Rules
 
@@ -81,6 +80,7 @@
 
 ## Risk and Change Discipline
 
+- Keep changes scoped; avoid broad refactors unless the task truly requires them.
 - Security, database schema, runtime, worker, CI, and secrets changes are high-risk. Call out rollback risks, compatibility concerns, and hidden side effects.
 - Preserve existing defaults unless the task explicitly changes them.
 - Avoid unrelated file churn and generated-file edits unless required.
