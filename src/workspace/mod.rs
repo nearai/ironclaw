@@ -1151,13 +1151,10 @@ impl Workspace {
         // may already have a profile from a previous install and doesn't need
         // onboarding). This prevents existing users from getting a spurious
         // first-run ritual after upgrading.
-        let has_profile = self
-            .read(paths::PROFILE)
-            .await
-            .is_ok_and(|d| {
-                !d.content.trim().is_empty()
-                    && serde_json::from_str::<serde_json::Value>(&d.content).is_ok()
-            });
+        let has_profile = self.read(paths::PROFILE).await.is_ok_and(|d| {
+            !d.content.trim().is_empty()
+                && serde_json::from_str::<serde_json::Value>(&d.content).is_ok()
+        });
         if is_fresh_workspace && !has_profile {
             if let Err(e) = self.write(paths::BOOTSTRAP, BOOTSTRAP_SEED).await {
                 tracing::warn!("Failed to seed {}: {}", paths::BOOTSTRAP, e);
