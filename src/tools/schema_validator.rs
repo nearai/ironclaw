@@ -46,7 +46,11 @@ pub fn validate_strict_schema(
 fn check_object_schema(schema: &serde_json::Value, path: &str) -> Vec<String> {
     let mut errors = Vec::new();
 
-    // Rule 1: must have "type": "object"
+    let has_combinators = schema.get("oneOf").is_some()
+        || schema.get("anyOf").is_some()
+        || schema.get("allOf").is_some();
+
+    // Rule 1: must have "type": "object" (unless combinators define the structure)
     match schema.get("type").and_then(|t| t.as_str()) {
         Some("object") => {}
         Some(other) => {
@@ -54,16 +58,32 @@ fn check_object_schema(schema: &serde_json::Value, path: &str) -> Vec<String> {
             return errors;
         }
         None => {
-            errors.push(format!("{path}: missing \"type\": \"object\""));
-            return errors;
+            if !has_combinators {
+                errors.push(format!("{path}: missing \"type\": \"object\""));
+                return errors;
+            }
         }
     }
 
-    // Rule 2: must have "properties" as an object
+    // Validate combinator variants recursively
+    for key in ["allOf", "oneOf", "anyOf"] {
+        if let Some(variants) = schema.get(key).and_then(|v| v.as_array()) {
+            for (i, variant) in variants.iter().enumerate() {
+                if variant.get("type").and_then(|t| t.as_str()) == Some("object") {
+                    let variant_path = format!("{path}.{key}[{i}]");
+                    errors.extend(check_object_schema(variant, &variant_path));
+                }
+            }
+        }
+    }
+
+    // Rule 2: must have "properties" as an object (unless combinators define them)
     let properties = match schema.get("properties").and_then(|p| p.as_object()) {
         Some(p) => p,
         None => {
-            errors.push(format!("{path}: missing or non-object \"properties\""));
+            if !has_combinators {
+                errors.push(format!("{path}: missing or non-object \"properties\""));
+            }
             return errors;
         }
     };

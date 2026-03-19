@@ -13,10 +13,10 @@ pub(crate) fn prepare_params_for_schema(
 }
 
 fn coerce_value(value: &serde_json::Value, schema: &serde_json::Value) -> serde_json::Value {
-    // This coercer intentionally handles the concrete schema shapes we expose in
-    // discovery today. It does not resolve combinators like anyOf/oneOf/allOf or
-    // references via $ref; those schemas pass through unchanged unless they also
-    // advertise a directly coercible type/property shape.
+    // This coercer handles concrete schema shapes including discriminated unions
+    // (oneOf/anyOf with const or single-element enum discriminators) and allOf
+    // merges. It does not resolve $ref references; those schemas pass through
+    // unchanged unless they also advertise a directly coercible type/property shape.
     if value.is_null() {
         return value.clone();
     }
@@ -47,7 +47,10 @@ fn coerce_value(value: &serde_json::Value, schema: &serde_json::Value) -> serde_
             return value.clone();
         }
 
-        let properties = schema.get("properties").and_then(|p| p.as_object());
+        let resolved = resolve_effective_properties(schema, obj);
+        let properties = resolved
+            .as_ref()
+            .or_else(|| schema.get("properties").and_then(|p| p.as_object()));
         let additional_schema = schema.get("additionalProperties").filter(|v| v.is_object());
         let mut coerced = obj.clone();
 
@@ -66,6 +69,110 @@ fn coerce_value(value: &serde_json::Value, schema: &serde_json::Value) -> serde_
     }
 
     value.clone()
+}
+
+/// When the schema uses `oneOf`, `anyOf`, or `allOf` combinators, build a
+/// merged property map that can be used for coercion.
+///
+/// - Top-level `properties` are included first (base properties).
+/// - `allOf`: merge ALL variants' properties (last-wins on conflicts).
+/// - `oneOf`/`anyOf`: find the discriminated match and merge its properties.
+///
+/// Returns `None` if no combinators are present or no match is found, so the
+/// caller falls back to the existing top-level `properties` lookup.
+fn resolve_effective_properties(
+    schema: &serde_json::Value,
+    obj: &serde_json::Map<String, serde_json::Value>,
+) -> Option<serde_json::Map<String, serde_json::Value>> {
+    let has_combinators = schema.get("allOf").is_some()
+        || schema.get("oneOf").is_some()
+        || schema.get("anyOf").is_some();
+
+    if !has_combinators {
+        return None;
+    }
+
+    let mut merged = serde_json::Map::new();
+
+    // Start with top-level properties
+    if let Some(props) = schema.get("properties").and_then(|p| p.as_object()) {
+        merged.extend(props.iter().map(|(k, v)| (k.clone(), v.clone())));
+    }
+
+    // allOf: merge ALL variants' properties
+    if let Some(all_of) = schema.get("allOf").and_then(|a| a.as_array()) {
+        for variant in all_of {
+            if let Some(props) = variant.get("properties").and_then(|p| p.as_object()) {
+                merged.extend(props.iter().map(|(k, v)| (k.clone(), v.clone())));
+            }
+        }
+    }
+
+    // oneOf: find discriminated match
+    if let Some(one_of) = schema.get("oneOf").and_then(|o| o.as_array())
+        && let Some(variant) = find_discriminated_variant(one_of, obj)
+        && let Some(props) = variant.get("properties").and_then(|p| p.as_object())
+    {
+        merged.extend(props.iter().map(|(k, v)| (k.clone(), v.clone())));
+    }
+
+    // anyOf: find discriminated match
+    if let Some(any_of) = schema.get("anyOf").and_then(|a| a.as_array())
+        && let Some(variant) = find_discriminated_variant(any_of, obj)
+        && let Some(props) = variant.get("properties").and_then(|p| p.as_object())
+    {
+        merged.extend(props.iter().map(|(k, v)| (k.clone(), v.clone())));
+    }
+
+    if merged.is_empty() {
+        None
+    } else {
+        Some(merged)
+    }
+}
+
+/// Find a `oneOf`/`anyOf` variant that matches the given object by checking
+/// `const`-valued and single-element `enum`-valued properties (discriminators).
+///
+/// A variant matches when ALL its discriminator properties match the object's
+/// values and at least one such discriminator exists. Returns `None` if no
+/// variant matches (safe fallback — no coercion).
+fn find_discriminated_variant<'a>(
+    variants: &'a [serde_json::Value],
+    obj: &serde_json::Map<String, serde_json::Value>,
+) -> Option<&'a serde_json::Value> {
+    variants.iter().find(|variant| {
+        let Some(props) = variant.get("properties").and_then(|p| p.as_object()) else {
+            return false;
+        };
+
+        let mut discriminator_count = 0;
+
+        for (key, prop_schema) in props {
+            // Check for const discriminator
+            if let Some(const_val) = prop_schema.get("const") {
+                discriminator_count += 1;
+                match obj.get(key) {
+                    Some(v) if v == const_val => {}
+                    _ => return false,
+                }
+                continue;
+            }
+
+            // Check for single-element enum discriminator
+            if let Some(enum_vals) = prop_schema.get("enum").and_then(|e| e.as_array())
+                && enum_vals.len() == 1
+            {
+                discriminator_count += 1;
+                match obj.get(key) {
+                    Some(v) if v == &enum_vals[0] => {}
+                    _ => return false,
+                }
+            }
+        }
+
+        discriminator_count > 0
+    })
 }
 
 fn coerce_string_value(s: &str, schema: &serde_json::Value) -> Option<serde_json::Value> {
@@ -114,10 +221,15 @@ fn schema_allows_type(schema: &serde_json::Value, expected: &str) -> bool {
         Some(serde_json::Value::String(t)) => t == expected,
         Some(serde_json::Value::Array(types)) => types.iter().any(|t| t.as_str() == Some(expected)),
         _ => match expected {
-            "object" => schema
-                .get("properties")
-                .and_then(|p| p.as_object())
-                .is_some(),
+            "object" => {
+                schema
+                    .get("properties")
+                    .and_then(|p| p.as_object())
+                    .is_some()
+                    || schema.get("oneOf").is_some()
+                    || schema.get("anyOf").is_some()
+                    || schema.get("allOf").is_some()
+            }
             "array" => schema.get("items").is_some(),
             _ => false,
         },
@@ -337,6 +449,164 @@ mod tests {
         let result = prepare_params_for_schema(&params, &schema);
 
         assert_eq!(result["count"], serde_json::json!("10")); // safety: test-only assertion
+    }
+
+    #[test]
+    fn coerces_oneof_discriminated_variant() {
+        let schema = serde_json::json!({
+            "oneOf": [
+                {
+                    "type": "object",
+                    "properties": {
+                        "action": { "const": "list_repos" },
+                        "limit": { "type": "integer" },
+                        "sort": { "type": "string" }
+                    }
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "action": { "const": "get_repo" },
+                        "repo": { "type": "string" }
+                    }
+                }
+            ]
+        });
+        let params = serde_json::json!({
+            "action": "list_repos",
+            "limit": "100",
+            "sort": "stars"
+        });
+
+        let result = prepare_params_for_schema(&params, &schema);
+
+        assert_eq!(result["action"], serde_json::json!("list_repos"));
+        assert_eq!(result["limit"], serde_json::json!(100));
+        assert_eq!(result["sort"], serde_json::json!("stars"));
+    }
+
+    #[test]
+    fn coerces_oneof_with_enum_discriminator() {
+        let schema = serde_json::json!({
+            "oneOf": [
+                {
+                    "type": "object",
+                    "properties": {
+                        "mode": { "enum": ["fetch"] },
+                        "count": { "type": "integer" }
+                    }
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "mode": { "enum": ["push"] },
+                        "force": { "type": "boolean" }
+                    }
+                }
+            ]
+        });
+        let params = serde_json::json!({
+            "mode": "push",
+            "force": "true"
+        });
+
+        let result = prepare_params_for_schema(&params, &schema);
+
+        assert_eq!(result["mode"], serde_json::json!("push"));
+        assert_eq!(result["force"], serde_json::json!(true));
+    }
+
+    #[test]
+    fn coerces_allof_merged_properties() {
+        let schema = serde_json::json!({
+            "allOf": [
+                {
+                    "type": "object",
+                    "properties": {
+                        "page": { "type": "integer" }
+                    }
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "per_page": { "type": "integer" },
+                        "verbose": { "type": "boolean" }
+                    }
+                }
+            ]
+        });
+        let params = serde_json::json!({
+            "page": "2",
+            "per_page": "50",
+            "verbose": "false"
+        });
+
+        let result = prepare_params_for_schema(&params, &schema);
+
+        assert_eq!(result["page"], serde_json::json!(2));
+        assert_eq!(result["per_page"], serde_json::json!(50));
+        assert_eq!(result["verbose"], serde_json::json!(false));
+    }
+
+    #[test]
+    fn oneof_no_discriminator_match_is_noop() {
+        let schema = serde_json::json!({
+            "oneOf": [
+                {
+                    "type": "object",
+                    "properties": {
+                        "action": { "const": "list_repos" },
+                        "limit": { "type": "integer" }
+                    }
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "action": { "const": "get_repo" },
+                        "repo": { "type": "string" }
+                    }
+                }
+            ]
+        });
+        let params = serde_json::json!({
+            "action": "unknown_action",
+            "limit": "100"
+        });
+
+        let result = prepare_params_for_schema(&params, &schema);
+
+        // No variant matched, so no coercion happens
+        assert_eq!(result["limit"], serde_json::json!("100"));
+    }
+
+    #[test]
+    fn anyof_without_discriminator_is_noop() {
+        let schema = serde_json::json!({
+            "anyOf": [
+                {
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string" }
+                    },
+                    "required": ["name"]
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "id": { "type": "integer" }
+                    },
+                    "required": ["id"]
+                }
+            ]
+        });
+        let params = serde_json::json!({
+            "id": "42"
+        });
+
+        let result = prepare_params_for_schema(&params, &schema);
+
+        // No const/enum discriminators, so no variant matches, no coercion
+        assert_eq!(result["id"], serde_json::json!("42"));
     }
 
     #[test]

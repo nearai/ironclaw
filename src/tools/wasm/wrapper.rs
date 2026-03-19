@@ -502,23 +502,51 @@ impl WasmToolSchemas {
     }
 
     fn is_permissive_schema(schema: &serde_json::Value) -> bool {
-        schema
+        if schema
             .get("properties")
             .and_then(|p| p.as_object())
-            .is_none_or(|p| p.is_empty())
+            .is_some_and(|p| !p.is_empty())
+        {
+            return false;
+        }
+
+        // Schemas with combinator variants containing properties are not permissive
+        for key in ["oneOf", "anyOf", "allOf"] {
+            if let Some(variants) = schema.get(key).and_then(|v| v.as_array())
+                && variants.iter().any(|v| {
+                    v.get("properties")
+                        .and_then(|p| p.as_object())
+                        .is_some_and(|p| !p.is_empty())
+                })
+            {
+                return false;
+            }
+        }
+
+        true
     }
 
     fn typed_property_count(schema: &serde_json::Value) -> usize {
-        schema
-            .get("properties")
-            .and_then(|p| p.as_object())
-            .map(|props| {
-                props
-                    .values()
-                    .filter(|prop| schema_is_typed_property(prop))
-                    .count()
-            })
-            .unwrap_or(0)
+        let mut all_props = serde_json::Map::new();
+
+        if let Some(props) = schema.get("properties").and_then(|p| p.as_object()) {
+            all_props.extend(props.iter().map(|(k, v)| (k.clone(), v.clone())));
+        }
+
+        for key in ["allOf", "oneOf", "anyOf"] {
+            if let Some(variants) = schema.get(key).and_then(|v| v.as_array()) {
+                for variant in variants {
+                    if let Some(props) = variant.get("properties").and_then(|p| p.as_object()) {
+                        all_props.extend(props.iter().map(|(k, v)| (k.clone(), v.clone())));
+                    }
+                }
+            }
+        }
+
+        all_props
+            .values()
+            .filter(|prop| schema_is_typed_property(prop))
+            .count()
     }
 
     fn new(discovery: serde_json::Value) -> Self {
@@ -1320,15 +1348,33 @@ fn is_private_ip(ip: std::net::IpAddr) -> bool {
 }
 
 fn schema_contains_container_properties(schema: &serde_json::Value) -> bool {
-    schema
+    let has_container = |props: &serde_json::Map<String, serde_json::Value>| {
+        props
+            .values()
+            .any(|prop| schema_declares_type(prop, "array") || schema_declares_type(prop, "object"))
+    };
+
+    if schema
         .get("properties")
         .and_then(|p| p.as_object())
-        .map(|props| {
-            props.values().any(|prop| {
-                schema_declares_type(prop, "array") || schema_declares_type(prop, "object")
+        .is_some_and(has_container)
+    {
+        return true;
+    }
+
+    for key in ["allOf", "oneOf", "anyOf"] {
+        if let Some(variants) = schema.get(key).and_then(|v| v.as_array())
+            && variants.iter().any(|v| {
+                v.get("properties")
+                    .and_then(|p| p.as_object())
+                    .is_some_and(has_container)
             })
-        })
-        .unwrap_or(false)
+        {
+            return true;
+        }
+    }
+
+    false
 }
 
 fn schema_declares_type(schema: &serde_json::Value, expected: &str) -> bool {

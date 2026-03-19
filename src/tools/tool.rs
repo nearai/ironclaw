@@ -481,7 +481,11 @@ fn validate_tool_schema_inner(schema: &serde_json::Value, path: &str, depth: usi
         return errors;
     }
 
-    // Rule 1: must have "type": "object" at this level
+    let has_combinators = schema.get("oneOf").is_some()
+        || schema.get("anyOf").is_some()
+        || schema.get("allOf").is_some();
+
+    // Rule 1: must have "type": "object" at this level (unless combinators define the structure)
     match schema.get("type").and_then(|t| t.as_str()) {
         Some("object") => {}
         Some(other) => {
@@ -489,16 +493,36 @@ fn validate_tool_schema_inner(schema: &serde_json::Value, path: &str, depth: usi
             return errors; // Can't check further
         }
         None => {
-            errors.push(format!("{path}: missing \"type\": \"object\""));
-            return errors;
+            if !has_combinators {
+                errors.push(format!("{path}: missing \"type\": \"object\""));
+                return errors;
+            }
         }
     }
 
-    // Rule 2: must have "properties" as an object
+    // Validate combinator variants recursively
+    for key in ["allOf", "oneOf", "anyOf"] {
+        if let Some(variants) = schema.get(key).and_then(|v| v.as_array()) {
+            for (i, variant) in variants.iter().enumerate() {
+                if variant.get("type").and_then(|t| t.as_str()) == Some("object") {
+                    let variant_path = format!("{path}.{key}[{i}]");
+                    errors.extend(validate_tool_schema_inner(
+                        variant,
+                        &variant_path,
+                        depth + 1,
+                    ));
+                }
+            }
+        }
+    }
+
+    // Rule 2: must have "properties" as an object (unless combinators define them)
     let properties = match schema.get("properties").and_then(|p| p.as_object()) {
         Some(p) => p,
         None => {
-            errors.push(format!("{path}: missing or non-object \"properties\""));
+            if !has_combinators {
+                errors.push(format!("{path}: missing or non-object \"properties\""));
+            }
             return errors;
         }
     };
