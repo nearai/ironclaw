@@ -17,7 +17,7 @@ use wasmtime::component::Linker;
 use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiView};
 
 use crate::context::JobContext;
-use crate::llm::recording::{HttpExchangeRequest, HttpInterceptor};
+use crate::llm::recording::{HttpExchangeRequest, HttpExchangeResponse, HttpInterceptor};
 use crate::safety::LeakDetector;
 use crate::secrets::SecretsStore;
 use crate::tools::tool::{Tool, ToolError, ToolOutput};
@@ -355,8 +355,10 @@ impl near::agent::host::Host for StoreData {
             let interceptor = Arc::clone(interceptor);
             let intercept_url = url.clone();
             let intercept_method = method.clone();
-            let intercept_headers: Vec<(String, String)> =
-                headers.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+            let intercept_headers: Vec<(String, String)> = headers
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
             let intercept_body = body
                 .as_ref()
                 .map(|b| String::from_utf8_lossy(b).to_string());
@@ -384,6 +386,20 @@ impl near::agent::host::Host for StoreData {
                 });
             }
         }
+
+        // Capture request metadata before headers/body are consumed by the reqwest
+        // builder. Used for after_response callback when a recording interceptor is set.
+        let interceptor_req = self.http_interceptor.as_ref().map(|_| HttpExchangeRequest {
+            method: method.clone(),
+            url: url.clone(),
+            headers: headers
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+            body: body
+                .as_ref()
+                .map(|b| String::from_utf8_lossy(b).to_string()),
+        });
 
         let result = rt.block_on(async {
             let client = reqwest::Client::builder()
@@ -474,6 +490,29 @@ impl near::agent::host::Host for StoreData {
                 body,
             })
         });
+
+        // Notify the interceptor about the completed response (recording mode).
+        // In practice this is dead code because our only interceptor
+        // (ReplayingHttpInterceptor) always returns Some from before_request,
+        // hitting the early return above. Implemented for correctness so a
+        // RecordingHttpInterceptor would capture WASM HTTP exchanges.
+        if let (Some(interceptor), Some(req), Ok(resp)) =
+            (&self.http_interceptor, &interceptor_req, &result)
+        {
+            let interceptor = Arc::clone(interceptor);
+            let req = req.clone();
+            let resp_headers: Vec<(String, String)> =
+                serde_json::from_str(&resp.headers_json).unwrap_or_default();
+            let resp_body = String::from_utf8_lossy(&resp.body).to_string();
+            let exchange_resp = HttpExchangeResponse {
+                status: resp.status,
+                headers: resp_headers,
+                body: resp_body,
+            };
+            rt.block_on(async {
+                interceptor.after_response(&req, &exchange_resp).await;
+            });
+        }
 
         // Redact credentials from error messages before returning to WASM
         result.map_err(|e| self.redact_credentials(&e))

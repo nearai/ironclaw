@@ -108,20 +108,14 @@ fn resolve_effective_properties(
         }
     }
 
-    // oneOf: find discriminated match
-    if let Some(one_of) = schema.get("oneOf").and_then(|o| o.as_array())
-        && let Some(variant) = find_discriminated_variant(one_of, obj)
-        && let Some(props) = variant.get("properties").and_then(|p| p.as_object())
-    {
-        merged.extend(props.iter().map(|(k, v)| (k.clone(), v.clone())));
-    }
-
-    // anyOf: find discriminated match
-    if let Some(any_of) = schema.get("anyOf").and_then(|a| a.as_array())
-        && let Some(variant) = find_discriminated_variant(any_of, obj)
-        && let Some(props) = variant.get("properties").and_then(|p| p.as_object())
-    {
-        merged.extend(props.iter().map(|(k, v)| (k.clone(), v.clone())));
+    // oneOf/anyOf: find discriminated match
+    for key in ["oneOf", "anyOf"] {
+        if let Some(variants) = schema.get(key).and_then(|v| v.as_array())
+            && let Some(variant) = find_discriminated_variant(variants, obj)
+            && let Some(props) = variant.get("properties").and_then(|p| p.as_object())
+        {
+            merged.extend(props.iter().map(|(k, v)| (k.clone(), v.clone())));
+        }
     }
 
     if merged.is_empty() {

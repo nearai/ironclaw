@@ -46,9 +46,9 @@ pub fn validate_strict_schema(
 fn check_object_schema(schema: &serde_json::Value, path: &str) -> Vec<String> {
     let mut errors = Vec::new();
 
-    let has_combinators = schema.get("oneOf").is_some()
-        || schema.get("anyOf").is_some()
-        || schema.get("allOf").is_some();
+    let has_combinators = schema.get("oneOf").and_then(|v| v.as_array()).is_some()
+        || schema.get("anyOf").and_then(|v| v.as_array()).is_some()
+        || schema.get("allOf").and_then(|v| v.as_array()).is_some();
 
     // Rule 1: must have "type": "object" (unless combinators define the structure)
     match schema.get("type").and_then(|t| t.as_str()) {
@@ -83,6 +83,39 @@ fn check_object_schema(schema: &serde_json::Value, path: &str) -> Vec<String> {
         None => {
             if !has_combinators {
                 errors.push(format!("{path}: missing or non-object \"properties\""));
+                return errors;
+            }
+            // Combinators define the structure — validate top-level `required` keys
+            // against merged properties from all combinator variants.
+            if let Some(required) = schema.get("required").and_then(|r| r.as_array()) {
+                let mut merged_keys = std::collections::HashSet::new();
+                if let Some(all_of) = schema.get("allOf").and_then(|a| a.as_array()) {
+                    for variant in all_of {
+                        if let Some(props) = variant.get("properties").and_then(|p| p.as_object()) {
+                            merged_keys.extend(props.keys().cloned());
+                        }
+                    }
+                }
+                for key in ["oneOf", "anyOf"] {
+                    if let Some(variants) = schema.get(key).and_then(|v| v.as_array()) {
+                        for variant in variants {
+                            if let Some(props) =
+                                variant.get("properties").and_then(|p| p.as_object())
+                            {
+                                merged_keys.extend(props.keys().cloned());
+                            }
+                        }
+                    }
+                }
+                for req in required {
+                    if let Some(key) = req.as_str()
+                        && !merged_keys.contains(key)
+                    {
+                        errors.push(format!(
+                            "{path}: required key \"{key}\" not found in any combinator variant properties"
+                        ));
+                    }
+                }
             }
             return errors;
         }

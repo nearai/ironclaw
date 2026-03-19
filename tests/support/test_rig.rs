@@ -587,10 +587,7 @@ impl TestRigBuilder {
             if exchanges.is_empty() {
                 None
             } else {
-                Some(
-                    Arc::new(ReplayingHttpInterceptor::new(exchanges))
-                        as Arc<dyn HttpInterceptor>,
-                )
+                Some(Arc::new(ReplayingHttpInterceptor::new(exchanges)) as Arc<dyn HttpInterceptor>)
             }
         };
 
@@ -656,8 +653,8 @@ impl TestRigBuilder {
             // Register WASM tools with the shared HTTP interceptor.
             if !wasm_tools.is_empty() {
                 use ironclaw::tools::wasm::{
-                    CapabilitiesFile, Capabilities, WasmRuntimeConfig,
-                    WasmToolRuntime, WasmToolWrapper,
+                    Capabilities, CapabilitiesFile, WasmRuntimeConfig, WasmToolRuntime,
+                    WasmToolWrapper,
                 };
 
                 let runtime = Arc::new(
@@ -679,9 +676,8 @@ impl TestRigBuilder {
                     let (capabilities, description, schema) =
                         if let Some(cap_path) = &spec.capabilities_path {
                             if cap_path.exists() {
-                                let cap_bytes = std::fs::read(cap_path).unwrap_or_else(|e| {
-                                    panic!("read {}: {e}", cap_path.display())
-                                });
+                                let cap_bytes = std::fs::read(cap_path)
+                                    .unwrap_or_else(|e| panic!("read {}: {e}", cap_path.display()));
                                 let cap_file = CapabilitiesFile::from_bytes(&cap_bytes)
                                     .expect("parse capabilities.json");
                                 (
@@ -699,9 +695,7 @@ impl TestRigBuilder {
                     let prepared = runtime
                         .prepare(&spec.name, &wasm_bytes, None)
                         .await
-                        .unwrap_or_else(|e| {
-                            panic!("prepare WASM tool '{}': {e}", spec.name)
-                        });
+                        .unwrap_or_else(|e| panic!("prepare WASM tool '{}': {e}", spec.name));
                     let mut wrapper =
                         WasmToolWrapper::new(Arc::clone(&runtime), prepared, capabilities);
                     if let Some(desc) = description {

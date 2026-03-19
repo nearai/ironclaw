@@ -741,9 +741,11 @@ mod tests {
         rig.verify_trace_expects(&trace, &responses);
         let tool_results = rig.tool_results();
         assert!(
-            tool_results.iter().any(|(name, preview)| name == "github_fixture"
-                && preview.contains("\"draft\"")
-                && preview.contains("true")),
+            tool_results
+                .iter()
+                .any(|(name, preview)| name == "github_fixture"
+                    && preview.contains("\"draft\"")
+                    && preview.contains("true")),
             "expected coerced create_pull_request result with draft=true, got {tool_results:?}"
         );
 

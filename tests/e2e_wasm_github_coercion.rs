@@ -13,17 +13,14 @@ mod tests {
 
     use serde_json::json;
 
-    use ironclaw::llm::recording::{
-        HttpExchange, HttpExchangeRequest, HttpExchangeResponse,
-    };
+    use ironclaw::llm::recording::{HttpExchange, HttpExchangeRequest, HttpExchangeResponse};
 
     use crate::support::test_rig::TestRigBuilder;
     use crate::support::trace_llm::{
         LlmTrace, TraceExpects, TraceResponse, TraceStep, TraceToolCall,
     };
 
-    const GITHUB_WASM: &str =
-        "tools-src/github/target/wasm32-wasip2/release/github_tool.wasm";
+    const GITHUB_WASM: &str = "tools-src/github/target/wasm32-wasip2/release/github_tool.wasm";
     const GITHUB_CAPS: &str = "tools-src/github/github-tool.capabilities.json";
 
     fn github_ok(body: &str) -> HttpExchangeResponse {
@@ -104,9 +101,7 @@ mod tests {
                     headers: vec![],
                     body: None,
                 },
-                response: github_ok(
-                    r#"[{"number":1,"title":"Test issue","state":"open"}]"#,
-                ),
+                response: github_ok(r#"[{"number":1,"title":"Test issue","state":"open"}]"#),
             }],
             expects: TraceExpects {
                 tools_used: vec!["github".to_string()],
@@ -185,9 +180,7 @@ mod tests {
                     headers: vec![],
                     body: None,
                 },
-                response: github_ok(
-                    r#"{"number":42,"title":"Test","state":"open","body":"desc"}"#,
-                ),
+                response: github_ok(r#"{"number":42,"title":"Test","state":"open","body":"desc"}"#),
             }],
             expects: TraceExpects {
                 tools_used: vec!["github".to_string()],
@@ -266,9 +259,7 @@ mod tests {
                     headers: vec![],
                     body: None,
                 },
-                response: github_ok(
-                    r#"[{"number":1,"title":"Test PR","state":"open"}]"#,
-                ),
+                response: github_ok(r#"[{"number":1,"title":"Test PR","state":"open"}]"#),
             }],
             expects: TraceExpects {
                 tools_used: vec!["github".to_string()],

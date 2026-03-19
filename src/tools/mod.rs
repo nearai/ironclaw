@@ -9,7 +9,7 @@
 
 pub mod builder;
 pub mod builtin;
-pub mod coercion;
+mod coercion;
 pub mod execute;
 pub mod mcp;
 pub mod rate_limiter;
