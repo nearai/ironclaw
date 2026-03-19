@@ -270,7 +270,9 @@ impl Guest for SlackChannel {
             // Track that we've participated in this thread so we can respond
             // to follow-up messages without requiring @mention
             let thread_key = format!("{}{}/{}", ACTIVE_THREADS_PREFIX, metadata.channel, thread_ts);
-            let _ = channel_host::workspace_write(&thread_key, "1");
+            if let Err(e) = channel_host::workspace_write(&thread_key, "1") {
+                channel_host::log(channel_host::LogLevel::Warn, &format!("Failed to track thread participation: {e}"));
+            }
 
             payload["thread_ts"] = serde_json::Value::String(thread_ts);
         }
