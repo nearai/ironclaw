@@ -62,6 +62,8 @@ pub trait EmbeddingProvider: Send + Sync {
 
 /// Default base URL for the OpenAI API.
 const OPENAI_API_BASE_URL: &str = "https://api.openai.com";
+/// Default base URL for the Gemini API.
+const GEMINI_API_BASE_URL: &str = "https://generativelanguage.googleapis.com";
 
 /// OpenAI embedding provider using text-embedding-ada-002 or text-embedding-3-small.
 ///
@@ -245,6 +247,213 @@ impl EmbeddingProvider for OpenAiEmbeddings {
         })?;
 
         Ok(result.data.into_iter().map(|d| d.embedding).collect())
+    }
+}
+
+/// Gemini embedding provider using the Gemini embeddings API.
+pub struct GeminiEmbeddings {
+    client: reqwest::Client,
+    api_key: String,
+    model: String,
+    dimension: usize,
+    base_url: String,
+}
+
+impl GeminiEmbeddings {
+    /// Create a new Gemini embedding provider with the default model.
+    ///
+    /// Uses `gemini-embedding-001` which returns 3072 dimensions by default.
+    pub fn new(api_key: impl Into<String>) -> Self {
+        Self {
+            client: reqwest::Client::new(),
+            api_key: api_key.into(),
+            model: "gemini-embedding-001".to_string(),
+            dimension: 3072,
+            base_url: GEMINI_API_BASE_URL.to_string(),
+        }
+    }
+
+    /// Use a custom model with specified dimension.
+    pub fn with_model(
+        api_key: impl Into<String>,
+        model: impl Into<String>,
+        dimension: usize,
+    ) -> Self {
+        Self {
+            client: reqwest::Client::new(),
+            api_key: api_key.into(),
+            model: model.into(),
+            dimension,
+            base_url: GEMINI_API_BASE_URL.to_string(),
+        }
+    }
+
+    /// Set a custom base URL for Gemini embedding providers.
+    ///
+    /// The URL must use `http://` or `https://` scheme. If no scheme is present,
+    /// `https://` is prepended automatically. Trailing slashes are stripped.
+    pub fn with_base_url(mut self, base_url: &str) -> Self {
+        let url = base_url.trim();
+
+        // Auto-prepend https:// if no scheme is present.
+        let mut url = if !url.starts_with("http://") && !url.starts_with("https://") {
+            tracing::debug!(
+                "No scheme in Gemini embedding base URL '{}', prepending https://",
+                url
+            );
+            format!("https://{url}")
+        } else {
+            url.to_string()
+        };
+
+        while url.ends_with('/') {
+            url.pop();
+        }
+
+        self.base_url = url;
+        self
+    }
+
+    fn model_resource_name(&self) -> String {
+        if self.model.starts_with("models/") {
+            self.model.clone()
+        } else {
+            format!("models/{}", self.model)
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct GeminiBatchEmbedRequest<'a> {
+    requests: Vec<GeminiEmbedRequest<'a>>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GeminiEmbedRequest<'a> {
+    model: String,
+    content: GeminiEmbedContent<'a>,
+    output_dimensionality: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct GeminiEmbedContent<'a> {
+    parts: Vec<GeminiEmbedPart<'a>>,
+}
+
+#[derive(Debug, Serialize)]
+struct GeminiEmbedPart<'a> {
+    text: &'a str,
+}
+
+#[derive(Debug, Deserialize)]
+struct GeminiBatchEmbedResponse {
+    embeddings: Vec<GeminiEmbeddingData>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GeminiEmbeddingData {
+    values: Vec<f32>,
+}
+
+#[async_trait]
+impl EmbeddingProvider for GeminiEmbeddings {
+    fn dimension(&self) -> usize {
+        self.dimension
+    }
+
+    fn model_name(&self) -> &str {
+        &self.model
+    }
+
+    fn max_input_length(&self) -> usize {
+        32_000
+    }
+
+    async fn embed(&self, text: &str) -> Result<Vec<f32>, EmbeddingError> {
+        if text.len() > self.max_input_length() {
+            return Err(EmbeddingError::TextTooLong {
+                length: text.len(),
+                max: self.max_input_length(),
+            });
+        }
+
+        let embeddings = self.embed_batch(&[text.to_string()]).await?;
+        embeddings
+            .into_iter()
+            .next()
+            .ok_or_else(|| EmbeddingError::InvalidResponse("No embedding returned".to_string()))
+    }
+
+    async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, EmbeddingError> {
+        if texts.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let model = self.model_resource_name();
+        let request = GeminiBatchEmbedRequest {
+            requests: texts
+                .iter()
+                .map(|text| GeminiEmbedRequest {
+                    model: model.clone(),
+                    content: GeminiEmbedContent {
+                        parts: vec![GeminiEmbedPart { text }],
+                    },
+                    output_dimensionality: self.dimension,
+                })
+                .collect(),
+        };
+
+        let url = format!("{}/v1beta/{}:batchEmbedContents", self.base_url, model);
+
+        let response = self
+            .client
+            .post(&url)
+            .header("x-goog-api-key", &self.api_key)
+            .json(&request)
+            .send()
+            .await?;
+
+        let status = response.status();
+
+        if matches!(
+            status,
+            reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
+        ) {
+            return Err(EmbeddingError::AuthFailed);
+        }
+
+        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            let retry_after = Some(crate::llm::retry::parse_retry_after(
+                response.headers().get("retry-after"),
+            ));
+            return Err(EmbeddingError::RateLimited { retry_after });
+        }
+
+        if !status.is_success() {
+            let error_text = response.text().await.unwrap_or_default();
+            return Err(EmbeddingError::HttpError(format!(
+                "Status {}: {}",
+                status, error_text
+            )));
+        }
+
+        let result: GeminiBatchEmbedResponse = response.json().await.map_err(|e| {
+            EmbeddingError::InvalidResponse(format!("Failed to parse Gemini response: {}", e))
+        })?;
+
+        for (i, emb) in result.embeddings.iter().enumerate() {
+            if emb.values.len() != self.dimension {
+                return Err(EmbeddingError::InvalidResponse(format!(
+                    "Gemini returned embedding of dimension {}, expected {} at index {}",
+                    emb.values.len(),
+                    self.dimension,
+                    i
+                )));
+            }
+        }
+
+        Ok(result.embeddings.into_iter().map(|d| d.values).collect())
     }
 }
 
@@ -563,6 +772,15 @@ impl EmbeddingProvider for MockEmbeddings {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    use axum::extract::State;
+    use axum::http::{HeaderMap, StatusCode};
+    use axum::routing::post;
+    use axum::{Json, Router};
+    use serde_json::{Value, json};
+    use tokio::net::TcpListener;
+    use tokio::sync::{Mutex, oneshot};
 
     #[tokio::test]
     async fn test_mock_embeddings() {
@@ -639,5 +857,108 @@ mod tests {
     fn test_openai_with_base_url_schemeless_prepends_https() {
         let provider = OpenAiEmbeddings::new("test-key").with_base_url("custom.example.com/v1");
         assert_eq!(provider.base_url, "https://custom.example.com/v1");
+    }
+
+    #[test]
+    fn test_gemini_embeddings_config() {
+        let provider = GeminiEmbeddings::new("test-key");
+        assert_eq!(provider.dimension(), 3072);
+        assert_eq!(provider.model_name(), "gemini-embedding-001");
+        assert_eq!(provider.base_url, GEMINI_API_BASE_URL);
+    }
+
+    #[test]
+    fn test_gemini_with_base_url_schemeless_prepends_https() {
+        let provider = GeminiEmbeddings::new("test-key").with_base_url("custom.example.com");
+        assert_eq!(provider.base_url, "https://custom.example.com");
+    }
+
+    struct GeminiTestState {
+        requests: Mutex<Vec<Value>>,
+    }
+
+    async fn gemini_batch_handler(
+        State(state): State<Arc<GeminiTestState>>,
+        headers: HeaderMap,
+        Json(payload): Json<Value>,
+    ) -> (StatusCode, Json<Value>) {
+        let api_key = headers
+            .get("x-goog-api-key")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+
+        state
+            .requests
+            .lock()
+            .await
+            .push(json!({ "api_key": api_key, "body": payload }));
+
+        (
+            StatusCode::OK,
+            Json(json!({
+                "embeddings": [
+                    { "values": [0.1, 0.2, 0.3] },
+                    { "values": [0.4, 0.5, 0.6] }
+                ]
+            })),
+        )
+    }
+
+    #[tokio::test]
+    async fn test_gemini_embed_batch_parses_response() {
+        let state = Arc::new(GeminiTestState {
+            requests: Mutex::new(Vec::new()),
+        });
+        let app = Router::new()
+            .route(
+                "/v1beta/models/gemini-embedding-001:batchEmbedContents",
+                post(gemini_batch_handler),
+            )
+            .with_state(Arc::clone(&state));
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let addr = listener.local_addr().expect("read local addr");
+
+        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+        let handle = tokio::spawn(async move {
+            let _ = axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = shutdown_rx.await;
+                })
+                .await;
+        });
+
+        let provider = GeminiEmbeddings::with_model("gemini-test-key", "gemini-embedding-001", 3)
+            .with_base_url(&format!("http://{}", addr));
+        let texts = vec!["hello".to_string(), "world".to_string()];
+        let embeddings = provider.embed_batch(&texts).await.unwrap();
+
+        assert_eq!(embeddings, vec![vec![0.1, 0.2, 0.3], vec![0.4, 0.5, 0.6]]);
+
+        let requests = state.requests.lock().await;
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0]["api_key"], "gemini-test-key");
+        assert_eq!(
+            requests[0]["body"]["requests"][0]["model"],
+            "models/gemini-embedding-001"
+        );
+        assert_eq!(
+            requests[0]["body"]["requests"][0]["content"]["parts"][0]["text"],
+            "hello"
+        );
+        assert_eq!(
+            requests[0]["body"]["requests"][0]["outputDimensionality"],
+            3
+        );
+        assert_eq!(
+            requests[0]["body"]["requests"][1]["content"]["parts"][0]["text"],
+            "world"
+        );
+
+        let _ = shutdown_tx.send(());
+        let _ = handle.await;
     }
 }

@@ -364,6 +364,7 @@ fn check_embeddings(settings: &Settings) -> CheckResult {
             }
             let has_creds = match config.provider.as_str() {
                 "openai" => config.openai_api_key().is_some(),
+                "gemini" => config.gemini_api_key().is_some(),
                 "nearai" => {
                     // NearAiEmbeddings uses SessionManager::get_token() which
                     // only returns session tokens, NOT NEARAI_API_KEY
@@ -385,6 +386,7 @@ fn check_embeddings(settings: &Settings) -> CheckResult {
             } else {
                 let hint = match config.provider.as_str() {
                     "nearai" => "run `ironclaw onboard` to create a session",
+                    "gemini" => "set GEMINI_API_KEY",
                     _ => "set OPENAI_API_KEY",
                 };
                 CheckResult::Fail(format!(
@@ -808,6 +810,8 @@ mod tests {
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("EMBEDDING_ENABLED");
+            std::env::remove_var("EMBEDDING_PROVIDER");
+            std::env::remove_var("GEMINI_API_KEY");
         }
         let settings = Settings::default();
         match check_embeddings(&settings) {
@@ -821,6 +825,36 @@ mod tests {
                 "expected Skip for disabled embeddings, got: {}",
                 format_result(&other)
             ),
+        }
+    }
+
+    #[test]
+    fn check_embeddings_gemini_missing_key_returns_fail() {
+        let _guard = crate::config::helpers::ENV_MUTEX.lock().expect("env mutex");
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::set_var("EMBEDDING_ENABLED", "true");
+            std::env::set_var("EMBEDDING_PROVIDER", "gemini");
+            std::env::remove_var("GEMINI_API_KEY");
+        }
+
+        match check_embeddings(&Settings::default()) {
+            CheckResult::Fail(msg) => {
+                assert!(
+                    msg.contains("GEMINI_API_KEY"),
+                    "expected GEMINI_API_KEY hint, got: {msg}"
+                );
+            }
+            other => panic!(
+                "expected Fail for gemini embeddings without key, got: {}",
+                format_result(&other)
+            ),
+        }
+
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("EMBEDDING_ENABLED");
+            std::env::remove_var("EMBEDDING_PROVIDER");
         }
     }
 

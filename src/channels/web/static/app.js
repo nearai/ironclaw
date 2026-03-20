@@ -4735,7 +4735,7 @@ var INFERENCE_SETTINGS = [
     settings: [
       { key: 'embeddings.enabled', label: 'cfg.embeddings_enabled.label', description: 'cfg.embeddings_enabled.desc', type: 'boolean' },
       { key: 'embeddings.provider', label: 'cfg.embeddings_provider.label', description: 'cfg.embeddings_provider.desc',
-        type: 'select', options: ['openai', 'nearai'] },
+        type: 'select', options: ['openai', 'gemini', 'nearai'] },
       { key: 'embeddings.model', label: 'cfg.embeddings_model.label', description: 'cfg.embeddings_model.desc', type: 'text' },
     ]
   },

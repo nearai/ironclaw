@@ -1905,10 +1905,12 @@ impl SetupWizard {
         let backend = self.settings.llm_backend.as_deref().unwrap_or("nearai");
         let has_openai_key = std::env::var("OPENAI_API_KEY").is_ok()
             || (backend == "openai" && self.llm_api_key.is_some());
+        let has_gemini_key = std::env::var("GEMINI_API_KEY").is_ok();
         let has_nearai = backend == "nearai" || self.session_manager.is_some();
 
         // If the LLM backend is OpenAI and we already have a key, default to OpenAI embeddings
-        if backend == "openai" && has_openai_key {
+        // unless Gemini is also configured and the user should choose explicitly.
+        if backend == "openai" && has_openai_key && !has_gemini_key {
             self.settings.embeddings.enabled = true;
             self.settings.embeddings.provider = "openai".to_string();
             self.settings.embeddings.model = "text-embedding-3-small".to_string();
@@ -1916,10 +1918,12 @@ impl SetupWizard {
             return Ok(());
         }
 
-        // If no NEAR AI session and no OpenAI key, only OpenAI is viable
-        if !has_nearai && !has_openai_key {
-            print_info("No NEAR AI session or OpenAI key found for embeddings.");
-            print_info("Set OPENAI_API_KEY in your environment to enable embeddings.");
+        // If no usable credentials are available, disable embeddings for now.
+        if !has_nearai && !has_openai_key && !has_gemini_key {
+            print_info("No NEAR AI session, OpenAI key, or Gemini key found for embeddings.");
+            print_info(
+                "Set OPENAI_API_KEY or GEMINI_API_KEY in your environment to enable embeddings.",
+            );
             self.settings.embeddings.enabled = false;
             return Ok(());
         }
@@ -1929,14 +1933,22 @@ impl SetupWizard {
             options.push("NEAR AI (uses same auth, no extra cost)");
         }
         options.push("OpenAI (requires API key)");
+        options.push("Gemini (requires API key)");
 
         let choice = select_one("Select embeddings provider:", &options).map_err(SetupError::Io)?;
 
         // Map choice back to provider name
-        let provider = if has_nearai && choice == 0 {
-            "nearai"
+        let provider = if has_nearai {
+            match choice {
+                0 => "nearai",
+                1 => "openai",
+                _ => "gemini",
+            }
         } else {
-            "openai"
+            match choice {
+                0 => "openai",
+                _ => "gemini",
+            }
         };
 
         match provider {
@@ -1946,16 +1958,31 @@ impl SetupWizard {
                 self.settings.embeddings.model = "text-embedding-3-small".to_string();
                 print_success("Embeddings enabled via NEAR AI");
             }
-            _ => {
+            "openai" => {
                 if !has_openai_key {
                     print_info("OPENAI_API_KEY not set in environment.");
-                    print_info("Add it to your .env file or environment to enable embeddings.");
+                    print_info(
+                        "Add it to your .env file or environment to enable embeddings.",
+                    );
                 }
                 self.settings.embeddings.enabled = true;
                 self.settings.embeddings.provider = "openai".to_string();
                 self.settings.embeddings.model = "text-embedding-3-small".to_string();
                 print_success("Embeddings configured for OpenAI");
             }
+            "gemini" => {
+                if !has_gemini_key {
+                    print_info("GEMINI_API_KEY not set in environment.");
+                    print_info(
+                        "Add it to your .env file or environment to enable embeddings.",
+                    );
+                }
+                self.settings.embeddings.enabled = true;
+                self.settings.embeddings.provider = "gemini".to_string();
+                self.settings.embeddings.model = "gemini-embedding-001".to_string();
+                print_success("Embeddings configured for Gemini");
+            }
+            _ => unreachable!("unexpected embeddings provider"),
         }
 
         Ok(())
