@@ -16,8 +16,8 @@ use crate::agent::routine::{Routine, RoutineRun, RunStatus};
 use crate::config::DatabaseConfig;
 use crate::context::{ActionRecord, JobContext, JobState};
 use crate::db::{
-    ConversationStore, Database, JobStore, RoutineStore, SandboxStore, SettingsStore,
-    ToolFailureStore, WorkspaceStore,
+    ConversationPageCursor, ConversationStore, Database, JobStore, RoutineStore, SandboxStore,
+    SettingsStore, ToolFailureStore, WorkspaceStore,
 };
 use crate::error::{DatabaseError, WorkspaceError};
 use crate::history::{
@@ -44,6 +44,13 @@ impl PgBackend {
         let store = Store::new(config).await?;
         let repo = Repository::new(store.pool());
         Ok(Self { store, repo })
+    }
+
+    /// Create a backend from an existing pool.
+    pub fn from_pool(pool: Pool) -> Self {
+        let store = Store::from_pool(pool.clone());
+        let repo = Repository::new(pool);
+        Self { store, repo }
     }
 
     /// Get a clone of the connection pool.
@@ -90,6 +97,25 @@ impl ConversationStore for PgBackend {
     ) -> Result<Uuid, DatabaseError> {
         self.store
             .add_conversation_message(conversation_id, role, content)
+            .await
+    }
+
+    async fn add_conversation_message_with_metadata(
+        &self,
+        conversation_id: Uuid,
+        role: &str,
+        content: &str,
+        created_at: DateTime<Utc>,
+        sequence_num: Option<i64>,
+    ) -> Result<Uuid, DatabaseError> {
+        self.store
+            .add_conversation_message_with_metadata(
+                conversation_id,
+                role,
+                content,
+                created_at,
+                sequence_num,
+            )
             .await
     }
 
@@ -167,10 +193,39 @@ impl ConversationStore for PgBackend {
             .await
     }
 
+    async fn create_conversation_with_metadata_and_timestamps(
+        &self,
+        channel: &str,
+        user_id: &str,
+        metadata: &serde_json::Value,
+        started_at: DateTime<Utc>,
+        last_activity: DateTime<Utc>,
+    ) -> Result<Uuid, DatabaseError> {
+        self.store
+            .create_conversation_with_metadata_and_timestamps(
+                channel,
+                user_id,
+                metadata,
+                started_at,
+                last_activity,
+            )
+            .await
+    }
+
+    async fn find_conversation_by_import_source(
+        &self,
+        user_id: &str,
+        source: &str,
+        source_id: &str,
+    ) -> Result<Option<Uuid>, DatabaseError> {
+        self.store
+            .find_conversation_by_import_source(user_id, source, source_id)
+            .await
+    }
     async fn list_conversation_messages_paginated(
         &self,
         conversation_id: Uuid,
-        before: Option<DateTime<Utc>>,
+        before: Option<ConversationPageCursor>,
         limit: i64,
     ) -> Result<(Vec<ConversationMessage>, bool), DatabaseError> {
         self.store

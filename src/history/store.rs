@@ -96,10 +96,11 @@ impl Store {
     ) -> Result<Uuid, DatabaseError> {
         let conn = self.conn().await?;
         let id = Uuid::new_v4();
+        let now = Utc::now();
 
         conn.execute(
-            "INSERT INTO conversations (id, channel, user_id, thread_id) VALUES ($1, $2, $3, $4)",
-            &[&id, &channel, &user_id, &thread_id],
+            "INSERT INTO conversations (id, channel, user_id, thread_id, started_at, last_activity) VALUES ($1, $2, $3, $4, $5, $5)",
+            &[&id, &channel, &user_id, &thread_id, &now],
         )
         .await?;
 
@@ -124,18 +125,65 @@ impl Store {
         role: &str,
         content: &str,
     ) -> Result<Uuid, DatabaseError> {
-        let conn = self.conn().await?;
+        self.add_conversation_message_with_metadata(
+            conversation_id,
+            role,
+            content,
+            Utc::now(),
+            None,
+        )
+        .await
+    }
+
+    /// Add a message with explicit source timestamp and optional sequence number.
+    pub async fn add_conversation_message_with_metadata(
+        &self,
+        conversation_id: Uuid,
+        role: &str,
+        content: &str,
+        created_at: DateTime<Utc>,
+        sequence_num: Option<i64>,
+    ) -> Result<Uuid, DatabaseError> {
+        let mut conn = self.conn().await?;
+        let tx = conn.transaction().await?;
         let id = Uuid::new_v4();
 
-        conn.execute(
-            "INSERT INTO conversation_messages (id, conversation_id, role, content) VALUES ($1, $2, $3, $4)",
-            &[&id, &conversation_id, &role, &content],
+        tx.query_opt(
+            "SELECT 1 FROM conversations WHERE id = $1 FOR UPDATE",
+            &[&conversation_id],
         )
         .await?;
 
-        // Update conversation activity
-        self.touch_conversation(conversation_id).await?;
+        let next_sequence = match sequence_num {
+            Some(sequence_num) => sequence_num,
+            None => {
+                let row = tx
+                    .query_one(
+                        "SELECT COALESCE(MAX(sequence_num), -1) + 1 AS next_sequence
+                         FROM conversation_messages
+                         WHERE conversation_id = $1",
+                        &[&conversation_id],
+                    )
+                    .await?;
+                row.get::<_, i64>("next_sequence")
+            }
+        };
 
+        tx.execute(
+            "INSERT INTO conversation_messages (id, conversation_id, role, content, created_at, sequence_num) VALUES ($1, $2, $3, $4, $5, $6)",
+            &[&id, &conversation_id, &role, &content, &created_at, &next_sequence],
+        )
+        .await?;
+
+        tx.execute(
+            "UPDATE conversations
+             SET last_activity = GREATEST(last_activity, $2)
+             WHERE id = $1",
+            &[&conversation_id, &created_at],
+        )
+        .await?;
+
+        tx.commit().await?;
         Ok(id)
     }
 
@@ -1453,6 +1501,13 @@ pub struct ConversationMessage {
     pub role: String,
     pub content: String,
     pub created_at: DateTime<Utc>,
+    pub sequence_num: i64,
+}
+
+impl ConversationMessage {
+    pub fn pagination_cursor(&self) -> String {
+        format!("seq:{}", self.sequence_num)
+    }
 }
 
 #[cfg(feature = "postgres")]
@@ -1507,7 +1562,7 @@ impl Store {
                     (SELECT LEFT(m2.content, 100)
                      FROM conversation_messages m2
                      WHERE m2.conversation_id = c.id AND m2.role = 'user'
-                     ORDER BY m2.created_at ASC
+                     ORDER BY m2.sequence_num ASC, m2.created_at ASC, m2.id ASC
                      LIMIT 1
                     ) AS title
                 FROM conversations c
@@ -1567,7 +1622,7 @@ impl Store {
                     (SELECT LEFT(m2.content, 100)
                      FROM conversation_messages m2
                      WHERE m2.conversation_id = c.id AND m2.role = 'user'
-                     ORDER BY m2.created_at ASC
+                     ORDER BY m2.sequence_num ASC, m2.created_at ASC, m2.id ASC
                      LIMIT 1
                     ) AS title
                 FROM conversations c
@@ -1751,16 +1806,54 @@ impl Store {
         user_id: &str,
         metadata: &serde_json::Value,
     ) -> Result<Uuid, DatabaseError> {
+        let now = Utc::now();
+        self.create_conversation_with_metadata_and_timestamps(channel, user_id, metadata, now, now)
+            .await
+    }
+
+    /// Create a conversation with metadata and explicit timestamps.
+    pub async fn create_conversation_with_metadata_and_timestamps(
+        &self,
+        channel: &str,
+        user_id: &str,
+        metadata: &serde_json::Value,
+        started_at: DateTime<Utc>,
+        last_activity: DateTime<Utc>,
+    ) -> Result<Uuid, DatabaseError> {
         let conn = self.conn().await?;
         let id = Uuid::new_v4();
 
         conn.execute(
-            "INSERT INTO conversations (id, channel, user_id, metadata) VALUES ($1, $2, $3, $4)",
-            &[&id, &channel, &user_id, metadata],
+            "INSERT INTO conversations (id, channel, user_id, metadata, started_at, last_activity) VALUES ($1, $2, $3, $4, $5, $6)",
+            &[&id, &channel, &user_id, metadata, &started_at, &last_activity],
         )
         .await?;
 
         Ok(id)
+    }
+
+    /// Find an imported conversation by source tuple.
+    pub async fn find_conversation_by_import_source(
+        &self,
+        user_id: &str,
+        source: &str,
+        source_id: &str,
+    ) -> Result<Option<Uuid>, DatabaseError> {
+        let conn = self.conn().await?;
+        let row = conn
+            .query_opt(
+                r#"
+                SELECT id
+                FROM conversations
+                WHERE user_id = $1
+                  AND metadata->>'import_source' = $2
+                  AND metadata->>'import_source_id' = $3
+                LIMIT 1
+                "#,
+                &[&user_id, &source, &source_id],
+            )
+            .await?;
+        Ok(row.map(|row| row.get("id")))
     }
 
     /// Check whether a conversation belongs to the given user.
@@ -1786,36 +1879,52 @@ impl Store {
     pub async fn list_conversation_messages_paginated(
         &self,
         conversation_id: Uuid,
-        before: Option<DateTime<Utc>>,
+        before: Option<crate::db::ConversationPageCursor>,
         limit: i64,
     ) -> Result<(Vec<ConversationMessage>, bool), DatabaseError> {
         let conn = self.conn().await?;
         let fetch_limit = limit + 1; // Fetch one extra to determine has_more
 
-        let rows = if let Some(before_ts) = before {
-            conn.query(
-                r#"
-                SELECT id, role, content, created_at
-                FROM conversation_messages
-                WHERE conversation_id = $1 AND created_at < $2
-                ORDER BY created_at DESC
-                LIMIT $3
-                "#,
-                &[&conversation_id, &before_ts, &fetch_limit],
-            )
-            .await?
-        } else {
-            conn.query(
-                r#"
-                SELECT id, role, content, created_at
-                FROM conversation_messages
-                WHERE conversation_id = $1
-                ORDER BY created_at DESC
-                LIMIT $2
-                "#,
-                &[&conversation_id, &fetch_limit],
-            )
-            .await?
+        let rows = match before {
+            Some(crate::db::ConversationPageCursor::Sequence(before_sequence)) => {
+                conn.query(
+                    r#"
+                    SELECT id, role, content, created_at, sequence_num
+                    FROM conversation_messages
+                    WHERE conversation_id = $1 AND sequence_num < $2
+                    ORDER BY sequence_num DESC
+                    LIMIT $3
+                    "#,
+                    &[&conversation_id, &before_sequence, &fetch_limit],
+                )
+                .await?
+            }
+            Some(crate::db::ConversationPageCursor::Timestamp(before_ts)) => {
+                conn.query(
+                    r#"
+                    SELECT id, role, content, created_at, sequence_num
+                    FROM conversation_messages
+                    WHERE conversation_id = $1 AND created_at < $2
+                    ORDER BY created_at DESC, sequence_num DESC, id DESC
+                    LIMIT $3
+                    "#,
+                    &[&conversation_id, &before_ts, &fetch_limit],
+                )
+                .await?
+            }
+            None => {
+                conn.query(
+                    r#"
+                    SELECT id, role, content, created_at, sequence_num
+                    FROM conversation_messages
+                    WHERE conversation_id = $1
+                    ORDER BY sequence_num DESC
+                    LIMIT $2
+                    "#,
+                    &[&conversation_id, &fetch_limit],
+                )
+                .await?
+            }
         };
 
         let has_more = rows.len() as i64 > limit;
@@ -1830,6 +1939,7 @@ impl Store {
                 role: r.get("role"),
                 content: r.get("content"),
                 created_at: r.get("created_at"),
+                sequence_num: r.get("sequence_num"),
             })
             .collect();
         messages.reverse();
@@ -1875,10 +1985,10 @@ impl Store {
         let rows = conn
             .query(
                 r#"
-                SELECT id, role, content, created_at
+                SELECT id, role, content, created_at, sequence_num
                 FROM conversation_messages
                 WHERE conversation_id = $1
-                ORDER BY created_at ASC
+                ORDER BY sequence_num ASC
                 "#,
                 &[&conversation_id],
             )
@@ -1891,6 +2001,7 @@ impl Store {
                 role: r.get("role"),
                 content: r.get("content"),
                 created_at: r.get("created_at"),
+                sequence_num: r.get("sequence_num"),
             })
             .collect())
     }
@@ -2232,5 +2343,56 @@ mod tests {
         conn.execute("DELETE FROM agent_jobs WHERE id = $1", &[&ctx.job_id])
             .await
             .unwrap();
+    }
+
+    /// Regression test for import dedup metadata lookup.
+    /// Requires a running PostgreSQL instance (integration tier).
+    #[cfg(feature = "postgres")]
+    #[tokio::test]
+    #[ignore]
+    async fn test_find_conversation_by_import_source() {
+        use crate::config::Config;
+
+        let _ = dotenvy::dotenv();
+        let config = Config::from_env().await.expect("Failed to load config");
+        let store = Store::new(&config.database)
+            .await
+            .expect("Failed to connect to database");
+        store
+            .run_migrations()
+            .await
+            .expect("Failed to run migrations");
+
+        let user_id = "test-user-import";
+        let metadata = serde_json::json!({
+            "import_source": "chatgpt",
+            "import_source_id": "conv-xyz-123",
+            "import_title": "Imported chat",
+        });
+
+        let conversation_id = store
+            .create_conversation_with_metadata("imported", user_id, &metadata)
+            .await
+            .unwrap();
+
+        let found = store
+            .find_conversation_by_import_source(user_id, "chatgpt", "conv-xyz-123")
+            .await
+            .unwrap();
+        assert_eq!(found, Some(conversation_id));
+
+        let missing = store
+            .find_conversation_by_import_source(user_id, "chatgpt", "missing-id")
+            .await
+            .unwrap();
+        assert_eq!(missing, None);
+
+        let conn = store.conn().await.unwrap();
+        conn.execute(
+            "DELETE FROM conversations WHERE id = $1",
+            &[&conversation_id],
+        )
+        .await
+        .unwrap();
     }
 }

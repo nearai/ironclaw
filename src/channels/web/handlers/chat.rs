@@ -14,7 +14,10 @@ use uuid::Uuid;
 use crate::channels::IncomingMessage;
 use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::*;
-use crate::channels::web::util::{build_turns_from_db_messages, truncate_preview};
+use crate::channels::web::util::{
+    build_turns_from_db_messages, history_cursor_from_message, parse_history_cursor,
+    truncate_preview,
+};
 
 pub async fn chat_send_handler(
     State(state): State<Arc<GatewayState>>,
@@ -288,14 +291,12 @@ pub async fn chat_history_handler(
         .before
         .as_deref()
         .map(|s| {
-            chrono::DateTime::parse_from_rfc3339(s)
-                .map(|dt| dt.with_timezone(&chrono::Utc))
-                .map_err(|_| {
-                    (
-                        StatusCode::BAD_REQUEST,
-                        "Invalid 'before' timestamp".to_string(),
-                    )
-                })
+            parse_history_cursor(s).map_err(|_| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    "Invalid 'before' cursor".to_string(),
+                )
+            })
         })
         .transpose()?;
 
@@ -334,7 +335,7 @@ pub async fn chat_history_handler(
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-        let oldest_timestamp = messages.first().map(|m| m.created_at.to_rfc3339());
+        let oldest_timestamp = messages.first().map(history_cursor_from_message);
         let turns = build_turns_from_db_messages(&messages);
         return Ok(Json(HistoryResponse {
             thread_id,
@@ -410,7 +411,7 @@ pub async fn chat_history_handler(
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
         if !messages.is_empty() {
-            let oldest_timestamp = messages.first().map(|m| m.created_at.to_rfc3339());
+            let oldest_timestamp = messages.first().map(history_cursor_from_message);
             let turns = build_turns_from_db_messages(&messages);
             return Ok(Json(HistoryResponse {
                 thread_id,
@@ -598,24 +599,28 @@ mod tests {
                 role: "user".to_string(),
                 content: "Hello".to_string(),
                 created_at: now,
+                sequence_num: 0,
             },
             crate::history::ConversationMessage {
                 id: Uuid::new_v4(),
                 role: "assistant".to_string(),
                 content: "Hi there!".to_string(),
                 created_at: now + chrono::TimeDelta::seconds(1),
+                sequence_num: 1,
             },
             crate::history::ConversationMessage {
                 id: Uuid::new_v4(),
                 role: "user".to_string(),
                 content: "How are you?".to_string(),
                 created_at: now + chrono::TimeDelta::seconds(2),
+                sequence_num: 2,
             },
             crate::history::ConversationMessage {
                 id: Uuid::new_v4(),
                 role: "assistant".to_string(),
                 content: "Doing well!".to_string(),
                 created_at: now + chrono::TimeDelta::seconds(3),
+                sequence_num: 3,
             },
         ];
 
@@ -637,18 +642,21 @@ mod tests {
                 role: "user".to_string(),
                 content: "Hello".to_string(),
                 created_at: now,
+                sequence_num: 0,
             },
             crate::history::ConversationMessage {
                 id: Uuid::new_v4(),
                 role: "assistant".to_string(),
                 content: "Hi!".to_string(),
                 created_at: now + chrono::TimeDelta::seconds(1),
+                sequence_num: 1,
             },
             crate::history::ConversationMessage {
                 id: Uuid::new_v4(),
                 role: "user".to_string(),
                 content: "Lost message".to_string(),
                 created_at: now + chrono::TimeDelta::seconds(2),
+                sequence_num: 2,
             },
         ];
 
@@ -672,18 +680,21 @@ mod tests {
                 role: "user".to_string(),
                 content: "List files".to_string(),
                 created_at: now,
+                sequence_num: 0,
             },
             crate::history::ConversationMessage {
                 id: Uuid::new_v4(),
                 role: "tool_calls".to_string(),
                 content: tool_calls_json.to_string(),
                 created_at: now + chrono::TimeDelta::milliseconds(500),
+                sequence_num: 1,
             },
             crate::history::ConversationMessage {
                 id: Uuid::new_v4(),
                 role: "assistant".to_string(),
                 content: "Here are the files".to_string(),
                 created_at: now + chrono::TimeDelta::seconds(1),
+                sequence_num: 2,
             },
         ];
 
@@ -713,18 +724,21 @@ mod tests {
                 role: "user".to_string(),
                 content: "Hello".to_string(),
                 created_at: now,
+                sequence_num: 0,
             },
             crate::history::ConversationMessage {
                 id: Uuid::new_v4(),
                 role: "tool_calls".to_string(),
                 content: "not valid json".to_string(),
                 created_at: now + chrono::TimeDelta::milliseconds(500),
+                sequence_num: 1,
             },
             crate::history::ConversationMessage {
                 id: Uuid::new_v4(),
                 role: "assistant".to_string(),
                 content: "Done".to_string(),
                 created_at: now + chrono::TimeDelta::seconds(1),
+                sequence_num: 2,
             },
         ];
 
@@ -744,12 +758,14 @@ mod tests {
                 role: "user".to_string(),
                 content: "Hello".to_string(),
                 created_at: now,
+                sequence_num: 0,
             },
             crate::history::ConversationMessage {
                 id: Uuid::new_v4(),
                 role: "assistant".to_string(),
                 content: "Hi!".to_string(),
                 created_at: now + chrono::TimeDelta::seconds(1),
+                sequence_num: 1,
             },
         ];
 

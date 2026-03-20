@@ -1,6 +1,7 @@
 //! Shared utility functions for the web gateway.
 
 use crate::channels::web::types::{ToolCallInfo, TurnInfo};
+use crate::db::ConversationPageCursor;
 
 /// Truncate a string to at most `max_bytes` bytes at a char boundary, appending "...".
 ///
@@ -113,6 +114,23 @@ pub fn build_turns_from_db_messages(
     turns
 }
 
+pub fn history_cursor_from_message(message: &crate::history::ConversationMessage) -> String {
+    message.pagination_cursor()
+}
+
+pub fn parse_history_cursor(raw: &str) -> Result<ConversationPageCursor, String> {
+    if let Some(sequence) = raw.strip_prefix("seq:") {
+        return sequence
+            .parse::<i64>()
+            .map(ConversationPageCursor::Sequence)
+            .map_err(|_| "Invalid 'before' cursor".to_string());
+    }
+
+    chrono::DateTime::parse_from_rfc3339(raw)
+        .map(|dt| ConversationPageCursor::Timestamp(dt.with_timezone(&chrono::Utc)))
+        .map_err(|_| "Invalid 'before' cursor".to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -208,6 +226,7 @@ mod tests {
             role: role.to_string(),
             content: content.to_string(),
             created_at: chrono::Utc::now() + chrono::TimeDelta::milliseconds(offset_ms),
+            sequence_num: offset_ms,
         }
     }
 

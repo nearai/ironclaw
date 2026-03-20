@@ -330,6 +330,14 @@ pub trait ConversationStore: Send + Sync {
         role: &str,
         content: &str,
     ) -> Result<Uuid, DatabaseError>;
+    async fn add_conversation_message_with_metadata(
+        &self,
+        conversation_id: Uuid,
+        role: &str,
+        content: &str,
+        created_at: DateTime<Utc>,
+        sequence_num: Option<i64>,
+    ) -> Result<Uuid, DatabaseError>;
     async fn ensure_conversation(
         &self,
         id: Uuid,
@@ -369,10 +377,24 @@ pub trait ConversationStore: Send + Sync {
         user_id: &str,
         metadata: &serde_json::Value,
     ) -> Result<Uuid, DatabaseError>;
+    async fn create_conversation_with_metadata_and_timestamps(
+        &self,
+        channel: &str,
+        user_id: &str,
+        metadata: &serde_json::Value,
+        started_at: DateTime<Utc>,
+        last_activity: DateTime<Utc>,
+    ) -> Result<Uuid, DatabaseError>;
+    async fn find_conversation_by_import_source(
+        &self,
+        user_id: &str,
+        source: &str,
+        source_id: &str,
+    ) -> Result<Option<Uuid>, DatabaseError>;
     async fn list_conversation_messages_paginated(
         &self,
         conversation_id: Uuid,
-        before: Option<DateTime<Utc>>,
+        before: Option<ConversationPageCursor>,
         limit: i64,
     ) -> Result<(Vec<ConversationMessage>, bool), DatabaseError>;
     async fn update_conversation_metadata_field(
@@ -394,6 +416,12 @@ pub trait ConversationStore: Send + Sync {
         conversation_id: Uuid,
         user_id: &str,
     ) -> Result<bool, DatabaseError>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConversationPageCursor {
+    Sequence(i64),
+    Timestamp(DateTime<Utc>),
 }
 
 #[async_trait]

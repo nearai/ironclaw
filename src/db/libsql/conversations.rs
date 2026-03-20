@@ -6,7 +6,7 @@ use libsql::params;
 use uuid::Uuid;
 
 use super::{LibSqlBackend, fmt_ts, get_i64, get_json, get_opt_text, get_text, get_ts, opt_text};
-use crate::db::ConversationStore;
+use crate::db::{ConversationPageCursor, ConversationStore};
 use crate::error::DatabaseError;
 use crate::history::{ConversationMessage, ConversationSummary};
 
@@ -48,17 +48,103 @@ impl ConversationStore for LibSqlBackend {
         role: &str,
         content: &str,
     ) -> Result<Uuid, DatabaseError> {
+        self.add_conversation_message_with_metadata(
+            conversation_id,
+            role,
+            content,
+            Utc::now(),
+            None,
+        )
+        .await
+    }
+
+    async fn add_conversation_message_with_metadata(
+        &self,
+        conversation_id: Uuid,
+        role: &str,
+        content: &str,
+        created_at: DateTime<Utc>,
+        sequence_num: Option<i64>,
+    ) -> Result<Uuid, DatabaseError> {
         let conn = self.connect().await?;
-        let id = Uuid::new_v4();
-        let now = fmt_ts(&Utc::now());
-        conn.execute(
-                "INSERT INTO conversation_messages (id, conversation_id, role, content, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![id.to_string(), conversation_id.to_string(), role, content, now],
+        let conversation_id_str = conversation_id.to_string();
+        let created_at_str = fmt_ts(&created_at);
+
+        conn.execute("BEGIN IMMEDIATE", params![])
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        let result: Result<Uuid, DatabaseError> = async {
+            let next_sequence = match sequence_num {
+                Some(sequence_num) => sequence_num,
+                None => {
+                    let mut rows = conn
+                        .query(
+                            r#"
+                            SELECT COALESCE(MAX(sequence_num), -1) + 1
+                            FROM conversation_messages
+                            WHERE conversation_id = ?1
+                            "#,
+                            params![conversation_id_str.clone()],
+                        )
+                        .await
+                        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+                    match rows
+                        .next()
+                        .await
+                        .map_err(|e| DatabaseError::Query(e.to_string()))?
+                    {
+                        Some(row) => row.get::<i64>(0).unwrap_or(0),
+                        None => 0,
+                    }
+                }
+            };
+
+            let id = Uuid::new_v4();
+            conn.execute(
+                "INSERT INTO conversation_messages (id, conversation_id, role, content, created_at, sequence_num) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    id.to_string(),
+                    conversation_id_str.clone(),
+                    role,
+                    content,
+                    created_at_str.clone(),
+                    next_sequence
+                ],
             )
             .await
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
-        self.touch_conversation(conversation_id).await?;
-        Ok(id)
+
+            conn.execute(
+                r#"
+                UPDATE conversations
+                SET last_activity = CASE
+                    WHEN last_activity > ?2 THEN last_activity
+                    ELSE ?2
+                END
+                WHERE id = ?1
+                "#,
+                params![conversation_id_str.clone(), created_at_str.clone()],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+            Ok(id)
+        }
+        .await;
+
+        match &result {
+            Ok(_) => {
+                conn.execute("COMMIT", params![])
+                    .await
+                    .map_err(|e| DatabaseError::Query(e.to_string()))?;
+            }
+            Err(_) => {
+                let _ = conn.execute("ROLLBACK", params![]).await;
+            }
+        }
+
+        result
     }
 
     async fn ensure_conversation(
@@ -106,7 +192,7 @@ impl ConversationStore for LibSqlBackend {
                     (SELECT substr(m2.content, 1, 100)
                      FROM conversation_messages m2
                      WHERE m2.conversation_id = c.id AND m2.role = 'user'
-                     ORDER BY m2.created_at ASC, m2.rowid ASC
+                     ORDER BY m2.sequence_num ASC, m2.created_at ASC, m2.id ASC
                      LIMIT 1
                     ) AS title
                 FROM conversations c
@@ -173,7 +259,7 @@ impl ConversationStore for LibSqlBackend {
                     (SELECT substr(m2.content, 1, 100)
                      FROM conversation_messages m2
                      WHERE m2.conversation_id = c.id AND m2.role = 'user'
-                     ORDER BY m2.created_at ASC, m2.rowid ASC
+                     ORDER BY m2.sequence_num ASC, m2.created_at ASC, m2.id ASC
                      LIMIT 1
                     ) AS title
                 FROM conversations c
@@ -402,52 +488,124 @@ impl ConversationStore for LibSqlBackend {
         user_id: &str,
         metadata: &serde_json::Value,
     ) -> Result<Uuid, DatabaseError> {
+        let now = Utc::now();
+        self.create_conversation_with_metadata_and_timestamps(channel, user_id, metadata, now, now)
+            .await
+    }
+
+    async fn create_conversation_with_metadata_and_timestamps(
+        &self,
+        channel: &str,
+        user_id: &str,
+        metadata: &serde_json::Value,
+        started_at: DateTime<Utc>,
+        last_activity: DateTime<Utc>,
+    ) -> Result<Uuid, DatabaseError> {
         let conn = self.connect().await?;
         let id = Uuid::new_v4();
-        let now = fmt_ts(&Utc::now());
         conn.execute(
-            "INSERT INTO conversations (id, channel, user_id, metadata, started_at, last_activity) VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
-            params![id.to_string(), channel, user_id, metadata.to_string(), now],
+            "INSERT INTO conversations (id, channel, user_id, metadata, started_at, last_activity) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                id.to_string(),
+                channel,
+                user_id,
+                metadata.to_string(),
+                fmt_ts(&started_at),
+                fmt_ts(&last_activity)
+            ],
         )
         .await
         .map_err(|e| DatabaseError::Query(e.to_string()))?;
         Ok(id)
     }
 
+    async fn find_conversation_by_import_source(
+        &self,
+        user_id: &str,
+        source: &str,
+        source_id: &str,
+    ) -> Result<Option<Uuid>, DatabaseError> {
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                r#"
+                SELECT id
+                FROM conversations
+                WHERE user_id = ?1
+                  AND json_extract(metadata, '$.import_source') = ?2
+                  AND json_extract(metadata, '$.import_source_id') = ?3
+                LIMIT 1
+                "#,
+                params![user_id, source, source_id],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        if let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        {
+            let id = get_text(&row, 0);
+            let parsed = id.parse().map_err(|e| {
+                DatabaseError::Serialization(format!("invalid conversation id '{}': {}", id, e))
+            })?;
+            return Ok(Some(parsed));
+        }
+
+        Ok(None)
+    }
+
     async fn list_conversation_messages_paginated(
         &self,
         conversation_id: Uuid,
-        before: Option<DateTime<Utc>>,
+        before: Option<ConversationPageCursor>,
         limit: i64,
     ) -> Result<(Vec<ConversationMessage>, bool), DatabaseError> {
         let conn = self.connect().await?;
         let fetch_limit = limit + 1;
         let cid = conversation_id.to_string();
 
-        let mut rows = if let Some(before_ts) = before {
-            conn.query(
-                r#"
-                    SELECT id, role, content, created_at
-                    FROM conversation_messages
-                    WHERE conversation_id = ?1 AND created_at < ?2
-                    ORDER BY created_at DESC, rowid DESC
-                    LIMIT ?3
-                    "#,
-                params![cid, fmt_ts(&before_ts), fetch_limit],
-            )
-            .await
-        } else {
-            conn.query(
-                r#"
-                    SELECT id, role, content, created_at
-                    FROM conversation_messages
-                    WHERE conversation_id = ?1
-                    ORDER BY created_at DESC, rowid DESC
-                    LIMIT ?2
-                    "#,
-                params![cid, fetch_limit],
-            )
-            .await
+        let mut rows = match before {
+            Some(ConversationPageCursor::Sequence(before_sequence)) => {
+                conn.query(
+                    r#"
+                        SELECT id, role, content, created_at, sequence_num
+                        FROM conversation_messages
+                        WHERE conversation_id = ?1 AND sequence_num < ?2
+                        ORDER BY sequence_num DESC
+                        LIMIT ?3
+                        "#,
+                    params![cid, before_sequence, fetch_limit],
+                )
+                .await
+            }
+            Some(ConversationPageCursor::Timestamp(before_ts)) => {
+                conn.query(
+                    r#"
+                        SELECT id, role, content, created_at, sequence_num
+                        FROM conversation_messages
+                        WHERE conversation_id = ?1 AND created_at < ?2
+                        ORDER BY created_at DESC, sequence_num DESC, id DESC
+                        LIMIT ?3
+                        "#,
+                    params![cid, fmt_ts(&before_ts), fetch_limit],
+                )
+                .await
+            }
+            None => {
+                conn.query(
+                    r#"
+                        SELECT id, role, content, created_at, sequence_num
+                        FROM conversation_messages
+                        WHERE conversation_id = ?1
+                        ORDER BY sequence_num DESC
+                        LIMIT ?2
+                        "#,
+                    params![cid, fetch_limit],
+                )
+                .await
+            }
         }
         .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
@@ -462,6 +620,7 @@ impl ConversationStore for LibSqlBackend {
                 role: get_text(&row, 1),
                 content: get_text(&row, 2),
                 created_at: get_ts(&row, 3),
+                sequence_num: get_i64(&row, 4),
             });
         }
 
@@ -520,10 +679,10 @@ impl ConversationStore for LibSqlBackend {
         let mut rows = conn
             .query(
                 r#"
-                SELECT id, role, content, created_at
+                SELECT id, role, content, created_at, sequence_num
                 FROM conversation_messages
                 WHERE conversation_id = ?1
-                ORDER BY created_at ASC, rowid ASC
+                ORDER BY sequence_num ASC
                 "#,
                 params![conversation_id.to_string()],
             )
@@ -541,6 +700,7 @@ impl ConversationStore for LibSqlBackend {
                 role: get_text(&row, 1),
                 content: get_text(&row, 2),
                 created_at: get_ts(&row, 3),
+                sequence_num: get_i64(&row, 4),
             });
         }
         Ok(messages)
@@ -689,5 +849,36 @@ mod tests {
             id1, id2,
             "Expected same heartbeat conversation on repeated calls"
         );
+    }
+
+    #[tokio::test]
+    async fn test_find_conversation_by_import_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test_import_dedup.db");
+        let backend = LibSqlBackend::new_local(&db_path).await.unwrap();
+        backend.run_migrations().await.unwrap();
+
+        let metadata = serde_json::json!({
+            "import_source": "chatgpt",
+            "import_source_id": "conv-abc-123",
+            "import_title": "Imported conversation",
+        });
+
+        let created = backend
+            .create_conversation_with_metadata("imported", "user-1", &metadata)
+            .await
+            .unwrap();
+
+        let found = backend
+            .find_conversation_by_import_source("user-1", "chatgpt", "conv-abc-123")
+            .await
+            .unwrap();
+        assert_eq!(found, Some(created));
+
+        let missing = backend
+            .find_conversation_by_import_source("user-1", "chatgpt", "does-not-exist")
+            .await
+            .unwrap();
+        assert!(missing.is_none());
     }
 }

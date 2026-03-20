@@ -83,7 +83,7 @@ pub struct HistoryResponse {
     /// Whether there are older messages available.
     #[serde(default)]
     pub has_more: bool,
-    /// Cursor for the next page (ISO8601 timestamp of the oldest message returned).
+    /// Opaque cursor for the next page of older messages.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub oldest_timestamp: Option<String>,
     /// Pending tool approval that needs user action (re-rendered on thread switch).

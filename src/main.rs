@@ -110,11 +110,10 @@ async fn async_main() -> anyhow::Result<()> {
             init_cli_tracing();
             return completion.run();
         }
-        #[cfg(feature = "import")]
         Some(Command::Import(import_cmd)) => {
             init_cli_tracing();
             let config = ironclaw::config::Config::from_env().await?;
-            return ironclaw::cli::run_import_command(import_cmd, &config).await;
+            return ironclaw::cli::run_import_command(import_cmd, &config, cli.no_db).await;
         }
         Some(Command::Worker {
             job_id,
@@ -185,6 +184,7 @@ async fn async_main() -> anyhow::Result<()> {
             channels_only,
             provider_only,
             quick,
+            import_history,
         }) => {
             #[cfg(any(feature = "postgres", feature = "libsql"))]
             {
@@ -193,6 +193,7 @@ async fn async_main() -> anyhow::Result<()> {
                     channels_only: *channels_only,
                     provider_only: *provider_only,
                     quick: *quick,
+                    import_history: *import_history,
                 };
                 let mut wizard =
                     SetupWizard::try_with_config_and_toml(config, cli.config.as_deref())?;
@@ -200,7 +201,13 @@ async fn async_main() -> anyhow::Result<()> {
             }
             #[cfg(not(any(feature = "postgres", feature = "libsql")))]
             {
-                let _ = (skip_auth, channels_only, provider_only, quick);
+                let _ = (
+                    skip_auth,
+                    channels_only,
+                    provider_only,
+                    quick,
+                    import_history,
+                );
                 eprintln!("Onboarding wizard requires the 'postgres' or 'libsql' feature.");
             }
             return Ok(());

@@ -54,6 +54,7 @@ pub(crate) const ROUTINE_RUN_COLUMNS: &str = "\
 /// Stores the `Database` handle in an `Arc` so that the same underlying
 /// database can be shared with stores (SecretsStore, WasmToolStore) that
 /// create their own connections per-operation.
+#[derive(Clone)]
 pub struct LibSqlBackend {
     db: Arc<LibSqlDatabase>,
 }

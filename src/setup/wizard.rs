@@ -2,14 +2,15 @@
 //!
 //! The wizard guides users through:
 //! 1. Database connection
-//! 2. Security (secrets master key)
-//! 3. Inference provider (NEAR AI, Anthropic, OpenAI, OpenAI Codex, Ollama, OpenAI-compatible)
-//! 4. Model selection
-//! 5. Embeddings
-//! 6. Channel configuration
-//! 7. Extensions (tool installation from registry)
-//! 8. Docker sandbox
-//! 9. Heartbeat (background tasks)
+//! 2. Conversation history import (optional)
+//! 3. Security (secrets master key)
+//! 4. Inference provider (NEAR AI, Anthropic, OpenAI, OpenAI Codex, Ollama, OpenAI-compatible)
+//! 5. Model selection
+//! 6. Embeddings
+//! 7. Channel configuration
+//! 8. Extensions (tool installation from registry)
+//! 9. Docker sandbox
+//! 10. Heartbeat (background tasks)
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -84,6 +85,8 @@ pub struct SetupConfig {
     pub provider_only: bool,
     /// Quick setup: auto-defaults everything except LLM provider and model.
     pub quick: bool,
+    /// Force showing the conversation import step even if nothing is auto-detected.
+    pub import_history: bool,
 }
 
 /// Interactive setup wizard for IronClaw.
@@ -214,6 +217,15 @@ impl SetupWizard {
             self.try_load_existing_settings().await;
             self.settings.merge_from(&step1_settings);
 
+            let show_import_step = self.config.import_history
+                || !crate::cli::import::autodetect_import_sources().is_empty();
+            let total_steps = if show_import_step { 3 } else { 2 };
+
+            if show_import_step {
+                print_step(1, total_steps, "Import Conversation History");
+                self.step_import_history().await?;
+            }
+
             self.auto_setup_security().await?;
             self.persist_after_step().await;
 
@@ -255,16 +267,27 @@ impl SetupWizard {
                 }
                 self.persist_after_step().await;
             } else {
-                print_step(1, 2, "Inference Provider");
+                print_step(
+                    if show_import_step { 2 } else { 1 },
+                    total_steps,
+                    "Inference Provider",
+                );
                 self.step_inference_provider().await?;
                 self.persist_after_step().await;
 
-                print_step(2, 2, "Model Selection");
+                print_step(
+                    if show_import_step { 3 } else { 2 },
+                    total_steps,
+                    "Model Selection",
+                );
                 self.step_model_selection().await?;
                 self.persist_after_step().await;
             }
         } else {
-            let total_steps = 9;
+            let show_import_step = self.config.import_history
+                || !crate::cli::import::autodetect_import_sources().is_empty();
+            let step_offset = if show_import_step { 1 } else { 0 };
+            let total_steps = 9 + step_offset;
 
             // Step 1: Database
             print_step(1, total_steps, "Database Connection");
@@ -282,46 +305,51 @@ impl SetupWizard {
 
             self.persist_after_step().await;
 
-            // Step 2: Security
-            print_step(2, total_steps, "Security");
+            if show_import_step {
+                print_step(2, total_steps, "Import Conversation History");
+                self.step_import_history().await?;
+            }
+
+            // Step 2/3: Security
+            print_step(2 + step_offset, total_steps, "Security");
             self.step_security().await?;
             self.persist_after_step().await;
 
-            // Step 3: Inference provider selection (unless skipped)
+            // Step 3/4: Inference provider selection (unless skipped)
             if !self.config.skip_auth {
-                print_step(3, total_steps, "Inference Provider");
+                print_step(3 + step_offset, total_steps, "Inference Provider");
                 self.step_inference_provider().await?;
             } else {
                 print_info("Skipping inference provider setup (using existing config)");
             }
             self.persist_after_step().await;
 
-            // Step 4: Model selection
-            print_step(4, total_steps, "Model Selection");
+            // Step 4/5: Model selection
+            print_step(4 + step_offset, total_steps, "Model Selection");
             self.step_model_selection().await?;
             self.persist_after_step().await;
 
-            // Step 5: Embeddings
-            print_step(5, total_steps, "Embeddings (Semantic Search)");
+            // Step 5/6: Embeddings
+            print_step(5 + step_offset, total_steps, "Embeddings (Semantic Search)");
             self.step_embeddings()?;
             self.persist_after_step().await;
 
-            // Step 6: Channel configuration
-            print_step(6, total_steps, "Channel Configuration");
+            // Step 6/7: Channel configuration
+            print_step(6 + step_offset, total_steps, "Channel Configuration");
             self.step_channels().await?;
             self.persist_after_step().await;
 
-            // Step 7: Extensions (tools)
-            print_step(7, total_steps, "Extensions");
+            // Step 7/8: Extensions (tools)
+            print_step(7 + step_offset, total_steps, "Extensions");
             self.step_extensions().await?;
 
-            // Step 8: Docker Sandbox
-            print_step(8, total_steps, "Docker Sandbox");
+            // Step 8/9: Docker Sandbox
+            print_step(8 + step_offset, total_steps, "Docker Sandbox");
             self.step_docker_sandbox().await?;
             self.persist_after_step().await;
 
-            // Step 9: Heartbeat
-            print_step(9, total_steps, "Background Tasks");
+            // Step 9/10: Heartbeat
+            print_step(9 + step_offset, total_steps, "Background Tasks");
             self.step_heartbeat()?;
             self.persist_after_step().await;
 
@@ -816,7 +844,126 @@ impl SetupWizard {
         Ok(())
     }
 
-    /// Step 2: Security (secrets master key).
+    /// Optional onboarding step: import conversation history from other tools.
+    ///
+    /// Auto-detects known source locations and lets users import all, select
+    /// sources, or skip. If nothing is detected, this step is silent unless
+    /// `--import-history` forced it.
+    async fn step_import_history(&mut self) -> Result<(), SetupError> {
+        let detected = crate::cli::import::autodetect_import_sources();
+        if detected.is_empty() {
+            if self.config.import_history {
+                if crate::cli::import::has_supported_history_import_sources() {
+                    print_info("No conversation history exports were detected.");
+                    print_info("You can still import later with: ironclaw import <source> [path]");
+                } else {
+                    print_info("No source-specific history importers are available yet.");
+                    print_info(
+                        "This build only includes the shared import infrastructure; source-specific parser integrations are not available yet.",
+                    );
+                }
+            }
+            return Ok(());
+        }
+
+        print_info("Found conversation history from:");
+        for source in &detected {
+            print_info(&format!(
+                "• {} ({}) — {}",
+                source.source.display_name(),
+                source.note,
+                source.path.display()
+            ));
+        }
+
+        let choice = select_one(
+            "Choose an action:",
+            &["Import all", "Select sources", "Skip"],
+        )
+        .map_err(SetupError::Io)?;
+
+        let selected_indices = match choice {
+            0 => (0..detected.len()).collect::<Vec<_>>(),
+            1 => {
+                let options = detected
+                    .iter()
+                    .map(|source| {
+                        (
+                            format!(
+                                "{} ({}) — {}",
+                                source.source.display_name(),
+                                source.note,
+                                source.path.display()
+                            ),
+                            true,
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let options_refs = options
+                    .iter()
+                    .map(|(label, selected)| (label.as_str(), *selected))
+                    .collect::<Vec<_>>();
+                select_many("Select sources to import:", &options_refs).map_err(SetupError::Io)?
+            }
+            _ => Vec::new(),
+        };
+
+        if selected_indices.is_empty() {
+            print_info("Skipped conversation history import.");
+            return Ok(());
+        }
+
+        let db = self.import_database()?;
+
+        for index in selected_indices {
+            let source = &detected[index];
+            let args = crate::cli::import::HistoryImportArgs {
+                path: Some(source.path.clone()),
+                user_id: self.owner_id().to_string(),
+                dedup: true,
+                to_workspace: true,
+                dry_run: false,
+            };
+
+            print_info(&format!(
+                "Importing {} from {}...",
+                source.source.display_name(),
+                source.path.display()
+            ));
+
+            if let Err(err) =
+                crate::cli::import::run_import_command_with_db(source.source, &args, db.clone())
+                    .await
+            {
+                print_error(&format!(
+                    "Import failed for {}: {}",
+                    source.source.display_name(),
+                    err
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
+    fn import_database(&self) -> Result<Arc<dyn crate::db::Database>, SetupError> {
+        #[cfg(feature = "postgres")]
+        if let Some(ref pool) = self.db_pool {
+            return Ok(Arc::new(crate::db::postgres::PgBackend::from_pool(
+                pool.clone(),
+            )));
+        }
+
+        #[cfg(feature = "libsql")]
+        if let Some(ref backend) = self.db_backend {
+            return Ok(Arc::new((*backend).clone()));
+        }
+
+        Err(SetupError::Database(
+            "Database is not available for import. Complete Step 1 first.".to_string(),
+        ))
+    }
+    /// Step 3: Security (secrets master key).
     async fn step_security(&mut self) -> Result<(), SetupError> {
         // Check current configuration
         let env_key_exists = std::env::var("SECRETS_MASTER_KEY").is_ok();
@@ -1060,7 +1207,7 @@ impl SetupWizard {
         Ok(())
     }
 
-    /// Step 3: Inference provider selection.
+    /// Step 4: Inference provider selection.
     ///
     /// Uses the provider registry to dynamically build the selection menu.
     /// NearAI is always first (special auth), then all registry providers
@@ -1697,7 +1844,7 @@ impl SetupWizard {
         Ok(())
     }
 
-    /// Step 4: Model selection.
+    /// Step 5: Model selection.
     ///
     /// Branches on the selected LLM backend and fetches models from the
     /// appropriate provider API, with static defaults as fallback.
@@ -1891,7 +2038,7 @@ impl SetupWizard {
         }
     }
 
-    /// Step 5: Embeddings configuration.
+    /// Step 6: Embeddings configuration.
     fn step_embeddings(&mut self) -> Result<(), SetupError> {
         print_info("Embeddings enable semantic search in your workspace memory.");
         println!();
@@ -2094,7 +2241,7 @@ impl SetupWizard {
         }
     }
 
-    /// Step 6: Channel configuration.
+    /// Step 7: Channel configuration.
     async fn step_channels(&mut self) -> Result<(), SetupError> {
         // First, configure tunnel (shared across all channels that need webhooks)
         match setup_tunnel(&self.settings).await {
@@ -2301,7 +2448,7 @@ impl SetupWizard {
         Ok(())
     }
 
-    /// Step 7: Extensions (tools) installation from registry.
+    /// Step 8: Extensions (tools) installation from registry.
     async fn step_extensions(&mut self) -> Result<(), SetupError> {
         let catalog = match load_registry_catalog() {
             Some(c) => c,
@@ -2427,7 +2574,7 @@ impl SetupWizard {
         Ok(())
     }
 
-    /// Step 8: Docker Sandbox -- check Docker installation and availability.
+    /// Step 9: Docker Sandbox -- check Docker installation and availability.
     async fn step_docker_sandbox(&mut self) -> Result<(), SetupError> {
         print_info("IronClaw can execute code, run builds, and use tools inside Docker");
         print_info("containers. This keeps your system safe -- commands from the LLM run");
@@ -2566,7 +2713,7 @@ impl SetupWizard {
         Ok(())
     }
 
-    /// Step 9: Heartbeat configuration.
+    /// Step 10: Heartbeat configuration.
     fn step_heartbeat(&mut self) -> Result<(), SetupError> {
         print_info("Heartbeat runs periodic background tasks (e.g., checking your calendar,");
         print_info("monitoring for notifications, running scheduled workflows).");
@@ -3409,6 +3556,7 @@ mod tests {
             channels_only: false,
             provider_only: false,
             quick: false,
+            import_history: false,
         };
         let wizard = SetupWizard::with_config(config);
         assert!(wizard.config.skip_auth);
