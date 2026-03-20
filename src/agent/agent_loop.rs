@@ -113,6 +113,17 @@ async fn resolve_routine_notification_target(
     .await
 }
 
+pub(crate) fn chat_tool_execution_metadata(message: &IncomingMessage) -> serde_json::Value {
+    serde_json::json!({
+        "notify_channel": message.channel,
+        "notify_user": message
+            .routing_target()
+            .unwrap_or_else(|| message.user_id.clone()),
+        "notify_thread_id": message.thread_id,
+        "notify_metadata": message.metadata,
+    })
+}
+
 fn should_fallback_routine_notification(error: &ChannelError) -> bool {
     !matches!(error, ChannelError::MissingRoutingTarget { .. })
 }
@@ -1124,9 +1135,10 @@ impl Agent {
 #[cfg(test)]
 mod tests {
     use super::{
-        resolve_routine_notification_user, should_fallback_routine_notification,
-        truncate_for_preview,
+        chat_tool_execution_metadata, resolve_routine_notification_user,
+        should_fallback_routine_notification, truncate_for_preview,
     };
+    use crate::channels::IncomingMessage;
     use crate::error::ChannelError;
 
     #[test]
@@ -1220,6 +1232,48 @@ mod tests {
         });
 
         assert_eq!(resolve_routine_notification_user(&metadata), None); // safety: test-only assertion
+    }
+
+    #[test]
+    fn chat_tool_execution_metadata_prefers_message_routing_target() {
+        let message = IncomingMessage::new("telegram", "owner-scope", "hello")
+            .with_sender_id("telegram-user")
+            .with_thread("thread-7")
+            .with_metadata(serde_json::json!({
+                "chat_id": 424242,
+                "chat_type": "private",
+            }));
+
+        let metadata = chat_tool_execution_metadata(&message);
+        assert_eq!(
+            metadata.get("notify_channel").and_then(|v| v.as_str()),
+            Some("telegram")
+        ); // safety: test-only assertion
+        assert_eq!(
+            metadata.get("notify_user").and_then(|v| v.as_str()),
+            Some("424242")
+        ); // safety: test-only assertion
+        assert_eq!(
+            metadata.get("notify_thread_id").and_then(|v| v.as_str()),
+            Some("thread-7")
+        ); // safety: test-only assertion
+    }
+
+    #[test]
+    fn chat_tool_execution_metadata_falls_back_to_user_scope_without_route() {
+        let message =
+            IncomingMessage::new("gateway", "owner-scope", "hello").with_sender_id("gateway-user");
+
+        let metadata = chat_tool_execution_metadata(&message);
+        assert_eq!(
+            metadata.get("notify_channel").and_then(|v| v.as_str()),
+            Some("gateway")
+        ); // safety: test-only assertion
+        assert_eq!(
+            metadata.get("notify_user").and_then(|v| v.as_str()),
+            Some("gateway-user")
+        ); // safety: test-only assertion
+        assert!(metadata.get("notify_thread_id").is_some()); // safety: test-only assertion
     }
 
     #[test]
