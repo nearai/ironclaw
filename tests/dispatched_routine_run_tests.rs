@@ -15,8 +15,7 @@ mod tests {
     use uuid::Uuid;
 
     use ironclaw::agent::routine::{
-        FullJobPermissionMode, Routine, RoutineAction, RoutineGuardrails, RoutineRun, RunStatus,
-        Trigger,
+        Routine, RoutineAction, RoutineGuardrails, RoutineRun, RunStatus, Trigger,
     };
     use ironclaw::context::{JobContext, JobState};
     use ironclaw::db::Database;
@@ -46,8 +45,6 @@ mod tests {
                 title: "Test job".to_string(),
                 description: "Test description".to_string(),
                 max_iterations: 5,
-                tool_permissions: vec![],
-                permission_mode: FullJobPermissionMode::Explicit,
             },
             guardrails: RoutineGuardrails {
                 cooldown: std::time::Duration::from_secs(0),

@@ -210,6 +210,11 @@ impl ToolRegistry {
         self.tools.read().await.values().cloned().collect()
     }
 
+    /// Get the set of built-in tool names currently registered.
+    pub async fn builtin_tool_names(&self) -> std::collections::HashSet<String> {
+        self.builtin_names.read().await.clone()
+    }
+
     /// Get tool definitions for LLM function calling.
     pub async fn tool_definitions(&self) -> Vec<ToolDefinition> {
         let mut defs: Vec<ToolDefinition> = self

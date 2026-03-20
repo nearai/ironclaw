@@ -7,6 +7,7 @@
 //! - Delegate tasks to other services
 //! - Build new software and tools
 
+mod autonomy;
 pub mod builder;
 pub mod builtin;
 mod coercion;
@@ -20,6 +21,10 @@ pub mod wasm;
 mod registry;
 mod tool;
 
+pub use autonomy::{
+    AUTONOMOUS_TOOL_DENYLIST, autonomous_allowed_tool_names, autonomous_unavailable_message,
+    is_autonomous_tool_denylisted,
+};
 pub use builder::{
     BuildPhase, BuildRequirement, BuildResult, BuildSoftwareTool, BuilderConfig, Language,
     LlmSoftwareBuilder, SoftwareBuilder, SoftwareType, Template, TemplateEngine, TemplateType,

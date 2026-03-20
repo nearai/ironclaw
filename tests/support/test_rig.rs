@@ -591,6 +591,7 @@ impl TestRigBuilder {
                     Arc::clone(ws),
                     notify_tx,
                     None,
+                    None,
                     components.tools.clone(),
                     components.safety.clone(),
                     ironclaw::agent::SandboxReadiness::Available, // tests don't use real Docker

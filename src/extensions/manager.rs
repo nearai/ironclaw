@@ -463,6 +463,28 @@ fn sanitize_url_for_logging(url: &str) -> String {
 }
 
 impl ExtensionManager {
+    pub fn owner_id(&self) -> &str {
+        &self.user_id
+    }
+
+    pub async fn active_tool_names(&self) -> HashSet<String> {
+        let mut names = HashSet::new();
+        if let Ok(extensions) = self.list(None, false).await {
+            for extension in extensions {
+                match extension.kind {
+                    ExtensionKind::WasmTool if extension.active => {
+                        names.insert(extension.name);
+                    }
+                    ExtensionKind::McpServer if extension.active => {
+                        names.extend(extension.tools);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        names
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         mcp_session_manager: Arc<McpSessionManager>,
