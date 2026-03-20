@@ -160,6 +160,8 @@ async fn llm_complete(
         input_tokens: resp.input_tokens,
         output_tokens: resp.output_tokens,
         finish_reason: format_finish_reason(resp.finish_reason),
+        cache_read_input_tokens: resp.cache_read_input_tokens,
+        cache_creation_input_tokens: resp.cache_creation_input_tokens,
     }))
 }
 
@@ -174,6 +176,7 @@ async fn llm_complete_with_tools(
         model: req.model,
         max_tokens: req.max_tokens,
         temperature: req.temperature,
+        stop_sequences: req.stop_sequences,
         tool_choice: req.tool_choice,
         metadata: std::collections::HashMap::new(),
     };
@@ -189,6 +192,8 @@ async fn llm_complete_with_tools(
         input_tokens: resp.input_tokens,
         output_tokens: resp.output_tokens,
         finish_reason: format_finish_reason(resp.finish_reason),
+        cache_read_input_tokens: resp.cache_read_input_tokens,
+        cache_creation_input_tokens: resp.cache_creation_input_tokens,
     }))
 }
 
@@ -328,6 +333,12 @@ async fn job_event_handler(
                 .get("session_id")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string()),
+            // NOTE: `fallback_deliverable` is currently always None in SSE events.
+            // In-memory jobs store fallback data in JobContext.metadata (accessed via job_status tool).
+            // Sandbox containers don't yet emit fallback data in their event payloads.
+            // This field is forward-compatible infrastructure for when container workers
+            // gain context/memory tracking capabilities.
+            fallback_deliverable: payload.data.get("fallback_deliverable").cloned(),
         },
         _ => SseEvent::JobStatus {
             job_id: job_id_str,
@@ -657,12 +668,9 @@ mod tests {
 
     #[tokio::test]
     async fn credentials_returns_secrets_when_store_configured() {
+        use crate::testing::credentials::test_secrets_store;
         use secrecy::SecretString;
-        let key = "0123456789abcdef0123456789abcdef";
-        let crypto = Arc::new(
-            crate::secrets::SecretsCrypto::new(SecretString::from(key.to_string())).unwrap(),
-        );
-        let secrets_store = Arc::new(crate::secrets::InMemorySecretsStore::new(crypto));
+        let secrets_store = Arc::new(test_secrets_store());
 
         // Create a secret
         secrets_store

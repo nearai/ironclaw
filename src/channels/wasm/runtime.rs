@@ -153,7 +153,16 @@ impl WasmChannelRuntime {
         // Enable persistent compilation cache. Wasmtime serializes compiled native
         // code to disk (~/.cache/wasmtime by default), so subsequent startups
         // deserialize instead of recompiling — typically 10-50x faster.
-        if let Err(e) = wasmtime_config.cache_config_load_default() {
+        //
+        // On Windows, each Engine gets its own cache subdirectory to avoid
+        // OS error 33 (ERROR_LOCK_VIOLATION) when multiple engines share the
+        // default cache and Windows holds exclusive locks on memory-mapped
+        // files. See #448.
+        if let Err(e) = crate::tools::wasm::enable_compilation_cache(
+            &mut wasmtime_config,
+            "channels",
+            config.cache_dir.as_deref(),
+        ) {
             tracing::warn!("Failed to enable wasmtime compilation cache: {}", e);
         }
 

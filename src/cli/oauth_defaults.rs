@@ -5,26 +5,20 @@
 //!
 //! # Built-in Credentials
 //!
-//! Many CLI tools (gcloud, rclone, gdrive) ship with default OAuth credentials
-//! so users don't need to register their own OAuth app. Google explicitly
-//! documents that client_secret for "Desktop App" / "Installed App" types
-//! is NOT actually secret.
-//!
-//! Default credentials are hardcoded below. They can be overridden at:
-//!
-//! - **Compile time**: Set IRONCLAW_GOOGLE_CLIENT_ID / IRONCLAW_GOOGLE_CLIENT_SECRET
-//!   env vars before building to replace the hardcoded defaults.
-//! - **Runtime**: Users can set GOOGLE_OAUTH_CLIENT_ID / GOOGLE_OAUTH_CLIENT_SECRET
-//!   env vars, which take priority over built-in defaults.
+//! Some providers ship with built-in OAuth credentials so users don't need to
+//! register their own OAuth app just to get started. Today this module only
+//! includes built-in defaults for Google-family tools, and those defaults can
+//! be overridden by provider-specific environment variables when needed.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use rand::RngCore;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::TcpListener;
+use tokio::sync::RwLock;
 
 use crate::secrets::{CreateSecretParams, SecretsStore};
 
@@ -60,261 +54,22 @@ pub fn builtin_credentials(secret_name: &str) -> Option<OAuthCredentials> {
     }
 }
 
+/// Returns the compile-time override env var name, if this provider supports one.
+pub fn builtin_client_id_override_env(secret_name: &str) -> Option<&'static str> {
+    match secret_name {
+        "google_oauth_token" => Some("IRONCLAW_GOOGLE_CLIENT_ID"),
+        _ => None,
+    }
+}
+
 // ── Shared callback server ──────────────────────────────────────────────
 
-/// Fixed port for all OAuth callbacks.
-///
-/// Every redirect URI registered with providers must use this port:
-/// `http://localhost:9876/callback` (or `/auth/callback` for NEAR AI).
-pub const OAUTH_CALLBACK_PORT: u16 = 9876;
-
-/// Returns the OAuth callback base URL.
-///
-/// Checks `IRONCLAW_OAUTH_CALLBACK_URL` env var first (useful for remote/VPS
-/// deployments where `127.0.0.1` is unreachable from the user's browser),
-/// then falls back to `http://{callback_host()}:{OAUTH_CALLBACK_PORT}`.
-pub fn callback_url() -> String {
-    std::env::var("IRONCLAW_OAUTH_CALLBACK_URL")
-        .ok()
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| format!("http://{}:{}", callback_host(), OAUTH_CALLBACK_PORT))
-}
-
-/// Returns the hostname used in OAuth callback URLs.
-///
-/// Reads `OAUTH_CALLBACK_HOST` from the environment (default: `127.0.0.1`).
-///
-/// **Remote server usage:** set `OAUTH_CALLBACK_HOST` to the network interface
-/// address you want to listen on (e.g. the server's LAN IP or `0.0.0.0`).
-/// The callback listener will bind to that specific address instead of the
-/// loopback interface, so the OAuth redirect can reach an external browser.
-/// Note: this transmits the session token over plain HTTP — prefer SSH port
-/// forwarding (`ssh -L 9876:127.0.0.1:9876 user@host`) when possible.
-///
-/// # Example
-///
-/// ```bash
-/// export OAUTH_CALLBACK_HOST=203.0.113.10
-/// ironclaw login
-/// # Opens: http://203.0.113.10:9876/auth/callback
-/// ```
-pub fn callback_host() -> String {
-    std::env::var("OAUTH_CALLBACK_HOST").unwrap_or_else(|_| "127.0.0.1".to_string())
-}
-
-/// Returns `true` if `host` is a loopback address that only accepts local connections.
-///
-/// Covers `localhost` (case-insensitive), the full `127.0.0.0/8` IPv4 loopback
-/// range, and `::1` for IPv6.
-pub fn is_loopback_host(host: &str) -> bool {
-    if host.eq_ignore_ascii_case("localhost") {
-        return true;
-    }
-    host.parse::<std::net::IpAddr>()
-        .map(|ip| ip.is_loopback())
-        .unwrap_or(false)
-}
-
-/// Error from the OAuth callback listener.
-#[derive(Debug, thiserror::Error)]
-pub enum OAuthCallbackError {
-    #[error("Port {0} is in use (another auth flow running?): {1}")]
-    PortInUse(u16, String),
-
-    #[error("Authorization denied by user")]
-    Denied,
-
-    #[error("Timed out waiting for authorization")]
-    Timeout,
-
-    #[error("CSRF state mismatch: expected {expected}, got {actual}")]
-    StateMismatch { expected: String, actual: String },
-
-    #[error("IO error: {0}")]
-    Io(String),
-}
-
-/// Map a `std::io::Error` from a bind attempt to an `OAuthCallbackError`.
-fn bind_error(e: std::io::Error) -> OAuthCallbackError {
-    if e.kind() == std::io::ErrorKind::AddrInUse {
-        OAuthCallbackError::PortInUse(OAUTH_CALLBACK_PORT, e.to_string())
-    } else {
-        OAuthCallbackError::Io(e.to_string())
-    }
-}
-
-/// Bind the OAuth callback listener on the fixed port.
-///
-/// When `OAUTH_CALLBACK_HOST` is a loopback address (the default `127.0.0.1`),
-/// binds to `127.0.0.1` first and falls back to `[::1]` so local-only auth
-/// flows remain restricted to the local machine.
-///
-/// When `OAUTH_CALLBACK_HOST` is set to a remote address, binds to that
-/// specific address so only connections directed to it are accepted.
-pub async fn bind_callback_listener() -> Result<TcpListener, OAuthCallbackError> {
-    let host = callback_host();
-
-    if is_loopback_host(&host) {
-        // Local mode: prefer IPv4 loopback, fall back to IPv6.
-        let ipv4_addr = format!("127.0.0.1:{}", OAUTH_CALLBACK_PORT);
-        match TcpListener::bind(&ipv4_addr).await {
-            Ok(listener) => return Ok(listener),
-            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
-                return Err(OAuthCallbackError::PortInUse(
-                    OAUTH_CALLBACK_PORT,
-                    e.to_string(),
-                ));
-            }
-            Err(_) => {
-                // IPv4 not available, fall back to IPv6
-            }
-        }
-        TcpListener::bind(format!("[::1]:{}", OAUTH_CALLBACK_PORT))
-            .await
-            .map_err(bind_error)
-    } else {
-        // Remote mode: bind to the specific configured host address only,
-        // not 0.0.0.0, to limit exposure to the intended interface.
-        let addr = format!("{}:{}", host, OAUTH_CALLBACK_PORT);
-        TcpListener::bind(&addr).await.map_err(bind_error)
-    }
-}
-
-/// Wait for an OAuth callback and extract a query parameter value.
-///
-/// Listens for a GET request matching `path_prefix` (e.g., "/callback" or "/auth/callback"),
-/// extracts the value of `param_name` (e.g., "code" or "token"), and shows a branded
-/// landing page using `display_name` (e.g., "Google", "Notion", "NEAR AI").
-///
-/// When `expected_state` is `Some`, the callback's `state` query parameter is validated
-/// against it to prevent CSRF attacks. If the state doesn't match, the callback is
-/// rejected with an error page.
-///
-/// Times out after 5 minutes.
-pub async fn wait_for_callback(
-    listener: TcpListener,
-    path_prefix: &str,
-    param_name: &str,
-    display_name: &str,
-    expected_state: Option<&str>,
-) -> Result<String, OAuthCallbackError> {
-    let path_prefix = path_prefix.to_string();
-    let param_name = param_name.to_string();
-    let display_name = display_name.to_string();
-    let expected_state = expected_state.map(String::from);
-
-    tokio::time::timeout(Duration::from_secs(300), async move {
-        loop {
-            let (mut socket, _) = listener
-                .accept()
-                .await
-                .map_err(|e| OAuthCallbackError::Io(e.to_string()))?;
-
-            let mut reader = BufReader::new(&mut socket);
-            let mut request_line = String::new();
-            reader
-                .read_line(&mut request_line)
-                .await
-                .map_err(|e| OAuthCallbackError::Io(e.to_string()))?;
-
-            if let Some(path) = request_line.split_whitespace().nth(1)
-                && path.starts_with(&path_prefix)
-                && let Some(query) = path.split('?').nth(1)
-            {
-                // Check for error first
-                if query.contains("error=") {
-                    let html = landing_html(&display_name, false);
-                    let response = format!(
-                        "HTTP/1.1 400 Bad Request\r\n\
-                         Content-Type: text/html; charset=utf-8\r\n\
-                         Connection: close\r\n\
-                         \r\n\
-                         {}",
-                        html
-                    );
-                    let _ = socket.write_all(response.as_bytes()).await;
-                    return Err(OAuthCallbackError::Denied);
-                }
-
-                // Parse all query params into a map for validation
-                let params: HashMap<&str, String> = query
-                    .split('&')
-                    .filter_map(|p| {
-                        let mut parts = p.splitn(2, '=');
-                        let key = parts.next()?;
-                        let val = parts.next().unwrap_or("");
-                        Some((
-                            key,
-                            urlencoding::decode(val)
-                                .unwrap_or_else(|_| val.into())
-                                .into_owned(),
-                        ))
-                    })
-                    .collect();
-
-                // Validate CSRF state parameter
-                if let Some(ref expected) = expected_state {
-                    let actual = params.get("state").cloned().unwrap_or_default();
-                    if actual != *expected {
-                        let html = landing_html(&display_name, false);
-                        let response = format!(
-                            "HTTP/1.1 403 Forbidden\r\n\
-                             Content-Type: text/html; charset=utf-8\r\n\
-                             Connection: close\r\n\
-                             \r\n\
-                             {}",
-                            html
-                        );
-                        let _ = socket.write_all(response.as_bytes()).await;
-                        return Err(OAuthCallbackError::StateMismatch {
-                            expected: expected.clone(),
-                            actual,
-                        });
-                    }
-                }
-
-                // Look for the target parameter
-                if let Some(value) = params.get(param_name.as_str()) {
-                    let html = landing_html(&display_name, true);
-                    let response = format!(
-                        "HTTP/1.1 200 OK\r\n\
-                         Content-Type: text/html; charset=utf-8\r\n\
-                         Connection: close\r\n\
-                         \r\n\
-                         {}",
-                        html
-                    );
-                    let _ = socket.write_all(response.as_bytes()).await;
-                    let _ = socket.shutdown().await;
-
-                    return Ok(value.clone());
-                }
-            }
-
-            // Not the callback we're looking for
-            let response = "HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n";
-            let _ = socket.write_all(response.as_bytes()).await;
-        }
-    })
-    .await
-    .map_err(|_| OAuthCallbackError::Timeout)?
-}
-
-/// Escape a string for safe interpolation into HTML content.
-fn html_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            '\'' => out.push_str("&#x27;"),
-            _ => out.push(c),
-        }
-    }
-    out
-}
+// Core OAuth callback infrastructure is defined in `crate::llm::oauth_helpers`
+// and re-exported here for backward compatibility.
+pub use crate::llm::oauth_helpers::{
+    OAUTH_CALLBACK_PORT, OAuthCallbackError, bind_callback_listener, callback_host, callback_url,
+    is_loopback_host, landing_html, wait_for_callback,
+};
 
 // ── Shared OAuth flow steps ─────────────────────────────────────────
 
@@ -351,7 +106,7 @@ pub fn build_oauth_url(
     // Generate PKCE verifier and challenge
     let (code_verifier, code_challenge) = if use_pkce {
         let mut verifier_bytes = [0u8; 32];
-        rand::thread_rng().fill_bytes(&mut verifier_bytes);
+        rand::rngs::OsRng.fill_bytes(&mut verifier_bytes);
         let verifier = URL_SAFE_NO_PAD.encode(verifier_bytes);
 
         let mut hasher = Sha256::new();
@@ -365,7 +120,7 @@ pub fn build_oauth_url(
 
     // Generate random state for CSRF protection
     let mut state_bytes = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut state_bytes);
+    rand::rngs::OsRng.fill_bytes(&mut state_bytes);
     let state = URL_SAFE_NO_PAD.encode(state_bytes);
 
     // Build authorization URL
@@ -420,6 +175,32 @@ pub async fn exchange_oauth_code(
     code_verifier: Option<&str>,
     access_token_field: &str,
 ) -> Result<OAuthTokenResponse, OAuthCallbackError> {
+    let extra_token_params = HashMap::new();
+    exchange_oauth_code_with_params(
+        token_url,
+        client_id,
+        client_secret,
+        code,
+        redirect_uri,
+        code_verifier,
+        access_token_field,
+        &extra_token_params,
+    )
+    .await
+}
+
+/// Exchange an OAuth authorization code for tokens with generic extra form parameters.
+#[allow(clippy::too_many_arguments)]
+pub async fn exchange_oauth_code_with_params(
+    token_url: &str,
+    client_id: &str,
+    client_secret: Option<&str>,
+    code: &str,
+    redirect_uri: &str,
+    code_verifier: Option<&str>,
+    access_token_field: &str,
+    extra_token_params: &HashMap<String, String>,
+) -> Result<OAuthTokenResponse, OAuthCallbackError> {
     let client = reqwest::Client::new();
     let mut token_params = vec![
         ("grant_type", "authorization_code".to_string()),
@@ -429,6 +210,10 @@ pub async fn exchange_oauth_code(
 
     if let Some(verifier) = code_verifier {
         token_params.push(("code_verifier", verifier.to_string()));
+    }
+
+    for (key, value) in extra_token_params {
+        token_params.push((key.as_str(), value.clone()));
     }
 
     let mut request = client.post(token_url);
@@ -486,6 +271,37 @@ pub async fn exchange_oauth_code(
         refresh_token,
         expires_in,
     })
+}
+
+/// Exchange an OAuth authorization code for tokens, with optional RFC 8707 `resource` parameter.
+///
+/// The `resource` parameter scopes the issued token to a specific server (used by MCP OAuth).
+#[allow(clippy::too_many_arguments)]
+pub async fn exchange_oauth_code_with_resource(
+    token_url: &str,
+    client_id: &str,
+    client_secret: Option<&str>,
+    code: &str,
+    redirect_uri: &str,
+    code_verifier: Option<&str>,
+    access_token_field: &str,
+    resource: Option<&str>,
+) -> Result<OAuthTokenResponse, OAuthCallbackError> {
+    let mut extra_token_params = HashMap::new();
+    if let Some(resource) = resource {
+        extra_token_params.insert("resource".to_string(), resource.to_string());
+    }
+    exchange_oauth_code_with_params(
+        token_url,
+        client_id,
+        client_secret,
+        code,
+        redirect_uri,
+        code_verifier,
+        access_token_field,
+        &extra_token_params,
+    )
+    .await
 }
 
 /// Store OAuth tokens (access + refresh) in the secrets store.
@@ -596,103 +412,349 @@ pub async fn validate_oauth_token(
     }
 }
 
-// ── Landing pages ───────────────────────────────────────────────────
+// ── Gateway callback support ─────────────────────────────────────────
 
-pub fn landing_html(provider_name: &str, success: bool) -> String {
-    let safe_name = html_escape(provider_name);
-    let (icon, heading, subtitle, accent) = if success {
-        (
-            r##"<div style="width:64px;height:64px;border-radius:50%;background:#22c55e;display:flex;align-items:center;justify-content:center;margin:0 auto 24px">
-                <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
-              </div>"##,
-            format!("{} Connected", safe_name),
-            "You can close this window and return to your terminal.",
-            "#22c55e",
-        )
-    } else {
-        (
-            r##"<div style="width:64px;height:64px;border-radius:50%;background:#ef4444;display:flex;align-items:center;justify-content:center;margin:0 auto 24px">
-                <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-              </div>"##,
-            "Authorization Failed".to_string(),
-            "The request was denied. You can close this window and try again.",
-            "#ef4444",
-        )
+/// State for an in-progress OAuth flow, keyed by CSRF `state` parameter.
+///
+/// Created by `start_wasm_oauth()` and consumed by the web gateway's
+/// `/oauth/callback` handler when running in hosted mode.
+pub struct PendingOAuthFlow {
+    /// Extension name (e.g., "google_calendar").
+    pub extension_name: String,
+    /// Human-readable display name (e.g., "Google Calendar").
+    pub display_name: String,
+    /// OAuth token exchange URL.
+    pub token_url: String,
+    /// OAuth client ID.
+    pub client_id: String,
+    /// OAuth client secret (optional for PKCE-only flows).
+    pub client_secret: Option<String>,
+    /// The redirect_uri used in the authorization request.
+    pub redirect_uri: String,
+    /// PKCE code verifier (must match the code_challenge sent in the auth URL).
+    pub code_verifier: Option<String>,
+    /// Field name in token response containing the access token.
+    pub access_token_field: String,
+    /// Secret name for storage (e.g., "google_oauth_token").
+    pub secret_name: String,
+    /// Provider hint (e.g., "google").
+    pub provider: Option<String>,
+    /// Token validation endpoint (optional).
+    pub validation_endpoint: Option<crate::tools::wasm::ValidationEndpointSchema>,
+    /// Scopes that were requested.
+    pub scopes: Vec<String>,
+    /// User ID for secret storage.
+    pub user_id: String,
+    /// Secrets store reference for token persistence.
+    pub secrets: Arc<dyn SecretsStore + Send + Sync>,
+    /// SSE broadcast sender for notifying the web UI.
+    pub sse_sender: Option<tokio::sync::broadcast::Sender<crate::channels::web::types::SseEvent>>,
+    /// Gateway auth token for authenticating with the platform token exchange proxy.
+    pub gateway_token: Option<String>,
+    /// Additional form params for the token exchange request.
+    /// Used for provider-specific requirements such as RFC 8707 `resource`.
+    pub token_exchange_extra_params: HashMap<String, String>,
+    /// Secret name for persisting the client ID (MCP OAuth only).
+    /// Needed so token refresh can find the client_id after the session ends.
+    pub client_id_secret_name: Option<String>,
+    /// When this flow was created (for expiry).
+    pub created_at: std::time::Instant,
+}
+
+impl std::fmt::Debug for PendingOAuthFlow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PendingOAuthFlow")
+            .field("extension_name", &self.extension_name)
+            .field("display_name", &self.display_name)
+            .field("secret_name", &self.secret_name)
+            .field("created_at", &self.created_at)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Thread-safe registry of pending OAuth flows, keyed by CSRF `state` parameter.
+pub type PendingOAuthRegistry = Arc<RwLock<HashMap<String, PendingOAuthFlow>>>;
+
+/// Create a new empty pending OAuth flow registry.
+pub fn new_pending_oauth_registry() -> PendingOAuthRegistry {
+    Arc::new(RwLock::new(HashMap::new()))
+}
+
+/// Returns `true` if OAuth callbacks should be routed through the web gateway
+/// instead of the local TCP listener.
+///
+/// This is the case when `IRONCLAW_OAUTH_CALLBACK_URL` is set to a non-loopback
+/// URL, meaning the user's browser will redirect to a hosted gateway rather than
+/// localhost.
+pub fn use_gateway_callback() -> bool {
+    crate::config::helpers::env_or_override("IRONCLAW_OAUTH_CALLBACK_URL")
+        .map(|raw| {
+            url::Url::parse(&raw)
+                .ok()
+                .and_then(|u| u.host_str().map(String::from))
+                .map(|host| !is_loopback_host(&host))
+                .unwrap_or(false)
+        })
+        .unwrap_or(false)
+}
+
+/// Returns the configured OAuth token-exchange proxy URL, if any.
+pub fn exchange_proxy_url() -> Option<String> {
+    crate::config::helpers::env_or_override("IRONCLAW_OAUTH_EXCHANGE_URL")
+        .map(|url| url.trim().to_string())
+        .filter(|url| !url.is_empty())
+}
+
+/// Maximum age for pending OAuth flows (5 minutes, matching TCP listener timeout).
+pub const OAUTH_FLOW_EXPIRY: Duration = Duration::from_secs(300);
+
+/// Remove expired flows from the registry.
+///
+/// Called when inserting new flows to prevent accumulation from abandoned
+/// OAuth attempts.
+pub async fn sweep_expired_flows(registry: &PendingOAuthRegistry) {
+    let mut flows = registry.write().await;
+    flows.retain(|_, flow| flow.created_at.elapsed() < OAUTH_FLOW_EXPIRY);
+}
+
+// ── Platform routing helpers ────────────────────────────────────────
+
+const HOSTED_STATE_PREFIX: &str = "ic2";
+const HOSTED_STATE_CHECKSUM_BYTES: usize = 12;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecodedHostedOAuthState {
+    pub flow_id: String,
+    pub instance_name: Option<String>,
+    pub is_legacy: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct HostedOAuthStatePayload {
+    flow_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    instance_name: Option<String>,
+    issued_at: u64,
+}
+
+fn current_instance_name() -> Option<String> {
+    crate::config::helpers::env_or_override("IRONCLAW_INSTANCE_NAME")
+        .or_else(|| crate::config::helpers::env_or_override("OPENCLAW_INSTANCE_NAME"))
+        .filter(|v| !v.is_empty())
+}
+
+fn hosted_state_checksum(payload_bytes: &[u8]) -> String {
+    let digest = Sha256::digest(payload_bytes);
+    URL_SAFE_NO_PAD.encode(&digest[..HOSTED_STATE_CHECKSUM_BYTES])
+}
+
+/// Build a versioned hosted OAuth state envelope.
+///
+/// The encoded value is opaque to providers and can be decoded by both
+/// IronClaw and the external auth proxy for routing and callback lookup.
+pub fn encode_hosted_oauth_state(flow_id: &str, instance_name: Option<&str>) -> String {
+    let payload = HostedOAuthStatePayload {
+        flow_id: flow_id.to_string(),
+        instance_name: instance_name
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_string),
+        issued_at: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
     };
+    let payload_json = match serde_json::to_vec(&payload) {
+        Ok(payload_json) => payload_json,
+        Err(error) => {
+            tracing::warn!(%error, flow_id, "Failed to serialize hosted OAuth state payload");
+            return payload.flow_id;
+        }
+    };
+    let payload = URL_SAFE_NO_PAD.encode(&payload_json);
+    let checksum = hosted_state_checksum(&payload_json);
+    format!("{HOSTED_STATE_PREFIX}.{payload}.{checksum}")
+}
 
-    format!(
-        r#"<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>IronClaw - {heading}</title>
-<style>
-  * {{ margin:0; padding:0; box-sizing:border-box }}
-  body {{
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-    background: #0a0a0a;
-    color: #e5e5e5;
-    display: flex;
-    justify-content: center;
-    align-items: center;
-    min-height: 100vh;
-  }}
-  .card {{
-    text-align: center;
-    padding: 48px 40px;
-    max-width: 420px;
-    border: 1px solid #262626;
-    border-radius: 16px;
-    background: #141414;
-  }}
-  h1 {{
-    font-size: 22px;
-    font-weight: 600;
-    margin-bottom: 8px;
-    color: #fafafa;
-  }}
-  p {{
-    font-size: 14px;
-    color: #a3a3a3;
-    line-height: 1.5;
-  }}
-  .accent {{ color: {accent}; }}
-  .brand {{
-    margin-top: 32px;
-    font-size: 12px;
-    color: #525252;
-    letter-spacing: 0.5px;
-    text-transform: uppercase;
-  }}
-</style>
-</head>
-<body>
-  <div class="card">
-    {icon}
-    <h1>{heading}</h1>
-    <p>{subtitle}</p>
-    <div class="brand">IronClaw</div>
-  </div>
-</body>
-</html>"#,
-        heading = heading,
-        icon = icon,
-        subtitle = subtitle,
-        accent = accent,
-    )
+/// Decode hosted OAuth state in either the new versioned format or the
+/// legacy `instance:nonce`/`nonce` forms.
+pub fn decode_hosted_oauth_state(state: &str) -> Result<DecodedHostedOAuthState, String> {
+    if let Some(rest) = state.strip_prefix(&format!("{HOSTED_STATE_PREFIX}."))
+        && let Some((payload_b64, checksum)) = rest.rsplit_once('.')
+        && let Ok(payload_json) = URL_SAFE_NO_PAD.decode(payload_b64)
+    {
+        let expected_checksum = hosted_state_checksum(&payload_json);
+        if checksum != expected_checksum {
+            return Err("Hosted OAuth state checksum mismatch".to_string());
+        }
+        if let Ok(payload) = serde_json::from_slice::<HostedOAuthStatePayload>(&payload_json)
+            && !payload.flow_id.trim().is_empty()
+        {
+            return Ok(DecodedHostedOAuthState {
+                flow_id: payload.flow_id,
+                instance_name: payload.instance_name.filter(|v| !v.is_empty()),
+                is_legacy: false,
+            });
+        }
+    }
+
+    if let Some((instance_name, flow_id)) = state.split_once(':') {
+        if flow_id.is_empty() {
+            return Err("Hosted OAuth legacy state is missing flow_id".to_string());
+        }
+        return Ok(DecodedHostedOAuthState {
+            flow_id: flow_id.to_string(),
+            instance_name: if instance_name.is_empty() {
+                None
+            } else {
+                Some(instance_name.to_string())
+            },
+            is_legacy: true,
+        });
+    }
+
+    if state.is_empty() {
+        return Err("Hosted OAuth state is empty".to_string());
+    }
+
+    Ok(DecodedHostedOAuthState {
+        flow_id: state.to_string(),
+        instance_name: None,
+        is_legacy: true,
+    })
+}
+
+/// Build the hosted callback state used by the public OAuth callback endpoint.
+///
+/// New flows emit a versioned opaque envelope, while callback decoding accepts
+/// both the envelope and the legacy `instance:nonce` contract.
+pub fn build_platform_state(nonce: &str) -> String {
+    encode_hosted_oauth_state(nonce, current_instance_name().as_deref())
+}
+
+/// Strip the instance prefix from a state parameter to recover the lookup nonce.
+///
+/// `"myinstance:abc123"` → `"abc123"`, `"abc123"` → `"abc123"` (no prefix).
+///
+/// Safe because nonces are base64url-encoded (`[A-Za-z0-9_-]`, no colons).
+pub fn strip_instance_prefix(state: &str) -> &str {
+    state
+        .split_once(':')
+        .map(|(_, nonce)| nonce)
+        .unwrap_or(state)
+}
+
+pub struct ProxyTokenExchangeRequest<'a> {
+    pub proxy_url: &'a str,
+    pub gateway_token: &'a str,
+    pub token_url: &'a str,
+    pub client_id: &'a str,
+    pub client_secret: Option<&'a str>,
+    pub code: &'a str,
+    pub redirect_uri: &'a str,
+    pub code_verifier: Option<&'a str>,
+    pub access_token_field: &'a str,
+    pub extra_token_params: &'a HashMap<String, String>,
+}
+
+/// Exchange an OAuth authorization code via the platform's token exchange proxy.
+///
+/// Authenticated via the gateway auth token (Bearer header). The caller may
+/// either rely on proxy-side secret lookup or forward a `client_secret` when
+/// the provider requires it.
+///
+/// The proxy expects standard OAuth form params plus optional provider-specific
+/// token params and returns a standard token response such as
+/// `{access_token, refresh_token, expires_in}`.
+pub async fn exchange_via_proxy(
+    request: ProxyTokenExchangeRequest<'_>,
+) -> Result<OAuthTokenResponse, OAuthCallbackError> {
+    if request.gateway_token.is_empty() {
+        return Err(OAuthCallbackError::Io(
+            "Gateway auth token is required for proxy token exchange".to_string(),
+        ));
+    }
+    let exchange_url = format!("{}/oauth/exchange", request.proxy_url.trim_end_matches('/'));
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(60))
+        .build()
+        .map_err(|e| OAuthCallbackError::Io(format!("Failed to build HTTP client: {}", e)))?;
+    let mut params = vec![
+        ("code", request.code.to_string()),
+        ("redirect_uri", request.redirect_uri.to_string()),
+        ("token_url", request.token_url.to_string()),
+        ("client_id", request.client_id.to_string()),
+        ("access_token_field", request.access_token_field.to_string()),
+    ];
+    if let Some(verifier) = request.code_verifier {
+        params.push(("code_verifier", verifier.to_string()));
+    }
+    if let Some(secret) = request.client_secret {
+        params.push(("client_secret", secret.to_string()));
+    }
+    for (key, value) in request.extra_token_params {
+        params.push((key.as_str(), value.clone()));
+    }
+
+    let response = client
+        .post(&exchange_url)
+        .bearer_auth(request.gateway_token)
+        .form(&params)
+        .send()
+        .await
+        .map_err(|e| {
+            OAuthCallbackError::Io(format!("Token exchange proxy request failed: {}", e))
+        })?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(OAuthCallbackError::Io(format!(
+            "Token exchange proxy failed: {} - {}",
+            status, body
+        )));
+    }
+
+    let token_data: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| OAuthCallbackError::Io(format!("Failed to parse proxy response: {}", e)))?;
+
+    let access_token = token_data
+        .get(request.access_token_field)
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            let fields: Vec<&str> = token_data
+                .as_object()
+                .map(|o| o.keys().map(|k| k.as_str()).collect())
+                .unwrap_or_default();
+            OAuthCallbackError::Io(format!(
+                "No '{}' field in proxy response (fields present: {:?})",
+                request.access_token_field, fields
+            ))
+        })?
+        .to_string();
+
+    let refresh_token = token_data
+        .get("refresh_token")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let expires_in = token_data.get("expires_in").and_then(|v| v.as_u64());
+
+    Ok(OAuthTokenResponse {
+        access_token,
+        refresh_token,
+        expires_in,
+    })
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
-
     use crate::cli::oauth_defaults::{
         builtin_credentials, callback_host, callback_url, is_loopback_host, landing_html,
     };
-
-    /// Serializes env-mutating tests to prevent parallel races.
-    static ENV_MUTEX: Mutex<()> = Mutex::new(());
+    use crate::config::helpers::ENV_MUTEX;
 
     #[test]
     fn test_is_loopback_host() {
@@ -938,5 +1000,248 @@ mod tests {
 
         // State should be different each time (random)
         assert_ne!(result1.state, result2.state);
+    }
+
+    #[test]
+    fn test_use_gateway_callback_false_by_default() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let original = std::env::var("IRONCLAW_OAUTH_CALLBACK_URL").ok();
+        // SAFETY: Under ENV_MUTEX, no concurrent env access.
+        unsafe {
+            std::env::remove_var("IRONCLAW_OAUTH_CALLBACK_URL");
+        }
+        assert!(!crate::cli::oauth_defaults::use_gateway_callback());
+        unsafe {
+            if let Some(val) = original {
+                std::env::set_var("IRONCLAW_OAUTH_CALLBACK_URL", val);
+            }
+        }
+    }
+
+    #[test]
+    fn test_use_gateway_callback_true_for_hosted() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let original = std::env::var("IRONCLAW_OAUTH_CALLBACK_URL").ok();
+        // SAFETY: Under ENV_MUTEX, no concurrent env access.
+        unsafe {
+            std::env::set_var(
+                "IRONCLAW_OAUTH_CALLBACK_URL",
+                "https://kind-deer.agent1.near.ai",
+            );
+        }
+        assert!(crate::cli::oauth_defaults::use_gateway_callback());
+        unsafe {
+            if let Some(val) = original {
+                std::env::set_var("IRONCLAW_OAUTH_CALLBACK_URL", val);
+            } else {
+                std::env::remove_var("IRONCLAW_OAUTH_CALLBACK_URL");
+            }
+        }
+    }
+
+    #[test]
+    fn test_use_gateway_callback_false_for_localhost() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let original = std::env::var("IRONCLAW_OAUTH_CALLBACK_URL").ok();
+        // SAFETY: Under ENV_MUTEX, no concurrent env access.
+        unsafe {
+            std::env::set_var("IRONCLAW_OAUTH_CALLBACK_URL", "http://127.0.0.1:3001");
+        }
+        assert!(!crate::cli::oauth_defaults::use_gateway_callback());
+        unsafe {
+            if let Some(val) = original {
+                std::env::set_var("IRONCLAW_OAUTH_CALLBACK_URL", val);
+            } else {
+                std::env::remove_var("IRONCLAW_OAUTH_CALLBACK_URL");
+            }
+        }
+    }
+
+    #[test]
+    fn test_use_gateway_callback_false_for_empty() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let original = std::env::var("IRONCLAW_OAUTH_CALLBACK_URL").ok();
+        // SAFETY: Under ENV_MUTEX, no concurrent env access.
+        unsafe {
+            std::env::set_var("IRONCLAW_OAUTH_CALLBACK_URL", "");
+        }
+        assert!(!crate::cli::oauth_defaults::use_gateway_callback());
+        unsafe {
+            if let Some(val) = original {
+                std::env::set_var("IRONCLAW_OAUTH_CALLBACK_URL", val);
+            } else {
+                std::env::remove_var("IRONCLAW_OAUTH_CALLBACK_URL");
+            }
+        }
+    }
+
+    #[test]
+    fn test_build_platform_state_with_instance() {
+        use crate::cli::oauth_defaults::{build_platform_state, decode_hosted_oauth_state};
+
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let original = std::env::var("IRONCLAW_INSTANCE_NAME").ok();
+        // SAFETY: Under ENV_MUTEX, no concurrent env access.
+        unsafe {
+            std::env::set_var("IRONCLAW_INSTANCE_NAME", "kind-deer");
+        }
+        let encoded = build_platform_state("abc123");
+        let decoded = decode_hosted_oauth_state(&encoded).expect("decode hosted state");
+        assert_eq!(decoded.flow_id, "abc123");
+        assert_eq!(decoded.instance_name.as_deref(), Some("kind-deer"));
+        assert!(!decoded.is_legacy);
+        unsafe {
+            if let Some(val) = original {
+                std::env::set_var("IRONCLAW_INSTANCE_NAME", val);
+            } else {
+                std::env::remove_var("IRONCLAW_INSTANCE_NAME");
+            }
+        }
+    }
+
+    #[test]
+    fn test_build_platform_state_without_instance() {
+        use crate::cli::oauth_defaults::{build_platform_state, decode_hosted_oauth_state};
+
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let original = std::env::var("IRONCLAW_INSTANCE_NAME").ok();
+        let original_oc = std::env::var("OPENCLAW_INSTANCE_NAME").ok();
+        // SAFETY: Under ENV_MUTEX, no concurrent env access.
+        unsafe {
+            std::env::remove_var("IRONCLAW_INSTANCE_NAME");
+            std::env::remove_var("OPENCLAW_INSTANCE_NAME");
+        }
+        let encoded = build_platform_state("abc123");
+        let decoded = decode_hosted_oauth_state(&encoded).expect("decode hosted state");
+        assert_eq!(decoded.flow_id, "abc123");
+        assert_eq!(decoded.instance_name, None);
+        assert!(!decoded.is_legacy);
+        unsafe {
+            if let Some(val) = original {
+                std::env::set_var("IRONCLAW_INSTANCE_NAME", val);
+            }
+            if let Some(val) = original_oc {
+                std::env::set_var("OPENCLAW_INSTANCE_NAME", val);
+            }
+        }
+    }
+
+    #[test]
+    fn test_build_platform_state_with_openclaw_instance() {
+        use crate::cli::oauth_defaults::{build_platform_state, decode_hosted_oauth_state};
+
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let original_ic = std::env::var("IRONCLAW_INSTANCE_NAME").ok();
+        let original_oc = std::env::var("OPENCLAW_INSTANCE_NAME").ok();
+        // SAFETY: Under ENV_MUTEX, no concurrent env access.
+        unsafe {
+            std::env::remove_var("IRONCLAW_INSTANCE_NAME");
+            std::env::set_var("OPENCLAW_INSTANCE_NAME", "quiet-lion");
+        }
+        let encoded = build_platform_state("xyz789");
+        let decoded = decode_hosted_oauth_state(&encoded).expect("decode hosted state");
+        assert_eq!(decoded.flow_id, "xyz789");
+        assert_eq!(decoded.instance_name.as_deref(), Some("quiet-lion"));
+        assert!(!decoded.is_legacy);
+        unsafe {
+            if let Some(val) = original_ic {
+                std::env::set_var("IRONCLAW_INSTANCE_NAME", val);
+            }
+            if let Some(val) = original_oc {
+                std::env::set_var("OPENCLAW_INSTANCE_NAME", val);
+            } else {
+                std::env::remove_var("OPENCLAW_INSTANCE_NAME");
+            }
+        }
+    }
+
+    #[test]
+    fn test_strip_instance_prefix_with_colon() {
+        use crate::cli::oauth_defaults::strip_instance_prefix;
+
+        assert_eq!(strip_instance_prefix("kind-deer:abc123"), "abc123");
+        assert_eq!(strip_instance_prefix("my-instance:xyz"), "xyz");
+    }
+
+    #[test]
+    fn test_strip_instance_prefix_without_colon() {
+        use crate::cli::oauth_defaults::strip_instance_prefix;
+
+        assert_eq!(strip_instance_prefix("abc123"), "abc123");
+        assert_eq!(strip_instance_prefix(""), "");
+    }
+
+    #[test]
+    fn test_decode_hosted_oauth_state_accepts_legacy_formats() {
+        use crate::cli::oauth_defaults::decode_hosted_oauth_state;
+
+        let decoded = decode_hosted_oauth_state("kind-deer:abc123").expect("legacy prefixed");
+        assert_eq!(decoded.flow_id, "abc123");
+        assert_eq!(decoded.instance_name.as_deref(), Some("kind-deer"));
+        assert!(decoded.is_legacy);
+
+        let decoded = decode_hosted_oauth_state("abc123").expect("legacy raw");
+        assert_eq!(decoded.flow_id, "abc123");
+        assert_eq!(decoded.instance_name, None);
+        assert!(decoded.is_legacy);
+    }
+
+    #[test]
+    fn test_decode_hosted_oauth_state_falls_back_for_non_envelope_ic2_prefix() {
+        use crate::cli::oauth_defaults::decode_hosted_oauth_state;
+
+        let decoded =
+            decode_hosted_oauth_state("ic2.provider-owned-state").expect("prefixed fallback");
+        assert_eq!(decoded.flow_id, "ic2.provider-owned-state");
+        assert_eq!(decoded.instance_name, None);
+        assert!(decoded.is_legacy);
+    }
+
+    #[test]
+    fn test_decode_hosted_oauth_state_rejects_tampered_checksum() {
+        use crate::cli::oauth_defaults::{decode_hosted_oauth_state, encode_hosted_oauth_state};
+
+        let encoded = encode_hosted_oauth_state("abc123", Some("kind-deer"));
+        let tampered = format!("{encoded}broken");
+        let err = decode_hosted_oauth_state(&tampered).expect_err("tampered state should fail");
+        assert!(err.contains("checksum"), "unexpected error: {err}");
+    }
+
+    /// Verify that `build_oauth_url` includes the RFC 8707 `resource` parameter
+    /// when passed through `extra_params`, which is how MCP OAuth gateway mode
+    /// scopes tokens to a specific MCP server.
+    #[test]
+    fn test_build_oauth_url_includes_resource_via_extra_params() {
+        use std::collections::HashMap;
+
+        use crate::cli::oauth_defaults::build_oauth_url;
+
+        let mut extra = HashMap::new();
+        extra.insert(
+            "resource".to_string(),
+            "https://mcp.example.com".to_string(),
+        );
+
+        let result = build_oauth_url(
+            "https://auth.example.com/authorize",
+            "client-123",
+            "https://gateway.example.com/oauth/callback",
+            &["read".to_string()],
+            true,
+            &extra,
+        );
+
+        // The resource parameter should be URL-encoded in the auth URL
+        assert!(
+            result
+                .url
+                .contains("resource=https%3A%2F%2Fmcp.example.com"),
+            "Expected resource param in URL: {}",
+            result.url
+        );
+        // State and PKCE should be present
+        assert!(result.url.contains("state="));
+        assert!(result.url.contains("code_challenge="));
+        assert!(result.code_verifier.is_some());
     }
 }

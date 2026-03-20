@@ -5,6 +5,7 @@
 //! - Workspace write access (scoped to channel namespace)
 //! - Rate limiting for message emission
 
+use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::channels::wasm::capabilities::{ChannelCapabilities, EmitRateLimitConfig};
@@ -17,6 +18,56 @@ const MAX_EMITS_PER_EXECUTION: usize = 100;
 /// Maximum message content size (64 KB).
 const MAX_MESSAGE_CONTENT_SIZE: usize = 64 * 1024;
 
+/// A file or media attachment on an incoming message.
+#[derive(Debug, Clone)]
+pub struct Attachment {
+    /// Unique identifier within the channel (e.g., Telegram file_id).
+    pub id: String,
+    /// MIME type (e.g., "image/jpeg", "audio/ogg", "application/pdf").
+    pub mime_type: String,
+    /// Original filename, if known.
+    pub filename: Option<String>,
+    /// File size in bytes, if known.
+    pub size_bytes: Option<u64>,
+    /// URL to download the file from the channel's API.
+    pub source_url: Option<String>,
+    /// Opaque key for host-side storage (e.g., after download/caching).
+    pub storage_key: Option<String>,
+    /// Extracted text content (e.g., OCR result, PDF text, audio transcript).
+    pub extracted_text: Option<String>,
+    /// Raw file bytes (for small files downloaded by the channel).
+    pub data: Vec<u8>,
+    /// Duration in seconds (for audio/video).
+    pub duration_secs: Option<u32>,
+}
+
+/// Maximum total attachment size per message (20 MB).
+const MAX_ATTACHMENT_TOTAL_SIZE: u64 = 20 * 1024 * 1024;
+
+/// Maximum number of attachments per message.
+const MAX_ATTACHMENTS_PER_MESSAGE: usize = 10;
+
+/// Allowed MIME type prefixes for attachments.
+const ALLOWED_MIME_PREFIXES: &[&str] = &[
+    "image/",
+    "audio/",
+    "video/",
+    "application/pdf",
+    "application/vnd.",
+    "application/msword",
+    "application/rtf",
+    "text/",
+    "application/json",
+    "application/zip",
+    "application/gzip",
+    "application/x-tar",
+    "application/octet-stream",
+];
+/// Truncate a string to at most `max_bytes` without splitting UTF-8 code points.
+fn truncate_utf8(s: &str, max_bytes: usize) -> &str {
+    let end = crate::util::floor_char_boundary(s, max_bytes);
+    &s[..end]
+}
 /// A message emitted by a WASM channel to be sent to the agent.
 #[derive(Debug, Clone)]
 pub struct EmittedMessage {
@@ -35,6 +86,9 @@ pub struct EmittedMessage {
     /// Channel-specific metadata as JSON string.
     pub metadata_json: String,
 
+    /// File or media attachments on this message.
+    pub attachments: Vec<Attachment>,
+
     /// Timestamp when the message was emitted.
     pub emitted_at_millis: u64,
 }
@@ -48,6 +102,7 @@ impl EmittedMessage {
             content: content.into(),
             thread_id: None,
             metadata_json: "{}".to_string(),
+            attachments: Vec::new(),
             emitted_at_millis: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map(|d| d.as_millis() as u64)
@@ -70,6 +125,12 @@ impl EmittedMessage {
     /// Set metadata JSON.
     pub fn with_metadata(mut self, metadata_json: impl Into<String>) -> Self {
         self.metadata_json = metadata_json.into();
+        self
+    }
+
+    /// Set attachments.
+    pub fn with_attachments(mut self, attachments: Vec<Attachment>) -> Self {
+        self.attachments = attachments;
         self
     }
 }
@@ -112,6 +173,13 @@ pub struct ChannelHostState {
 
     /// Count of emits dropped due to rate limiting.
     emits_dropped: usize,
+
+    /// Binary data stored for attachments via `store-attachment-data`.
+    /// Keyed by attachment ID, cleared after callback completes.
+    attachment_data: HashMap<String, Vec<u8>>,
+
+    /// Total bytes stored in attachment_data (for enforcing limits).
+    attachment_data_total: u64,
 }
 
 impl std::fmt::Debug for ChannelHostState {
@@ -141,6 +209,8 @@ impl ChannelHostState {
             emit_count: 0,
             emit_enabled: true,
             emits_dropped: 0,
+            attachment_data: HashMap::new(),
+            attachment_data_total: 0,
         }
     }
 
@@ -168,6 +238,7 @@ impl ChannelHostState {
     ///
     /// Messages are queued and delivered after callback execution completes.
     /// Rate limiting is enforced per-execution and globally.
+    /// Attachments are validated for count, total size, and MIME type.
     pub fn emit_message(&mut self, msg: EmittedMessage) -> Result<(), WasmChannelError> {
         // Check per-execution limit
         if !self.emit_enabled {
@@ -186,6 +257,9 @@ impl ChannelHostState {
             return Ok(());
         }
 
+        // Validate attachments
+        let msg = self.validate_attachments(msg);
+
         // Validate message content size
         if msg.content.len() > MAX_MESSAGE_CONTENT_SIZE {
             tracing::warn!(
@@ -194,7 +268,7 @@ impl ChannelHostState {
                 max = MAX_MESSAGE_CONTENT_SIZE,
                 "Message content too large, truncating"
             );
-            let mut truncated = msg.content[..MAX_MESSAGE_CONTENT_SIZE].to_string();
+            let mut truncated = truncate_utf8(&msg.content, MAX_MESSAGE_CONTENT_SIZE).to_string();
             truncated.push_str("... (truncated)");
             let msg = EmittedMessage {
                 content: truncated,
@@ -207,6 +281,71 @@ impl ChannelHostState {
 
         self.emit_count += 1;
         Ok(())
+    }
+
+    /// Validate and sanitize attachments on an emitted message.
+    ///
+    /// Enforces count limits, total size limits, and MIME type allowlist.
+    /// Invalid attachments are dropped with a warning.
+    fn validate_attachments(&self, mut msg: EmittedMessage) -> EmittedMessage {
+        if msg.attachments.is_empty() {
+            return msg;
+        }
+
+        // Enforce attachment count limit
+        if msg.attachments.len() > MAX_ATTACHMENTS_PER_MESSAGE {
+            tracing::warn!(
+                channel = %self.channel_name,
+                count = msg.attachments.len(),
+                max = MAX_ATTACHMENTS_PER_MESSAGE,
+                "Too many attachments, truncating"
+            );
+            msg.attachments.truncate(MAX_ATTACHMENTS_PER_MESSAGE);
+        }
+
+        // Filter by MIME type and enforce total size limit
+        let mut total_size: u64 = 0;
+        msg.attachments.retain(|att| {
+            let mime_ok = ALLOWED_MIME_PREFIXES
+                .iter()
+                .any(|prefix| att.mime_type.starts_with(prefix));
+            if !mime_ok {
+                tracing::warn!(
+                    channel = %self.channel_name,
+                    mime_type = %att.mime_type,
+                    "Attachment MIME type not allowed, dropping"
+                );
+                return false;
+            }
+
+            // Use the larger of reported size_bytes and actual stored data size
+            // to prevent WASM channels from under-reporting to bypass limits.
+            let stored_size = self
+                .attachment_data
+                .get(&att.id)
+                .map(|d| d.len() as u64)
+                .unwrap_or(att.data.len() as u64);
+            let size = att
+                .size_bytes
+                .map(|reported| reported.max(stored_size))
+                .unwrap_or(stored_size);
+            if size > 0 {
+                total_size = total_size.saturating_add(size);
+                if total_size > MAX_ATTACHMENT_TOTAL_SIZE {
+                    tracing::warn!(
+                        channel = %self.channel_name,
+                        total_size,
+                        max = MAX_ATTACHMENT_TOTAL_SIZE,
+                        "Attachment total size exceeded, dropping"
+                    );
+                    return false;
+                }
+            }
+
+            true
+        });
+
+        msg
     }
 
     /// Take all emitted messages (clears the queue).
@@ -222,6 +361,69 @@ impl ChannelHostState {
     /// Get the number of emits dropped due to rate limiting.
     pub fn emits_dropped(&self) -> usize {
         self.emits_dropped
+    }
+
+    /// Store binary data for an attachment.
+    ///
+    /// Called by WASM channels to associate downloaded bytes with an attachment ID.
+    /// The data is retrieved after callback completion and merged into `Attachment::data`.
+    pub fn store_attachment_data(
+        &mut self,
+        attachment_id: &str,
+        data: Vec<u8>,
+    ) -> Result<(), WasmChannelError> {
+        const MAX_PER_ATTACHMENT: u64 = 20 * 1024 * 1024; // 20 MB
+        const MAX_TOTAL: u64 = 50 * 1024 * 1024; // 50 MB
+
+        let size = data.len() as u64;
+        if size > MAX_PER_ATTACHMENT {
+            return Err(WasmChannelError::CallbackFailed {
+                name: self.channel_name.clone(),
+                reason: format!(
+                    "Attachment data too large: {} bytes (max {})",
+                    size, MAX_PER_ATTACHMENT
+                ),
+            });
+        }
+
+        // Subtract the old entry size (if overwriting) before adding new size
+        let old_size = self
+            .attachment_data
+            .get(attachment_id)
+            .map(|d| d.len() as u64)
+            .unwrap_or(0);
+        let adjusted_total = self.attachment_data_total.saturating_sub(old_size);
+        let new_total = adjusted_total.saturating_add(size);
+        if new_total > MAX_TOTAL {
+            return Err(WasmChannelError::CallbackFailed {
+                name: self.channel_name.clone(),
+                reason: format!(
+                    "Total attachment data too large: {} bytes (max {})",
+                    new_total, MAX_TOTAL
+                ),
+            });
+        }
+
+        self.attachment_data_total = new_total;
+        self.attachment_data.insert(attachment_id.to_string(), data);
+        Ok(())
+    }
+
+    /// Remove stored binary data for a specific attachment ID.
+    pub fn remove_attachment_data(&mut self, id: &str) -> Option<Vec<u8>> {
+        if let Some(data) = self.attachment_data.remove(id) {
+            self.attachment_data_total =
+                self.attachment_data_total.saturating_sub(data.len() as u64);
+            Some(data)
+        } else {
+            None
+        }
+    }
+
+    /// Take all stored attachment data (clears the store).
+    pub fn take_attachment_data(&mut self) -> HashMap<String, Vec<u8>> {
+        self.attachment_data_total = 0;
+        std::mem::take(&mut self.attachment_data)
     }
 
     /// Write to workspace (scoped to channel namespace).
@@ -431,7 +633,9 @@ impl ChannelEmitRateLimiter {
 mod tests {
     use crate::channels::wasm::capabilities::{ChannelCapabilities, EmitRateLimitConfig};
     use crate::channels::wasm::host::{
-        ChannelEmitRateLimiter, ChannelHostState, EmittedMessage, MAX_EMITS_PER_EXECUTION,
+        Attachment, ChannelEmitRateLimiter, ChannelHostState, EmittedMessage,
+        MAX_ATTACHMENT_TOTAL_SIZE, MAX_ATTACHMENTS_PER_MESSAGE, MAX_EMITS_PER_EXECUTION,
+        MAX_MESSAGE_CONTENT_SIZE,
     };
 
     #[test]
@@ -488,6 +692,25 @@ mod tests {
 
         assert_eq!(state.emitted_count(), MAX_EMITS_PER_EXECUTION);
         assert_eq!(state.emits_dropped(), 1);
+    }
+
+    #[test]
+    fn test_emit_message_truncates_utf8_safely() {
+        let caps = ChannelCapabilities::for_channel("test");
+        let mut state = ChannelHostState::new("test", caps);
+
+        let prefix = "a".repeat(MAX_MESSAGE_CONTENT_SIZE - 1);
+        let content = format!("{}🙂suffix", prefix);
+        let msg = EmittedMessage::new("user123", content);
+
+        state.emit_message(msg).unwrap();
+        let messages = state.take_emitted_messages();
+        assert_eq!(messages.len(), 1);
+
+        let emitted = &messages[0].content;
+        assert!(emitted.starts_with(&prefix));
+        assert!(emitted.ends_with("... (truncated)"));
+        assert!(!emitted.contains("🙂"));
     }
 
     #[test]
@@ -759,5 +982,134 @@ mod tests {
             sl_reader.workspace_read("offset").unwrap(),
             Some("200".to_string())
         );
+    }
+
+    // === Attachment validation tests ===
+
+    fn make_attachment(id: &str, mime: &str, size: Option<u64>) -> Attachment {
+        Attachment {
+            id: id.to_string(),
+            mime_type: mime.to_string(),
+            filename: None,
+            size_bytes: size,
+            source_url: None,
+            storage_key: None,
+            extracted_text: None,
+            data: Vec::new(),
+            duration_secs: None,
+        }
+    }
+
+    #[test]
+    fn test_emit_message_with_attachments() {
+        let caps = ChannelCapabilities::for_channel("test");
+        let mut state = ChannelHostState::new("test", caps);
+
+        let msg = EmittedMessage::new("user1", "Check this image")
+            .with_attachments(vec![make_attachment("file1", "image/jpeg", Some(1024))]);
+
+        state.emit_message(msg).unwrap();
+
+        let messages = state.take_emitted_messages();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].attachments.len(), 1);
+        assert_eq!(messages[0].attachments[0].id, "file1");
+        assert_eq!(messages[0].attachments[0].mime_type, "image/jpeg");
+        assert_eq!(messages[0].attachments[0].size_bytes, Some(1024));
+    }
+
+    #[test]
+    fn test_emit_message_no_attachments_backward_compat() {
+        let caps = ChannelCapabilities::for_channel("test");
+        let mut state = ChannelHostState::new("test", caps);
+
+        let msg = EmittedMessage::new("user1", "Just text");
+        state.emit_message(msg).unwrap();
+
+        let messages = state.take_emitted_messages();
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].attachments.is_empty());
+    }
+
+    #[test]
+    fn test_attachment_count_limit() {
+        let caps = ChannelCapabilities::for_channel("test");
+        let mut state = ChannelHostState::new("test", caps);
+
+        let attachments: Vec<Attachment> = (0..MAX_ATTACHMENTS_PER_MESSAGE + 5)
+            .map(|i| make_attachment(&format!("file{}", i), "image/png", Some(100)))
+            .collect();
+
+        let msg = EmittedMessage::new("user1", "Many files").with_attachments(attachments);
+        state.emit_message(msg).unwrap();
+
+        let messages = state.take_emitted_messages();
+        assert_eq!(messages[0].attachments.len(), MAX_ATTACHMENTS_PER_MESSAGE);
+    }
+
+    #[test]
+    fn test_attachment_total_size_limit() {
+        let caps = ChannelCapabilities::for_channel("test");
+        let mut state = ChannelHostState::new("test", caps);
+
+        // Each file is 1/3 of the limit, so 3 fit but 4th does not
+        let chunk_size = MAX_ATTACHMENT_TOTAL_SIZE / 3;
+        let attachments = vec![
+            make_attachment("file1", "image/png", Some(chunk_size)),
+            make_attachment("file2", "image/png", Some(chunk_size)),
+            make_attachment("file3", "image/png", Some(chunk_size)),
+            make_attachment("file4", "image/png", Some(chunk_size)),
+        ];
+
+        let msg = EmittedMessage::new("user1", "Big files").with_attachments(attachments);
+        state.emit_message(msg).unwrap();
+
+        let messages = state.take_emitted_messages();
+        // Only first 3 fit within the total size limit
+        assert_eq!(messages[0].attachments.len(), 3);
+    }
+
+    #[test]
+    fn test_attachment_mime_type_filtering() {
+        let caps = ChannelCapabilities::for_channel("test");
+        let mut state = ChannelHostState::new("test", caps);
+
+        let attachments = vec![
+            make_attachment("ok1", "image/jpeg", Some(100)),
+            make_attachment("bad1", "application/x-executable", Some(100)),
+            make_attachment("ok2", "application/pdf", Some(100)),
+            make_attachment("bad2", "application/x-msdos-program", Some(100)),
+            make_attachment("ok3", "text/plain", Some(100)),
+            make_attachment("ok4", "audio/mpeg", Some(100)),
+            make_attachment("ok5", "video/mp4", Some(100)),
+        ];
+
+        let msg = EmittedMessage::new("user1", "Mixed files").with_attachments(attachments);
+        state.emit_message(msg).unwrap();
+
+        let messages = state.take_emitted_messages();
+        let ids: Vec<&str> = messages[0]
+            .attachments
+            .iter()
+            .map(|a| a.id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["ok1", "ok2", "ok3", "ok4", "ok5"]);
+    }
+
+    #[test]
+    fn test_attachment_unknown_size_allowed() {
+        let caps = ChannelCapabilities::for_channel("test");
+        let mut state = ChannelHostState::new("test", caps);
+
+        let attachments = vec![
+            make_attachment("file1", "image/jpeg", None),
+            make_attachment("file2", "image/png", None),
+        ];
+
+        let msg = EmittedMessage::new("user1", "No sizes").with_attachments(attachments);
+        state.emit_message(msg).unwrap();
+
+        let messages = state.take_emitted_messages();
+        assert_eq!(messages[0].attachments.len(), 2);
     }
 }

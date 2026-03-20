@@ -24,6 +24,10 @@ use crate::skills::{
 /// Prevents resource exhaustion from a directory with thousands of entries.
 const MAX_DISCOVERED_SKILLS: usize = 100;
 
+fn to_lowercase_vec(items: &[String]) -> Vec<String> {
+    items.iter().map(|s| s.to_lowercase()).collect()
+}
+
 /// Error type for skill registry operations.
 #[derive(Debug, thiserror::Error)]
 pub enum SkillRegistryError {
@@ -286,6 +290,18 @@ impl SkillRegistry {
     /// Get the number of loaded skills.
     pub fn count(&self) -> usize {
         self.skills.len()
+    }
+
+    /// Retain only skills whose names are in the given allowlist.
+    ///
+    /// If `names` is empty, this is a no-op (all skills are kept).
+    pub fn retain_only(&mut self, names: &[&str]) {
+        if names.is_empty() {
+            return;
+        }
+        let names_set: HashSet<&str> = names.iter().copied().collect();
+        self.skills
+            .retain(|s| names_set.contains(s.manifest.name.as_str()));
     }
 
     /// Check if a skill with the given name is loaded.
@@ -570,18 +586,9 @@ async fn load_and_validate_skill(
     let compiled_patterns = LoadedSkill::compile_patterns(&manifest.activation.patterns);
 
     // Pre-compute lowercased keywords and tags for efficient scoring
-    let lowercased_keywords = manifest
-        .activation
-        .keywords
-        .iter()
-        .map(|k| k.to_lowercase())
-        .collect();
-    let lowercased_tags = manifest
-        .activation
-        .tags
-        .iter()
-        .map(|t| t.to_lowercase())
-        .collect();
+    let lowercased_keywords = to_lowercase_vec(&manifest.activation.keywords);
+    let lowercased_exclude_keywords = to_lowercase_vec(&manifest.activation.exclude_keywords);
+    let lowercased_tags = to_lowercase_vec(&manifest.activation.tags);
 
     let name = manifest.name.clone();
     let skill = LoadedSkill {
@@ -592,6 +599,7 @@ async fn load_and_validate_skill(
         content_hash,
         compiled_patterns,
         lowercased_keywords,
+        lowercased_exclude_keywords,
         lowercased_tags,
     };
 
@@ -980,6 +988,27 @@ mod tests {
         let skill = registry.find_by_name("case-skill").unwrap();
         assert_eq!(skill.lowercased_keywords, vec!["write", "edit"]);
         assert_eq!(skill.lowercased_tags, vec!["email", "prose"]);
+    }
+
+    #[tokio::test]
+    async fn test_retain_only_empty_is_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("SKILL.md"),
+            "---\nname: keep-me\ndescription: test\nactivation:\n  keywords: [\"test\"]\n---\n\nKeep this skill.\n",
+        )
+        .unwrap();
+
+        let mut registry = SkillRegistry::new(dir.path().to_path_buf());
+        registry.discover_all().await;
+        assert_eq!(registry.count(), 1);
+
+        registry.retain_only(&[]);
+        assert_eq!(
+            registry.count(),
+            1,
+            "empty retain_only should keep all skills"
+        );
     }
 
     #[test]

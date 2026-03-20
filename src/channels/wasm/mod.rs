@@ -69,7 +69,7 @@
 //! let runtime = WasmChannelRuntime::new(config)?;
 //!
 //! // Load channels from directory
-//! let loader = WasmChannelLoader::new(runtime);
+//! let loader = WasmChannelLoader::new(runtime, pairing_store, settings_store, owner_scope_id);
 //! let channels = loader.load_from_dir(Path::new("~/.ironclaw/channels/")).await?;
 //!
 //! // Add to channel manager
@@ -86,8 +86,12 @@ mod loader;
 mod router;
 mod runtime;
 mod schema;
+pub mod setup;
 pub(crate) mod signature;
 mod socket_bridge;
+#[allow(dead_code)]
+pub(crate) mod storage;
+mod telegram_host_config;
 mod wrapper;
 
 // Core types
@@ -106,4 +110,6 @@ pub use runtime::{PreparedChannelModule, WasmChannelRuntime, WasmChannelRuntimeC
 pub use schema::{
     ChannelCapabilitiesFile, ChannelConfig, SecretSetupSchema, SetupSchema, WebhookSchema,
 };
+pub use setup::{WasmChannelSetup, inject_channel_credentials, setup_wasm_channels};
+pub(crate) use telegram_host_config::{TELEGRAM_CHANNEL_NAME, bot_username_setting_key};
 pub use wrapper::{HttpResponse, SharedWasmChannel, WasmChannel};

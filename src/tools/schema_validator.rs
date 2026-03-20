@@ -558,34 +558,7 @@ mod tests {
             // Routine tools
             (
                 "routine_create",
-                serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "name": { "type": "string", "description": "Routine name" },
-                        "description": { "type": "string", "description": "What it does" },
-                        "trigger_type": {
-                            "type": "string",
-                            "enum": ["cron", "event", "webhook", "manual"],
-                            "description": "When the routine fires"
-                        },
-                        "schedule": { "type": "string", "description": "Cron expression" },
-                        "event_pattern": { "type": "string", "description": "Regex pattern" },
-                        "event_channel": { "type": "string", "description": "Channel filter" },
-                        "prompt": { "type": "string", "description": "Instructions" },
-                        "context_paths": {
-                            "type": "array",
-                            "items": { "type": "string" },
-                            "description": "Workspace paths to load"
-                        },
-                        "action_type": {
-                            "type": "string",
-                            "enum": ["lightweight", "full_job"],
-                            "description": "Execution mode"
-                        },
-                        "cooldown_secs": { "type": "integer", "description": "Min seconds between fires" }
-                    },
-                    "required": ["name", "trigger_type", "prompt"]
-                }),
+                crate::tools::builtin::routine::routine_create_parameters_schema(),
             ),
             (
                 "routine_list",
@@ -597,17 +570,7 @@ mod tests {
             ),
             (
                 "routine_update",
-                serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "name": { "type": "string", "description": "Name" },
-                        "enabled": { "type": "boolean", "description": "Toggle" },
-                        "prompt": { "type": "string", "description": "New prompt" },
-                        "schedule": { "type": "string", "description": "New cron schedule" },
-                        "description": { "type": "string", "description": "New description" }
-                    },
-                    "required": ["name"]
-                }),
+                crate::tools::builtin::routine::routine_update_parameters_schema(),
             ),
             (
                 "routine_delete",
@@ -615,6 +578,16 @@ mod tests {
                     "type": "object",
                     "properties": {
                         "name": { "type": "string", "description": "Name" }
+                    },
+                    "required": ["name"]
+                }),
+            ),
+            (
+                "routine_fire",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string", "description": "Routine name" }
                     },
                     "required": ["name"]
                 }),
@@ -629,6 +602,10 @@ mod tests {
                     },
                     "required": ["name"]
                 }),
+            ),
+            (
+                "event_emit",
+                crate::tools::builtin::routine::event_emit_parameters_schema(),
             ),
             // Job tools with complex deps
             (

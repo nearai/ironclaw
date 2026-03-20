@@ -1,5 +1,8 @@
 //! PostgreSQL store for persisting agent data.
 
+#[cfg(feature = "postgres")]
+use std::collections::HashMap;
+
 use chrono::{DateTime, Utc};
 #[cfg(feature = "postgres")]
 use deadpool_postgres::{Config, Pool};
@@ -149,18 +152,23 @@ impl Store {
             r#"
             INSERT INTO agent_jobs (
                 id, conversation_id, title, description, category, status, source,
+                user_id,
                 budget_amount, budget_token, bid_amount, estimated_cost, estimated_time_secs,
-                actual_cost, repair_attempts, created_at, started_at, completed_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+                actual_cost, repair_attempts, max_tokens, total_tokens_used,
+                created_at, started_at, completed_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
             ON CONFLICT (id) DO UPDATE SET
                 title = EXCLUDED.title,
                 description = EXCLUDED.description,
                 category = EXCLUDED.category,
                 status = EXCLUDED.status,
+                user_id = EXCLUDED.user_id,
                 estimated_cost = EXCLUDED.estimated_cost,
                 estimated_time_secs = EXCLUDED.estimated_time_secs,
                 actual_cost = EXCLUDED.actual_cost,
                 repair_attempts = EXCLUDED.repair_attempts,
+                max_tokens = EXCLUDED.max_tokens,
+                total_tokens_used = EXCLUDED.total_tokens_used,
                 started_at = EXCLUDED.started_at,
                 completed_at = EXCLUDED.completed_at
             "#,
@@ -172,6 +180,7 @@ impl Store {
                 &ctx.category,
                 &status,
                 &"direct", // source
+                &ctx.user_id,
                 &ctx.budget,
                 &ctx.budget_token,
                 &ctx.bid_amount,
@@ -179,6 +188,8 @@ impl Store {
                 &estimated_time_secs,
                 &ctx.actual_cost,
                 &(ctx.repair_attempts as i32),
+                &(ctx.max_tokens as i64),
+                &(ctx.total_tokens_used as i64),
                 &ctx.created_at,
                 &ctx.started_at,
                 &ctx.completed_at,
@@ -198,7 +209,8 @@ impl Store {
                 r#"
                 SELECT id, conversation_id, title, description, category, status, user_id,
                        budget_amount, budget_token, bid_amount, estimated_cost, estimated_time_secs,
-                       actual_cost, repair_attempts, created_at, started_at, completed_at
+                       actual_cost, repair_attempts, max_tokens, total_tokens_used,
+                       created_at, started_at, completed_at
                 FROM agent_jobs WHERE id = $1
                 "#,
                 &[&id],
@@ -215,6 +227,7 @@ impl Store {
                     job_id: row.get("id"),
                     state,
                     user_id: row.get::<_, String>("user_id"),
+                    requester_id: None,
                     conversation_id: row.get("conversation_id"),
                     title: row.get("title"),
                     description: row.get("description"),
@@ -234,9 +247,17 @@ impl Store {
                     completed_at: row.get("completed_at"),
                     transitions: Vec::new(), // Not loaded from DB for now
                     metadata: serde_json::Value::Null,
-                    total_tokens_used: 0,
-                    max_tokens: 0,
+                    max_tokens: row.get::<_, Option<i64>>("max_tokens").unwrap_or(0) as u64,
+                    total_tokens_used: row.get::<_, Option<i64>>("total_tokens_used").unwrap_or(0)
+                        as u64,
                     extra_env: std::sync::Arc::new(std::collections::HashMap::new()),
+                    http_interceptor: None,
+                    tool_output_stash: std::sync::Arc::new(tokio::sync::RwLock::new(
+                        std::collections::HashMap::new(),
+                    )),
+                    // TODO(#661): persist user_timezone in agent_jobs table so
+                    // background/routine jobs retain the session's timezone context.
+                    user_timezone: "UTC".to_string(),
                 }))
             }
             None => Ok(None),
@@ -1077,7 +1098,7 @@ impl Store {
         let conn = self.conn().await?;
         let rows = conn
             .query(
-                "SELECT * FROM routines WHERE enabled AND trigger_type = 'event'",
+                "SELECT * FROM routines WHERE enabled AND trigger_type IN ('event', 'system_event')",
                 &[],
             )
             .await?;
@@ -1277,6 +1298,42 @@ impl Store {
         Ok(row.get("cnt"))
     }
 
+    /// Batch-load concurrent run counts for multiple routines in a single query.
+    /// Returns a map where missing routine IDs default to 0.
+    #[cfg(feature = "postgres")]
+    pub async fn count_running_routine_runs_batch(
+        &self,
+        routine_ids: &[Uuid],
+    ) -> Result<HashMap<Uuid, i64>, DatabaseError> {
+        if routine_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let conn = self.conn().await?;
+        let rows = conn
+            .query(
+                "SELECT routine_id, COUNT(*) as cnt FROM routine_runs
+                 WHERE routine_id = ANY($1) AND status = 'running'
+                 GROUP BY routine_id",
+                &[&routine_ids],
+            )
+            .await?;
+
+        let mut counts = HashMap::new();
+        for row in rows {
+            let id: Uuid = row.get("routine_id");
+            let cnt: i64 = row.get("cnt");
+            counts.insert(id, cnt);
+        }
+
+        // Ensure all requested IDs are in the map (defaults to 0 for no running runs)
+        for id in routine_ids {
+            counts.entry(*id).or_insert(0);
+        }
+
+        Ok(counts)
+    }
+
     /// Link a routine run to a dispatched job.
     pub async fn link_routine_run_to_job(
         &self,
@@ -1290,6 +1347,18 @@ impl Store {
         )
         .await?;
         Ok(())
+    }
+
+    /// List routine runs dispatched as full_job that have not yet been finalized.
+    pub async fn list_dispatched_routine_runs(&self) -> Result<Vec<RoutineRun>, DatabaseError> {
+        let conn = self.conn().await?;
+        let rows = conn
+            .query(
+                "SELECT * FROM routine_runs WHERE status = 'running' AND job_id IS NOT NULL",
+                &[],
+            )
+            .await?;
+        rows.iter().map(row_to_routine_run).collect()
     }
 }
 
@@ -1373,6 +1442,8 @@ pub struct ConversationSummary {
     pub last_activity: DateTime<Utc>,
     /// Thread type extracted from metadata (e.g. "assistant", "thread").
     pub thread_type: Option<String>,
+    /// Channel that owns this conversation (e.g. "gateway", "telegram", "routine").
+    pub channel: String,
 }
 
 /// A single message in a conversation.
@@ -1388,25 +1459,31 @@ pub struct ConversationMessage {
 impl Store {
     /// Ensure a conversation row exists for a given UUID.
     ///
-    /// Idempotent: inserts on first call, bumps `last_activity` on subsequent calls.
+    /// Returns `true` when the row is inserted or refreshed for the same
+    /// `(channel, user_id)`. Returns `false` when the UUID already exists but
+    /// belongs to a different owner/channel.
     pub async fn ensure_conversation(
         &self,
         id: Uuid,
         channel: &str,
         user_id: &str,
         thread_id: Option<&str>,
-    ) -> Result<(), DatabaseError> {
+    ) -> Result<bool, DatabaseError> {
         let conn = self.conn().await?;
-        conn.execute(
-            r#"
+        let affected = conn
+            .execute(
+                r#"
             INSERT INTO conversations (id, channel, user_id, thread_id)
             VALUES ($1, $2, $3, $4)
-            ON CONFLICT (id) DO UPDATE SET last_activity = NOW()
+            ON CONFLICT (id) DO UPDATE
+            SET last_activity = NOW()
+            WHERE conversations.user_id = EXCLUDED.user_id
+              AND conversations.channel = EXCLUDED.channel
             "#,
-            &[&id, &channel, &user_id, &thread_id],
-        )
-        .await?;
-        Ok(())
+                &[&id, &channel, &user_id, &thread_id],
+            )
+            .await?;
+        Ok(affected > 0)
     }
 
     /// List conversations with a title derived from the first user message.
@@ -1425,6 +1502,7 @@ impl Store {
                     c.started_at,
                     c.last_activity,
                     c.metadata,
+                    c.channel,
                     (SELECT COUNT(*) FROM conversation_messages m WHERE m.conversation_id = c.id AND m.role = 'user') AS message_count,
                     (SELECT LEFT(m2.content, 100)
                      FROM conversation_messages m2
@@ -1449,16 +1527,179 @@ impl Store {
                     .get("thread_type")
                     .and_then(|v| v.as_str())
                     .map(String::from);
+                let sql_title: Option<String> = r.get("title");
+                let title = sql_title.or_else(|| {
+                    metadata
+                        .get("routine_name")
+                        .and_then(|v| v.as_str())
+                        .map(String::from)
+                });
                 ConversationSummary {
                     id: r.get("id"),
-                    title: r.get("title"),
+                    title,
                     message_count: r.get("message_count"),
                     started_at: r.get("started_at"),
                     last_activity: r.get("last_activity"),
                     thread_type,
+                    channel: r.get("channel"),
                 }
             })
             .collect())
+    }
+
+    /// List conversations across all channels with a title derived from the first user message.
+    pub async fn list_conversations_all_channels(
+        &self,
+        user_id: &str,
+        limit: i64,
+    ) -> Result<Vec<ConversationSummary>, DatabaseError> {
+        let conn = self.conn().await?;
+        let rows = conn
+            .query(
+                r#"
+                SELECT
+                    c.id,
+                    c.started_at,
+                    c.last_activity,
+                    c.metadata,
+                    c.channel,
+                    (SELECT COUNT(*) FROM conversation_messages m WHERE m.conversation_id = c.id AND m.role = 'user') AS message_count,
+                    (SELECT LEFT(m2.content, 100)
+                     FROM conversation_messages m2
+                     WHERE m2.conversation_id = c.id AND m2.role = 'user'
+                     ORDER BY m2.created_at ASC
+                     LIMIT 1
+                    ) AS title
+                FROM conversations c
+                WHERE c.user_id = $1
+                ORDER BY c.last_activity DESC
+                LIMIT $2
+                "#,
+                &[&user_id, &limit],
+            )
+            .await?;
+
+        Ok(rows
+            .iter()
+            .map(|r| {
+                let metadata: serde_json::Value = r.get("metadata");
+                let thread_type = metadata
+                    .get("thread_type")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                // For routine/heartbeat threads, derive title from metadata
+                // since they may have no user messages.
+                let sql_title: Option<String> = r.get("title");
+                let title = sql_title.or_else(|| {
+                    metadata
+                        .get("routine_name")
+                        .and_then(|v| v.as_str())
+                        .map(String::from)
+                });
+                ConversationSummary {
+                    id: r.get("id"),
+                    title,
+                    message_count: r.get("message_count"),
+                    started_at: r.get("started_at"),
+                    last_activity: r.get("last_activity"),
+                    thread_type,
+                    channel: r.get("channel"),
+                }
+            })
+            .collect())
+    }
+
+    /// Get or create a persistent conversation for a routine.
+    ///
+    /// Looks for a conversation where `metadata->>'routine_id' = routine_id`.
+    /// Creates one if it doesn't exist. Uses INSERT ON CONFLICT to avoid
+    /// TOCTOU races under concurrent routine executions.
+    pub async fn get_or_create_routine_conversation(
+        &self,
+        routine_id: Uuid,
+        routine_name: &str,
+        user_id: &str,
+    ) -> Result<Uuid, DatabaseError> {
+        let conn = self.conn().await?;
+        let rid = routine_id.to_string();
+
+        // Attempt insert first; the partial unique index
+        // uq_conv_routine(user_id, (metadata->>'routine_id')) prevents duplicates.
+        let new_id = Uuid::new_v4();
+        let metadata = serde_json::json!({
+            "thread_type": "routine",
+            "routine_id": routine_id.to_string(),
+            "routine_name": routine_name,
+        });
+        conn.execute(
+            r#"
+            INSERT INTO conversations (id, channel, user_id, metadata)
+            VALUES ($1, 'routine', $2, $3)
+            ON CONFLICT (user_id, (metadata->>'routine_id'))
+                WHERE metadata->>'routine_id' IS NOT NULL
+                DO NOTHING
+            "#,
+            &[&new_id, &user_id, &metadata],
+        )
+        .await?;
+
+        // Select back — always returns the winner.
+        let row = conn
+            .query_one(
+                r#"
+                SELECT id FROM conversations
+                WHERE user_id = $1 AND metadata->>'routine_id' = $2
+                LIMIT 1
+                "#,
+                &[&user_id, &rid],
+            )
+            .await?;
+
+        Ok(row.get("id"))
+    }
+
+    /// Get or create the singleton heartbeat conversation for a user.
+    ///
+    /// Looks for a conversation where `metadata->>'thread_type' = 'heartbeat'`.
+    /// Creates one if it doesn't exist. Uses INSERT ON CONFLICT to avoid
+    /// TOCTOU races under concurrent heartbeat sends.
+    pub async fn get_or_create_heartbeat_conversation(
+        &self,
+        user_id: &str,
+    ) -> Result<Uuid, DatabaseError> {
+        let conn = self.conn().await?;
+
+        // Attempt insert; the partial unique index
+        // uq_conv_heartbeat(user_id) prevents duplicates.
+        let new_id = Uuid::new_v4();
+        let metadata = serde_json::json!({
+            "thread_type": "heartbeat",
+        });
+        conn.execute(
+            r#"
+            INSERT INTO conversations (id, channel, user_id, metadata)
+            VALUES ($1, 'heartbeat', $2, $3)
+            ON CONFLICT (user_id)
+                WHERE metadata->>'thread_type' = 'heartbeat'
+                DO NOTHING
+            "#,
+            &[&new_id, &user_id, &metadata],
+        )
+        .await?;
+
+        // Select back — always returns the winner.
+        let row = conn
+            .query_one(
+                r#"
+                SELECT id FROM conversations
+                WHERE user_id = $1 AND metadata->>'thread_type' = 'heartbeat'
+                LIMIT 1
+                "#,
+                &[&user_id],
+            )
+            .await?;
+
+        Ok(row.get("id"))
     }
 
     /// Get or create the singleton "assistant" conversation for a user+channel.
@@ -1922,5 +2163,74 @@ impl Store {
             .await?;
         let count: i64 = row.get("cnt");
         Ok(count > 0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_conversation_summary_has_channel_field() {
+        // Regression: ConversationSummary must include a `channel` field
+        // so the gateway can distinguish thread origins.
+        let summary = ConversationSummary {
+            id: Uuid::nil(),
+            title: Some("Hello".to_string()),
+            message_count: 1,
+            started_at: Utc::now(),
+            last_activity: Utc::now(),
+            thread_type: Some("thread".to_string()),
+            channel: "telegram".to_string(),
+        };
+        assert_eq!(summary.channel, "telegram");
+    }
+
+    #[test]
+    fn test_conversation_summary_channel_various_values() {
+        for ch in ["gateway", "routine", "heartbeat", "telegram", "signal"] {
+            let summary = ConversationSummary {
+                id: Uuid::nil(),
+                title: None,
+                message_count: 0,
+                started_at: Utc::now(),
+                last_activity: Utc::now(),
+                thread_type: None,
+                channel: ch.to_string(),
+            };
+            assert_eq!(summary.channel, ch);
+        }
+    }
+
+    /// Regression test: save_job must persist user_id and get_job must return it.
+    /// Requires a running PostgreSQL instance (integration tier).
+    #[cfg(feature = "postgres")]
+    #[tokio::test]
+    #[ignore]
+    async fn test_save_job_persists_user_id() {
+        use crate::config::Config;
+        use crate::context::JobContext;
+
+        let _ = dotenvy::dotenv();
+        let config = Config::from_env().await.expect("Failed to load config");
+        let store = Store::new(&config.database)
+            .await
+            .expect("Failed to connect to database");
+        store
+            .run_migrations()
+            .await
+            .expect("Failed to run migrations");
+
+        let ctx = JobContext::with_user("test-user-42", "PG user_id test", "regression test");
+        store.save_job(&ctx).await.unwrap();
+
+        let loaded = store.get_job(ctx.job_id).await.unwrap().unwrap();
+        assert_eq!(loaded.user_id, "test-user-42");
+
+        // Clean up
+        let conn = store.conn().await.unwrap();
+        conn.execute("DELETE FROM agent_jobs WHERE id = $1", &[&ctx.job_id])
+            .await
+            .unwrap();
     }
 }

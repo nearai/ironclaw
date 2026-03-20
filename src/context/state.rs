@@ -9,6 +9,18 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::llm::recording::HttpInterceptor;
+
+/// Error returned when a job exceeds its token budget.
+#[derive(Debug, thiserror::Error)]
+#[error("Token budget exceeded: used {used} of {limit} allowed tokens")]
+pub struct TokenBudgetExceeded {
+    /// Total tokens consumed (including the call that exceeded the budget).
+    pub used: u64,
+    /// Configured token limit for this job.
+    pub limit: u64,
+}
+
 /// State of a job.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -36,6 +48,14 @@ impl JobState {
     pub fn can_transition_to(&self, target: JobState) -> bool {
         use JobState::*;
 
+        // Allow idempotent Completed -> Completed transition.
+        // Both the execution loop and the worker wrapper may race to mark a
+        // job complete; the second call should be a harmless no-op rather
+        // than an error that masks the successful completion.
+        if matches!((self, target), (Completed, Completed)) {
+            return true;
+        }
+
         matches!(
             (self, target),
             // From Pending
@@ -60,6 +80,15 @@ impl JobState {
     /// Check if the job is active (not terminal).
     pub fn is_active(&self) -> bool {
         !self.is_terminal()
+    }
+
+    /// Check if this job consumes a parallel execution slot.
+    ///
+    /// Only jobs in Pending, InProgress, or Stuck states consume execution resources
+    /// and should count toward the parallel job limit. Completed and Submitted jobs
+    /// are in the state machine but are no longer actively executing.
+    pub fn is_parallel_blocking(&self) -> bool {
+        matches!(self, Self::Pending | Self::InProgress | Self::Stuck)
     }
 }
 
@@ -101,6 +130,9 @@ pub struct JobContext {
     pub state: JobState,
     /// User ID that owns this job (for workspace scoping).
     pub user_id: String,
+    /// Channel-specific requester/actor ID, when different from the owner scope.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requester_id: Option<String>,
     /// Conversation ID if linked to a conversation.
     pub conversation_id: Option<Uuid>,
     /// Job title.
@@ -146,6 +178,24 @@ pub struct JobContext {
     /// Wrapped in `Arc` for cheap cloning on every tool invocation.
     #[serde(skip)]
     pub extra_env: Arc<HashMap<String, String>>,
+    /// Optional HTTP interceptor for trace recording/replay.
+    ///
+    /// When set, tools that make outgoing HTTP requests should check this
+    /// interceptor before sending real requests. During recording, the
+    /// interceptor captures request/response pairs. During replay, it
+    /// returns pre-recorded responses.
+    #[serde(skip)]
+    pub http_interceptor: Option<Arc<dyn HttpInterceptor>>,
+    /// Stash of full tool outputs keyed by tool_call_id.
+    ///
+    /// Tool outputs may be truncated before reaching the LLM context window,
+    /// but subsequent tools (e.g., `json`) may need the full output. This
+    /// stash stores the complete, unsanitized output so tools can reference
+    /// previous results by ID via `$tool_call_id` parameter syntax.
+    #[serde(skip)]
+    pub tool_output_stash: Arc<tokio::sync::RwLock<HashMap<String, String>>>,
+    /// User's preferred timezone (IANA name, e.g. "America/New_York"). Defaults to "UTC".
+    pub user_timezone: String,
 }
 
 impl JobContext {
@@ -164,6 +214,7 @@ impl JobContext {
             job_id: Uuid::new_v4(),
             state: JobState::Pending,
             user_id: user_id.into(),
+            requester_id: None,
             conversation_id: None,
             title: title.into(),
             description: description.into(),
@@ -182,8 +233,23 @@ impl JobContext {
             repair_attempts: 0,
             transitions: Vec::new(),
             extra_env: Arc::new(HashMap::new()),
+            http_interceptor: None,
             metadata: serde_json::Value::Null,
+            tool_output_stash: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            user_timezone: "UTC".to_string(),
         }
+    }
+
+    /// Set the user timezone on this context.
+    pub fn with_timezone(mut self, tz: impl Into<String>) -> Self {
+        self.user_timezone = tz.into();
+        self
+    }
+
+    /// Set the channel-specific requester/actor ID.
+    pub fn with_requester_id(mut self, requester_id: impl Into<String>) -> Self {
+        self.requester_id = Some(requester_id.into());
+        self
     }
 
     /// Transition to a new state.
@@ -197,6 +263,18 @@ impl JobContext {
                 "Cannot transition from {} to {}",
                 self.state, new_state
             ));
+        }
+
+        // Idempotent: already in the target state, skip recording a duplicate
+        // transition. This handles the Completed -> Completed race between
+        // execution_loop and the worker wrapper.
+        if self.state == new_state {
+            tracing::debug!(
+                job_id = %self.job_id,
+                state = %self.state,
+                "idempotent state transition (already in target state), skipping"
+            );
+            return Ok(());
         }
 
         let transition = StateTransition {
@@ -236,15 +314,15 @@ impl JobContext {
         self.actual_cost += cost;
     }
 
-    /// Record token usage from an LLM call. Returns an error string if the
-    /// token budget has been exceeded after this addition.
-    pub fn add_tokens(&mut self, tokens: u64) -> Result<(), String> {
+    /// Record token usage from an LLM call. Returns an error if the token
+    /// budget has been exceeded after this addition.
+    pub fn add_tokens(&mut self, tokens: u64) -> Result<(), TokenBudgetExceeded> {
         self.total_tokens_used += tokens;
         if self.max_tokens > 0 && self.total_tokens_used > self.max_tokens {
-            Err(format!(
-                "Token budget exceeded: used {} of {} allowed tokens",
-                self.total_tokens_used, self.max_tokens
-            ))
+            Err(TokenBudgetExceeded {
+                used: self.total_tokens_used,
+                limit: self.max_tokens,
+            })
         } else {
             Ok(())
         }
@@ -299,6 +377,45 @@ mod tests {
         assert!(JobState::InProgress.can_transition_to(JobState::Completed));
         assert!(!JobState::Completed.can_transition_to(JobState::Pending));
         assert!(!JobState::Accepted.can_transition_to(JobState::InProgress));
+    }
+
+    #[test]
+    fn test_completed_to_completed_is_idempotent() {
+        // Regression test for the race condition where both execution_loop
+        // and the worker wrapper call mark_completed(). The second call
+        // must succeed without error and must not record a duplicate
+        // transition.
+        let mut ctx = JobContext::new("Test", "Idempotent completion test");
+        ctx.transition_to(JobState::InProgress, None).unwrap();
+        ctx.transition_to(JobState::Completed, Some("first".into()))
+            .unwrap();
+        assert_eq!(ctx.state, JobState::Completed);
+        let transitions_before = ctx.transitions.len();
+
+        // Second Completed -> Completed must be a no-op
+        let result = ctx.transition_to(JobState::Completed, Some("duplicate".into()));
+        assert!(
+            result.is_ok(),
+            "Completed -> Completed should be idempotent"
+        );
+        assert_eq!(ctx.state, JobState::Completed);
+        assert_eq!(
+            ctx.transitions.len(),
+            transitions_before,
+            "idempotent transition should not record a new history entry"
+        );
+    }
+
+    #[test]
+    fn test_other_self_transitions_still_rejected() {
+        // Ensure we only allow Completed -> Completed, not arbitrary X -> X.
+        assert!(!JobState::Pending.can_transition_to(JobState::Pending));
+        assert!(!JobState::InProgress.can_transition_to(JobState::InProgress));
+        assert!(!JobState::Failed.can_transition_to(JobState::Failed));
+        assert!(!JobState::Stuck.can_transition_to(JobState::Stuck));
+        assert!(!JobState::Submitted.can_transition_to(JobState::Submitted));
+        assert!(!JobState::Accepted.can_transition_to(JobState::Accepted));
+        assert!(!JobState::Cancelled.can_transition_to(JobState::Cancelled));
     }
 
     #[test]

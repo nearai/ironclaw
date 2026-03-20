@@ -10,12 +10,7 @@ use clap::Subcommand;
 use tokio::fs;
 
 use crate::bootstrap::ironclaw_base_dir;
-use crate::config::Config;
-#[allow(unused_imports)]
-use crate::db::Database;
-#[cfg(feature = "postgres")]
-use crate::secrets::PostgresSecretsStore;
-use crate::secrets::{CreateSecretParams, SecretsCrypto, SecretsStore};
+use crate::secrets::{CreateSecretParams, SecretsStore};
 use crate::tools::wasm::{CapabilitiesFile, compute_binary_hash};
 
 /// Default tools directory.
@@ -556,66 +551,7 @@ fn validate_tool_name(name: &str) -> anyhow::Result<()> {
 
 /// Initialize the secrets store from environment config.
 async fn init_secrets_store() -> anyhow::Result<Arc<dyn SecretsStore + Send + Sync>> {
-    let config = Config::from_env().await?;
-    let master_key = config.secrets.master_key().ok_or_else(|| {
-        anyhow::anyhow!(
-            "SECRETS_MASTER_KEY not set. Run 'ironclaw onboard' first or set it in .env"
-        )
-    })?;
-
-    let crypto = SecretsCrypto::new(master_key.clone())?;
-
-    let store: Arc<dyn SecretsStore + Send + Sync> = {
-        #[cfg(feature = "postgres")]
-        {
-            let store = crate::history::Store::new(&config.database).await?;
-            store.run_migrations().await?;
-            Arc::new(PostgresSecretsStore::new(store.pool(), Arc::new(crypto)))
-        }
-        #[cfg(all(feature = "libsql", not(feature = "postgres")))]
-        {
-            use crate::db::Database as _;
-            use crate::db::libsql::LibSqlBackend;
-            use secrecy::ExposeSecret as _;
-
-            let default_path = crate::config::default_libsql_path();
-            let db_path = config
-                .database
-                .libsql_path
-                .as_deref()
-                .unwrap_or(&default_path);
-
-            let backend = if let Some(ref url) = config.database.libsql_url {
-                let token = config.database.libsql_auth_token.as_ref().ok_or_else(|| {
-                    anyhow::anyhow!("LIBSQL_AUTH_TOKEN is required when LIBSQL_URL is set")
-                })?;
-                LibSqlBackend::new_remote_replica(db_path, url, token.expose_secret())
-                    .await
-                    .map_err(|e| anyhow::anyhow!("{}", e))?
-            } else {
-                LibSqlBackend::new_local(db_path)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("{}", e))?
-            };
-            backend
-                .run_migrations()
-                .await
-                .map_err(|e| anyhow::anyhow!("{}", e))?;
-
-            Arc::new(crate::secrets::LibSqlSecretsStore::new(
-                backend.shared_db(),
-                Arc::new(crypto),
-            ))
-        }
-        #[cfg(not(any(feature = "postgres", feature = "libsql")))]
-        {
-            let _ = crypto;
-            anyhow::bail!(
-                "No database backend available for secrets. Enable 'postgres' or 'libsql' feature."
-            );
-        }
-    };
-    Ok(store)
+    crate::cli::init_secrets_store().await
 }
 
 /// Configure authentication for a tool.
@@ -715,8 +651,8 @@ async fn auth_tool(name: String, dir: Option<PathBuf>, user_id: String) -> anyho
 
     // Check for OAuth configuration
     if let Some(ref oauth) = auth.oauth {
-        // For providers with shared tokens (e.g., all Google tools share google_oauth_token),
-        // combine scopes from all installed tools so one auth covers everything.
+        // For providers with shared tokens, combine scopes from all installed
+        // tools so one auth covers everything.
         let combined = combine_provider_scopes(&tools_dir, &auth.secret_name, oauth).await;
         if combined.scopes.len() > oauth.scopes.len() {
             let extra = combined.scopes.len() - oauth.scopes.len();
@@ -734,8 +670,8 @@ async fn auth_tool(name: String, dir: Option<PathBuf>, user_id: String) -> anyho
 }
 
 /// Scan the tools directory for all capabilities files sharing the same secret_name
-/// and combine their OAuth scopes. This way, authing any Google tool requests scopes
-/// for ALL installed Google tools, so one login covers everything.
+/// and combine their OAuth scopes so one authorization covers the full shared
+/// credential set.
 async fn combine_provider_scopes(
     tools_dir: &Path,
     secret_name: &str,
@@ -800,11 +736,18 @@ async fn auth_tool_oauth(
         })
         .or_else(|| builtin.as_ref().map(|c| c.client_id.to_string()))
         .ok_or_else(|| {
-            anyhow::anyhow!(
+            let mut message = format!(
                 "OAuth client_id not configured.\n\
-                 Set {} env var, or build with IRONCLAW_GOOGLE_CLIENT_ID.",
+                 Set {} env var",
                 oauth.client_id_env.as_deref().unwrap_or("the client_id")
-            )
+            );
+            if let Some(override_env) =
+                oauth_defaults::builtin_client_id_override_env(&auth.secret_name)
+            {
+                message.push_str(&format!(", or build with {override_env}"));
+            }
+            message.push('.');
+            anyhow::anyhow!(message)
         })?;
 
     // Get client_secret: capabilities file > runtime env var > built-in defaults

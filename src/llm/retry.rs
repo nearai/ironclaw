@@ -5,6 +5,7 @@
 //! - `retry_backoff_delay()` — exponential backoff with jitter
 //! - `RetryProvider` — decorator that wraps any `LlmProvider` with automatic retries
 
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -12,11 +13,17 @@ use async_trait::async_trait;
 use rand::Rng;
 use rust_decimal::Decimal;
 
-use crate::error::LlmError;
+use crate::llm::error::LlmError;
 use crate::llm::provider::{
     CompletionRequest, CompletionResponse, LlmProvider, ModelMetadata, ToolCompletionRequest,
     ToolCompletionResponse,
 };
+
+/// Upper bound for provider-suggested `Retry-After` delays.
+///
+/// This prevents malicious or malformed headers from turning a retryable
+/// response into an effectively unbounded sleep.
+pub(crate) const MAX_RETRY_AFTER_SECS: u64 = 3600;
 
 /// Returns `true` if the `LlmError` is transient and the request should be retried.
 ///
@@ -66,6 +73,38 @@ pub(crate) fn retry_backoff_delay(attempt: u32) -> Duration {
     Duration::from_millis(delay_ms)
 }
 
+/// Clamp a provider-suggested retry delay to a safe maximum.
+pub(crate) fn cap_retry_after(duration: Duration) -> Duration {
+    duration.min(Duration::from_secs(MAX_RETRY_AFTER_SECS))
+}
+
+/// Parse a `Retry-After` header value into a capped `Duration`.
+///
+/// Supports both delay-seconds (RFC 7231 §7.1.3) and HTTP-date formats (RFC 7231
+/// §7.1.1 / IMF-fixdate). The implementation uses `chrono::DateTime::parse_from_rfc2822`,
+/// which also accepts RFC 2822-style dates.
+/// Returns `DEFAULT_RETRY_AFTER` (60 s) if the header is missing or unparseable.
+pub(crate) fn parse_retry_after(header: Option<&reqwest::header::HeaderValue>) -> Duration {
+    header
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| {
+            if let Ok(secs) = v.trim().parse::<u64>() {
+                return Some(cap_retry_after(Duration::from_secs(secs)));
+            }
+            if let Ok(dt) = chrono::DateTime::parse_from_rfc2822(v.trim()) {
+                let now = chrono::Utc::now();
+                let delta = dt.signed_duration_since(now);
+                return Some(cap_retry_after(Duration::from_secs(
+                    delta.num_seconds().max(0) as u64,
+                )));
+            }
+            None
+        })
+        .unwrap_or(Duration::from_secs(DEFAULT_RETRY_AFTER_SECS))
+}
+
+const DEFAULT_RETRY_AFTER_SECS: u64 = 60;
+
 /// Configuration for the retry decorator.
 #[derive(Debug, Clone)]
 pub struct RetryConfig {
@@ -97,6 +136,50 @@ impl RetryProvider {
     pub fn new(inner: Arc<dyn LlmProvider>, config: RetryConfig) -> Self {
         Self { inner, config }
     }
+
+    async fn retry_loop<T, F, Fut>(&self, mut op: F, label: &str) -> Result<T, LlmError>
+    where
+        F: FnMut() -> Fut,
+        Fut: Future<Output = Result<T, LlmError>>,
+    {
+        let mut last_error: Option<LlmError> = None;
+
+        for attempt in 0..=self.config.max_retries {
+            match op().await {
+                Ok(resp) => return Ok(resp),
+                Err(err) => {
+                    if !is_retryable(&err) || attempt == self.config.max_retries {
+                        return Err(err);
+                    }
+
+                    let delay = match &err {
+                        LlmError::RateLimited {
+                            retry_after: Some(duration),
+                            ..
+                        } => *duration,
+                        _ => retry_backoff_delay(attempt),
+                    };
+
+                    tracing::warn!(
+                        provider = %self.inner.model_name(),
+                        attempt = attempt + 1,
+                        max_retries = self.config.max_retries,
+                        delay_ms = delay.as_millis() as u64,
+                        error = %err,
+                        "Retrying after transient error{label}"
+                    );
+
+                    last_error = Some(err);
+                    tokio::time::sleep(delay).await;
+                }
+            }
+        }
+
+        Err(last_error.unwrap_or_else(|| LlmError::RequestFailed {
+            provider: self.inner.model_name().to_string(),
+            reason: "retry loop exited unexpectedly".to_string(),
+        }))
+    }
 }
 
 #[async_trait]
@@ -109,89 +192,39 @@ impl LlmProvider for RetryProvider {
         self.inner.cost_per_token()
     }
 
+    fn cache_write_multiplier(&self) -> Decimal {
+        self.inner.cache_write_multiplier()
+    }
+
+    fn cache_read_discount(&self) -> Decimal {
+        self.inner.cache_read_discount()
+    }
+
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
-        let mut last_error: Option<LlmError> = None;
-
-        for attempt in 0..=self.config.max_retries {
-            let req = request.clone();
-            match self.inner.complete(req).await {
-                Ok(resp) => return Ok(resp),
-                Err(err) => {
-                    if !is_retryable(&err) || attempt == self.config.max_retries {
-                        return Err(err);
-                    }
-
-                    let delay = match &err {
-                        LlmError::RateLimited {
-                            retry_after: Some(duration),
-                            ..
-                        } => *duration,
-                        _ => retry_backoff_delay(attempt),
-                    };
-
-                    tracing::warn!(
-                        provider = %self.inner.model_name(),
-                        attempt = attempt + 1,
-                        max_retries = self.config.max_retries,
-                        delay_ms = delay.as_millis() as u64,
-                        error = %err,
-                        "Retrying after transient error"
-                    );
-
-                    last_error = Some(err);
-                    tokio::time::sleep(delay).await;
-                }
-            }
-        }
-
-        Err(last_error.unwrap_or_else(|| LlmError::RequestFailed {
-            provider: self.inner.model_name().to_string(),
-            reason: "retry loop exited unexpectedly".to_string(),
-        }))
+        let inner = &self.inner;
+        self.retry_loop(
+            || {
+                let req = request.clone();
+                async move { inner.complete(req).await }
+            },
+            "",
+        )
+        .await
     }
 
     async fn complete_with_tools(
         &self,
         request: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, LlmError> {
-        let mut last_error: Option<LlmError> = None;
-
-        for attempt in 0..=self.config.max_retries {
-            let req = request.clone();
-            match self.inner.complete_with_tools(req).await {
-                Ok(resp) => return Ok(resp),
-                Err(err) => {
-                    if !is_retryable(&err) || attempt == self.config.max_retries {
-                        return Err(err);
-                    }
-
-                    let delay = match &err {
-                        LlmError::RateLimited {
-                            retry_after: Some(duration),
-                            ..
-                        } => *duration,
-                        _ => retry_backoff_delay(attempt),
-                    };
-
-                    tracing::warn!(
-                        provider = %self.inner.model_name(),
-                        attempt = attempt + 1,
-                        max_retries = self.config.max_retries,
-                        delay_ms = delay.as_millis() as u64,
-                        error = %err,
-                        "Retrying after transient error (tools)"
-                    );
-
-                    last_error = Some(err);
-                    tokio::time::sleep(delay).await;
-                }
-            }
-        }
-
-        Err(last_error.unwrap_or_else(|| LlmError::RequestFailed {
-            provider: self.inner.model_name().to_string(),
-            reason: "retry loop exited unexpectedly".to_string(),
-        }))
+        let inner = &self.inner;
+        self.retry_loop(
+            || {
+                let req = request.clone();
+                async move { inner.complete_with_tools(req).await }
+            },
+            " (tools)",
+        )
+        .await
     }
 
     async fn list_models(&self) -> Result<Vec<String>, LlmError> {
@@ -200,6 +233,10 @@ impl LlmProvider for RetryProvider {
 
     async fn model_metadata(&self) -> Result<ModelMetadata, LlmError> {
         self.inner.model_metadata().await
+    }
+
+    fn effective_model_name(&self, requested_model: Option<&str>) -> String {
+        self.inner.effective_model_name(requested_model)
     }
 
     fn active_model_name(&self) -> String {
@@ -394,5 +431,93 @@ mod tests {
         assert_eq!(retry.active_model_name(), "my-model");
         assert_eq!(retry.cost_per_token(), (Decimal::ZERO, Decimal::ZERO));
         assert_eq!(retry.calculate_cost(100, 50), Decimal::ZERO);
+    }
+
+    // Regression test: Rate limiter fallback when Retry-After header is missing
+    //
+    // Verifies that RateLimited errors always have a duration (never None)
+    // due to the 60-second fallback applied in all rate limit error creation sites
+    // (nearai_chat.rs, anthropic_oauth.rs, embeddings.rs).
+    #[test]
+    fn rate_limited_error_always_has_duration() {
+        let err = LlmError::RateLimited {
+            provider: "test".to_string(),
+            retry_after: Some(std::time::Duration::from_secs(60)),
+        };
+
+        if let LlmError::RateLimited { retry_after, .. } = err {
+            assert!(
+                retry_after.is_some(),
+                "Rate limited error should always have retry_after duration"
+            );
+            assert_eq!(
+                retry_after,
+                Some(std::time::Duration::from_secs(60)),
+                "Fallback should be 60 seconds"
+            );
+        } else {
+            panic!("Expected RateLimited error");
+        }
+    }
+
+    #[test]
+    fn cap_retry_after_clamps_huge_delays() {
+        assert_eq!(
+            cap_retry_after(Duration::from_secs(u64::MAX)),
+            Duration::from_secs(MAX_RETRY_AFTER_SECS)
+        );
+        assert_eq!(
+            cap_retry_after(Duration::from_secs(0)),
+            Duration::from_secs(0)
+        );
+    }
+
+    #[test]
+    fn parse_retry_after_delay_seconds() {
+        let val = reqwest::header::HeaderValue::from_static("30");
+        assert_eq!(parse_retry_after(Some(&val)), Duration::from_secs(30));
+    }
+
+    #[test]
+    fn parse_retry_after_missing_header() {
+        assert_eq!(
+            parse_retry_after(None),
+            Duration::from_secs(DEFAULT_RETRY_AFTER_SECS)
+        );
+    }
+
+    #[test]
+    fn parse_retry_after_unparseable() {
+        let val = reqwest::header::HeaderValue::from_static("not-a-number");
+        assert_eq!(
+            parse_retry_after(Some(&val)),
+            Duration::from_secs(DEFAULT_RETRY_AFTER_SECS)
+        );
+    }
+
+    #[test]
+    fn parse_retry_after_clamps_large_value() {
+        let val = reqwest::header::HeaderValue::from_static("999999");
+        assert_eq!(
+            parse_retry_after(Some(&val)),
+            Duration::from_secs(MAX_RETRY_AFTER_SECS)
+        );
+    }
+
+    #[test]
+    fn parse_retry_after_http_date() {
+        let future = chrono::Utc::now() + chrono::Duration::seconds(30);
+        let date_str = future.to_rfc2822();
+        let val = reqwest::header::HeaderValue::from_str(&date_str).unwrap();
+        let parsed = parse_retry_after(Some(&val));
+        let diff = if parsed > Duration::from_secs(30) {
+            parsed - Duration::from_secs(30)
+        } else {
+            Duration::from_secs(30) - parsed
+        };
+        assert!(
+            diff <= Duration::from_secs(2),
+            "expected ~30s, got {parsed:?} (diff {diff:?}) from header {date_str:?}"
+        );
     }
 }

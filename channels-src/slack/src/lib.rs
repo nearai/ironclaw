@@ -32,7 +32,7 @@ use exports::near::agent::channel::{
     AgentResponse, ChannelConfig, Guest, HttpEndpointConfig, IncomingHttpRequest,
     OutgoingHttpResponse, StatusUpdate,
 };
-use near::agent::channel_host::{self, EmittedMessage};
+use near::agent::channel_host::{self, EmittedMessage, InboundAttachment};
 
 /// Slack event wrapper.
 #[derive(Debug, Deserialize)]
@@ -82,6 +82,25 @@ struct SlackEvent {
 
     /// Subtype (bot_message, etc.)
     subtype: Option<String>,
+
+    /// File attachments shared in the message.
+    #[serde(default)]
+    files: Option<Vec<SlackFile>>,
+}
+
+/// Slack file attachment.
+#[derive(Debug, Deserialize)]
+struct SlackFile {
+    /// File ID.
+    id: String,
+    /// MIME type.
+    mimetype: Option<String>,
+    /// Original filename.
+    name: Option<String>,
+    /// File size in bytes.
+    size: Option<u64>,
+    /// URL to download the file (requires auth).
+    url_private: Option<String>,
 }
 
 /// Metadata stored with emitted messages for response routing.
@@ -327,7 +346,7 @@ impl Guest for SlackChannel {
             // Actual event callback
             "event_callback" => {
                 if let Some(event) = event_wrapper.event {
-                    handle_slack_event(event, event_wrapper.team_id);
+                    handle_slack_event(event, event_wrapper.team_id, event_wrapper.event_id);
                 }
                 // Always respond 200 quickly to Slack (they have a 3s timeout)
                 json_response(200, serde_json::json!({"ok": true}))
@@ -372,6 +391,10 @@ impl Guest for SlackChannel {
     }
 
     fn on_status(_update: StatusUpdate) {}
+
+    fn on_broadcast(_user_id: String, _response: AgentResponse) -> Result<(), String> {
+        Err("broadcast not yet implemented for Slack channel".to_string())
+    }
 
     fn on_shutdown() {
         channel_host::log(channel_host::LogLevel::Info, "Slack channel shutting down");
@@ -539,8 +562,130 @@ fn notify_auth_failure(error: &str) {
 // Event Handling
 // ============================================================================
 
+/// Extract attachments from Slack file objects.
+fn extract_slack_attachments(files: &Option<Vec<SlackFile>>) -> Vec<InboundAttachment> {
+    let Some(files) = files else {
+        return Vec::new();
+    };
+    files
+        .iter()
+        .map(|f| InboundAttachment {
+            id: f.id.clone(),
+            mime_type: f
+                .mimetype
+                .clone()
+                .unwrap_or_else(|| "application/octet-stream".to_string()),
+            filename: f.name.clone(),
+            size_bytes: f.size,
+            source_url: f.url_private.clone(),
+            storage_key: None,
+            extracted_text: None,
+            extras_json: String::new(),
+        })
+        .collect()
+}
+
+/// Download a file from Slack using the url_private endpoint.
+///
+/// Slack file downloads require Bearer auth with the bot token, which is
+/// injected by the host credential system via `channel_host::http_request`.
+fn download_slack_file(url: &str) -> Result<Vec<u8>, String> {
+    let headers = serde_json::json!({});
+
+    let result = channel_host::http_request("GET", url, &headers.to_string(), None, None);
+
+    let response = result.map_err(|e| format!("Slack file download failed: {}", e))?;
+
+    if response.status != 200 {
+        let body_str = String::from_utf8_lossy(&response.body);
+        return Err(format!(
+            "Slack file download returned {}: {}",
+            response.status, body_str
+        ));
+    }
+
+    Ok(response.body)
+}
+
+/// Download file bytes and store them via the host for processing.
+///
+/// Downloads all file types (images, documents, etc.) so the host-side
+/// middleware can process them (vision pipeline for images, text extraction
+/// for documents, transcription for audio, etc.).
+/// Maximum file size to download (20 MB). Files larger than this are skipped
+/// to avoid excessive memory use and slow downloads in the WASM runtime.
+const MAX_DOWNLOAD_SIZE_BYTES: u64 = 20 * 1024 * 1024;
+
+fn download_and_store_slack_files(attachments: &[InboundAttachment]) {
+    for att in attachments {
+        let Some(ref url) = att.source_url else {
+            continue;
+        };
+
+        // Skip files that exceed the size limit
+        if let Some(size) = att.size_bytes {
+            if size > MAX_DOWNLOAD_SIZE_BYTES {
+                channel_host::log(
+                    channel_host::LogLevel::Warn,
+                    &format!(
+                        "Skipping Slack file download: {} bytes exceeds {} MB limit (id={})",
+                        size,
+                        MAX_DOWNLOAD_SIZE_BYTES / (1024 * 1024),
+                        att.id
+                    ),
+                );
+                continue;
+            }
+        }
+
+        match download_slack_file(url) {
+            Ok(bytes) => {
+                // Post-download size guard: metadata size_bytes is optional,
+                // so a file with no size info could bypass the pre-download check.
+                if bytes.len() as u64 > MAX_DOWNLOAD_SIZE_BYTES {
+                    channel_host::log(
+                        channel_host::LogLevel::Warn,
+                        &format!(
+                            "Discarding Slack file after download: {} bytes exceeds {} MB limit (id={})",
+                            bytes.len(),
+                            MAX_DOWNLOAD_SIZE_BYTES / (1024 * 1024),
+                            att.id
+                        ),
+                    );
+                    continue;
+                }
+
+                channel_host::log(
+                    channel_host::LogLevel::Info,
+                    &format!(
+                        "Downloaded Slack file: {} bytes, mime={}",
+                        bytes.len(),
+                        att.mime_type
+                    ),
+                );
+                if let Err(e) = channel_host::store_attachment_data(&att.id, &bytes) {
+                    channel_host::log(
+                        channel_host::LogLevel::Error,
+                        &format!("Failed to store Slack file data: {}", e),
+                    );
+                }
+            }
+            Err(e) => {
+                channel_host::log(
+                    channel_host::LogLevel::Error,
+                    &format!("Failed to download Slack file: {}", e),
+                );
+            }
+        }
+    }
+}
+
 /// Handle a Slack event and emit message if applicable.
-fn handle_slack_event(event: SlackEvent, team_id: Option<String>) {
+fn handle_slack_event(event: SlackEvent, team_id: Option<String>, _event_id: Option<String>) {
+    let attachments = extract_slack_attachments(&event.files);
+
+    // Download and store file attachments for host-side processing
+    download_and_store_slack_files(&attachments);
     match event.event_type.as_str() {
         // Direct mention of the bot (always in a channel, not a DM)
         "app_mention" => {
@@ -554,7 +699,14 @@ fn handle_slack_event(event: SlackEvent, team_id: Option<String>) {
                 if !check_sender_permission(&user, &channel, false) {
                     return;
                 }
-                emit_message(user, text, channel, event.thread_ts.or(Some(ts)), team_id);
+                emit_message(
+                    user,
+                    text,
+                    channel,
+                    event.thread_ts.or(Some(ts)),
+                    team_id,
+                    attachments,
+                );
             }
         }
 
@@ -587,12 +739,19 @@ fn handle_slack_event(event: SlackEvent, team_id: Option<String>) {
                     if !check_sender_permission(&user, &channel, true) {
                         return;
                     }
-                    emit_message(user, text, channel, event.thread_ts.or(Some(ts)), team_id);
+                    emit_message(
+                        user,
+                        text,
+                        channel,
+                        event.thread_ts.or(Some(ts)),
+                        team_id,
+                        attachments,
+                    );
                 } else if is_threaded_reply {
                     if !check_sender_permission(&user, &channel, false) {
                         return;
                     }
-                    emit_message(user, text, channel, event.thread_ts, team_id);
+                    emit_message(user, text, channel, event.thread_ts, team_id, attachments);
                 }
             }
         }
@@ -613,6 +772,7 @@ fn emit_message(
     channel: String,
     thread_ts: Option<String>,
     team_id: Option<String>,
+    attachments: Vec<InboundAttachment>,
 ) {
     let message_ts = thread_ts.clone().unwrap_or_default();
 
@@ -640,6 +800,7 @@ fn emit_message(
         content: cleaned_text,
         thread_id: thread_ts,
         metadata_json,
+        attachments,
     });
 }
 
@@ -800,14 +961,9 @@ fn json_response(status: u16, value: serde_json::Value) -> OutgoingHttpResponse 
 // Export the component
 export!(SlackChannel);
 
-// ============================================================================
-// Tests
-// ============================================================================
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
     // --- Error classification ---
 
     #[test]
@@ -1043,5 +1199,113 @@ mod tests {
             config.allow_from,
             Some(vec!["U456".to_string(), "U789".to_string()])
         );
+
+    #[test]
+    fn test_extract_slack_attachments_with_files() {
+        let files = Some(vec![
+            SlackFile {
+                id: "F123".to_string(),
+                mimetype: Some("image/png".to_string()),
+                name: Some("screenshot.png".to_string()),
+                size: Some(50000),
+                url_private: Some("https://files.slack.com/F123".to_string()),
+            },
+            SlackFile {
+                id: "F456".to_string(),
+                mimetype: Some("application/pdf".to_string()),
+                name: Some("doc.pdf".to_string()),
+                size: Some(120000),
+                url_private: None,
+            },
+        ]);
+
+        let attachments = extract_slack_attachments(&files);
+        assert_eq!(attachments.len(), 2);
+
+        assert_eq!(attachments[0].id, "F123");
+        assert_eq!(attachments[0].mime_type, "image/png");
+        assert_eq!(attachments[0].filename, Some("screenshot.png".to_string()));
+        assert_eq!(attachments[0].size_bytes, Some(50000));
+        assert_eq!(
+            attachments[0].source_url,
+            Some("https://files.slack.com/F123".to_string())
+        );
+
+        assert_eq!(attachments[1].id, "F456");
+        assert_eq!(attachments[1].mime_type, "application/pdf");
+        assert!(attachments[1].source_url.is_none());
+    }
+
+    #[test]
+    fn test_extract_slack_attachments_none() {
+        let attachments = extract_slack_attachments(&None);
+        assert!(attachments.is_empty());
+    }
+
+    #[test]
+    fn test_extract_slack_attachments_empty() {
+        let attachments = extract_slack_attachments(&Some(vec![]));
+        assert!(attachments.is_empty());
+    }
+
+    #[test]
+    fn test_extract_slack_attachments_missing_mime() {
+        let files = Some(vec![SlackFile {
+            id: "F789".to_string(),
+            mimetype: None,
+            name: Some("unknown".to_string()),
+            size: None,
+            url_private: None,
+        }]);
+
+        let attachments = extract_slack_attachments(&files);
+        assert_eq!(attachments.len(), 1);
+        assert_eq!(attachments[0].mime_type, "application/octet-stream");
+    }
+
+    #[test]
+    fn test_parse_slack_event_with_files() {
+        let json = r#"{
+            "type": "message",
+            "user": "U123",
+            "channel": "D456",
+            "text": "Check this file",
+            "ts": "1234567890.000001",
+            "files": [
+                {
+                    "id": "F001",
+                    "mimetype": "image/jpeg",
+                    "name": "photo.jpg",
+                    "size": 30000,
+                    "url_private": "https://files.slack.com/F001"
+                }
+            ]
+        }"#;
+
+        let event: SlackEvent = serde_json::from_str(json).unwrap();
+        assert!(event.files.is_some());
+        let files = event.files.unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].id, "F001");
+    }
+
+    #[test]
+    fn test_parse_slack_event_without_files() {
+        let json = r#"{
+            "type": "message",
+            "user": "U123",
+            "channel": "D456",
+            "text": "Just text",
+            "ts": "1234567890.000001"
+        }"#;
+
+        let event: SlackEvent = serde_json::from_str(json).unwrap();
+        assert!(event.files.is_none());
+    }
+
+    #[test]
+    fn test_max_download_size_constant() {
+        // Verify the constant is 20 MB
+        assert_eq!(MAX_DOWNLOAD_SIZE_BYTES, 20 * 1024 * 1024);
     }
 }

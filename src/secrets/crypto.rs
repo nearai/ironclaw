@@ -59,7 +59,7 @@ impl SecretsCrypto {
     /// Generate a random salt for a new secret.
     pub fn generate_salt() -> Vec<u8> {
         let mut salt = vec![0u8; SALT_SIZE];
-        rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut salt);
+        rand::RngCore::fill_bytes(&mut OsRng, &mut salt);
         salt
     }
 
@@ -153,11 +153,11 @@ mod tests {
     use secrecy::SecretString;
 
     use crate::secrets::crypto::SecretsCrypto;
+    use crate::testing::credentials::TEST_CRYPTO_KEY;
 
     fn test_crypto() -> SecretsCrypto {
         // 32-byte test key
-        let key = "0123456789abcdef0123456789abcdef";
-        SecretsCrypto::new(SecretString::from(key.to_string())).unwrap()
+        SecretsCrypto::new(SecretString::from(TEST_CRYPTO_KEY.to_string())).unwrap()
     }
 
     #[test]
@@ -246,5 +246,128 @@ mod tests {
         let (encrypted, salt) = crypto.encrypt(&plaintext).unwrap();
         let decrypted = crypto.decrypt(&encrypted, &salt).unwrap();
         assert_eq!(decrypted.expose().as_bytes(), plaintext.as_slice());
+    }
+
+    #[test]
+    fn test_generate_salt_correct_length() {
+        let salt = SecretsCrypto::generate_salt();
+        assert_eq!(salt.len(), super::SALT_SIZE);
+    }
+
+    #[test]
+    fn test_generate_salt_nonzero() {
+        let salt = SecretsCrypto::generate_salt();
+        assert!(salt.iter().any(|&b| b != 0), "salt should not be all zeros");
+    }
+
+    #[test]
+    fn test_generate_salt_unique() {
+        let s1 = SecretsCrypto::generate_salt();
+        let s2 = SecretsCrypto::generate_salt();
+        assert_ne!(s1, s2, "two generated salts should not be identical");
+    }
+
+    #[test]
+    fn test_decrypt_truncated_ciphertext() {
+        let crypto = test_crypto();
+        // Too short: less than NONCE_SIZE + TAG_SIZE (12 + 16 = 28)
+        let short = vec![0u8; 10];
+        let salt = SecretsCrypto::generate_salt();
+        let result = crypto.decrypt(&short, &salt);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            crate::secrets::types::SecretError::DecryptionFailed(msg) => {
+                assert!(msg.contains("too short"));
+            }
+            other => panic!("expected DecryptionFailed, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_different_master_keys_different_ciphertext() {
+        let key_a = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let key_b = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let crypto_a = SecretsCrypto::new(SecretString::from(key_a.to_string())).unwrap();
+        let crypto_b = SecretsCrypto::new(SecretString::from(key_b.to_string())).unwrap();
+
+        let plaintext = b"shared_secret";
+        let (enc_a, salt_a) = crypto_a.encrypt(plaintext).unwrap();
+        let (enc_b, salt_b) = crypto_b.encrypt(plaintext).unwrap();
+
+        // Each decrypts its own ciphertext
+        let dec_a = crypto_a.decrypt(&enc_a, &salt_a).unwrap();
+        let dec_b = crypto_b.decrypt(&enc_b, &salt_b).unwrap();
+        assert_eq!(dec_a.expose(), "shared_secret");
+        assert_eq!(dec_b.expose(), "shared_secret");
+
+        // Cross-decryption fails
+        assert!(crypto_a.decrypt(&enc_b, &salt_b).is_err());
+        assert!(crypto_b.decrypt(&enc_a, &salt_a).is_err());
+    }
+
+    #[test]
+    fn test_exact_minimum_key_length() {
+        // Exactly 32 bytes should work
+        let key = "a".repeat(super::KEY_SIZE);
+        assert!(SecretsCrypto::new(SecretString::from(key)).is_ok());
+
+        // 31 bytes should fail
+        let short = "a".repeat(super::KEY_SIZE - 1);
+        assert!(SecretsCrypto::new(SecretString::from(short)).is_err());
+    }
+
+    #[test]
+    fn test_longer_master_key_works() {
+        // Keys longer than 32 bytes are fine (HKDF handles it)
+        let long_key = "x".repeat(128);
+        let crypto = SecretsCrypto::new(SecretString::from(long_key)).unwrap();
+        let plaintext = b"works with long key";
+        let (encrypted, salt) = crypto.encrypt(plaintext).unwrap();
+        let decrypted = crypto.decrypt(&encrypted, &salt).unwrap();
+        assert_eq!(decrypted.expose(), "works with long key");
+    }
+
+    #[test]
+    fn test_debug_redacts_master_key() {
+        let crypto = test_crypto();
+        let debug = format!("{:?}", crypto);
+        assert!(debug.contains("REDACTED"));
+        assert!(!debug.contains("0123456789abcdef"));
+    }
+
+    #[test]
+    fn test_encrypted_output_structure() {
+        let crypto = test_crypto();
+        let plaintext = b"hello";
+        let (encrypted, salt) = crypto.encrypt(plaintext).unwrap();
+
+        // encrypted = nonce (12) + ciphertext (plaintext_len) + tag (16)
+        assert_eq!(
+            encrypted.len(),
+            super::NONCE_SIZE + plaintext.len() + super::TAG_SIZE
+        );
+        assert_eq!(salt.len(), super::SALT_SIZE);
+    }
+
+    #[test]
+    fn test_tampered_nonce_fails() {
+        let crypto = test_crypto();
+        let plaintext = b"sensitive";
+        let (mut encrypted, salt) = crypto.encrypt(plaintext).unwrap();
+
+        // Flip a bit in the nonce region (first 12 bytes)
+        encrypted[0] ^= 0x01;
+
+        let result = crypto.decrypt(&encrypted, &salt);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_unicode_plaintext_roundtrip() {
+        let crypto = test_crypto();
+        let plaintext = "password: p@$$w0rd! 你好 🔑".as_bytes();
+        let (encrypted, salt) = crypto.encrypt(plaintext).unwrap();
+        let decrypted = crypto.decrypt(&encrypted, &salt).unwrap();
+        assert_eq!(decrypted.expose(), "password: p@$$w0rd! 你好 🔑");
     }
 }

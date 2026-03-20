@@ -13,6 +13,11 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Fetch PR head and base
+        run: |
+          git fetch origin ${{ github.event.pull_request.base.ref }}
+          git fetch origin pull/${{ github.event.pull_request.number }}/head:pr-head
+
       - name: Check for regression tests
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
@@ -21,6 +26,8 @@ jobs:
           set -euo pipefail
 
           BASE_REF="origin/${{ github.event.pull_request.base.ref }}"
+          # Use the actual PR head, not the merge commit that actions/checkout checks out
+          HEAD_REF="pr-head"
 
           # --- 1. Is this a fix PR? Check title first, then commit messages ---
           IS_FIX=false
@@ -30,18 +37,48 @@ jobs:
           fi
 
           if [ "$IS_FIX" = false ]; then
-            COMMITS=$(git log --format='%s' "${BASE_REF}..HEAD")
+            COMMITS=$(git log --format='%s' "${BASE_REF}..${HEAD_REF}")
             if grep -qiE '^(fix(\(.*\))?|hotfix|bugfix):' <<< "$COMMITS"; then
               IS_FIX=true
             fi
           fi
 
-          if [ "$IS_FIX" = false ]; then
-            echo "Not a fix PR — skipping regression test check."
+          # --- 1b. Does this PR touch high-risk state machine or resilience code? ---
+          CHANGED_FILES=$(git diff --name-only "${BASE_REF}...${HEAD_REF}")
+
+          TOUCHES_HIGH_RISK=false
+          HIGH_RISK_PATTERNS=(
+            "src/context/state.rs"
+            "src/agent/session.rs"
+            "src/llm/circuit_breaker.rs"
+            "src/llm/retry.rs"
+            "src/llm/failover.rs"
+            "src/agent/self_repair.rs"
+            "src/agent/agentic_loop.rs"
+            "src/tools/execute.rs"
+            "crates/ironclaw_safety/src/"
+          )
+
+          for pattern in "${HIGH_RISK_PATTERNS[@]}"; do
+            if echo "$CHANGED_FILES" | grep -q "$pattern"; then
+              TOUCHES_HIGH_RISK=true
+              echo "High-risk file matched: $pattern"
+              break
+            fi
+          done
+
+          # Skip only if NEITHER condition holds — no double-firing on fix PRs
+          if [ "$IS_FIX" = false ] && [ "$TOUCHES_HIGH_RISK" = false ]; then
+            echo "Not a fix PR and no high-risk files changed — skipping."
             exit 0
           fi
 
-          echo "Fix PR detected."
+          if [ "$IS_FIX" = true ]; then
+            echo "Fix PR detected."
+          fi
+          if [ "$TOUCHES_HIGH_RISK" = true ]; then
+            echo "High-risk state machine or resilience code modified."
+          fi
 
           # --- 2. Skip label or commit message marker ---
           if grep -qF ',skip-regression-check,' <<< ",$PR_LABELS,"; then
@@ -49,15 +86,13 @@ jobs:
             exit 0
           fi
 
-          COMMIT_BODIES=$(git log --format='%B' "${BASE_REF}..HEAD")
+          COMMIT_BODIES=$(git log --format='%B' "${BASE_REF}..${HEAD_REF}")
           if grep -qF '[skip-regression-check]' <<< "$COMMIT_BODIES"; then
             echo "[skip-regression-check] found in commit message — skipping."
             exit 0
           fi
 
           # --- 3. Exempt static-only / docs-only changes ---
-          CHANGED_FILES=$(git diff --name-only "${BASE_REF}...HEAD")
-
           if [ -z "$CHANGED_FILES" ]; then
             echo "No changed files — skipping."
             exit 0
@@ -80,13 +115,13 @@ jobs:
           # --- 4. Look for test changes ---
 
           # Fast path: new test attributes or test modules in added lines.
-          if git diff "${BASE_REF}...HEAD" -U0 -- '*.rs' | grep -qE '^\+.*(#\[test\]|#\[tokio::test\]|#\[cfg\(test\)\]|mod tests)'; then
+          if git diff "${BASE_REF}...${HEAD_REF}" -U0 -- '*.rs' | grep -qE '^\+.*(#\[test\]|#\[tokio::test\]|#\[cfg\(test\)\]|mod tests)'; then
             echo "Test changes found in .rs files."
             exit 0
           fi
 
           # Whole-function context: detect edits inside existing test functions.
-          if git diff "${BASE_REF}...HEAD" -W -- '*.rs' | awk '
+          if git diff "${BASE_REF}...${HEAD_REF}" -W -- '*.rs' | awk '
             /^@@/           { if (has_test && has_add) { found=1; exit } has_test=0; has_add=0 }
             /^ .*#\[test\]/ || /^ .*#\[tokio::test\]/ || /^ .*#\[cfg\(test\)\]/ || /^ .*mod tests/ { has_test=1 }
             /^\+.*#\[test\]/ || /^\+.*#\[tokio::test\]/ || /^\+.*#\[cfg\(test\)\]/ || /^\+.*mod tests/ { has_test=1 }
@@ -103,5 +138,12 @@ jobs:
           fi
 
           # --- 5. No tests found ---
-          echo "::warning::This PR looks like a bug fix but contains no test changes. Every fix should include a regression test. Add a #[test] or #[tokio::test], or apply the 'skip-regression-check' label if not feasible."
+          if [ "$IS_FIX" = true ]; then
+            echo "::warning::This PR looks like a bug fix but contains no test changes."
+          fi
+          if [ "$TOUCHES_HIGH_RISK" = true ]; then
+            echo "::warning::This PR modifies high-risk state machine or resilience code but includes no test changes."
+          fi
+          echo "::warning::Please add tests exercising the changed behavior, or apply the 'skip-regression-check' label if not feasible."
           exit 1
+
