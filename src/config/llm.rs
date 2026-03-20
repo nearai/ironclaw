@@ -188,8 +188,10 @@ impl LlmConfig {
                 .unwrap_or_else(|| "gpt-5.3-codex".to_string());
             let auth_endpoint = optional_env("OPENAI_CODEX_AUTH_URL")?
                 .unwrap_or_else(|| "https://auth.openai.com".to_string());
+            validate_base_url(&auth_endpoint, "OPENAI_CODEX_AUTH_URL")?;
             let api_base_url = optional_env("OPENAI_CODEX_API_URL")?
                 .unwrap_or_else(|| "https://chatgpt.com/backend-api/codex".to_string());
+            validate_base_url(&api_base_url, "OPENAI_CODEX_API_URL")?;
             let client_id = optional_env("OPENAI_CODEX_CLIENT_ID")?
                 .unwrap_or_else(|| "app_EMoamEEZ73f0CkXaXp7hrann".to_string());
             let session_path = optional_env("OPENAI_CODEX_SESSION_PATH")?
@@ -1202,5 +1204,64 @@ mod tests {
         let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
         let codex = cfg.openai_codex.expect("codex config should be present");
         assert_eq!(codex.model, "gpt-4o-mini");
+    }
+
+    /// Regression: SSRF validation on OPENAI_CODEX_API_URL (#1103).
+    #[test]
+    fn openai_codex_rejects_ssrf_api_url() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        clear_openai_codex_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::set_var(
+                "OPENAI_CODEX_API_URL",
+                "http://169.254.169.254/latest/meta-data",
+            );
+        }
+
+        let settings = Settings {
+            llm_backend: Some("openai_codex".to_string()),
+            ..Default::default()
+        };
+
+        let err = LlmConfig::resolve(&settings).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("OPENAI_CODEX_API_URL"),
+            "error should reference the field name: {msg}"
+        );
+
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("OPENAI_CODEX_API_URL");
+        }
+    }
+
+    /// Regression: SSRF validation on OPENAI_CODEX_AUTH_URL (#1103).
+    #[test]
+    fn openai_codex_rejects_ssrf_auth_url() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        clear_openai_codex_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::set_var("OPENAI_CODEX_AUTH_URL", "http://10.0.0.1");
+        }
+
+        let settings = Settings {
+            llm_backend: Some("openai_codex".to_string()),
+            ..Default::default()
+        };
+
+        let err = LlmConfig::resolve(&settings).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("OPENAI_CODEX_AUTH_URL"),
+            "error should reference the field name: {msg}"
+        );
+
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("OPENAI_CODEX_AUTH_URL");
+        }
     }
 }

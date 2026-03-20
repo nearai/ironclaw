@@ -758,23 +758,7 @@ fn parse_sse_response(body: &str) -> Result<ParsedResponse, LlmError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // Build a minimal JWT for testing (header.payload.signature)
-    fn make_test_jwt(account_id: &str) -> String {
-        use base64::Engine;
-        let engine = base64::engine::general_purpose::URL_SAFE_NO_PAD;
-
-        let header = engine.encode(b"{\"alg\":\"RS256\",\"typ\":\"JWT\"}");
-        let payload_json = serde_json::json!({
-            "sub": "user123",
-            "https://api.openai.com/auth": {
-                "chatgpt_account_id": account_id,
-            },
-        });
-        let payload = engine.encode(payload_json.to_string().as_bytes());
-        let sig = engine.encode(b"fake-signature");
-        format!("{header}.{payload}.{sig}")
-    }
+    use crate::llm::codex_test_helpers::make_test_jwt;
 
     #[test]
     fn test_extract_account_id_success() {

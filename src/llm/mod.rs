@@ -33,6 +33,9 @@ pub mod session;
 pub mod smart_routing;
 mod token_refreshing;
 
+#[cfg(test)]
+mod codex_test_helpers;
+
 pub mod image_models;
 pub mod models;
 pub mod reasoning_models;

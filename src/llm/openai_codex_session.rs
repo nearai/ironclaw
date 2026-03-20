@@ -403,9 +403,10 @@ impl OpenAiCodexSessionManager {
                 });
             }
 
-            // Slow down on 429
+            // Slow down on 429, cap at 60s to avoid unbounded growth
             if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-                interval += std::time::Duration::from_secs(5);
+                interval = (interval + std::time::Duration::from_secs(5))
+                    .min(std::time::Duration::from_secs(60));
                 continue;
             }
 
@@ -458,7 +459,12 @@ impl OpenAiCodexSessionManager {
         let session = OpenAiCodexSession {
             access_token: token_resp.access_token,
             refresh_token: token_resp.refresh_token,
-            expires_at: Utc::now() + chrono::Duration::seconds(token_resp.expires_in as i64),
+            expires_at: Utc::now()
+                + chrono::Duration::seconds(if token_resp.expires_in > 0 {
+                    token_resp.expires_in
+                } else {
+                    3600
+                } as i64),
             created_at: Utc::now(),
         };
 
@@ -526,7 +532,12 @@ impl OpenAiCodexSessionManager {
         let session = OpenAiCodexSession {
             access_token: token_resp.access_token,
             refresh_token: token_resp.refresh_token,
-            expires_at: Utc::now() + chrono::Duration::seconds(token_resp.expires_in as i64),
+            expires_at: Utc::now()
+                + chrono::Duration::seconds(if token_resp.expires_in > 0 {
+                    token_resp.expires_in
+                } else {
+                    3600
+                } as i64),
             created_at: Utc::now(),
         };
 
@@ -624,18 +635,8 @@ impl OpenAiCodexSessionManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::llm::codex_test_helpers::test_codex_config as test_config;
     use tempfile::tempdir;
-
-    fn test_config(session_path: std::path::PathBuf) -> OpenAiCodexConfig {
-        OpenAiCodexConfig {
-            model: "gpt-5.3-codex".to_string(),
-            auth_endpoint: "https://auth.openai.com".to_string(),
-            api_base_url: "https://chatgpt.com/backend-api/codex".to_string(),
-            client_id: "test_client_id".to_string(),
-            session_path,
-            token_refresh_margin_secs: 300,
-        }
-    }
 
     #[tokio::test]
     async fn test_save_and_load_session() {
