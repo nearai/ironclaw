@@ -231,6 +231,19 @@ impl ToolSchema {
     }
 }
 
+/// Curated discovery guidance surfaced by `tool_info(detail: "summary")`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ToolDiscoverySummary {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub always_required: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conditional_requirements: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub examples: Vec<serde_json::Value>,
+}
+
 /// Trait for tools that the agent can use.
 #[async_trait]
 pub trait Tool: Send + Sync {
@@ -347,12 +360,32 @@ pub trait Tool: Send + Sync {
         self.parameters_schema()
     }
 
+    /// Curated discovery guidance used by `tool_info(detail: "summary")`.
+    ///
+    /// Default: no custom summary; callers may derive a minimal fallback from
+    /// `discovery_schema()`.
+    fn discovery_summary(&self) -> Option<ToolDiscoverySummary> {
+        None
+    }
+
     /// Get the tool schema for LLM function calling.
     fn schema(&self) -> ToolSchema {
+        let parameters = self.parameters_schema();
+        let has_discovery_hint =
+            self.discovery_summary().is_some() || self.discovery_schema() != parameters;
+        let description = if has_discovery_hint {
+            format!(
+                "{} (call tool_info(name: \"{}\", detail: \"summary\") for rules/examples or detail: \"schema\" for the full discovery schema)",
+                self.description(),
+                self.name()
+            )
+        } else {
+            self.description().to_string()
+        };
         ToolSchema {
             name: self.name().to_string(),
-            description: self.description().to_string(),
-            parameters: self.parameters_schema(),
+            description,
+            parameters,
         }
     }
 }
@@ -430,8 +463,23 @@ pub fn redact_params(params: &serde_json::Value, sensitive: &[&str]) -> serde_js
 /// Properties without a `"type"` field are allowed (freeform/any-type).
 /// This is an intentional pattern used by tools like `json` and `http` for
 /// OpenAI compatibility, since union types with arrays require `items`.
+/// Maximum nesting depth for tool schema validation to prevent stack overflow
+/// on maliciously crafted schemas.
+const MAX_SCHEMA_DEPTH: usize = 16;
+
 pub fn validate_tool_schema(schema: &serde_json::Value, path: &str) -> Vec<String> {
+    validate_tool_schema_inner(schema, path, 0)
+}
+
+fn validate_tool_schema_inner(schema: &serde_json::Value, path: &str, depth: usize) -> Vec<String> {
     let mut errors = Vec::new();
+
+    if depth > MAX_SCHEMA_DEPTH {
+        errors.push(format!(
+            "{path}: schema nesting exceeds maximum depth of {MAX_SCHEMA_DEPTH}"
+        ));
+        return errors;
+    }
 
     // Rule 1: must have "type": "object" at this level
     match schema.get("type").and_then(|t| t.as_str()) {
@@ -474,14 +522,17 @@ pub fn validate_tool_schema(schema: &serde_json::Value, path: &str) -> Vec<Strin
         if let Some(prop_type) = prop.get("type").and_then(|t| t.as_str()) {
             match prop_type {
                 "object" => {
-                    errors.extend(validate_tool_schema(prop, &prop_path));
+                    errors.extend(validate_tool_schema_inner(prop, &prop_path, depth + 1));
                 }
                 "array" => {
                     if let Some(items) = prop.get("items") {
                         // If items is an object type, recurse
                         if items.get("type").and_then(|t| t.as_str()) == Some("object") {
-                            errors
-                                .extend(validate_tool_schema(items, &format!("{prop_path}.items")));
+                            errors.extend(validate_tool_schema_inner(
+                                items,
+                                &format!("{prop_path}.items"),
+                                depth + 1,
+                            ));
                         }
                     } else {
                         errors.push(format!("{prop_path}: array property missing \"items\""));
@@ -808,6 +859,33 @@ mod tests {
         assert_eq!(errors.len(), 1);
         assert!(errors[0].contains("headers.items"));
         assert!(errors[0].contains("\"missing_field\""));
+    }
+
+    /// Regression test for issue #975: deeply nested schemas must not cause
+    /// stack overflow. The validator should stop at MAX_SCHEMA_DEPTH and
+    /// report an error instead of recursing infinitely.
+    #[test]
+    fn test_validate_schema_depth_limit() {
+        // Build a schema nested 20 levels deep (exceeds MAX_SCHEMA_DEPTH=16)
+        let mut schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "leaf": { "type": "string" }
+            }
+        });
+        for _ in 0..20 {
+            schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "nested": schema
+                }
+            });
+        }
+        let errors = validate_tool_schema(&schema, "test");
+        assert!(
+            errors.iter().any(|e| e.contains("maximum depth")),
+            "expected depth limit error, got: {errors:?}"
+        );
     }
 
     #[test]

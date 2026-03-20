@@ -109,3 +109,59 @@ pub fn create_secrets_store(
 
     store
 }
+
+/// Try to resolve an existing master key from env var or OS keychain.
+///
+/// Resolution order:
+/// 1. `SECRETS_MASTER_KEY` environment variable (hex-encoded)
+/// 2. OS keychain (macOS Keychain / Linux secret-service)
+///
+/// Returns `None` if no key is available (caller should generate one).
+pub async fn resolve_master_key() -> Option<String> {
+    // 1. Check env var
+    if let Ok(env_key) = std::env::var("SECRETS_MASTER_KEY")
+        && !env_key.is_empty()
+    {
+        return Some(env_key);
+    }
+
+    // 2. Try OS keychain
+    if let Ok(keychain_key_bytes) = keychain::get_master_key().await {
+        let key_hex: String = keychain_key_bytes
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect();
+        return Some(key_hex);
+    }
+
+    None
+}
+
+/// Create a `SecretsCrypto` from a master key string.
+///
+/// The key is typically hex-encoded (from `generate_master_key_hex` or
+/// the `SECRETS_MASTER_KEY` env var), but `SecretsCrypto::new` validates
+/// only key length, not encoding. Any sufficiently long string works.
+pub fn crypto_from_hex(hex: &str) -> Result<std::sync::Arc<SecretsCrypto>, SecretError> {
+    let crypto = SecretsCrypto::new(secrecy::SecretString::from(hex.to_string()))?;
+    Ok(std::sync::Arc::new(crypto))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_crypto_from_hex_valid() {
+        // 32 bytes = 64 hex chars
+        let hex = "0123456789abcdef".repeat(4); // 64 hex chars
+        let result = crypto_from_hex(&hex);
+        assert!(result.is_ok()); // safety: test assertion
+    }
+
+    #[test]
+    fn test_crypto_from_hex_invalid() {
+        let result = crypto_from_hex("too_short");
+        assert!(result.is_err()); // safety: test assertion
+    }
+}

@@ -17,7 +17,7 @@ use crate::error::{Error, JobError};
 use crate::hooks::HookRegistry;
 use crate::llm::LlmProvider;
 use crate::safety::SafetyLayer;
-use crate::tools::{ApprovalContext, ToolRegistry};
+use crate::tools::{ApprovalContext, ToolRegistry, prepare_tool_params};
 use crate::worker::job::{Worker, WorkerDeps};
 
 /// Message to send to a worker.
@@ -179,27 +179,33 @@ impl Scheduler {
             })
             .unwrap_or(self.config.max_tokens_per_job);
 
-        // Apply both metadata and token budget in one closure (Issue #813: atomic update)
-        if let Some(meta) = metadata {
+        // Apply both metadata and token budget in one closure (Issue #813: atomic update).
+        // Use update_context_and_get to ensure atomicity: no gap where concurrent workers
+        // can modify the context between update and DB persist (Issue #807).
+        let ctx = if let Some(meta) = metadata {
             self.context_manager
-                .update_context(job_id, |ctx| {
+                .update_context_and_get(job_id, |ctx| {
                     ctx.metadata = meta;
                     if max_tokens > 0 {
                         ctx.max_tokens = max_tokens;
                     }
                 })
-                .await?;
+                .await?
         } else if max_tokens > 0 {
             self.context_manager
-                .update_context(job_id, |ctx| {
+                .update_context_and_get(job_id, |ctx| {
                     ctx.max_tokens = max_tokens;
                 })
-                .await?;
-        }
+                .await?
+        } else {
+            // No metadata or token budget to set; get the initial context
+            self.context_manager.get_context(job_id).await?
+        };
 
-        // Persist to DB before scheduling so the worker's FK references are valid
+        // Persist to DB before scheduling so the worker's FK references are valid.
+        // The context was read under the same lock as the update (atomic), preventing
+        // concurrent worker interference (Issue #807: non-transactional context updates).
         if let Some(ref store) = self.store {
-            let ctx = self.context_manager.get_context(job_id).await?;
             store.save_job(&ctx).await.map_err(|e| JobError::Failed {
                 id: job_id,
                 reason: format!("failed to persist job: {e}"),
@@ -505,8 +511,10 @@ impl Scheduler {
             .into());
         }
 
+        let normalized_params = prepare_tool_params(tool.as_ref(), &params);
+
         // Scheduler-specific approval check
-        let requirement = tool.requires_approval(&params);
+        let requirement = tool.requires_approval(&normalized_params);
         let blocked =
             ApprovalContext::is_blocked_or_default(&approval_context, tool_name, requirement);
         if blocked {
@@ -518,7 +526,11 @@ impl Scheduler {
 
         // Delegate to shared tool execution pipeline
         let output_str = crate::tools::execute::execute_tool_with_safety(
-            &tools, &safety, tool_name, &params, &job_ctx,
+            &tools,
+            &safety,
+            tool_name,
+            &normalized_params,
+            &job_ctx,
         )
         .await?;
 
@@ -833,6 +845,24 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn test_dispatch_job_no_metadata_no_user_tokens_edge_case() {
+        // Edge case coverage: when metadata=None AND max_tokens=0 (config),
+        // the else branch calls get_context() directly (not update_context_and_get).
+        // This test verifies that path works correctly (Issue #807: full branch coverage).
+        let sched = make_test_scheduler(0); // 0 = unlimited, but user provides None
+        let job_id = sched
+            .dispatch_job("user1", "test", "desc", None) // None metadata
+            .await
+            .unwrap(); // safety: test code
+
+        let ctx = sched.context_manager.get_context(job_id).await.unwrap(); // safety: test code
+        // No metadata was set, should have default empty metadata
+        assert!(ctx.metadata.is_null() || ctx.metadata == serde_json::json!({})); // safety: test code
+        // No user tokens AND unlimited config means max_tokens stays at default
+        assert_eq!(ctx.max_tokens, 0, "unlimited config"); // safety: test code
+    }
+
     #[test]
     fn test_scheduler_creation() {
         // Would need to mock dependencies for proper testing
@@ -1039,6 +1069,81 @@ mod tests {
         assert!(
             result.is_ok(),
             "hard_gate should pass with explicit permission"
+        );
+    }
+
+    struct NormalizedApprovalTool;
+
+    #[async_trait::async_trait]
+    impl Tool for NormalizedApprovalTool {
+        fn name(&self) -> &str {
+            "normalized_gate"
+        }
+        fn description(&self) -> &str {
+            "approval depends on normalized params"
+        }
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "safe": { "type": "boolean" }
+                }
+            })
+        }
+        async fn execute(
+            &self,
+            _params: serde_json::Value,
+            _ctx: &JobContext,
+        ) -> Result<ToolOutput, ToolError> {
+            Ok(ToolOutput::text(
+                "normalized_ok",
+                std::time::Instant::now().elapsed(),
+            ))
+        }
+        fn requires_approval(&self, params: &serde_json::Value) -> ApprovalRequirement {
+            if params.get("safe").and_then(|v| v.as_bool()) == Some(true) {
+                ApprovalRequirement::Never
+            } else {
+                ApprovalRequirement::Always
+            }
+        }
+        fn requires_sanitization(&self) -> bool {
+            false
+        }
+    }
+
+    #[tokio::test]
+    async fn test_execute_tool_task_normalizes_params_before_approval() {
+        let registry = ToolRegistry::new();
+        registry.register(Arc::new(NormalizedApprovalTool)).await;
+
+        let cm = Arc::new(ContextManager::new(5));
+        let job_id = cm.create_job("test", "normalized approval").await.unwrap(); // safety: test-only setup
+        cm.update_context(job_id, |ctx| ctx.transition_to(JobState::InProgress, None))
+            .await
+            .unwrap() // safety: test-only setup
+            .unwrap(); // safety: test-only setup
+
+        let safety = Arc::new(SafetyLayer::new(&SafetyConfig {
+            max_output_length: 100_000,
+            injection_check_enabled: false,
+        }));
+
+        let result = Scheduler::execute_tool_task(
+            Arc::new(registry),
+            cm,
+            safety,
+            None,
+            job_id,
+            "normalized_gate",
+            serde_json::json!({"safe": "true"}),
+        )
+        .await;
+
+        #[rustfmt::skip]
+        assert!( // safety: test-only assertion
+            result.is_ok(),
+            "stringified boolean should normalize before approval: {result:?}"
         );
     }
 }

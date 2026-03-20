@@ -1,13 +1,15 @@
 //! Routine-related RoutineStore implementation for LibSqlBackend.
 
+use std::collections::{HashMap, HashSet};
+
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use libsql::params;
 use uuid::Uuid;
 
 use super::{
-    LibSqlBackend, ROUTINE_COLUMNS, ROUTINE_RUN_COLUMNS, fmt_opt_ts, fmt_ts, get_i64, opt_text,
-    opt_text_owned, row_to_routine_libsql, row_to_routine_run_libsql,
+    LibSqlBackend, ROUTINE_COLUMNS, ROUTINE_RUN_COLUMNS, fmt_opt_ts, fmt_ts, get_i64, get_text,
+    opt_text, opt_text_owned, row_to_routine_libsql, row_to_routine_run_libsql,
 };
 use crate::agent::routine::{Routine, RoutineRun, RunStatus};
 use crate::db::RoutineStore;
@@ -55,7 +57,7 @@ impl RoutineStore for LibSqlBackend {
                     max_concurrent,
                     dedup_window_secs,
                     opt_text(routine.notify.channel.as_deref()),
-                    routine.notify.user.as_str(),
+                    opt_text(routine.notify.user.as_deref()),
                     routine.notify.on_success as i64,
                     routine.notify.on_failure as i64,
                     routine.notify.on_attention as i64,
@@ -248,7 +250,7 @@ impl RoutineStore for LibSqlBackend {
                 max_concurrent,
                 dedup_window_secs,
                 opt_text(routine.notify.channel.as_deref()),
-                routine.notify.user.as_str(),
+                opt_text(routine.notify.user.as_deref()),
                 routine.notify.on_success as i64,
                 routine.notify.on_failure as i64,
                 routine.notify.on_attention as i64,
@@ -409,6 +411,57 @@ impl RoutineStore for LibSqlBackend {
         }
     }
 
+    async fn count_running_routine_runs_batch(
+        &self,
+        routine_ids: &[Uuid],
+    ) -> Result<HashMap<Uuid, i64>, DatabaseError> {
+        if routine_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let mut counts = HashMap::new();
+        let conn = self.connect().await?;
+
+        // Query all running routines and filter in memory
+        // This is simpler for libSQL than building dynamic parameter lists
+        let mut rows = conn
+            .query(
+                "SELECT routine_id, COUNT(*) as cnt FROM routine_runs
+                 WHERE status = 'running'
+                 GROUP BY routine_id",
+                params![],
+            )
+            .await
+            .map_err(|e| {
+                DatabaseError::Query(format!("Failed to batch count running routines: {}", e))
+            })?;
+
+        let routine_id_set: HashSet<Uuid> = routine_ids.iter().copied().collect();
+
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        {
+            let id_str: String = get_text(&row, 0);
+            let id = Uuid::parse_str(&id_str)
+                .map_err(|e| DatabaseError::Query(format!("Invalid routine UUID: {}", e)))?;
+
+            // Only include if this routine ID was requested
+            if routine_id_set.contains(&id) {
+                let cnt: i64 = get_i64(&row, 1);
+                counts.insert(id, cnt);
+            }
+        }
+
+        // Ensure all requested IDs are in the map (defaults to 0 for no running runs)
+        for id in routine_ids {
+            counts.entry(*id).or_insert(0);
+        }
+
+        Ok(counts)
+    }
+
     async fn link_routine_run_to_job(
         &self,
         run_id: Uuid,
@@ -422,5 +475,29 @@ impl RoutineStore for LibSqlBackend {
         .await
         .map_err(|e| DatabaseError::Query(e.to_string()))?;
         Ok(())
+    }
+
+    async fn list_dispatched_routine_runs(&self) -> Result<Vec<RoutineRun>, DatabaseError> {
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                &format!(
+                    "SELECT {} FROM routine_runs WHERE status = 'running' AND job_id IS NOT NULL",
+                    ROUTINE_RUN_COLUMNS
+                ),
+                params![],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        let mut runs = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        {
+            runs.push(row_to_routine_run_libsql(&row)?);
+        }
+        Ok(runs)
     }
 }

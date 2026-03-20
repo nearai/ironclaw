@@ -143,6 +143,7 @@ impl SseManager {
                     SseEvent::JobResult { .. } => "job_result",
                     SseEvent::Heartbeat => "heartbeat",
                     SseEvent::ImageGenerated { .. } => "image_generated",
+                    SseEvent::Suggestions { .. } => "suggestions",
                     SseEvent::ExtensionStatus { .. } => "extension_status",
                 };
                 Ok(Event::default().event(event_type).data(data))

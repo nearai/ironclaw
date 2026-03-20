@@ -1,0 +1,46 @@
+{
+  "model_name": "advanced-routine-event-any-channel",
+  "expects": {
+    "tools_used": ["routine_create"],
+    "all_tools_succeeded": true,
+    "min_responses": 1
+  },
+  "steps": [
+    {
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_routine_create_event_any_channel",
+            "name": "routine_create",
+            "arguments": {
+              "name": "any-channel-bug-watcher",
+              "description": "Watch bug reports from any incoming channel.",
+              "trigger_type": "event",
+              "event_pattern": "^bug\\b",
+              "prompt": "Summarize the bug report in one line."
+            }
+          }
+        ],
+        "input_tokens": 130,
+        "output_tokens": 38
+      }
+    },
+    {
+      "response": {
+        "type": "text",
+        "content": "Created the any-channel-bug-watcher routine for bug messages.",
+        "input_tokens": 170,
+        "output_tokens": 18
+      }
+    },
+    {
+      "response": {
+        "type": "text",
+        "content": "Bug report detected: login button broken.",
+        "input_tokens": 120,
+        "output_tokens": 14
+      }
+    }
+  ]
+}

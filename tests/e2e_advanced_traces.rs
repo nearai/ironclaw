@@ -9,6 +9,10 @@ mod support;
 mod advanced {
     use std::time::Duration;
 
+    use ironclaw::agent::routine::Trigger;
+    use ironclaw::channels::IncomingMessage;
+    use ironclaw::db::Database;
+
     use crate::support::cleanup::CleanupGuard;
     use crate::support::test_rig::TestRigBuilder;
     use crate::support::trace_llm::LlmTrace;
@@ -18,6 +22,28 @@ mod advanced {
         "/tests/fixtures/llm_traces/advanced"
     );
     const TIMEOUT: Duration = Duration::from_secs(30);
+
+    async fn wait_for_routine_run(
+        db: &std::sync::Arc<dyn Database>,
+        routine_id: uuid::Uuid,
+        timeout: Duration,
+    ) -> Vec<ironclaw::agent::routine::RoutineRun> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let runs = db
+                .list_routine_runs(routine_id, 10)
+                .await
+                .expect("list_routine_runs");
+            if !runs.is_empty() {
+                return runs;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "timed out waiting for routine run"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
 
     // -----------------------------------------------------------------------
     // 1. Multi-turn memory coherence
@@ -381,6 +407,150 @@ mod advanced {
     }
 
     // -----------------------------------------------------------------------
+    // 6b. Event routine: Telegram-scoped trigger fires on matching message
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn routine_event_trigger_telegram_channel_fires() {
+        let trace = LlmTrace::from_file(format!("{FIXTURES}/routine_event_telegram.json")).unwrap();
+        let rig = TestRigBuilder::new()
+            .with_trace(trace.clone())
+            .with_routines()
+            .with_auto_approve_tools(true)
+            .build()
+            .await;
+
+        rig.send_message(
+            "Create a routine that watches Telegram messages starting with 'bug:' and alerts me.",
+        )
+        .await;
+        let create_responses = rig.wait_for_responses(1, TIMEOUT).await;
+        rig.verify_trace_expects(&trace, &create_responses);
+
+        let routine = rig
+            .database()
+            .get_routine_by_name("test-user", "telegram-bug-watcher")
+            .await
+            .expect("get_routine_by_name")
+            .expect("telegram-bug-watcher should exist");
+
+        match &routine.trigger {
+            Trigger::Event { channel, pattern } => {
+                assert_eq!(channel.as_deref(), Some("telegram"));
+                assert_eq!(pattern, "^bug\\b");
+            }
+            other => panic!("expected event trigger, got {other:?}"),
+        }
+
+        rig.clear().await;
+        let llm_calls_before = rig.llm_call_count();
+
+        rig.send_incoming(IncomingMessage::new(
+            "telegram",
+            "test-user",
+            "bug: home button broken",
+        ))
+        .await;
+
+        let runs = wait_for_routine_run(rig.database(), routine.id, TIMEOUT).await;
+        assert_eq!(runs[0].trigger_type, "event");
+        assert_eq!(
+            rig.llm_call_count(),
+            llm_calls_before + 1,
+            "matching event message should only trigger the routine LLM call"
+        );
+
+        let responses = rig.wait_for_responses(1, TIMEOUT).await;
+        assert_eq!(
+            responses.len(),
+            1,
+            "expected only the routine notification after the matching event"
+        );
+        assert!(
+            responses.iter().any(|response| {
+                response
+                    .metadata
+                    .get("source")
+                    .and_then(|value| value.as_str())
+                    == Some("routine")
+                    && response.content.contains("telegram-bug-watcher")
+                    && response.content.contains("Bug report detected")
+            }),
+            "expected routine notification in responses: {responses:?}"
+        );
+
+        rig.shutdown();
+    }
+
+    // -----------------------------------------------------------------------
+    // 6c. Event routine without channel filter still fires on Telegram
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn routine_event_trigger_without_channel_filter_still_fires() {
+        let trace =
+            LlmTrace::from_file(format!("{FIXTURES}/routine_event_any_channel.json")).unwrap();
+        let rig = TestRigBuilder::new()
+            .with_trace(trace)
+            .with_routines()
+            .with_auto_approve_tools(true)
+            .build()
+            .await;
+
+        rig.send_message(
+            "Create a routine that watches messages starting with 'bug:' and alerts me.",
+        )
+        .await;
+        let _ = rig.wait_for_responses(1, TIMEOUT).await;
+
+        let routine = rig
+            .database()
+            .get_routine_by_name("test-user", "any-channel-bug-watcher")
+            .await
+            .expect("get_routine_by_name")
+            .expect("any-channel-bug-watcher should exist");
+
+        match &routine.trigger {
+            Trigger::Event { channel, pattern } => {
+                assert_eq!(channel, &None);
+                assert_eq!(pattern, "^bug\\b");
+            }
+            other => panic!("expected event trigger, got {other:?}"),
+        }
+
+        rig.clear().await;
+        let llm_calls_before = rig.llm_call_count();
+
+        rig.send_incoming(IncomingMessage::new(
+            "telegram",
+            "test-user",
+            "bug: login button broken",
+        ))
+        .await;
+
+        let runs = wait_for_routine_run(rig.database(), routine.id, TIMEOUT).await;
+        assert_eq!(runs[0].trigger_type, "event");
+        assert_eq!(
+            rig.llm_call_count(),
+            llm_calls_before + 1,
+            "matching event message should only trigger the routine LLM call"
+        );
+
+        let responses = rig.wait_for_responses(1, TIMEOUT).await;
+        assert_eq!(
+            responses.len(),
+            1,
+            "expected only the routine notification after the matching event"
+        );
+        assert!(
+            responses[0].content.contains("Bug report detected"),
+            "expected routine notification, got: {responses:?}"
+        );
+
+        rig.shutdown();
+    }
+
+    // -----------------------------------------------------------------------
     // 7. Prompt injection resilience
     // -----------------------------------------------------------------------
 
@@ -533,6 +703,212 @@ mod advanced {
         assert!(failed.is_empty(), "Tools failed: {failed:?}");
 
         mock_server.shutdown().await;
+        rig.shutdown();
+    }
+
+    // -----------------------------------------------------------------------
+    // 9. Bootstrap greeting fires on fresh workspace
+    // -----------------------------------------------------------------------
+
+    /// Verifies that a fresh workspace triggers a static bootstrap greeting
+    /// before the user sends any message (no LLM call needed).
+    #[tokio::test]
+    async fn bootstrap_greeting_fires() {
+        let rig = TestRigBuilder::new().with_bootstrap().build().await;
+
+        // The static bootstrap greeting should arrive without us sending any
+        // message and without an LLM call.
+        let responses = rig.wait_for_responses(1, TIMEOUT).await;
+        assert!(
+            !responses.is_empty(),
+            "bootstrap greeting should produce a response"
+        );
+        let greeting = &responses[0].content;
+        assert!(
+            greeting.contains("chief of staff"),
+            "bootstrap greeting should contain the static text, got: {greeting}"
+        );
+
+        // The bootstrap greeting must carry a thread_id so the gateway can
+        // route it to the correct assistant conversation.
+        assert!(
+            responses[0].thread_id.is_some(),
+            "bootstrap greeting response should have a thread_id set"
+        );
+
+        rig.shutdown();
+    }
+
+    // -----------------------------------------------------------------------
+    // 10. Bootstrap onboarding completes and clears BOOTSTRAP.md
+    // -----------------------------------------------------------------------
+
+    /// Exercises the full onboarding flow: bootstrap greeting fires, user
+    /// converses for 3 turns, agent writes profile + memory + identity,
+    /// clears BOOTSTRAP.md, and the workspace reflects all writes.
+    #[tokio::test]
+    async fn bootstrap_onboarding_clears_bootstrap() {
+        use ironclaw::workspace::paths;
+
+        let trace = LlmTrace::from_file(format!("{FIXTURES}/bootstrap_onboarding.json")).unwrap();
+        let rig = TestRigBuilder::new()
+            .with_trace(trace.clone())
+            .with_bootstrap()
+            .build()
+            .await;
+
+        // 1. Wait for the static bootstrap greeting (no user message needed).
+        let greeting_responses = rig.wait_for_responses(1, TIMEOUT).await;
+        assert!(
+            !greeting_responses.is_empty(),
+            "bootstrap greeting should arrive"
+        );
+        assert!(
+            greeting_responses[0].content.contains("chief of staff"),
+            "expected bootstrap greeting, got: {}",
+            greeting_responses[0].content
+        );
+
+        // 2. BOOTSTRAP.md should exist (non-empty) before onboarding completes.
+        let ws = rig.workspace().expect("workspace should exist");
+        let bootstrap_before = ws.read(paths::BOOTSTRAP).await;
+        assert!(
+            bootstrap_before.is_ok_and(|d| !d.content.is_empty()),
+            "BOOTSTRAP.md should be non-empty before onboarding"
+        );
+
+        // 3. Run the 3-turn conversation. The trace has the agent write
+        //    profile, memory, identity, and then clear bootstrap.
+        let mut total = 1; // already have the greeting
+        for turn in &trace.turns {
+            rig.send_message(&turn.user_input).await;
+            total += 1;
+            let _ = rig.wait_for_responses(total, TIMEOUT).await;
+        }
+
+        // 4. Verify all memory_write calls succeeded.
+        let completed = rig.tool_calls_completed();
+        let memory_writes: Vec<_> = completed
+            .iter()
+            .filter(|(name, _)| name == "memory_write")
+            .collect();
+        assert!(
+            memory_writes.len() >= 4,
+            "expected at least 4 memory_write calls (profile, memory, identity, bootstrap), got: {memory_writes:?}"
+        );
+        assert!(
+            memory_writes.iter().all(|(_, ok)| *ok),
+            "all memory_write calls should succeed: {memory_writes:?}"
+        );
+
+        // 5. BOOTSTRAP.md should now be empty (cleared by memory_write target=bootstrap).
+        let bootstrap_after = ws.read(paths::BOOTSTRAP).await.expect("read BOOTSTRAP");
+        assert!(
+            bootstrap_after.content.is_empty(),
+            "BOOTSTRAP.md should be empty after onboarding, got: {:?}",
+            bootstrap_after.content
+        );
+
+        // 6. The bootstrap-completed flag should be set (prevents re-injection).
+        assert!(
+            ws.is_bootstrap_completed(),
+            "bootstrap_completed flag should be set after profile write"
+        );
+
+        // 7. Profile should exist in workspace with expected fields.
+        let profile = ws.read(paths::PROFILE).await.expect("read profile");
+        assert!(
+            !profile.content.is_empty(),
+            "profile.json should not be empty"
+        );
+        assert!(
+            profile.content.contains("Alex"),
+            "profile should contain preferred_name, got: {:?}",
+            &profile.content[..profile.content.len().min(200)]
+        );
+
+        // Try parsing the stored profile to catch deserialization issues early.
+        let stored = ws
+            .read(paths::PROFILE)
+            .await
+            .expect("read profile for deser test");
+        let deser_result =
+            serde_json::from_str::<ironclaw::profile::PsychographicProfile>(&stored.content);
+        assert!(
+            deser_result.is_ok(),
+            "profile should deserialize: {:?}\ncontent: {:?}",
+            deser_result.err(),
+            &stored.content[..stored.content.len().min(300)]
+        );
+        let parsed = deser_result.unwrap();
+        assert!(
+            parsed.is_populated(),
+            "profile should be populated: name={:?}, profession={:?}, goals={:?}",
+            parsed.preferred_name,
+            parsed.context.profession,
+            parsed.assistance.goals
+        );
+
+        // Manually trigger sync.
+        let synced = ws
+            .sync_profile_documents()
+            .await
+            .expect("sync_profile_documents");
+        assert!(
+            synced,
+            "sync_profile_documents should return true for a populated profile"
+        );
+        assert!(
+            profile.content.contains("backend engineer"),
+            "profile should contain profession"
+        );
+        assert!(
+            profile.content.contains("distributed systems"),
+            "profile should contain interests"
+        );
+
+        // 8. USER.md should have been synced from the profile via sync_profile_documents().
+        let user_doc = ws.read(paths::USER).await.expect("read USER.md");
+        assert!(
+            user_doc.content.contains("Alex"),
+            "USER.md should contain user name from profile, got: {:?}",
+            &user_doc.content[..user_doc.content.len().min(300)]
+        );
+        assert!(
+            user_doc.content.contains("direct"),
+            "USER.md should contain communication tone from profile, got: {:?}",
+            &user_doc.content[..user_doc.content.len().min(300)]
+        );
+        assert!(
+            user_doc.content.contains("backend engineer"),
+            "USER.md should contain profession from profile, got: {:?}",
+            &user_doc.content[..user_doc.content.len().min(300)]
+        );
+
+        // 9. Assistant directives should have been synced from the profile.
+        let directives = ws
+            .read(paths::ASSISTANT_DIRECTIVES)
+            .await
+            .expect("read assistant-directives.md");
+        assert!(
+            directives.content.contains("Alex"),
+            "assistant-directives should reference user name, got: {:?}",
+            &directives.content[..directives.content.len().min(300)]
+        );
+        assert!(
+            directives.content.contains("direct"),
+            "assistant-directives should reflect communication style, got: {:?}",
+            &directives.content[..directives.content.len().min(300)]
+        );
+
+        // 10. IDENTITY.md should have been written by the agent.
+        let identity = ws.read(paths::IDENTITY).await.expect("read IDENTITY.md");
+        assert!(
+            identity.content.contains("Claw"),
+            "IDENTITY.md should contain the chosen agent name, got: {:?}",
+            identity.content
+        );
+
         rig.shutdown();
     }
 }

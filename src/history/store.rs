@@ -1,5 +1,8 @@
 //! PostgreSQL store for persisting agent data.
 
+#[cfg(feature = "postgres")]
+use std::collections::HashMap;
+
 use chrono::{DateTime, Utc};
 #[cfg(feature = "postgres")]
 use deadpool_postgres::{Config, Pool};
@@ -224,6 +227,7 @@ impl Store {
                     job_id: row.get("id"),
                     state,
                     user_id: row.get::<_, String>("user_id"),
+                    requester_id: None,
                     conversation_id: row.get("conversation_id"),
                     title: row.get("title"),
                     description: row.get("description"),
@@ -1294,6 +1298,42 @@ impl Store {
         Ok(row.get("cnt"))
     }
 
+    /// Batch-load concurrent run counts for multiple routines in a single query.
+    /// Returns a map where missing routine IDs default to 0.
+    #[cfg(feature = "postgres")]
+    pub async fn count_running_routine_runs_batch(
+        &self,
+        routine_ids: &[Uuid],
+    ) -> Result<HashMap<Uuid, i64>, DatabaseError> {
+        if routine_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let conn = self.conn().await?;
+        let rows = conn
+            .query(
+                "SELECT routine_id, COUNT(*) as cnt FROM routine_runs
+                 WHERE routine_id = ANY($1) AND status = 'running'
+                 GROUP BY routine_id",
+                &[&routine_ids],
+            )
+            .await?;
+
+        let mut counts = HashMap::new();
+        for row in rows {
+            let id: Uuid = row.get("routine_id");
+            let cnt: i64 = row.get("cnt");
+            counts.insert(id, cnt);
+        }
+
+        // Ensure all requested IDs are in the map (defaults to 0 for no running runs)
+        for id in routine_ids {
+            counts.entry(*id).or_insert(0);
+        }
+
+        Ok(counts)
+    }
+
     /// Link a routine run to a dispatched job.
     pub async fn link_routine_run_to_job(
         &self,
@@ -1307,6 +1347,18 @@ impl Store {
         )
         .await?;
         Ok(())
+    }
+
+    /// List routine runs dispatched as full_job that have not yet been finalized.
+    pub async fn list_dispatched_routine_runs(&self) -> Result<Vec<RoutineRun>, DatabaseError> {
+        let conn = self.conn().await?;
+        let rows = conn
+            .query(
+                "SELECT * FROM routine_runs WHERE status = 'running' AND job_id IS NOT NULL",
+                &[],
+            )
+            .await?;
+        rows.iter().map(row_to_routine_run).collect()
     }
 }
 
