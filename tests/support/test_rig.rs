@@ -578,6 +578,7 @@ impl TestRigBuilder {
                     None,
                     components.tools.clone(),
                     components.safety.clone(),
+                    ironclaw::agent::SandboxReadiness::Available, // tests don't use real Docker
                 ));
                 components
                     .tools
@@ -642,6 +643,7 @@ impl TestRigBuilder {
             },
             transcription: None,
             document_extraction: None,
+            sandbox_readiness: ironclaw::agent::SandboxReadiness::Available, // tests don't use real Docker
             builder: None,
         };
 

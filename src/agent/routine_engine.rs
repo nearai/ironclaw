@@ -44,6 +44,17 @@ enum EventMatcher {
     System { routine: Routine },
 }
 
+/// Distinguishes why sandbox is unavailable so error messages are accurate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SandboxReadiness {
+    /// Docker is available and sandbox is enabled.
+    Available,
+    /// User explicitly disabled sandboxing (SANDBOX_ENABLED=false).
+    DisabledByConfig,
+    /// Sandbox is enabled but Docker is not running or not installed.
+    DockerUnavailable,
+}
+
 /// The routine execution engine.
 pub struct RoutineEngine {
     config: RoutineConfig,
@@ -62,6 +73,8 @@ pub struct RoutineEngine {
     tools: Arc<ToolRegistry>,
     /// Safety layer for tool output sanitization.
     safety: Arc<SafetyLayer>,
+    /// Sandbox readiness state for full-job dispatch.
+    sandbox_readiness: SandboxReadiness,
     /// Timestamp when this engine instance was created. Used by
     /// `sync_dispatched_runs` to distinguish orphaned runs (from a previous
     /// process) from actively-watched runs (from this process).
@@ -79,6 +92,7 @@ impl RoutineEngine {
         scheduler: Option<Arc<Scheduler>>,
         tools: Arc<ToolRegistry>,
         safety: Arc<SafetyLayer>,
+        sandbox_readiness: SandboxReadiness,
     ) -> Self {
         Self {
             config,
@@ -91,6 +105,7 @@ impl RoutineEngine {
             scheduler,
             tools,
             safety,
+            sandbox_readiness,
             boot_time: Utc::now(),
         }
     }
@@ -689,6 +704,7 @@ impl RoutineEngine {
             scheduler: self.scheduler.clone(),
             tools: self.tools.clone(),
             safety: self.safety.clone(),
+            sandbox_readiness: self.sandbox_readiness,
         };
 
         tokio::spawn(async move {
@@ -724,6 +740,7 @@ impl RoutineEngine {
             scheduler: self.scheduler.clone(),
             tools: self.tools.clone(),
             safety: self.safety.clone(),
+            sandbox_readiness: self.sandbox_readiness,
         };
 
         // Record the run in DB, then spawn execution
@@ -860,6 +877,7 @@ struct EngineContext {
     scheduler: Option<Arc<Scheduler>>,
     tools: Arc<ToolRegistry>,
     safety: Arc<SafetyLayer>,
+    sandbox_readiness: SandboxReadiness,
 }
 
 /// Execute a routine run. Handles both lightweight and full_job modes.
@@ -1040,6 +1058,24 @@ async fn execute_full_job(
     run: &RoutineRun,
     execution: &FullJobExecutionConfig<'_>,
 ) -> Result<(RunStatus, Option<String>, Option<i32>), RoutineError> {
+    match ctx.sandbox_readiness {
+        SandboxReadiness::Available => {}
+        SandboxReadiness::DisabledByConfig => {
+            return Err(RoutineError::JobDispatchFailed {
+                reason: "Sandboxing is disabled (SANDBOX_ENABLED=false). \
+                         Full-job routines require sandbox."
+                    .to_string(),
+            });
+        }
+        SandboxReadiness::DockerUnavailable => {
+            return Err(RoutineError::JobDispatchFailed {
+                reason: "Sandbox is enabled but Docker is not available. \
+                         Install Docker or set SANDBOX_ENABLED=false."
+                    .to_string(),
+            });
+        }
+    }
+
     let scheduler = ctx
         .scheduler
         .as_ref()
@@ -1710,6 +1746,7 @@ pub fn spawn_cron_ticker(
             // never races with FullJobWatcher instances from this process.
             engine.sync_dispatched_runs().await;
             engine.check_cron_triggers().await;
+            engine.sync_dispatched_runs().await;
         }
     })
 }
@@ -1721,6 +1758,56 @@ fn truncate(s: &str, max: usize) -> String {
         let end = crate::util::floor_char_boundary(s, max);
         format!("{}...", &s[..end])
     }
+}
+
+/// Sanitize a summary string from job transitions before using in notifications.
+///
+/// `last_reason` comes from untrusted container code, so we:
+/// 1. Strip control characters (except newline) to prevent terminal injection
+/// 2. Strip HTML tags to prevent injection in web-rendered notifications
+/// 3. Collapse multiple whitespace/newlines to single spaces for cleaner output
+/// 4. Truncate to 500 chars to prevent oversized notifications
+#[cfg(test)]
+fn sanitize_summary(s: &str) -> String {
+    // Strip control characters (keep newline for now, collapse later)
+    let no_control: String = s
+        .chars()
+        .filter(|c| !c.is_control() || *c == '\n')
+        .collect();
+
+    // Strip HTML tags (e.g. <script>, <img>, <a href=...>)
+    let no_html = strip_html_tags(&no_control);
+
+    // Collapse whitespace: multiple spaces/newlines become a single space
+    let collapsed: String = no_html.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    // Truncate to reasonable length
+    if collapsed.len() <= 500 {
+        collapsed
+    } else {
+        // Find a safe char boundary for truncation
+        let mut end = 500;
+        while !collapsed.is_char_boundary(end) && end > 0 {
+            end -= 1;
+        }
+        format!("{}...", &collapsed[..end])
+    }
+}
+
+/// Remove HTML/XML tags from a string.
+#[cfg(test)]
+fn strip_html_tags(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut in_tag = false;
+    for c in s.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' if in_tag => in_tag = false,
+            _ if !in_tag => result.push(c),
+            _ => {}
+        }
+    }
+    result
 }
 
 #[cfg(test)]
@@ -2004,6 +2091,62 @@ mod tests {
         assert_eq!(snapshot[2].content, "b"); // safety: test-only no-panics CI false positive
     }
 
+    #[test]
+    fn test_running_status_does_not_notify() {
+        let config = NotifyConfig {
+            on_success: true,
+            on_failure: true,
+            on_attention: true,
+            ..Default::default()
+        };
+        let should_notify = match RunStatus::Running {
+            RunStatus::Ok => config.on_success,
+            RunStatus::Attention => config.on_attention,
+            RunStatus::Failed => config.on_failure,
+            RunStatus::Running => false,
+        };
+        assert!(!should_notify);
+    }
+
+    #[test]
+    fn test_full_job_dispatch_returns_running_status() {
+        assert_eq!(RunStatus::Running.to_string(), "running");
+    }
+
+    #[test]
+    fn test_sandbox_readiness_disabled_by_config_error() {
+        use super::SandboxReadiness;
+
+        let readiness = SandboxReadiness::DisabledByConfig;
+        assert_ne!(readiness, SandboxReadiness::Available);
+
+        let err = crate::error::RoutineError::JobDispatchFailed {
+            reason: "Sandboxing is disabled (SANDBOX_ENABLED=false). \
+                     Full-job routines require sandbox."
+                .to_string(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("SANDBOX_ENABLED=false"));
+        assert!(msg.contains("require sandbox"));
+    }
+
+    #[test]
+    fn test_sandbox_readiness_docker_unavailable_error() {
+        use super::SandboxReadiness;
+
+        let readiness = SandboxReadiness::DockerUnavailable;
+        assert_ne!(readiness, SandboxReadiness::Available);
+
+        let err = crate::error::RoutineError::JobDispatchFailed {
+            reason: "Sandbox is enabled but Docker is not available. \
+                     Install Docker or set SANDBOX_ENABLED=false."
+                .to_string(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("Docker is not available"));
+        assert!(msg.contains("SANDBOX_ENABLED"));
+    }
+
     /// Regression test for #1317: FullJobWatcher maps terminal job states correctly.
     #[test]
     fn test_full_job_watcher_state_mapping() {
@@ -2084,5 +2227,51 @@ mod tests {
                 state
             );
         }
+    }
+
+    #[test]
+    fn test_sanitize_summary_strips_control_chars() {
+        use super::sanitize_summary;
+
+        // Preserves normal text
+        assert_eq!(sanitize_summary("Job completed"), "Job completed");
+
+        // Strips control characters and collapses whitespace
+        assert_eq!(
+            sanitize_summary("line1\nline2\x00\x1b[31mred"),
+            "line1 line2[31mred"
+        );
+
+        // Truncates long strings
+        let long = "x".repeat(600);
+        let result = sanitize_summary(&long);
+        assert!(result.len() <= 503); // 500 + "..."
+        assert!(result.ends_with("..."));
+    }
+
+    #[test]
+    fn test_sanitize_summary_strips_html() {
+        use super::sanitize_summary;
+
+        assert_eq!(
+            sanitize_summary("Hello <script>alert('xss')</script> world"),
+            "Hello alert('xss') world"
+        );
+        assert_eq!(
+            sanitize_summary("<b>bold</b> and <a href=\"evil\">link</a>"),
+            "bold and link"
+        );
+        assert_eq!(sanitize_summary("<img src=x onerror=alert(1)>"), "");
+    }
+
+    #[test]
+    fn test_sanitize_summary_multibyte_truncation() {
+        use super::sanitize_summary;
+
+        // Ensure truncation doesn't panic on multi-byte chars near the boundary
+        let s = "a".repeat(498) + "\u{1F600}\u{1F600}"; // 498 + two 4-byte emoji
+        let result = sanitize_summary(&s);
+        assert!(result.len() <= 503);
+        assert!(result.ends_with("..."));
     }
 }

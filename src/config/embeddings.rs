@@ -57,7 +57,7 @@ impl Default for EmbeddingsConfig {
 /// Infer the embedding dimension from a well-known model name.
 ///
 /// Falls back to 1536 (OpenAI text-embedding-3-small default) for unknown models.
-fn default_dimension_for_model(model: &str) -> usize {
+pub(crate) fn default_dimension_for_model(model: &str) -> usize {
     match model {
         "text-embedding-3-small" => 1536,
         "text-embedding-3-large" => 3072,
