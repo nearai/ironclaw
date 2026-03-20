@@ -52,10 +52,22 @@ fn coerce_value(value: &serde_json::Value, schema: &serde_json::Value) -> serde_
             .as_ref()
             .or_else(|| schema.get("properties").and_then(|p| p.as_object()));
         let additional_schema = schema.get("additionalProperties").filter(|v| v.is_object());
+        let required: std::collections::HashSet<&str> = schema
+            .get("required")
+            .and_then(|r| r.as_array())
+            .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
+            .unwrap_or_default();
         let mut coerced = obj.clone();
 
         for (key, current) in &mut coerced {
             if let Some(prop_schema) = properties.and_then(|props| props.get(key)) {
+                // LLMs send "" for optional fields instead of omitting them.
+                // Coerce to null when the field is not in `required` — an empty
+                // string is never a meaningful value for an optional parameter.
+                if current.as_str() == Some("") && !required.contains(key.as_str()) {
+                    *current = serde_json::Value::Null;
+                    continue;
+                }
                 *current = coerce_value(current, prop_schema);
                 continue;
             }
@@ -170,7 +182,20 @@ fn find_discriminated_variant<'a>(
 }
 
 fn coerce_string_value(s: &str, schema: &serde_json::Value) -> Option<serde_json::Value> {
+    // LLMs often send "" instead of null for optional fields. Coerce empty
+    // strings to null when the schema allows null but not string, or allows
+    // both but the value is empty (a string field with content "" is kept).
+    if s.is_empty() && schema_allows_type(schema, "null") && !schema_allows_type(schema, "string") {
+        return Some(serde_json::Value::Null);
+    }
+
     if schema_allows_type(schema, "string") {
+        return None;
+    }
+
+    // Empty string with no type match — coerce to null as a safe fallback
+    // rather than attempting numeric/boolean parsing on "".
+    if s.is_empty() {
         return None;
     }
 
@@ -429,6 +454,69 @@ mod tests {
         let result = prepare_params_for_schema(&params, &schema);
 
         assert_eq!(result["value"], serde_json::json!("{\"mode\":\"raw\"}")); // safety: test-only assertion
+    }
+
+    #[test]
+    fn coerces_empty_string_to_null_for_nullable_non_required_field() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "timezone": { "type": "string" },
+                "schedule": { "type": "string" }
+            },
+            "required": ["schedule"]
+        });
+        let params = serde_json::json!({
+            "timezone": "",
+            "schedule": "0 9 * * *"
+        });
+
+        let result = prepare_params_for_schema(&params, &schema);
+
+        // Non-required "timezone" with empty string → null
+        assert_eq!(result["timezone"], serde_json::Value::Null);
+        // Required "schedule" keeps its value even if empty would be weird
+        assert_eq!(result["schedule"], serde_json::json!("0 9 * * *"));
+    }
+
+    #[test]
+    fn coerces_empty_string_to_null_for_explicit_nullable_type() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "from_timezone": { "type": ["string", "null"] },
+                "operation": { "type": "string" }
+            },
+            "required": ["operation"]
+        });
+        let params = serde_json::json!({
+            "from_timezone": "",
+            "operation": "now"
+        });
+
+        let result = prepare_params_for_schema(&params, &schema);
+
+        // Nullable type with empty string → null (even if it were required,
+        // the per-value coercion in coerce_string_value handles this)
+        assert_eq!(result["from_timezone"], serde_json::Value::Null);
+        assert_eq!(result["operation"], serde_json::json!("now"));
+    }
+
+    #[test]
+    fn keeps_empty_string_for_required_string_only_field() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "name": { "type": "string" }
+            },
+            "required": ["name"]
+        });
+        let params = serde_json::json!({ "name": "" });
+
+        let result = prepare_params_for_schema(&params, &schema);
+
+        // Required string-only field keeps empty string
+        assert_eq!(result["name"], serde_json::json!(""));
     }
 
     #[test]
