@@ -378,7 +378,7 @@ impl AppBuilder {
             let b = tools
                 .register_builder_tool(llm.clone(), Some(self.config.builder.to_builder_config()))
                 .await;
-            tracing::info!("Builder mode enabled");
+            tracing::debug!("Builder mode enabled");
             Some(b)
         } else {
             None

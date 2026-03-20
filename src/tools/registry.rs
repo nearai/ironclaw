@@ -600,7 +600,7 @@ impl ToolRegistry {
         self.register(Arc::new(BuildSoftwareTool::new(Arc::clone(&builder))))
             .await;
 
-        tracing::info!("Registered software builder tool");
+        tracing::debug!("Registered software builder tool");
         builder
     }
 
