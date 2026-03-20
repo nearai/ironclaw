@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use crate::secrets::SecretsStore;
 use crate::tools::mcp::config::{EffectiveTransport, McpServerConfig};
+use crate::tools::mcp::http_transport::HttpMcpTransport;
 use crate::tools::mcp::{McpClient, McpProcessManager, McpSessionManager, McpTransport};
 
 /// Error returned when MCP client creation fails.
@@ -90,20 +91,32 @@ pub async fn create_client_from_config(
                         user_id,
                     ))
                 } else {
-                    Ok(McpClient::new_with_config(server)
-                        .map_err(|e| McpFactoryError::InvalidConfig {
-                            name: server_name.clone(),
-                            reason: e.to_string(),
-                        })?
-                        .with_session_manager(Arc::clone(session_manager)))
+                    let transport = Arc::new(
+                        HttpMcpTransport::new(server.url.clone(), server.name.clone())
+                            .with_session_manager(Arc::clone(session_manager)),
+                    );
+                    Ok(McpClient::new_with_transport(
+                        server.name.clone(),
+                        transport,
+                        Some(Arc::clone(session_manager)),
+                        Some(Arc::clone(secrets)),
+                        user_id,
+                        Some(server),
+                    ))
                 }
             } else {
-                Ok(McpClient::new_with_config(server)
-                    .map_err(|e| McpFactoryError::InvalidConfig {
-                        name: server_name,
-                        reason: e.to_string(),
-                    })?
-                    .with_session_manager(Arc::clone(session_manager)))
+                let transport = Arc::new(
+                    HttpMcpTransport::new(server.url.clone(), server.name.clone())
+                        .with_session_manager(Arc::clone(session_manager)),
+                );
+                Ok(McpClient::new_with_transport(
+                    server.name.clone(),
+                    transport,
+                    Some(Arc::clone(session_manager)),
+                    None,
+                    user_id,
+                    Some(server),
+                ))
             }
         }
     }
@@ -132,6 +145,88 @@ mod tests {
         assert!(
             client.has_session_manager(),
             "non-OAuth HTTP clients must carry a session manager"
+        );
+    }
+
+    /// Regression test: the factory must wire the session manager into the
+    /// *transport*, not just the client. Otherwise the transport never
+    /// captures `Mcp-Session-Id` from responses and subsequent requests
+    /// lack the header, causing the server to reject them.
+    #[tokio::test]
+    async fn test_factory_non_oauth_http_transport_captures_session_id() {
+        use axum::http::header::HeaderName;
+        use axum::{Router, http::StatusCode, response::IntoResponse, routing::post};
+        use tokio::net::TcpListener;
+
+        const SESSION_ID: &str = "test-session-abc123";
+
+        async fn session_echo() -> impl IntoResponse {
+            let body = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {}
+            })
+            .to_string();
+            (
+                StatusCode::OK,
+                [(
+                    HeaderName::from_static("mcp-session-id"),
+                    SESSION_ID.to_string(),
+                )],
+                body,
+            )
+        }
+
+        let app = Router::new().route("/", post(session_echo));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = format!("http://127.0.0.1:{}", addr.port());
+
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let server = McpServerConfig::new("session-test", &url);
+        let session_manager = Arc::new(McpSessionManager::new());
+        let process_manager = Arc::new(McpProcessManager::new());
+
+        let client = create_client_from_config(
+            server,
+            &session_manager,
+            &process_manager,
+            None,
+            "test-user",
+        )
+        .await
+        .expect("factory should succeed for HTTP config");
+
+        // Pre-create a session entry so that update_session_id has something to update.
+        // In production, the MCP initialize handshake calls get_or_create before responses arrive.
+        session_manager
+            .get_or_create("session-test", &url)
+            .await;
+
+        // Send a request through the client's transport to trigger session capture.
+        use crate::tools::mcp::protocol::McpRequest;
+        let request = McpRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(1),
+            method: "test".to_string(),
+            params: Some(serde_json::json!({})),
+        };
+        let headers = std::collections::HashMap::new();
+        client
+            .transport()
+            .send(&request, &headers)
+            .await
+            .expect("request should succeed");
+
+        // Verify the session manager captured the session ID from the response.
+        let captured = session_manager.get_session_id("session-test").await;
+        assert_eq!(
+            captured.as_deref(),
+            Some(SESSION_ID),
+            "transport must capture Mcp-Session-Id into session manager"
         );
     }
 }
