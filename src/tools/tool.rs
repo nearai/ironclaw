@@ -28,30 +28,29 @@ impl ApprovalRequirement {
     }
 }
 
-/// Approval context for autonomous tool execution (routines, background jobs).
+/// Precomputed autonomous tool scope for background jobs and routines.
 ///
-/// Interactive sessions don't use this type — they rely on session-level
-/// auto-approve lists managed by the UI. This enum models only the autonomous
-/// case where no interactive user is present.
+/// Interactive sessions don't use this type — they still rely on
+/// `requires_approval()` and session-level approval state.
 #[derive(Debug, Clone)]
 pub enum ApprovalContext {
-    /// Autonomous job with no interactive user. `UnlessAutoApproved` tools are
-    /// pre-approved. `Always` tools are blocked unless listed in `allowed_tools`.
+    /// Autonomous job with no interactive user. Only tools in `allowed_tools`
+    /// may run; interactive approval requirements are ignored.
     Autonomous {
-        /// Tool names that are pre-authorized even for `Always` approval.
+        /// Tool names that may run autonomously for this job/run.
         allowed_tools: std::collections::HashSet<String>,
     },
 }
 
 impl ApprovalContext {
-    /// Create an autonomous context with no extra tool permissions.
+    /// Create an autonomous context with no allowed tools.
     pub fn autonomous() -> Self {
         Self::Autonomous {
             allowed_tools: std::collections::HashSet::new(),
         }
     }
 
-    /// Create an autonomous context with specific tools pre-authorized.
+    /// Create an autonomous context with specific allowed tools.
     pub fn autonomous_with_tools(tools: impl IntoIterator<Item = String>) -> Self {
         Self::Autonomous {
             allowed_tools: tools.into_iter().collect(),
@@ -59,13 +58,9 @@ impl ApprovalContext {
     }
 
     /// Check whether a tool invocation is blocked in this context.
-    pub fn is_blocked(&self, tool_name: &str, requirement: ApprovalRequirement) -> bool {
+    pub fn is_blocked(&self, tool_name: &str, _requirement: ApprovalRequirement) -> bool {
         match self {
-            Self::Autonomous { allowed_tools } => match requirement {
-                ApprovalRequirement::Never => false,
-                ApprovalRequirement::UnlessAutoApproved => false,
-                ApprovalRequirement::Always => !allowed_tools.contains(tool_name),
-            },
+            Self::Autonomous { allowed_tools } => !allowed_tools.contains(tool_name),
         }
     }
 
@@ -960,26 +955,27 @@ mod tests {
     }
 
     #[test]
-    fn test_approval_context_autonomous_allows_unless_auto_approved() {
+    fn test_approval_context_autonomous_blocks_tools_not_in_scope() {
         let ctx = ApprovalContext::autonomous();
-        assert!(!ctx.is_blocked("shell", ApprovalRequirement::Never));
-        assert!(!ctx.is_blocked("shell", ApprovalRequirement::UnlessAutoApproved));
+        assert!(ctx.is_blocked("shell", ApprovalRequirement::Never));
+        assert!(ctx.is_blocked("shell", ApprovalRequirement::UnlessAutoApproved));
         assert!(ctx.is_blocked("shell", ApprovalRequirement::Always));
     }
 
     #[test]
-    fn test_approval_context_autonomous_with_tools_allows_always() {
+    fn test_approval_context_autonomous_with_tools_allows_registered_name() {
         let ctx =
             ApprovalContext::autonomous_with_tools(["shell".to_string(), "message".to_string()]);
+        assert!(!ctx.is_blocked("shell", ApprovalRequirement::Never));
         assert!(!ctx.is_blocked("shell", ApprovalRequirement::Always));
         assert!(!ctx.is_blocked("message", ApprovalRequirement::Always));
         assert!(ctx.is_blocked("http", ApprovalRequirement::Always));
     }
 
     #[test]
-    fn test_approval_context_never_is_not_blocked() {
+    fn test_approval_context_blocks_never_when_not_in_scope() {
         let ctx = ApprovalContext::autonomous();
-        assert!(!ctx.is_blocked("any_tool", ApprovalRequirement::Never));
+        assert!(ctx.is_blocked("any_tool", ApprovalRequirement::Never));
     }
 
     #[test]
@@ -1017,7 +1013,7 @@ mod tests {
             "other",
             ApprovalRequirement::Always
         ));
-        assert!(!ApprovalContext::is_blocked_or_default(
+        assert!(ApprovalContext::is_blocked_or_default(
             &ctx,
             "any",
             ApprovalRequirement::UnlessAutoApproved
