@@ -1,16 +1,16 @@
-//! Channel trait implementation for channel-relay SSE streams.
+//! Channel trait implementation for channel-relay webhook callbacks.
 //!
-//! `RelayChannel` connects to a channel-relay service via SSE, converts
-//! incoming events to `IncomingMessage`s, and sends responses via the
-//! relay's provider-specific proxy API (Slack).
+//! `RelayChannel` receives events from channel-relay via HTTP POST callbacks
+//! (pushed through an mpsc channel by the webhook handler), converts them
+//! to `IncomingMessage`s, and sends responses via the relay's provider-specific
+//! proxy API (Slack).
 
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use async_trait::async_trait;
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::mpsc;
 
-use crate::channels::relay::client::{RelayClient, RelayError};
+use crate::channels::relay::client::{ChannelEvent, RelayClient};
 use crate::channels::{Channel, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate};
 use crate::error::ChannelError;
 
@@ -39,44 +39,34 @@ impl RelayProvider {
     }
 }
 
-/// Channel implementation that connects to a channel-relay SSE stream.
+/// Channel implementation that receives events from channel-relay via webhook callbacks.
 pub struct RelayChannel {
     client: RelayClient,
     provider: RelayProvider,
-    stream_token: Arc<RwLock<String>>,
     team_id: String,
     instance_id: String,
-    user_id: String,
-    /// SSE stream long-poll timeout in seconds.
-    stream_timeout_secs: u64,
-    /// Initial exponential backoff in milliseconds.
-    backoff_initial_ms: u64,
-    /// Maximum exponential backoff in milliseconds.
-    backoff_max_ms: u64,
-    /// Handle to the reconnect task for clean shutdown.
-    reconnect_handle: RwLock<Option<tokio::task::JoinHandle<()>>>,
-    /// Handle to the SSE parser task for clean shutdown.
-    parser_handle: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
-    /// Maximum consecutive reconnect failures before giving up.
-    max_consecutive_failures: u64,
+    /// Sender side of the event channel — shared with the webhook handler.
+    event_tx: mpsc::Sender<ChannelEvent>,
+    /// Receiver side — taken once by `start()`.
+    event_rx: tokio::sync::Mutex<Option<mpsc::Receiver<ChannelEvent>>>,
 }
 
 impl RelayChannel {
     /// Create a new relay channel for Slack (default provider).
     pub fn new(
         client: RelayClient,
-        stream_token: String,
         team_id: String,
         instance_id: String,
-        user_id: String,
+        event_tx: mpsc::Sender<ChannelEvent>,
+        event_rx: mpsc::Receiver<ChannelEvent>,
     ) -> Self {
         Self::new_with_provider(
             client,
             RelayProvider::Slack,
-            stream_token,
             team_id,
             instance_id,
-            user_id,
+            event_tx,
+            event_rx,
         )
     }
 
@@ -84,44 +74,24 @@ impl RelayChannel {
     pub fn new_with_provider(
         client: RelayClient,
         provider: RelayProvider,
-        stream_token: String,
         team_id: String,
         instance_id: String,
-        user_id: String,
+        event_tx: mpsc::Sender<ChannelEvent>,
+        event_rx: mpsc::Receiver<ChannelEvent>,
     ) -> Self {
         Self {
             client,
             provider,
-            stream_token: Arc::new(RwLock::new(stream_token)),
             team_id,
             instance_id,
-            user_id,
-            stream_timeout_secs: 86400,
-            backoff_initial_ms: 1000,
-            backoff_max_ms: 60000,
-            reconnect_handle: RwLock::new(None),
-            parser_handle: Arc::new(RwLock::new(None)),
-            max_consecutive_failures: 50,
+            event_tx,
+            event_rx: tokio::sync::Mutex::new(Some(event_rx)),
         }
     }
 
-    /// Set backoff/timeout parameters from relay config values.
-    pub fn with_timeouts(
-        mut self,
-        stream_timeout_secs: u64,
-        backoff_initial_ms: u64,
-        backoff_max_ms: u64,
-    ) -> Self {
-        self.stream_timeout_secs = stream_timeout_secs;
-        self.backoff_initial_ms = backoff_initial_ms;
-        self.backoff_max_ms = backoff_max_ms;
-        self
-    }
-
-    /// Set the maximum number of consecutive reconnect failures before giving up.
-    pub fn with_max_failures(mut self, max: u64) -> Self {
-        self.max_consecutive_failures = max;
-        self
+    /// Get a clone of the event sender for wiring into the webhook endpoint.
+    pub fn event_sender(&self) -> mpsc::Sender<ChannelEvent> {
+        self.event_tx.clone()
     }
 
     /// Build a provider-appropriate proxy body for sending a message.
@@ -151,15 +121,9 @@ impl RelayChannel {
         team_id: &str,
         method: &str,
         body: serde_json::Value,
-    ) -> Result<serde_json::Value, RelayError> {
+    ) -> Result<serde_json::Value, crate::channels::relay::client::RelayError> {
         self.client
-            .proxy_provider(
-                self.provider.as_str(),
-                team_id,
-                method,
-                body,
-                Some(&self.instance_id),
-            )
+            .proxy_provider(self.provider.as_str(), team_id, method, body)
             .await
     }
 }
@@ -172,204 +136,82 @@ impl Channel for RelayChannel {
 
     async fn start(&self) -> Result<MessageStream, ChannelError> {
         let channel_name = self.name().to_string();
-        let token = self.stream_token.read().await.clone();
-        let (stream, initial_parser_handle) = self
-            .client
-            .connect_stream(&token, self.stream_timeout_secs)
-            .await
-            .map_err(|e| ChannelError::StartupFailed {
-                name: channel_name.clone(),
-                reason: e.to_string(),
-            })?;
 
-        *self.parser_handle.write().await = Some(initial_parser_handle);
+        // Take the receiver (can only start once)
+        let mut event_rx =
+            self.event_rx
+                .lock()
+                .await
+                .take()
+                .ok_or_else(|| ChannelError::StartupFailed {
+                    name: channel_name.clone(),
+                    reason: "RelayChannel already started".to_string(),
+                })?;
 
         let (tx, rx) = mpsc::channel(64);
-
-        // Spawn the stream reader + reconnect task
-        let client = self.client.clone();
-        let stream_token = Arc::clone(&self.stream_token);
-        let instance_id = self.instance_id.clone();
-        let user_id = self.user_id.clone();
-        let team_id = self.team_id.clone();
-        let stream_timeout_secs = self.stream_timeout_secs;
-        let backoff_initial_ms = self.backoff_initial_ms;
-        let backoff_max_ms = self.backoff_max_ms;
-        let max_consecutive_failures = self.max_consecutive_failures;
-        let parser_handle = Arc::clone(&self.parser_handle);
         let provider_str = self.provider.as_str().to_string();
         let relay_name = channel_name.clone();
 
-        let handle = tokio::spawn(async move {
-            use futures::StreamExt;
-
-            let mut current_stream = stream;
-            let mut backoff_ms = backoff_initial_ms;
-            let mut consecutive_failures: u64 = 0;
-
-            loop {
-                // Read events from the current stream
-                while let Some(event) = current_stream.next().await {
-                    // Reset backoff and failure count on successful event
-                    backoff_ms = backoff_initial_ms;
-                    consecutive_failures = 0;
-
-                    // Validate required fields
-                    if event.sender_id.is_empty()
-                        || event.channel_id.is_empty()
-                        || event.provider_scope.is_empty()
-                    {
-                        tracing::debug!(
-                            event_type = %event.event_type,
-                            sender_id = %event.sender_id,
-                            channel_id = %event.channel_id,
-                            "Relay: skipping event with missing required fields"
-                        );
-                        continue;
-                    }
-
-                    // Skip non-message events
-                    if !event.is_message() {
-                        tracing::debug!(
-                            event_type = %event.event_type,
-                            "Relay: skipping non-message event"
-                        );
-                        continue;
-                    }
-
-                    tracing::info!(
+        // Spawn a task that reads events from the webhook handler and converts to IncomingMessage
+        tokio::spawn(async move {
+            while let Some(event) = event_rx.recv().await {
+                // Validate required fields
+                if event.sender_id.is_empty()
+                    || event.channel_id.is_empty()
+                    || event.provider_scope.is_empty()
+                {
+                    tracing::debug!(
                         event_type = %event.event_type,
-                        sender = %event.sender_id,
-                        channel = %event.channel_id,
-                        provider = %provider_str,
-                        "Relay: received message from {}", provider_str
+                        sender_id = %event.sender_id,
+                        channel_id = %event.channel_id,
+                        "Relay: skipping event with missing required fields"
                     );
-
-                    let msg = IncomingMessage::new(&relay_name, &event.sender_id, event.text())
-                        .with_user_name(event.display_name())
-                        .with_metadata(serde_json::json!({
-                            "team_id": event.team_id(),
-                            "channel_id": event.channel_id,
-                            "sender_id": event.sender_id,
-                            "sender_name": event.display_name(),
-                            "event_type": event.event_type,
-                            "thread_id": event.thread_id,
-                            "provider": event.provider,
-                        }));
-
-                    let msg = if let Some(ref thread_id) = event.thread_id {
-                        msg.with_thread(thread_id)
-                    } else {
-                        msg.with_thread(&event.channel_id)
-                    };
-
-                    if tx.send(msg).await.is_err() {
-                        tracing::info!("Relay channel receiver dropped, stopping");
-                        return;
-                    }
+                    continue;
                 }
 
-                // Stream ended, attempt reconnect with backoff
-                consecutive_failures += 1;
-                if consecutive_failures >= max_consecutive_failures {
-                    tracing::error!(
-                        channel = %relay_name,
-                        failures = consecutive_failures,
-                        "Relay channel giving up after {} consecutive failures",
-                        consecutive_failures
+                // Skip non-message events
+                if !event.is_message() {
+                    tracing::debug!(
+                        event_type = %event.event_type,
+                        "Relay: skipping non-message event"
                     );
-                    break;
+                    continue;
                 }
 
-                tracing::warn!(
-                    backoff_ms = backoff_ms,
-                    failures = consecutive_failures,
-                    "Relay SSE stream ended, reconnecting..."
+                tracing::info!(
+                    event_type = %event.event_type,
+                    sender = %event.sender_id,
+                    channel = %event.channel_id,
+                    provider = %provider_str,
+                    "Relay: received message from {}", provider_str
                 );
-                tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
-                backoff_ms = (backoff_ms * 2).min(backoff_max_ms);
 
-                // Try to reconnect
-                let token = stream_token.read().await.clone();
-                match client.connect_stream(&token, stream_timeout_secs).await {
-                    Ok((new_stream, new_parser)) => {
-                        tracing::info!("Relay SSE stream reconnected");
-                        consecutive_failures = 0;
-                        backoff_ms = backoff_initial_ms;
-                        current_stream = new_stream;
-                        // Abort old parser before replacing
-                        if let Some(old) = parser_handle.write().await.take() {
-                            old.abort();
-                        }
-                        *parser_handle.write().await = Some(new_parser);
-                    }
-                    Err(RelayError::TokenExpired) => {
-                        // Attempt token renewal
-                        tracing::info!("Relay stream token expired, renewing...");
-                        match client.renew_token(&instance_id, &user_id).await {
-                            Ok(new_token) => {
-                                *stream_token.write().await = new_token.clone();
-                                match client.connect_stream(&new_token, stream_timeout_secs).await {
-                                    Ok((new_stream, new_parser)) => {
-                                        tracing::info!(
-                                            "Relay SSE stream reconnected with new token"
-                                        );
-                                        consecutive_failures = 0;
-                                        backoff_ms = backoff_initial_ms;
-                                        current_stream = new_stream;
-                                        if let Some(old) = parser_handle.write().await.take() {
-                                            old.abort();
-                                        }
-                                        *parser_handle.write().await = Some(new_parser);
-                                    }
-                                    Err(e) => {
-                                        tracing::error!(
-                                            error = %e,
-                                            "Failed to reconnect after token renewal"
-                                        );
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                tracing::error!(
-                                    error = %e,
-                                    "Failed to renew relay stream token"
-                                );
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        tracing::error!(error = %e, "Failed to reconnect relay SSE stream");
-                    }
-                }
+                let msg = IncomingMessage::new(&relay_name, &event.sender_id, event.text())
+                    .with_user_name(event.display_name())
+                    .with_metadata(serde_json::json!({
+                        "team_id": event.team_id(),
+                        "channel_id": event.channel_id,
+                        "sender_id": event.sender_id,
+                        "sender_name": event.display_name(),
+                        "event_type": event.event_type,
+                        "thread_id": event.thread_id,
+                        "provider": event.provider,
+                    }));
 
-                // Check if the team is still valid (skip when team_id is unknown,
-                // e.g. when no DB store was available at activation time)
-                if !team_id.is_empty() {
-                    match client.list_connections(&instance_id).await {
-                        Ok(conns) => {
-                            let has_team =
-                                conns.iter().any(|c| c.team_id == team_id && c.connected);
-                            if !has_team {
-                                tracing::warn!(
-                                    team_id = %team_id,
-                                    "Team no longer connected, stopping relay channel"
-                                );
-                                return;
-                            }
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                error = %e,
-                                "Could not verify team connection, will retry next iteration"
-                            );
-                        }
-                    }
+                let msg = if let Some(ref thread_id) = event.thread_id {
+                    msg.with_thread(thread_id)
+                } else {
+                    msg.with_thread(&event.channel_id)
+                };
+
+                if tx.send(msg).await.is_err() {
+                    tracing::info!("Relay channel receiver dropped, stopping");
+                    return;
                 }
             }
-        });
 
-        *self.reconnect_handle.write().await = Some(handle);
+            tracing::info!("Relay event channel closed");
+        });
 
         let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
         Ok(Box::pin(stream))
@@ -423,6 +265,7 @@ impl Channel for RelayChannel {
             tool_name,
             description,
             parameters,
+            allow_always: _,
         } = status
         else {
             return Ok(());
@@ -450,28 +293,24 @@ impl Channel for RelayChannel {
                 name: self.name().to_string(),
                 reason: "Missing channel_id for approval buttons".into(),
             })?;
-        let sender_id = metadata
-            .get("sender_id")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| ChannelError::SendFailed {
-                name: self.name().to_string(),
-                reason: "Missing sender_id for approval buttons".into(),
-            })?;
         let thread_id = metadata.get("thread_id").and_then(|v| v.as_str());
         let team_id = metadata
             .get("team_id")
             .and_then(|v| v.as_str())
             .unwrap_or(&self.team_id);
 
-        // Button value payload (Slack limits button values to 2000 chars;
-        // safe with typical UUIDs but documented here as a constraint)
+        // Register server-side approval record and get opaque token.
+        // The button value contains ONLY the token — no routing fields.
+        let approval_token = self
+            .client
+            .create_approval(team_id, channel_id, thread_id, &request_id)
+            .await
+            .map_err(|e| ChannelError::SendFailed {
+                name: self.name().to_string(),
+                reason: format!("Failed to register approval: {e}"),
+            })?;
         let value_payload = serde_json::json!({
-            "instance_id": self.instance_id,
-            "team_id": team_id,
-            "channel_id": channel_id,
-            "thread_ts": thread_id,
-            "request_id": request_id,
-            "sender_id": sender_id,
+            "approval_token": approval_token,
         });
         let value_str = value_payload.to_string();
 
@@ -582,12 +421,8 @@ impl Channel for RelayChannel {
     }
 
     async fn shutdown(&self) -> Result<(), ChannelError> {
-        if let Some(handle) = self.reconnect_handle.write().await.take() {
-            handle.abort();
-        }
-        if let Some(handle) = self.parser_handle.write().await.take() {
-            handle.abort();
-        }
+        // Relay cleanup is driven by the extension manager dropping the shared
+        // sender and removing the channel from the channel manager.
         Ok(())
     }
 }
@@ -605,27 +440,20 @@ mod tests {
         .expect("client")
     }
 
+    fn make_channel() -> RelayChannel {
+        let (tx, rx) = mpsc::channel(64);
+        RelayChannel::new(test_client(), "T123".into(), "inst1".into(), tx, rx)
+    }
+
     #[test]
     fn relay_channel_name() {
-        let channel = RelayChannel::new(
-            test_client(),
-            "token".into(),
-            "T123".into(),
-            "inst1".into(),
-            "user1".into(),
-        );
+        let channel = make_channel();
         assert_eq!(channel.name(), DEFAULT_RELAY_NAME);
     }
 
     #[test]
     fn conversation_context_extracts_metadata() {
-        let channel = RelayChannel::new(
-            test_client(),
-            "token".into(),
-            "T123".into(),
-            "inst1".into(),
-            "user1".into(),
-        );
+        let channel = make_channel();
 
         let metadata = serde_json::json!({
             "sender_name": "bob",
@@ -640,8 +468,6 @@ mod tests {
 
     #[test]
     fn metadata_shape_includes_event_type_and_sender_name() {
-        // Regression: metadata JSON must include event_type and sender_name
-        // for downstream routing (DM vs channel) and conversation_context().
         let metadata = serde_json::json!({
             "team_id": "T123",
             "channel_id": "C456",
@@ -651,12 +477,10 @@ mod tests {
             "thread_id": null,
             "provider": "slack",
         });
-        // event_type must be present for DM-vs-channel routing
         assert_eq!(
             metadata.get("event_type").and_then(|v| v.as_str()),
             Some("direct_message")
         );
-        // sender_name must be present for conversation_context
         assert_eq!(
             metadata.get("sender_name").and_then(|v| v.as_str()),
             Some("alice")
@@ -664,30 +488,8 @@ mod tests {
     }
 
     #[test]
-    fn with_timeouts_sets_values() {
-        let channel = RelayChannel::new(
-            test_client(),
-            "token".into(),
-            "T123".into(),
-            "inst1".into(),
-            "user1".into(),
-        )
-        .with_timeouts(43200, 2000, 120000);
-
-        assert_eq!(channel.stream_timeout_secs, 43200);
-        assert_eq!(channel.backoff_initial_ms, 2000);
-        assert_eq!(channel.backoff_max_ms, 120000);
-    }
-
-    #[test]
     fn build_send_body_slack() {
-        let channel = RelayChannel::new(
-            test_client(),
-            "token".into(),
-            "T123".into(),
-            "inst1".into(),
-            "user1".into(),
-        );
+        let channel = make_channel();
         let (method, body) = channel.build_send_body("C456", "hello", Some("1234567.890"));
         assert_eq!(method, "chat.postMessage");
         assert_eq!(body["channel"], "C456");
@@ -695,72 +497,95 @@ mod tests {
         assert_eq!(body["thread_ts"], "1234567.890");
     }
 
-    #[test]
-    fn parser_handle_is_shared_arc() {
-        let channel = RelayChannel::new(
-            test_client(),
-            "token".into(),
-            "T123".into(),
-            "inst1".into(),
-            "user1".into(),
-        );
-        // parser_handle should be an Arc — cloning should give a second reference
-        let handle_clone = Arc::clone(&channel.parser_handle);
-        // Both point to the same allocation
-        assert!(Arc::ptr_eq(&channel.parser_handle, &handle_clone));
+    #[tokio::test]
+    async fn start_processes_events() {
+        let (tx, rx) = mpsc::channel(64);
+        let channel =
+            RelayChannel::new(test_client(), "T123".into(), "inst1".into(), tx.clone(), rx);
+
+        let mut stream = channel.start().await.unwrap();
+
+        // Send an event
+        tx.send(ChannelEvent {
+            id: "1".into(),
+            event_type: "message".into(),
+            provider: "slack".into(),
+            provider_scope: "T123".into(),
+            channel_id: "C456".into(),
+            sender_id: "U789".into(),
+            sender_name: Some("alice".into()),
+            content: Some("hello".into()),
+            thread_id: None,
+            raw: serde_json::Value::Null,
+            timestamp: None,
+        })
+        .await
+        .unwrap();
+
+        use futures::StreamExt;
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(1), stream.next())
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(msg.content, "hello");
+        assert_eq!(msg.user_id, "U789");
     }
 
-    #[test]
-    fn with_max_failures_sets_value() {
-        let channel = RelayChannel::new(
-            test_client(),
-            "token".into(),
-            "T123".into(),
-            "inst1".into(),
-            "user1".into(),
-        )
-        .with_max_failures(10);
+    #[tokio::test]
+    async fn start_skips_non_message_events() {
+        let (tx, rx) = mpsc::channel(64);
+        let channel =
+            RelayChannel::new(test_client(), "T123".into(), "inst1".into(), tx.clone(), rx);
 
-        assert_eq!(channel.max_consecutive_failures, 10);
-    }
+        let mut stream = channel.start().await.unwrap();
 
-    #[test]
-    fn default_max_failures_is_50() {
-        let channel = RelayChannel::new(
-            test_client(),
-            "token".into(),
-            "T123".into(),
-            "inst1".into(),
-            "user1".into(),
-        );
-        assert_eq!(channel.max_consecutive_failures, 50);
-    }
+        // Send a non-message event (should be skipped)
+        tx.send(ChannelEvent {
+            id: "1".into(),
+            event_type: "reaction".into(),
+            provider: "slack".into(),
+            provider_scope: "T123".into(),
+            channel_id: "C456".into(),
+            sender_id: "U789".into(),
+            sender_name: None,
+            content: None,
+            thread_id: None,
+            raw: serde_json::Value::Null,
+            timestamp: None,
+        })
+        .await
+        .unwrap();
 
-    #[test]
-    fn empty_team_id_accepted_at_construction() {
-        // Regression: empty team_id (when no DB store is available) must not
-        // prevent channel construction or cause immediate shutdown.
-        let channel = RelayChannel::new(
-            test_client(),
-            "token".into(),
-            String::new(), // empty team_id
-            "inst1".into(),
-            "user1".into(),
-        );
-        assert_eq!(channel.team_id, "");
-        // The reconnect loop now skips team validation when team_id is empty,
-        // so the channel remains alive.
+        // Send a real message
+        tx.send(ChannelEvent {
+            id: "2".into(),
+            event_type: "message".into(),
+            provider: "slack".into(),
+            provider_scope: "T123".into(),
+            channel_id: "C456".into(),
+            sender_id: "U789".into(),
+            sender_name: None,
+            content: Some("real message".into()),
+            thread_id: None,
+            raw: serde_json::Value::Null,
+            timestamp: None,
+        })
+        .await
+        .unwrap();
+
+        use futures::StreamExt;
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(1), stream.next())
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(msg.content, "real message");
     }
 
     #[tokio::test]
     async fn test_send_status_non_approval_is_noop() {
-        let channel = RelayChannel::new(
-            test_client(),
-            "token".into(),
-            "T123".into(),
-            "inst1".into(),
-            "user1".into(),
-        );
+        let channel = make_channel();
         let metadata = serde_json::json!({});
         let result = channel
             .send_status(
@@ -775,13 +600,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_send_status_approval_non_dm_skips() {
-        let channel = RelayChannel::new(
-            test_client(),
-            "token".into(),
-            "T123".into(),
-            "inst1".into(),
-            "user1".into(),
-        );
+        let channel = make_channel();
         let metadata = serde_json::json!({
             "event_type": "message",
             "channel_id": "C456",
@@ -794,6 +613,7 @@ mod tests {
                     tool_name: "shell".into(),
                     description: "run command".into(),
                     parameters: serde_json::json!({}),
+                    allow_always: true,
                 },
                 &metadata,
             )
@@ -804,13 +624,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_send_status_approval_dm_missing_channel_id_errors() {
-        let channel = RelayChannel::new(
-            test_client(),
-            "token".into(),
-            "T123".into(),
-            "inst1".into(),
-            "user1".into(),
-        );
+        let channel = make_channel();
         let metadata = serde_json::json!({
             "event_type": "direct_message",
             "sender_id": "U789",
@@ -822,6 +636,7 @@ mod tests {
                     tool_name: "shell".into(),
                     description: "run command".into(),
                     parameters: serde_json::json!({}),
+                    allow_always: true,
                 },
                 &metadata,
             )
@@ -835,14 +650,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_send_status_approval_dm_missing_sender_id_errors() {
-        let channel = RelayChannel::new(
-            test_client(),
-            "token".into(),
-            "T123".into(),
-            "inst1".into(),
-            "user1".into(),
-        );
+    async fn test_send_status_approval_dm_without_sender_id_is_ok() {
+        let channel = make_channel();
         let metadata = serde_json::json!({
             "event_type": "direct_message",
             "channel_id": "C456",
@@ -854,6 +663,7 @@ mod tests {
                     tool_name: "shell".into(),
                     description: "run command".into(),
                     parameters: serde_json::json!({}),
+                    allow_always: true,
                 },
                 &metadata,
             )
@@ -861,8 +671,8 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
-            err.contains("sender_id"),
-            "expected sender_id error, got: {err}"
+            !err.contains("sender_id"),
+            "sender_id should not be required anymore, got: {err}"
         );
     }
 }

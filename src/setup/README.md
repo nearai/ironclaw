@@ -106,6 +106,12 @@ Step 9: Background Tasks (heartbeat)
 
 `--channels-only` mode runs only Step 6, skipping everything else.
 
+**Personal onboarding** happens conversationally during the user's first interaction
+with the running assistant (not during the wizard). The `## First-Run Bootstrap` block in
+`src/workspace/mod.rs` injects onboarding instructions from `BOOTSTRAP.md` into the system
+prompt on first run. Once the agent writes a profile via `memory_write` and deletes
+`BOOTSTRAP.md`, the block stops injecting.
+
 ---
 
 ### Step 1: Database Connection
@@ -114,6 +120,13 @@ Step 9: Background Tasks (heartbeat)
 
 **Goal:** Select backend, establish connection, run migrations.
 
+**Init delegation:** Backend-specific connection logic lives in `src/db/mod.rs`
+(`connect_without_migrations()`), not in the wizard. The wizard calls
+`test_database_connection()` which delegates to the db module factory. Feature-flag
+branching (`#[cfg(feature = ...)]`) is confined to `src/db/mod.rs`. PostgreSQL
+validation (version >= 15, pgvector) is handled by `validate_postgres()` in
+`src/db/mod.rs`.
+
 **Decision tree:**
 
 ```
@@ -121,26 +134,23 @@ Both features compiled?
 ├─ Yes → DATABASE_BACKEND env var set?
 │  ├─ Yes → use that backend
 │  └─ No  → interactive selection (PostgreSQL vs libSQL)
-├─ Only postgres feature → step_database_postgres()
-└─ Only libsql feature  → step_database_libsql()
+├─ Only postgres feature → prompt for DATABASE_URL, test connection
+└─ Only libsql feature  → prompt for path, test connection
 ```
 
-**PostgreSQL path** (`step_database_postgres`):
+**PostgreSQL path:**
 1. Check `DATABASE_URL` from env or settings
-2. Test connection (creates `deadpool_postgres::Pool`)
-3. Optionally run refinery migrations
-4. Store pool in `self.db_pool`
+2. Test connection via `connect_without_migrations()` (validates version, pgvector)
+3. Optionally run migrations
 
-**libSQL path** (`step_database_libsql`):
+**libSQL path:**
 1. Offer local path (default: `~/.ironclaw/ironclaw.db`)
 2. Optional Turso cloud sync (URL + auth token)
-3. Test connection (creates `LibSqlBackend`)
+3. Test connection via `connect_without_migrations()`
 4. Always run migrations (idempotent CREATE IF NOT EXISTS)
-5. Store backend in `self.db_backend`
 
-**Invariant:** After Step 1, exactly one of `self.db_pool` or
-`self.db_backend` is `Some`. This is required for settings persistence
-in `save_and_summarize()`.
+**Invariant:** After Step 1, `self.db` is `Some(Arc<dyn Database>)`.
+This is required for settings persistence in `save_and_summarize()`.
 
 ---
 
@@ -338,7 +348,7 @@ key first, then falls back to the standard env var.
 1. Check `self.secrets_crypto` (set in Step 2) → use if available
 2. Else try `SECRETS_MASTER_KEY` env var
 3. Else try `get_master_key()` from keychain (only in `channels_only` mode)
-4. Create backend-appropriate secrets store (respects selected database backend)
+4. Create secrets store using `self.db` (`Arc<dyn Database>`)
 
 ---
 

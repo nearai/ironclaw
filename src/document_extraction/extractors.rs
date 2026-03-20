@@ -205,7 +205,8 @@ fn extract_rtf(data: &[u8]) -> Result<String, String> {
                 let mut word = String::new();
                 while let Some(&next) = chars.peek() {
                     if next.is_ascii_alphabetic() {
-                        word.push(chars.next().unwrap());
+                        chars.next();
+                        word.push(next);
                     } else {
                         break;
                     }

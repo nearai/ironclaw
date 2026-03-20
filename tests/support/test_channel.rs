@@ -25,6 +25,8 @@ use ironclaw::error::ChannelError;
 /// A `Channel` implementation for injecting messages and capturing responses
 /// in integration tests.
 pub struct TestChannel {
+    /// Channel name returned by `Channel::name()`.
+    channel_name: String,
     /// Sender half for injecting `IncomingMessage`s into the stream.
     tx: mpsc::Sender<IncomingMessage>,
     /// Receiver half, wrapped in Option so `start()` can take it exactly once.
@@ -59,6 +61,7 @@ impl TestChannel {
         let (tx, rx) = mpsc::channel(256);
         let (ready_tx, ready_rx) = oneshot::channel();
         Self {
+            channel_name: "test".to_string(),
             tx,
             rx: Mutex::new(Some(rx)),
             responses: Arc::new(Mutex::new(Vec::new())),
@@ -70,6 +73,12 @@ impl TestChannel {
             ready_tx: Arc::new(Mutex::new(Some(ready_tx))),
             ready_rx: Arc::new(Mutex::new(Some(ready_rx))),
         }
+    }
+
+    /// Override the channel name (default: "test").
+    pub fn with_name(mut self, name: impl Into<String>) -> Self {
+        self.channel_name = name.into();
+        self
     }
 
     /// Signal the channel (and any listening agent) to shut down.
@@ -87,7 +96,7 @@ impl TestChannel {
 
     /// Inject a user message into the channel stream.
     pub async fn send_message(&self, content: &str) {
-        let msg = IncomingMessage::new("test", &self.user_id, content);
+        let msg = IncomingMessage::new(&self.channel_name, &self.user_id, content);
         self.tx.send(msg).await.expect("TestChannel tx closed");
     }
 
@@ -98,7 +107,8 @@ impl TestChannel {
 
     /// Inject a user message with a specific thread ID.
     pub async fn send_message_in_thread(&self, content: &str, thread_id: &str) {
-        let msg = IncomingMessage::new("test", &self.user_id, content).with_thread(thread_id);
+        let msg =
+            IncomingMessage::new(&self.channel_name, &self.user_id, content).with_thread(thread_id);
         self.tx.send(msg).await.expect("TestChannel tx closed");
     }
 
@@ -281,7 +291,7 @@ impl Channel for TestChannelHandle {
 #[async_trait]
 impl Channel for TestChannel {
     fn name(&self) -> &str {
-        "test"
+        &self.channel_name
     }
 
     async fn start(&self) -> Result<MessageStream, ChannelError> {
@@ -291,7 +301,7 @@ impl Channel for TestChannel {
             .await
             .take()
             .ok_or_else(|| ChannelError::StartupFailed {
-                name: "test".to_string(),
+                name: self.channel_name.clone(),
                 reason: "start() already called".to_string(),
             })?;
 
