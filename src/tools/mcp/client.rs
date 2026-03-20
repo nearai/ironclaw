@@ -235,6 +235,12 @@ impl McpClient {
         self.session_manager.is_some()
     }
 
+    /// Get the underlying transport (test-only).
+    #[cfg(test)]
+    pub(crate) fn transport(&self) -> &Arc<dyn McpTransport> {
+        &self.transport
+    }
+
     /// Get the next request ID.
     fn next_request_id(&self) -> u64 {
         self.next_id.fetch_add(1, Ordering::SeqCst)
