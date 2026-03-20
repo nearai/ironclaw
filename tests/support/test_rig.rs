@@ -688,12 +688,14 @@ impl TestRigBuilder {
                         );
                         continue;
                     }
-                    let wasm_bytes = std::fs::read(&spec.wasm_path)
+                    let wasm_bytes = tokio::fs::read(&spec.wasm_path)
+                        .await
                         .unwrap_or_else(|e| panic!("read {}: {e}", spec.wasm_path.display()));
                     let (capabilities, description, schema) =
                         if let Some(cap_path) = &spec.capabilities_path {
                             if cap_path.exists() {
-                                let cap_bytes = std::fs::read(cap_path)
+                                let cap_bytes = tokio::fs::read(cap_path)
+                                    .await
                                     .unwrap_or_else(|e| panic!("read {}: {e}", cap_path.display()));
                                 let cap_file = CapabilitiesFile::from_bytes(&cap_bytes)
                                     .expect("parse capabilities.json");

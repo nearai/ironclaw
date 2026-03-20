@@ -499,20 +499,41 @@ impl near::agent::host::Host for StoreData {
             (&self.http_interceptor, &interceptor_req, &result)
         {
             let interceptor = Arc::clone(interceptor);
-            let req = req.clone();
+
+            // Redact credentials from request before passing to the interceptor
+            // to prevent credential leakage into recorded traces.
+            let mut redacted_req = req.clone();
+            redacted_req.url = self.redact_credentials(&redacted_req.url);
+            redacted_req.headers = redacted_req
+                .headers
+                .into_iter()
+                .map(|(k, v)| (k, self.redact_credentials(&v)))
+                .collect();
+            redacted_req.body = redacted_req.body.map(|b| self.redact_credentials(&b));
+
             let resp_headers: Vec<(String, String)> =
                 serde_json::from_str::<HashMap<String, String>>(&resp.headers_json)
                     .unwrap_or_default()
                     .into_iter()
                     .collect();
             let resp_body = String::from_utf8_lossy(&resp.body).to_string();
+
+            // Redact credentials from response as well
+            let redacted_headers: Vec<(String, String)> = resp_headers
+                .into_iter()
+                .map(|(k, v)| (k, self.redact_credentials(&v)))
+                .collect();
+            let redacted_body = self.redact_credentials(&resp_body);
+
             let exchange_resp = HttpExchangeResponse {
                 status: resp.status,
-                headers: resp_headers,
-                body: resp_body,
+                headers: redacted_headers,
+                body: redacted_body,
             };
             rt.block_on(async {
-                interceptor.after_response(&req, &exchange_resp).await;
+                interceptor
+                    .after_response(&redacted_req, &exchange_resp)
+                    .await;
             });
         }
 

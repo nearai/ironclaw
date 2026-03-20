@@ -138,9 +138,14 @@ fn coerce_value(value: &serde_json::Value, schema: &serde_json::Value) -> serde_
         for (key, current) in &mut coerced {
             if let Some(prop_schema) = properties.and_then(|props| props.get(key)) {
                 // LLMs send "" for optional fields instead of omitting them.
-                // Coerce to null when the field is not in `required` — an empty
-                // string is never a meaningful value for an optional parameter.
-                if current.as_str() == Some("") && !required.contains(key.as_str()) {
+                // Coerce to null only when the field is not required AND the schema
+                // allows null or doesn't allow string — a `type: "string"` field
+                // may legitimately accept "" as a meaningful value.
+                if current.as_str() == Some("")
+                    && !required.contains(key.as_str())
+                    && (schema_allows_type(prop_schema, "null")
+                        || !schema_allows_type(prop_schema, "string"))
+                {
                     *current = serde_json::Value::Null;
                     continue;
                 }
@@ -326,8 +331,8 @@ fn coerce_string_value(s: &str, schema: &serde_json::Value) -> Option<serde_json
         return None;
     }
 
-    // Empty string with no type match — coerce to null as a safe fallback
-    // rather than attempting numeric/boolean parsing on "".
+    // Empty string with no type match — return unchanged since we can't
+    // determine the intended type.
     if s.is_empty() {
         return None;
     }
@@ -594,6 +599,29 @@ mod tests {
         let schema = serde_json::json!({
             "type": "object",
             "properties": {
+                "timezone": { "type": ["string", "null"] },
+                "schedule": { "type": "string" }
+            },
+            "required": ["schedule"]
+        });
+        let params = serde_json::json!({
+            "timezone": "",
+            "schedule": "0 9 * * *"
+        });
+
+        let result = prepare_params_for_schema(&params, &schema);
+
+        // Non-required nullable "timezone" with empty string → null
+        assert_eq!(result["timezone"], serde_json::Value::Null);
+        // Required "schedule" keeps its value even if empty would be weird
+        assert_eq!(result["schedule"], serde_json::json!("0 9 * * *"));
+    }
+
+    #[test]
+    fn keeps_empty_string_for_non_required_string_only_field() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
                 "timezone": { "type": "string" },
                 "schedule": { "type": "string" }
             },
@@ -606,9 +634,8 @@ mod tests {
 
         let result = prepare_params_for_schema(&params, &schema);
 
-        // Non-required "timezone" with empty string → null
-        assert_eq!(result["timezone"], serde_json::Value::Null);
-        // Required "schedule" keeps its value even if empty would be weird
+        // Non-required string-only "timezone" keeps empty string (meaningful value)
+        assert_eq!(result["timezone"], serde_json::json!(""));
         assert_eq!(result["schedule"], serde_json::json!("0 9 * * *"));
     }
 

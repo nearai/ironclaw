@@ -13,6 +13,12 @@
 #[cfg(feature = "libsql")]
 mod support;
 
+/// Note on URL verification: the `ReplayingHttpInterceptor` logs warnings on
+/// URL mismatch but still returns the canned response. The real verification is
+/// that the tool succeeds end-to-end: coercion produced the correct typed
+/// parameters, serde deserialization succeeded, and the WASM tool constructed a
+/// valid HTTP request. A URL mismatch warning in logs does not indicate test
+/// failure — it is a soft check only.
 #[cfg(feature = "libsql")]
 mod tests {
     use std::time::Duration;

@@ -42,13 +42,27 @@ pub fn validate_strict_schema(
     }
 }
 
+/// Returns true if the schema uses `oneOf`, `anyOf`, or `allOf` combinators
+/// where at least one variant is an object type (has `type: "object"` or `properties`).
+fn has_object_combinator_variants(schema: &serde_json::Value) -> bool {
+    for key in ["oneOf", "anyOf", "allOf"] {
+        if let Some(variants) = schema.get(key).and_then(|v| v.as_array())
+            && variants.iter().any(|v| {
+                v.get("type").and_then(|t| t.as_str()) == Some("object")
+                    || v.get("properties").is_some()
+            })
+        {
+            return true;
+        }
+    }
+    false
+}
+
 /// Recursively validate an object-typed schema node.
 fn check_object_schema(schema: &serde_json::Value, path: &str) -> Vec<String> {
     let mut errors = Vec::new();
 
-    let has_combinators = schema.get("oneOf").and_then(|v| v.as_array()).is_some()
-        || schema.get("anyOf").and_then(|v| v.as_array()).is_some()
-        || schema.get("allOf").and_then(|v| v.as_array()).is_some();
+    let has_combinators = has_object_combinator_variants(schema);
 
     // Rule 1: must have "type": "object" (unless combinators define the structure)
     match schema.get("type").and_then(|t| t.as_str()) {

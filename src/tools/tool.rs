@@ -467,6 +467,22 @@ pub fn redact_params(params: &serde_json::Value, sensitive: &[&str]) -> serde_js
 /// on maliciously crafted schemas.
 const MAX_SCHEMA_DEPTH: usize = 16;
 
+/// Returns true if the schema uses `oneOf`, `anyOf`, or `allOf` combinators
+/// where at least one variant is an object type (has `type: "object"` or `properties`).
+fn has_object_combinator_variants(schema: &serde_json::Value) -> bool {
+    for key in ["oneOf", "anyOf", "allOf"] {
+        if let Some(variants) = schema.get(key).and_then(|v| v.as_array())
+            && variants.iter().any(|v| {
+                v.get("type").and_then(|t| t.as_str()) == Some("object")
+                    || v.get("properties").is_some()
+            })
+        {
+            return true;
+        }
+    }
+    false
+}
+
 pub fn validate_tool_schema(schema: &serde_json::Value, path: &str) -> Vec<String> {
     validate_tool_schema_inner(schema, path, 0)
 }
@@ -481,9 +497,7 @@ fn validate_tool_schema_inner(schema: &serde_json::Value, path: &str, depth: usi
         return errors;
     }
 
-    let has_combinators = schema.get("oneOf").and_then(|v| v.as_array()).is_some()
-        || schema.get("anyOf").and_then(|v| v.as_array()).is_some()
-        || schema.get("allOf").and_then(|v| v.as_array()).is_some();
+    let has_combinators = has_object_combinator_variants(schema);
 
     // Rule 1: must have "type": "object" at this level (unless combinators define the structure)
     match schema.get("type").and_then(|t| t.as_str()) {
