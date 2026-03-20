@@ -617,11 +617,15 @@ pub fn decode_hosted_oauth_state(state: &str) -> Result<DecodedHostedOAuthState,
         return Err("Hosted OAuth state is empty".to_string());
     }
 
-    Ok(DecodedHostedOAuthState {
-        flow_id: state.to_string(),
-        instance_name: None,
-        is_legacy: true,
-    })
+    if state.starts_with(HOSTED_STATE_PREFIX) {
+        return Ok(DecodedHostedOAuthState {
+            flow_id: state.to_string(),
+            instance_name: None,
+            is_legacy: true,
+        });
+    }
+
+    Err("Hosted OAuth state is missing a legacy instance prefix".to_string())
 }
 
 /// Build the hosted callback state used by the public OAuth callback endpoint.
@@ -1179,11 +1183,6 @@ mod tests {
         assert_eq!(decoded.flow_id, "abc123");
         assert_eq!(decoded.instance_name.as_deref(), Some("kind-deer"));
         assert!(decoded.is_legacy);
-
-        let decoded = decode_hosted_oauth_state("abc123").expect("legacy raw");
-        assert_eq!(decoded.flow_id, "abc123");
-        assert_eq!(decoded.instance_name, None);
-        assert!(decoded.is_legacy);
     }
 
     #[test]
@@ -1195,6 +1194,17 @@ mod tests {
         assert_eq!(decoded.flow_id, "ic2.provider-owned-state");
         assert_eq!(decoded.instance_name, None);
         assert!(decoded.is_legacy);
+    }
+
+    #[test]
+    fn test_decode_hosted_oauth_state_rejects_raw_legacy_state() {
+        use crate::cli::oauth_defaults::decode_hosted_oauth_state;
+
+        let err = decode_hosted_oauth_state("abc123").expect_err("raw legacy state should fail");
+        assert!(
+            err.contains("legacy instance prefix"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

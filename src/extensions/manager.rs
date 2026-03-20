@@ -1031,10 +1031,7 @@ impl ExtensionManager {
         }
 
         let Ok(mut parsed) = url::Url::parse(&auth_url) else {
-            return auth_url.replace(
-                &format!("state={}", urlencoding::encode(expected_state)),
-                &format!("state={}", urlencoding::encode(hosted_state)),
-            );
+            return auth_url;
         };
 
         let mut replaced = false;
@@ -7070,6 +7067,15 @@ mod tests {
                 "new-hosted-state",
             ),
             "https://auth.example.com/authorize?client_id=abc&state=new-hosted-state&hint=state%3Dkeep"
+        );
+    }
+
+    #[test]
+    fn rewrite_oauth_state_param_leaves_unparseable_urls_unchanged() {
+        let auth_url = "not-a-url?client_id=abc&state=old-state&hint=state%3Dkeep".to_string();
+        assert_eq!(
+            ExtensionManager::rewrite_oauth_state_param(auth_url.clone(), "old-state", "new-state"),
+            auth_url
         );
     }
 

@@ -77,6 +77,19 @@ fn redact_oauth_state_for_logs(state: &str) -> String {
     format!("sha256:{short_hash}:len={}", state.len())
 }
 
+fn rate_limited_html_response() -> (StatusCode, axum::response::Html<String>) {
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        axum::response::Html(
+            "<html><body style='font-family: system-ui; text-align: center; padding: 60px;'>\
+             <h2>Too Many Requests</h2>\
+             <p>Please try again later.</p>\
+             </body></html>"
+                .to_string(),
+        ),
+    )
+}
+
 /// Simple sliding-window rate limiter.
 ///
 /// Tracks the number of requests in the current window. Resets when the window expires.
@@ -556,6 +569,10 @@ async fn oauth_callback_handler(
 ) -> impl IntoResponse {
     use crate::cli::oauth_defaults;
 
+    if !state.oauth_rate_limiter.check() {
+        return rate_limited_html_response().into_response();
+    }
+
     // Check for error from OAuth provider (e.g., user denied consent)
     if let Some(error) = params.get("error") {
         let description = params
@@ -888,14 +905,7 @@ async fn slack_relay_oauth_callback_handler(
 ) -> impl IntoResponse {
     // Rate limit
     if !state.oauth_rate_limiter.check() {
-        return axum::response::Html(
-            "<html><body style='font-family: system-ui; text-align: center; padding: 60px;'>\
-             <h2>Too Many Requests</h2>\
-             <p>Please try again later.</p>\
-             </body></html>"
-                .to_string(),
-        )
-        .into_response();
+        return rate_limited_html_response().into_response();
     }
 
     // Validate team_id format: empty or T followed by alphanumeric (max 20 chars)
@@ -2813,6 +2823,13 @@ mod tests {
 
     /// Build a minimal `GatewayState` for testing the OAuth callback handler.
     fn test_gateway_state(ext_mgr: Option<Arc<ExtensionManager>>) -> Arc<GatewayState> {
+        test_gateway_state_with_rate_limiter(ext_mgr, RateLimiter::new(10, 60))
+    }
+
+    fn test_gateway_state_with_rate_limiter(
+        ext_mgr: Option<Arc<ExtensionManager>>,
+        oauth_rate_limiter: RateLimiter,
+    ) -> Arc<GatewayState> {
         Arc::new(GatewayState {
             msg_tx: tokio::sync::RwLock::new(None),
             sse: SseManager::new(),
@@ -2833,7 +2850,7 @@ mod tests {
             skill_catalog: None,
             scheduler: None,
             chat_rate_limiter: RateLimiter::new(30, 60),
-            oauth_rate_limiter: RateLimiter::new(10, 60),
+            oauth_rate_limiter,
             registry_entries: vec![],
             cost_guard: None,
             routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
@@ -3087,6 +3104,32 @@ mod tests {
             .expect("body");
         let html = String::from_utf8_lossy(&body);
         assert!(html.contains("Authorization Failed"));
+    }
+
+    #[tokio::test]
+    async fn test_oauth_callback_rate_limited() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let state = test_gateway_state_with_rate_limiter(None, RateLimiter::new(1, 60));
+        assert!(state.oauth_rate_limiter.check());
+        let app = test_oauth_router(state);
+
+        let req = axum::http::Request::builder()
+            .uri("/oauth/callback?state=second&code=two")
+            .body(Body::empty())
+            .expect("request");
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+            .await
+            .expect("body");
+        let html = String::from_utf8_lossy(&body);
+        assert!(html.contains("Too Many Requests"));
     }
 
     #[tokio::test]
