@@ -3,6 +3,12 @@
 //! Loads the compiled github WASM binary into the test rig, replays an LLM
 //! trace that sends string-typed numeric params, and verifies the WASM tool
 //! constructs the correct HTTP API call via `http_exchanges` in the trace.
+//!
+//! These tests are `#[ignore]` by default because they require a pre-compiled
+//! WASM binary. Build it with:
+//!   cargo build -p github-tool --target wasm32-wasip2 --release
+//! Then run with:
+//!   cargo test --features libsql --test e2e_wasm_github_coercion -- --ignored
 
 #[cfg(feature = "libsql")]
 mod support;
@@ -34,26 +40,11 @@ mod tests {
         }
     }
 
-    fn skip_if_no_wasm() -> bool {
-        if !std::path::Path::new(GITHUB_WASM).exists() {
-            eprintln!(
-                "Skipping: github WASM binary not found at {GITHUB_WASM}. \
-                 Build with: cargo build -p github-tool --target wasm32-wasip2 --release"
-            );
-            true
-        } else {
-            false
-        }
-    }
-
     /// LLM sends `limit: "50"` (string) to `list_issues`. Coercion converts it
     /// to integer, and the WASM tool must call `GET /repos/.../issues?...&per_page=50`.
     #[tokio::test]
+    #[ignore] // requires pre-compiled WASM binary
     async fn wasm_github_list_issues_coerces_string_limit() {
-        if skip_if_no_wasm() {
-            return;
-        }
-
         let expected_url =
             "https://api.github.com/repos/nearai/ironclaw/issues?state=open&per_page=50";
 
@@ -115,7 +106,7 @@ mod tests {
 
         let rig = TestRigBuilder::new()
             .with_trace(trace.clone())
-            .with_wasm_tool("github", GITHUB_WASM, Some(GITHUB_CAPS))
+            .with_wasm_tool("github", GITHUB_WASM, Some(GITHUB_CAPS.into()))
             .build()
             .await;
 
@@ -130,11 +121,8 @@ mod tests {
     /// LLM sends `issue_number: "42"` (string) to `get_issue`. Coercion converts
     /// it to integer, and the URL must contain `/issues/42`.
     #[tokio::test]
+    #[ignore] // requires pre-compiled WASM binary
     async fn wasm_github_get_issue_coerces_string_issue_number() {
-        if skip_if_no_wasm() {
-            return;
-        }
-
         let expected_url = "https://api.github.com/repos/nearai/ironclaw/issues/42";
 
         let trace = LlmTrace {
@@ -194,7 +182,7 @@ mod tests {
 
         let rig = TestRigBuilder::new()
             .with_trace(trace.clone())
-            .with_wasm_tool("github", GITHUB_WASM, Some(GITHUB_CAPS))
+            .with_wasm_tool("github", GITHUB_WASM, Some(GITHUB_CAPS.into()))
             .build()
             .await;
 
@@ -208,11 +196,8 @@ mod tests {
     /// LLM sends `limit: "25"` (string) to `list_pull_requests`. URL must
     /// contain `per_page=25`.
     #[tokio::test]
+    #[ignore] // requires pre-compiled WASM binary
     async fn wasm_github_list_prs_coerces_string_limit() {
-        if skip_if_no_wasm() {
-            return;
-        }
-
         let expected_url =
             "https://api.github.com/repos/nearai/ironclaw/pulls?state=open&per_page=25";
 
@@ -273,7 +258,7 @@ mod tests {
 
         let rig = TestRigBuilder::new()
             .with_trace(trace.clone())
-            .with_wasm_tool("github", GITHUB_WASM, Some(GITHUB_CAPS))
+            .with_wasm_tool("github", GITHUB_WASM, Some(GITHUB_CAPS.into()))
             .build()
             .await;
 

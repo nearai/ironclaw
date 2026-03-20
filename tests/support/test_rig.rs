@@ -387,18 +387,19 @@ impl TestRigBuilder {
     /// interceptor used for `with_http_exchanges()`, so `http_exchanges` in
     /// the trace can specify expected requests/responses for WASM tool HTTP calls.
     ///
-    /// Gracefully skips if the WASM binary does not exist (returns the builder
-    /// unchanged so tests can use `if !rig.has_tool("name") { return; }`).
+    /// If the WASM binary does not exist at build time, the tool is silently
+    /// skipped (logged as a warning). Tests should use `#[ignore]` or check
+    /// for the binary in a preamble if the tool is required.
     pub fn with_wasm_tool(
         mut self,
         name: impl Into<String>,
         wasm_path: impl Into<std::path::PathBuf>,
-        capabilities_path: Option<impl Into<std::path::PathBuf>>,
+        capabilities_path: Option<std::path::PathBuf>,
     ) -> Self {
         self.wasm_tools.push(WasmToolSpec {
             name: name.into(),
             wasm_path: wasm_path.into(),
-            capabilities_path: capabilities_path.map(Into::into),
+            capabilities_path,
         });
         self
     }

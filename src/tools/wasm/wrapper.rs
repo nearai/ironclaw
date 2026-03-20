@@ -355,10 +355,11 @@ impl near::agent::host::Host for StoreData {
             let interceptor = Arc::clone(interceptor);
             let intercept_url = url.clone();
             let intercept_method = method.clone();
-            let intercept_headers: Vec<(String, String)> = headers
+            let mut intercept_headers: Vec<(String, String)> = headers
                 .iter()
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect();
+            intercept_headers.sort_by(|a, b| a.0.cmp(&b.0));
             let intercept_body = body
                 .as_ref()
                 .map(|b| String::from_utf8_lossy(b).to_string());
@@ -492,17 +493,18 @@ impl near::agent::host::Host for StoreData {
         });
 
         // Notify the interceptor about the completed response (recording mode).
-        // In practice this is dead code because our only interceptor
-        // (ReplayingHttpInterceptor) always returns Some from before_request,
-        // hitting the early return above. Implemented for correctness so a
-        // RecordingHttpInterceptor would capture WASM HTTP exchanges.
+        // RecordingHttpInterceptor returns None from before_request and captures
+        // exchanges via after_response, so this path is exercised during trace recording.
         if let (Some(interceptor), Some(req), Ok(resp)) =
             (&self.http_interceptor, &interceptor_req, &result)
         {
             let interceptor = Arc::clone(interceptor);
             let req = req.clone();
             let resp_headers: Vec<(String, String)> =
-                serde_json::from_str(&resp.headers_json).unwrap_or_default();
+                serde_json::from_str::<HashMap<String, String>>(&resp.headers_json)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .collect();
             let resp_body = String::from_utf8_lossy(&resp.body).to_string();
             let exchange_resp = HttpExchangeResponse {
                 status: resp.status,
