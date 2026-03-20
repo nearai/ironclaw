@@ -198,6 +198,8 @@ mod tests {
             http_interceptor: None,
             transcription: None,
             document_extraction: None,
+            sandbox_readiness: ironclaw::agent::SandboxReadiness::DisabledByConfig,
+            builder: None,
         };
 
         let gateway = Arc::new(TestChannel::new());

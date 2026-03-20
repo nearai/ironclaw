@@ -17,7 +17,7 @@ use crate::agent::routine_engine::{RoutineEngine, spawn_cron_ticker};
 use crate::agent::self_repair::{DefaultSelfRepair, RepairResult, SelfRepair};
 use crate::agent::session_manager::SessionManager;
 use crate::agent::submission::{Submission, SubmissionParser, SubmissionResult};
-use crate::agent::{HeartbeatConfig as AgentHeartbeatConfig, Router, Scheduler};
+use crate::agent::{HeartbeatConfig as AgentHeartbeatConfig, Router, Scheduler, SchedulerDeps};
 use crate::channels::{ChannelManager, IncomingMessage, OutgoingResponse};
 use crate::config::{AgentConfig, HeartbeatConfig, RoutineConfig, SkillsConfig};
 use crate::context::ContextManager;
@@ -30,6 +30,13 @@ use crate::safety::SafetyLayer;
 use crate::skills::SkillRegistry;
 use crate::tools::ToolRegistry;
 use crate::workspace::Workspace;
+
+/// Static greeting persisted to DB and broadcast on first launch.
+///
+/// Sent before the LLM is involved so the user sees something immediately.
+/// The conversational onboarding (profile building, channel setup) happens
+/// organically in the subsequent turns driven by BOOTSTRAP.md.
+const BOOTSTRAP_GREETING: &str = include_str!("../workspace/seeds/GREETING.md");
 
 /// Collapse a tool output string into a single-line preview for display.
 pub(crate) fn truncate_for_preview(output: &str, max_chars: usize) -> String {
@@ -113,6 +120,17 @@ async fn resolve_routine_notification_target(
     .await
 }
 
+pub(crate) fn chat_tool_execution_metadata(message: &IncomingMessage) -> serde_json::Value {
+    serde_json::json!({
+        "notify_channel": message.channel,
+        "notify_user": message
+            .routing_target()
+            .unwrap_or_else(|| message.user_id.clone()),
+        "notify_thread_id": message.thread_id,
+        "notify_metadata": message.metadata,
+    })
+}
+
 fn should_fallback_routine_notification(error: &ChannelError) -> bool {
     !matches!(error, ChannelError::MissingRoutingTarget { .. })
 }
@@ -146,6 +164,10 @@ pub struct AgentDeps {
     pub transcription: Option<Arc<crate::transcription::TranscriptionMiddleware>>,
     /// Document text extraction middleware for PDF, DOCX, PPTX, etc.
     pub document_extraction: Option<Arc<crate::document_extraction::DocumentExtractionMiddleware>>,
+    /// Sandbox readiness state for full-job routine dispatch.
+    pub sandbox_readiness: crate::agent::routine_engine::SandboxReadiness,
+    /// Software builder for self-repair tool rebuilding.
+    pub builder: Option<Arc<dyn crate::tools::SoftwareBuilder>>,
 }
 
 /// The main agent that coordinates all components.
@@ -161,9 +183,10 @@ pub struct Agent {
     pub(super) heartbeat_config: Option<HeartbeatConfig>,
     pub(super) hygiene_config: Option<crate::config::HygieneConfig>,
     pub(super) routine_config: Option<RoutineConfig>,
-    /// Optional slot to expose the routine engine to the gateway for manual triggering.
+    /// Shared routine-engine slot used for internal event matching and for exposing
+    /// the engine to gateway/manual trigger entry points.
     pub(super) routine_engine_slot:
-        Option<Arc<tokio::sync::RwLock<Option<Arc<crate::agent::routine_engine::RoutineEngine>>>>>,
+        Arc<tokio::sync::RwLock<Option<Arc<crate::agent::routine_engine::RoutineEngine>>>>,
 }
 
 impl Agent {
@@ -204,9 +227,12 @@ impl Agent {
             context_manager.clone(),
             deps.llm.clone(),
             deps.safety.clone(),
-            deps.tools.clone(),
-            deps.store.clone(),
-            deps.hooks.clone(),
+            SchedulerDeps {
+                tools: deps.tools.clone(),
+                extension_manager: deps.extension_manager.clone(),
+                store: deps.store.clone(),
+                hooks: deps.hooks.clone(),
+            },
         );
         if let Some(ref tx) = deps.sse_tx {
             scheduler.set_sse_sender(tx.clone());
@@ -228,16 +254,21 @@ impl Agent {
             heartbeat_config,
             hygiene_config,
             routine_config,
-            routine_engine_slot: None,
+            routine_engine_slot: Arc::new(tokio::sync::RwLock::new(None)),
         }
     }
 
-    /// Set the routine engine slot for exposing the engine to the gateway.
+    /// Replace the routine-engine slot with a shared one so the gateway and
+    /// agent reference the same engine.
     pub fn set_routine_engine_slot(
         &mut self,
         slot: Arc<tokio::sync::RwLock<Option<Arc<crate::agent::routine_engine::RoutineEngine>>>>,
     ) {
-        self.routine_engine_slot = Some(slot);
+        self.routine_engine_slot = slot;
+    }
+
+    async fn routine_engine(&self) -> Option<Arc<crate::agent::routine_engine::RoutineEngine>> {
+        self.routine_engine_slot.read().await.clone()
     }
 
     // Convenience accessors
@@ -330,15 +361,48 @@ impl Agent {
 
     /// Run the agent main loop.
     pub async fn run(self) -> Result<(), Error> {
+        // Proactive bootstrap: persist the static greeting to DB *before*
+        // starting channels so the first web client sees it via history.
+        let bootstrap_thread_id = if self
+            .workspace()
+            .is_some_and(|ws| ws.take_bootstrap_pending())
+        {
+            tracing::debug!(
+                "Fresh workspace detected — persisting static bootstrap greeting to DB"
+            );
+            if let Some(store) = self.store() {
+                let thread_id = store
+                    .get_or_create_assistant_conversation("default", "gateway")
+                    .await
+                    .ok();
+                if let Some(id) = thread_id {
+                    self.persist_assistant_response(id, "gateway", "default", BOOTSTRAP_GREETING)
+                        .await;
+                }
+                thread_id
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         // Start channels
         let mut message_stream = self.channels.start_all().await?;
 
         // Start self-repair task with notification forwarding
-        let repair = Arc::new(DefaultSelfRepair::new(
+        let mut self_repair = DefaultSelfRepair::new(
             self.context_manager.clone(),
             self.config.stuck_threshold,
             self.config.max_repair_attempts,
-        ));
+        );
+        if let Some(ref store) = self.deps.store {
+            self_repair = self_repair.with_store(Arc::clone(store));
+        }
+        if let Some(ref builder) = self.deps.builder {
+            self_repair = self_repair.with_builder(Arc::clone(builder), Arc::clone(self.tools()));
+        }
+        let repair = Arc::new(self_repair);
         let repair_interval = self.config.repair_check_interval;
         let repair_channels = self.channels.clone();
         let repair_owner_id = self.owner_id().to_string();
@@ -539,8 +603,10 @@ impl Agent {
                         Arc::clone(workspace),
                         notify_tx,
                         Some(self.scheduler.clone()),
+                        self.deps.extension_manager.clone(),
                         self.tools().clone(),
                         self.safety().clone(),
+                        self.deps.sandbox_readiness,
                     ));
 
                     // Register routine tools
@@ -633,9 +699,7 @@ impl Agent {
                     // via a local to use in the message loop below.
 
                     // Expose engine to gateway for manual triggering
-                    if let Some(ref slot) = self.routine_engine_slot {
-                        *slot.write().await = Some(Arc::clone(&engine));
-                    }
+                    *self.routine_engine_slot.write().await = Some(Arc::clone(&engine));
 
                     tracing::debug!(
                         "Routines enabled: cron ticker every {}s, max {} concurrent",
@@ -655,8 +719,29 @@ impl Agent {
             None
         };
 
-        // Extract engine ref for use in message loop
-        let routine_engine_for_loop = routine_handle.as_ref().map(|(_, e)| Arc::clone(e));
+        // Bootstrap phase 2: register the thread in session manager and
+        // broadcast the greeting via SSE for any clients already connected.
+        // The greeting was already persisted to DB before start_all(), so
+        // clients that connect after this point will see it via history.
+        if let Some(id) = bootstrap_thread_id {
+            // Use get_or_create_session (not resolve_thread) to avoid creating
+            // an orphan thread. Then insert the DB-sourced thread directly.
+            let session = self.session_manager.get_or_create_session("default").await;
+            {
+                use crate::agent::session::Thread;
+                let mut sess = session.lock().await;
+                let thread = Thread::with_id(id, sess.id);
+                sess.active_thread = Some(id);
+                sess.threads.entry(id).or_insert(thread);
+            }
+            self.session_manager
+                .register_thread("default", "gateway", id, session)
+                .await;
+
+            let mut out = OutgoingResponse::text(BOOTSTRAP_GREETING.to_string());
+            out.thread_id = Some(id.to_string());
+            let _ = self.channels.broadcast("gateway", "default", out).await;
+        }
 
         // Main message loop
         tracing::debug!("Agent {} ready and listening", self.config.name);
@@ -692,29 +777,6 @@ impl Agent {
 
             // Store successfully extracted document text in workspace for indexing
             self.store_extracted_documents(&message).await;
-
-            // Event-triggered routines consume plain user input before it enters
-            // the normal chat/tool pipeline. This avoids a duplicate turn where
-            // the main agent responds and the routine also fires on the same
-            // inbound message.
-            if !message.is_internal
-                && matches!(
-                    SubmissionParser::parse(&message.content),
-                    Submission::UserInput { .. }
-                )
-                && let Some(ref engine) = routine_engine_for_loop
-            {
-                let fired = engine.check_event_triggers(&message).await;
-                if fired > 0 {
-                    tracing::debug!(
-                        channel = %message.channel,
-                        user = %message.user_id,
-                        fired,
-                        "Consumed inbound user message with matching event-triggered routine(s)"
-                    );
-                    continue;
-                }
-            }
 
             match self.handle_message(&message).await {
                 Ok(Some(response)) if !response.is_empty() => {
@@ -874,9 +936,6 @@ impl Agent {
     }
 
     async fn handle_message(&self, message: &IncomingMessage) -> Result<Option<String>, Error> {
-        // Log at info level only for tracking without exposing PII (user_id can be a phone number)
-        tracing::info!(message_id = %message.id, "Processing message");
-
         // Log sensitive details at debug level for troubleshooting
         tracing::debug!(
             message_id = %message.id,
@@ -956,10 +1015,6 @@ impl Agent {
         }
 
         // Resolve session and thread
-        tracing::debug!(
-            message_id = %message.id,
-            "Resolving session and thread"
-        );
         let (session, thread_id) = self
             .session_manager
             .resolve_thread(
@@ -1031,6 +1086,24 @@ impl Agent {
             message.channel,
             message.content.len()
         );
+
+        if !message.is_internal
+            && let Submission::UserInput { ref content } = submission
+            && let Some(engine) = self.routine_engine().await
+        {
+            let fired = engine
+                .check_event_triggers(&message.user_id, &message.channel, content)
+                .await;
+            if fired > 0 {
+                tracing::debug!(
+                    channel = %message.channel,
+                    user = %message.user_id,
+                    fired,
+                    "Consumed inbound user message with matching event-triggered routine(s)"
+                );
+                return Ok(Some(String::new()));
+            }
+        }
 
         // Process based on submission type
         let result = match submission {
@@ -1119,9 +1192,10 @@ impl Agent {
 #[cfg(test)]
 mod tests {
     use super::{
-        resolve_routine_notification_user, should_fallback_routine_notification,
-        truncate_for_preview,
+        chat_tool_execution_metadata, resolve_routine_notification_user,
+        should_fallback_routine_notification, truncate_for_preview,
     };
+    use crate::channels::IncomingMessage;
     use crate::error::ChannelError;
 
     #[test]
@@ -1215,6 +1289,50 @@ mod tests {
         });
 
         assert_eq!(resolve_routine_notification_user(&metadata), None); // safety: test-only assertion
+    }
+
+    #[test]
+    fn chat_tool_execution_metadata_prefers_message_routing_target() {
+        let message = IncomingMessage::new("telegram", "owner-scope", "hello")
+            .with_sender_id("telegram-user")
+            .with_thread("thread-7")
+            .with_metadata(serde_json::json!({
+                "chat_id": 424242,
+                "chat_type": "private",
+            }));
+
+        let metadata = chat_tool_execution_metadata(&message);
+        assert_eq!(
+            metadata.get("notify_channel").and_then(|v| v.as_str()),
+            Some("telegram")
+        ); // safety: test-only assertion
+        assert_eq!(
+            metadata.get("notify_user").and_then(|v| v.as_str()),
+            Some("424242")
+        ); // safety: test-only assertion
+        assert_eq!(
+            metadata.get("notify_thread_id").and_then(|v| v.as_str()),
+            Some("thread-7")
+        ); // safety: test-only assertion
+    }
+
+    #[test]
+    fn chat_tool_execution_metadata_falls_back_to_user_scope_without_route() {
+        let message = IncomingMessage::new("gateway", "owner-scope", "hello").with_sender_id("");
+
+        let metadata = chat_tool_execution_metadata(&message);
+        assert_eq!(
+            metadata.get("notify_channel").and_then(|v| v.as_str()),
+            Some("gateway")
+        ); // safety: test-only assertion
+        assert_eq!(
+            metadata.get("notify_user").and_then(|v| v.as_str()),
+            Some("owner-scope")
+        ); // safety: test-only assertion
+        assert_eq!(
+            metadata.get("notify_thread_id"),
+            Some(&serde_json::Value::Null)
+        ); // safety: test-only assertion
     }
 
     #[test]

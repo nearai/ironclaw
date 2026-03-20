@@ -3,7 +3,7 @@
 //! The wizard guides users through:
 //! 1. Database connection
 //! 2. Security (secrets master key)
-//! 3. Inference provider (NEAR AI, Anthropic, OpenAI, Ollama, OpenAI-compatible)
+//! 3. Inference provider (NEAR AI, Anthropic, OpenAI, OpenAI Codex, Ollama, OpenAI-compatible)
 //! 4. Model selection
 //! 5. Embeddings
 //! 6. Channel configuration
@@ -217,13 +217,52 @@ impl SetupWizard {
             self.auto_setup_security().await?;
             self.persist_after_step().await;
 
-            print_step(1, 2, "Inference Provider");
-            self.step_inference_provider().await?;
-            self.persist_after_step().await;
+            // Pre-populate backend from env so step_inference_provider
+            // can offer "Keep current provider?" instead of asking from scratch.
+            if self.settings.llm_backend.is_none() {
+                use crate::config::helpers::env_or_override;
+                if let Some(b) = env_or_override("LLM_BACKEND")
+                    && !b.trim().is_empty()
+                {
+                    self.settings.llm_backend = Some(b.trim().to_string());
+                } else if env_or_override("NEARAI_API_KEY").is_some() {
+                    self.settings.llm_backend = Some("nearai".to_string());
+                } else if env_or_override("ANTHROPIC_API_KEY").is_some()
+                    || env_or_override("ANTHROPIC_OAUTH_TOKEN").is_some()
+                {
+                    self.settings.llm_backend = Some("anthropic".to_string());
+                } else if env_or_override("OPENAI_API_KEY").is_some() {
+                    self.settings.llm_backend = Some("openai".to_string());
+                }
+            }
 
-            print_step(2, 2, "Model Selection");
-            self.step_model_selection().await?;
-            self.persist_after_step().await;
+            if let Some(api_key) = crate::config::helpers::env_or_override("NEARAI_API_KEY")
+                && self.settings.llm_backend.as_deref() == Some("nearai")
+            {
+                // NEARAI_API_KEY is set and backend auto-detected — skip interactive prompts
+                print_info("NEARAI_API_KEY found — using NEAR AI provider");
+                if let Ok(ctx) = self.init_secrets_context().await {
+                    let key = SecretString::from(api_key.clone());
+                    if let Err(e) = ctx.save_secret("llm_nearai_api_key", &key).await {
+                        tracing::warn!("Failed to persist NEARAI_API_KEY to secrets: {}", e);
+                    }
+                }
+                self.llm_api_key = Some(SecretString::from(api_key));
+                if self.settings.selected_model.is_none() {
+                    let default = crate::llm::DEFAULT_MODEL;
+                    self.settings.selected_model = Some(default.to_string());
+                    print_info(&format!("Using default model: {default}"));
+                }
+                self.persist_after_step().await;
+            } else {
+                print_step(1, 2, "Inference Provider");
+                self.step_inference_provider().await?;
+                self.persist_after_step().await;
+
+                print_step(2, 2, "Model Selection");
+                self.step_model_selection().await?;
+                self.persist_after_step().await;
+            }
         } else {
             let total_steps = 9;
 
@@ -285,6 +324,10 @@ impl SetupWizard {
             print_step(9, total_steps, "Background Tasks");
             self.step_heartbeat()?;
             self.persist_after_step().await;
+
+            // Personal onboarding now happens conversationally during the
+            // user's first interaction with the assistant (see bootstrap
+            // block in workspace/mod.rs system_prompt_for_context).
         }
 
         // Save settings and print summary
@@ -1040,14 +1083,20 @@ impl SetupWizard {
             print_info(&format!("Current provider: {}", display));
             println!();
 
-            let is_known =
-                current == "nearai" || current == "bedrock" || registry.is_known(&current);
+            let is_known = current == "nearai"
+                || current == "bedrock"
+                || current == "openai_codex"
+                || registry.is_known(&current);
 
             if is_known && confirm("Keep current provider?", true).map_err(SetupError::Io)? {
                 if current == "bedrock" {
                     // Keeping the existing Bedrock config — no need to re-run
                     // the full setup flow (region, auth, cross-region).
                     print_info("Keeping existing AWS Bedrock configuration.");
+                    return Ok(());
+                }
+                if current == "openai_codex" {
+                    print_info("Keeping existing OpenAI Codex configuration.");
                     return Ok(());
                 }
                 return self.run_provider_setup(&current, &registry).await;
@@ -1064,13 +1113,16 @@ impl SetupWizard {
         print_info("Select your inference provider:");
         println!();
 
-        // Build menu: NearAI first, then all registry providers with setup hints, then Bedrock
+        // Build menu: NearAI first, then OpenAI Codex, then registry providers, then Bedrock
         let selectable = registry.selectable();
         let mut options: Vec<String> = Vec::with_capacity(2 + selectable.len());
         let mut provider_ids: Vec<String> = Vec::with_capacity(2 + selectable.len());
 
         options.push("NEAR AI          - multi-model access via NEAR account".to_string());
         provider_ids.push("nearai".to_string());
+
+        options.push("OpenAI Codex     - ChatGPT subscription (Plus/Pro/Max)".to_string());
+        provider_ids.push("openai_codex".to_string());
 
         for def in &selectable {
             let label = format!(
@@ -1113,6 +1165,10 @@ impl SetupWizard {
     ) -> Result<(), SetupError> {
         if provider_id == "nearai" {
             return self.setup_nearai().await;
+        }
+
+        if provider_id == "openai_codex" {
+            return self.setup_openai_codex().await;
         }
 
         let def = registry
@@ -1194,6 +1250,27 @@ impl SetupWizard {
     /// NEAR AI provider setup (extracted from the old step_authentication).
     async fn setup_nearai(&mut self) -> Result<(), SetupError> {
         self.set_llm_backend_preserving_model("nearai");
+
+        // Check if NEARAI_API_KEY is already provided via environment or runtime overlay
+        if let Some(existing) = crate::config::helpers::env_or_override("NEARAI_API_KEY")
+            && !existing.is_empty()
+        {
+            print_info(&format!(
+                "NEARAI_API_KEY found: {}",
+                mask_api_key(&existing)
+            ));
+            if confirm("Use this key?", true).map_err(SetupError::Io)? {
+                if let Ok(ctx) = self.init_secrets_context().await {
+                    let key = SecretString::from(existing.clone());
+                    if let Err(e) = ctx.save_secret("llm_nearai_api_key", &key).await {
+                        tracing::warn!("Failed to persist NEARAI_API_KEY to secrets: {}", e);
+                    }
+                }
+                self.llm_api_key = Some(SecretString::from(existing));
+                print_success("NEAR AI configured (from env)");
+                return Ok(());
+            }
+        }
 
         // Check if we already have a session
         if let Some(ref session) = self.session_manager
@@ -1426,6 +1503,29 @@ impl SetupWizard {
         Ok(())
     }
 
+    /// OpenAI Codex (ChatGPT subscription) setup: device code OAuth flow.
+    async fn setup_openai_codex(&mut self) -> Result<(), SetupError> {
+        self.settings.llm_backend = Some("openai_codex".to_string());
+        if self.settings.selected_model.is_some() {
+            self.settings.selected_model = None;
+        }
+
+        use crate::config::OpenAiCodexConfig;
+        use crate::llm::OpenAiCodexSessionManager;
+
+        let config = OpenAiCodexConfig::default();
+
+        let mgr = OpenAiCodexSessionManager::new(config).map_err(|e| {
+            SetupError::Config(format!("OpenAI Codex session manager init failed: {}", e))
+        })?;
+        mgr.device_code_login().await.map_err(|e| {
+            SetupError::Config(format!("OpenAI Codex authentication failed: {}", e))
+        })?;
+
+        print_success("OpenAI Codex configured (ChatGPT subscription)");
+        Ok(())
+    }
+
     /// Generic Ollama-style setup: just needs a base URL, no API key.
     fn setup_ollama_generic(
         &mut self,
@@ -1623,25 +1723,8 @@ impl SetupWizard {
         if backend == "nearai" {
             // NEAR AI: use existing provider list_models()
             let fetched = self.fetch_nearai_models().await;
-            let default_models: Vec<(String, String)> = vec![
-                (
-                    "zai-org/GLM-latest".into(),
-                    "GLM Latest (default, fast)".into(),
-                ),
-                (
-                    "anthropic::claude-sonnet-4-20250514".into(),
-                    "Claude Sonnet 4 (best quality)".into(),
-                ),
-                (
-                    "openai::gpt-5.3-codex".into(),
-                    "GPT-5.3 Codex (flagship)".into(),
-                ),
-                ("openai::gpt-5.2".into(), "GPT-5.2".into()),
-                ("openai::gpt-4o".into(), "GPT-4o".into()),
-            ];
-
             let models = if fetched.is_empty() {
-                default_models
+                crate::llm::default_models()
             } else {
                 fetched.iter().map(|m| (m.clone(), m.clone())).collect()
             };
@@ -2916,6 +2999,7 @@ impl SetupWizard {
                 "ollama" => "Ollama",
                 "openai_compatible" => "OpenAI-compatible",
                 "bedrock" => "AWS Bedrock",
+                "openai_codex" => "OpenAI Codex",
                 other => other,
             };
             println!("  Provider: {}", display);
@@ -3837,6 +3921,32 @@ mod tests {
         assert!(
             config.nearai.api_key.is_none(),
             "config should have no api_key when env var is empty"
+        );
+    }
+
+    /// Regression: API key set via set_runtime_env (interactive api_key_login
+    /// path) must be picked up by build_nearai_model_fetch_config so that
+    /// model listing doesn't fall back to session-token auth and re-trigger
+    /// the NEAR AI authentication menu.
+    #[test]
+    fn test_build_nearai_model_fetch_config_picks_up_runtime_env() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        // Ensure the real env var is unset so the only source is the overlay.
+        let _guard = EnvGuard::clear("NEARAI_API_KEY");
+
+        crate::config::helpers::set_runtime_env("NEARAI_API_KEY", "test-key-from-overlay");
+        let config = build_nearai_model_fetch_config();
+
+        // Clean up runtime overlay
+        crate::config::helpers::set_runtime_env("NEARAI_API_KEY", "");
+
+        assert!(
+            config.nearai.api_key.is_some(),
+            "config must pick up NEARAI_API_KEY from runtime overlay"
+        );
+        assert_eq!(
+            config.nearai.base_url, "https://cloud-api.near.ai",
+            "API key auth must use cloud-api base URL"
         );
     }
 }
