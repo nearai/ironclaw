@@ -39,9 +39,7 @@ pub enum OAuthCallbackError {
 /// deployments where `127.0.0.1` is unreachable from the user's browser),
 /// then falls back to `http://{callback_host()}:{OAUTH_CALLBACK_PORT}`.
 pub fn callback_url() -> String {
-    std::env::var("IRONCLAW_OAUTH_CALLBACK_URL")
-        .ok()
-        .filter(|v| !v.is_empty())
+    crate::config::helpers::env_or_override("IRONCLAW_OAUTH_CALLBACK_URL")
         .unwrap_or_else(|| format!("http://{}:{}", callback_host(), OAUTH_CALLBACK_PORT))
 }
 
@@ -57,7 +55,8 @@ pub fn callback_url() -> String {
 /// Note: this transmits the session token over plain HTTP — prefer SSH port
 /// forwarding (`ssh -L 9876:127.0.0.1:9876 user@host`) when possible.
 pub fn callback_host() -> String {
-    std::env::var("OAUTH_CALLBACK_HOST").unwrap_or_else(|_| "127.0.0.1".to_string())
+    crate::config::helpers::env_or_override("OAUTH_CALLBACK_HOST")
+        .unwrap_or_else(|| "127.0.0.1".to_string())
 }
 
 /// Returns `true` if `host` is a loopback address that only accepts local connections.
