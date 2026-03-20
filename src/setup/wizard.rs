@@ -2618,14 +2618,16 @@ impl SetupWizard {
 
     /// Write bootstrap environment variables to `~/.ironclaw/.env`.
     ///
-    /// These are the chicken-and-egg settings needed before the database is
-    /// connected (DATABASE_BACKEND, DATABASE_URL, LLM_BACKEND, etc.).
+    /// Only true chicken-and-egg settings are written here — things needed
+    /// before the database is connected: `DATABASE_BACKEND`, `DATABASE_URL`,
+    /// `LIBSQL_PATH`, `SECRETS_MASTER_KEY`, `ONBOARD_COMPLETED`, and
+    /// channel config vars (Signal, Claude Code sandbox).
     ///
-    /// **Credentials are NOT written here.** API keys and OAuth tokens live
-    /// only in the encrypted secrets DB. `LlmConfig::resolve()` defers
-    /// gracefully when credentials are missing during early startup, and the
-    /// re-resolution in `AppBuilder::build_all()` fills them in after
-    /// `inject_llm_keys_from_secrets()` loads from encrypted storage.
+    /// **LLM settings and credentials are NOT written here.** `LLM_BACKEND`,
+    /// base URLs, and model names are persisted to the DB via
+    /// `persist_settings()` and loaded by `Config::from_db_with_toml()`.
+    /// API keys live only in the encrypted secrets DB and are injected via
+    /// `inject_llm_keys_from_secrets()` after DB init.
     fn write_bootstrap_env(&self) -> Result<(), SetupError> {
         let mut env_vars: Vec<(String, String)> = Vec::new();
 
@@ -3841,7 +3843,8 @@ mod tests {
         crate::config::inject_single_var("NEARAI_API_KEY", "injected-wizard-key");
         let config = build_nearai_model_fetch_config();
 
-        // Clean up
+        // Clean up: empty values are treated as unset by env_or_override()
+        // at every layer (real env, runtime overrides, INJECTED_VARS).
         crate::config::inject_single_var("NEARAI_API_KEY", "");
 
         assert!(

@@ -406,26 +406,24 @@ Contains only the settings needed BEFORE database connection. Written by
 ```env
 DATABASE_BACKEND="libsql"
 LIBSQL_PATH="/Users/name/.ironclaw/ironclaw.db"
-LLM_BACKEND="openai_compatible"
-LLM_BASE_URL="http://my-vllm:8000/v1"
+SECRETS_MASTER_KEY="..."   # only if env key source selected
+ONBOARD_COMPLETED="true"
 ```
 
-Or for PostgreSQL + NEAR AI:
+Or for PostgreSQL:
 ```env
 DATABASE_BACKEND="postgres"
 DATABASE_URL="postgres://user:pass@localhost/ironclaw"
-LLM_BACKEND="nearai"
-```
-
-Or for Ollama:
-```env
-LLM_BACKEND="ollama"
-OLLAMA_BASE_URL="http://localhost:11434"
+SECRETS_MASTER_KEY="..."
+ONBOARD_COMPLETED="true"
 ```
 
 **Why separate?** Chicken-and-egg: you need `DATABASE_BACKEND` to know
-which database to connect to, and `LLM_BACKEND` to know whether to
-attempt NEAR AI session auth -- neither can be stored in the database.
+which database to connect to, and `SECRETS_MASTER_KEY` to decrypt the
+secrets store — neither can be stored in the database. LLM settings
+(`LLM_BACKEND`, base URLs, model names) are persisted to the DB via
+`persist_settings()` and loaded after connection. API keys are stored
+encrypted in the secrets DB.
 
 **Layer 2: Database settings table** (everything else)
 
@@ -495,6 +493,7 @@ that are needed before the DB is connected):
 - `LIBSQL_URL` (if turso sync)
 - `SECRETS_MASTER_KEY` (if env key source selected in Step 2)
 - `ONBOARD_COMPLETED` (always, "true")
+- Channel/sandbox vars: `CLAUDE_CODE_ENABLED`, `SIGNAL_HTTP_URL`, `SIGNAL_ACCOUNT`, etc. (channel init may precede DB)
 
 LLM settings (`LLM_BACKEND`, `LLM_BASE_URL`, model, API keys) are persisted
 to the DB via `persist_settings()` and loaded by `Config::from_db_with_toml()`
@@ -589,7 +588,7 @@ in the database `secrets` table. The wizard writes secrets like:
 ```
 telegram_bot_token    → encrypted bot token
 telegram_webhook_secret → encrypted webhook HMAC secret
-anthropic_api_key     → encrypted API key
+llm_anthropic_api_key → encrypted API key
 ```
 
 ---
