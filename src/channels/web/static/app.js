@@ -169,6 +169,7 @@ function authenticate() {
       startGatewayStatusPolling();
       checkTeeStatus();
       loadThreads();
+      requestAnimationFrame(updateTabIndicator);
       loadMemoryTree();
       loadJobs();
       // Apply URL log_level param if present, otherwise just sync the dropdown
@@ -1020,8 +1021,32 @@ function copyMessage(btn) {
   });
 }
 
+let _lastMessageDate = null;
+
+function maybeInsertTimeSeparator(container, timestamp) {
+  const date = timestamp ? new Date(timestamp) : new Date();
+  const dateStr = date.toDateString();
+  if (_lastMessageDate === dateStr) return;
+  _lastMessageDate = dateStr;
+
+  const now = new Date();
+  const today = now.toDateString();
+  const yesterday = new Date(now.getTime() - 86400000).toDateString();
+
+  let label;
+  if (dateStr === today) label = 'Today';
+  else if (dateStr === yesterday) label = 'Yesterday';
+  else label = date.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+
+  const sep = document.createElement('div');
+  sep.className = 'time-separator';
+  sep.textContent = label;
+  container.appendChild(sep);
+}
+
 function addMessage(role, content) {
   const container = document.getElementById('chat-messages');
+  maybeInsertTimeSeparator(container);
   const div = createMessageElement(role, content);
   container.appendChild(div);
   container.scrollTop = container.scrollHeight;
@@ -1134,16 +1159,14 @@ function addToolCard(name) {
 
   const body = document.createElement('div');
   body.className = 'activity-tool-body';
-  body.style.display = 'none';
 
   const output = document.createElement('pre');
   output.className = 'activity-tool-output';
   body.appendChild(output);
 
   header.addEventListener('click', () => {
-    const isOpen = body.style.display !== 'none';
-    body.style.display = isOpen ? 'none' : 'block';
-    chevron.classList.toggle('expanded', !isOpen);
+    body.classList.toggle('expanded');
+    chevron.classList.toggle('expanded', body.classList.contains('expanded'));
   });
 
   card.appendChild(header);
@@ -1202,7 +1225,7 @@ function completeToolCard(name, success, error, parameters) {
       // Auto-expand so the error is immediately visible
       const body = entry.card.querySelector('.activity-tool-body');
       const chevron = entry.card.querySelector('.activity-tool-chevron');
-      if (body) body.style.display = 'block';
+      if (body) body.classList.add('expanded');
       if (chevron) chevron.classList.add('expanded');
     }
   }
@@ -1763,6 +1786,11 @@ function createMessageElement(role, content) {
   const div = document.createElement('div');
   div.className = 'message ' + role;
 
+  const ts = document.createElement('span');
+  ts.className = 'message-timestamp';
+  ts.textContent = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  div.appendChild(ts);
+
   // Message content
   const contentEl = document.createElement('div');
   contentEl.className = 'message-content';
@@ -2093,6 +2121,10 @@ chatInput.addEventListener('input', () => {
     ghost.style.display = 'block';
     wrapper.classList.add('has-ghost');
   }
+  const sendBtn = document.getElementById('send-btn');
+  if (sendBtn) {
+    sendBtn.classList.toggle('active', chatInput.value.trim().length > 0);
+  }
 });
 chatInput.addEventListener('blur', () => {
   // Small delay so mousedown on autocomplete item fires first
@@ -2114,8 +2146,13 @@ document.getElementById('chat-messages').addEventListener('scroll', function () 
 });
 
 function autoResizeTextarea(el) {
+  const prev = el.offsetHeight;
   el.style.height = 'auto';
-  el.style.height = Math.min(el.scrollHeight, 120) + 'px';
+  const target = Math.min(el.scrollHeight, 120);
+  el.style.height = prev + 'px';
+  requestAnimationFrame(() => {
+    el.style.height = target + 'px';
+  });
 }
 
 // --- Tabs ---
@@ -2146,7 +2183,25 @@ function switchTab(tab) {
   } else {
     stopPairingPoll();
   }
+  updateTabIndicator();
 }
+
+function updateTabIndicator() {
+  const indicator = document.getElementById('tab-indicator');
+  if (!indicator) return;
+  const activeBtn = document.querySelector('.tab-bar button[data-tab].active');
+  if (!activeBtn) {
+    indicator.style.width = '0';
+    return;
+  }
+  const bar = activeBtn.closest('.tab-bar');
+  const barRect = bar.getBoundingClientRect();
+  const btnRect = activeBtn.getBoundingClientRect();
+  indicator.style.left = (btnRect.left - barRect.left) + 'px';
+  indicator.style.width = btnRect.width + 'px';
+}
+
+window.addEventListener('resize', updateTabIndicator);
 
 // --- Memory (filesystem tree) ---
 
@@ -5187,34 +5242,30 @@ function renderStructuredSettingsRow(def, value, activeValue) {
   var placeholderText = activeValueText ? I18n.t('settings.envValue', { value: activeValueText }) : (def.placeholder || I18n.t('settings.envDefault'));
 
   if (def.type === 'boolean') {
-    var boolSel = document.createElement('select');
-    boolSel.className = 'settings-select';
-    boolSel.setAttribute('data-setting-key', def.key);
-    boolSel.setAttribute('aria-label', ariaLabel);
-    var boolDefault = document.createElement('option');
-    boolDefault.value = '';
-    boolDefault.textContent = activeValue !== undefined && activeValue !== null
-      ? '\u2014 ' + I18n.t('settings.envValue', { value: String(activeValue) }) + ' \u2014'
-      : '\u2014 ' + I18n.t('settings.useEnvDefault') + ' \u2014';
-    if (value === null || value === undefined) boolDefault.selected = true;
-    boolSel.appendChild(boolDefault);
-    var boolOn = document.createElement('option');
-    boolOn.value = 'true';
-    boolOn.textContent = I18n.t('settings.on');
-    if (value === true) boolOn.selected = true;
-    boolSel.appendChild(boolOn);
-    var boolOff = document.createElement('option');
-    boolOff.value = 'false';
-    boolOff.textContent = I18n.t('settings.off');
-    if (value === false) boolOff.selected = true;
-    boolSel.appendChild(boolOff);
-    boolSel.addEventListener('change', (function(k, el) {
-      return function() {
-        if (el.value === '') saveSetting(k, null);
-        else saveSetting(k, el.value === 'true');
-      };
-    })(def.key, boolSel));
-    inputWrap.appendChild(boolSel);
+    var toggle = document.createElement('div');
+    toggle.className = 'toggle-switch' + (value === 'true' || value === true ? ' on' : '');
+    toggle.setAttribute('role', 'switch');
+    toggle.setAttribute('aria-checked', value === 'true' || value === true ? 'true' : 'false');
+    toggle.setAttribute('aria-label', ariaLabel);
+    toggle.setAttribute('tabindex', '0');
+
+    var savedIndicator = document.createElement('span');
+    savedIndicator.className = 'settings-saved-indicator';
+    savedIndicator.textContent = I18n.t('settings.saved');
+
+    toggle.addEventListener('click', function() {
+      var isOn = this.classList.toggle('on');
+      this.setAttribute('aria-checked', isOn ? 'true' : 'false');
+      saveSetting(def.key, isOn ? 'true' : 'false', savedIndicator);
+    });
+    toggle.addEventListener('keydown', function(e) {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        this.click();
+      }
+    });
+    inputWrap.appendChild(toggle);
+    inputWrap.appendChild(savedIndicator);
   } else if (def.type === 'select' && def.options) {
     var sel = document.createElement('select');
     sel.className = 'settings-select';
@@ -5588,13 +5639,33 @@ function showToast(message, type) {
   const container = document.getElementById('toasts');
   const toast = document.createElement('div');
   toast.className = 'toast toast-' + (type || 'info');
-  toast.textContent = message;
+
+  // Icon prefix
+  const icon = document.createElement('span');
+  icon.className = 'toast-icon';
+  if (type === 'success') icon.textContent = '\u2713';
+  else if (type === 'error') icon.textContent = '\u2717';
+  else icon.textContent = '\u2139';
+  toast.appendChild(icon);
+
+  // Message text
+  const text = document.createElement('span');
+  text.textContent = message;
+  toast.appendChild(text);
+
+  // Countdown bar
+  const countdown = document.createElement('div');
+  countdown.className = 'toast-countdown';
+  toast.appendChild(countdown);
+
   container.appendChild(toast);
   // Trigger slide-in
   requestAnimationFrame(() => toast.classList.add('visible'));
   setTimeout(() => {
-    toast.classList.remove('visible');
-    toast.addEventListener('transitionend', () => toast.remove());
+    toast.classList.add('dismissing');
+    toast.addEventListener('transitionend', () => toast.remove(), { once: true });
+    // Fallback removal if transitionend doesn't fire
+    setTimeout(() => { if (toast.parentNode) toast.remove(); }, 500);
   }, 4000);
 }
 
@@ -5691,18 +5762,14 @@ function removeWelcomeCard() {
 // --- Connection Status Banner (Phase 4.1) ---
 
 function showConnectionBanner(message, type) {
-  // Remove existing banner if any
   const existing = document.getElementById('connection-banner');
   if (existing) existing.remove();
-
-  const chatPanel = document.getElementById('tab-chat');
-  if (!chatPanel) return;
 
   const banner = document.createElement('div');
   banner.id = 'connection-banner';
   banner.className = 'connection-banner connection-banner-' + type;
   banner.textContent = message;
-  chatPanel.insertBefore(banner, chatPanel.firstChild);
+  document.body.appendChild(banner);
 }
 
 // --- Keyboard Shortcut Helpers (Phase 7.4) ---
