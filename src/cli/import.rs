@@ -8,10 +8,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDateTime, Utc};
 use clap::{Args, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
 
+use crate::cli::import_chatgpt::ChatGptImporter;
+use crate::cli::import_codex::{CodexCliImporter, default_codex_cli_path};
 use crate::config::Config;
 
 #[cfg(feature = "import")]
@@ -89,9 +91,8 @@ impl ImportSource {
     /// Whether this build includes a parser for this history source.
     pub fn supports_history_import(self) -> bool {
         match self {
-            Self::ClaudeCode | Self::ClaudeWeb | Self::CodexCli | Self::ChatGpt | Self::Gemini => {
-                false
-            }
+            Self::CodexCli | Self::ChatGpt => true,
+            Self::ClaudeCode | Self::ClaudeWeb | Self::Gemini => false,
         }
     }
 }
@@ -420,17 +421,18 @@ pub fn autodetect_import_sources() -> Vec<AutoDetectedImportSource> {
         }
     }
 
-    if ImportSource::CodexCli.supports_history_import()
-        && let Some(path) = default_codex_cli_path().filter(|path| path.exists())
-    {
-        let file_count = count_files_with_extension(&path, "jsonl", 10_000)
-            + count_files_with_extension(&path, "json", 10_000);
-        if file_count > 0 {
-            detected.push(AutoDetectedImportSource {
-                source: ImportSource::CodexCli,
-                path,
-                note: format!("{} history file(s)", file_count),
-            });
+    if ImportSource::CodexCli.supports_history_import() {
+        let path = default_codex_cli_path();
+        if path.exists() {
+            let file_count = count_files_with_extension(&path, "jsonl", 10_000)
+                + count_files_with_extension(&path, "json", 10_000);
+            if file_count > 0 {
+                detected.push(AutoDetectedImportSource {
+                    source: ImportSource::CodexCli,
+                    path,
+                    note: format!("{} history file(s)", file_count),
+                });
+            }
         }
     }
 
@@ -448,15 +450,12 @@ pub fn autodetect_import_sources() -> Vec<AutoDetectedImportSource> {
     }
 
     if ImportSource::ChatGpt.supports_history_import()
-        && let Some(path) = detect_latest_zip(|name| {
-            let lower = name.to_ascii_lowercase();
-            (lower.contains("chatgpt") || lower.contains("openai")) && lower.ends_with(".zip")
-        })
+        && let Some(path) = detect_latest_chatgpt_export()
     {
         detected.push(AutoDetectedImportSource {
             source: ImportSource::ChatGpt,
             path,
-            note: "Found matching ZIP in Downloads".to_string(),
+            note: "Found ChatGPT export ZIP in Downloads".to_string(),
         });
     }
 
@@ -502,9 +501,7 @@ fn resolve_source_path(
                 path: "~/.claude/projects".to_string(),
             })
         }
-        ImportSource::CodexCli => default_codex_cli_path().ok_or_else(|| ImportError::NotFound {
-            path: "~/.codex/sessions or ~/.config/codex/sessions".to_string(),
-        }),
+        ImportSource::CodexCli => Ok(default_codex_cli_path()),
         ImportSource::ClaudeWeb | ImportSource::ChatGpt | ImportSource::Gemini => {
             autodetect_import_sources()
                 .into_iter()
@@ -518,7 +515,13 @@ fn resolve_source_path(
 }
 
 fn importer_for_source(source: ImportSource) -> Box<dyn Importer> {
-    Box::new(UnimplementedImporter { source })
+    match source {
+        ImportSource::CodexCli => Box::new(CodexCliImporter),
+        ImportSource::ChatGpt => Box::new(ChatGptImporter),
+        ImportSource::ClaudeCode | ImportSource::ClaudeWeb | ImportSource::Gemini => {
+            Box::new(UnimplementedImporter { source })
+        }
+    }
 }
 
 struct UnimplementedImporter {
@@ -542,21 +545,6 @@ impl Importer for UnimplementedImporter {
 
 fn default_claude_code_path() -> Option<PathBuf> {
     home_dir().map(|home| home.join(".claude").join("projects"))
-}
-
-fn default_codex_cli_path() -> Option<PathBuf> {
-    let home = home_dir()?;
-    let primary = home.join(".codex").join("sessions");
-    if primary.exists() {
-        return Some(primary);
-    }
-
-    let fallback = home.join(".config").join("codex").join("sessions");
-    if fallback.exists() {
-        return Some(fallback);
-    }
-
-    Some(primary)
 }
 
 fn home_dir() -> Option<PathBuf> {
@@ -591,6 +579,84 @@ fn detect_latest_zip(predicate: impl Fn(&str) -> bool) -> Option<PathBuf> {
 
     matches.sort_by_key(|(modified, _)| Reverse(*modified));
     matches.into_iter().map(|(_, path)| path).next()
+}
+
+fn detect_latest_chatgpt_export() -> Option<PathBuf> {
+    let downloads_dir = home_dir()?.join("Downloads");
+    let entries = fs::read_dir(downloads_dir).ok()?;
+
+    let mut zip_paths = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let is_zip = path
+            .extension()
+            .and_then(|value| value.to_str())
+            .map(|value| value.eq_ignore_ascii_case("zip"))
+            .unwrap_or(false);
+        if !is_zip {
+            continue;
+        }
+
+        let modified = entry
+            .metadata()
+            .ok()
+            .and_then(|metadata| metadata.modified().ok())
+            .unwrap_or(SystemTime::UNIX_EPOCH);
+        zip_paths.push((modified, path));
+    }
+
+    zip_paths.sort_by_key(|(modified, _)| Reverse(*modified));
+    zip_paths.into_iter().find_map(|(_, path)| {
+        if is_likely_chatgpt_export_zip(&path) {
+            Some(path)
+        } else {
+            None
+        }
+    })
+}
+
+fn is_likely_chatgpt_export_zip(path: &Path) -> bool {
+    let file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(_) => return false,
+    };
+    let mut archive = match zip::ZipArchive::new(file) {
+        Ok(archive) => archive,
+        Err(_) => return false,
+    };
+
+    let mut has_chat_html = false;
+    let mut has_conversation_json = false;
+
+    for index in 0..archive.len() {
+        let Ok(entry) = archive.by_index(index) else {
+            continue;
+        };
+        let name = entry
+            .name()
+            .rsplit('/')
+            .next()
+            .unwrap_or(entry.name())
+            .to_ascii_lowercase();
+        if name == "chat.html" {
+            has_chat_html = true;
+        }
+        if name == "conversations.json"
+            || name == "shared_conversations.json"
+            || (name.starts_with("conversations-") && name.ends_with(".json"))
+        {
+            has_conversation_json = true;
+        }
+
+        if has_chat_html && has_conversation_json {
+            return true;
+        }
+    }
+
+    false
 }
 
 fn count_files_with_extension(root: &Path, extension: &str, limit: usize) -> usize {
@@ -715,6 +781,42 @@ fn slugify(input: &str) -> String {
     }
 }
 
+pub(crate) fn parse_timestamp(raw: &str) -> Option<DateTime<Utc>> {
+    if let Ok(dt) = DateTime::parse_from_rfc3339(raw) {
+        return Some(dt.with_timezone(&Utc));
+    }
+
+    let zoned_formats = [
+        "%Y-%m-%d %H:%M:%S%.f%z",
+        "%Y-%m-%dT%H:%M:%S%.f%z",
+        "%Y-%m-%d %H:%M:%S%z",
+        "%Y-%m-%dT%H:%M:%S%z",
+    ];
+    for format in zoned_formats {
+        if let Ok(dt) = DateTime::parse_from_str(raw, format) {
+            return Some(dt.with_timezone(&Utc));
+        }
+    }
+
+    let naive_formats = [
+        "%Y-%m-%d %H:%M:%S%.f",
+        "%Y-%m-%dT%H:%M:%S%.f",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%dT%H:%M:%S",
+    ];
+    for format in naive_formats {
+        if let Ok(dt) = NaiveDateTime::parse_from_str(raw, format) {
+            return Some(DateTime::<Utc>::from_naive_utc_and_offset(dt, Utc));
+        }
+    }
+
+    None
+}
+
+pub(crate) fn truncate_chars(input: &str, max_chars: usize) -> String {
+    input.chars().take(max_chars).collect()
+}
+
 #[cfg(feature = "import")]
 async fn run_import_openclaw(
     config: &Config,
@@ -814,9 +916,14 @@ async fn run_import_openclaw(
 
 #[cfg(test)]
 mod tests {
-    use super::workspace_document_path;
+    use std::fs::File;
+    use std::io::Write;
+
+    use super::{is_likely_chatgpt_export_zip, workspace_document_path};
     use chrono::DateTime;
     use clap::ValueEnum;
+    use tempfile::tempdir;
+    use zip::write::SimpleFileOptions;
 
     use crate::cli::import::{ImportSource, autodetect_import_sources};
     use crate::cli::import::{ImportedConversation, ImportedMessage, slugify};
@@ -918,5 +1025,39 @@ mod tests {
         assert!(first_path.starts_with("imported/chatgpt/repeated-title-"));
         assert!(second_path.starts_with("imported/chatgpt/repeated-title-"));
         assert_ne!(first_path, second_path);
+    }
+
+    #[test]
+    fn detects_chatgpt_export_zip_by_contents() {
+        let temp = tempdir().expect("tempdir");
+        let zip_path = temp.path().join("f51-random-name.zip");
+        let file = File::create(&zip_path).expect("create zip");
+        let mut writer = zip::ZipWriter::new(file);
+        writer
+            .start_file("chat.html", SimpleFileOptions::default())
+            .expect("start chat.html");
+        writer.write_all(b"<html></html>").expect("write chat.html");
+        writer
+            .start_file("conversations-000.json", SimpleFileOptions::default())
+            .expect("start conversations shard");
+        writer.write_all(b"[]").expect("write conversations shard");
+        writer.finish().expect("finish zip");
+
+        assert!(is_likely_chatgpt_export_zip(&zip_path));
+    }
+
+    #[test]
+    fn rejects_non_chatgpt_zip_without_required_entries() {
+        let temp = tempdir().expect("tempdir");
+        let zip_path = temp.path().join("not-chatgpt.zip");
+        let file = File::create(&zip_path).expect("create zip");
+        let mut writer = zip::ZipWriter::new(file);
+        writer
+            .start_file("chat.html", SimpleFileOptions::default())
+            .expect("start chat.html");
+        writer.write_all(b"<html></html>").expect("write chat.html");
+        writer.finish().expect("finish zip");
+
+        assert!(!is_likely_chatgpt_export_zip(&zip_path));
     }
 }

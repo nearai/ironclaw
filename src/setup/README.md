@@ -172,6 +172,7 @@ sources as soon as the database is available.
 1. If nothing is detected and `--import-history` was not passed, skip silently.
 2. If nothing is detected but `--import-history` was passed, show an informational message.
 3. Onboarding only offers sources whose parsers are implemented in the current build.
+   Current implemented history sources: `codex-cli`, `chatgpt`.
 4. If candidates are found, offer `Import all`, `Select sources`, or `Skip`.
 5. Imports run with `dedup = true` and `to_workspace = true`.
 6. Individual source failures are reported but do not abort onboarding.

@@ -7,6 +7,8 @@ use chrono::{DateTime, Utc};
 #[cfg(feature = "postgres")]
 use deadpool_postgres::{Config, Pool};
 use rust_decimal::Decimal;
+#[cfg(feature = "postgres")]
+use tokio_postgres::types::Type;
 use uuid::Uuid;
 
 #[cfg(feature = "postgres")]
@@ -147,6 +149,7 @@ impl Store {
         let mut conn = self.conn().await?;
         let tx = conn.transaction().await?;
         let id = Uuid::new_v4();
+        let created_at_ms = created_at.timestamp_millis();
 
         tx.query_opt(
             "SELECT 1 FROM conversations WHERE id = $1 FOR UPDATE",
@@ -169,19 +172,43 @@ impl Store {
             }
         };
 
+        let insert_message = tx
+            .prepare_typed(
+                "INSERT INTO conversation_messages (id, conversation_id, role, content, created_at, sequence_num)
+                 VALUES ($1, $2, $3, $4, to_timestamp(($5::bigint)::double precision / 1000.0), $6)",
+                &[
+                    Type::UUID,
+                    Type::UUID,
+                    Type::TEXT,
+                    Type::TEXT,
+                    Type::INT8,
+                    Type::INT8,
+                ],
+            )
+            .await?;
         tx.execute(
-            "INSERT INTO conversation_messages (id, conversation_id, role, content, created_at, sequence_num) VALUES ($1, $2, $3, $4, $5, $6)",
-            &[&id, &conversation_id, &role, &content, &created_at, &next_sequence],
+            &insert_message,
+            &[
+                &id,
+                &conversation_id,
+                &role,
+                &content,
+                &created_at_ms,
+                &next_sequence,
+            ],
         )
         .await?;
 
-        tx.execute(
-            "UPDATE conversations
-             SET last_activity = GREATEST(last_activity, $2)
-             WHERE id = $1",
-            &[&conversation_id, &created_at],
-        )
-        .await?;
+        let update_conversation = tx
+            .prepare_typed(
+                "UPDATE conversations
+                 SET last_activity = GREATEST(last_activity, to_timestamp(($2::bigint)::double precision / 1000.0))
+                 WHERE id = $1",
+                &[Type::UUID, Type::INT8],
+            )
+            .await?;
+        tx.execute(&update_conversation, &[&conversation_id, &created_at_ms])
+            .await?;
 
         tx.commit().await?;
         Ok(id)
@@ -1807,8 +1834,16 @@ impl Store {
         metadata: &serde_json::Value,
     ) -> Result<Uuid, DatabaseError> {
         let now = Utc::now();
-        self.create_conversation_with_metadata_and_timestamps(channel, user_id, metadata, now, now)
-            .await
+        let conn = self.conn().await?;
+        let id = Uuid::new_v4();
+
+        conn.execute(
+            "INSERT INTO conversations (id, channel, user_id, metadata, started_at, last_activity) VALUES ($1, $2, $3, $4, $5, $6)",
+            &[&id, &channel, &user_id, metadata, &now, &now],
+        )
+        .await?;
+
+        Ok(id)
     }
 
     /// Create a conversation with metadata and explicit timestamps.
