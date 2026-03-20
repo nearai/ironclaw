@@ -577,7 +577,10 @@ pub fn encode_hosted_oauth_state(flow_id: &str, instance_name: Option<&str>) -> 
 }
 
 /// Decode hosted OAuth state in either the new versioned format or the
-/// legacy `instance:nonce`/`nonce` forms.
+/// legacy `instance:nonce` form.
+///
+/// Bare raw states without an instance prefix are intentionally rejected to
+/// avoid ambiguous callback routing in hosted deployments.
 pub fn decode_hosted_oauth_state(state: &str) -> Result<DecodedHostedOAuthState, String> {
     if let Some(rest) = state.strip_prefix(&format!("{HOSTED_STATE_PREFIX}."))
         && let Some((payload_b64, checksum)) = rest.rsplit_once('.')
@@ -625,7 +628,7 @@ pub fn decode_hosted_oauth_state(state: &str) -> Result<DecodedHostedOAuthState,
         });
     }
 
-    Err("Hosted OAuth state is missing a legacy instance prefix".to_string())
+    Err("Hosted OAuth state is missing a legacy instance prefix; raw legacy states are no longer supported".to_string())
 }
 
 /// Build the hosted callback state used by the public OAuth callback endpoint.

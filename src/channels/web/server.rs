@@ -90,6 +90,14 @@ fn rate_limited_html_response() -> (StatusCode, axum::response::Html<String>) {
     )
 }
 
+async fn check_oauth_callback_rate_limit(state: &GatewayState, lookup_key: &str) -> bool {
+    let mut limiters = state.oauth_callback_rate_limiters.lock().await;
+    let limiter = limiters
+        .entry(lookup_key.to_string())
+        .or_insert_with(|| RateLimiter::new(10, 60));
+    limiter.check()
+}
+
 /// Simple sliding-window rate limiter.
 ///
 /// Tracks the number of requests in the current window. Resets when the window expires.
@@ -201,8 +209,11 @@ pub struct GatewayState {
     pub scheduler: Option<crate::tools::builtin::SchedulerSlot>,
     /// Rate limiter for chat endpoints (30 messages per 60 seconds).
     pub chat_rate_limiter: RateLimiter,
-    /// Rate limiter for OAuth callback endpoints (10 requests per 60 seconds).
+    /// Rate limiter for the Slack relay OAuth callback endpoint (10 requests per 60 seconds).
     pub oauth_rate_limiter: RateLimiter,
+    /// Per-flow rate limiters for public OAuth callback handling.
+    pub oauth_callback_rate_limiters:
+        tokio::sync::Mutex<std::collections::HashMap<String, RateLimiter>>,
     /// Registry catalog entries for the available extensions API.
     /// Populated at startup from `registry/` manifests, independent of extension manager.
     pub registry_entries: Vec<crate::extensions::RegistryEntry>,
@@ -569,10 +580,6 @@ async fn oauth_callback_handler(
 ) -> impl IntoResponse {
     use crate::cli::oauth_defaults;
 
-    if !state.oauth_rate_limiter.check() {
-        return rate_limited_html_response().into_response();
-    }
-
     // Check for error from OAuth provider (e.g., user denied consent)
     if let Some(error) = params.get("error") {
         let description = params
@@ -622,6 +629,10 @@ async fn oauth_callback_handler(
         }
     };
     let lookup_key = decoded_state.flow_id.clone();
+
+    if !check_oauth_callback_rate_limit(&state, &lookup_key).await {
+        return rate_limited_html_response().into_response();
+    }
 
     let flow = ext_mgr
         .pending_oauth_flows()
@@ -2851,6 +2862,7 @@ mod tests {
             scheduler: None,
             chat_rate_limiter: RateLimiter::new(30, 60),
             oauth_rate_limiter,
+            oauth_callback_rate_limiters: tokio::sync::Mutex::new(std::collections::HashMap::new()),
             registry_entries: vec![],
             cost_guard: None,
             routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
@@ -3106,30 +3118,137 @@ mod tests {
         assert!(html.contains("Authorization Failed"));
     }
 
+    #[test]
+    fn test_rate_limited_html_response_is_429() {
+        let (status, body) = rate_limited_html_response();
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert!(body.0.contains("Too Many Requests"));
+    }
+
     #[tokio::test]
     async fn test_oauth_callback_rate_limited() {
+        let state = test_gateway_state(None);
+        {
+            let mut limiters = state.oauth_callback_rate_limiters.lock().await;
+            limiters.insert("second".to_string(), RateLimiter::new(0, 60));
+        }
+        assert!(!check_oauth_callback_rate_limit(&state, "second").await);
+        assert!(check_oauth_callback_rate_limit(&state, "allowed").await);
+    }
+
+    #[tokio::test]
+    async fn test_oauth_callback_rate_limiter_is_scoped_per_flow() {
         use axum::body::Body;
         use tower::ServiceExt;
 
-        let state = test_gateway_state_with_rate_limiter(None, RateLimiter::new(1, 60));
-        assert!(state.oauth_rate_limiter.check());
-        let app = test_oauth_router(state);
+        let secrets = test_secrets_store();
+        let (ext_mgr, _wasm_tools_dir, _wasm_channels_dir) = test_ext_mgr(secrets.clone());
+        let Some(created_at) = expired_flow_created_at() else {
+            eprintln!(
+                "Skipping scoped OAuth rate-limit test: monotonic uptime below expiry window"
+            );
+            return;
+        };
 
-        let req = axum::http::Request::builder()
-            .uri("/oauth/callback?state=second&code=two")
+        let blocked_flow = crate::cli::oauth_defaults::PendingOAuthFlow {
+            extension_name: "blocked_tool".to_string(),
+            display_name: "Blocked Tool".to_string(),
+            token_url: "https://example.com/token".to_string(),
+            client_id: "client123".to_string(),
+            client_secret: None,
+            redirect_uri: "https://example.com/oauth/callback".to_string(),
+            code_verifier: None,
+            access_token_field: "access_token".to_string(),
+            secret_name: "blocked_token".to_string(),
+            provider: None,
+            validation_endpoint: None,
+            scopes: vec![],
+            user_id: "test".to_string(),
+            secrets: secrets.clone(),
+            sse_sender: None,
+            gateway_token: None,
+            token_exchange_extra_params: std::collections::HashMap::new(),
+            client_id_secret_name: None,
+            created_at,
+        };
+        let allowed_flow = crate::cli::oauth_defaults::PendingOAuthFlow {
+            extension_name: "allowed_tool".to_string(),
+            display_name: "Allowed Tool".to_string(),
+            token_url: "https://example.com/token".to_string(),
+            client_id: "client456".to_string(),
+            client_secret: None,
+            redirect_uri: "https://example.com/oauth/callback".to_string(),
+            code_verifier: None,
+            access_token_field: "access_token".to_string(),
+            secret_name: "allowed_token".to_string(),
+            provider: None,
+            validation_endpoint: None,
+            scopes: vec![],
+            user_id: "test".to_string(),
+            secrets: secrets.clone(),
+            sse_sender: None,
+            gateway_token: None,
+            token_exchange_extra_params: std::collections::HashMap::new(),
+            client_id_secret_name: None,
+            created_at,
+        };
+
+        ext_mgr
+            .pending_oauth_flows()
+            .write()
+            .await
+            .insert("blocked_state".to_string(), blocked_flow);
+        ext_mgr
+            .pending_oauth_flows()
+            .write()
+            .await
+            .insert("allowed_state".to_string(), allowed_flow);
+
+        let state = test_gateway_state(Some(ext_mgr));
+        {
+            let mut limiters = state.oauth_callback_rate_limiters.lock().await;
+            limiters.insert("blocked_state".to_string(), RateLimiter::new(0, 60));
+        }
+        let app = test_oauth_router(state);
+        let blocked_state = crate::cli::oauth_defaults::encode_hosted_oauth_state(
+            "blocked_state",
+            Some("myinstance"),
+        );
+        let allowed_state = crate::cli::oauth_defaults::encode_hosted_oauth_state(
+            "allowed_state",
+            Some("myinstance"),
+        );
+
+        let blocked_req = axum::http::Request::builder()
+            .uri(format!(
+                "/oauth/callback?code=test_code&state={}",
+                urlencoding::encode(&blocked_state)
+            ))
             .body(Body::empty())
             .expect("request");
+        let blocked_resp =
+            ServiceExt::<axum::http::Request<Body>>::oneshot(app.clone(), blocked_req)
+                .await
+                .expect("blocked response");
+        assert_eq!(blocked_resp.status(), StatusCode::TOO_MANY_REQUESTS);
 
-        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+        let allowed_req = axum::http::Request::builder()
+            .uri(format!(
+                "/oauth/callback?code=test_code&state={}",
+                urlencoding::encode(&allowed_state)
+            ))
+            .body(Body::empty())
+            .expect("request");
+        let allowed_resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, allowed_req)
             .await
-            .expect("response");
-        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+            .expect("allowed response");
+        assert_eq!(allowed_resp.status(), StatusCode::OK);
 
-        let body = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+        let body = axum::body::to_bytes(allowed_resp.into_body(), 1024 * 64)
             .await
             .expect("body");
         let html = String::from_utf8_lossy(&body);
-        assert!(html.contains("Too Many Requests"));
+        assert!(html.contains("Authorization Failed"));
     }
 
     #[tokio::test]
