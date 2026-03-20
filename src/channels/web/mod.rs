@@ -62,6 +62,8 @@ pub struct GatewayChannel {
     state: Arc<GatewayState>,
     /// The actual auth token in use (generated or from config).
     auth_token: String,
+    /// OIDC JWT auth state (None when OIDC is disabled).
+    oidc_state: Option<self::auth::OidcState>,
 }
 
 impl GatewayChannel {
@@ -75,6 +77,23 @@ impl GatewayChannel {
             let mut bytes = [0u8; 32];
             OsRng.fill_bytes(&mut bytes);
             bytes.iter().map(|b| format!("{b:02x}")).collect()
+        });
+
+        let oidc_state = config.oidc.as_ref().and_then(|oidc_config| {
+            match auth::OidcState::from_config(oidc_config) {
+                Ok(state) => {
+                    tracing::info!(
+                        header = %oidc_config.header,
+                        jwks_url = %oidc_config.jwks_url,
+                        "OIDC JWT authentication enabled"
+                    );
+                    Some(state)
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "Failed to initialize OIDC auth — falling back to token-only auth");
+                    None
+                }
+            }
         });
 
         let state = Arc::new(GatewayState {
@@ -109,6 +128,7 @@ impl GatewayChannel {
             config,
             state,
             auth_token,
+            oidc_state,
         }
     }
 
@@ -289,7 +309,7 @@ impl Channel for GatewayChannel {
                 ),
             })?;
 
-        server::start_server(addr, self.state.clone(), self.auth_token.clone()).await?;
+        server::start_server(addr, self.state.clone(), self.auth_token.clone(), self.oidc_state.clone()).await?;
 
         Ok(Box::pin(ReceiverStream::new(rx)))
     }

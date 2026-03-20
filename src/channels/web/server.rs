@@ -196,6 +196,7 @@ pub async fn start_server(
     addr: SocketAddr,
     state: Arc<GatewayState>,
     auth_token: String,
+    oidc: Option<super::auth::OidcState>,
 ) -> Result<SocketAddr, crate::error::ChannelError> {
     let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
         crate::error::ChannelError::StartupFailed {
@@ -221,7 +222,7 @@ pub async fn start_server(
         );
 
     // Protected routes (require auth)
-    let auth_state = AuthState { token: auth_token };
+    let auth_state = AuthState { token: auth_token, oidc };
     let protected = Router::new()
         // Chat
         .route("/api/chat/send", post(chat_send_handler))
@@ -3089,7 +3090,7 @@ mod tests {
         let state = test_gateway_state(None);
 
         let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-        let bound = start_server(addr, state.clone(), "test-token".to_string())
+        let bound = start_server(addr, state.clone(), "test-token".to_string(), None)
             .await
             .expect("server should start");
 
