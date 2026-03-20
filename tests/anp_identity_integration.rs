@@ -58,6 +58,17 @@ fn did_cli_generates_stable_identity_and_document() {
         .to_string();
     assert_eq!(did, did_second, "DID should persist across invocations");
 
+    let stored_identity: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&identity_path).expect("read identity file"))
+            .expect("parse stored identity");
+    assert!(
+        stored_identity.get("secret_key_hex").is_none()
+            || stored_identity["secret_key_hex"].is_null(),
+        "identity file should not store a plaintext secret key"
+    );
+    assert!(stored_identity["encrypted_secret_key_hex"].is_string());
+    assert!(stored_identity["key_salt_hex"].is_string());
+
     let document = run_cli(dir.path(), &["--no-db", "did", "document"]);
     let json: serde_json::Value =
         serde_json::from_slice(&document.stdout).expect("valid DID document JSON");

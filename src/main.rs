@@ -157,7 +157,7 @@ async fn async_main() -> anyhow::Result<()> {
         }
         Some(Command::Did(did_cmd)) => {
             init_cli_tracing();
-            return run_did_command(did_cmd.clone()).await;
+            return run_did_command(*did_cmd).await;
         }
         Some(Command::Completion(completion)) => {
             init_cli_tracing();
