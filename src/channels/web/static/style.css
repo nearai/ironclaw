@@ -2756,7 +2756,7 @@ body {
 
 .stepper-step.failed .stepper-circle {
   background: var(--danger);
-  color: var(--text-on-accent);
+  color: var(--text-on-danger);
 }
 
 .stepper-step.failed .stepper-label {
@@ -4393,7 +4393,7 @@ input[type="checkbox"]:focus-visible {
   height: 18px;
   border-radius: 50%;
   background: var(--danger);
-  color: var(--text-on-accent);
+  color: var(--text-on-danger);
   border: none;
   font-size: 12px;
   line-height: 18px;
@@ -4403,7 +4403,7 @@ input[type="checkbox"]:focus-visible {
 }
 
 .image-preview-remove:hover {
-  background: var(--danger);
+  filter: brightness(1.2);
 }
 
 /* Generated Image */
