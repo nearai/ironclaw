@@ -408,6 +408,8 @@ impl AppBuilder {
 
         let mcp_session_manager = Arc::new(McpSessionManager::new());
         let mcp_process_manager = Arc::new(McpProcessManager::new());
+        let companion_mcp_server =
+            crate::tools::mcp::config::derive_nearai_companion_mcp_server(&self.config);
 
         // Create WASM tool runtime eagerly so extensions installed after startup
         // (e.g. via the web UI) can still be activated. The tools directory is only
@@ -485,6 +487,7 @@ impl AppBuilder {
             let mcp_sm = Arc::clone(&mcp_session_manager);
             let pm = Arc::clone(&mcp_process_manager);
             let owner_id = self.config.owner_id.clone();
+            let companion_mcp_server = companion_mcp_server.clone();
             async move {
                 let servers_result = if let Some(ref d) = db {
                     load_mcp_servers_from_db(d.as_ref(), &owner_id).await
@@ -492,7 +495,16 @@ impl AppBuilder {
                     crate::tools::mcp::config::load_mcp_servers().await
                 };
                 match servers_result {
-                    Ok(servers) => {
+                    Ok(mut servers) => {
+                        if let Some(companion) = companion_mcp_server {
+                            let companion_name = companion.name.clone();
+                            if !servers.insert_if_absent(companion) {
+                                tracing::debug!(
+                                    "Skipping derived MCP companion '{}': an existing config with that name is already present",
+                                    companion_name
+                                );
+                            }
+                        }
                         let enabled: Vec<_> = servers.enabled_servers().cloned().collect();
                         if !enabled.is_empty() {
                             tracing::debug!(
@@ -504,6 +516,8 @@ impl AppBuilder {
                         let mut join_set = tokio::task::JoinSet::new();
                         for server in enabled {
                             let mcp_sm = Arc::clone(&mcp_sm);
+                            let nearai_session = Arc::clone(&self.session);
+                            let nearai_api_key = self.config.llm.nearai.api_key.clone();
                             let secrets = secrets_store.clone();
                             let tools = Arc::clone(&tools);
                             let pm = Arc::clone(&pm);
@@ -515,6 +529,8 @@ impl AppBuilder {
                                 let client = match crate::tools::mcp::create_client_from_config(
                                     server,
                                     &mcp_sm,
+                                    Some(nearai_session),
+                                    nearai_api_key,
                                     &pm,
                                     secrets,
                                     &owner_id,
@@ -652,6 +668,8 @@ impl AppBuilder {
             let manager = Arc::new(ExtensionManager::new(
                 Arc::clone(&mcp_session_manager),
                 Arc::clone(&mcp_process_manager),
+                Some(Arc::clone(&self.session)),
+                self.config.llm.nearai.api_key.clone(),
                 ext_secrets,
                 Arc::clone(tools),
                 Some(Arc::clone(hooks)),
@@ -661,6 +679,7 @@ impl AppBuilder {
                 self.config.tunnel.public_url.clone(),
                 self.config.owner_id.clone(),
                 self.db.clone(),
+                companion_mcp_server,
                 catalog_entries.clone(),
             ));
             tools.register_extension_tools(Arc::clone(&manager));

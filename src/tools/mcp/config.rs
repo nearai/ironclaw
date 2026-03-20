@@ -51,6 +51,16 @@ pub struct McpServerConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub oauth: Option<OAuthConfig>,
 
+    /// Built-in auth source provided by IronClaw at runtime.
+    ///
+    /// This is used for companion MCP servers that should reuse an existing
+    /// provider identity instead of running their own MCP OAuth flow.
+    ///
+    /// Security: this field is runtime-only. Persisted user config must not be
+    /// able to opt a server into reusing the active provider bearer token.
+    #[serde(default, skip_serializing, skip_deserializing)]
+    pub auth_source: Option<McpAuthSource>,
+
     /// Whether this server is enabled.
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -58,6 +68,14 @@ pub struct McpServerConfig {
     /// Optional description for the server.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+}
+
+/// Runtime-provided auth sources for MCP companion servers.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum McpAuthSource {
+    /// Reuse the active NEAR AI bearer token (session token or API key).
+    NearAi,
 }
 
 fn default_true() -> bool {
@@ -73,6 +91,7 @@ impl McpServerConfig {
             transport: None,
             headers: HashMap::new(),
             oauth: None,
+            auth_source: None,
             enabled: true,
             description: None,
         }
@@ -95,6 +114,7 @@ impl McpServerConfig {
             }),
             headers: HashMap::new(),
             oauth: None,
+            auth_source: None,
             enabled: true,
             description: None,
         }
@@ -110,6 +130,7 @@ impl McpServerConfig {
             }),
             headers: HashMap::new(),
             oauth: None,
+            auth_source: None,
             enabled: true,
             description: None,
         }
@@ -118,6 +139,12 @@ impl McpServerConfig {
     /// Set OAuth configuration.
     pub fn with_oauth(mut self, oauth: OAuthConfig) -> Self {
         self.oauth = Some(oauth);
+        self
+    }
+
+    /// Set a runtime-provided auth source.
+    pub fn with_auth_source(mut self, auth_source: McpAuthSource) -> Self {
+        self.auth_source = Some(auth_source);
         self
     }
 
@@ -151,6 +178,15 @@ impl McpServerConfig {
         if self.name.is_empty() {
             return Err(ConfigError::InvalidConfig {
                 reason: "Server name cannot be empty".to_string(),
+            });
+        }
+
+        if self.uses_runtime_auth_source() && !is_nearai_companion_server_name(&self.name) {
+            return Err(ConfigError::InvalidConfig {
+                reason: format!(
+                    "Runtime auth source is only allowed for reserved server '{}'",
+                    NEARAI_COMPANION_MCP_NAME
+                ),
             });
         }
 
@@ -222,6 +258,11 @@ impl McpServerConfig {
             .any(|k| k.eq_ignore_ascii_case("authorization"))
     }
 
+    /// Check if this server uses a built-in runtime auth bridge.
+    pub fn uses_runtime_auth_source(&self) -> bool {
+        self.auth_source.is_some()
+    }
+
     /// Check if this server requires authentication.
     ///
     /// Returns true if OAuth is pre-configured OR if this is a remote HTTPS server
@@ -234,7 +275,7 @@ impl McpServerConfig {
             return false;
         }
 
-        if self.oauth.is_some() {
+        if self.oauth.is_some() || self.uses_runtime_auth_source() {
             return true;
         }
         // Remote HTTPS servers need auth handling (DCR, token refresh, 401 detection).
@@ -258,6 +299,68 @@ impl McpServerConfig {
     pub fn client_id_secret_name(&self) -> String {
         format!("mcp_{}_client_id", self.name)
     }
+}
+
+/// Reserved name used for the companion chat-api MCP server derived from NEAR AI config.
+pub const NEARAI_COMPANION_MCP_NAME: &str = "_nearai_companion_mcp";
+
+pub fn is_nearai_companion_server_name(name: &str) -> bool {
+    name == NEARAI_COMPANION_MCP_NAME
+}
+
+fn strip_reserved_nearai_companion_servers(config: &mut McpServersFile, source: &str) -> usize {
+    let len_before = config.servers.len();
+    config
+        .servers
+        .retain(|server| !is_nearai_companion_server_name(&server.name));
+    let removed = len_before.saturating_sub(config.servers.len());
+
+    if removed > 0 {
+        tracing::warn!(
+            count = removed,
+            source,
+            "Ignoring persisted reserved MCP companion config(s); this name is system-managed"
+        );
+    }
+
+    removed
+}
+
+/// Build the companion chat-api MCP server from the active NearAI config.
+///
+/// The MCP endpoint is treated as a sibling to the versioned REST API:
+/// `https://host/v1` becomes `https://host/mcp`.
+pub fn derive_nearai_companion_mcp_server(
+    config: &crate::config::Config,
+) -> Option<McpServerConfig> {
+    derive_nearai_companion_mcp_server_from_llm(&config.llm)
+}
+
+/// Build the companion chat-api MCP server from an LLM config.
+///
+/// This lighter-weight helper is used by CLI code paths that should not need
+/// to resolve the full application config (and therefore should not require
+/// database configuration) just to discover the derived companion MCP server.
+pub fn derive_nearai_companion_mcp_server_from_llm(
+    llm: &crate::config::LlmConfig,
+) -> Option<McpServerConfig> {
+    if llm.backend != "nearai" {
+        return None;
+    }
+
+    let base = llm.nearai.base_url.trim_end_matches('/');
+    let mcp_base = base
+        .strip_suffix("/v1")
+        .unwrap_or(base)
+        .trim_end_matches('/');
+
+    Some(
+        McpServerConfig::new(NEARAI_COMPANION_MCP_NAME, format!("{mcp_base}/mcp"))
+            .with_auth_source(McpAuthSource::NearAi)
+            .with_description(
+                "Companion chat-api MCP server derived from the active NEAR AI provider",
+            ),
+    )
 }
 
 /// OAuth 2.1 configuration for an MCP server.
@@ -356,6 +459,16 @@ impl McpServersFile {
         }
     }
 
+    /// Insert a server only if no server with the same name already exists.
+    pub fn insert_if_absent(&mut self, config: McpServerConfig) -> bool {
+        if self.get(&config.name).is_some() {
+            false
+        } else {
+            self.servers.push(config);
+            true
+        }
+    }
+
     /// Remove a server by name.
     pub fn remove(&mut self, name: &str) -> bool {
         let len_before = self.servers.len();
@@ -410,7 +523,8 @@ pub async fn load_mcp_servers_from(path: impl AsRef<Path>) -> Result<McpServersF
     }
 
     let content = fs::read_to_string(path).await?;
-    let config: McpServersFile = serde_json::from_str(&content)?;
+    let mut config: McpServersFile = serde_json::from_str(&content)?;
+    strip_reserved_nearai_companion_servers(&mut config, &path.display().to_string());
 
     // Validate every server on load so corrupted configs are caught early
     for server in &config.servers {
@@ -452,6 +566,15 @@ pub async fn save_mcp_servers_to(
 
 /// Add a new MCP server configuration.
 pub async fn add_mcp_server(config: McpServerConfig) -> Result<(), ConfigError> {
+    if is_nearai_companion_server_name(&config.name) {
+        return Err(ConfigError::InvalidConfig {
+            reason: format!(
+                "Server name '{}' is reserved for the NEAR AI companion MCP server",
+                config.name
+            ),
+        });
+    }
+
     config.validate()?;
 
     let mut servers = load_mcp_servers().await?;
@@ -499,7 +622,8 @@ pub async fn load_mcp_servers_from_db(
 ) -> Result<McpServersFile, ConfigError> {
     match store.get_setting(user_id, "mcp_servers").await {
         Ok(Some(value)) => {
-            let config: McpServersFile = serde_json::from_value(value)?;
+            let mut config: McpServersFile = serde_json::from_value(value)?;
+            strip_reserved_nearai_companion_servers(&mut config, "database");
             // Validate every server on load so corrupted DB configs are caught early
             for server in &config.servers {
                 server.validate().map_err(|e| ConfigError::InvalidConfig {
@@ -542,6 +666,15 @@ pub async fn add_mcp_server_db(
     user_id: &str,
     config: McpServerConfig,
 ) -> Result<(), ConfigError> {
+    if is_nearai_companion_server_name(&config.name) {
+        return Err(ConfigError::InvalidConfig {
+            reason: format!(
+                "Server name '{}' is reserved for the NEAR AI companion MCP server",
+                config.name
+            ),
+        });
+    }
+
     config.validate()?;
 
     let mut servers = load_mcp_servers_from_db(store, user_id).await?;
@@ -719,6 +852,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_load_drops_reserved_nearai_companion_server() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("mcp-servers.json");
+
+        let persisted = serde_json::json!({
+            "servers": [
+                {
+                    "name": NEARAI_COMPANION_MCP_NAME,
+                    "url": "https://evil.example.com/mcp",
+                    "enabled": true,
+                    "auth_source": "near_ai"
+                },
+                {
+                    "name": "notion",
+                    "url": "https://mcp.notion.com",
+                    "enabled": true
+                }
+            ]
+        });
+        tokio::fs::write(&path, persisted.to_string())
+            .await
+            .unwrap();
+
+        let config = load_mcp_servers_from(&path).await.unwrap();
+        assert_eq!(config.servers.len(), 1);
+        assert!(config.get(NEARAI_COMPANION_MCP_NAME).is_none());
+        assert_eq!(
+            config.get("notion").map(|server| server.url.as_str()),
+            Some("https://mcp.notion.com")
+        );
+    }
+
+    #[test]
+    fn test_deserialize_ignores_persisted_auth_source() {
+        let raw = serde_json::json!({
+            "name": "user-managed",
+            "url": "https://mcp.example.com",
+            "enabled": true,
+            "auth_source": "near_ai"
+        });
+
+        let server: McpServerConfig = serde_json::from_value(raw).expect("server");
+        assert_eq!(server.auth_source, None);
+    }
+
+    #[cfg(feature = "libsql")]
+    #[test]
+    fn test_derive_nearai_companion_mcp_server_strips_trailing_v1() {
+        let mut config = crate::config::Config::for_testing(
+            std::env::temp_dir().join("ironclaw-test-companion.db"),
+            std::env::temp_dir().join("ironclaw-test-skills"),
+            std::env::temp_dir().join("ironclaw-test-installed-skills"),
+        );
+        config.llm.backend = "nearai".to_string();
+        config.llm.nearai.base_url = "https://private.near.ai/v1".to_string();
+
+        let server = derive_nearai_companion_mcp_server(&config).expect("companion server");
+        assert_eq!(server.name, NEARAI_COMPANION_MCP_NAME);
+        assert_eq!(server.url, "https://private.near.ai/mcp");
+        assert_eq!(server.auth_source, Some(McpAuthSource::NearAi));
+    }
+
+    #[tokio::test]
     async fn test_load_rejects_corrupted_headers() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("mcp-servers.json");
@@ -761,6 +957,20 @@ mod tests {
         let config = McpServerConfig::new("notion", "https://mcp.notion.com")
             .with_oauth(OAuthConfig::new("client-123"));
         assert!(config.requires_auth());
+    }
+
+    #[test]
+    fn test_validate_rejects_runtime_auth_on_user_managed_server() {
+        let config = McpServerConfig::new("user-managed", "https://mcp.example.com")
+            .with_auth_source(McpAuthSource::NearAi);
+
+        let err = config
+            .validate()
+            .expect_err("runtime auth should be reserved for the companion server");
+        assert!(
+            err.to_string().contains(NEARAI_COMPANION_MCP_NAME),
+            "expected reserved-name validation message, got: {err}"
+        );
     }
 
     #[test]

@@ -173,36 +173,7 @@ impl NearAiChatProvider {
     /// The env var fallback (#3) only triggers after `ensure_authenticated()`
     /// runs, because `api_key_login()` sets the env var but not a session token.
     async fn resolve_bearer_token(&self) -> Result<String, LlmError> {
-        // 1. Config-level API key takes priority
-        if let Some(ref api_key) = self.config.api_key {
-            return Ok(api_key.expose_secret().to_string());
-        }
-
-        // 2. Existing session token (OAuth was already completed)
-        if self.session.has_token().await {
-            let token = self.session.get_token().await?;
-            return Ok(token.expose_secret().to_string());
-        }
-
-        // No token yet, trigger interactive login
-        self.session.ensure_authenticated().await?;
-
-        // 3. After login, check if a session token was stored (OAuth path)
-        if self.session.has_token().await {
-            let token = self.session.get_token().await?;
-            return Ok(token.expose_secret().to_string());
-        }
-
-        // 4. api_key_login() sets NEARAI_API_KEY env var but not a session token
-        if let Ok(key) = std::env::var("NEARAI_API_KEY")
-            && !key.is_empty()
-        {
-            return Ok(key);
-        }
-
-        Err(LlmError::AuthFailed {
-            provider: "nearai".to_string(),
-        })
+        crate::llm::resolve_nearai_bearer_token(self.config.api_key.as_ref(), &self.session).await
     }
 
     /// Send a single request to the chat completions API.

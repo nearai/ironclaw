@@ -800,6 +800,8 @@ mod tests {
         Arc::new(ExtensionManager::new(
             Arc::new(McpSessionManager::new()),
             Arc::new(crate::tools::mcp::process::McpProcessManager::new()),
+            None,
+            None,
             Arc::new(InMemorySecretsStore::new(crypto)),
             Arc::new(ToolRegistry::new()),
             None,
@@ -808,6 +810,7 @@ mod tests {
             std::env::temp_dir().join("ironclaw-test-channels"),
             None,
             "test".to_string(),
+            None,
             None,
             Vec::new(),
         ))

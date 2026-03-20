@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use clap::{Args, Subcommand};
 
-use crate::config::Config;
+use crate::config::{Config, LlmConfig};
 use crate::db::Database;
 use crate::secrets::SecretsStore;
 use crate::tools::mcp::{
@@ -173,6 +173,13 @@ async fn add_server(args: McpAddArgs) -> anyhow::Result<()> {
         description,
     } = args;
 
+    if config::is_nearai_companion_server_name(&name) {
+        anyhow::bail!(
+            "Server name '{}' is reserved for the NEAR AI companion MCP server",
+            name
+        );
+    }
+
     let transport_lower = transport.to_lowercase();
 
     let mut config = match transport_lower.as_str() {
@@ -244,7 +251,7 @@ async fn add_server(args: McpAddArgs) -> anyhow::Result<()> {
 
     // Save (DB if available, else disk)
     let db = connect_db().await;
-    let mut servers = load_servers(db.as_deref()).await?;
+    let mut servers = load_persisted_servers(db.as_deref()).await?;
     servers.upsert(config);
     save_servers(db.as_deref(), &servers).await?;
 
@@ -281,8 +288,15 @@ async fn add_server(args: McpAddArgs) -> anyhow::Result<()> {
 
 /// Remove an MCP server.
 async fn remove_server(name: String) -> anyhow::Result<()> {
+    if config::is_nearai_companion_server_name(&name) {
+        anyhow::bail!(
+            "Server '{}' is derived from the active NEAR AI provider and cannot be removed directly",
+            name
+        );
+    }
+
     let db = connect_db().await;
-    let mut servers = load_servers(db.as_deref()).await?;
+    let mut servers = load_persisted_servers(db.as_deref()).await?;
     if !servers.remove(&name) {
         anyhow::bail!("Server '{}' not found", name);
     }
@@ -298,7 +312,7 @@ async fn remove_server(name: String) -> anyhow::Result<()> {
 /// List configured MCP servers.
 async fn list_servers(verbose: bool) -> anyhow::Result<()> {
     let db = connect_db().await;
-    let servers = load_servers(db.as_deref()).await?;
+    let servers = load_servers_with_derived(db.as_deref()).await?;
 
     if servers.servers.is_empty() {
         println!();
@@ -404,11 +418,22 @@ async fn list_servers(verbose: bool) -> anyhow::Result<()> {
 async fn auth_server(name: String, user_id: String) -> anyhow::Result<()> {
     // Get server config
     let db = connect_db().await;
-    let servers = load_servers(db.as_deref()).await?;
+    let servers = load_servers_with_derived(db.as_deref()).await?;
     let server = servers
         .get(&name)
         .cloned()
         .ok_or_else(|| anyhow::anyhow!("Server '{}' not found", name))?;
+
+    if server.uses_runtime_auth_source() {
+        println!();
+        println!(
+            "  Server '{}' reuses your active NEAR AI authentication and does not support separate MCP OAuth.",
+            name
+        );
+        println!("  Configure NEAR AI auth (API key or session login) instead.");
+        println!();
+        return Ok(());
+    }
 
     // Initialize secrets store
     let secrets = get_secrets_store().await?;
@@ -477,7 +502,7 @@ async fn auth_server(name: String, user_id: String) -> anyhow::Result<()> {
 async fn test_server(name: String, user_id: String) -> anyhow::Result<()> {
     // Get server config
     let db = connect_db().await;
-    let servers = load_servers(db.as_deref()).await?;
+    let servers = load_servers_with_derived(db.as_deref()).await?;
     let server = servers
         .get(&name)
         .cloned()
@@ -488,35 +513,66 @@ async fn test_server(name: String, user_id: String) -> anyhow::Result<()> {
 
     // Create client
     let session_manager = Arc::new(McpSessionManager::new());
-
-    // Always check for stored tokens (from either pre-configured OAuth or DCR)
-    let secrets = get_secrets_store().await?;
-    let has_tokens = is_authenticated(&server, &secrets, &user_id).await;
-
-    let client = if has_tokens {
-        // We have stored tokens, use authenticated client
-        McpClient::new_authenticated(server.clone(), session_manager.clone(), secrets, user_id)
-    } else if server.requires_auth() {
-        // OAuth configured but no tokens - need to authenticate
-        println!();
-        println!(
-            "  ✗ Not authenticated. Run 'ironclaw mcp auth {}' first.",
-            name
-        );
-        println!();
-        return Ok(());
-    } else {
-        // Use the factory to dispatch on transport type (HTTP, stdio, unix)
+    let (client, has_tokens) = if server.uses_runtime_auth_source() {
         let process_manager = Arc::new(McpProcessManager::new());
-        create_client_from_config(
-            server.clone(),
-            &session_manager,
-            &process_manager,
-            None,
-            "default",
+        let llm = resolve_llm_from_env()?;
+        let nearai_session = crate::llm::create_session_manager(llm.session.clone()).await;
+        (
+            create_client_from_config(
+                server.clone(),
+                &session_manager,
+                Some(nearai_session),
+                llm.nearai.api_key.clone(),
+                &process_manager,
+                None,
+                "default",
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", e))?,
+            false,
         )
-        .await
-        .map_err(|e| anyhow::anyhow!("{}", e))?
+    } else {
+        // Only initialize the secrets store for non-runtime-auth servers that
+        // can actually use persisted OAuth/DCR tokens.
+        let secrets = get_secrets_store().await?;
+        let has_tokens = is_authenticated(&server, &secrets, &user_id).await;
+
+        if has_tokens {
+            (
+                McpClient::new_authenticated(
+                    server.clone(),
+                    session_manager.clone(),
+                    secrets,
+                    user_id,
+                ),
+                true,
+            )
+        } else if server.requires_auth() {
+            println!();
+            println!(
+                "  ✗ Not authenticated. Run 'ironclaw mcp auth {}' first.",
+                name
+            );
+            println!();
+            return Ok(());
+        } else {
+            // Use the factory to dispatch on transport type (HTTP, stdio, unix)
+            let process_manager = Arc::new(McpProcessManager::new());
+            (
+                create_client_from_config(
+                    server.clone(),
+                    &session_manager,
+                    None,
+                    None,
+                    &process_manager,
+                    None,
+                    "default",
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("{}", e))?,
+                false,
+            )
+        }
     };
 
     // Test connection
@@ -581,8 +637,15 @@ async fn test_server(name: String, user_id: String) -> anyhow::Result<()> {
 
 /// Toggle server enabled/disabled state.
 async fn toggle_server(name: String, enable: bool, disable: bool) -> anyhow::Result<()> {
+    if config::is_nearai_companion_server_name(&name) {
+        anyhow::bail!(
+            "Server '{}' is derived from the active NEAR AI provider and cannot be toggled directly",
+            name
+        );
+    }
+
     let db = connect_db().await;
-    let mut servers = load_servers(db.as_deref()).await?;
+    let mut servers = load_persisted_servers(db.as_deref()).await?;
 
     let server = servers
         .get_mut(&name)
@@ -615,13 +678,30 @@ async fn connect_db() -> Option<Arc<dyn Database>> {
     crate::db::connect_from_config(&config.database).await.ok()
 }
 
-/// Load MCP servers (DB if available, else disk).
-async fn load_servers(db: Option<&dyn Database>) -> Result<McpServersFile, config::ConfigError> {
-    if let Some(db) = db {
-        config::load_mcp_servers_from_db(db, DEFAULT_USER_ID).await
+/// Load only persisted MCP servers (DB if available, else disk).
+async fn load_persisted_servers(
+    db: Option<&dyn Database>,
+) -> Result<McpServersFile, config::ConfigError> {
+    Ok(if let Some(db) = db {
+        config::load_mcp_servers_from_db(db, DEFAULT_USER_ID).await?
     } else {
-        config::load_mcp_servers().await
+        config::load_mcp_servers().await?
+    })
+}
+
+/// Load MCP servers plus any derived runtime companions.
+async fn load_servers_with_derived(
+    db: Option<&dyn Database>,
+) -> Result<McpServersFile, config::ConfigError> {
+    let mut servers = load_persisted_servers(db).await?;
+
+    if let Ok(llm) = resolve_llm_from_env()
+        && let Some(companion) = config::derive_nearai_companion_mcp_server_from_llm(&llm)
+    {
+        servers.insert_if_absent(companion);
     }
+
+    Ok(servers)
 }
 
 /// Save MCP servers (DB if available, else disk).
@@ -629,16 +709,26 @@ async fn save_servers(
     db: Option<&dyn Database>,
     servers: &McpServersFile,
 ) -> Result<(), config::ConfigError> {
+    let mut persisted = servers.clone();
+    persisted
+        .servers
+        .retain(|server| !config::is_nearai_companion_server_name(&server.name));
+
     if let Some(db) = db {
-        config::save_mcp_servers_to_db(db, DEFAULT_USER_ID, servers).await
+        config::save_mcp_servers_to_db(db, DEFAULT_USER_ID, &persisted).await
     } else {
-        config::save_mcp_servers(servers).await
+        config::save_mcp_servers(&persisted).await
     }
 }
 
 /// Initialize and return the secrets store.
 async fn get_secrets_store() -> anyhow::Result<Arc<dyn SecretsStore + Send + Sync>> {
     crate::cli::init_secrets_store().await
+}
+
+fn resolve_llm_from_env() -> Result<LlmConfig, crate::error::ConfigError> {
+    let settings = crate::config::load_bootstrap_settings(None)?;
+    LlmConfig::resolve(&settings)
 }
 
 #[cfg(test)]

@@ -17,6 +17,8 @@ target/
 # Python
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
 
 # Benchmark results (local runs, not committed)
 bench-results/
@@ -34,8 +36,5 @@ trace_*.json
 .claude/settings.local.json
 .worktrees/
 
-# Python cache
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
+# JetBrains IDE
+.idea

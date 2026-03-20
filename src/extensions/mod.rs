@@ -504,6 +504,10 @@ pub struct InstalledExtension {
     /// Whether this extension has an auth configuration (OAuth or manual token).
     #[serde(default)]
     pub has_auth: bool,
+    /// Whether this extension is derived from provider/runtime state instead of
+    /// being a user-managed persisted configuration.
+    #[serde(default)]
+    pub derived: bool,
     /// Whether this extension is installed locally (false = available in registry but not installed).
     #[serde(default = "default_true")]
     pub installed: bool,
@@ -934,6 +938,7 @@ mod tests {
         assert!(ext.installed, "installed should default to true");
         assert!(!ext.needs_setup, "needs_setup should default to false");
         assert!(!ext.has_auth);
+        assert!(!ext.derived);
         assert!(ext.tools.is_empty());
         assert!(ext.display_name.is_none());
         assert!(ext.description.is_none());
@@ -954,6 +959,7 @@ mod tests {
             tools: vec!["send_email".to_string(), "read_inbox".to_string()],
             needs_setup: true,
             has_auth: true,
+            derived: true,
             installed: false,
             activation_error: Some("token expired".to_string()),
             version: None,
@@ -963,6 +969,7 @@ mod tests {
         assert_eq!(json["description"], "Read and send emails");
         assert_eq!(json["url"], "https://gmail.example.com");
         assert_eq!(json["needs_setup"], true);
+        assert_eq!(json["derived"], true);
         assert_eq!(json["installed"], false);
         assert_eq!(json["activation_error"], "token expired");
 
@@ -970,6 +977,7 @@ mod tests {
         assert_eq!(back.name, "gmail");
         assert_eq!(back.tools.len(), 2);
         assert!(back.needs_setup);
+        assert!(back.derived);
         assert!(!back.installed);
         assert_eq!(back.activation_error.as_deref(), Some("token expired"));
     }
