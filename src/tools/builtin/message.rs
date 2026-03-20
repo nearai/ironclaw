@@ -80,6 +80,14 @@ fn metadata_notify_user(metadata: &serde_json::Value) -> Option<String> {
     metadata_string(metadata, "notify_user").filter(|value| value != "default")
 }
 
+fn channel_matches_source(resolved_channel: Option<&str>, source_channel: Option<&str>) -> bool {
+    match (resolved_channel, source_channel) {
+        (None, _) => true,
+        (Some(resolved), Some(source)) if resolved == source => true,
+        _ => false,
+    }
+}
+
 async fn resolve_channel_fallback_target(
     extension_manager: Option<&Arc<ExtensionManager>>,
     channel: Option<&str>,
@@ -96,6 +104,56 @@ async fn resolve_channel_fallback_target(
     }
 
     Some(ctx_user_id.to_string())
+}
+
+struct MessageTargetResolution<'a> {
+    extension_manager: Option<&'a Arc<ExtensionManager>>,
+    explicit_target: Option<String>,
+    metadata_target: Option<String>,
+    default_target: Option<String>,
+    channel: Option<&'a str>,
+    metadata_channel: Option<&'a str>,
+    default_channel: Option<&'a str>,
+    has_execution_routing_metadata: bool,
+    ctx_user_id: &'a str,
+}
+
+async fn resolve_message_target(inputs: MessageTargetResolution<'_>) -> Option<String> {
+    if let Some(target) = inputs.explicit_target {
+        return Some(target);
+    }
+
+    if inputs.has_execution_routing_metadata {
+        if channel_matches_source(inputs.channel, inputs.metadata_channel)
+            && let Some(target) = inputs.metadata_target
+        {
+            return Some(target);
+        }
+
+        return resolve_channel_fallback_target(
+            inputs.extension_manager,
+            inputs.channel,
+            inputs.ctx_user_id,
+        )
+        .await;
+    }
+
+    if channel_matches_source(inputs.channel, inputs.default_channel)
+        && let Some(target) = inputs.default_target
+    {
+        return Some(target);
+    }
+
+    if inputs.channel.is_some() {
+        return resolve_channel_fallback_target(
+            inputs.extension_manager,
+            inputs.channel,
+            inputs.ctx_user_id,
+        )
+        .await;
+    }
+
+    None
 }
 
 #[async_trait]
@@ -179,54 +237,23 @@ impl Tool for MessageTool {
             .and_then(|v| v.as_str())
             .map(|value| value.to_string());
         let metadata_target = metadata_notify_user(&ctx.metadata);
-        let has_routing_metadata = metadata_channel.is_some() || metadata_target.is_some();
-        let can_use_metadata_target = match (channel.as_deref(), metadata_channel.as_deref()) {
-            (None, _) => true,
-            (Some(resolved), Some(metadata_channel)) if resolved == metadata_channel => true,
-            _ => false,
-        };
-        let can_use_default_target = match (channel.as_deref(), default_channel.as_deref()) {
-            (None, _) => true,
-            (Some(resolved), Some(default_channel)) if resolved == default_channel => true,
-            _ => false,
-        };
+        let has_execution_routing_metadata =
+            metadata_channel.is_some() || metadata_target.is_some();
 
         // Prefer explicit params, then execution-local routing metadata. Shared
         // conversation defaults are only consulted when no job metadata exists.
-        let target = if let Some(target) = explicit_target {
-            Some(target)
-        } else if can_use_metadata_target {
-            if let Some(target) = metadata_target {
-                Some(target)
-            } else if has_routing_metadata {
-                resolve_channel_fallback_target(
-                    self.extension_manager.as_ref(),
-                    channel.as_deref(),
-                    &ctx.user_id,
-                )
-                .await
-            } else {
-                None
-            }
-        } else if has_routing_metadata {
-            resolve_channel_fallback_target(
-                self.extension_manager.as_ref(),
-                channel.as_deref(),
-                &ctx.user_id,
-            )
-            .await
-        } else if can_use_default_target && default_target.is_some() {
-            default_target
-        } else if channel.is_some() {
-            resolve_channel_fallback_target(
-                self.extension_manager.as_ref(),
-                channel.as_deref(),
-                &ctx.user_id,
-            )
-            .await
-        } else {
-            None
-        };
+        let target = resolve_message_target(MessageTargetResolution {
+            extension_manager: self.extension_manager.as_ref(),
+            explicit_target,
+            metadata_target,
+            default_target,
+            channel: channel.as_deref(),
+            metadata_channel: metadata_channel.as_deref(),
+            default_channel: default_channel.as_deref(),
+            has_execution_routing_metadata,
+            ctx_user_id: &ctx.user_id,
+        })
+        .await;
 
         let Some(target) = target else {
             return Err(ToolError::ExecutionFailed(
