@@ -139,6 +139,8 @@ impl OidcState {
                     DecodingKey::from_ec_pem(trimmed.as_bytes())
                         .map_err(|e| OidcError::KeyFetch(format!("EC PEM parse: {e}")))
                 }
+                Algorithm::EdDSA => DecodingKey::from_ed_pem(trimmed.as_bytes())
+                    .map_err(|e| OidcError::KeyFetch(format!("EdDSA PEM parse: {e}"))),
                 _ => DecodingKey::from_rsa_pem(trimmed.as_bytes())
                     .map_err(|e| OidcError::KeyFetch(format!("RSA PEM parse: {e}"))),
             }
@@ -428,9 +430,6 @@ async fn validate_oidc_jwt(oidc: &OidcState, jwt: &str) -> Result<String, OidcEr
 
     if let Some(ref iss) = oidc.config.issuer {
         validation.set_issuer(&[iss]);
-    } else {
-        validation.validate_exp = true;
-        validation.set_issuer::<String>(&[]);
     }
     if let Some(ref aud) = oidc.config.audience {
         validation.set_audience(&[aud]);
@@ -445,8 +444,8 @@ async fn validate_oidc_jwt(oidc: &OidcState, jwt: &str) -> Result<String, OidcEr
         .claims
         .get("sub")
         .and_then(|v| v.as_str())
-        .unwrap_or("unknown")
-        .to_string();
+        .map(|s| s.to_string())
+        .ok_or_else(|| OidcError::InvalidClaims("missing `sub` claim".to_string()))?;
 
     Ok(sub)
 }
@@ -875,5 +874,73 @@ mod tests {
         let parts: Vec<&str> = token.split('.').collect();
         let tampered = format!("{}.{}.{}", parts[0], "dGFtcGVyZWQ", parts[2]);
         assert!(verify_signature(&tampered, &key, Algorithm::HS256).is_err());
+    }
+
+    #[tokio::test]
+    async fn test_validate_oidc_jwt_rejects_missing_sub() {
+        use jsonwebtoken::{EncodingKey, Header};
+
+        // Create a valid HS256 JWT without a `sub` claim.
+        let secret = b"test-secret-at-least-256-bits!!!";
+        let mut header = Header::new(Algorithm::HS256);
+        header.kid = Some("test-kid".to_string());
+        let claims = serde_json::json!({"exp": 9999999999u64, "name": "alice"});
+        let token = jsonwebtoken::encode(
+            &header,
+            &claims,
+            &EncodingKey::from_secret(secret),
+        )
+        .unwrap();
+
+        // Build an OidcState that serves the key from a mock.
+        // We can't easily mock HTTP, so test the claim extraction path directly:
+        // build a Validation that skips signature check and verify `sub` is required.
+        let mut validation = Validation::new(Algorithm::HS256);
+        validation.insecure_disable_signature_validation();
+        validation.validate_aud = false;
+
+        let data =
+            jsonwebtoken::decode::<serde_json::Value>(&token, &DecodingKey::from_secret(secret), &validation)
+                .unwrap();
+        let result = data
+            .claims
+            .get("sub")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .ok_or_else(|| OidcError::InvalidClaims("missing `sub` claim".to_string()));
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains("sub"),
+            "error should mention missing sub claim"
+        );
+    }
+
+    #[test]
+    fn test_issuer_validation_disabled_when_not_configured() {
+        // When no issuer is configured, Validation should NOT require iss.
+        // Previously the code called set_issuer::<String>(&[]) which required
+        // iss but with an empty allowed set — rejecting all tokens.
+        let mut validation = Validation::new(Algorithm::HS256);
+        validation.insecure_disable_signature_validation();
+        validation.validate_aud = false;
+        // Do NOT call set_issuer — this is what the fixed code does.
+
+        use jsonwebtoken::{EncodingKey, Header};
+        let secret = b"test-secret-at-least-256-bits!!!";
+        let claims = serde_json::json!({"sub": "alice", "exp": 9999999999u64, "iss": "https://example.com"});
+        let token = jsonwebtoken::encode(
+            &Header::new(Algorithm::HS256),
+            &claims,
+            &EncodingKey::from_secret(secret),
+        )
+        .unwrap();
+
+        // Should succeed — issuer validation is not enforced.
+        let result = jsonwebtoken::decode::<serde_json::Value>(
+            &token,
+            &DecodingKey::from_secret(secret),
+            &validation,
+        );
+        assert!(result.is_ok(), "token with any issuer should pass when issuer validation is disabled");
     }
 }

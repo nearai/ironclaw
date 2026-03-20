@@ -55,6 +55,29 @@ let _activityThinking = null;
 
 // --- Auth ---
 
+// Common post-auth initialization shared by token auth and OIDC auto-auth.
+function initApp() {
+  // Strip token and log_level from URL so they're not visible in the address bar
+  var cleaned = new URL(window.location);
+  var urlLogLevel = cleaned.searchParams.get('log_level');
+  cleaned.searchParams.delete('token');
+  cleaned.searchParams.delete('log_level');
+  window.history.replaceState({}, '', cleaned.pathname + cleaned.search);
+  connectSSE();
+  connectLogSSE();
+  startGatewayStatusPolling();
+  checkTeeStatus();
+  loadThreads();
+  loadMemoryTree();
+  loadJobs();
+  // Apply URL log_level param if present, otherwise just sync the dropdown
+  if (urlLogLevel) {
+    setServerLogLevel(urlLogLevel);
+  } else {
+    loadServerLogLevel();
+  }
+}
+
 function authenticate() {
   token = document.getElementById('token-input').value.trim();
   if (!token) {
@@ -68,25 +91,7 @@ function authenticate() {
       sessionStorage.setItem('ironclaw_token', token);
       document.getElementById('auth-screen').style.display = 'none';
       document.getElementById('app').style.display = 'flex';
-      // Strip token and log_level from URL so they're not visible in the address bar
-      const cleaned = new URL(window.location);
-      const urlLogLevel = cleaned.searchParams.get('log_level');
-      cleaned.searchParams.delete('token');
-      cleaned.searchParams.delete('log_level');
-      window.history.replaceState({}, '', cleaned.pathname + cleaned.search);
-      connectSSE();
-      connectLogSSE();
-      startGatewayStatusPolling();
-      checkTeeStatus();
-      loadThreads();
-      loadMemoryTree();
-      loadJobs();
-      // Apply URL log_level param if present, otherwise just sync the dropdown
-      if (urlLogLevel) {
-        setServerLogLevel(urlLogLevel);
-      } else {
-        loadServerLogLevel();
-      }
+      initApp();
     })
     .catch(() => {
       sessionStorage.removeItem('ironclaw_token');
