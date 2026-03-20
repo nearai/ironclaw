@@ -589,6 +589,7 @@ function connectSSE() {
 
   eventSource.addEventListener('turn_cost', (e) => {
     const event = JSON.parse(e.data);
+    if (!isCurrentThread(event.thread_id)) return;
     // Add cost badge below last assistant message
     const messages = document.querySelectorAll('.message.assistant');
     const lastMsg = messages[messages.length - 1];
