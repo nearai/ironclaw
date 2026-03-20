@@ -10,6 +10,7 @@
 use std::sync::Arc;
 
 use futures::StreamExt;
+use uuid::Uuid;
 
 use crate::agent::context_monitor::ContextMonitor;
 use crate::agent::heartbeat::spawn_heartbeat;
@@ -1010,15 +1011,51 @@ impl Agent {
             }
         }
 
-        // Resolve session and thread
-        let (session, thread_id) = self
-            .session_manager
-            .resolve_thread(
-                &message.user_id,
-                &message.channel,
-                message.conversation_scope(),
-            )
-            .await;
+        // Resolve session and thread. Approval submissions are allowed to
+        // target an already-loaded owned thread by UUID across channels so the
+        // web approval UI can approve work that originated from HTTP/other
+        // owner-scoped channels.
+        let approval_thread_uuid = if matches!(
+            submission,
+            Submission::ExecApproval { .. } | Submission::ApprovalResponse { .. }
+        ) {
+            message
+                .conversation_scope()
+                .and_then(|thread_id| Uuid::parse_str(thread_id).ok())
+        } else {
+            None
+        };
+
+        let (session, thread_id) = if let Some(target_thread_id) = approval_thread_uuid {
+            let session = self
+                .session_manager
+                .get_or_create_session(&message.user_id)
+                .await;
+            let mut sess = session.lock().await;
+            if sess.threads.contains_key(&target_thread_id) {
+                sess.active_thread = Some(target_thread_id);
+                sess.last_active_at = chrono::Utc::now();
+                drop(sess);
+                (session, target_thread_id)
+            } else {
+                drop(sess);
+                self.session_manager
+                    .resolve_thread(
+                        &message.user_id,
+                        &message.channel,
+                        message.conversation_scope(),
+                    )
+                    .await
+            }
+        } else {
+            self.session_manager
+                .resolve_thread(
+                    &message.user_id,
+                    &message.channel,
+                    message.conversation_scope(),
+                )
+                .await
+        };
         tracing::debug!(
             message_id = %message.id,
             thread_id = %thread_id,
