@@ -3952,9 +3952,10 @@ function renderRoutineDetail(routine) {
       + '<th>Trigger</th><th>Started</th><th>Completed</th><th>Status</th><th>Summary</th><th>Tokens</th>'
       + '</tr></thead><tbody>';
     for (const run of routine.recent_runs) {
-      const runStatusClass = run.status === 'Ok' ? 'completed'
-        : run.status === 'Failed' ? 'failed'
-        : run.status === 'Attention' ? 'stuck'
+      const runStatusClass = run.status === 'ok' ? 'completed'
+        : run.status === 'failed' ? 'failed'
+        : run.status === 'attention' ? 'stuck'
+        : run.status === 'running' ? 'in_progress'
         : 'in_progress';
       html += '<tr>'
         + '<td>' + escapeHtml(run.trigger_type) + '</td>'
