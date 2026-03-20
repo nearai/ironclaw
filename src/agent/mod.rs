@@ -40,7 +40,7 @@ pub use heartbeat::{HeartbeatConfig, HeartbeatResult, HeartbeatRunner, spawn_hea
 pub use router::{MessageIntent, Router};
 pub use routine::{Routine, RoutineAction, RoutineRun, Trigger};
 pub use routine_engine::{RoutineEngine, SandboxReadiness};
-pub use scheduler::Scheduler;
+pub use scheduler::{Scheduler, SchedulerDeps};
 pub use self_repair::{BrokenTool, RepairResult, RepairTask, SelfRepair, StuckJob};
 pub use session::{PendingApproval, PendingAuth, Session, Thread, ThreadState, Turn, TurnState};
 pub use session_manager::SessionManager;

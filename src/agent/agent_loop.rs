@@ -17,7 +17,7 @@ use crate::agent::routine_engine::{RoutineEngine, spawn_cron_ticker};
 use crate::agent::self_repair::{DefaultSelfRepair, RepairResult, SelfRepair};
 use crate::agent::session_manager::SessionManager;
 use crate::agent::submission::{Submission, SubmissionParser, SubmissionResult};
-use crate::agent::{HeartbeatConfig as AgentHeartbeatConfig, Router, Scheduler};
+use crate::agent::{HeartbeatConfig as AgentHeartbeatConfig, Router, Scheduler, SchedulerDeps};
 use crate::channels::{ChannelManager, IncomingMessage, OutgoingResponse};
 use crate::config::{AgentConfig, HeartbeatConfig, RoutineConfig, SkillsConfig};
 use crate::context::ContextManager;
@@ -227,9 +227,12 @@ impl Agent {
             context_manager.clone(),
             deps.llm.clone(),
             deps.safety.clone(),
-            deps.tools.clone(),
-            deps.store.clone(),
-            deps.hooks.clone(),
+            SchedulerDeps {
+                tools: deps.tools.clone(),
+                extension_manager: deps.extension_manager.clone(),
+                store: deps.store.clone(),
+                hooks: deps.hooks.clone(),
+            },
         );
         if let Some(ref tx) = deps.sse_tx {
             scheduler.set_sse_sender(tx.clone());
@@ -600,6 +603,7 @@ impl Agent {
                         Arc::clone(workspace),
                         notify_tx,
                         Some(self.scheduler.clone()),
+                        self.deps.extension_manager.clone(),
                         self.tools().clone(),
                         self.safety().clone(),
                         self.deps.sandbox_readiness,
