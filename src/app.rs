@@ -25,7 +25,7 @@ use crate::tools::ToolRegistry;
 use crate::tools::mcp::{McpProcessManager, McpSessionManager};
 use crate::tools::wasm::SharedCredentialRegistry;
 use crate::tools::wasm::WasmToolRuntime;
-use crate::workspace::{EmbeddingProvider, Workspace};
+use crate::workspace::{EmbeddingCacheConfig, EmbeddingProvider, Workspace};
 
 /// Fully initialized application components, ready for channel wiring
 /// and agent construction.
@@ -56,6 +56,7 @@ pub struct AppComponents {
     pub session: Arc<SessionManager>,
     pub catalog_entries: Vec<crate::extensions::RegistryEntry>,
     pub dev_loaded_tool_names: Vec<String>,
+    pub builder: Option<Arc<dyn crate::tools::SoftwareBuilder>>,
 }
 
 /// Options that control optional init phases.
@@ -280,6 +281,7 @@ impl AppBuilder {
             Arc<ToolRegistry>,
             Option<Arc<dyn EmbeddingProvider>>,
             Option<Arc<Workspace>>,
+            Option<Arc<dyn crate::tools::SoftwareBuilder>>,
         ),
         anyhow::Error,
     > {
@@ -311,10 +313,13 @@ impl AppBuilder {
 
         // Register memory tools if database is available
         let workspace = if let Some(ref db) = self.db {
+            let emb_cache_config = EmbeddingCacheConfig {
+                max_entries: self.config.embeddings.cache_size,
+            };
             let mut ws = Workspace::new_with_db(&self.config.owner_id, db.clone())
                 .with_search_config(&self.config.search);
             if let Some(ref emb) = embeddings {
-                ws = ws.with_embeddings(emb.clone());
+                ws = ws.with_embeddings_cached(emb.clone(), emb_cache_config);
             }
             let ws = Arc::new(ws);
             tools.register_memory_tools(Arc::clone(&ws));
@@ -367,16 +372,19 @@ impl AppBuilder {
         }
 
         // Register builder tool if enabled
-        if self.config.builder.enabled
+        let builder = if self.config.builder.enabled
             && (self.config.agent.allow_local_tools || !self.config.sandbox.enabled)
         {
-            tools
+            let b = tools
                 .register_builder_tool(llm.clone(), Some(self.config.builder.to_builder_config()))
                 .await;
-            tracing::debug!("Builder mode enabled");
-        }
+            tracing::info!("Builder mode enabled");
+            Some(b)
+        } else {
+            None
+        };
 
-        Ok((safety, tools, embeddings, workspace))
+        Ok((safety, tools, embeddings, workspace, builder))
     }
 
     /// Phase 5: Load WASM tools, MCP servers, and create extension manager.
@@ -699,7 +707,7 @@ impl AppBuilder {
         } else {
             self.init_llm().await?
         };
-        let (safety, tools, embeddings, workspace) = self.init_tools(&llm).await?;
+        let (safety, tools, embeddings, workspace, builder) = self.init_tools(&llm).await?;
 
         // Create hook registry early so runtime extension activation can register hooks.
         let hooks = Arc::new(HookRegistry::new());
@@ -830,6 +838,7 @@ impl AppBuilder {
             session: self.session,
             catalog_entries,
             dev_loaded_tool_names,
+            builder,
         })
     }
 }

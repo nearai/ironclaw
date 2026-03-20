@@ -475,6 +475,10 @@ I18n.register('en', {
   'cfg.routines_max_concurrent.desc': 'Maximum routines running simultaneously',
   'cfg.routines_cooldown.label': 'Default Cooldown',
   'cfg.routines_cooldown.desc': 'Minimum seconds between routine fires',
+  'cfg.routines_full_job_default_mode.label': 'Full Job Default Mode',
+  'cfg.routines_full_job_default_mode.desc': 'Default permission behavior for new full_job routines. When unset, inherit_owner is used.',
+  'cfg.routines_full_job_owner_tools.label': 'Full Job Owner Allowlist',
+  'cfg.routines_full_job_owner_tools.desc': 'Comma-separated tool names that full_job routines may inherit at run time.',
 
   // Safety settings
   'cfg.safety_max_output.label': 'Max Output Length',

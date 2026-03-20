@@ -22,7 +22,8 @@ use uuid::Uuid;
 
 use crate::agent::Scheduler;
 use crate::agent::routine::{
-    NotifyConfig, Routine, RoutineAction, RoutineRun, RunStatus, Trigger, next_cron_fire,
+    NotifyConfig, Routine, RoutineAction, RoutineRun, RunStatus, Trigger,
+    effective_full_job_tool_permissions, load_full_job_permission_settings, next_cron_fire,
 };
 use crate::channels::OutgoingResponse;
 use crate::config::RoutineConfig;
@@ -890,17 +891,16 @@ async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) 
             description,
             max_iterations,
             tool_permissions,
+            permission_mode,
         } => {
-            execute_full_job(
-                &ctx,
-                &routine,
-                &run,
+            let execution = FullJobExecutionConfig {
                 title,
                 description,
-                *max_iterations,
+                max_iterations: *max_iterations,
                 tool_permissions,
-            )
-            .await
+                permission_mode: *permission_mode,
+            };
+            execute_full_job(&ctx, &routine, &run, &execution).await
         }
     };
 
@@ -1026,14 +1026,19 @@ fn sanitize_routine_name(name: &str) -> String {
 /// non-active state (not Pending/InProgress/Stuck). Returns the final
 /// `RunStatus` mapped from the job outcome. This keeps the routine run
 /// active for the full job lifetime so concurrency guardrails apply.
+struct FullJobExecutionConfig<'a> {
+    title: &'a str,
+    description: &'a str,
+    max_iterations: u32,
+    tool_permissions: &'a [String],
+    permission_mode: crate::agent::routine::FullJobPermissionMode,
+}
+
 async fn execute_full_job(
     ctx: &EngineContext,
     routine: &Routine,
     run: &RoutineRun,
-    title: &str,
-    description: &str,
-    max_iterations: u32,
-    tool_permissions: &[String],
+    execution: &FullJobExecutionConfig<'_>,
 ) -> Result<(RunStatus, Option<String>, Option<i32>), RoutineError> {
     let scheduler = ctx
         .scheduler
@@ -1042,8 +1047,10 @@ async fn execute_full_job(
             reason: "scheduler not available".to_string(),
         })?;
 
-    let mut metadata =
-        serde_json::json!({ "max_iterations": max_iterations, "owner_id": routine.user_id });
+    let mut metadata = serde_json::json!({
+        "max_iterations": execution.max_iterations,
+        "owner_id": routine.user_id
+    });
     // Carry the routine's notify config in job metadata so the message tool
     // can resolve channel/target per-job without global state mutation.
     if let Some(channel) = &routine.notify.channel {
@@ -1051,15 +1058,38 @@ async fn execute_full_job(
     }
     metadata["notify_user"] = serde_json::json!(&routine.notify.user);
 
+    let effective_permissions = match execution.permission_mode {
+        crate::agent::routine::FullJobPermissionMode::Explicit => {
+            effective_full_job_tool_permissions(
+                execution.permission_mode,
+                execution.tool_permissions,
+                &[],
+            )
+        }
+        crate::agent::routine::FullJobPermissionMode::InheritOwner => {
+            let owner_permissions =
+                load_full_job_permission_settings(ctx.store.as_ref(), &routine.user_id)
+                    .await
+                    .map_err(|e| RoutineError::Database {
+                        reason: format!("failed to load routine permission settings: {e}"),
+                    })?;
+            effective_full_job_tool_permissions(
+                execution.permission_mode,
+                execution.tool_permissions,
+                &owner_permissions.owner_allowed_tools,
+            )
+        }
+    };
+
     // Build approval context: UnlessAutoApproved tools are auto-approved for routines;
-    // Always tools require explicit listing in tool_permissions.
-    let approval_context = ApprovalContext::autonomous_with_tools(tool_permissions.iter().cloned());
+    // Always tools require explicit listing in the resolved effective permissions.
+    let approval_context = ApprovalContext::autonomous_with_tools(effective_permissions);
 
     let job_id = scheduler
         .dispatch_job_with_context(
             &routine.user_id,
-            title,
-            description,
+            execution.title,
+            execution.description,
             Some(metadata),
             approval_context,
         )
@@ -1082,7 +1112,7 @@ async fn execute_full_job(
     tracing::info!(
         routine = %routine.name,
         job_id = %job_id,
-        max_iterations = max_iterations,
+        max_iterations = execution.max_iterations,
         "Dispatched full job for routine, watching for completion"
     );
 
