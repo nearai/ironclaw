@@ -1,6 +1,7 @@
 //! Context manager for handling multiple job contexts.
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use tokio::sync::RwLock;
 use uuid::Uuid;
@@ -205,12 +206,46 @@ impl ContextManager {
     }
 
     /// Find stuck jobs.
+    ///
+    /// Returns jobs that are explicitly in `Stuck` state, plus `InProgress`
+    /// jobs that have been running longer than `elapsed_threshold` (if provided).
+    /// The threshold-based detection catches jobs that never transitioned to
+    /// `Stuck` (e.g., due to a deadlock or unhandled timeout).
     pub async fn find_stuck_jobs(&self) -> Vec<Uuid> {
+        self.find_stuck_jobs_with_threshold(None).await
+    }
+
+    /// Find stuck jobs with an optional elapsed threshold for `InProgress` detection.
+    pub async fn find_stuck_jobs_with_threshold(
+        &self,
+        elapsed_threshold: Option<Duration>,
+    ) -> Vec<Uuid> {
+        let now = chrono::Utc::now();
         self.contexts
             .read()
             .await
             .iter()
-            .filter(|(_, c)| c.state == crate::context::JobState::Stuck)
+            .filter(|(_, c)| {
+                // Always include explicitly Stuck jobs.
+                if c.state == crate::context::JobState::Stuck {
+                    return true;
+                }
+                // Detect InProgress jobs that have been running beyond the elapsed threshold.
+                // NOTE: `started_at` is set on the first transition to InProgress and is
+                // NOT reset when a job recovers from Stuck back to InProgress. This means
+                // a recovered job may be re-detected on the next scan. A future improvement
+                // could track `in_progress_since` or use the most recent StateTransition
+                // with `to == InProgress` to avoid false positives on recovered jobs.
+                if c.state == crate::context::JobState::InProgress
+                    && let Some(threshold) = elapsed_threshold
+                    && let Some(started) = c.started_at
+                {
+                    let elapsed = now.signed_duration_since(started);
+                    let elapsed_secs = elapsed.num_seconds().max(0) as u64;
+                    return elapsed_secs > threshold.as_secs();
+                }
+                false
+            })
             .map(|(id, _)| *id)
             .collect()
     }
@@ -627,6 +662,48 @@ mod tests {
         let stuck = manager.find_stuck_jobs().await;
         assert_eq!(stuck.len(), 1);
         assert_eq!(stuck[0], id2);
+    }
+
+    /// Regression test for #1223: InProgress jobs exceeding the threshold
+    /// should be detected as stuck even if they never transitioned to Stuck.
+    #[tokio::test]
+    async fn find_stuck_jobs_with_threshold_detects_idle_in_progress() {
+        let manager = ContextManager::new(10);
+
+        let id1 = manager.create_job("Active job", "desc").await.unwrap();
+        let id2 = manager.create_job("Idle job", "desc").await.unwrap();
+
+        // Both transition to InProgress
+        for id in [id1, id2] {
+            manager
+                .update_context(id, |ctx| {
+                    ctx.transition_to(crate::context::JobState::InProgress, None)
+                })
+                .await
+                .unwrap()
+                .unwrap();
+        }
+
+        // Backdate id2's started_at to simulate a long-running job
+        manager
+            .update_context(id2, |ctx| -> Result<(), crate::error::JobError> {
+                ctx.started_at = Some(chrono::Utc::now() - chrono::Duration::seconds(600));
+                Ok(())
+            })
+            .await
+            .unwrap()
+            .unwrap();
+
+        // With a 5-minute threshold, only id2 (10 min) should be detected
+        let stuck = manager
+            .find_stuck_jobs_with_threshold(Some(Duration::from_secs(300)))
+            .await;
+        assert_eq!(stuck.len(), 1);
+        assert_eq!(stuck[0], id2);
+
+        // Without threshold, neither InProgress job is detected (no explicit Stuck state)
+        let stuck_no_threshold = manager.find_stuck_jobs().await;
+        assert!(stuck_no_threshold.is_empty());
     }
 
     #[tokio::test]
