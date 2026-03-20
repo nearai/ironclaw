@@ -24,14 +24,26 @@ I18n.register('en', {
   'restart.progressSubtitle': 'Please wait for the process to restart...',
   'restart.checkLogs': 'Check the Logs tab for details after restart completes.',
   
+  // Theme
+  'theme.tooltipDark': 'Theme: Dark (click for Light)',
+  'theme.tooltipLight': 'Theme: Light (click for System)',
+  'theme.tooltipSystem': 'Theme: System (click for Dark)',
+  'theme.announce': 'Theme: {mode}',
+
   // Tabs
   'tab.chat': 'Chat',
   'tab.memory': 'Memory',
   'tab.jobs': 'Jobs',
   'tab.routines': 'Routines',
+  'tab.settings': 'Settings',
   'tab.extensions': 'Extensions',
   'tab.skills': 'Skills',
   'tab.logs': 'Logs',
+  'settings.inference': 'Inference',
+  'settings.agent': 'Agent',
+  'settings.channels': 'Channels',
+  'settings.networking': 'Networking',
+  'settings.mcp': 'MCP',
   
   // Status
   'status.connected': 'Connected',
@@ -131,10 +143,10 @@ I18n.register('en', {
   
   // Extensions Tab
   'extensions.installed': 'Installed Extensions',
-  'extensions.available': 'Available WASM Extensions',
-  'extensions.installWasm': 'Install WASM Extension',
+  'extensions.available': 'Available Extensions',
+  'extensions.installWasm': 'Install Extension',
   'extensions.noInstalled': 'No extensions installed',
-  'extensions.noAvailable': 'No additional WASM extensions available',
+  'extensions.noAvailable': 'No additional extensions available',
   'extensions.loading': 'Loading...',
   'extensions.install': 'Install',
   'extensions.installing': 'Installing...',
@@ -156,13 +168,8 @@ I18n.register('en', {
   'mcp.addCustom': 'Add Custom MCP Server',
   'mcp.add': 'Add',
   'mcp.addedSuccess': 'Added MCP server {name}',
-  
-  // Registered Tools
-  'tools.registered': 'Registered Tools',
-  'tools.name': 'Name',
-  'tools.description': 'Description',
-  'tools.empty': 'No tools registered',
-  
+
+
   // Skills Tab
   'skills.installed': 'Installed Skills',
   'skills.noInstalled': 'No skills installed',
@@ -302,6 +309,7 @@ I18n.register('en', {
   
   // Common
   'common.loading': 'Loading...',
+  'common.loadFailed': 'Failed to load',
   'common.noData': 'No data',
   'common.search': 'Search',
   'common.add': 'Add',
@@ -328,6 +336,8 @@ I18n.register('en', {
   
   // Extensions
   'ext.active': 'Active',
+  'ext.inactive': 'Inactive',
+  'ext.builtin': 'Built-in',
   'ext.remove': 'Remove',
   'ext.install': 'Install',
   'ext.installing': 'Installing...',
@@ -342,10 +352,12 @@ I18n.register('en', {
   
   // Configure
   'config.title': 'Configure {name}',
-  'config.telegramOwnerHint': 'After saving, IronClaw will show a one-time code. Send `/start CODE` to your bot in Telegram, then click Verify owner.',
+  'config.telegramOwnerHint': 'After saving, IronClaw will show a one-time code. Send `/start CODE` to your bot in Telegram and IronClaw will finish setup automatically.',
   'config.telegramChallengeTitle': 'Telegram owner verification',
   'config.telegramOwnerWaiting': 'Waiting for Telegram owner verification...',
-  'config.telegramVerifyOwner': 'Verify owner',
+  'config.telegramCommandLabel': 'Send this in Telegram:',
+  'config.telegramStartOver': 'Start over',
+  'config.telegramStartOverHint': 'Telegram verification did not complete. Click Start over to generate a new code and try again.',
   'config.telegramOpenBot': 'Open bot in Telegram',
   'config.optional': ' (optional)',
   'config.alreadySet': '(already set — leave empty to keep)',
@@ -353,4 +365,164 @@ I18n.register('en', {
   'config.autoGenerate': 'Auto-generated if empty',
   'config.save': 'Save',
   'config.cancel': 'Cancel',
+
+  // Settings toolbar
+  'settings.export': 'Export',
+  'settings.import': 'Import',
+  'settings.searchPlaceholder': 'Search settings...',
+  'settings.exportSuccess': 'Settings exported',
+  'settings.exportFailed': 'Export failed: {message}',
+  'settings.importSuccess': 'Settings imported successfully',
+  'settings.importFailed': 'Import failed: {message}',
+  'settings.restartRequired': 'Restart required for changes to take effect.',
+  'settings.restartNow': 'Restart Now',
+  'settings.noMatchingSettings': 'No settings matching "{query}"',
+  'settings.noSettings': 'No settings found',
+  'settings.saved': 'Saved',
+  'settings.on': 'On',
+  'settings.off': 'Off',
+  'settings.envValue': 'env: {value}',
+  'settings.envDefault': 'env default',
+  'settings.useEnvDefault': 'use env default',
+
+  // Settings groups
+  'cfg.group.llm': 'LLM Provider',
+  'cfg.group.embeddings': 'Embeddings',
+  'cfg.group.agent': 'Agent',
+  'cfg.group.heartbeat': 'Heartbeat',
+  'cfg.group.sandbox': 'Sandbox',
+  'cfg.group.routines': 'Routines',
+  'cfg.group.safety': 'Safety',
+  'cfg.group.skills': 'Skills',
+  'cfg.group.search': 'Search',
+  'cfg.group.tunnel': 'Tunnel',
+  'cfg.group.gateway': 'Gateway',
+
+  // Inference settings
+  'cfg.llm_backend.label': 'Backend',
+  'cfg.llm_backend.desc': 'LLM inference provider',
+  'cfg.selected_model.label': 'Model',
+  'cfg.selected_model.desc': 'Model name or ID for the selected backend',
+  'cfg.ollama_base_url.label': 'Ollama URL',
+  'cfg.ollama_base_url.desc': 'Base URL for Ollama API',
+  'cfg.openai_compatible_base_url.label': 'OpenAI-compatible URL',
+  'cfg.openai_compatible_base_url.desc': 'Base URL for OpenAI-compatible API',
+  'cfg.bedrock_region.label': 'Bedrock Region',
+  'cfg.bedrock_region.desc': 'AWS region for Bedrock',
+  'cfg.bedrock_cross_region.label': 'Cross-Region',
+  'cfg.bedrock_cross_region.desc': 'Enable cross-region inference',
+  'cfg.bedrock_profile.label': 'AWS Profile',
+  'cfg.bedrock_profile.desc': 'AWS profile for Bedrock auth',
+  'cfg.embeddings_enabled.label': 'Enabled',
+  'cfg.embeddings_enabled.desc': 'Enable vector embeddings for memory search',
+  'cfg.embeddings_provider.label': 'Provider',
+  'cfg.embeddings_provider.desc': 'Embeddings API provider',
+  'cfg.embeddings_model.label': 'Model',
+  'cfg.embeddings_model.desc': 'Embedding model name',
+
+  // Agent settings
+  'cfg.agent_name.label': 'Name',
+  'cfg.agent_name.desc': 'Agent display name',
+  'cfg.agent_max_parallel_jobs.label': 'Max Parallel Jobs',
+  'cfg.agent_max_parallel_jobs.desc': 'Maximum concurrent background jobs',
+  'cfg.agent_job_timeout.label': 'Job Timeout',
+  'cfg.agent_job_timeout.desc': 'Max duration per job in seconds',
+  'cfg.agent_max_tool_iterations.label': 'Max Tool Iterations',
+  'cfg.agent_max_tool_iterations.desc': 'Max tool calls per turn',
+  'cfg.agent_use_planning.label': 'Planning',
+  'cfg.agent_use_planning.desc': 'Enable multi-step planning before execution',
+  'cfg.agent_auto_approve.label': 'Auto-approve Tools',
+  'cfg.agent_auto_approve.desc': 'Skip manual approval for tool calls',
+  'cfg.agent_timezone.label': 'Timezone',
+  'cfg.agent_timezone.desc': 'Default timezone (IANA)',
+  'cfg.agent_session_idle.label': 'Session Idle Timeout',
+  'cfg.agent_session_idle.desc': 'Seconds before idle session expires',
+  'cfg.agent_stuck_threshold.label': 'Stuck Threshold',
+  'cfg.agent_stuck_threshold.desc': 'Seconds before a job is considered stuck',
+  'cfg.agent_max_repair.label': 'Max Repair Attempts',
+  'cfg.agent_max_repair.desc': 'Auto-recovery attempts for stuck jobs',
+  'cfg.agent_max_cost.label': 'Max Daily Cost',
+  'cfg.agent_max_cost.desc': 'Daily LLM spend cap in cents (0 = unlimited)',
+  'cfg.agent_max_actions.label': 'Max Actions/Hour',
+  'cfg.agent_max_actions.desc': 'Hourly tool call rate limit (0 = unlimited)',
+  'cfg.agent_allow_local.label': 'Allow Local Tools',
+  'cfg.agent_allow_local.desc': 'Enable local filesystem tool execution',
+
+  // Heartbeat settings
+  'cfg.heartbeat_enabled.label': 'Enabled',
+  'cfg.heartbeat_enabled.desc': 'Run periodic background checks',
+  'cfg.heartbeat_interval.label': 'Interval',
+  'cfg.heartbeat_interval.desc': 'Seconds between heartbeats (default: 1800)',
+  'cfg.heartbeat_notify_channel.label': 'Notify Channel',
+  'cfg.heartbeat_notify_channel.desc': 'Channel to send heartbeat findings to',
+  'cfg.heartbeat_notify_user.label': 'Notify User',
+  'cfg.heartbeat_notify_user.desc': 'User ID to notify',
+  'cfg.heartbeat_quiet_start.label': 'Quiet Hours Start',
+  'cfg.heartbeat_quiet_start.desc': 'Hour (0-23) to stop heartbeats',
+  'cfg.heartbeat_quiet_end.label': 'Quiet Hours End',
+  'cfg.heartbeat_quiet_end.desc': 'Hour (0-23) to resume heartbeats',
+  'cfg.heartbeat_timezone.label': 'Timezone',
+  'cfg.heartbeat_timezone.desc': 'Timezone for quiet hours (IANA)',
+
+  // Sandbox settings
+  'cfg.sandbox_enabled.label': 'Enabled',
+  'cfg.sandbox_enabled.desc': 'Enable Docker sandbox for background jobs',
+  'cfg.sandbox_policy.label': 'Policy',
+  'cfg.sandbox_policy.desc': 'Sandbox security policy',
+  'cfg.sandbox_timeout.label': 'Timeout',
+  'cfg.sandbox_timeout.desc': 'Max job duration in seconds',
+  'cfg.sandbox_memory.label': 'Memory Limit',
+  'cfg.sandbox_memory.desc': 'Container memory limit (MB)',
+  'cfg.sandbox_image.label': 'Docker Image',
+  'cfg.sandbox_image.desc': 'Container image for sandbox jobs',
+
+  // Routines settings
+  'cfg.routines_max_concurrent.label': 'Max Concurrent',
+  'cfg.routines_max_concurrent.desc': 'Maximum routines running simultaneously',
+  'cfg.routines_cooldown.label': 'Default Cooldown',
+  'cfg.routines_cooldown.desc': 'Minimum seconds between routine fires',
+  'cfg.routines_full_job_default_mode.label': 'Full Job Default Mode',
+  'cfg.routines_full_job_default_mode.desc': 'Default permission behavior for new full_job routines. When unset, inherit_owner is used.',
+  'cfg.routines_full_job_owner_tools.label': 'Full Job Owner Allowlist',
+  'cfg.routines_full_job_owner_tools.desc': 'Comma-separated tool names that full_job routines may inherit at run time.',
+
+  // Safety settings
+  'cfg.safety_max_output.label': 'Max Output Length',
+  'cfg.safety_max_output.desc': 'Maximum output tokens per response',
+  'cfg.safety_injection_check.label': 'Injection Check',
+  'cfg.safety_injection_check.desc': 'Enable prompt injection detection',
+
+  // Skills settings
+  'cfg.skills_max_active.label': 'Max Active Skills',
+  'cfg.skills_max_active.desc': 'Maximum skills active simultaneously',
+  'cfg.skills_max_tokens.label': 'Max Context Tokens',
+  'cfg.skills_max_tokens.desc': 'Token budget for skill prompts',
+
+  // Search settings
+  'cfg.search_fusion.label': 'Fusion Strategy',
+  'cfg.search_fusion.desc': 'Hybrid search ranking method',
+
+  // Networking settings
+  'cfg.tunnel_provider.label': 'Provider',
+  'cfg.tunnel_provider.desc': 'Public URL tunnel provider',
+  'cfg.tunnel_public_url.label': 'Public URL',
+  'cfg.tunnel_public_url.desc': 'Static public URL (if not using tunnel provider)',
+  'cfg.gateway_rate_limit.label': 'Rate Limit',
+  'cfg.gateway_rate_limit.desc': 'Max chat messages per minute',
+  'cfg.gateway_max_connections.label': 'Max Connections',
+  'cfg.gateway_max_connections.desc': 'Max simultaneous SSE/WS connections',
+
+  // Channels subtab
+  'channels.builtin': 'Built-in Channels',
+  'channels.messaging': 'Messaging Channels',
+  'channels.webGateway': 'Web Gateway',
+  'channels.webGatewayDesc': 'Browser-based chat interface',
+  'channels.httpWebhook': 'HTTP Webhook',
+  'channels.httpWebhookDesc': 'Incoming webhook endpoint for external integrations',
+  'channels.cli': 'CLI',
+  'channels.cliDesc': 'Terminal UI with Ratatui',
+  'channels.repl': 'REPL',
+  'channels.replDesc': 'Simple read-eval-print loop for testing',
+  'channels.configureVia': 'Configure via {env}',
+  'channels.runWith': 'Run with: {cmd}',
 });

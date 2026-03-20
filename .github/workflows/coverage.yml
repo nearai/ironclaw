@@ -174,7 +174,7 @@ jobs:
 
       - name: Run E2E tests
         run: |
-          pytest tests/e2e/ -v -x --timeout=120
+          pytest tests/e2e/ -v --timeout=120
         env:
           RUST_LOG: ironclaw=info
           RUST_BACKTRACE: "1"

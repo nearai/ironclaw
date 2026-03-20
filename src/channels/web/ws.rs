@@ -522,6 +522,7 @@ mod tests {
             cost_guard: None,
             routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
             startup_time: std::time::Instant::now(),
+            active_config: crate::channels::web::server::ActiveConfigSnapshot::default(),
         }
     }
 }

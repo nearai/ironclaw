@@ -63,6 +63,7 @@ async fn start_test_server() -> (
         cost_guard: None,
         routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
         startup_time: std::time::Instant::now(),
+        active_config: ironclaw::channels::web::server::ActiveConfigSnapshot::default(),
     });
 
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();

@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use secrecy::SecretString;
 
 use crate::bootstrap::ironclaw_base_dir;
-use crate::config::helpers::{optional_env, parse_optional_env};
+use crate::config::helpers::{optional_env, parse_optional_env, validate_base_url};
 use crate::error::ConfigError;
 use crate::llm::config::*;
 use crate::llm::registry::{ProviderProtocol, ProviderRegistry};
@@ -81,9 +81,11 @@ impl LlmConfig {
         }
 
         // Session config (used by NearAI provider for OAuth/session-token auth)
+        let nearai_auth_url = optional_env("NEARAI_AUTH_URL")?
+            .unwrap_or_else(|| "https://private.near.ai".to_string());
+        validate_base_url(&nearai_auth_url, "NEARAI_AUTH_URL")?;
         let session = SessionConfig {
-            auth_base_url: optional_env("NEARAI_AUTH_URL")?
-                .unwrap_or_else(|| "https://private.near.ai".to_string()),
+            auth_base_url: nearai_auth_url,
             session_path: optional_env("NEARAI_SESSION_PATH")?
                 .map(PathBuf::from)
                 .unwrap_or_else(default_session_path),
@@ -92,15 +94,19 @@ impl LlmConfig {
         // Always resolve NEAR AI config (used for embeddings even when not the primary backend)
         let nearai_api_key = optional_env("NEARAI_API_KEY")?.map(SecretString::from);
         let nearai = NearAiConfig {
-            model: Self::resolve_model("NEARAI_MODEL", settings, "zai-org/GLM-latest")?,
+            model: Self::resolve_model("NEARAI_MODEL", settings, crate::llm::DEFAULT_MODEL)?,
             cheap_model: optional_env("NEARAI_CHEAP_MODEL")?,
-            base_url: optional_env("NEARAI_BASE_URL")?.unwrap_or_else(|| {
-                if nearai_api_key.is_some() {
-                    "https://cloud-api.near.ai".to_string()
-                } else {
-                    "https://private.near.ai".to_string()
-                }
-            }),
+            base_url: {
+                let url = optional_env("NEARAI_BASE_URL")?.unwrap_or_else(|| {
+                    if nearai_api_key.is_some() {
+                        "https://cloud-api.near.ai".to_string()
+                    } else {
+                        "https://private.near.ai".to_string()
+                    }
+                });
+                validate_base_url(&url, "NEARAI_BASE_URL")?;
+                url
+            },
             api_key: nearai_api_key,
             fallback_model: optional_env("NEARAI_FALLBACK_MODEL")?,
             max_retries: parse_optional_env("NEARAI_MAX_RETRIES", 3)?,
@@ -323,6 +329,12 @@ impl LlmConfig {
                 key: env_var.to_string(),
                 hint: format!("Set {env_var} when LLM_BACKEND={backend}"),
             });
+        }
+
+        // Validate base URL to prevent SSRF (#1103).
+        if !base_url.is_empty() {
+            let field = base_url_env.unwrap_or("LLM_BASE_URL");
+            validate_base_url(&base_url, field)?;
         }
 
         // Resolve model

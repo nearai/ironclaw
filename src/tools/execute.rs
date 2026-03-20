@@ -22,6 +22,12 @@ pub async fn execute_tool_with_safety(
     params: &serde_json::Value,
     job_ctx: &JobContext,
 ) -> Result<String, Error> {
+    if tool_name.is_empty() {
+        return Err(crate::error::ToolError::NotFound {
+            name: tool_name.to_string(),
+        }
+        .into());
+    }
     let tool = tools
         .get(tool_name)
         .await
@@ -289,6 +295,33 @@ mod tests {
             registry.register(tool).await;
         }
         registry
+    }
+
+    #[tokio::test]
+    async fn test_execute_empty_tool_name_returns_not_found() {
+        // Regression: execute_tool_with_safety must reject empty tool names
+        // gracefully via ToolError::NotFound (not a panic).
+        let registry = registry_with(vec![]).await;
+        let safety = test_safety();
+
+        let result = execute_tool_with_safety(
+            &registry,
+            &safety,
+            "",
+            &serde_json::json!({}),
+            &test_job_ctx(),
+        )
+        .await;
+
+        assert!(
+            matches!(
+                result,
+                Err(crate::error::Error::Tool(
+                    crate::error::ToolError::NotFound { .. }
+                ))
+            ),
+            "Empty tool name should return ToolError::NotFound, got: {result:?}"
+        );
     }
 
     #[tokio::test]
