@@ -36,11 +36,7 @@ impl Default for EmbeddingCacheConfig {
 }
 
 struct CacheEntry {
-    /// Stored as `Arc` so that the underlying allocation can be shared between
-    /// cache entries and, in cases where we can `Arc::try_unwrap` (e.g. when an
-    /// embedding is not retained in the cache), reused for the returned `Vec<f32>`.
-    /// Normal cache hit/miss paths still clone into a fresh `Vec<f32>` for callers.
-    embedding: Arc<Vec<f32>>,
+    embedding: Vec<f32>,
     last_accessed: Instant,
 }
 
@@ -172,7 +168,7 @@ impl EmbeddingProvider for CachedEmbeddingProvider {
             if let Some(entry) = guard.get_mut(&key) {
                 entry.last_accessed = Instant::now();
                 tracing::trace!("embedding cache hit");
-                return Ok((*entry.embedding).clone());
+                return Ok(entry.embedding.clone());
             }
         }
         // Lock released before HTTP call.
@@ -182,23 +178,20 @@ impl EmbeddingProvider for CachedEmbeddingProvider {
 
         let embedding = self.inner.embed(text).await?;
 
-        // Clone + wrap outside the lock so the mutex is held only for the insert.
-        let cached = Arc::new(embedding.clone());
-
         // Store result. Re-check under lock: another concurrent caller may
         // have inserted this key while the lock was released for the HTTP call.
         {
             let mut guard = self.cache.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(entry) = guard.get_mut(&key) {
-                // Key already present (thundering herd) — just update, no eviction needed.
-                entry.embedding = cached;
+                // Thundering herd — another caller already cached it.
+                // Just touch timestamp; skip the clone.
                 entry.last_accessed = Instant::now();
             } else {
                 Self::evict_lru(&mut guard, self.config.max_entries);
                 guard.insert(
                     key,
                     CacheEntry {
-                        embedding: cached,
+                        embedding: embedding.clone(),
                         last_accessed: Instant::now(),
                     },
                 );
@@ -225,7 +218,7 @@ impl EmbeddingProvider for CachedEmbeddingProvider {
             for (i, key) in keys.iter().enumerate() {
                 if let Some(entry) = guard.get_mut(key) {
                     entry.last_accessed = now;
-                    results[i] = Some((*entry.embedding).clone());
+                    results[i] = Some(entry.embedding.clone());
                 } else {
                     miss_indices.push(i);
                 }
@@ -251,13 +244,7 @@ impl EmbeddingProvider for CachedEmbeddingProvider {
 
         // Fetch missing embeddings
         let miss_texts: Vec<String> = miss_indices.iter().map(|&i| texts[i].clone()).collect();
-        let new_embeddings: Vec<Arc<Vec<f32>>> = self
-            .inner
-            .embed_batch(&miss_texts)
-            .await?
-            .into_iter()
-            .map(Arc::new)
-            .collect();
+        let new_embeddings = self.inner.embed_batch(&miss_texts).await?;
 
         if new_embeddings.len() != miss_indices.len() {
             return Err(EmbeddingError::InvalidResponse(format!(
@@ -273,9 +260,8 @@ impl EmbeddingProvider for CachedEmbeddingProvider {
             "embedding batch: partial cache"
         );
 
-        // Cache the new embeddings, respecting max_entries.
-        // Done BEFORE assembling results so that Arc::try_unwrap can
-        // avoid a clone when the cache doesn't keep a copy.
+        // Cache FIRST (clone only the cacheable subset), then move originals
+        // into results. This avoids cloning capacity-skipped embeddings entirely.
         {
             let mut guard = self.cache.lock().unwrap_or_else(|e| e.into_inner());
             let cacheable = miss_indices.len().min(self.config.max_entries);
@@ -289,17 +275,16 @@ impl EmbeddingProvider for CachedEmbeddingProvider {
                 guard.insert(
                     keys[orig_idx],
                     CacheEntry {
-                        embedding: Arc::clone(emb),
+                        embedding: emb.clone(),
                         last_accessed: now,
                     },
                 );
             }
         }
 
-        // Assemble results: try_unwrap avoids a clone when the Arc is sole-owned
-        // (i.e., when the embedding was skipped during caching due to capacity).
+        // Move originals into results (zero-copy for all, including cached ones).
         for (orig_idx, emb) in miss_indices.iter().copied().zip(new_embeddings) {
-            results[orig_idx] = Some(Arc::try_unwrap(emb).unwrap_or_else(|arc| (*arc).clone()));
+            results[orig_idx] = Some(emb);
         }
 
         results
