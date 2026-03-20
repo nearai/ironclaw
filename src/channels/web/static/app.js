@@ -7,8 +7,11 @@ function getSystemTheme() {
   return window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
 }
 
+const VALID_THEME_MODES = { dark: true, light: true, system: true };
+
 function getThemeMode() {
-  return localStorage.getItem('ironclaw-theme') || 'system';
+  const stored = localStorage.getItem('ironclaw-theme');
+  return (stored && VALID_THEME_MODES[stored]) ? stored : 'system';
 }
 
 function resolveTheme(mode) {
@@ -19,11 +22,11 @@ function applyTheme(mode) {
   const resolved = resolveTheme(mode);
   document.documentElement.setAttribute('data-theme', resolved);
   document.documentElement.setAttribute('data-theme-mode', mode);
-  const titles = { dark: 'Theme: Dark (click for Light)', light: 'Theme: Light (click for System)', system: 'Theme: System (click for Dark)' };
+  const titleKeys = { dark: 'theme.tooltipDark', light: 'theme.tooltipLight', system: 'theme.tooltipSystem' };
   const btn = document.getElementById('theme-toggle');
-  if (btn) btn.title = titles[mode] || '';
+  if (btn) btn.title = (typeof I18n !== 'undefined' && titleKeys[mode]) ? I18n.t(titleKeys[mode]) : ('Theme: ' + mode);
   const announce = document.getElementById('theme-announce');
-  if (announce) announce.textContent = 'Theme: ' + mode;
+  if (announce) announce.textContent = (typeof I18n !== 'undefined') ? I18n.t('theme.announce', { mode: mode }) : ('Theme: ' + mode);
 }
 
 function toggleTheme() {
@@ -46,11 +49,17 @@ requestAnimationFrame(function() {
 });
 
 // Listen for OS theme changes — only re-apply when in 'system' mode.
-window.matchMedia('(prefers-color-scheme: light)').addEventListener('change', function() {
+const mql = window.matchMedia('(prefers-color-scheme: light)');
+const onSchemeChange = function() {
   if (getThemeMode() === 'system') {
     applyTheme('system');
   }
-});
+};
+if (mql.addEventListener) {
+  mql.addEventListener('change', onSchemeChange);
+} else if (mql.addListener) {
+  mql.addListener(onSchemeChange);
+}
 
 // Bind theme toggle button (CSP-compliant — no inline onclick).
 document.getElementById('theme-toggle').addEventListener('click', toggleTheme);
