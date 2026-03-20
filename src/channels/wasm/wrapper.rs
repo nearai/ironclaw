@@ -3847,6 +3847,7 @@ mod tests {
     use std::sync::Arc;
 
     use crate::channels::Channel;
+    use crate::channels::OutgoingResponse;
     use crate::channels::wasm::capabilities::ChannelCapabilities;
     use crate::channels::wasm::host::{ChannelHostState, PendingWorkspaceWrite};
     use crate::channels::wasm::runtime::{
@@ -4116,6 +4117,16 @@ mod tests {
 
         // Health check should fail after shutdown
         assert!(channel.health_check().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_broadcast_delegates_to_call_on_broadcast() {
+        let channel = create_test_channel();
+        // With `component: None`, call_on_broadcast short-circuits to Ok(()).
+        let result = channel
+            .broadcast("146032821", OutgoingResponse::text("hello"))
+            .await;
+        assert!(result.is_ok());
     }
 
     #[tokio::test]
