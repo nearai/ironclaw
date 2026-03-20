@@ -1031,17 +1031,18 @@ async fn build_routine_action(
             max_tool_rounds: execution.max_tool_rounds,
         }),
         NormalizedExecutionMode::FullJob => {
-            let owner_settings = load_full_job_permission_settings(store, user_id)
-                .await
-                .map_err(|e| {
-                    ToolError::ExecutionFailed(format!(
-                        "failed to load routine permission settings: {e}"
-                    ))
-                })?;
-            let requested_mode =
-                execution
-                    .permission_mode
-                    .unwrap_or(match owner_settings.default_mode {
+            let mut owner_settings = None;
+            let requested_mode = match execution.permission_mode {
+                Some(mode) => mode,
+                None => {
+                    let settings = load_full_job_permission_settings(store, user_id)
+                        .await
+                        .map_err(|e| {
+                            ToolError::ExecutionFailed(format!(
+                                "failed to load routine permission settings: {e}"
+                            ))
+                        })?;
+                    let mode = match settings.default_mode {
                         FullJobPermissionDefaultMode::Explicit => {
                             RequestedFullJobPermissionMode::Explicit
                         }
@@ -1051,7 +1052,11 @@ async fn build_routine_action(
                         FullJobPermissionDefaultMode::CopyOwner => {
                             RequestedFullJobPermissionMode::CopyOwner
                         }
-                    });
+                    };
+                    owner_settings = Some(settings);
+                    mode
+                }
+            };
             let (permission_mode, tool_permissions) = match requested_mode {
                 RequestedFullJobPermissionMode::Explicit => (
                     FullJobPermissionMode::Explicit,
@@ -1061,15 +1066,29 @@ async fn build_routine_action(
                     FullJobPermissionMode::InheritOwner,
                     execution.tool_permissions.clone(),
                 ),
-                RequestedFullJobPermissionMode::CopyOwner => (
-                    FullJobPermissionMode::Explicit,
-                    normalize_tool_names(
-                        owner_settings
-                            .owner_allowed_tools
-                            .into_iter()
-                            .chain(execution.tool_permissions.iter().cloned()),
-                    ),
-                ),
+                RequestedFullJobPermissionMode::CopyOwner => {
+                    let owner_allowed_tools = match owner_settings {
+                        Some(settings) => settings.owner_allowed_tools,
+                        None => {
+                            load_full_job_permission_settings(store, user_id)
+                                .await
+                                .map_err(|e| {
+                                    ToolError::ExecutionFailed(format!(
+                                        "failed to load routine permission settings: {e}"
+                                    ))
+                                })?
+                                .owner_allowed_tools
+                        }
+                    };
+                    (
+                        FullJobPermissionMode::Explicit,
+                        normalize_tool_names(
+                            owner_allowed_tools
+                                .into_iter()
+                                .chain(execution.tool_permissions.iter().cloned()),
+                        ),
+                    )
+                }
             };
             Ok(RoutineAction::FullJob {
                 title: name.to_string(),
@@ -1463,14 +1482,6 @@ impl Tool for RoutineUpdateTool {
                     permission_mode,
                     ..
                 } => {
-                    let owner_settings =
-                        load_full_job_permission_settings(self.store.as_ref(), &ctx.user_id)
-                            .await
-                            .map_err(|e| {
-                                ToolError::ExecutionFailed(format!(
-                                    "failed to load routine permission settings: {e}"
-                                ))
-                            })?;
                     let next_tool_permissions =
                         requested_tool_permissions.unwrap_or_else(|| tool_permissions.clone());
                     match requested_permission_mode {
@@ -1483,6 +1494,16 @@ impl Tool for RoutineUpdateTool {
                             *tool_permissions = next_tool_permissions;
                         }
                         Some(RequestedFullJobPermissionMode::CopyOwner) => {
+                            let owner_settings = load_full_job_permission_settings(
+                                self.store.as_ref(),
+                                &ctx.user_id,
+                            )
+                            .await
+                            .map_err(|e| {
+                                ToolError::ExecutionFailed(format!(
+                                    "failed to load routine permission settings: {e}"
+                                ))
+                            })?;
                             *permission_mode = FullJobPermissionMode::Explicit;
                             *tool_permissions = normalize_tool_names(
                                 owner_settings

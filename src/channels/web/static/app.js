@@ -4972,8 +4972,11 @@ function renderStructuredSettingsRow(def, value, activeValue) {
     listInp.type = 'text';
     listInp.className = 'settings-input';
     listInp.setAttribute('aria-label', ariaLabel);
-    listInp.value = Array.isArray(value) ? value.join(', ') : '';
-    if (!value || (Array.isArray(value) && value.length === 0)) listInp.placeholder = placeholderText;
+    var listValue = '';
+    if (Array.isArray(value)) listValue = value.join(', ');
+    else if (typeof value === 'string') listValue = value;
+    listInp.value = listValue;
+    if (!listValue) listInp.placeholder = placeholderText;
     listInp.addEventListener('change', (function(k, el) {
       return function() {
         if (el.value.trim() === '') return saveSetting(k, null);

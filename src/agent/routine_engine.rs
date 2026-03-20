@@ -1058,16 +1058,28 @@ async fn execute_full_job(
     }
     metadata["notify_user"] = serde_json::json!(&routine.notify.user);
 
-    let owner_permissions = load_full_job_permission_settings(ctx.store.as_ref(), &routine.user_id)
-        .await
-        .map_err(|e| RoutineError::Database {
-            reason: format!("failed to load routine permission settings: {e}"),
-        })?;
-    let effective_permissions = effective_full_job_tool_permissions(
-        execution.permission_mode,
-        execution.tool_permissions,
-        &owner_permissions.owner_allowed_tools,
-    );
+    let effective_permissions = match execution.permission_mode {
+        crate::agent::routine::FullJobPermissionMode::Explicit => {
+            effective_full_job_tool_permissions(
+                execution.permission_mode,
+                execution.tool_permissions,
+                &[],
+            )
+        }
+        crate::agent::routine::FullJobPermissionMode::InheritOwner => {
+            let owner_permissions =
+                load_full_job_permission_settings(ctx.store.as_ref(), &routine.user_id)
+                    .await
+                    .map_err(|e| RoutineError::Database {
+                        reason: format!("failed to load routine permission settings: {e}"),
+                    })?;
+            effective_full_job_tool_permissions(
+                execution.permission_mode,
+                execution.tool_permissions,
+                &owner_permissions.owner_allowed_tools,
+            )
+        }
+    };
 
     // Build approval context: UnlessAutoApproved tools are auto-approved for routines;
     // Always tools require explicit listing in the resolved effective permissions.
