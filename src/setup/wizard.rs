@@ -220,17 +220,18 @@ impl SetupWizard {
             // Pre-populate backend from env so step_inference_provider
             // can offer "Keep current provider?" instead of asking from scratch.
             if self.settings.llm_backend.is_none() {
-                if let Ok(b) = std::env::var("LLM_BACKEND")
+                use crate::config::helpers::env_or_override;
+                if let Some(b) = env_or_override("LLM_BACKEND")
                     && !b.trim().is_empty()
                 {
-                    self.settings.llm_backend = Some(b);
-                } else if std::env::var("NEARAI_API_KEY").is_ok_and(|v| !v.is_empty()) {
+                    self.settings.llm_backend = Some(b.trim().to_string());
+                } else if env_or_override("NEARAI_API_KEY").is_some() {
                     self.settings.llm_backend = Some("nearai".to_string());
-                } else if std::env::var("ANTHROPIC_API_KEY").is_ok_and(|v| !v.is_empty())
-                    || std::env::var("ANTHROPIC_OAUTH_TOKEN").is_ok_and(|v| !v.is_empty())
+                } else if env_or_override("ANTHROPIC_API_KEY").is_some()
+                    || env_or_override("ANTHROPIC_OAUTH_TOKEN").is_some()
                 {
                     self.settings.llm_backend = Some("anthropic".to_string());
-                } else if std::env::var("OPENAI_API_KEY").is_ok_and(|v| !v.is_empty()) {
+                } else if env_or_override("OPENAI_API_KEY").is_some() {
                     self.settings.llm_backend = Some("openai".to_string());
                 }
             }

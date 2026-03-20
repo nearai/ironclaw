@@ -504,10 +504,6 @@ impl Workspace {
     /// Adds a newline separator between existing and new content.
     pub async fn append(&self, path: &str, content: &str) -> Result<(), WorkspaceError> {
         let path = normalize_path(path);
-        // Scan system-prompt-injected files for prompt injection.
-        if is_system_prompt_file(&path) && !content.is_empty() {
-            reject_if_injected(&path, content)?;
-        }
         let doc = self
             .storage
             .get_or_create_document_by_path(&self.user_id, self.agent_id, &path)
@@ -518,6 +514,12 @@ impl Workspace {
         } else {
             format!("{}\n{}", doc.content, content)
         };
+
+        // Scan the combined content (not just the appended chunk) so that
+        // injection patterns split across multiple appends are caught.
+        if is_system_prompt_file(&path) && !new_content.is_empty() {
+            reject_if_injected(&path, &new_content)?;
+        }
 
         self.storage.update_document(doc.id, &new_content).await?;
         self.reindex_document(doc.id).await?;
@@ -1181,7 +1183,7 @@ impl Workspace {
         // first-run ritual after upgrading.
         let has_profile = self.read(paths::PROFILE).await.is_ok_and(|d| {
             !d.content.trim().is_empty()
-                && serde_json::from_str::<serde_json::Value>(&d.content).is_ok()
+                && serde_json::from_str::<crate::profile::PsychographicProfile>(&d.content).is_ok()
         });
         if is_fresh_workspace && !has_profile {
             if let Err(e) = self.write(paths::BOOTSTRAP, BOOTSTRAP_SEED).await {
@@ -1589,8 +1591,10 @@ mod seed_tests {
     async fn seed_if_empty_skips_bootstrap_with_populated_profile() {
         let (ws, _dir) = create_test_workspace().await;
 
-        // Pre-create a non-empty profile.json (existing user upgrading).
-        ws.write(paths::PROFILE, r#"{"version":2,"confidence":0.5}"#)
+        // Pre-create a valid profile.json (existing user upgrading).
+        let profile = crate::profile::PsychographicProfile::default();
+        let profile_json = serde_json::to_string(&profile).expect("serialize profile");
+        ws.write(paths::PROFILE, &profile_json)
             .await
             .expect("write profile");
 
