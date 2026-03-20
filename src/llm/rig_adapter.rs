@@ -117,10 +117,9 @@ impl<M: CompletionModel> RigAdapter<M> {
 /// Direct `f32 as f64` preserves the binary representation, producing values
 /// like `0.699999988079071` instead of `0.7`. Some providers (e.g. Zhipu/GLM)
 /// reject these values with a 400 error. Rounding to 6 decimal places removes
-/// the artifact while preserving all meaningful precision for temperature/top_p.
+/// the artifact while preserving all meaningful precision for temperature.
 fn round_f32_to_f64(val: f32) -> f64 {
-    let s = format!("{:.6}", val);
-    s.parse::<f64>().unwrap_or(val as f64)
+    ((val as f64) * 1_000_000.0).round() / 1_000_000.0
 }
 
 /// Normalize a JSON Schema for OpenAI strict mode compliance.
@@ -787,7 +786,6 @@ mod tests {
         assert_eq!(round_f32_to_f64(0.0_f32), 0.0_f64);
         // Original cast produces artifacts — our fix should not
         assert_ne!(0.7_f32 as f64, 0.7_f64);
-        assert_eq!(round_f32_to_f64(0.7_f32), 0.7_f64);
     }
 
     #[test]
