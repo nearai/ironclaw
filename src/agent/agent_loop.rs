@@ -1036,6 +1036,14 @@ impl Agent {
                 sess.active_thread = Some(target_thread_id);
                 sess.last_active_at = chrono::Utc::now();
                 drop(sess);
+                self.session_manager
+                    .register_thread(
+                        &message.user_id,
+                        &message.channel,
+                        target_thread_id,
+                        Arc::clone(&session),
+                    )
+                    .await;
                 (session, target_thread_id)
             } else {
                 drop(sess);
