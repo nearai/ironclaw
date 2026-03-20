@@ -223,6 +223,9 @@ impl Tool for MessageTool {
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
+        let metadata_target = metadata_notify_user(&ctx.metadata);
+        let has_execution_routing_metadata =
+            metadata_channel.is_some() || metadata_target.is_some();
 
         // Job metadata is authoritative for autonomous executions. The shared
         // conversation defaults are only a legacy fallback when no execution-local
@@ -230,15 +233,16 @@ impl Tool for MessageTool {
         let channel: Option<String> = explicit_channel
             .clone()
             .or_else(|| metadata_channel.clone())
-            .or_else(|| default_channel.clone());
+            .or_else(|| {
+                (!has_execution_routing_metadata)
+                    .then(|| default_channel.clone())
+                    .flatten()
+            });
 
         let explicit_target = params
             .get("target")
             .and_then(|v| v.as_str())
             .map(|value| value.to_string());
-        let metadata_target = metadata_notify_user(&ctx.metadata);
-        let has_execution_routing_metadata =
-            metadata_channel.is_some() || metadata_target.is_some();
 
         // Prefer explicit params, then execution-local routing metadata. Shared
         // conversation defaults are only consulted when no job metadata exists.
@@ -968,6 +972,43 @@ mod tests {
         );
 
         assert!(gateway_captures.lock().await.is_empty());
+        let telegram = telegram_captures.lock().await.clone();
+        assert_eq!(telegram.len(), 1);
+        assert_eq!(telegram[0].0, "424242");
+        assert_eq!(telegram[0].1.content, "hello");
+    }
+
+    #[tokio::test]
+    async fn message_tool_notify_user_only_metadata_does_not_reuse_stale_default_channel() {
+        let (tool, gateway_captures, telegram_captures) =
+            message_tool_with_recording_channels().await;
+        tool.set_context(
+            Some("gateway".to_string()),
+            Some("stale-gateway-target".to_string()),
+        )
+        .await;
+
+        let mut ctx = crate::context::JobContext::with_user("owner-scope", "test", "test");
+        ctx.metadata = serde_json::json!({
+            "notify_user": "424242",
+        });
+
+        let result = tool
+            .execute(serde_json::json!({"content": "hello"}), &ctx)
+            .await
+            .expect("message tool should broadcast when only notify_user is provided");
+        assert!(
+            result
+                .result
+                .as_str()
+                .is_some_and(|message| message.contains("Broadcast message to"))
+        );
+
+        let gateway = gateway_captures.lock().await.clone();
+        assert_eq!(gateway.len(), 1);
+        assert_eq!(gateway[0].0, "424242");
+        assert_eq!(gateway[0].1.content, "hello");
+
         let telegram = telegram_captures.lock().await.clone();
         assert_eq!(telegram.len(), 1);
         assert_eq!(telegram[0].0, "424242");
