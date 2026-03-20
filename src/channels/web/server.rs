@@ -354,6 +354,7 @@ pub async fn start_server(
         .route("/", get(index_handler))
         .route("/style.css", get(css_handler))
         .route("/app.js", get(js_handler))
+        .route("/theme-init.js", get(theme_init_handler))
         .route("/favicon.ico", get(favicon_handler))
         .route("/i18n/index.js", get(i18n_index_handler))
         .route("/i18n/en.js", get(i18n_en_handler))
@@ -472,6 +473,16 @@ async fn js_handler() -> impl IntoResponse {
             (header::CACHE_CONTROL, "no-cache"),
         ],
         include_str!("static/app.js"),
+    )
+}
+
+async fn theme_init_handler() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "application/javascript"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        include_str!("static/theme-init.js"),
     )
 }
 

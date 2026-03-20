@@ -24,6 +24,12 @@ I18n.register('en', {
   'restart.progressSubtitle': 'Please wait for the process to restart...',
   'restart.checkLogs': 'Check the Logs tab for details after restart completes.',
   
+  // Theme
+  'theme.tooltipDark': 'Theme: Dark (click for Light)',
+  'theme.tooltipLight': 'Theme: Light (click for System)',
+  'theme.tooltipSystem': 'Theme: System (click for Dark)',
+  'theme.announce': 'Theme: {mode}',
+
   // Tabs
   'tab.chat': 'Chat',
   'tab.memory': 'Memory',

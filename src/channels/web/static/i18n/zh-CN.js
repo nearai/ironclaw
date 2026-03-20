@@ -24,6 +24,12 @@ I18n.register('zh-CN', {
   'restart.progressSubtitle': '请等待进程重启...',
   'restart.checkLogs': '重启完成后，请查看日志标签页了解详情。',
   
+  // 主题
+  'theme.tooltipDark': '主题：深色（点击切换浅色）',
+  'theme.tooltipLight': '主题：浅色（点击切换跟随系统）',
+  'theme.tooltipSystem': '主题：跟随系统（点击切换深色）',
+  'theme.announce': '主题：{mode}',
+
   // 标签页
   'tab.chat': '聊天',
   'tab.memory': '记忆',
