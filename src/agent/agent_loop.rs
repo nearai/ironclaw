@@ -1019,16 +1019,16 @@ impl Agent {
         // target an already-loaded owned thread by UUID across channels so the
         // web approval UI can approve work that originated from HTTP/other
         // owner-scoped channels.
-        let approval_thread_uuid = if matches!(
+        let approval_thread_scope = if matches!(
             submission,
             Submission::ExecApproval { .. } | Submission::ApprovalResponse { .. }
         ) {
-            message
-                .conversation_scope()
-                .and_then(|thread_id| Uuid::parse_str(thread_id).ok())
+            message.conversation_scope()
         } else {
             None
         };
+        let approval_thread_uuid =
+            approval_thread_scope.and_then(|thread_id| Uuid::parse_str(thread_id).ok());
 
         let (session, thread_id) = if let Some(target_thread_id) = approval_thread_uuid {
             let session = self
@@ -1040,11 +1040,26 @@ impl Agent {
                 sess.active_thread = Some(target_thread_id);
                 sess.last_active_at = chrono::Utc::now();
                 drop(sess);
-                if !self
-                    .session_manager
-                    .is_thread_registered(&message.user_id, &message.channel, target_thread_id)
-                    .await
-                {
+                if let Some(approval_thread_scope) = approval_thread_scope {
+                    if !self
+                        .session_manager
+                        .is_thread_registered(
+                            &message.user_id,
+                            &message.channel,
+                            approval_thread_scope,
+                        )
+                        .await
+                    {
+                        self.session_manager
+                            .register_thread(
+                                &message.user_id,
+                                &message.channel,
+                                target_thread_id,
+                                Arc::clone(&session),
+                            )
+                            .await;
+                    }
+                } else {
                     self.session_manager
                         .register_thread(
                             &message.user_id,
