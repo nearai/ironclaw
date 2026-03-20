@@ -9,14 +9,87 @@ pub(crate) fn prepare_params_for_schema(
     params: &serde_json::Value,
     schema: &serde_json::Value,
 ) -> serde_json::Value {
-    coerce_value(params, schema)
+    let resolved = resolve_refs(schema);
+    coerce_value(params, &resolved)
 }
+
+// ── $ref resolution ──────────────────────────────────────────────────
+
+/// Inline all `$ref` pointers in a JSON Schema so downstream coercion
+/// operates on a flat, self-contained schema tree.
+///
+/// Supports `#/definitions/<name>` and `#/$defs/<name>` (JSON Schema
+/// draft-07 and 2020-12 respectively). Unknown `$ref` formats are left
+/// unchanged. A depth limit prevents infinite recursion from circular refs.
+fn resolve_refs(schema: &serde_json::Value) -> serde_json::Value {
+    let definitions = schema
+        .get("definitions")
+        .or_else(|| schema.get("$defs"))
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    resolve_refs_inner(schema, &definitions, 0)
+}
+
+const MAX_REF_DEPTH: usize = 16;
+
+fn resolve_refs_inner(
+    schema: &serde_json::Value,
+    definitions: &serde_json::Value,
+    depth: usize,
+) -> serde_json::Value {
+    if depth > MAX_REF_DEPTH {
+        return schema.clone();
+    }
+    match schema {
+        serde_json::Value::Object(obj) => {
+            // If this node is a $ref, resolve it and recurse into the target.
+            if let Some(ref_str) = obj.get("$ref").and_then(|v| v.as_str()) {
+                if let Some(target) = resolve_ref_pointer(ref_str, definitions) {
+                    return resolve_refs_inner(&target, definitions, depth + 1);
+                }
+                return schema.clone();
+            }
+
+            // Recursively resolve refs in all values (skip definitions maps).
+            let resolved: serde_json::Map<String, serde_json::Value> = obj
+                .iter()
+                .map(|(k, v)| {
+                    if k == "definitions" || k == "$defs" {
+                        (k.clone(), v.clone())
+                    } else {
+                        (k.clone(), resolve_refs_inner(v, definitions, depth + 1))
+                    }
+                })
+                .collect();
+            serde_json::Value::Object(resolved)
+        }
+        serde_json::Value::Array(arr) => serde_json::Value::Array(
+            arr.iter()
+                .map(|v| resolve_refs_inner(v, definitions, depth + 1))
+                .collect(),
+        ),
+        _ => schema.clone(),
+    }
+}
+
+fn resolve_ref_pointer(
+    ref_str: &str,
+    definitions: &serde_json::Value,
+) -> Option<serde_json::Value> {
+    let path = ref_str.strip_prefix("#/")?;
+    let parts: Vec<&str> = path.split('/').collect();
+    if parts.len() == 2 && (parts[0] == "definitions" || parts[0] == "$defs") {
+        return definitions.get(parts[1]).cloned();
+    }
+    None
+}
+
+// ── Core coercion ────────────────────────────────────────────────────
 
 fn coerce_value(value: &serde_json::Value, schema: &serde_json::Value) -> serde_json::Value {
     // This coercer handles concrete schema shapes including discriminated unions
-    // (oneOf/anyOf with const or single-element enum discriminators) and allOf
-    // merges. It does not resolve $ref references; those schemas pass through
-    // unchanged unless they also advertise a directly coercible type/property shape.
+    // (oneOf/anyOf with const or single-element enum discriminators), allOf
+    // merges, and $ref references (resolved in a pre-pass).
     if value.is_null() {
         return value.clone();
     }
@@ -51,7 +124,10 @@ fn coerce_value(value: &serde_json::Value, schema: &serde_json::Value) -> serde_
         let properties = resolved
             .as_ref()
             .or_else(|| schema.get("properties").and_then(|p| p.as_object()));
-        let additional_schema = schema.get("additionalProperties").filter(|v| v.is_object());
+        let additional_schema = schema
+            .get("additionalProperties")
+            .filter(|v| v.is_object())
+            .or_else(|| resolve_additional_properties(schema, obj));
         let required: std::collections::HashSet<&str> = schema
             .get("required")
             .and_then(|r| r.as_array())
@@ -96,6 +172,21 @@ fn resolve_effective_properties(
     schema: &serde_json::Value,
     obj: &serde_json::Map<String, serde_json::Value>,
 ) -> Option<serde_json::Map<String, serde_json::Value>> {
+    collect_properties(schema, obj, 0)
+}
+
+const MAX_COMBINATOR_DEPTH: usize = 4;
+
+/// Recursively collect properties from a schema and its combinator variants.
+fn collect_properties(
+    schema: &serde_json::Value,
+    obj: &serde_json::Map<String, serde_json::Value>,
+    depth: usize,
+) -> Option<serde_json::Map<String, serde_json::Value>> {
+    if depth > MAX_COMBINATOR_DEPTH {
+        return None;
+    }
+
     let has_combinators = schema.get("allOf").is_some()
         || schema.get("oneOf").is_some()
         || schema.get("anyOf").is_some();
@@ -111,22 +202,31 @@ fn resolve_effective_properties(
         merged.extend(props.iter().map(|(k, v)| (k.clone(), v.clone())));
     }
 
-    // allOf: merge ALL variants' properties
+    // allOf: merge ALL variants' properties, recursing into nested combinators
     if let Some(all_of) = schema.get("allOf").and_then(|a| a.as_array()) {
         for variant in all_of {
             if let Some(props) = variant.get("properties").and_then(|p| p.as_object()) {
                 merged.extend(props.iter().map(|(k, v)| (k.clone(), v.clone())));
             }
+            // Recurse into variant if it has its own combinators
+            if let Some(nested) = collect_properties(variant, obj, depth + 1) {
+                merged.extend(nested);
+            }
         }
     }
 
-    // oneOf/anyOf: find discriminated match
+    // oneOf/anyOf: find discriminated match and merge its properties
     for key in ["oneOf", "anyOf"] {
         if let Some(variants) = schema.get(key).and_then(|v| v.as_array())
             && let Some(variant) = find_discriminated_variant(variants, obj)
-            && let Some(props) = variant.get("properties").and_then(|p| p.as_object())
         {
-            merged.extend(props.iter().map(|(k, v)| (k.clone(), v.clone())));
+            if let Some(props) = variant.get("properties").and_then(|p| p.as_object()) {
+                merged.extend(props.iter().map(|(k, v)| (k.clone(), v.clone())));
+            }
+            // Recurse into matched variant if it has its own combinators
+            if let Some(nested) = collect_properties(variant, obj, depth + 1) {
+                merged.extend(nested);
+            }
         }
     }
 
@@ -135,6 +235,39 @@ fn resolve_effective_properties(
     } else {
         Some(merged)
     }
+}
+
+/// Find `additionalProperties` from a matched combinator variant.
+///
+/// Checks `allOf` variants first (last-wins), then the matched `oneOf`/`anyOf`
+/// variant. Returns `None` if no variant defines `additionalProperties`.
+fn resolve_additional_properties<'a>(
+    schema: &'a serde_json::Value,
+    obj: &serde_json::Map<String, serde_json::Value>,
+) -> Option<&'a serde_json::Value> {
+    // allOf: last variant with additionalProperties wins
+    if let Some(all_of) = schema.get("allOf").and_then(|a| a.as_array()) {
+        for variant in all_of.iter().rev() {
+            if let Some(ap) = variant.get("additionalProperties")
+                && ap.is_object()
+            {
+                return Some(ap);
+            }
+        }
+    }
+
+    // oneOf/anyOf: check matched variant
+    for key in ["oneOf", "anyOf"] {
+        if let Some(variants) = schema.get(key).and_then(|v| v.as_array())
+            && let Some(variant) = find_discriminated_variant(variants, obj)
+            && let Some(ap) = variant.get("additionalProperties")
+            && ap.is_object()
+        {
+            return Some(ap);
+        }
+    }
+
+    None
 }
 
 /// Find a `oneOf`/`anyOf` variant that matches the given object by checking
@@ -689,6 +822,183 @@ mod tests {
 
         // No const/enum discriminators, so no variant matches, no coercion
         assert_eq!(result["id"], serde_json::json!("42"));
+    }
+
+    #[test]
+    fn resolves_ref_and_coerces_referenced_properties() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "definitions": {
+                "Pagination": {
+                    "type": "object",
+                    "properties": {
+                        "page": { "type": "integer" },
+                        "per_page": { "type": "integer" }
+                    }
+                }
+            },
+            "allOf": [
+                { "$ref": "#/definitions/Pagination" },
+                {
+                    "type": "object",
+                    "properties": {
+                        "query": { "type": "string" }
+                    }
+                }
+            ]
+        });
+        let params = serde_json::json!({
+            "page": "2",
+            "per_page": "50",
+            "query": "test"
+        });
+
+        let result = prepare_params_for_schema(&params, &schema);
+
+        assert_eq!(result["page"], serde_json::json!(2));
+        assert_eq!(result["per_page"], serde_json::json!(50));
+        assert_eq!(result["query"], serde_json::json!("test"));
+    }
+
+    #[test]
+    fn resolves_nested_refs_in_oneof_variants() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "$defs": {
+                "ListParams": {
+                    "properties": {
+                        "action": { "const": "list" },
+                        "limit": { "type": "integer" }
+                    }
+                }
+            },
+            "oneOf": [
+                { "$ref": "#/$defs/ListParams" },
+                {
+                    "properties": {
+                        "action": { "const": "get" },
+                        "id": { "type": "integer" }
+                    }
+                }
+            ]
+        });
+        let params = serde_json::json!({
+            "action": "list",
+            "limit": "25"
+        });
+
+        let result = prepare_params_for_schema(&params, &schema);
+
+        assert_eq!(result["limit"], serde_json::json!(25));
+    }
+
+    #[test]
+    fn coerces_nested_combinators_allof_containing_oneof() {
+        // allOf where one variant is itself a oneOf (nested combinator)
+        let schema = serde_json::json!({
+            "type": "object",
+            "allOf": [
+                {
+                    "properties": {
+                        "version": { "type": "integer" }
+                    }
+                },
+                {
+                    "oneOf": [
+                        {
+                            "properties": {
+                                "mode": { "const": "fast" },
+                                "threads": { "type": "integer" }
+                            }
+                        },
+                        {
+                            "properties": {
+                                "mode": { "const": "safe" },
+                                "retries": { "type": "integer" }
+                            }
+                        }
+                    ]
+                }
+            ]
+        });
+        let params = serde_json::json!({
+            "version": "3",
+            "mode": "fast",
+            "threads": "8"
+        });
+
+        let result = prepare_params_for_schema(&params, &schema);
+
+        assert_eq!(result["version"], serde_json::json!(3));
+        assert_eq!(result["threads"], serde_json::json!(8));
+    }
+
+    #[test]
+    fn coerces_array_items_with_oneof_discriminator() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "actions": {
+                    "type": "array",
+                    "items": {
+                        "oneOf": [
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "type": { "const": "move" },
+                                    "distance": { "type": "integer" }
+                                }
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "type": { "const": "wait" },
+                                    "seconds": { "type": "number" }
+                                }
+                            }
+                        ]
+                    }
+                }
+            }
+        });
+        let params = serde_json::json!({
+            "actions": [
+                { "type": "move", "distance": "10" },
+                { "type": "wait", "seconds": "2.5" }
+            ]
+        });
+
+        let result = prepare_params_for_schema(&params, &schema);
+
+        assert_eq!(result["actions"][0]["distance"], serde_json::json!(10));
+        assert_eq!(result["actions"][1]["seconds"], serde_json::json!(2.5));
+    }
+
+    #[test]
+    fn circular_ref_does_not_infinite_loop() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "definitions": {
+                "Node": {
+                    "type": "object",
+                    "properties": {
+                        "value": { "type": "integer" },
+                        "child": { "$ref": "#/definitions/Node" }
+                    }
+                }
+            },
+            "properties": {
+                "root": { "$ref": "#/definitions/Node" }
+            }
+        });
+        let params = serde_json::json!({
+            "root": { "value": "42" }
+        });
+
+        // Should not hang — depth limit stops the recursion
+        let result = prepare_params_for_schema(&params, &schema);
+
+        assert_eq!(result["root"]["value"], serde_json::json!(42));
     }
 
     #[test]
