@@ -507,10 +507,10 @@ async def test_configure_noninstalled(ironclaw_server):
 
 
 async def test_extensions_tab_shows_registry(page):
-    """Extensions tab loads and shows available extensions from registry."""
-    tab_btn = page.locator(SEL["tab_button"].format(tab="extensions"))
-    await tab_btn.click()
-    panel = page.locator(SEL["tab_panel"].format(tab="extensions"))
+    """Extensions subtab loads and shows available extensions from registry."""
+    await page.locator(SEL["tab_button"].format(tab="settings")).click()
+    await page.locator(SEL["settings_subtab"].format(subtab="extensions")).click()
+    panel = page.locator(SEL["settings_subpanel"].format(subtab="extensions"))
     await panel.wait_for(state="visible", timeout=5000)
 
     available_section = page.locator(SEL["available_wasm_list"])

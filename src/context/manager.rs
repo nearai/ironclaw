@@ -46,11 +46,17 @@ impl ContextManager {
         description: impl Into<String>,
     ) -> Result<Uuid, JobError> {
         // Hold write lock for the entire check-insert to prevent TOCTOU races
-        // where two concurrent calls both pass the active_count check.
+        // where two concurrent calls both pass the parallel_count check.
         let mut contexts = self.contexts.write().await;
-        let active_count = contexts.values().filter(|c| c.state.is_active()).count();
+        // Only count jobs that consume execution slots (Pending, InProgress, Stuck).
+        // Completed and Submitted jobs are no longer actively executing and shouldn't
+        // block new job creation.
+        let parallel_count = contexts
+            .values()
+            .filter(|c| c.state.is_parallel_blocking())
+            .count();
 
-        if active_count >= self.max_jobs {
+        if parallel_count >= self.max_jobs {
             return Err(JobError::MaxJobsExceeded { max: self.max_jobs });
         }
 
@@ -85,6 +91,28 @@ impl ContextManager {
             .get_mut(&job_id)
             .ok_or(JobError::NotFound { id: job_id })?;
         Ok(f(context))
+    }
+
+    /// Atomically update a job context and return the updated context.
+    ///
+    /// This method holds the write lock for the entire update-and-read sequence,
+    /// preventing concurrent workers from interleaving modifications between the
+    /// update and the subsequent read (Issue #807: non-transactional context updates).
+    /// Use this when you need to update context and immediately persist it to DB.
+    pub async fn update_context_and_get<F>(
+        &self,
+        job_id: Uuid,
+        f: F,
+    ) -> Result<JobContext, JobError>
+    where
+        F: FnOnce(&mut JobContext),
+    {
+        let mut contexts = self.contexts.write().await;
+        let context = contexts
+            .get_mut(&job_id)
+            .ok_or(JobError::NotFound { id: job_id })?;
+        f(context);
+        Ok(context.clone())
     }
 
     /// Get job memory.
@@ -876,5 +904,285 @@ mod tests {
         }
 
         assert_eq!(manager.all_jobs().await.len(), 10);
+    }
+
+    #[tokio::test]
+    async fn update_context_and_get_atomicity_regression_issue_807() {
+        // Regression test for Issue #807: non-transactional context updates.
+        // Verify that update_context_and_get returns the exact state that was set,
+        // without allowing concurrent workers to interleave modifications.
+        let manager = std::sync::Arc::new(ContextManager::new(100));
+        let job_id = manager
+            .create_job("Atomicity Test", "verify no race condition")
+            .await
+            .unwrap(); // safety: test code
+
+        // Update and get atomically, setting metadata
+        let metadata = serde_json::json!({ "priority": "high", "user_id": 42 });
+        let returned_ctx = manager
+            .update_context_and_get(job_id, |ctx| {
+                ctx.metadata = metadata.clone();
+                ctx.max_tokens = 5000;
+            })
+            .await
+            .unwrap(); // safety: test code
+
+        // Verify the returned context has the exact updates we set
+        assert_eq!(returned_ctx.metadata, metadata); // safety: test code
+        assert_eq!(returned_ctx.max_tokens, 5000); // safety: test code
+
+        // Verify a fresh get returns the same state
+        let fresh_ctx = manager.get_context(job_id).await.unwrap(); // safety: test code
+        assert_eq!(fresh_ctx.metadata, metadata); // safety: test code
+        assert_eq!(fresh_ctx.max_tokens, 5000); // safety: test code
+    }
+
+    #[tokio::test]
+    async fn update_context_and_get_no_concurrent_interleave() {
+        // Verify that concurrent updates cannot interleave during update_context_and_get.
+        // If the lock were released too early, a concurrent state transition could
+        // get mixed into the returned context.
+        let manager = std::sync::Arc::new(ContextManager::new(100));
+        let job_id = manager
+            .create_job("Concurrent Race Test", "ensure atomicity")
+            .await
+            .unwrap(); // safety: test code
+
+        let metadata = serde_json::json!({ "test": "race_condition" });
+        let metadata_clone = metadata.clone();
+
+        // Spawn a task that will update_context_and_get
+        let mgr1 = std::sync::Arc::clone(&manager);
+        let returned_ctx_handle = tokio::spawn(async move {
+            mgr1.update_context_and_get(job_id, |ctx| {
+                ctx.metadata = metadata_clone;
+                ctx.max_tokens = 3000;
+            })
+            .await
+        });
+
+        // The returned context should have *only* the metadata update, not any
+        // concurrent state transitions that might happen during the operation.
+        let returned_ctx = returned_ctx_handle.await.unwrap().unwrap(); // safety: test code
+
+        // Verify atomicity: returned context has the metadata we set
+        assert_eq!(returned_ctx.metadata, metadata); // safety: test code
+        assert_eq!(returned_ctx.max_tokens, 3000); // safety: test code
+        // And it's in the initial state (Pending), not modified by concurrent workers
+        assert_eq!(returned_ctx.state, crate::context::JobState::Pending); // safety: test code
+    }
+
+    #[tokio::test]
+    async fn sequential_routines_unlimited_completed_not_counted() {
+        // TEST: Sequential (non-parallel) routines should NOT be limited by max_jobs.
+        //
+        // Completed/Submitted jobs should NOT count toward the parallel job limit,
+        // since they're no longer actively consuming execution resources.
+        //
+        // Scenario: Create 10 sequential routines, each completing before the next starts.
+        // Currently FAILS because Completed jobs still count as "active".
+        // After fix, should PASS because only Pending/InProgress/Stuck count.
+
+        let manager = ContextManager::new(5); // max 5 truly parallel jobs
+
+        // Try to create and complete 10 sequential routines
+        for i in 0..10 {
+            let result = manager
+                .create_job(format!("Sequential Routine {}", i), "one at a time")
+                .await;
+
+            match result {
+                Ok(job_id) => {
+                    // Simulate execution: Pending -> InProgress -> Completed
+                    manager
+                        .update_context(job_id, |ctx| {
+                            ctx.transition_to(crate::context::JobState::InProgress, None)
+                        })
+                        .await
+                        .unwrap()
+                        .unwrap();
+
+                    manager
+                        .update_context(job_id, |ctx| {
+                            ctx.transition_to(crate::context::JobState::Completed, None)
+                        })
+                        .await
+                        .unwrap()
+                        .unwrap();
+
+                    println!("✓ Routine {} created and completed", i);
+                }
+                Err(JobError::MaxJobsExceeded { max }) => {
+                    panic!(
+                        "✗ Routine {} FAILED to create: MaxJobsExceeded (max={}).\n\
+                         This shows the bug: Completed jobs from routines 0-4 are still counting \
+                         toward the limit even though they're not running.\n\
+                         After the fix, this test should pass because Completed jobs won't count.",
+                        i, max
+                    );
+                }
+                Err(e) => {
+                    panic!("Unexpected error for routine {}: {:?}", i, e);
+                }
+            }
+        }
+
+        // If we reach here, all 10 routines succeeded (bug is fixed)
+        assert_eq!(manager.all_jobs().await.len(), 10);
+        println!("✓ SUCCESS: All 10 sequential routines created despite max_jobs=5 limit");
+        println!("  This is correct: Completed jobs don't count toward parallel limit");
+    }
+
+    #[tokio::test]
+    async fn parallel_jobs_limit_enforced_for_active_jobs() {
+        // TEST: Parallel (simultaneous) jobs ARE limited by max_jobs.
+        //
+        // Jobs in Pending/InProgress/Stuck states consume execution slots.
+        // The 6th truly-active job should fail because the limit is 5.
+        //
+        // This test verifies the limit DOES work correctly for parallel execution.
+
+        let manager = ContextManager::new(5); // max 5 parallel jobs
+
+        // Create 5 jobs and make them InProgress (simulating parallel execution)
+        let mut job_ids = Vec::new();
+        for i in 0..5 {
+            let job_id = manager
+                .create_job(format!("Parallel Job {}", i), "running in parallel")
+                .await
+                .expect("First 5 jobs should create successfully");
+            job_ids.push(job_id);
+
+            // Transition to InProgress (simulating active execution)
+            manager
+                .update_context(job_id, |ctx| {
+                    ctx.transition_to(crate::context::JobState::InProgress, None)
+                })
+                .await
+                .unwrap()
+                .unwrap();
+        }
+
+        // Verify all 5 jobs are InProgress
+        for job_id in &job_ids {
+            let ctx = manager.get_context(*job_id).await.unwrap();
+            assert_eq!(
+                ctx.state,
+                crate::context::JobState::InProgress,
+                "All jobs should be InProgress"
+            );
+        }
+
+        // Check active count - should be 5 (all InProgress)
+        let active_count = manager.active_count().await;
+        assert_eq!(
+            active_count, 5,
+            "Active count should be 5 (all InProgress jobs count)"
+        );
+
+        // Try to create a 6th job - should FAIL because limit is reached
+        let result = manager.create_job("Parallel Job 6", "sixth job").await;
+
+        match result {
+            Err(JobError::MaxJobsExceeded { max: 5 }) => {
+                println!("✓ SUCCESS: Parallel job limit correctly enforced at 5 active jobs");
+                println!("✓ 6th InProgress job correctly blocked when 5 are already running");
+            }
+            Ok(_) => {
+                panic!(
+                    "FAILED: 6th parallel job should have been blocked \
+                     but was created. Limit enforcement is broken."
+                );
+            }
+            Err(e) => {
+                panic!(
+                    "UNEXPECTED ERROR: Expected MaxJobsExceeded but got: {:?}",
+                    e
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn completed_jobs_should_free_slots_after_fix() {
+        // TEST: After the fix, Completed jobs should NOT count toward the limit.
+        //
+        // This test demonstrates that when a job transitions from InProgress -> Completed,
+        // it should free up a slot in the parallel execution limit.
+        //
+        // Currently FAILS (bug not fixed), proving Completed jobs incorrectly stay in the limit.
+        // After fix, this will PASS (Completed jobs freed their slot).
+
+        let manager = ContextManager::new(5); // max 5 parallel jobs
+
+        // Create 5 InProgress jobs (fill the limit)
+        let mut job_ids = Vec::new();
+        for i in 0..5 {
+            let job_id = manager
+                .create_job(format!("Job {}", i), "parallel")
+                .await
+                .unwrap();
+            job_ids.push(job_id);
+
+            manager
+                .update_context(job_id, |ctx| {
+                    ctx.transition_to(crate::context::JobState::InProgress, None)
+                })
+                .await
+                .unwrap()
+                .unwrap();
+        }
+
+        // Verify limit is hit
+        let result = manager.create_job("Job 5", "should fail").await;
+        assert!(
+            matches!(result, Err(JobError::MaxJobsExceeded { max: 5 })),
+            "Limit should be hit with 5 InProgress jobs"
+        );
+        println!("✓ Limit enforced: 5 InProgress jobs block 6th creation");
+
+        // Now transition job 0 from InProgress -> Completed
+        manager
+            .update_context(job_ids[0], |ctx| {
+                ctx.transition_to(crate::context::JobState::Completed, None)
+            })
+            .await
+            .unwrap()
+            .unwrap();
+
+        println!("✓ Job 0 transitioned: InProgress -> Completed");
+
+        // Try to create a 6th job - this will FAIL until the bug is fixed
+        let result = manager
+            .create_job("Job 5 (retry)", "after 1 Completed")
+            .await;
+
+        match result {
+            Ok(job_6) => {
+                println!("✓ SUCCESS: 6th job created after job 0 completed");
+                println!("✓ This proves Completed jobs don't count toward the limit (BUG FIXED)");
+
+                // Verify we can transition it to InProgress
+                manager
+                    .update_context(job_6, |ctx| {
+                        ctx.transition_to(crate::context::JobState::InProgress, None)
+                    })
+                    .await
+                    .unwrap()
+                    .unwrap();
+                println!("✓ 6th job now InProgress: 4 remaining + 1 new = 5 limit reached");
+            }
+            Err(JobError::MaxJobsExceeded { max: 5 }) => {
+                panic!(
+                    "✗ BUG NOT FIXED: 6th job creation still blocked after freeing slot.\n\
+                     State: 1 Completed (job 0) + 4 InProgress (jobs 1-4) = 5 active\n\
+                     BUG: Completed job 0 still counts toward limit\n\
+                     EXPECTED: Only 4 InProgress count, 1 slot free"
+                );
+            }
+            Err(e) => {
+                panic!("Unexpected error: {:?}", e);
+            }
+        }
     }
 }

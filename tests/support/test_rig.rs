@@ -612,6 +612,7 @@ impl TestRigBuilder {
 
         // 7. Construct AgentDeps from AppComponents (mirrors main.rs).
         let deps = AgentDeps {
+            owner_id: components.config.owner_id.clone(),
             store: components.db,
             llm: components.llm,
             cheap_llm: components.cheap_llm,
@@ -641,6 +642,7 @@ impl TestRigBuilder {
             },
             transcription: None,
             document_extraction: None,
+            builder: None,
         };
 
         // 7. Create TestChannel and ChannelManager.
@@ -652,7 +654,7 @@ impl TestRigBuilder {
 
         // 7b. Register message tool so routines can send messages to channels.
         deps.tools
-            .register_message_tools(Arc::clone(&channels))
+            .register_message_tools(Arc::clone(&channels), deps.extension_manager.clone())
             .await;
 
         // 8. Create Agent.

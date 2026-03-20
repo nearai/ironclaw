@@ -11,6 +11,7 @@
 //! - Managing OS service (`service install`, `service start`, `service stop`)
 //! - Listing configured channels (`channels list`)
 //! - Active health diagnostics (`doctor`)
+//! - Viewing gateway logs (`logs`)
 //! - Checking system health (`status`)
 
 mod channels;
@@ -19,6 +20,7 @@ mod config;
 mod doctor;
 #[cfg(feature = "import")]
 pub mod import;
+mod logs;
 mod mcp;
 pub mod memory;
 pub mod oauth_defaults;
@@ -36,6 +38,7 @@ pub use config::{ConfigCommand, run_config_command};
 pub use doctor::run_doctor_command;
 #[cfg(feature = "import")]
 pub use import::{ImportCommand, run_import_command};
+pub use logs::{LogsCommand, run_logs_command};
 pub use mcp::{McpCommand, run_mcp_command};
 pub use memory::MemoryCommand;
 pub use memory::run_memory_command_with_db;
@@ -206,6 +209,13 @@ pub enum Command {
     )]
     Doctor,
 
+    /// View and manage gateway logs
+    #[command(
+        about = "View and manage gateway logs",
+        long_about = "Tail gateway logs, stream live output, or adjust log level.\nExamples:\n  ironclaw logs                 # Show last 200 lines from gateway.log\n  ironclaw logs --follow        # Stream live logs via SSE\n  ironclaw logs --level         # Show current log level\n  ironclaw logs --level debug   # Set log level to debug"
+    )]
+    Logs(LogsCommand),
+
     /// Show system health and diagnostics
     #[command(
         about = "Show system status",
@@ -326,7 +336,10 @@ pub async fn run_memory_command(mem_cmd: &MemoryCommand) -> anyhow::Result<()> {
         .await
         .map_err(|e| anyhow::anyhow!("{}", e))?;
 
-    run_memory_command_with_db(mem_cmd.clone(), db, embeddings).await
+    let cache_config = crate::workspace::EmbeddingCacheConfig {
+        max_entries: config.embeddings.cache_size,
+    };
+    run_memory_command_with_db(mem_cmd.clone(), db, embeddings, cache_config).await
 }
 
 #[cfg(test)]

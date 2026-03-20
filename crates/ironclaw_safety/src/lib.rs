@@ -279,4 +279,100 @@ mod tests {
         assert!(wrapped.contains("prompt injection"));
         assert!(wrapped.contains(payload));
     }
+
+    /// Adversarial tests for SafetyLayer truncation at multi-byte boundaries.
+    /// See <https://github.com/nearai/ironclaw/issues/1025>.
+    mod adversarial {
+        use super::*;
+
+        fn safety_with_max_len(max_output_length: usize) -> SafetyLayer {
+            SafetyLayer::new(&SafetyConfig {
+                max_output_length,
+                injection_check_enabled: false,
+            })
+        }
+
+        // ── Truncation at multi-byte UTF-8 boundaries ───────────────
+
+        #[test]
+        fn truncate_in_middle_of_4byte_emoji() {
+            // 🔑 is 4 bytes (F0 9F 94 91). Place max_output_length to land
+            // in the middle of this emoji (e.g. at byte offset 2 into the emoji).
+            let prefix = "aa"; // 2 bytes
+            let input = format!("{prefix}🔑bbbb");
+            // max_output_length = 4 → lands at byte 4, which is in the middle
+            // of the emoji (bytes 2..6). is_char_boundary(4) is false,
+            // so truncation backs up to byte 2.
+            let safety = safety_with_max_len(4);
+            let result = safety.sanitize_tool_output("test", &input);
+            assert!(result.was_modified);
+            // Content should NOT contain invalid UTF-8 — Rust strings guarantee this.
+            // The truncated part should only contain the prefix.
+            assert!(
+                !result.content.contains('🔑'),
+                "emoji should be cut entirely when boundary lands in middle"
+            );
+        }
+
+        #[test]
+        fn truncate_in_middle_of_3byte_cjk() {
+            // '中' is 3 bytes (E4 B8 AD).
+            let prefix = "a"; // 1 byte
+            let input = format!("{prefix}中bbb");
+            // max_output_length = 2 → lands at byte 2, in the middle of '中'
+            // (bytes 1..4). backs up to byte 1.
+            let safety = safety_with_max_len(2);
+            let result = safety.sanitize_tool_output("test", &input);
+            assert!(result.was_modified);
+            assert!(
+                !result.content.contains('中'),
+                "CJK char should be cut when boundary lands in middle"
+            );
+        }
+
+        #[test]
+        fn truncate_in_middle_of_2byte_char() {
+            // 'ñ' is 2 bytes (C3 B1).
+            let input = "ñbbbb";
+            // max_output_length = 1 → lands at byte 1, in the middle of 'ñ'
+            // (bytes 0..2). backs up to byte 0.
+            let safety = safety_with_max_len(1);
+            let result = safety.sanitize_tool_output("test", input);
+            assert!(result.was_modified);
+            // The truncated content should have cut = 0, so only the notice remains.
+            assert!(
+                !result.content.contains('ñ'),
+                "2-byte char should be cut entirely when max_len = 1"
+            );
+        }
+
+        #[test]
+        fn single_4byte_char_with_max_len_1() {
+            let input = "🔑";
+            let safety = safety_with_max_len(1);
+            let result = safety.sanitize_tool_output("test", input);
+            assert!(result.was_modified);
+            // is_char_boundary(1) is false for 4-byte char, backs up to 0
+            assert!(
+                !result.content.starts_with('🔑'),
+                "single 4-byte char with max_len=1 should produce empty truncated prefix"
+            );
+            assert!(
+                result.content.contains("truncated"),
+                "should still contain truncation notice"
+            );
+        }
+
+        #[test]
+        fn exact_boundary_does_not_corrupt() {
+            // max_output_length exactly at a char boundary
+            let input = "ab🔑cd";
+            // 'a'=1, 'b'=2, '🔑'=6, 'c'=7, 'd'=8
+            let safety = safety_with_max_len(6);
+            let result = safety.sanitize_tool_output("test", input);
+            assert!(result.was_modified);
+            // Cut at byte 6 is exactly after '🔑' — valid boundary
+            assert!(result.content.contains("ab🔑"));
+        }
+    }
 }

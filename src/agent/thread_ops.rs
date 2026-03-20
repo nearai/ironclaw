@@ -187,13 +187,18 @@ impl Agent {
         );
 
         // First check thread state without holding lock during I/O
-        let thread_state = {
+        let (thread_state, approval_context) = {
             let sess = session.lock().await;
             let thread = sess
                 .threads
                 .get(&thread_id)
                 .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
-            thread.state
+            let approval_context = thread.pending_approval.as_ref().map(|a| {
+                let desc_preview =
+                    crate::agent::agent_loop::truncate_for_preview(&a.description, 80);
+                (a.tool_name.clone(), desc_preview)
+            });
+            (thread.state, approval_context)
         };
 
         tracing::debug!(
@@ -221,9 +226,13 @@ impl Agent {
                     thread_id = %thread_id,
                     "Thread awaiting approval, rejecting new input"
                 );
-                return Ok(SubmissionResult::error(
-                    "Waiting for approval. Use /interrupt to cancel.",
-                ));
+                let msg = match approval_context {
+                    Some((tool_name, desc_preview)) => format!(
+                        "Waiting for approval: {tool_name} — {desc_preview}. Use /interrupt to cancel."
+                    ),
+                    None => "Waiting for approval. Use /interrupt to cancel.".to_string(),
+                };
+                return Ok(SubmissionResult::pending(msg));
             }
             ThreadState::Completed => {
                 tracing::warn!(
@@ -420,6 +429,10 @@ impl Agent {
         // Complete, fail, or request approval
         match result {
             Ok(AgenticLoopResult::Response(response)) => {
+                // Extract <suggestions> from response text before user sees it
+                let (response, suggestions) =
+                    crate::agent::dispatcher::extract_suggestions(&response);
+
                 // Hook: TransformResponse — allow hooks to modify or reject the final response
                 let response = {
                     let event = crate::hooks::HookEvent::ResponseTransform {
@@ -473,6 +486,18 @@ impl Agent {
                 )
                 .await;
 
+                // Send suggestions after response (best-effort, rendered by web gateway)
+                if !suggestions.is_empty() {
+                    let _ = self
+                        .channels
+                        .send_status(
+                            &message.channel,
+                            StatusUpdate::Suggestions { suggestions },
+                            &message.metadata,
+                        )
+                        .await;
+                }
+
                 Ok(SubmissionResult::response(response))
             }
             Ok(AgenticLoopResult::NeedApproval { pending }) => {
@@ -481,7 +506,8 @@ impl Agent {
                 let tool_name = pending.tool_name.clone();
                 let description = pending.description.clone();
                 let parameters = pending.display_parameters.clone();
-                thread.await_approval(pending);
+                let allow_always = pending.allow_always;
+                thread.await_approval(*pending);
                 let _ = self
                     .channels
                     .send_status(
@@ -491,6 +517,7 @@ impl Agent {
                             tool_name: tool_name.clone(),
                             description: description.clone(),
                             parameters: parameters.clone(),
+                            allow_always,
                         },
                         &message.metadata,
                     )
@@ -500,6 +527,7 @@ impl Agent {
                     tool_name,
                     description,
                     parameters,
+                    allow_always,
                 })
             }
             Err(e) => {
@@ -908,7 +936,8 @@ impl Agent {
 
             // Execute the approved tool and continue the loop
             let mut job_ctx =
-                JobContext::with_user(&message.user_id, "chat", "Interactive chat session");
+                JobContext::with_user(&message.user_id, "chat", "Interactive chat session")
+                    .with_requester_id(&message.sender_id);
             job_ctx.http_interceptor = self.deps.http_interceptor.clone();
             // Prefer a valid timezone from the approval message, fall back to the
             // resolved timezone stored when the approval was originally requested.
@@ -1043,28 +1072,31 @@ impl Agent {
                 usize,
                 crate::llm::ToolCall,
                 Arc<dyn crate::tools::Tool>,
+                bool, // allow_always
             )> = None;
 
             for (idx, tc) in deferred_tool_calls.iter().enumerate() {
                 if let Some(tool) = self.tools().get(&tc.name).await {
                     // Match dispatcher.rs: when auto_approve_tools is true, skip
                     // all approval checks (including ApprovalRequirement::Always).
-                    let needs_approval = if self.config.auto_approve_tools {
-                        false
+                    let (needs_approval, allow_always) = if self.config.auto_approve_tools {
+                        (false, true)
                     } else {
                         use crate::tools::ApprovalRequirement;
-                        match tool.requires_approval(&tc.arguments) {
+                        let requirement = tool.requires_approval(&tc.arguments);
+                        let needs = match requirement {
                             ApprovalRequirement::Never => false,
                             ApprovalRequirement::UnlessAutoApproved => {
                                 let sess = session.lock().await;
                                 !sess.is_tool_auto_approved(&tc.name)
                             }
                             ApprovalRequirement::Always => true,
-                        }
+                        };
+                        (needs, !matches!(requirement, ApprovalRequirement::Always))
                     };
 
                     if needs_approval {
-                        approval_needed = Some((idx, tc.clone(), tool));
+                        approval_needed = Some((idx, tc.clone(), tool, allow_always));
                         break; // remaining tools stay deferred
                     }
                 }
@@ -1272,7 +1304,7 @@ impl Agent {
             }
 
             // Handle approval if a tool needed it
-            if let Some((approval_idx, tc, tool)) = approval_needed {
+            if let Some((approval_idx, tc, tool, allow_always)) = approval_needed {
                 let new_pending = PendingApproval {
                     request_id: Uuid::new_v4(),
                     tool_name: tc.name.clone(),
@@ -1284,6 +1316,7 @@ impl Agent {
                     deferred_tool_calls: deferred_tool_calls[approval_idx + 1..].to_vec(),
                     // Carry forward the resolved timezone from the original pending approval
                     user_timezone: pending.user_timezone.clone(),
+                    allow_always,
                 };
 
                 let request_id = new_pending.request_id;
@@ -1307,6 +1340,7 @@ impl Agent {
                             tool_name: tool_name.clone(),
                             description: description.clone(),
                             parameters: parameters.clone(),
+                            allow_always,
                         },
                         &message.metadata,
                     )
@@ -1317,6 +1351,7 @@ impl Agent {
                     tool_name,
                     description,
                     parameters,
+                    allow_always,
                 });
             }
 
@@ -1334,6 +1369,8 @@ impl Agent {
 
             match result {
                 Ok(AgenticLoopResult::Response(response)) => {
+                    let (response, suggestions) =
+                        crate::agent::dispatcher::extract_suggestions(&response);
                     thread.complete_turn(&response);
                     let (turn_number, tool_calls) = thread
                         .turns
@@ -1364,6 +1401,16 @@ impl Agent {
                             &message.metadata,
                         )
                         .await;
+                    if !suggestions.is_empty() {
+                        let _ = self
+                            .channels
+                            .send_status(
+                                &message.channel,
+                                StatusUpdate::Suggestions { suggestions },
+                                &message.metadata,
+                            )
+                            .await;
+                    }
                     Ok(SubmissionResult::response(response))
                 }
                 Ok(AgenticLoopResult::NeedApproval {
@@ -1373,7 +1420,8 @@ impl Agent {
                     let tool_name = new_pending.tool_name.clone();
                     let description = new_pending.description.clone();
                     let parameters = new_pending.display_parameters.clone();
-                    thread.await_approval(new_pending);
+                    let allow_always = new_pending.allow_always;
+                    thread.await_approval(*new_pending);
                     let _ = self
                         .channels
                         .send_status(
@@ -1383,6 +1431,7 @@ impl Agent {
                                 tool_name: tool_name.clone(),
                                 description: description.clone(),
                                 parameters: parameters.clone(),
+                                allow_always,
                             },
                             &message.metadata,
                         )
@@ -1392,6 +1441,7 @@ impl Agent {
                         tool_name,
                         description,
                         parameters,
+                        allow_always,
                     })
                 }
                 Err(e) => {
@@ -1512,7 +1562,8 @@ impl Agent {
             .configure_token(&pending.extension_name, token)
             .await
         {
-            Ok(result) => {
+            Ok(result) if result.activated => {
+                // Ensure extension is actually activated
                 tracing::info!(
                     "Extension '{}' configured via auth mode: {}",
                     pending.extension_name,
@@ -1526,6 +1577,28 @@ impl Agent {
                             extension_name: pending.extension_name.clone(),
                             success: true,
                             message: result.message.clone(),
+                        },
+                        &message.metadata,
+                    )
+                    .await;
+                Ok(Some(result.message))
+            }
+            Ok(result) => {
+                {
+                    let mut sess = session.lock().await;
+                    if let Some(thread) = sess.threads.get_mut(&thread_id) {
+                        thread.enter_auth_mode(pending.extension_name.clone());
+                    }
+                }
+                let _ = self
+                    .channels
+                    .send_status(
+                        &message.channel,
+                        StatusUpdate::AuthRequired {
+                            extension_name: pending.extension_name.clone(),
+                            instructions: Some(result.message.clone()),
+                            auth_url: None,
+                            setup_url: None,
                         },
                         &message.metadata,
                     )
@@ -1863,6 +1936,106 @@ mod tests {
             role: role.to_string(),
             content: content.to_string(),
             created_at: chrono::Utc::now(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_awaiting_approval_rejection_includes_tool_context() {
+        // Test that when a thread is in AwaitingApproval state and receives a new message,
+        // process_user_input rejects it with a non-error status that includes tool context.
+        use crate::agent::session::{PendingApproval, Session, Thread, ThreadState};
+        use uuid::Uuid;
+
+        let session_id = Uuid::new_v4();
+        let thread_id = Uuid::new_v4();
+        let mut thread = Thread::with_id(thread_id, session_id);
+
+        // Set thread to AwaitingApproval with a pending tool approval
+        let pending = PendingApproval {
+            request_id: Uuid::new_v4(),
+            tool_name: "shell".to_string(),
+            parameters: serde_json::json!({"command": "echo hello"}),
+            display_parameters: serde_json::json!({"command": "[REDACTED]"}),
+            description: "Execute: echo hello".to_string(),
+            tool_call_id: "call_0".to_string(),
+            context_messages: vec![],
+            deferred_tool_calls: vec![],
+            user_timezone: None,
+            allow_always: false,
+        };
+        thread.await_approval(pending);
+
+        let mut session = Session::new("test-user");
+        session.threads.insert(thread_id, thread);
+
+        // Verify thread is in AwaitingApproval state
+        assert_eq!(
+            session.threads[&thread_id].state,
+            ThreadState::AwaitingApproval
+        );
+
+        let result = extract_approval_message(&session, thread_id);
+
+        // Verify result is an Ok with a message (not an Error)
+        match result {
+            Ok(Some(msg)) => {
+                // Should NOT start with "Error:"
+                assert!(
+                    !msg.to_lowercase().starts_with("error:"),
+                    "Approval rejection should not have 'Error:' prefix. Got: {}",
+                    msg
+                );
+
+                // Should contain "waiting for approval"
+                assert!(
+                    msg.to_lowercase().contains("waiting for approval"),
+                    "Should contain 'waiting for approval'. Got: {}",
+                    msg
+                );
+
+                // Should contain the tool name
+                assert!(
+                    msg.contains("shell"),
+                    "Should contain tool name 'shell'. Got: {}",
+                    msg
+                );
+
+                // Should contain the description (or truncated version)
+                assert!(
+                    msg.contains("echo hello"),
+                    "Should contain description 'echo hello'. Got: {}",
+                    msg
+                );
+            }
+            _ => panic!("Expected approval rejection message"),
+        }
+    }
+
+    // Helper function to extract the approval message without needing a full Agent instance
+    fn extract_approval_message(
+        session: &crate::agent::session::Session,
+        thread_id: Uuid,
+    ) -> Result<Option<String>, crate::error::Error> {
+        let thread = session.threads.get(&thread_id).ok_or_else(|| {
+            crate::error::Error::from(crate::error::JobError::NotFound { id: thread_id })
+        })?;
+
+        if thread.state == ThreadState::AwaitingApproval {
+            let approval_context = thread.pending_approval.as_ref().map(|a| {
+                let desc_preview =
+                    crate::agent::agent_loop::truncate_for_preview(&a.description, 80);
+                (a.tool_name.clone(), desc_preview)
+            });
+
+            let msg = match approval_context {
+                Some((tool_name, desc_preview)) => format!(
+                    "Waiting for approval: {tool_name} — {desc_preview}. Use /interrupt to cancel."
+                ),
+                None => "Waiting for approval. Use /interrupt to cancel.".to_string(),
+            };
+            Ok(Some(msg))
+        } else {
+            Ok(None)
         }
     }
 }

@@ -52,11 +52,20 @@ impl Default for SandboxModeConfig {
 }
 
 impl SandboxModeConfig {
-    pub(crate) fn resolve() -> Result<Self, ConfigError> {
+    pub(crate) fn resolve(settings: &crate::settings::Settings) -> Result<Self, ConfigError> {
+        let ss = &settings.sandbox;
+
         let extra_domains = optional_env("SANDBOX_EXTRA_DOMAINS")?
             .map(|s| s.split(',').map(|d| d.trim().to_string()).collect())
-            .unwrap_or_default();
+            .unwrap_or_else(|| {
+                if ss.extra_allowed_domains.is_empty() {
+                    Vec::new()
+                } else {
+                    ss.extra_allowed_domains.clone()
+                }
+            });
 
+        // reaper/orphan fields have no Settings counterpart — env > default only.
         let reaper_interval_secs: u64 = parse_optional_env("SANDBOX_REAPER_INTERVAL_SECS", 300)?;
         let orphan_threshold_secs: u64 = parse_optional_env("SANDBOX_ORPHAN_THRESHOLD_SECS", 600)?;
 
@@ -76,14 +85,15 @@ impl SandboxModeConfig {
         }
 
         Ok(Self {
-            enabled: parse_bool_env("SANDBOX_ENABLED", true)?,
-            policy: parse_string_env("SANDBOX_POLICY", "readonly")?,
+            enabled: parse_bool_env("SANDBOX_ENABLED", ss.enabled)?,
+            policy: parse_string_env("SANDBOX_POLICY", ss.policy.clone())?,
+            // allow_full_access has no Settings counterpart — env > default only.
             allow_full_access: parse_bool_env("SANDBOX_ALLOW_FULL_ACCESS", false)?,
-            timeout_secs: parse_optional_env("SANDBOX_TIMEOUT_SECS", 120)?,
-            memory_limit_mb: parse_optional_env("SANDBOX_MEMORY_LIMIT_MB", 2048)?,
-            cpu_shares: parse_optional_env("SANDBOX_CPU_SHARES", 1024)?,
-            image: parse_string_env("SANDBOX_IMAGE", "ironclaw-worker:latest")?,
-            auto_pull_image: parse_bool_env("SANDBOX_AUTO_PULL", true)?,
+            timeout_secs: parse_optional_env("SANDBOX_TIMEOUT_SECS", ss.timeout_secs)?,
+            memory_limit_mb: parse_optional_env("SANDBOX_MEMORY_LIMIT_MB", ss.memory_limit_mb)?,
+            cpu_shares: parse_optional_env("SANDBOX_CPU_SHARES", ss.cpu_shares)?,
+            image: parse_string_env("SANDBOX_IMAGE", ss.image.clone())?,
+            auto_pull_image: parse_bool_env("SANDBOX_AUTO_PULL", ss.auto_pull_image)?,
             extra_allowed_domains: extra_domains,
             reaper_interval_secs,
             orphan_threshold_secs,
@@ -200,7 +210,7 @@ impl ClaudeCodeConfig {
     /// Load from environment variables only (used inside containers where
     /// there is no database or full config).
     pub fn from_env() -> Self {
-        match Self::resolve() {
+        match Self::resolve_env_only() {
             Ok(c) => c,
             Err(e) => {
                 tracing::warn!("Failed to resolve ClaudeCodeConfig: {e}, using defaults");
@@ -253,7 +263,33 @@ impl ClaudeCodeConfig {
         None
     }
 
-    pub(crate) fn resolve() -> Result<Self, ConfigError> {
+    pub(crate) fn resolve(settings: &crate::settings::Settings) -> Result<Self, ConfigError> {
+        let defaults = Self::default();
+        Ok(Self {
+            // Use settings.sandbox.claude_code_enabled as fallback (written by setup wizard).
+            enabled: parse_bool_env("CLAUDE_CODE_ENABLED", settings.sandbox.claude_code_enabled)?,
+            config_dir: optional_env("CLAUDE_CONFIG_DIR")?
+                .map(std::path::PathBuf::from)
+                .unwrap_or(defaults.config_dir),
+            model: parse_string_env("CLAUDE_CODE_MODEL", defaults.model)?,
+            max_turns: parse_optional_env("CLAUDE_CODE_MAX_TURNS", defaults.max_turns)?,
+            memory_limit_mb: parse_optional_env(
+                "CLAUDE_CODE_MEMORY_LIMIT_MB",
+                defaults.memory_limit_mb,
+            )?,
+            allowed_tools: optional_env("CLAUDE_CODE_ALLOWED_TOOLS")?
+                .map(|s| {
+                    s.split(',')
+                        .map(|t| t.trim().to_string())
+                        .filter(|t| !t.is_empty())
+                        .collect()
+                })
+                .unwrap_or(defaults.allowed_tools),
+        })
+    }
+
+    /// Resolve from env vars only, no Settings. Used inside containers.
+    fn resolve_env_only() -> Result<Self, ConfigError> {
         let defaults = Self::default();
         Ok(Self {
             enabled: parse_bool_env("CLAUDE_CODE_ENABLED", defaults.enabled)?,
@@ -552,6 +588,80 @@ mod tests {
             sandbox.policy,
             crate::sandbox::SandboxPolicy::WorkspaceWrite
         );
+    }
+
+    // ── Settings fallback tests ──────────────────────────────────────
+
+    #[test]
+    fn sandbox_resolve_falls_back_to_settings() {
+        let _guard = crate::config::helpers::ENV_MUTEX
+            .lock()
+            .expect("env mutex poisoned");
+        let mut settings = crate::settings::Settings::default();
+        settings.sandbox.cpu_shares = 99;
+        settings.sandbox.auto_pull_image = false;
+        settings.sandbox.enabled = false;
+
+        let cfg = SandboxModeConfig::resolve(&settings).expect("resolve");
+        assert!(!cfg.enabled);
+        assert_eq!(cfg.cpu_shares, 99);
+        assert!(!cfg.auto_pull_image);
+    }
+
+    #[test]
+    fn sandbox_env_overrides_settings() {
+        let _guard = crate::config::helpers::ENV_MUTEX
+            .lock()
+            .expect("env mutex poisoned");
+        let mut settings = crate::settings::Settings::default();
+        settings.sandbox.timeout_secs = 999;
+
+        // SAFETY: Under ENV_MUTEX, no concurrent env access.
+        unsafe { std::env::set_var("SANDBOX_TIMEOUT_SECS", "5") };
+        let cfg = SandboxModeConfig::resolve(&settings).expect("resolve");
+        unsafe { std::env::remove_var("SANDBOX_TIMEOUT_SECS") };
+
+        assert_eq!(cfg.timeout_secs, 5);
+    }
+
+    // ── ClaudeCodeConfig settings fallback tests ────────────────────
+
+    #[test]
+    fn claude_code_resolve_uses_settings_enabled() {
+        let _guard = crate::config::helpers::ENV_MUTEX
+            .lock()
+            .expect("env mutex poisoned");
+        let mut settings = crate::settings::Settings::default();
+        settings.sandbox.claude_code_enabled = true;
+
+        let cfg = ClaudeCodeConfig::resolve(&settings).expect("resolve");
+        assert!(cfg.enabled);
+    }
+
+    #[test]
+    fn claude_code_resolve_defaults_disabled() {
+        let _guard = crate::config::helpers::ENV_MUTEX
+            .lock()
+            .expect("env mutex poisoned");
+        let settings = crate::settings::Settings::default();
+        let cfg = ClaudeCodeConfig::resolve(&settings).expect("resolve");
+        assert!(!cfg.enabled);
+    }
+
+    #[test]
+    fn claude_code_env_overrides_settings() {
+        let _guard = crate::config::helpers::ENV_MUTEX
+            .lock()
+            .expect("env mutex poisoned");
+        let mut settings = crate::settings::Settings::default();
+        settings.sandbox.claude_code_enabled = true;
+
+        // SAFETY: Under ENV_MUTEX, no concurrent env access.
+        unsafe { std::env::set_var("CLAUDE_CODE_ENABLED", "false") };
+        let cfg = ClaudeCodeConfig::resolve(&settings).expect("resolve");
+        unsafe { std::env::remove_var("CLAUDE_CODE_ENABLED") };
+
+        assert!(!cfg.enabled);
     }
 
     #[test]

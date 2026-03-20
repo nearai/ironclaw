@@ -12,40 +12,125 @@ mod tests {
     use std::time::Duration;
 
     use chrono::Utc;
+    use libsql::params;
     use uuid::Uuid;
 
     use ironclaw::agent::routine::{
-        NotifyConfig, Routine, RoutineAction, RoutineGuardrails, Trigger,
+        FullJobPermissionMode, NotifyConfig, Routine, RoutineAction, RoutineGuardrails, RoutineRun,
+        RunStatus, Trigger,
     };
     use ironclaw::agent::routine_engine::RoutineEngine;
-    use ironclaw::agent::{HeartbeatConfig, HeartbeatRunner};
+    use ironclaw::agent::{HeartbeatConfig, HeartbeatRunner, Scheduler};
     use ironclaw::channels::IncomingMessage;
-    use ironclaw::config::{RoutineConfig, SafetyConfig};
-    use ironclaw::db::Database;
+    use ironclaw::config::{AgentConfig, RoutineConfig, SafetyConfig};
+    use ironclaw::context::{ContextManager, JobContext};
+    use ironclaw::db::{Database, libsql::LibSqlBackend};
+    use ironclaw::hooks::HookRegistry;
+    use ironclaw::llm::LlmProvider;
     use ironclaw::safety::SafetyLayer;
-    use ironclaw::tools::ToolRegistry;
+    use ironclaw::tools::builtin::routine::RoutineUpdateTool;
+    use ironclaw::tools::{ApprovalRequirement, Tool, ToolError, ToolOutput, ToolRegistry};
     use ironclaw::workspace::Workspace;
     use ironclaw::workspace::hygiene::HygieneConfig;
 
-    use crate::support::trace_llm::{LlmTrace, TraceLlm, TraceResponse, TraceStep};
+    use crate::support::trace_llm::{LlmTrace, TraceLlm, TraceResponse, TraceStep, TraceToolCall};
+
+    const OWNER_GATE_COUNT_SETTING_KEY: &str = "tests.owner_gate_count";
+
+    struct OwnerGateTool {
+        store: Arc<dyn Database>,
+    }
+
+    #[async_trait::async_trait]
+    impl Tool for OwnerGateTool {
+        fn name(&self) -> &str {
+            "owner_gate"
+        }
+
+        fn description(&self) -> &str {
+            "Test-only tool gated by owner full_job permissions"
+        }
+
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({
+                "type": "object",
+                "properties": {}
+            })
+        }
+
+        async fn execute(
+            &self,
+            _params: serde_json::Value,
+            ctx: &JobContext,
+        ) -> Result<ToolOutput, ToolError> {
+            let start = std::time::Instant::now();
+            let current = self
+                .store
+                .get_setting(&ctx.user_id, OWNER_GATE_COUNT_SETTING_KEY)
+                .await
+                .map_err(|e| {
+                    ToolError::ExecutionFailed(format!("failed to read owner gate count: {e}"))
+                })?
+                .and_then(|value| value.as_i64())
+                .unwrap_or(0);
+            self.store
+                .set_setting(
+                    &ctx.user_id,
+                    OWNER_GATE_COUNT_SETTING_KEY,
+                    &serde_json::json!(current + 1),
+                )
+                .await
+                .map_err(|e| {
+                    ToolError::ExecutionFailed(format!("failed to persist owner gate count: {e}"))
+                })?;
+
+            Ok(ToolOutput::text("owner gate executed", start.elapsed()))
+        }
+
+        fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+            ApprovalRequirement::Always
+        }
+
+        fn requires_sanitization(&self) -> bool {
+            false
+        }
+    }
 
     /// Create a temp libSQL database with migrations applied.
     async fn create_test_db() -> (Arc<dyn Database>, tempfile::TempDir) {
-        use ironclaw::db::libsql::LibSqlBackend;
+        let (backend, temp_dir) = create_test_backend().await;
+        let db: Arc<dyn Database> = backend;
+        (db, temp_dir)
+    }
 
+    async fn create_test_backend() -> (Arc<LibSqlBackend>, tempfile::TempDir) {
         let temp_dir = tempfile::tempdir().expect("tempdir");
         let db_path = temp_dir.path().join("test.db");
-        let backend = LibSqlBackend::new_local(&db_path)
-            .await
-            .expect("LibSqlBackend");
+        let backend = Arc::new(
+            LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("LibSqlBackend"),
+        );
         backend.run_migrations().await.expect("migrations");
-        let db: Arc<dyn Database> = Arc::new(backend);
-        (db, temp_dir)
+        (backend, temp_dir)
     }
 
     /// Create a workspace backed by the test database.
     fn create_workspace(db: &Arc<dyn Database>) -> Arc<Workspace> {
         Arc::new(Workspace::new_with_db("default", db.clone()))
+    }
+
+    fn make_message(
+        channel: &str,
+        user_id: &str,
+        owner_id: &str,
+        sender_id: &str,
+        content: &str,
+    ) -> IncomingMessage {
+        IncomingMessage::new(channel, user_id, content)
+            .with_owner_id(owner_id)
+            .with_sender_id(sender_id)
+            .with_metadata(serde_json::json!({}))
     }
 
     /// Helper to insert a routine directly into the database.
@@ -77,6 +162,143 @@ mod tests {
             state: serde_json::json!({}),
             created_at: Utc::now(),
             updated_at: Utc::now(),
+        }
+    }
+
+    fn make_full_job_routine(
+        name: &str,
+        permission_mode: FullJobPermissionMode,
+        tool_permissions: Vec<String>,
+    ) -> Routine {
+        Routine {
+            id: Uuid::new_v4(),
+            name: name.to_string(),
+            description: format!("Full-job test routine: {name}"),
+            user_id: "default".to_string(),
+            enabled: true,
+            trigger: Trigger::Manual,
+            action: RoutineAction::FullJob {
+                title: name.to_string(),
+                description: "Use the owner-gated tool when permitted.".to_string(),
+                max_iterations: 3,
+                tool_permissions,
+                permission_mode,
+            },
+            guardrails: RoutineGuardrails {
+                cooldown: Duration::from_secs(0),
+                max_concurrent: 1,
+                dedup_window: None,
+            },
+            notify: NotifyConfig::default(),
+            last_run_at: None,
+            next_fire_at: None,
+            run_count: 0,
+            consecutive_failures: 0,
+            state: serde_json::json!({}),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    fn owner_gate_trace(include_completion: bool) -> LlmTrace {
+        let mut steps = vec![TraceStep {
+            request_hint: None,
+            response: TraceResponse::ToolCalls {
+                tool_calls: vec![TraceToolCall {
+                    id: "call_owner_gate".to_string(),
+                    name: "owner_gate".to_string(),
+                    arguments: serde_json::json!({}),
+                }],
+                input_tokens: 40,
+                output_tokens: 10,
+            },
+            expected_tool_results: vec![],
+        }];
+        if include_completion {
+            // The worker first calls `select_tools()`, then falls back to
+            // `respond_with_tools()` when no tool calls are returned. Both
+            // methods consume a trace step, so the successful completion path
+            // needs two text responses after the tool call.
+            for _ in 0..2 {
+                steps.push(TraceStep {
+                    request_hint: None,
+                    response: TraceResponse::Text {
+                        content: "I have completed the task.".to_string(),
+                        input_tokens: 20,
+                        output_tokens: 5,
+                    },
+                    expected_tool_results: vec![],
+                });
+            }
+        }
+        LlmTrace::single_turn("test-owner-gate", "run owner gate", steps)
+    }
+
+    async fn setup_owner_gate_engine(db: Arc<dyn Database>, trace: LlmTrace) -> Arc<RoutineEngine> {
+        let ws = create_workspace(&db);
+        let (notify_tx, _rx) = tokio::sync::mpsc::channel(16);
+        let registry = Arc::new(ToolRegistry::new());
+        registry
+            .register(Arc::new(OwnerGateTool { store: db.clone() }))
+            .await;
+
+        let safety = Arc::new(SafetyLayer::new(&SafetyConfig {
+            max_output_length: 100_000,
+            injection_check_enabled: false,
+        }));
+        let llm: Arc<dyn LlmProvider> = Arc::new(TraceLlm::from_trace(trace));
+        let scheduler = Arc::new(Scheduler::new(
+            AgentConfig::for_testing(),
+            Arc::new(ContextManager::new(5)),
+            llm.clone(),
+            safety.clone(),
+            registry.clone(),
+            Some(db.clone()),
+            Arc::new(HookRegistry::new()),
+        ));
+
+        Arc::new(RoutineEngine::new(
+            RoutineConfig::default(),
+            db,
+            llm,
+            ws,
+            notify_tx,
+            Some(scheduler),
+            registry,
+            safety,
+        ))
+    }
+
+    async fn owner_gate_count(db: &Arc<dyn Database>) -> i64 {
+        db.get_setting("default", OWNER_GATE_COUNT_SETTING_KEY)
+            .await
+            .expect("get owner gate count")
+            .and_then(|value| value.as_i64())
+            .unwrap_or(0)
+    }
+
+    async fn wait_for_run_completion(
+        db: &Arc<dyn Database>,
+        routine_id: Uuid,
+        run_id: Uuid,
+    ) -> RoutineRun {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let runs = db
+                .list_routine_runs(routine_id, 10)
+                .await
+                .expect("list_routine_runs");
+            if let Some(run) = runs.into_iter().find(|run| run.id == run_id)
+                && run.status != RunStatus::Running
+            {
+                return run;
+            }
+
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for routine run {run_id} to complete"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
     }
 
@@ -218,19 +440,20 @@ mod tests {
         engine.refresh_event_cache().await;
 
         // Positive match: message containing "deploy to production".
-        let matching_msg = IncomingMessage {
-            id: Uuid::new_v4(),
-            channel: "test".to_string(),
-            user_id: "default".to_string(),
-            user_name: None,
-            content: "deploy to production now".to_string(),
-            thread_id: None,
-            received_at: Utc::now(),
-            metadata: serde_json::json!({}),
-            timezone: None,
-            attachments: Vec::new(),
-        };
-        let fired = engine.check_event_triggers(&matching_msg).await;
+        let matching_msg = make_message(
+            "test",
+            "default",
+            "default",
+            "default",
+            "deploy to production now",
+        );
+        let fired = engine
+            .check_event_triggers(
+                &matching_msg.user_id,
+                &matching_msg.channel,
+                &matching_msg.content,
+            )
+            .await;
         assert!(
             fired >= 1,
             "Expected >= 1 routine fired on match, got {fired}"
@@ -240,20 +463,122 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(500)).await;
 
         // Negative match: message that doesn't match.
-        let non_matching_msg = IncomingMessage {
-            id: Uuid::new_v4(),
-            channel: "test".to_string(),
-            user_id: "default".to_string(),
-            user_name: None,
-            content: "check the staging environment".to_string(),
-            thread_id: None,
-            received_at: Utc::now(),
-            metadata: serde_json::json!({}),
-            timezone: None,
-            attachments: Vec::new(),
-        };
-        let fired_neg = engine.check_event_triggers(&non_matching_msg).await;
+        let non_matching_msg = make_message(
+            "test",
+            "default",
+            "default",
+            "default",
+            "check the staging environment",
+        );
+        let fired_neg = engine
+            .check_event_triggers(
+                &non_matching_msg.user_id,
+                &non_matching_msg.channel,
+                &non_matching_msg.content,
+            )
+            .await;
         assert_eq!(fired_neg, 0, "Expected 0 routines fired on non-match");
+    }
+
+    #[tokio::test]
+    async fn event_trigger_respects_message_user_scope() {
+        let (db, _tmp) = create_test_db().await;
+        let ws = create_workspace(&db);
+
+        let trace = LlmTrace::single_turn(
+            "test-event-user-scope",
+            "deploy",
+            vec![TraceStep {
+                request_hint: None,
+                response: TraceResponse::Text {
+                    content: "Owner event handled".to_string(),
+                    input_tokens: 50,
+                    output_tokens: 8,
+                },
+                expected_tool_results: vec![],
+            }],
+        );
+        let llm = Arc::new(TraceLlm::from_trace(trace));
+        let (notify_tx, _notify_rx) = tokio::sync::mpsc::channel(16);
+
+        let tools = Arc::new(ToolRegistry::new());
+        let safety = Arc::new(SafetyLayer::new(&SafetyConfig {
+            max_output_length: 100_000,
+            injection_check_enabled: true,
+        }));
+
+        let engine = Arc::new(RoutineEngine::new(
+            RoutineConfig::default(),
+            db.clone(),
+            llm,
+            ws,
+            notify_tx,
+            None,
+            tools,
+            safety,
+        ));
+
+        let routine = make_routine(
+            "owner-deploy-watcher",
+            Trigger::Event {
+                channel: None,
+                pattern: "deploy.*production".to_string(),
+            },
+            "Report on deployment.",
+        );
+        db.create_routine(&routine).await.expect("create_routine");
+        engine.refresh_event_cache().await;
+
+        let guest_msg = make_message(
+            "telegram",
+            "guest",
+            "default",
+            "guest-sender",
+            "deploy to production now",
+        );
+        let guest_fired = engine
+            .check_event_triggers(&guest_msg.user_id, &guest_msg.channel, &guest_msg.content)
+            .await;
+        assert_eq!(
+            guest_fired, 0,
+            "Guest scope must not fire owner event routines"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let guest_runs = db
+            .list_routine_runs(routine.id, 10)
+            .await
+            .expect("list_routine_runs after guest message");
+        assert!(
+            guest_runs.is_empty(),
+            "Guest message should not create routine runs"
+        );
+
+        let owner_msg = make_message(
+            "telegram",
+            "default",
+            "default",
+            "owner-sender",
+            "deploy to production now",
+        );
+        let owner_fired = engine
+            .check_event_triggers(&owner_msg.user_id, &owner_msg.channel, &owner_msg.content)
+            .await;
+        assert!(
+            owner_fired >= 1,
+            "Owner scope should fire matching owner event routine"
+        );
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        let owner_runs = db
+            .list_routine_runs(routine.id, 10)
+            .await
+            .expect("list_routine_runs after owner message");
+        assert_eq!(
+            owner_runs.len(),
+            1,
+            "Owner message should create exactly one run"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -455,19 +780,16 @@ mod tests {
         engine.refresh_event_cache().await;
 
         // First fire should work.
-        let msg = IncomingMessage {
-            id: Uuid::new_v4(),
-            channel: "test".to_string(),
-            user_id: "default".to_string(),
-            user_name: None,
-            content: "test-cooldown trigger".to_string(),
-            thread_id: None,
-            received_at: Utc::now(),
-            metadata: serde_json::json!({}),
-            timezone: None,
-            attachments: Vec::new(),
-        };
-        let fired1 = engine.check_event_triggers(&msg).await;
+        let msg = make_message(
+            "test",
+            "default",
+            "default",
+            "default",
+            "test-cooldown trigger",
+        );
+        let fired1 = engine
+            .check_event_triggers(&msg.user_id, &msg.channel, &msg.content)
+            .await;
         assert!(fired1 >= 1, "First fire should work");
 
         // Give spawn time, then update last_run_at to simulate recent execution.
@@ -482,7 +804,9 @@ mod tests {
         engine.refresh_event_cache().await;
 
         // Second fire should be blocked by cooldown.
-        let fired2 = engine.check_event_triggers(&msg).await;
+        let fired2 = engine
+            .check_event_triggers(&msg.user_id, &msg.channel, &msg.content)
+            .await;
         assert_eq!(fired2, 0, "Second fire should be blocked by cooldown");
     }
 
@@ -584,5 +908,484 @@ mod tests {
             matches!(result, ironclaw::agent::HeartbeatResult::Skipped),
             "Expected Skipped for empty checklist, got: {result:?}"
         );
+    }
+
+    /// Helper to set up a test environment for routine engine mutation tests.
+    /// Returns the engine, database, and temp directory.
+    async fn setup_routine_mutation_test()
+    -> (Arc<RoutineEngine>, Arc<dyn Database>, tempfile::TempDir) {
+        let (db, dir) = create_test_db().await;
+        let ws = create_workspace(&db);
+        let (notify_tx, _rx) = tokio::sync::mpsc::channel(16);
+        let tools = Arc::new(ToolRegistry::new());
+
+        let safety_config = SafetyConfig {
+            max_output_length: 100_000,
+            injection_check_enabled: true,
+        };
+        let safety = Arc::new(SafetyLayer::new(&safety_config));
+
+        let trace = LlmTrace::single_turn(
+            "test-routine-mutation",
+            "test",
+            vec![TraceStep {
+                request_hint: None,
+                response: TraceResponse::Text {
+                    content: "ROUTINE_OK".to_string(),
+                    input_tokens: 50,
+                    output_tokens: 5,
+                },
+                expected_tool_results: vec![],
+            }],
+        );
+        let llm = Arc::new(TraceLlm::from_trace(trace));
+
+        let engine = Arc::new(RoutineEngine::new(
+            RoutineConfig::default(),
+            Arc::clone(&db),
+            llm,
+            ws,
+            notify_tx,
+            None,
+            tools,
+            safety,
+        ));
+
+        (engine, db, dir)
+    }
+
+    /// Regression test for issue #1076: disabling an event routine via a DB mutation
+    /// followed by refresh_event_cache() (the path now taken by the web toggle handler)
+    /// must immediately stop the routine from firing.
+    #[tokio::test]
+    async fn toggle_disabling_event_routine_removes_from_cache() {
+        let (engine, db, _dir) = setup_routine_mutation_test().await;
+
+        // Create and cache an event routine.
+        let mut routine = make_routine(
+            "disable-me",
+            Trigger::Event {
+                pattern: "DISABLE_ME".to_string(),
+                channel: None,
+            },
+            "Handle DISABLE_ME event",
+        );
+        db.create_routine(&routine).await.expect("create_routine");
+        engine.refresh_event_cache().await;
+
+        let msg = IncomingMessage::new("test", "default", "DISABLE_ME");
+        let fired_before = engine
+            .check_event_triggers(&msg.user_id, &msg.channel, &msg.content)
+            .await;
+        assert!(fired_before >= 1, "Expected routine to fire before disable");
+
+        // Simulate what routines_toggle_handler now does: update DB, then refresh.
+        routine.enabled = false;
+        routine.updated_at = Utc::now();
+        db.update_routine(&routine).await.expect("update_routine");
+        engine.refresh_event_cache().await;
+
+        let fired_after = engine
+            .check_event_triggers(&msg.user_id, &msg.channel, &msg.content)
+            .await;
+        assert_eq!(
+            fired_after, 0,
+            "Disabled routine must not fire after cache refresh"
+        );
+    }
+
+    /// Regression test for issue #1076: deleting an event routine via a DB mutation
+    /// followed by refresh_event_cache() must immediately stop the routine from firing.
+    #[tokio::test]
+    async fn delete_event_routine_removes_from_cache() {
+        let (engine, db, _dir) = setup_routine_mutation_test().await;
+
+        let routine = make_routine(
+            "delete-me",
+            Trigger::Event {
+                pattern: "DELETE_ME".to_string(),
+                channel: None,
+            },
+            "Handle DELETE_ME event",
+        );
+        db.create_routine(&routine).await.expect("create_routine");
+        engine.refresh_event_cache().await;
+
+        let msg = IncomingMessage::new("test", "default", "DELETE_ME");
+        assert!(
+            engine
+                .check_event_triggers(&msg.user_id, &msg.channel, &msg.content)
+                .await
+                >= 1,
+            "Expected routine to fire before delete"
+        );
+
+        // Simulate what routines_delete_handler now does: delete from DB, then refresh.
+        db.delete_routine(routine.id).await.expect("delete_routine");
+        engine.refresh_event_cache().await;
+
+        assert_eq!(
+            engine
+                .check_event_triggers(&msg.user_id, &msg.channel, &msg.content)
+                .await,
+            0,
+            "Deleted routine must not fire after cache refresh"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: full_job per-routine concurrency blocks second fire (issue #1318)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn full_job_max_concurrent_blocks_second_fire_while_first_active() {
+        use ironclaw::agent::routine::{
+            NotifyConfig, Routine, RoutineAction, RoutineGuardrails, RoutineRun, RunStatus, Trigger,
+        };
+        use ironclaw::error::RoutineError;
+
+        let (db, _tmp) = create_test_db().await;
+        let ws = create_workspace(&db);
+
+        // Stub LLM — fire_manual will be rejected before any LLM call
+        let trace = LlmTrace::single_turn(
+            "stub",
+            "stub",
+            vec![TraceStep {
+                request_hint: None,
+                response: TraceResponse::Text {
+                    content: "ROUTINE_OK".to_string(),
+                    input_tokens: 10,
+                    output_tokens: 5,
+                },
+                expected_tool_results: vec![],
+            }],
+        );
+        let llm = Arc::new(TraceLlm::from_trace(trace));
+        let (notify_tx, _notify_rx) = tokio::sync::mpsc::channel(4);
+        let tools = Arc::new(ToolRegistry::new());
+        let safety = Arc::new(SafetyLayer::new(&SafetyConfig {
+            max_output_length: 100_000,
+            injection_check_enabled: false,
+        }));
+
+        let engine = Arc::new(RoutineEngine::new(
+            RoutineConfig::default(),
+            db.clone(),
+            llm,
+            ws,
+            notify_tx,
+            None, // no scheduler — rejected before dispatch
+            tools,
+            safety,
+        ));
+
+        // Create a full_job routine with max_concurrent = 1
+        let routine = Routine {
+            id: Uuid::new_v4(),
+            name: "concurrent-guard".to_string(),
+            description: "test max_concurrent for full_job".to_string(),
+            user_id: "default".to_string(),
+            enabled: true,
+            trigger: Trigger::Manual,
+            action: RoutineAction::FullJob {
+                title: "t".to_string(),
+                description: "d".to_string(),
+                max_iterations: 3,
+                tool_permissions: vec![],
+                permission_mode: ironclaw::agent::routine::FullJobPermissionMode::Explicit,
+            },
+            guardrails: RoutineGuardrails {
+                cooldown: Duration::from_secs(0),
+                max_concurrent: 1,
+                dedup_window: None,
+            },
+            notify: NotifyConfig::default(),
+            last_run_at: None,
+            next_fire_at: None,
+            run_count: 0,
+            consecutive_failures: 0,
+            state: serde_json::json!({}),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        db.create_routine(&routine).await.expect("create_routine");
+
+        // Simulate first full_job run still active: the fix keeps the
+        // routine_run in Running state while the linked job executes.
+        let active_run = RoutineRun {
+            id: Uuid::new_v4(),
+            routine_id: routine.id,
+            trigger_type: "cron".to_string(),
+            trigger_detail: None,
+            started_at: Utc::now(),
+            completed_at: None,
+            status: RunStatus::Running,
+            result_summary: None,
+            tokens_used: None,
+            job_id: None,
+            created_at: Utc::now(),
+        };
+        db.create_routine_run(&active_run)
+            .await
+            .expect("create_routine_run");
+
+        // Attempt to fire the same routine again — must be rejected
+        let result = engine.fire_manual(routine.id, None).await;
+        assert!(
+            matches!(result, Err(RoutineError::MaxConcurrent { .. })),
+            "second fire while first full_job active must be rejected by max_concurrent=1, got: {:?}",
+            result
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: global running_count tracks live full_job runs (issue #1318)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn global_concurrency_counts_live_full_job_runs() {
+        use std::sync::atomic::Ordering;
+
+        let (db, _tmp) = create_test_db().await;
+        let ws = create_workspace(&db);
+
+        let trace = LlmTrace::single_turn(
+            "test-global-limit",
+            "check",
+            vec![TraceStep {
+                request_hint: None,
+                response: TraceResponse::Text {
+                    content: "ROUTINE_OK".to_string(),
+                    input_tokens: 50,
+                    output_tokens: 5,
+                },
+                expected_tool_results: vec![],
+            }],
+        );
+        let llm = Arc::new(TraceLlm::from_trace(trace));
+        let (notify_tx, _notify_rx) = tokio::sync::mpsc::channel(16);
+        let tools = Arc::new(ToolRegistry::new());
+        let safety = Arc::new(SafetyLayer::new(&SafetyConfig {
+            max_output_length: 100_000,
+            injection_check_enabled: true,
+        }));
+
+        // Configure global limit of 1
+        let config = RoutineConfig {
+            max_concurrent_routines: 1,
+            ..RoutineConfig::default()
+        };
+
+        let engine = Arc::new(RoutineEngine::new(
+            config,
+            db.clone(),
+            llm,
+            ws,
+            notify_tx,
+            None,
+            tools,
+            safety,
+        ));
+
+        // Insert a due cron routine
+        let mut routine = make_routine(
+            "global-limit-test",
+            Trigger::Cron {
+                schedule: "* * * * *".to_string(),
+                timezone: None,
+            },
+            "Check status.",
+        );
+        routine.next_fire_at = Some(Utc::now() - chrono::Duration::minutes(1));
+        db.create_routine(&routine).await.expect("create_routine");
+
+        // Simulate one full_job from another routine holding the global slot.
+        // With the fix, running_count stays elevated for the full job duration.
+        engine
+            .running_count_for_test()
+            .fetch_add(1, Ordering::Relaxed);
+
+        // check_cron_triggers should see global limit hit and skip
+        engine.check_cron_triggers().await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let runs = db
+            .list_routine_runs(routine.id, 10)
+            .await
+            .expect("list_routine_runs");
+        assert!(
+            runs.is_empty(),
+            "cron routine must not fire when global limit is reached by live full_job"
+        );
+
+        // Release the global slot
+        engine
+            .running_count_for_test()
+            .fetch_sub(1, Ordering::Relaxed);
+
+        // Now the routine should fire
+        engine.check_cron_triggers().await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // Because the first check skipped it, next_fire_at is unchanged —
+        // the second check should see it as still due and fire it.
+        let runs_after = db
+            .list_routine_runs(routine.id, 10)
+            .await
+            .expect("list_routine_runs");
+        assert!(
+            !runs_after.is_empty(),
+            "cron routine should fire after global slot is released"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: inherit_owner full_job routines can use owner-gated tools
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn full_job_inherit_owner_uses_owner_allowlist() {
+        let (backend, _tmp) = create_test_backend().await;
+        let db: Arc<dyn Database> = backend;
+        let engine = setup_owner_gate_engine(db.clone(), owner_gate_trace(true)).await;
+
+        db.set_setting(
+            "default",
+            ironclaw::agent::routine::FULL_JOB_OWNER_ALLOWED_TOOLS_SETTING_KEY,
+            &serde_json::json!(["owner_gate"]),
+        )
+        .await
+        .expect("set owner allowlist");
+
+        let routine = make_full_job_routine(
+            "inherit-owner-allowed",
+            FullJobPermissionMode::InheritOwner,
+            vec![],
+        );
+        db.create_routine(&routine).await.expect("create_routine");
+
+        let run_id = engine
+            .fire_manual(routine.id, None)
+            .await
+            .expect("fire manual");
+        let run = wait_for_run_completion(&db, routine.id, run_id).await;
+
+        assert_eq!(run.status, RunStatus::Ok);
+        assert_eq!(owner_gate_count(&db).await, 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: inherit_owner full_job routines stay blocked without owner allowlist
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn full_job_inherit_owner_blocks_without_owner_allowlist() {
+        let (backend, _tmp) = create_test_backend().await;
+        let db: Arc<dyn Database> = backend;
+        let engine = setup_owner_gate_engine(db.clone(), owner_gate_trace(false)).await;
+
+        let routine = make_full_job_routine(
+            "inherit-owner-blocked",
+            FullJobPermissionMode::InheritOwner,
+            vec![],
+        );
+        db.create_routine(&routine).await.expect("create_routine");
+
+        let run_id = engine
+            .fire_manual(routine.id, None)
+            .await
+            .expect("fire manual");
+        let run = wait_for_run_completion(&db, routine.id, run_id).await;
+
+        assert_eq!(run.status, RunStatus::Failed);
+        assert_eq!(owner_gate_count(&db).await, 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: legacy full_job routines remain explicit until updated
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn legacy_full_job_stays_explicit_until_updated() {
+        let (backend, _tmp) = create_test_backend().await;
+        let db: Arc<dyn Database> = backend.clone();
+
+        db.set_setting(
+            "default",
+            ironclaw::agent::routine::FULL_JOB_OWNER_ALLOWED_TOOLS_SETTING_KEY,
+            &serde_json::json!(["owner_gate"]),
+        )
+        .await
+        .expect("set owner allowlist");
+
+        let legacy_routine =
+            make_full_job_routine("legacy-full-job", FullJobPermissionMode::Explicit, vec![]);
+        db.create_routine(&legacy_routine)
+            .await
+            .expect("create_routine");
+
+        let conn = backend.connect().await.expect("connect");
+        conn.execute(
+            "UPDATE routines SET action_config = ?1 WHERE id = ?2",
+            params![
+                serde_json::json!({
+                    "title": legacy_routine.name,
+                    "description": "Use the owner-gated tool when permitted.",
+                    "max_iterations": 3,
+                    "tool_permissions": [],
+                })
+                .to_string(),
+                legacy_routine.id.to_string(),
+            ],
+        )
+        .await
+        .expect("strip permission_mode from action_config");
+
+        let blocked_engine = setup_owner_gate_engine(db.clone(), owner_gate_trace(false)).await;
+        let first_run_id = blocked_engine
+            .fire_manual(legacy_routine.id, None)
+            .await
+            .expect("fire manual legacy routine");
+        let first_run = wait_for_run_completion(&db, legacy_routine.id, first_run_id).await;
+
+        assert_eq!(first_run.status, RunStatus::Failed);
+        assert_eq!(owner_gate_count(&db).await, 0);
+
+        let update_tool = RoutineUpdateTool::new(db.clone(), blocked_engine.clone());
+        let update_ctx = JobContext::with_user("default", "update", "update legacy routine");
+        update_tool
+            .execute(
+                serde_json::json!({
+                    "name": legacy_routine.name,
+                    "permission_mode": "inherit_owner",
+                }),
+                &update_ctx,
+            )
+            .await
+            .expect("routine_update should succeed");
+
+        let updated = db
+            .get_routine(legacy_routine.id)
+            .await
+            .expect("get_routine")
+            .expect("routine should still exist");
+        assert!(matches!(
+            updated.action,
+            RoutineAction::FullJob {
+                permission_mode: FullJobPermissionMode::InheritOwner,
+                ..
+            }
+        ));
+
+        let allowed_engine = setup_owner_gate_engine(db.clone(), owner_gate_trace(true)).await;
+        let second_run_id = allowed_engine
+            .fire_manual(legacy_routine.id, None)
+            .await
+            .expect("fire manual updated routine");
+        let second_run = wait_for_run_completion(&db, legacy_routine.id, second_run_id).await;
+
+        assert_eq!(second_run.status, RunStatus::Ok);
+        assert_eq!(owner_gate_count(&db).await, 1);
     }
 }

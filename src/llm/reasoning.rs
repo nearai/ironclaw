@@ -155,22 +155,22 @@ pub fn is_silent_reply(text: &str) -> bool {
 
 /// Quick-check: bail early if no reasoning/final tags are present at all.
 static QUICK_TAG_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)<\s*/?\s*(?:think(?:ing)?|thought|thoughts|antthinking|reasoning|reflection|scratchpad|inner_monologue|final)\b").expect("QUICK_TAG_RE")
+    Regex::new(r"(?i)<\s*/?\s*(?:think(?:ing)?|thought|thoughts|antthinking|reasoning|reflection|scratchpad|inner_monologue|final)\b").expect("QUICK_TAG_RE") // safety: hardcoded literal
 });
 
 /// Matches thinking/reasoning open and close tags. Capture group 1 is "/" for close tags.
 /// Whitespace-tolerant, case-insensitive, attribute-aware.
 static THINKING_TAG_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)<\s*(/?)\s*(?:think(?:ing)?|thought|thoughts|antthinking|reasoning|reflection|scratchpad|inner_monologue)\b[^<>]*>").expect("THINKING_TAG_RE")
+    Regex::new(r"(?i)<\s*(/?)\s*(?:think(?:ing)?|thought|thoughts|antthinking|reasoning|reflection|scratchpad|inner_monologue)\b[^<>]*>").expect("THINKING_TAG_RE") // safety: hardcoded literal
 });
 
 /// Matches `<final>` / `</final>` tags. Capture group 1 is "/" for close tags.
 static FINAL_TAG_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)<\s*(/?)\s*final\b[^<>]*>").expect("FINAL_TAG_RE"));
+    LazyLock::new(|| Regex::new(r"(?i)<\s*(/?)\s*final\b[^<>]*>").expect("FINAL_TAG_RE")); // safety: hardcoded literal
 
 /// Matches pipe-delimited reasoning tags: `<|think|>...<|/think|>` etc.
 static PIPE_REASONING_TAG_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)<\|(/?)\s*(?:think(?:ing)?|thought|thoughts|antthinking|reasoning|reflection|scratchpad|inner_monologue)\|>").expect("PIPE_REASONING_TAG_RE")
+    Regex::new(r"(?i)<\|(/?)\s*(?:think(?:ing)?|thought|thoughts|antthinking|reasoning|reflection|scratchpad|inner_monologue)\|>").expect("PIPE_REASONING_TAG_RE") // safety: hardcoded literal
 });
 
 /// Context for reasoning operations.
@@ -902,7 +902,8 @@ Example:
 ## Guidelines
 - Be concise and direct
 - Use markdown formatting where helpful
-- For code, use appropriate code blocks with language tags{}
+- For code, use appropriate code blocks with language tags
+- ALWAYS end your response with a <suggestions> tag containing a JSON array of 1-3 short follow-up commands. Each suggestion must read as something the USER would type to instruct YOU. Write them in the user's voice as direct commands, not as requests FROM you TO the user. Do NOT repeat or rephrase content already in your response. Example: <suggestions>["Suggest dinner spots in my area", "Find a quick recipe for pasta"]</suggestions> Keep each under 80 characters.{}
 
 ## Safety
 - You have no independent goals. Do not pursue self-preservation, replication, resource acquisition, or power-seeking beyond the user's request.

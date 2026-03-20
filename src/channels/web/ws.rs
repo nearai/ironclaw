@@ -265,14 +265,25 @@ async fn handle_client_message(
             if let Some(ref ext_mgr) = state.extension_manager {
                 match ext_mgr.configure_token(&extension_name, &token).await {
                     Ok(result) => {
-                        crate::channels::web::server::clear_auth_mode(state).await;
-                        state
-                            .sse
-                            .broadcast(crate::channels::web::types::SseEvent::AuthCompleted {
-                                extension_name,
-                                success: true,
-                                message: result.message,
-                            });
+                        if result.verification.is_some() {
+                            state.sse.broadcast(
+                                crate::channels::web::types::SseEvent::AuthRequired {
+                                    extension_name: extension_name.clone(),
+                                    instructions: Some(result.message),
+                                    auth_url: None,
+                                    setup_url: None,
+                                },
+                            );
+                        } else {
+                            crate::channels::web::server::clear_auth_mode(state).await;
+                            state.sse.broadcast(
+                                crate::channels::web::types::SseEvent::AuthCompleted {
+                                    extension_name,
+                                    success: true,
+                                    message: result.message,
+                                },
+                            );
+                        }
                     }
                     Err(e) => {
                         let msg = format!("Auth failed: {}", e);
@@ -510,6 +521,7 @@ mod tests {
             cost_guard: None,
             routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
             startup_time: std::time::Instant::now(),
+            active_config: crate::channels::web::server::ActiveConfigSnapshot::default(),
         }
     }
 }

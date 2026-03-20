@@ -162,15 +162,30 @@ pub async fn chat_auth_token_handler(
         .await
     {
         Ok(result) => {
-            clear_auth_mode(&state).await;
+            let mut resp = ActionResponse::ok(result.message.clone());
+            resp.activated = Some(result.activated);
+            resp.auth_url = result.auth_url.clone();
+            resp.verification = result.verification.clone();
+            resp.instructions = result.verification.as_ref().map(|v| v.instructions.clone());
 
-            state.sse.broadcast(SseEvent::AuthCompleted {
-                extension_name: req.extension_name.clone(),
-                success: true,
-                message: result.message.clone(),
-            });
+            if result.verification.is_some() {
+                state.sse.broadcast(SseEvent::AuthRequired {
+                    extension_name: req.extension_name.clone(),
+                    instructions: Some(result.message),
+                    auth_url: None,
+                    setup_url: None,
+                });
+            } else {
+                clear_auth_mode(&state).await;
 
-            Ok(Json(ActionResponse::ok(result.message)))
+                state.sse.broadcast(SseEvent::AuthCompleted {
+                    extension_name: req.extension_name.clone(),
+                    success: true,
+                    message: result.message,
+                });
+            }
+
+            Ok(Json(resp))
         }
         Err(e) => {
             let msg = e.to_string();

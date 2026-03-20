@@ -10,10 +10,28 @@ use axum::{
 use serde::Deserialize;
 use uuid::Uuid;
 
-use crate::agent::routine::{Trigger, next_cron_fire};
+use crate::agent::routine::{
+    FullJobPermissionDefaultMode, FullJobPermissionMode, RoutineAction, Trigger,
+    effective_full_job_tool_permissions, load_full_job_permission_settings, next_cron_fire,
+};
 use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::*;
 use crate::error::RoutineError;
+
+fn permission_mode_label(mode: FullJobPermissionMode) -> String {
+    match mode {
+        FullJobPermissionMode::Explicit => "explicit".to_string(),
+        FullJobPermissionMode::InheritOwner => "inherit_owner".to_string(),
+    }
+}
+
+fn default_permission_mode_label(mode: FullJobPermissionDefaultMode) -> String {
+    match mode {
+        FullJobPermissionDefaultMode::Explicit => "explicit".to_string(),
+        FullJobPermissionDefaultMode::InheritOwner => "inherit_owner".to_string(),
+        FullJobPermissionDefaultMode::CopyOwner => "copy_owner".to_string(),
+    }
+}
 
 pub async fn routines_list_handler(
     State(state): State<Arc<GatewayState>>,
@@ -112,12 +130,40 @@ pub async fn routines_detail_handler(
             job_id: run.job_id,
         })
         .collect();
+    let routine_info = RoutineInfo::from_routine(&routine);
+    let full_job_permissions = match &routine.action {
+        RoutineAction::FullJob {
+            tool_permissions,
+            permission_mode,
+            ..
+        } => {
+            let owner_settings =
+                load_full_job_permission_settings(store.as_ref(), &routine.user_id)
+                    .await
+                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            Some(FullJobPermissionInfo {
+                permission_mode: permission_mode_label(*permission_mode),
+                default_permission_mode: default_permission_mode_label(owner_settings.default_mode),
+                stored_tool_permissions: tool_permissions.clone(),
+                effective_tool_permissions: effective_full_job_tool_permissions(
+                    *permission_mode,
+                    tool_permissions,
+                    &owner_settings.owner_allowed_tools,
+                ),
+                owner_allowed_tools: owner_settings.owner_allowed_tools,
+            })
+        }
+        RoutineAction::Lightweight { .. } => None,
+    };
 
     Ok(Json(RoutineDetailResponse {
         id: routine.id,
         name: routine.name.clone(),
         description: routine.description.clone(),
         enabled: routine.enabled,
+        trigger_type: routine_info.trigger_type,
+        trigger_raw: routine_info.trigger_raw,
+        trigger_summary: routine_info.trigger_summary,
         trigger: serde_json::to_value(&routine.trigger).unwrap_or_default(),
         action: serde_json::to_value(&routine.action).unwrap_or_default(),
         guardrails: serde_json::to_value(&routine.guardrails).unwrap_or_default(),
@@ -127,6 +173,7 @@ pub async fn routines_detail_handler(
         run_count: routine.run_count,
         consecutive_failures: routine.consecutive_failures,
         created_at: routine.created_at.to_rfc3339(),
+        full_job_permissions,
         recent_runs,
     }))
 }

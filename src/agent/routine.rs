@@ -17,7 +17,7 @@
 //!                                     └──────────────┘
 //! ```
 
-use std::collections::hash_map::DefaultHasher;
+use std::collections::{HashSet, hash_map::DefaultHasher};
 use std::hash::{Hash, Hasher};
 use std::str::FromStr;
 use std::time::Duration;
@@ -27,6 +27,171 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::error::RoutineError;
+
+pub const FULL_JOB_OWNER_ALLOWED_TOOLS_SETTING_KEY: &str = "routines.full_job_owner_allowed_tools";
+pub const FULL_JOB_DEFAULT_PERMISSION_MODE_SETTING_KEY: &str =
+    "routines.full_job_default_permission_mode";
+
+/// Persisted per-routine permission mode for autonomous `full_job` routines.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum FullJobPermissionMode {
+    /// Only use the routine's stored `tool_permissions`.
+    #[default]
+    Explicit,
+    /// Union the owner-scoped allowlist with the routine's `tool_permissions`.
+    InheritOwner,
+}
+
+impl FullJobPermissionMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Explicit => "explicit",
+            Self::InheritOwner => "inherit_owner",
+        }
+    }
+}
+
+impl FromStr for FullJobPermissionMode {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "explicit" => Ok(Self::Explicit),
+            "inherit_owner" => Ok(Self::InheritOwner),
+            _ => Err(()),
+        }
+    }
+}
+
+/// Owner-scoped default behavior for newly-created `full_job` routines.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FullJobPermissionDefaultMode {
+    Explicit,
+    #[default]
+    InheritOwner,
+    CopyOwner,
+}
+
+impl FullJobPermissionDefaultMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Explicit => "explicit",
+            Self::InheritOwner => "inherit_owner",
+            Self::CopyOwner => "copy_owner",
+        }
+    }
+}
+
+impl FromStr for FullJobPermissionDefaultMode {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "explicit" => Ok(Self::Explicit),
+            "inherit_owner" => Ok(Self::InheritOwner),
+            "copy_owner" => Ok(Self::CopyOwner),
+            _ => Err(()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct FullJobPermissionSettings {
+    pub owner_allowed_tools: Vec<String>,
+    pub default_mode: FullJobPermissionDefaultMode,
+}
+
+pub fn normalize_tool_names<I>(tools: I) -> Vec<String>
+where
+    I: IntoIterator<Item = String>,
+{
+    let mut seen = HashSet::new();
+    let mut normalized = Vec::new();
+    for tool in tools {
+        let trimmed = tool.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let normalized_name = trimmed.to_string();
+        if seen.insert(normalized_name.clone()) {
+            normalized.push(normalized_name);
+        }
+    }
+    normalized
+}
+
+pub fn parse_full_job_permission_mode(value: &serde_json::Value) -> FullJobPermissionMode {
+    value
+        .get("permission_mode")
+        .and_then(|v| v.as_str())
+        .and_then(|mode| FullJobPermissionMode::from_str(mode).ok())
+        .unwrap_or_default()
+}
+
+fn parse_owner_allowed_tools_setting(value: Option<serde_json::Value>) -> Vec<String> {
+    match value {
+        Some(serde_json::Value::Array(values)) => normalize_tool_names(
+            values
+                .into_iter()
+                .filter_map(|value| value.as_str().map(ToOwned::to_owned)),
+        ),
+        Some(serde_json::Value::String(csv)) => normalize_tool_names(
+            csv.split([',', '\n'])
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned),
+        ),
+        _ => Vec::new(),
+    }
+}
+
+fn parse_default_permission_mode_setting(
+    value: Option<serde_json::Value>,
+) -> FullJobPermissionDefaultMode {
+    value
+        .and_then(|v| v.as_str().map(ToOwned::to_owned))
+        .and_then(|mode| FullJobPermissionDefaultMode::from_str(&mode).ok())
+        .unwrap_or_default()
+}
+
+pub async fn load_full_job_permission_settings(
+    store: &(dyn crate::db::SettingsStore + Sync),
+    user_id: &str,
+) -> Result<FullJobPermissionSettings, crate::error::DatabaseError> {
+    let owner_allowed_tools = parse_owner_allowed_tools_setting(
+        store
+            .get_setting(user_id, FULL_JOB_OWNER_ALLOWED_TOOLS_SETTING_KEY)
+            .await?,
+    );
+    let default_mode = parse_default_permission_mode_setting(
+        store
+            .get_setting(user_id, FULL_JOB_DEFAULT_PERMISSION_MODE_SETTING_KEY)
+            .await?,
+    );
+    Ok(FullJobPermissionSettings {
+        owner_allowed_tools,
+        default_mode,
+    })
+}
+
+pub fn effective_full_job_tool_permissions(
+    permission_mode: FullJobPermissionMode,
+    routine_tool_permissions: &[String],
+    owner_allowed_tools: &[String],
+) -> Vec<String> {
+    match permission_mode {
+        FullJobPermissionMode::Explicit => {
+            normalize_tool_names(routine_tool_permissions.iter().cloned())
+        }
+        FullJobPermissionMode::InheritOwner => normalize_tool_names(
+            owner_allowed_tools
+                .iter()
+                .cloned()
+                .chain(routine_tool_permissions.iter().cloned()),
+        ),
+    }
+}
 
 /// A routine is a named, persistent, user-owned task with a trigger and an action.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -240,6 +405,10 @@ pub enum RoutineAction {
         /// automatically permitted in routine jobs without listing them here.
         #[serde(default)]
         tool_permissions: Vec<String>,
+        /// Whether this routine should inherit the owner's durable full-job
+        /// permission allowlist or use only its explicit `tool_permissions`.
+        #[serde(default)]
+        permission_mode: FullJobPermissionMode,
     },
 }
 
@@ -266,15 +435,14 @@ fn clamp_max_tool_rounds(value: u64) -> u32 {
 
 /// Parse a `tool_permissions` JSON array into a `Vec<String>`.
 pub fn parse_tool_permissions(value: &serde_json::Value) -> Vec<String> {
-    value
-        .get("tool_permissions")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect()
-        })
-        .unwrap_or_default()
+    normalize_tool_names(
+        value
+            .get("tool_permissions")
+            .and_then(|v| v.as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|v| v.as_str().map(String::from)),
+    )
 }
 
 impl RoutineAction {
@@ -352,11 +520,13 @@ impl RoutineAction {
                     .unwrap_or(default_max_iterations() as u64)
                     as u32;
                 let tool_permissions = parse_tool_permissions(&config);
+                let permission_mode = parse_full_job_permission_mode(&config);
                 Ok(RoutineAction::FullJob {
                     title,
                     description,
                     max_iterations,
                     tool_permissions,
+                    permission_mode,
                 })
             }
             other => Err(RoutineError::UnknownActionType {
@@ -386,11 +556,13 @@ impl RoutineAction {
                 description,
                 max_iterations,
                 tool_permissions,
+                permission_mode,
             } => serde_json::json!({
                 "title": title,
                 "description": description,
                 "max_iterations": max_iterations,
                 "tool_permissions": tool_permissions,
+                "permission_mode": permission_mode,
             }),
         }
     }
@@ -422,8 +594,8 @@ impl Default for RoutineGuardrails {
 pub struct NotifyConfig {
     /// Channel to notify on (None = default/broadcast all).
     pub channel: Option<String>,
-    /// User to notify.
-    pub user: String,
+    /// Explicit target to notify. None means "resolve the owner's last-seen target".
+    pub user: Option<String>,
     /// Notify when routine produces actionable output.
     pub on_attention: bool,
     /// Notify when routine errors.
@@ -436,7 +608,7 @@ impl Default for NotifyConfig {
     fn default() -> Self {
         Self {
             channel: None,
-            user: "default".to_string(),
+            user: None,
             on_attention: true,
             on_failure: true,
             on_success: false,
@@ -538,11 +710,174 @@ pub fn next_cron_fire(
     }
 }
 
+/// Describe common routine cron patterns in plain English.
+///
+/// Falls back to `cron: <raw>` for malformed or complex expressions.
+pub fn describe_cron(schedule: &str, timezone: Option<&str>) -> String {
+    fn fallback(raw: &str) -> String {
+        if raw.trim().is_empty() {
+            "cron: (empty)".to_string()
+        } else {
+            format!("cron: {}", raw.trim())
+        }
+    }
+
+    fn parse_u8_token(token: &str) -> Option<u8> {
+        token.parse::<u8>().ok()
+    }
+
+    fn parse_step(token: &str) -> Option<u8> {
+        token
+            .strip_prefix("*/")
+            .and_then(parse_u8_token)
+            .filter(|n| *n > 0)
+    }
+
+    fn weekday_name(dow: &str) -> Option<&'static str> {
+        let normalized = dow.trim().to_ascii_uppercase();
+        match normalized.as_str() {
+            "MON" | "1" => Some("Monday"),
+            "TUE" | "2" => Some("Tuesday"),
+            "WED" | "3" => Some("Wednesday"),
+            "THU" | "4" => Some("Thursday"),
+            "FRI" | "5" => Some("Friday"),
+            "SAT" | "6" => Some("Saturday"),
+            "SUN" | "0" | "7" => Some("Sunday"),
+            _ => None,
+        }
+    }
+
+    fn format_time(hour: u8, minute: u8) -> String {
+        if hour == 0 && minute == 0 {
+            return "midnight".to_string();
+        }
+        let (display_hour, am_pm) = match hour {
+            0 => (12, "AM"),
+            1..=11 => (hour, "AM"),
+            12 => (12, "PM"),
+            _ => (hour - 12, "PM"),
+        };
+        format!("{display_hour}:{minute:02} {am_pm}")
+    }
+
+    fn ordinal(n: u8) -> String {
+        let suffix = if (11..=13).contains(&(n % 100)) {
+            "th"
+        } else {
+            match n % 10 {
+                1 => "st",
+                2 => "nd",
+                3 => "rd",
+                _ => "th",
+            }
+        };
+        format!("{n}{suffix}")
+    }
+
+    fn describe_inner(raw: &str) -> Option<String> {
+        let fields: Vec<&str> = raw.split_whitespace().collect();
+        let (sec, min, hour, dom, month, dow, year) = match fields.len() {
+            5 => (
+                "0", fields[0], fields[1], fields[2], fields[3], fields[4], None,
+            ),
+            6 => (
+                fields[0], fields[1], fields[2], fields[3], fields[4], fields[5], None,
+            ),
+            7 => (
+                fields[0],
+                fields[1],
+                fields[2],
+                fields[3],
+                fields[4],
+                fields[5],
+                Some(fields[6]),
+            ),
+            _ => return None,
+        };
+
+        if year.is_some_and(|v| v != "*") {
+            return None;
+        }
+
+        if sec == "0"
+            && hour == "*"
+            && dom == "*"
+            && month == "*"
+            && dow == "*"
+            && let Some(step) = parse_step(min)
+        {
+            return Some(match step {
+                1 => "Every minute".to_string(),
+                n => format!("Every {n} minutes"),
+            });
+        }
+
+        if sec == "0"
+            && min == "0"
+            && dom == "*"
+            && month == "*"
+            && dow == "*"
+            && let Some(step) = parse_step(hour)
+        {
+            return Some(match step {
+                1 => "Every hour".to_string(),
+                n => format!("Every {n} hours"),
+            });
+        }
+
+        let hour = parse_u8_token(hour).filter(|h| *h <= 23)?;
+        let minute = parse_u8_token(min).filter(|m| *m <= 59)?;
+        let time = format_time(hour, minute);
+        let time_phrase = if time == "midnight" {
+            "at midnight".to_string()
+        } else {
+            format!("at {time}")
+        };
+
+        if sec == "0" && dom == "*" && month == "*" && dow == "*" {
+            return Some(format!("Daily {time_phrase}"));
+        }
+
+        if sec == "0" && dom == "*" && month == "*" && dow.eq_ignore_ascii_case("MON-FRI") {
+            return Some(format!("Weekdays {time_phrase}"));
+        }
+
+        if sec == "0"
+            && dom == "*"
+            && month == "*"
+            && let Some(day_name) = weekday_name(dow)
+        {
+            return Some(format!("Every {day_name} {time_phrase}"));
+        }
+
+        if sec == "0"
+            && month == "*"
+            && dow == "*"
+            && let Some(day_of_month) = parse_u8_token(dom).filter(|d| (1..=31).contains(d))
+        {
+            return Some(format!(
+                "{} of every month {time_phrase}",
+                ordinal(day_of_month)
+            ));
+        }
+
+        None
+    }
+
+    let mut description = describe_inner(schedule).unwrap_or_else(|| fallback(schedule));
+    if let Some(tz) = timezone.map(str::trim).filter(|tz| !tz.is_empty()) {
+        description.push_str(" (");
+        description.push_str(tz);
+        description.push(')');
+    }
+    description
+}
+
 #[cfg(test)]
 mod tests {
     use crate::agent::routine::{
-        MAX_TOOL_ROUNDS_LIMIT, RoutineAction, RoutineGuardrails, RunStatus, Trigger, content_hash,
-        next_cron_fire,
+        FullJobPermissionMode, MAX_TOOL_ROUNDS_LIMIT, RoutineAction, RoutineGuardrails, RunStatus,
+        Trigger, content_hash, describe_cron, effective_full_job_tool_permissions, next_cron_fire,
     };
 
     #[test]
@@ -610,13 +945,65 @@ mod tests {
             description: "Review and deploy pending changes".to_string(),
             max_iterations: 5,
             tool_permissions: vec!["shell".to_string()],
+            permission_mode: FullJobPermissionMode::InheritOwner,
         };
         let json = action.to_config_json();
         let parsed = RoutineAction::from_db("full_job", json).expect("parse full_job");
         assert!(
-            matches!(parsed, RoutineAction::FullJob { title, max_iterations, tool_permissions, .. }
-            if title == "Deploy review" && max_iterations == 5 && tool_permissions == vec!["shell".to_string()])
+            matches!(parsed, RoutineAction::FullJob { title, max_iterations, tool_permissions, permission_mode, .. }
+            if title == "Deploy review"
+                && max_iterations == 5
+                && tool_permissions == vec!["shell".to_string()]
+                && permission_mode == FullJobPermissionMode::InheritOwner)
         );
+    }
+
+    #[test]
+    fn test_action_full_job_missing_permission_mode_defaults_to_explicit() {
+        let parsed = RoutineAction::from_db(
+            "full_job",
+            serde_json::json!({
+                "title": "Deploy review",
+                "description": "Review and deploy pending changes",
+                "max_iterations": 5,
+                "tool_permissions": ["shell"]
+            }),
+        )
+        .expect("parse full_job");
+        assert!(matches!(
+            parsed,
+            RoutineAction::FullJob {
+                permission_mode: FullJobPermissionMode::Explicit,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_effective_full_job_tool_permissions_inherit_owner_unions_lists() {
+        let resolved = effective_full_job_tool_permissions(
+            FullJobPermissionMode::InheritOwner,
+            &["shell".to_string(), "message".to_string()],
+            &["message".to_string(), "http".to_string()],
+        );
+        assert_eq!(
+            resolved,
+            vec![
+                "message".to_string(),
+                "http".to_string(),
+                "shell".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn test_effective_full_job_tool_permissions_explicit_ignores_owner_defaults() {
+        let resolved = effective_full_job_tool_permissions(
+            FullJobPermissionMode::Explicit,
+            &["shell".to_string()],
+            &["message".to_string(), "http".to_string()],
+        );
+        assert_eq!(resolved, vec!["shell".to_string()]);
     }
 
     #[test]
@@ -696,6 +1083,40 @@ mod tests {
             .expect("has next");
         // EST is UTC-5 (or EDT UTC-4), so the UTC result should differ
         assert_ne!(next_utc, next_est, "timezone should shift the fire time");
+    }
+
+    #[test]
+    fn test_describe_cron_common_patterns() {
+        let cases = vec![
+            ("0 */30 * * * *", None, "Every 30 minutes"),
+            ("0 0 9 * * *", None, "Daily at 9:00 AM"),
+            ("0 0 9 * * MON-FRI", None, "Weekdays at 9:00 AM"),
+            ("0 0 */2 * * *", None, "Every 2 hours"),
+            ("0 0 0 * * *", None, "Daily at midnight"),
+            ("0 0 9 * * 1", None, "Every Monday at 9:00 AM"),
+            ("0 0 9 1 * *", None, "1st of every month at 9:00 AM"),
+            (
+                "0 0 9 * * MON-FRI",
+                Some("America/New_York"),
+                "Weekdays at 9:00 AM (America/New_York)",
+            ),
+            ("1 2 3 4 5 6", None, "cron: 1 2 3 4 5 6"),
+        ];
+
+        for (schedule, timezone, expected) in cases {
+            let actual = describe_cron(schedule, timezone);
+            assert_eq!(actual, expected); // safety: test-only assertion in #[cfg(test)] module
+        }
+    }
+
+    #[test]
+    fn test_describe_cron_edge_cases() {
+        assert_eq!(describe_cron("", None), "cron: (empty)"); // safety: test-only assertion in #[cfg(test)] module
+        assert_eq!(describe_cron("not a cron", None), "cron: not a cron"); // safety: test-only assertion in #[cfg(test)] module
+        let weekdays_5_field = describe_cron("0 9 * * MON-FRI", None);
+        assert_eq!(weekdays_5_field, "Weekdays at 9:00 AM"); // safety: test-only assertion in #[cfg(test)] module
+        let weekdays_7_field = describe_cron("0 0 9 * * MON-FRI *", None);
+        assert_eq!(weekdays_7_field, "Weekdays at 9:00 AM"); // safety: test-only assertion in #[cfg(test)] module
     }
 
     #[test]

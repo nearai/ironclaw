@@ -9,7 +9,6 @@ use crate::llm::config::*;
 use crate::llm::registry::{ProviderProtocol, ProviderRegistry};
 use crate::llm::session::SessionConfig;
 use crate::settings::Settings;
-
 impl LlmConfig {
     /// Create a test-friendly config without reading env vars.
     #[cfg(feature = "libsql")]
@@ -39,6 +38,8 @@ impl LlmConfig {
             provider: None,
             bedrock: None,
             request_timeout_secs: 120,
+            cheap_model: None,
+            smart_routing_cascade: false,
         }
     }
 
@@ -169,6 +170,14 @@ impl LlmConfig {
 
         let request_timeout_secs = parse_optional_env("LLM_REQUEST_TIMEOUT_SECS", 120)?;
 
+        // Generic cheap model (works with any backend).
+        // Falls back to NearAI-specific cheap_model in provider chain logic.
+        let cheap_model = optional_env("LLM_CHEAP_MODEL")?;
+
+        // Generic smart routing cascade flag.
+        // Defaults to true. Overrides NearAI-specific smart_routing_cascade.
+        let smart_routing_cascade = parse_optional_env("SMART_ROUTING_CASCADE", true)?;
+
         Ok(Self {
             backend: if is_nearai {
                 "nearai".to_string()
@@ -184,6 +193,8 @@ impl LlmConfig {
             provider,
             bedrock,
             request_timeout_secs,
+            cheap_model,
+            smart_routing_cascade,
         })
     }
 
@@ -241,8 +252,30 @@ impl LlmConfig {
             )
         };
 
-        // Resolve API key from env
-        let api_key = if let Some(env_var) = api_key_env {
+        // Codex auth.json override: when LLM_USE_CODEX_AUTH=true,
+        // credentials from the Codex CLI's auth.json take highest priority
+        // (over env vars AND secrets store). In ChatGPT mode, the base URL
+        // is also overridden to the private ChatGPT backend endpoint.
+        let mut codex_base_url_override: Option<String> = None;
+        let codex_creds = if parse_optional_env("LLM_USE_CODEX_AUTH", false)? {
+            let path = optional_env("CODEX_AUTH_PATH")?
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(crate::llm::codex_auth::default_codex_auth_path);
+            crate::llm::codex_auth::load_codex_credentials(&path)
+        } else {
+            None
+        };
+
+        let codex_refresh_token = codex_creds.as_ref().and_then(|c| c.refresh_token.clone());
+        let codex_auth_path = codex_creds.as_ref().and_then(|c| c.auth_path.clone());
+
+        let api_key = if let Some(creds) = codex_creds {
+            if creds.is_chatgpt_mode {
+                codex_base_url_override = Some(creds.base_url().to_string());
+            }
+            Some(creds.token)
+        } else if let Some(env_var) = api_key_env {
+            // Resolve API key from env (including secrets store overlay)
             optional_env(env_var)?.map(SecretString::from)
         } else {
             None
@@ -259,22 +292,28 @@ impl LlmConfig {
             }
         }
 
-        // Resolve base URL: env var > settings (backward compat) > registry default
-        let base_url = if let Some(env_var) = base_url_env {
-            optional_env(env_var)?
-        } else {
-            None
-        }
-        .or_else(|| {
-            // Backward compat: check legacy settings fields
-            match backend {
-                "ollama" => settings.ollama_base_url.clone(),
-                "openai_compatible" | "openrouter" => settings.openai_compatible_base_url.clone(),
-                _ => None,
-            }
-        })
-        .or_else(|| default_base_url.map(String::from))
-        .unwrap_or_default();
+        // Resolve base URL: codex override > env var > settings (backward compat) > registry default
+        let is_codex_chatgpt = codex_base_url_override.is_some();
+        let base_url = codex_base_url_override
+            .or_else(|| {
+                if let Some(env_var) = base_url_env {
+                    optional_env(env_var).ok().flatten()
+                } else {
+                    None
+                }
+            })
+            .or_else(|| {
+                // Backward compat: check legacy settings fields
+                match backend {
+                    "ollama" => settings.ollama_base_url.clone(),
+                    "openai_compatible" | "openrouter" => {
+                        settings.openai_compatible_base_url.clone()
+                    }
+                    _ => None,
+                }
+            })
+            .or_else(|| default_base_url.map(String::from))
+            .unwrap_or_default();
 
         if base_url_required
             && base_url.is_empty()
@@ -340,6 +379,9 @@ impl LlmConfig {
             model,
             extra_headers,
             oauth_token,
+            is_codex_chatgpt,
+            refresh_token: codex_refresh_token,
+            auth_path: codex_auth_path,
             cache_retention,
             unsupported_params,
         })

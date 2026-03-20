@@ -14,33 +14,26 @@ use crate::channels::web::types::*;
 pub(crate) fn derive_activation_status(
     ext: &crate::extensions::InstalledExtension,
     pairing_store: &crate::pairing::PairingStore,
-) -> Option<String> {
+    has_owner_binding: bool,
+) -> Option<ExtensionActivationStatus> {
     if ext.kind == crate::extensions::ExtensionKind::WasmChannel {
-        Some(if ext.activation_error.is_some() {
-            "failed".to_string()
-        } else if !ext.authenticated {
-            "installed".to_string()
-        } else if ext.active {
-            let allowlist_exists = pairing_store.has_allow_from_file(&ext.name).unwrap_or(false);
-            let has_paired = pairing_store
-                .read_allow_from(&ext.name)
-                .map(|list| !list.is_empty())
-                .unwrap_or(false);
-            if !allowlist_exists || has_paired {
-                "active".to_string()
-            } else {
-                "pairing".to_string()
-            }
-        } else {
-            "configured".to_string()
-        })
+        let allowlist_exists = pairing_store.has_allow_from_file(&ext.name).unwrap_or(false);
+        let has_paired = pairing_store
+            .read_allow_from(&ext.name)
+            .map(|list| !list.is_empty())
+            .unwrap_or(false);
+        classify_wasm_channel_activation(
+            ext,
+            has_paired,
+            has_owner_binding || (ext.active && !allowlist_exists),
+        )
     } else if ext.kind == crate::extensions::ExtensionKind::ChannelRelay {
         Some(if ext.active {
-            "active".to_string()
+            ExtensionActivationStatus::Active
         } else if ext.authenticated {
-            "configured".to_string()
+            ExtensionActivationStatus::Configured
         } else {
-            "installed".to_string()
+            ExtensionActivationStatus::Installed
         })
     } else {
         None
@@ -61,10 +54,22 @@ pub async fn extensions_list_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     let pairing_store = crate::pairing::PairingStore::new();
+    let mut owner_bound_channels = std::collections::HashSet::new();
+    for ext in &installed {
+        if ext.kind == crate::extensions::ExtensionKind::WasmChannel
+            && ext_mgr.has_wasm_channel_owner_binding(&ext.name).await
+        {
+            owner_bound_channels.insert(ext.name.clone());
+        }
+    }
     let extensions = installed
         .into_iter()
         .map(|ext| {
-            let activation_status = derive_activation_status(&ext, &pairing_store);
+            let activation_status = derive_activation_status(
+                &ext,
+                &pairing_store,
+                owner_bound_channels.contains(&ext.name),
+            );
             ExtensionInfo {
                 name: ext.name,
                 display_name: ext.display_name,
@@ -93,6 +98,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::derive_activation_status;
+    use crate::channels::web::types::ExtensionActivationStatus;
     use crate::extensions::{ExtensionKind, InstalledExtension};
     use crate::pairing::PairingStore;
 
@@ -120,7 +126,10 @@ mod tests {
         let pairing_store = PairingStore::with_base_dir(temp_dir.path().to_path_buf());
         let ext = active_authenticated_wasm_channel("discord");
 
-        assert_eq!(derive_activation_status(&ext, &pairing_store).as_deref(), Some("active"));
+        assert_eq!(
+            derive_activation_status(&ext, &pairing_store, false),
+            Some(ExtensionActivationStatus::Active)
+        );
     }
 
     #[test]
@@ -135,7 +144,10 @@ mod tests {
         )
         .expect("write empty allowlist");
 
-        assert_eq!(derive_activation_status(&ext, &pairing_store).as_deref(), Some("pairing"));
+        assert_eq!(
+            derive_activation_status(&ext, &pairing_store, false),
+            Some(ExtensionActivationStatus::Pairing)
+        );
     }
 }
 

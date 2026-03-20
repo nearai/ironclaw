@@ -19,6 +19,9 @@ let _loadThreadsTimer = null;
 const JOB_EVENTS_CAP = 500;
 const MEMORY_SEARCH_QUERY_MAX_LENGTH = 100;
 let stagedImages = [];
+let authFlowPending = false;
+let _ghostSuggestion = '';
+let currentSettingsSubtab = 'inference';
 
 // --- Slash Commands ---
 
@@ -133,6 +136,7 @@ function apiFetch(path, options) {
         throw new Error(body || (res.status + ' ' + res.statusText));
       });
     }
+    if (res.status === 204) return null;
     return res.json();
   });
 }
@@ -286,7 +290,16 @@ function connectSSE() {
       if (data.thread_id) debouncedLoadThreads();
       return;
     }
+    clearSuggestionChips();
     showActivityThinking(data.message);
+  });
+
+  eventSource.addEventListener('suggestions', (e) => {
+    const data = JSON.parse(e.data);
+    if (!isCurrentThread(data.thread_id)) return;
+    if (data.suggestions && data.suggestions.length > 0) {
+      showSuggestionChips(data.suggestions);
+    }
   });
 
   eventSource.addEventListener('tool_started', (e) => {
@@ -353,8 +366,8 @@ function connectSSE() {
       debouncedLoadThreads();
     }
 
-    // Extension setup flows can surface approvals while user is on Extensions tab.
-    if (currentTab === 'extensions') loadExtensions();
+    // Extension setup flows can surface approvals from any settings subtab.
+    if (currentTab === 'settings') refreshCurrentSettingsTab();
   });
 
   eventSource.addEventListener('auth_required', (e) => {
@@ -362,11 +375,12 @@ function connectSSE() {
   });
 
   eventSource.addEventListener('auth_completed', (e) => {
-    handleAuthCompleted(JSON.parse(e.data));
+    const data = JSON.parse(e.data);
+    handleAuthCompleted(data);
   });
 
   eventSource.addEventListener('extension_status', (e) => {
-    if (currentTab === 'extensions') loadExtensions();
+    if (currentTab === 'settings') refreshCurrentSettingsTab();
   });
 
   eventSource.addEventListener('image_generated', (e) => {
@@ -423,10 +437,66 @@ function isCurrentThread(threadId) {
   return threadId === currentThreadId;
 }
 
+// --- Suggestion Chips ---
+
+function showSuggestionChips(suggestions) {
+  // Clear previous chips/ghost without restoring placeholder (we'll set it below)
+  _ghostSuggestion = '';
+  const container = document.getElementById('suggestion-chips');
+  container.innerHTML = '';
+  const ghost = document.getElementById('ghost-text');
+  ghost.style.display = 'none';
+  const wrapper = document.querySelector('.chat-input-wrapper');
+  if (wrapper) wrapper.classList.remove('has-ghost');
+
+  _ghostSuggestion = suggestions[0] || '';
+  const input = document.getElementById('chat-input');
+  suggestions.forEach(text => {
+    const chip = document.createElement('button');
+    chip.className = 'suggestion-chip';
+    chip.textContent = text;
+    chip.addEventListener('click', () => {
+      input.value = text;
+      clearSuggestionChips();
+      autoResizeTextarea(input);
+      input.focus();
+      sendMessage();
+    });
+    container.appendChild(chip);
+  });
+  container.style.display = 'flex';
+  // Show first suggestion as ghost text in the input so user knows Tab works
+  if (_ghostSuggestion && input.value === '') {
+    ghost.textContent = _ghostSuggestion;
+    ghost.style.display = 'block';
+    input.closest('.chat-input-wrapper').classList.add('has-ghost');
+  }
+}
+
+function clearSuggestionChips() {
+  _ghostSuggestion = '';
+  const container = document.getElementById('suggestion-chips');
+  if (container) {
+    container.innerHTML = '';
+    container.style.display = 'none';
+  }
+  const ghost = document.getElementById('ghost-text');
+  if (ghost) ghost.style.display = 'none';
+  const wrapper = document.querySelector('.chat-input-wrapper');
+  if (wrapper) wrapper.classList.remove('has-ghost');
+}
+
 // --- Chat ---
 
 function sendMessage() {
+  clearSuggestionChips();
   const input = document.getElementById('chat-input');
+  if (authFlowPending) {
+    showToast('Complete the auth step before sending chat messages.', 'info');
+    const tokenField = document.querySelector('.auth-card .auth-token-input input');
+    if (tokenField) tokenField.focus();
+    return;
+  }
   if (!currentThreadId) {
     console.warn('sendMessage: no thread selected, ignoring');
     return;
@@ -455,12 +525,11 @@ function sendMessage() {
 }
 
 function enableChatInput() {
-  if (currentThreadIsReadOnly) return;
+  if (currentThreadIsReadOnly || authFlowPending) return;
   const input = document.getElementById('chat-input');
   const btn = document.getElementById('send-btn');
   if (input) {
     input.disabled = false;
-    input.placeholder = I18n.t('chat.inputPlaceholder');
   }
   if (btn) btn.disabled = false;
 }
@@ -538,6 +607,22 @@ document.getElementById('chat-input').addEventListener('paste', (e) => {
       if (file) handleImageFiles([file]);
     }
   }
+});
+
+const chatMessagesEl = document.getElementById('chat-messages');
+chatMessagesEl.addEventListener('copy', (e) => {
+  const selection = window.getSelection();
+  if (!selection || selection.isCollapsed) return;
+  const anchorNode = selection.anchorNode;
+  const focusNode = selection.focusNode;
+  if (!anchorNode || !focusNode) return;
+  if (!chatMessagesEl.contains(anchorNode) || !chatMessagesEl.contains(focusNode)) return;
+  const text = selection.toString();
+  if (!text || !e.clipboardData) return;
+  // Force plain-text clipboard output so dark-theme styling never leaks on paste.
+  e.preventDefault();
+  e.clipboardData.clearData();
+  e.clipboardData.setData('text/plain', text);
 });
 
 function addGeneratedImage(dataUrl, path) {
@@ -1053,18 +1138,19 @@ function showApproval(data) {
   approveBtn.textContent = I18n.t('approval.approve');
   approveBtn.addEventListener('click', () => sendApprovalAction(data.request_id, 'approve'));
 
-  const alwaysBtn = document.createElement('button');
-  alwaysBtn.className = 'always';
-  alwaysBtn.textContent = I18n.t('approval.always');
-  alwaysBtn.addEventListener('click', () => sendApprovalAction(data.request_id, 'always'));
-
   const denyBtn = document.createElement('button');
   denyBtn.className = 'deny';
   denyBtn.textContent = I18n.t('approval.deny');
   denyBtn.addEventListener('click', () => sendApprovalAction(data.request_id, 'deny'));
 
   actions.appendChild(approveBtn);
-  actions.appendChild(alwaysBtn);
+  if (data.allow_always !== false) {
+    const alwaysBtn = document.createElement('button');
+    alwaysBtn.className = 'always';
+    alwaysBtn.textContent = I18n.t('approval.always');
+    alwaysBtn.addEventListener('click', () => sendApprovalAction(data.request_id, 'always'));
+    actions.appendChild(alwaysBtn);
+  }
   actions.appendChild(denyBtn);
   card.appendChild(actions);
 
@@ -1123,9 +1209,12 @@ function showJobCard(data) {
 
 function handleAuthRequired(data) {
   if (data.auth_url) {
+    setAuthFlowPending(true, data.instructions);
     // OAuth flow: show the global auth prompt with an OAuth button + optional token paste field.
     showAuthCard(data);
   } else {
+    if (getConfigureOverlay(data.extension_name)) return;
+    setAuthFlowPending(true, data.instructions);
     // Setup flow: fetch the extension's credential schema and show the multi-field
     // configure modal (the same UI used by the Extensions tab "Setup" button).
     showConfigureModal(data.extension_name);
@@ -1133,14 +1222,21 @@ function handleAuthRequired(data) {
 }
 
 function handleAuthCompleted(data) {
-  // Dismiss only the matching extension's UI so unrelated setup work is not interrupted.
+  showToast(data.message, data.success ? 'success' : 'error');
+  // Dismiss only the matching extension's UI so stale prompts are cleared.
   removeAuthCard(data.extension_name);
   closeConfigureModal(data.extension_name);
-  showToast(data.message, data.success ? 'success' : 'error');
+  if (!data.success) {
+    setAuthFlowPending(false);
+    if (currentTab === 'extensions') loadExtensions();
+    enableChatInput();
+    return;
+  }
+  setAuthFlowPending(false);
   if (shouldShowChannelConnectedMessage(data.extension_name, data.success)) {
     addMessage('system', 'Telegram is now connected. You can message me there and I can send you notifications.');
   }
-  if (currentTab === 'extensions') loadExtensions();
+  if (currentTab === 'settings') refreshCurrentSettingsTab();
   enableChatInput();
 }
 
@@ -1316,6 +1412,7 @@ function cancelAuth(extensionName) {
     body: { extension_name: extensionName },
   }).catch(() => {});
   removeAuthCard(extensionName);
+  setAuthFlowPending(false);
   enableChatInput();
 }
 
@@ -1333,7 +1430,24 @@ function showAuthCardError(extensionName, message) {
   }
 }
 
+function setAuthFlowPending(pending, instructions) {
+  authFlowPending = !!pending;
+  const input = document.getElementById('chat-input');
+  const btn = document.getElementById('send-btn');
+  if (!input || !btn) return;
+  if (authFlowPending) {
+    input.disabled = true;
+    btn.disabled = true;
+    return;
+  }
+  if (!currentThreadIsReadOnly) {
+    input.disabled = false;
+    btn.disabled = false;
+  }
+}
+
 function loadHistory(before) {
+  clearSuggestionChips();
   let historyUrl = '/api/chat/history?limit=50';
   if (currentThreadId) {
     historyUrl += '&thread_id=' + encodeURIComponent(currentThreadId);
@@ -1629,6 +1743,7 @@ function switchToAssistant() {
 }
 
 function switchThread(threadId) {
+  clearSuggestionChips();
   finalizeActivityGroup();
   currentThreadId = threadId;
   unreadThreads.delete(threadId);
@@ -1661,6 +1776,15 @@ chatInput.addEventListener('keydown', (e) => {
   const acEl = document.getElementById('slash-autocomplete');
   const acVisible = acEl && acEl.style.display !== 'none';
 
+  // Accept first suggestion with Tab (plain Tab only, not Shift+Tab)
+  if (e.key === 'Tab' && !e.shiftKey && !acVisible && _ghostSuggestion && chatInput.value === '') {
+    e.preventDefault();
+    chatInput.value = _ghostSuggestion;
+    clearSuggestionChips();
+    autoResizeTextarea(chatInput);
+    return;
+  }
+
   if (acVisible) {
     const items = acEl.querySelectorAll('.slash-ac-item');
     if (e.key === 'ArrowDown') {
@@ -1688,7 +1812,10 @@ chatInput.addEventListener('keydown', (e) => {
     }
   }
 
-  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+  // Safari fires compositionend before keydown, so e.isComposing is already false
+  // when Enter confirms IME input. keyCode 229 (VK_PROCESS) catches this case.
+  // See https://bugs.webkit.org/show_bug.cgi?id=165004
+  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && e.keyCode !== 229) {
     e.preventDefault();
     hideSlashAutocomplete();
     sendMessage();
@@ -1697,6 +1824,16 @@ chatInput.addEventListener('keydown', (e) => {
 chatInput.addEventListener('input', () => {
   autoResizeTextarea(chatInput);
   filterSlashCommands(chatInput.value);
+  const ghost = document.getElementById('ghost-text');
+  const wrapper = chatInput.closest('.chat-input-wrapper');
+  if (chatInput.value !== '') {
+    ghost.style.display = 'none';
+    wrapper.classList.remove('has-ghost');
+  } else if (_ghostSuggestion) {
+    ghost.textContent = _ghostSuggestion;
+    ghost.style.display = 'block';
+    wrapper.classList.add('has-ghost');
+  }
 });
 chatInput.addEventListener('blur', () => {
   // Small delay so mousedown on autocomplete item fires first
@@ -1744,13 +1881,11 @@ function switchTab(tab) {
   if (tab === 'jobs') loadJobs();
   if (tab === 'routines') loadRoutines();
   if (tab === 'logs') applyLogFilters();
-  if (tab === 'extensions') {
-    loadExtensions();
-    startPairingPoll();
+  if (tab === 'settings') {
+    loadSettingsSubtab(currentSettingsSubtab);
   } else {
     stopPairingPoll();
   }
-  if (tab === 'skills') loadSkills();
 }
 
 // --- Memory (filesystem tree) ---
@@ -2137,61 +2272,42 @@ var kindLabels = { 'wasm_channel': 'Channel', 'wasm_tool': 'Tool', 'mcp_server':
 function loadExtensions() {
   const extList = document.getElementById('extensions-list');
   const wasmList = document.getElementById('available-wasm-list');
-  const mcpList = document.getElementById('mcp-servers-list');
-  const toolsTbody = document.getElementById('tools-tbody');
-  const toolsEmpty = document.getElementById('tools-empty');
+  extList.innerHTML = renderCardsSkeleton(3);
 
-  // Fetch all three in parallel
+  // Fetch extensions and registry in parallel
   Promise.all([
     apiFetch('/api/extensions').catch(() => ({ extensions: [] })),
-    apiFetch('/api/extensions/tools').catch(() => ({ tools: [] })),
     apiFetch('/api/extensions/registry').catch(function(err) { console.warn('registry fetch failed:', err); return { entries: [] }; }),
-  ]).then(([extData, toolData, registryData]) => {
-    // Render installed extensions
-    if (extData.extensions.length === 0) {
+  ]).then(([extData, registryData]) => {
+    // Render installed extensions (exclude wasm_channel and mcp_server — shown in their own tabs)
+    var nonChannelExts = extData.extensions.filter(function(e) {
+      return e.kind !== 'wasm_channel' && e.kind !== 'mcp_server';
+    });
+    if (nonChannelExts.length === 0) {
       extList.innerHTML = '<div class="empty-state">' + I18n.t('extensions.noInstalled') + '</div>';
     } else {
       extList.innerHTML = '';
-      for (const ext of extData.extensions) {
+      for (const ext of nonChannelExts) {
         extList.appendChild(renderExtensionCard(ext));
       }
     }
 
-    // Split registry entries by kind
-    var wasmEntries = registryData.entries.filter(function(e) { return e.kind !== 'mcp_server' && !e.installed; });
-    var mcpEntries = registryData.entries.filter(function(e) { return e.kind === 'mcp_server'; });
+    // Available extensions (exclude MCP servers and channels — they have their own tabs)
+    var wasmEntries = registryData.entries.filter(function(e) {
+      return e.kind !== 'mcp_server' && e.kind !== 'wasm_channel' && e.kind !== 'channel' && !e.installed;
+    });
 
-    // Available WASM extensions
+    var wasmSection = document.getElementById('available-wasm-section');
     if (wasmEntries.length === 0) {
-      wasmList.innerHTML = '<div class="empty-state">' + I18n.t('extensions.noAvailable') + '</div>';
+      if (wasmSection) wasmSection.style.display = 'none';
     } else {
+      if (wasmSection) wasmSection.style.display = '';
       wasmList.innerHTML = '';
       for (const entry of wasmEntries) {
         wasmList.appendChild(renderAvailableExtensionCard(entry));
       }
     }
 
-    // MCP servers (show both installed and uninstalled)
-    if (mcpEntries.length === 0) {
-      mcpList.innerHTML = '<div class="empty-state">' + I18n.t('mcp.noServers') + '</div>';
-    } else {
-      mcpList.innerHTML = '';
-      for (const entry of mcpEntries) {
-        var installedExt = extData.extensions.find(function(e) { return e.name === entry.name; });
-        mcpList.appendChild(renderMcpServerCard(entry, installedExt));
-      }
-    }
-
-    // Render tools
-    if (toolData.tools.length === 0) {
-      toolsTbody.innerHTML = '';
-      toolsEmpty.style.display = 'block';
-    } else {
-      toolsEmpty.style.display = 'none';
-      toolsTbody.innerHTML = toolData.tools.map((t) =>
-        '<tr><td>' + escapeHtml(t.name) + '</td><td>' + escapeHtml(t.description) + '</td></tr>'
-      ).join('');
-    }
   });
 }
 
@@ -2257,18 +2373,18 @@ function renderAvailableExtensionCard(entry) {
           showToast('Opening authentication for ' + entry.display_name, 'info');
           openOAuthUrl(res.auth_url);
         }
-        loadExtensions();
+        refreshCurrentSettingsTab();
         // Auto-open configure for WASM channels
         if (entry.kind === 'wasm_channel') {
           showConfigureModal(entry.name);
         }
       } else {
         showToast('Install: ' + (res.message || 'unknown error'), 'error');
-        loadExtensions();
+        refreshCurrentSettingsTab();
       }
     }).catch(function(err) {
       showToast('Install failed: ' + err.message, 'error');
-      loadExtensions();
+      refreshCurrentSettingsTab();
     });
   });
   actions.appendChild(installBtn);
@@ -2324,6 +2440,13 @@ function renderMcpServerCard(entry, installedExt) {
       activeLabel.textContent = I18n.t('ext.active');
       actions.appendChild(activeLabel);
     }
+    if (installedExt.needs_setup || (installedExt.has_auth && installedExt.authenticated)) {
+      var configBtn = document.createElement('button');
+      configBtn.className = 'btn-ext configure';
+      configBtn.textContent = installedExt.authenticated ? I18n.t('ext.reconfigure') : I18n.t('ext.configure');
+      configBtn.addEventListener('click', function() { showConfigureModal(installedExt.name); });
+      actions.appendChild(configBtn);
+    }
     var removeBtn = document.createElement('button');
     removeBtn.className = 'btn-ext remove';
     removeBtn.textContent = I18n.t('ext.remove');
@@ -2345,10 +2468,10 @@ function renderMcpServerCard(entry, installedExt) {
         } else {
           showToast(I18n.t('ext.install') + ': ' + (res.message || 'unknown error'), 'error');
         }
-        loadExtensions();
+        loadMcpServers();
       }).catch(function(err) {
         showToast(I18n.t('ext.installFailed', { message: err.message }), 'error');
-        loadExtensions();
+        loadMcpServers();
       });
     });
     actions.appendChild(installBtn);
@@ -2368,7 +2491,16 @@ function createReconfigureButton(extName) {
 
 function renderExtensionCard(ext) {
   const card = document.createElement('div');
-  card.className = 'ext-card';
+  var stateClass = 'state-inactive';
+  if (ext.kind === 'wasm_channel') {
+    var s = ext.activation_status || 'installed';
+    if (s === 'active') stateClass = 'state-active';
+    else if (s === 'failed') stateClass = 'state-error';
+    else if (s === 'pairing') stateClass = 'state-pairing';
+  } else if (ext.active) {
+    stateClass = 'state-active';
+  }
+  card.className = 'ext-card ' + stateClass;
 
   const header = document.createElement('div');
   header.className = 'ext-header';
@@ -2513,6 +2645,12 @@ function renderExtensionCard(ext) {
   return card;
 }
 
+function refreshCurrentSettingsTab() {
+  if (currentSettingsSubtab === 'extensions') loadExtensions();
+  if (currentSettingsSubtab === 'channels') loadChannelsStatus();
+  if (currentSettingsSubtab === 'mcp') loadMcpServers();
+}
+
 function activateExtension(name) {
   apiFetch('/api/extensions/' + encodeURIComponent(name) + '/activate', { method: 'POST' })
     .then((res) => {
@@ -2526,7 +2664,7 @@ function activateExtension(name) {
           showToast('Opening authentication for ' + name, 'info');
           openOAuthUrl(res.auth_url);
         }
-        loadExtensions();
+        refreshCurrentSettingsTab();
         return;
       }
 
@@ -2542,23 +2680,24 @@ function activateExtension(name) {
       } else {
         showToast('Activate failed: ' + res.message, 'error');
       }
-      loadExtensions();
+      refreshCurrentSettingsTab();
     })
     .catch((err) => showToast('Activate failed: ' + err.message, 'error'));
 }
 
 function removeExtension(name) {
-  if (!confirm(I18n.t('ext.confirmRemove', { name: name }))) return;
-  apiFetch('/api/extensions/' + encodeURIComponent(name) + '/remove', { method: 'POST' })
-    .then((res) => {
-      if (!res.success) {
-        showToast(I18n.t('ext.removeFailed', { message: res.message }), 'error');
-      } else {
-        showToast(I18n.t('ext.removed', { name: name }), 'success');
-      }
-      loadExtensions();
-    })
-    .catch((err) => showToast(I18n.t('ext.removeFailed', { message: err.message }), 'error'));
+  showConfirmModal(I18n.t('ext.confirmRemove', { name: name }), '', function() {
+    apiFetch('/api/extensions/' + encodeURIComponent(name) + '/remove', { method: 'POST' })
+      .then((res) => {
+        if (!res.success) {
+          showToast(I18n.t('ext.removeFailed', { message: res.message }), 'error');
+        } else {
+          showToast(I18n.t('ext.removed', { name: name }), 'success');
+        }
+        refreshCurrentSettingsTab();
+      })
+      .catch((err) => showToast(I18n.t('ext.removeFailed', { message: err.message }), 'error'));
+  }, I18n.t('common.remove'), 'btn-danger');
 }
 
 function showConfigureModal(name) {
@@ -2578,8 +2717,11 @@ function renderConfigureModal(name, secrets) {
   const overlay = document.createElement('div');
   overlay.className = 'configure-overlay';
   overlay.setAttribute('data-extension-name', name);
+  overlay.dataset.telegramVerificationState = 'idle';
   overlay.addEventListener('click', (e) => {
-    if (e.target === overlay) closeConfigureModal();
+    if (e.target !== overlay) return;
+    if (name === 'telegram' && overlay.dataset.telegramVerificationState === 'waiting') return;
+    closeConfigureModal();
   });
 
   const modal = document.createElement('div');
@@ -2589,6 +2731,13 @@ function renderConfigureModal(name, secrets) {
   header.textContent = I18n.t('config.title', { name: name });
   modal.appendChild(header);
 
+  if (name === 'telegram') {
+    const hint = document.createElement('div');
+    hint.className = 'configure-hint';
+    hint.textContent = I18n.t('config.telegramOwnerHint');
+    modal.appendChild(hint);
+  }
+
   const form = document.createElement('div');
   form.className = 'configure-form';
 
@@ -2596,6 +2745,7 @@ function renderConfigureModal(name, secrets) {
   for (const secret of secrets) {
     const field = document.createElement('div');
     field.className = 'configure-field';
+    field.dataset.secretName = secret.name;
 
     const label = document.createElement('label');
     label.textContent = secret.prompt;
@@ -2640,6 +2790,16 @@ function renderConfigureModal(name, secrets) {
 
   modal.appendChild(form);
 
+  const error = document.createElement('div');
+  error.className = 'configure-inline-error';
+  error.style.display = 'none';
+  modal.appendChild(error);
+
+  const status = document.createElement('div');
+  status.className = 'configure-inline-status';
+  status.style.display = 'none';
+  modal.appendChild(status);
+
   const actions = document.createElement('div');
   actions.className = 'configure-actions';
 
@@ -2662,7 +2822,110 @@ function renderConfigureModal(name, secrets) {
   if (fields.length > 0) fields[0].input.focus();
 }
 
-function submitConfigureModal(name, fields) {
+function renderTelegramVerificationChallenge(overlay, verification) {
+  if (!overlay || !verification) return;
+  const modal = overlay.querySelector('.configure-modal');
+  if (!modal) return;
+  const telegramField = modal.querySelector('.configure-field[data-secret-name="telegram_bot_token"]');
+
+  let panel = modal.querySelector('.configure-verification');
+  if (!panel) {
+    panel = document.createElement('div');
+    panel.className = 'configure-verification';
+  }
+  if (telegramField && telegramField.parentNode) {
+    telegramField.insertAdjacentElement('afterend', panel);
+  } else {
+    modal.insertBefore(
+      panel,
+      modal.querySelector('.configure-inline-error') || modal.querySelector('.configure-actions')
+    );
+  }
+
+  panel.innerHTML = '';
+
+  const title = document.createElement('div');
+  title.className = 'configure-verification-title';
+  title.textContent = I18n.t('config.telegramChallengeTitle');
+  panel.appendChild(title);
+
+  const instructions = document.createElement('div');
+  instructions.className = 'configure-verification-instructions';
+  instructions.textContent = verification.instructions;
+  panel.appendChild(instructions);
+
+  const commandLabel = document.createElement('div');
+  commandLabel.className = 'configure-verification-instructions';
+  commandLabel.textContent = I18n.t('config.telegramCommandLabel');
+  panel.appendChild(commandLabel);
+
+  const command = document.createElement('code');
+  command.className = 'configure-verification-code';
+  command.textContent = '/start ' + verification.code;
+  panel.appendChild(command);
+
+  if (verification.deep_link) {
+    const link = document.createElement('a');
+    link.className = 'configure-verification-link';
+    link.href = verification.deep_link;
+    link.target = '_blank';
+    link.rel = 'noreferrer noopener';
+    link.textContent = I18n.t('config.telegramOpenBot');
+    panel.appendChild(link);
+  }
+}
+
+function getConfigurePrimaryButton(overlay) {
+  return overlay && overlay.querySelector('.configure-actions button.btn-ext.activate');
+}
+
+function getConfigureCancelButton(overlay) {
+  return overlay && overlay.querySelector('.configure-actions button.btn-ext.remove');
+}
+
+function setConfigureInlineError(overlay, message) {
+  const error = overlay && overlay.querySelector('.configure-inline-error');
+  if (!error) return;
+  error.textContent = message || '';
+  error.style.display = message ? 'block' : 'none';
+}
+
+function clearConfigureInlineError(overlay) {
+  setConfigureInlineError(overlay, '');
+}
+
+function setConfigureInlineStatus(overlay, message) {
+  const status = overlay && overlay.querySelector('.configure-inline-status');
+  if (!status) return;
+  status.textContent = message || '';
+  status.style.display = message ? 'block' : 'none';
+}
+
+function setTelegramConfigureState(overlay, fields, state) {
+  if (!overlay) return;
+  overlay.dataset.telegramVerificationState = state;
+
+  const primaryBtn = getConfigurePrimaryButton(overlay);
+  const cancelBtn = getConfigureCancelButton(overlay);
+  const waiting = state === 'waiting';
+  const retry = state === 'retry';
+
+  setConfigureInlineStatus(overlay, waiting ? I18n.t('config.telegramOwnerWaiting') : '');
+
+  if (primaryBtn) {
+    primaryBtn.style.display = waiting ? 'none' : '';
+    primaryBtn.disabled = false;
+    primaryBtn.textContent = retry ? I18n.t('config.telegramStartOver') : I18n.t('config.save');
+  }
+  if (cancelBtn) cancelBtn.disabled = waiting;
+}
+
+function startTelegramAutoVerify(name, fields) {
+  window.setTimeout(() => submitConfigureModal(name, fields, { telegramAutoVerify: true }), 0);
+}
+
+function submitConfigureModal(name, fields, options) {
+  options = options || {};
   const secrets = {};
   for (const f of fields) {
     if (f.input.value.trim()) {
@@ -2670,10 +2933,16 @@ function submitConfigureModal(name, fields) {
     }
   }
 
-  // Disable buttons to prevent double-submit
   const overlay = getConfigureOverlay(name) || document.querySelector('.configure-overlay');
+  const isTelegram = name === 'telegram';
+  clearConfigureInlineError(overlay);
+
+  // Disable buttons to prevent double-submit
   var btns = overlay ? overlay.querySelectorAll('.configure-actions button') : [];
   btns.forEach(function(b) { b.disabled = true; });
+  if (overlay && isTelegram) {
+    setTelegramConfigureState(overlay, fields, 'waiting');
+  }
 
   apiFetch('/api/extensions/' + encodeURIComponent(name) + '/setup', {
     method: 'POST',
@@ -2681,6 +2950,23 @@ function submitConfigureModal(name, fields) {
   })
     .then((res) => {
       if (res.success) {
+        if (res.verification && isTelegram) {
+          renderTelegramVerificationChallenge(overlay, res.verification);
+          fields.forEach(function(f) { f.input.value = ''; });
+          setTelegramConfigureState(overlay, fields, 'waiting');
+          // Once the verification challenge is rendered inline, the global auth lock
+          // should not keep the chat composer disabled for this setup-driven flow.
+          setAuthFlowPending(false);
+          enableChatInput();
+          if (!options.telegramAutoVerify) {
+            startTelegramAutoVerify(name, fields);
+            return;
+          }
+          setTelegramConfigureState(overlay, fields, 'retry');
+          setConfigureInlineError(overlay, I18n.t('config.telegramStartOverHint'));
+          return;
+        }
+
         closeConfigureModal();
         if (res.auth_url) {
           showAuthCard({
@@ -2689,18 +2975,36 @@ function submitConfigureModal(name, fields) {
           });
           showToast('Opening OAuth authorization for ' + name, 'info');
           openOAuthUrl(res.auth_url);
-          loadExtensions();
+          refreshCurrentSettingsTab();
         }
         // For non-OAuth success: the server always broadcasts auth_completed SSE,
         // which will show the toast and refresh extensions — no need to do it here too.
       } else {
         // Keep modal open so the user can correct their input and retry.
         btns.forEach(function(b) { b.disabled = false; });
+        setConfigureInlineError(overlay, res.message || 'Configuration failed');
+        if (isTelegram) {
+          const hasVerification = overlay && overlay.querySelector('.configure-verification');
+          if (options.telegramAutoVerify || hasVerification) {
+            setTelegramConfigureState(overlay, fields, 'retry');
+          } else {
+            setTelegramConfigureState(overlay, fields, 'idle');
+          }
+        }
         showToast(res.message || 'Configuration failed', 'error');
       }
     })
     .catch((err) => {
       btns.forEach(function(b) { b.disabled = false; });
+      setConfigureInlineError(overlay, 'Configuration failed: ' + err.message);
+      if (isTelegram) {
+        const hasVerification = overlay && overlay.querySelector('.configure-verification');
+        if (options.telegramAutoVerify || hasVerification) {
+          setTelegramConfigureState(overlay, fields, 'retry');
+        } else {
+          setTelegramConfigureState(overlay, fields, 'idle');
+        }
+      }
       showToast('Configuration failed: ' + err.message, 'error');
     });
 }
@@ -2709,6 +3013,10 @@ function closeConfigureModal(extensionName) {
   if (typeof extensionName !== 'string') extensionName = null;
   const existing = getConfigureOverlay(extensionName);
   if (existing) existing.remove();
+  if (!document.querySelector('.configure-overlay') && !document.querySelector('.auth-card')) {
+    setAuthFlowPending(false);
+    enableChatInput();
+  }
 }
 
 // Validate that a server-supplied OAuth URL is HTTPS before opening a popup.
@@ -2776,7 +3084,7 @@ function approvePairing(channel, code, container) {
   }).then(res => {
     if (res.success) {
       showToast('Pairing approved', 'success');
-      loadExtensions();
+      refreshCurrentSettingsTab();
     } else {
       showToast(res.message || 'Approve failed', 'error');
     }
@@ -3454,10 +3762,13 @@ function renderRoutinesList(routines) {
 
     const toggleLabel = r.enabled ? 'Disable' : 'Enable';
     const toggleClass = r.enabled ? 'btn-cancel' : 'btn-restart';
+    const triggerTitle = (r.trigger_type === 'cron' && r.trigger_raw)
+      ? ' title="' + escapeHtml(r.trigger_raw) + '"'
+      : '';
 
     return '<tr class="routine-row" data-action="open-routine" data-id="' + escapeHtml(r.id) + '">'
       + '<td>' + escapeHtml(r.name) + '</td>'
-      + '<td>' + escapeHtml(r.trigger_summary) + '</td>'
+      + '<td' + triggerTitle + '>' + escapeHtml(r.trigger_summary) + '</td>'
       + '<td>' + escapeHtml(r.action_type) + '</td>'
       + '<td>' + formatRelativeTime(r.last_run_at) + '</td>'
       + '<td>' + formatRelativeTime(r.next_fire_at) + '</td>'
@@ -3525,10 +3836,36 @@ function renderRoutineDetail(routine) {
   }
 
   // Trigger config
-  html += '<div class="job-description"><h3>Trigger</h3>'
-    + '<pre class="action-json">' + escapeHtml(JSON.stringify(routine.trigger, null, 2)) + '</pre></div>';
+  if (routine.trigger_type === 'cron') {
+    const summary = routine.trigger_summary || 'cron';
+    const raw = routine.trigger_raw || '';
+    const timezone = routine.trigger && routine.trigger.timezone ? String(routine.trigger.timezone) : '';
+    html += '<div class="job-description"><h3>Trigger</h3>'
+      + '<div class="job-description-body"><strong>' + escapeHtml(summary) + '</strong></div>';
+    if (raw) {
+      html += '<div class="job-meta-item">'
+        + '<span class="job-meta-label">Raw</span>'
+        + '<span class="job-meta-value">' + escapeHtml(raw + (timezone ? ' (' + timezone + ')' : '')) + '</span>'
+        + '</div>';
+    }
+    html += '</div>';
+  } else {
+    html += '<div class="job-description"><h3>Trigger</h3>'
+      + '<pre class="action-json">' + escapeHtml(JSON.stringify(routine.trigger, null, 2)) + '</pre></div>';
+  }
 
   // Action config
+  if (routine.full_job_permissions) {
+    html += '<div class="job-description"><h3>Full Job Permissions</h3>'
+      + '<div class="job-meta-grid">'
+      + metaItem('Mode', routine.full_job_permissions.permission_mode)
+      + metaItem('Owner Default', routine.full_job_permissions.default_permission_mode)
+      + metaItem('Inherited Tools', (routine.full_job_permissions.owner_allowed_tools || []).join(', ') || '-')
+      + metaItem('Stored Tools', (routine.full_job_permissions.stored_tool_permissions || []).join(', ') || '-')
+      + metaItem('Effective Tools', (routine.full_job_permissions.effective_tool_permissions || []).join(', ') || '-')
+      + '</div></div>';
+  }
+
   html += '<div class="job-description"><h3>Action</h3>'
     + '<pre class="action-json">' + escapeHtml(JSON.stringify(routine.action, null, 2)) + '</pre></div>';
 
@@ -3864,7 +4201,7 @@ function addMcpServer() {
       showToast('Added MCP server ' + name, 'success');
       document.getElementById('mcp-install-name').value = '';
       document.getElementById('mcp-install-url').value = '';
-      loadExtensions();
+      loadMcpServers();
     } else {
       showToast('Failed to add MCP server: ' + (res.message || 'unknown error'), 'error');
     }
@@ -3877,6 +4214,7 @@ function addMcpServer() {
 
 function loadSkills() {
   var skillsList = document.getElementById('skills-list');
+  skillsList.innerHTML = renderCardsSkeleton(3);
   apiFetch('/api/skills').then(function(data) {
     if (!data.skills || data.skills.length === 0) {
       skillsList.innerHTML = '<div class="empty-state">' + I18n.t('skills.noInstalled') + '</div>';
@@ -3893,7 +4231,7 @@ function loadSkills() {
 
 function renderSkillCard(skill) {
   var card = document.createElement('div');
-  card.className = 'ext-card';
+  card.className = 'ext-card state-active';
 
   var header = document.createElement('div');
   header.className = 'ext-header';
@@ -4160,20 +4498,21 @@ function installSkill(nameOrSlug, url, btn) {
 }
 
 function removeSkill(name) {
-  if (!confirm(I18n.t('skills.confirmRemove', { name: name }))) return;
-  apiFetch('/api/skills/' + encodeURIComponent(name), {
-    method: 'DELETE',
-    headers: { 'X-Confirm-Action': 'true' },
-  }).then(function(res) {
-    if (res.success) {
-      showToast(I18n.t('skills.removed', { name: name }), 'success');
-    } else {
-      showToast(I18n.t('skills.removeFailed', { message: res.message || 'unknown error' }), 'error');
-    }
-    loadSkills();
-  }).catch(function(err) {
-    showToast(I18n.t('skills.removeFailed', { message: err.message }), 'error');
-  });
+  showConfirmModal(I18n.t('skills.confirmRemove', { name: name }), '', function() {
+    apiFetch('/api/skills/' + encodeURIComponent(name), {
+      method: 'DELETE',
+      headers: { 'X-Confirm-Action': 'true' },
+    }).then(function(res) {
+      if (res.success) {
+        showToast(I18n.t('skills.removed', { name: name }), 'success');
+      } else {
+        showToast(I18n.t('skills.removeFailed', { message: res.message || 'unknown error' }), 'error');
+      }
+      loadSkills();
+    }).catch(function(err) {
+      showToast(I18n.t('skills.removeFailed', { message: err.message }), 'error');
+    });
+  }, I18n.t('common.remove'), 'btn-danger');
 }
 
 function installSkillFromForm() {
@@ -4202,10 +4541,10 @@ document.addEventListener('keydown', (e) => {
   const tag = (e.target.tagName || '').toLowerCase();
   const inInput = tag === 'input' || tag === 'textarea';
 
-  // Mod+1-6: switch tabs
-  if (mod && e.key >= '1' && e.key <= '6') {
+  // Mod+1-5: switch tabs
+  if (mod && e.key >= '1' && e.key <= '5') {
     e.preventDefault();
-    const tabs = ['chat', 'memory', 'jobs', 'routines', 'extensions', 'skills'];
+    const tabs = ['chat', 'memory', 'jobs', 'routines', 'settings'];
     const idx = parseInt(e.key) - 1;
     if (tabs[idx]) switchTab(tabs[idx]);
     return;
@@ -4244,6 +4583,715 @@ document.addEventListener('keydown', (e) => {
     return;
   }
 });
+
+// --- Settings Tab ---
+
+document.querySelectorAll('.settings-subtab').forEach(function(btn) {
+  btn.addEventListener('click', function() {
+    switchSettingsSubtab(btn.getAttribute('data-settings-subtab'));
+  });
+});
+
+function switchSettingsSubtab(subtab) {
+  currentSettingsSubtab = subtab;
+  document.querySelectorAll('.settings-subtab').forEach(function(b) {
+    b.classList.toggle('active', b.getAttribute('data-settings-subtab') === subtab);
+  });
+  document.querySelectorAll('.settings-subpanel').forEach(function(p) {
+    p.classList.toggle('active', p.id === 'settings-' + subtab);
+  });
+  // Clear search when switching subtabs so stale filters don't apply
+  var searchInput = document.getElementById('settings-search-input');
+  if (searchInput && searchInput.value) {
+    searchInput.value = '';
+    searchInput.dispatchEvent(new Event('input'));
+  }
+  loadSettingsSubtab(subtab);
+}
+
+function loadSettingsSubtab(subtab) {
+  if (subtab === 'inference') loadInferenceSettings();
+  else if (subtab === 'agent') loadAgentSettings();
+  else if (subtab === 'channels') { loadChannelsStatus(); startPairingPoll(); }
+  else if (subtab === 'networking') loadNetworkingSettings();
+  else if (subtab === 'extensions') { loadExtensions(); startPairingPoll(); }
+  else if (subtab === 'mcp') loadMcpServers();
+  else if (subtab === 'skills') loadSkills();
+  if (subtab !== 'extensions' && subtab !== 'channels') stopPairingPoll();
+}
+
+// --- Structured Settings Definitions ---
+
+var INFERENCE_SETTINGS = [
+  {
+    group: 'cfg.group.llm',
+    settings: [
+      { key: 'llm_backend', label: 'cfg.llm_backend.label', description: 'cfg.llm_backend.desc',
+        type: 'select', options: ['nearai', 'anthropic', 'openai', 'ollama', 'openai_compatible', 'tinfoil', 'bedrock'] },
+      { key: 'selected_model', label: 'cfg.selected_model.label', description: 'cfg.selected_model.desc', type: 'text' },
+      { key: 'ollama_base_url', label: 'cfg.ollama_base_url.label', description: 'cfg.ollama_base_url.desc', type: 'text',
+        showWhen: { key: 'llm_backend', value: 'ollama' } },
+      { key: 'openai_compatible_base_url', label: 'cfg.openai_compatible_base_url.label', description: 'cfg.openai_compatible_base_url.desc', type: 'text',
+        showWhen: { key: 'llm_backend', value: 'openai_compatible' } },
+      { key: 'bedrock_region', label: 'cfg.bedrock_region.label', description: 'cfg.bedrock_region.desc', type: 'text',
+        showWhen: { key: 'llm_backend', value: 'bedrock' } },
+      { key: 'bedrock_cross_region', label: 'cfg.bedrock_cross_region.label', description: 'cfg.bedrock_cross_region.desc',
+        type: 'select', options: ['us', 'eu', 'apac', 'global'],
+        showWhen: { key: 'llm_backend', value: 'bedrock' } },
+      { key: 'bedrock_profile', label: 'cfg.bedrock_profile.label', description: 'cfg.bedrock_profile.desc', type: 'text',
+        showWhen: { key: 'llm_backend', value: 'bedrock' } },
+    ]
+  },
+  {
+    group: 'cfg.group.embeddings',
+    settings: [
+      { key: 'embeddings.enabled', label: 'cfg.embeddings_enabled.label', description: 'cfg.embeddings_enabled.desc', type: 'boolean' },
+      { key: 'embeddings.provider', label: 'cfg.embeddings_provider.label', description: 'cfg.embeddings_provider.desc',
+        type: 'select', options: ['openai', 'nearai'] },
+      { key: 'embeddings.model', label: 'cfg.embeddings_model.label', description: 'cfg.embeddings_model.desc', type: 'text' },
+    ]
+  },
+];
+
+var AGENT_SETTINGS = [
+  {
+    group: 'cfg.group.agent',
+    settings: [
+      { key: 'agent.name', label: 'cfg.agent_name.label', description: 'cfg.agent_name.desc', type: 'text' },
+      { key: 'agent.max_parallel_jobs', label: 'cfg.agent_max_parallel_jobs.label', description: 'cfg.agent_max_parallel_jobs.desc', type: 'number' },
+      { key: 'agent.job_timeout_secs', label: 'cfg.agent_job_timeout.label', description: 'cfg.agent_job_timeout.desc', type: 'number' },
+      { key: 'agent.max_tool_iterations', label: 'cfg.agent_max_tool_iterations.label', description: 'cfg.agent_max_tool_iterations.desc', type: 'number' },
+      { key: 'agent.use_planning', label: 'cfg.agent_use_planning.label', description: 'cfg.agent_use_planning.desc', type: 'boolean' },
+      { key: 'agent.auto_approve_tools', label: 'cfg.agent_auto_approve.label', description: 'cfg.agent_auto_approve.desc', type: 'boolean' },
+      { key: 'agent.default_timezone', label: 'cfg.agent_timezone.label', description: 'cfg.agent_timezone.desc', type: 'text' },
+      { key: 'agent.session_idle_timeout_secs', label: 'cfg.agent_session_idle.label', description: 'cfg.agent_session_idle.desc', type: 'number' },
+      { key: 'agent.stuck_threshold_secs', label: 'cfg.agent_stuck_threshold.label', description: 'cfg.agent_stuck_threshold.desc', type: 'number' },
+      { key: 'agent.max_repair_attempts', label: 'cfg.agent_max_repair.label', description: 'cfg.agent_max_repair.desc', type: 'number' },
+      { key: 'agent.max_cost_per_day_cents', label: 'cfg.agent_max_cost.label', description: 'cfg.agent_max_cost.desc', type: 'number', min: 0 },
+      { key: 'agent.max_actions_per_hour', label: 'cfg.agent_max_actions.label', description: 'cfg.agent_max_actions.desc', type: 'number', min: 0 },
+      { key: 'agent.allow_local_tools', label: 'cfg.agent_allow_local.label', description: 'cfg.agent_allow_local.desc', type: 'boolean' },
+    ]
+  },
+  {
+    group: 'cfg.group.heartbeat',
+    settings: [
+      { key: 'heartbeat.enabled', label: 'cfg.heartbeat_enabled.label', description: 'cfg.heartbeat_enabled.desc', type: 'boolean' },
+      { key: 'heartbeat.interval_secs', label: 'cfg.heartbeat_interval.label', description: 'cfg.heartbeat_interval.desc', type: 'number' },
+      { key: 'heartbeat.notify_channel', label: 'cfg.heartbeat_notify_channel.label', description: 'cfg.heartbeat_notify_channel.desc', type: 'text' },
+      { key: 'heartbeat.notify_user', label: 'cfg.heartbeat_notify_user.label', description: 'cfg.heartbeat_notify_user.desc', type: 'text' },
+      { key: 'heartbeat.quiet_hours_start', label: 'cfg.heartbeat_quiet_start.label', description: 'cfg.heartbeat_quiet_start.desc', type: 'number', min: 0, max: 23 },
+      { key: 'heartbeat.quiet_hours_end', label: 'cfg.heartbeat_quiet_end.label', description: 'cfg.heartbeat_quiet_end.desc', type: 'number', min: 0, max: 23 },
+      { key: 'heartbeat.timezone', label: 'cfg.heartbeat_timezone.label', description: 'cfg.heartbeat_timezone.desc', type: 'text' },
+    ]
+  },
+  {
+    group: 'cfg.group.sandbox',
+    settings: [
+      { key: 'sandbox.enabled', label: 'cfg.sandbox_enabled.label', description: 'cfg.sandbox_enabled.desc', type: 'boolean' },
+      { key: 'sandbox.policy', label: 'cfg.sandbox_policy.label', description: 'cfg.sandbox_policy.desc',
+        type: 'select', options: ['readonly', 'workspace_write', 'full_access'] },
+      { key: 'sandbox.timeout_secs', label: 'cfg.sandbox_timeout.label', description: 'cfg.sandbox_timeout.desc', type: 'number', min: 0 },
+      { key: 'sandbox.memory_limit_mb', label: 'cfg.sandbox_memory.label', description: 'cfg.sandbox_memory.desc', type: 'number', min: 0 },
+      { key: 'sandbox.image', label: 'cfg.sandbox_image.label', description: 'cfg.sandbox_image.desc', type: 'text' },
+    ]
+  },
+  {
+    group: 'cfg.group.routines',
+    settings: [
+      { key: 'routines.max_concurrent', label: 'cfg.routines_max_concurrent.label', description: 'cfg.routines_max_concurrent.desc', type: 'number', min: 0 },
+      { key: 'routines.default_cooldown_secs', label: 'cfg.routines_cooldown.label', description: 'cfg.routines_cooldown.desc', type: 'number', min: 0 },
+      { key: 'routines.full_job_default_permission_mode', label: 'cfg.routines_full_job_default_mode.label', description: 'cfg.routines_full_job_default_mode.desc',
+        type: 'select', options: ['inherit_owner', 'explicit', 'copy_owner'] },
+      { key: 'routines.full_job_owner_allowed_tools', label: 'cfg.routines_full_job_owner_tools.label', description: 'cfg.routines_full_job_owner_tools.desc',
+        type: 'list', placeholder: 'shell, http' },
+    ]
+  },
+  {
+    group: 'cfg.group.safety',
+    settings: [
+      { key: 'safety.max_output_length', label: 'cfg.safety_max_output.label', description: 'cfg.safety_max_output.desc', type: 'number', min: 0 },
+      { key: 'safety.injection_check_enabled', label: 'cfg.safety_injection_check.label', description: 'cfg.safety_injection_check.desc', type: 'boolean' },
+    ]
+  },
+  {
+    group: 'cfg.group.skills',
+    settings: [
+      { key: 'skills.max_active', label: 'cfg.skills_max_active.label', description: 'cfg.skills_max_active.desc', type: 'number', min: 0 },
+      { key: 'skills.max_context_tokens', label: 'cfg.skills_max_tokens.label', description: 'cfg.skills_max_tokens.desc', type: 'number', min: 0 },
+    ]
+  },
+  {
+    group: 'cfg.group.search',
+    settings: [
+      { key: 'search.fusion_strategy', label: 'cfg.search_fusion.label', description: 'cfg.search_fusion.desc',
+        type: 'select', options: ['rrf', 'weighted'] },
+    ]
+  },
+];
+
+function renderSettingsSkeleton(rows) {
+  var html = '<div class="settings-group" style="border:none;background:none">';
+  for (var i = 0; i < (rows || 5); i++) {
+    var w1 = 100 + Math.floor(Math.random() * 60);
+    var w2 = 140 + Math.floor(Math.random() * 60);
+    html += '<div class="skeleton-row"><div class="skeleton-bar" style="width:' + w1 + 'px"></div><div class="skeleton-bar" style="width:' + w2 + 'px"></div></div>';
+  }
+  html += '</div>';
+  return html;
+}
+
+function renderCardsSkeleton(count) {
+  var html = '';
+  for (var i = 0; i < (count || 3); i++) {
+    html += '<div class="skeleton-card"><div class="skeleton-bar" style="width:60%;height:14px"></div><div class="skeleton-bar" style="width:90%;height:10px"></div><div class="skeleton-bar" style="width:40%;height:10px"></div></div>';
+  }
+  return html;
+}
+
+function loadInferenceSettings() {
+  var container = document.getElementById('settings-inference-content');
+  container.innerHTML = renderSettingsSkeleton(6);
+
+  Promise.all([
+    apiFetch('/api/settings/export'),
+    apiFetch('/api/gateway/status').catch(function() { return {}; }),
+    apiFetch('/v1/models').catch(function() { return { data: [] }; })
+  ]).then(function(results) {
+    var settings = results[0].settings || {};
+    var status = results[1];
+    var modelsData = results[2];
+    var activeValues = {
+      'llm_backend': status.llm_backend,
+      'selected_model': status.llm_model
+    };
+    // Inject available model IDs as suggestions for the selected_model field
+    var modelIds = (modelsData.data || []).map(function(m) { return m.id; }).filter(Boolean);
+    var llmGroup = INFERENCE_SETTINGS[0];
+    for (var i = 0; i < llmGroup.settings.length; i++) {
+      if (llmGroup.settings[i].key === 'selected_model') {
+        llmGroup.settings[i].suggestions = modelIds;
+        break;
+      }
+    }
+    container.innerHTML = '';
+    renderStructuredSettingsInto(container, INFERENCE_SETTINGS, settings, activeValues);
+  }).catch(function(err) {
+    container.innerHTML = '<div class="empty-state">' + I18n.t('common.loadFailed') + ': '
+      + escapeHtml(err.message) + '</div>';
+  });
+}
+
+function loadAgentSettings() {
+  loadStructuredSettings('settings-agent-content', AGENT_SETTINGS);
+}
+
+function loadStructuredSettings(containerId, settingsDefs) {
+  var container = document.getElementById(containerId);
+  container.innerHTML = renderSettingsSkeleton(8);
+
+  apiFetch('/api/settings/export').then(function(data) {
+    var settings = data.settings || {};
+    container.innerHTML = '';
+    renderStructuredSettingsInto(container, settingsDefs, settings, {});
+  }).catch(function(err) {
+    container.innerHTML = '<div class="empty-state">' + I18n.t('common.loadFailed') + ': '
+      + escapeHtml(err.message) + '</div>';
+  });
+}
+
+function renderStructuredSettingsInto(container, settingsDefs, settings, activeValues) {
+    for (var gi = 0; gi < settingsDefs.length; gi++) {
+      var groupDef = settingsDefs[gi];
+      var group = document.createElement('div');
+      group.className = 'settings-group';
+
+      var title = document.createElement('div');
+      title.className = 'settings-group-title';
+      title.textContent = I18n.t(groupDef.group);
+      group.appendChild(title);
+
+      var rows = [];
+      for (var si = 0; si < groupDef.settings.length; si++) {
+        var def = groupDef.settings[si];
+        var activeVal = activeValues ? activeValues[def.key] : undefined;
+        var row = renderStructuredSettingsRow(def, settings[def.key], activeVal);
+        if (def.showWhen) {
+          row.setAttribute('data-show-when-key', def.showWhen.key);
+          row.setAttribute('data-show-when-value', def.showWhen.value);
+          var currentVal = settings[def.showWhen.key];
+          if (currentVal === def.showWhen.value) {
+            row.classList.remove('hidden');
+          } else {
+            row.classList.add('hidden');
+          }
+        }
+        rows.push(row);
+        group.appendChild(row);
+      }
+
+      container.appendChild(group);
+
+      // Wire up showWhen reactivity for select fields in this group
+      (function(groupRows, allSettings) {
+        for (var ri = 0; ri < groupRows.length; ri++) {
+          var sel = groupRows[ri].querySelector('.settings-select');
+          if (sel) {
+            sel.addEventListener('change', function() {
+              var changedKey = this.getAttribute('data-setting-key');
+              var changedVal = this.value;
+              for (var rj = 0; rj < groupRows.length; rj++) {
+                var whenKey = groupRows[rj].getAttribute('data-show-when-key');
+                var whenVal = groupRows[rj].getAttribute('data-show-when-value');
+                if (whenKey === changedKey) {
+                  if (changedVal === whenVal) {
+                    groupRows[rj].classList.remove('hidden');
+                  } else {
+                    groupRows[rj].classList.add('hidden');
+                  }
+                }
+              }
+            });
+          }
+        }
+      })(rows, settings);
+    }
+
+    if (container.children.length === 0) {
+      container.innerHTML = '<div class="empty-state">' + I18n.t('settings.noSettings') + '</div>';
+    }
+}
+
+function renderStructuredSettingsRow(def, value, activeValue) {
+  var row = document.createElement('div');
+  row.className = 'settings-row';
+
+  var labelWrap = document.createElement('div');
+  labelWrap.className = 'settings-label-wrap';
+
+  var label = document.createElement('div');
+  label.className = 'settings-label';
+  label.textContent = I18n.t(def.label);
+  labelWrap.appendChild(label);
+
+  if (def.description) {
+    var desc = document.createElement('div');
+    desc.className = 'settings-description';
+    desc.textContent = I18n.t(def.description);
+    labelWrap.appendChild(desc);
+  }
+
+  row.appendChild(labelWrap);
+
+  var inputWrap = document.createElement('div');
+  inputWrap.style.display = 'flex';
+  inputWrap.style.alignItems = 'center';
+  inputWrap.style.gap = '8px';
+
+  var ariaLabel = I18n.t(def.label) + (def.description ? '. ' + I18n.t(def.description) : '');
+  function formatSettingValue(raw) {
+    if (Array.isArray(raw)) return raw.join(', ');
+    if (raw === null || raw === undefined) return '';
+    return String(raw);
+  }
+
+  var activeValueText = formatSettingValue(activeValue);
+  var placeholderText = activeValueText ? I18n.t('settings.envValue', { value: activeValueText }) : (def.placeholder || I18n.t('settings.envDefault'));
+
+  if (def.type === 'boolean') {
+    var boolSel = document.createElement('select');
+    boolSel.className = 'settings-select';
+    boolSel.setAttribute('data-setting-key', def.key);
+    boolSel.setAttribute('aria-label', ariaLabel);
+    var boolDefault = document.createElement('option');
+    boolDefault.value = '';
+    boolDefault.textContent = activeValue !== undefined && activeValue !== null
+      ? '\u2014 ' + I18n.t('settings.envValue', { value: String(activeValue) }) + ' \u2014'
+      : '\u2014 ' + I18n.t('settings.useEnvDefault') + ' \u2014';
+    if (value === null || value === undefined) boolDefault.selected = true;
+    boolSel.appendChild(boolDefault);
+    var boolOn = document.createElement('option');
+    boolOn.value = 'true';
+    boolOn.textContent = I18n.t('settings.on');
+    if (value === true) boolOn.selected = true;
+    boolSel.appendChild(boolOn);
+    var boolOff = document.createElement('option');
+    boolOff.value = 'false';
+    boolOff.textContent = I18n.t('settings.off');
+    if (value === false) boolOff.selected = true;
+    boolSel.appendChild(boolOff);
+    boolSel.addEventListener('change', (function(k, el) {
+      return function() {
+        if (el.value === '') saveSetting(k, null);
+        else saveSetting(k, el.value === 'true');
+      };
+    })(def.key, boolSel));
+    inputWrap.appendChild(boolSel);
+  } else if (def.type === 'select' && def.options) {
+    var sel = document.createElement('select');
+    sel.className = 'settings-select';
+    sel.setAttribute('data-setting-key', def.key);
+    sel.setAttribute('aria-label', ariaLabel);
+    var emptyOpt = document.createElement('option');
+    emptyOpt.value = '';
+    emptyOpt.textContent = activeValue ? '\u2014 ' + I18n.t('settings.envValue', { value: activeValue }) + ' \u2014' : '\u2014 ' + I18n.t('settings.useEnvDefault') + ' \u2014';
+    if (!value && value !== false && value !== 0) emptyOpt.selected = true;
+    sel.appendChild(emptyOpt);
+    for (var oi = 0; oi < def.options.length; oi++) {
+      var opt = document.createElement('option');
+      opt.value = def.options[oi];
+      opt.textContent = def.options[oi];
+      if (String(value) === def.options[oi]) opt.selected = true;
+      sel.appendChild(opt);
+    }
+    sel.addEventListener('change', (function(k, el) {
+      return function() { saveSetting(k, el.value === '' ? null : el.value); };
+    })(def.key, sel));
+    inputWrap.appendChild(sel);
+  } else if (def.type === 'number') {
+    var numInp = document.createElement('input');
+    numInp.type = 'number';
+    numInp.step = '1';
+    numInp.className = 'settings-input';
+    numInp.setAttribute('aria-label', ariaLabel);
+    numInp.value = (value === null || value === undefined) ? '' : value;
+    if (!value && value !== 0) numInp.placeholder = placeholderText;
+    if (def.min !== undefined) numInp.min = def.min;
+    if (def.max !== undefined) numInp.max = def.max;
+    numInp.addEventListener('change', (function(k, el) {
+      return function() {
+        if (el.value === '') return saveSetting(k, null);
+        var parsed = parseInt(el.value, 10);
+        if (isNaN(parsed)) return;
+        el.value = parsed;
+        saveSetting(k, parsed);
+      };
+    })(def.key, numInp));
+    inputWrap.appendChild(numInp);
+  } else if (def.type === 'list') {
+    var listInp = document.createElement('input');
+    listInp.type = 'text';
+    listInp.className = 'settings-input';
+    listInp.setAttribute('aria-label', ariaLabel);
+    var listValue = '';
+    if (Array.isArray(value)) listValue = value.join(', ');
+    else if (typeof value === 'string') listValue = value;
+    listInp.value = listValue;
+    if (!listValue) listInp.placeholder = placeholderText;
+    listInp.addEventListener('change', (function(k, el) {
+      return function() {
+        if (el.value.trim() === '') return saveSetting(k, null);
+        var items = el.value.split(/[\n,]/).map(function(item) {
+          return item.trim();
+        }).filter(Boolean);
+        saveSetting(k, items);
+      };
+    })(def.key, listInp));
+    inputWrap.appendChild(listInp);
+  } else {
+    var textInp = document.createElement('input');
+    textInp.type = 'text';
+    textInp.className = 'settings-input';
+    textInp.setAttribute('aria-label', ariaLabel);
+    textInp.value = (value === null || value === undefined) ? '' : String(value);
+    if (!value) textInp.placeholder = placeholderText;
+    // Attach datalist for autocomplete suggestions (e.g., model list)
+    if (def.suggestions && def.suggestions.length > 0) {
+      var dlId = 'dl-' + def.key.replace(/\./g, '-');
+      var dl = document.createElement('datalist');
+      dl.id = dlId;
+      for (var di = 0; di < def.suggestions.length; di++) {
+        var dlOpt = document.createElement('option');
+        dlOpt.value = def.suggestions[di];
+        dl.appendChild(dlOpt);
+      }
+      textInp.setAttribute('list', dlId);
+      inputWrap.appendChild(dl);
+    }
+    textInp.addEventListener('change', (function(k, el) {
+      return function() { saveSetting(k, el.value === '' ? null : el.value); };
+    })(def.key, textInp));
+    inputWrap.appendChild(textInp);
+  }
+
+  var saved = document.createElement('span');
+  saved.className = 'settings-saved-indicator';
+  saved.textContent = '\u2713 ' + I18n.t('settings.saved');
+  saved.setAttribute('data-key', def.key);
+  saved.setAttribute('role', 'status');
+  saved.setAttribute('aria-live', 'polite');
+  inputWrap.appendChild(saved);
+
+  row.appendChild(inputWrap);
+  return row;
+}
+
+var RESTART_REQUIRED_KEYS = ['llm_backend', 'selected_model', 'ollama_base_url', 'openai_compatible_base_url',
+  'bedrock_region', 'bedrock_cross_region', 'bedrock_profile', 'embeddings.enabled', 'embeddings.provider', 'embeddings.model',
+  'agent.auto_approve_tools', 'tunnel.provider', 'tunnel.public_url', 'gateway.rate_limit', 'gateway.max_connections'];
+
+var _settingsSavedTimers = {};
+
+function saveSetting(key, value) {
+  var method = (value === null || value === undefined) ? 'DELETE' : 'PUT';
+  var opts = { method: method };
+  if (method === 'PUT') opts.body = { value: value };
+  apiFetch('/api/settings/' + encodeURIComponent(key), opts).then(function() {
+    var indicator = document.querySelector('.settings-saved-indicator[data-key="' + key + '"]');
+    if (indicator) {
+      if (_settingsSavedTimers[key]) clearTimeout(_settingsSavedTimers[key]);
+      indicator.classList.add('visible');
+      _settingsSavedTimers[key] = setTimeout(function() { indicator.classList.remove('visible'); }, 2000);
+    }
+    // Show restart banner for inference settings
+    if (RESTART_REQUIRED_KEYS.indexOf(key) !== -1) {
+      showRestartBanner();
+    }
+  }).catch(function(err) {
+    showToast('Failed to save ' + key + ': ' + err.message, 'error');
+  });
+}
+
+function showRestartBanner() {
+  var container = document.querySelector('.settings-content');
+  if (!container || container.querySelector('.restart-banner')) return;
+  var banner = document.createElement('div');
+  banner.className = 'restart-banner';
+  banner.setAttribute('role', 'alert');
+  var textSpan = document.createElement('span');
+  textSpan.className = 'restart-banner-text';
+  textSpan.textContent = '\u26A0\uFE0F ' + I18n.t('settings.restartRequired');
+  banner.appendChild(textSpan);
+  var restartBtn = document.createElement('button');
+  restartBtn.className = 'restart-banner-btn';
+  restartBtn.textContent = I18n.t('settings.restartNow');
+  restartBtn.addEventListener('click', function() { triggerRestart(); });
+  banner.appendChild(restartBtn);
+  container.insertBefore(banner, container.firstChild);
+}
+
+function loadMcpServers() {
+  var mcpList = document.getElementById('mcp-servers-list');
+  mcpList.innerHTML = renderCardsSkeleton(2);
+
+  Promise.all([
+    apiFetch('/api/extensions').catch(function() { return { extensions: [] }; }),
+    apiFetch('/api/extensions/registry').catch(function() { return { entries: [] }; }),
+  ]).then(function(results) {
+    var extData = results[0];
+    var registryData = results[1];
+    var mcpEntries = (registryData.entries || []).filter(function(e) { return e.kind === 'mcp_server'; });
+    var installedMcp = (extData.extensions || []).filter(function(e) { return e.kind === 'mcp_server'; });
+
+    mcpList.innerHTML = '';
+    var renderedNames = {};
+
+    // Registry entries (cross-referenced with installed)
+    for (var i = 0; i < mcpEntries.length; i++) {
+      renderedNames[mcpEntries[i].name] = true;
+      var installedExt = installedMcp.find(function(e) { return e.name === mcpEntries[i].name; });
+      mcpList.appendChild(renderMcpServerCard(mcpEntries[i], installedExt));
+    }
+
+    // Custom installed MCP servers not in registry
+    for (var j = 0; j < installedMcp.length; j++) {
+      if (!renderedNames[installedMcp[j].name]) {
+        mcpList.appendChild(renderExtensionCard(installedMcp[j]));
+      }
+    }
+
+    if (mcpList.children.length === 0) {
+      mcpList.innerHTML = '<div class="empty-state">' + I18n.t('mcp.noServers') + '</div>';
+    }
+  }).catch(function(err) {
+    mcpList.innerHTML = '<div class="empty-state">' + I18n.t('common.loadFailed') + ': '
+      + escapeHtml(err.message) + '</div>';
+  });
+}
+
+function loadChannelsStatus() {
+  var container = document.getElementById('settings-channels-content');
+  container.innerHTML = renderCardsSkeleton(4);
+
+  Promise.all([
+    apiFetch('/api/gateway/status').catch(function() { return {}; }),
+    apiFetch('/api/extensions').catch(function() { return { extensions: [] }; }),
+    apiFetch('/api/extensions/registry').catch(function() { return { entries: [] }; }),
+  ]).then(function(results) {
+    var status = results[0];
+    var extensions = results[1].extensions || [];
+    var registry = results[2].entries || [];
+
+    container.innerHTML = '';
+
+    // Built-in Channels section
+    var builtinSection = document.createElement('div');
+    builtinSection.className = 'extensions-section';
+    var builtinTitle = document.createElement('h3');
+    builtinTitle.textContent = I18n.t('channels.builtin');
+    builtinSection.appendChild(builtinTitle);
+    var builtinList = document.createElement('div');
+    builtinList.className = 'extensions-list';
+
+    builtinList.appendChild(renderBuiltinChannelCard(
+      I18n.t('channels.webGateway'),
+      I18n.t('channels.webGatewayDesc'),
+      true,
+      'SSE: ' + (status.sse_connections || 0) + ' \u00B7 WS: ' + (status.ws_connections || 0)
+    ));
+
+    var enabledChannels = status.enabled_channels || [];
+
+    builtinList.appendChild(renderBuiltinChannelCard(
+      I18n.t('channels.httpWebhook'),
+      I18n.t('channels.httpWebhookDesc'),
+      enabledChannels.indexOf('http') !== -1,
+      I18n.t('channels.configureVia', { env: 'ENABLE_HTTP=true' })
+    ));
+
+    builtinList.appendChild(renderBuiltinChannelCard(
+      I18n.t('channels.cli'),
+      I18n.t('channels.cliDesc'),
+      enabledChannels.indexOf('cli') !== -1,
+      I18n.t('channels.runWith', { cmd: 'ironclaw run --cli' })
+    ));
+
+    builtinList.appendChild(renderBuiltinChannelCard(
+      I18n.t('channels.repl'),
+      I18n.t('channels.replDesc'),
+      enabledChannels.indexOf('repl') !== -1,
+      I18n.t('channels.runWith', { cmd: 'ironclaw run --repl' })
+    ));
+
+    builtinSection.appendChild(builtinList);
+    container.appendChild(builtinSection);
+
+    // Messaging Channels section — use extension cards with full stepper/pairing UI
+    var channelEntries = registry.filter(function(e) {
+      return e.kind === 'wasm_channel' || e.kind === 'channel';
+    });
+    var installedChannels = extensions.filter(function(e) {
+      return e.kind === 'wasm_channel';
+    });
+
+    if (channelEntries.length > 0 || installedChannels.length > 0) {
+      var messagingSection = document.createElement('div');
+      messagingSection.className = 'extensions-section';
+      var messagingTitle = document.createElement('h3');
+      messagingTitle.textContent = I18n.t('channels.messaging');
+      messagingSection.appendChild(messagingTitle);
+      var messagingList = document.createElement('div');
+      messagingList.className = 'extensions-list';
+
+      var renderedNames = {};
+
+      // Registry entries: show full ext card if installed, available card if not
+      for (var i = 0; i < channelEntries.length; i++) {
+        var entry = channelEntries[i];
+        renderedNames[entry.name] = true;
+        var installed = null;
+        for (var k = 0; k < installedChannels.length; k++) {
+          if (installedChannels[k].name === entry.name) { installed = installedChannels[k]; break; }
+        }
+        if (installed) {
+          messagingList.appendChild(renderExtensionCard(installed));
+        } else {
+          messagingList.appendChild(renderAvailableExtensionCard(entry));
+        }
+      }
+
+      // Installed channels not in registry (custom installs)
+      for (var j = 0; j < installedChannels.length; j++) {
+        if (!renderedNames[installedChannels[j].name]) {
+          messagingList.appendChild(renderExtensionCard(installedChannels[j]));
+        }
+      }
+
+      messagingSection.appendChild(messagingList);
+      container.appendChild(messagingSection);
+    }
+  });
+}
+
+function renderBuiltinChannelCard(name, description, active, detail) {
+  var card = document.createElement('div');
+  card.className = 'ext-card ' + (active ? 'state-active' : 'state-inactive');
+
+  var header = document.createElement('div');
+  header.className = 'ext-header';
+
+  var nameEl = document.createElement('span');
+  nameEl.className = 'ext-name';
+  nameEl.textContent = name;
+  header.appendChild(nameEl);
+
+  var kindEl = document.createElement('span');
+  kindEl.className = 'ext-kind kind-builtin';
+  kindEl.textContent = I18n.t('ext.builtin');
+  header.appendChild(kindEl);
+
+  var statusDot = document.createElement('span');
+  statusDot.className = 'ext-auth-dot ' + (active ? 'authed' : 'unauthed');
+  statusDot.title = active ? I18n.t('ext.active') : I18n.t('ext.inactive');
+  header.appendChild(statusDot);
+
+  card.appendChild(header);
+
+  var desc = document.createElement('div');
+  desc.className = 'ext-desc';
+  desc.textContent = description;
+  card.appendChild(desc);
+
+  if (detail) {
+    var detailEl = document.createElement('div');
+    detailEl.className = 'ext-url';
+    detailEl.textContent = detail;
+    card.appendChild(detailEl);
+  }
+
+  var actions = document.createElement('div');
+  actions.className = 'ext-actions';
+  var label = document.createElement('span');
+  label.className = 'ext-active-label';
+  label.textContent = active ? I18n.t('ext.active') : I18n.t('ext.inactive');
+  actions.appendChild(label);
+  card.appendChild(actions);
+
+  return card;
+}
+
+// --- Networking Settings ---
+
+var NETWORKING_SETTINGS = [
+  {
+    group: 'cfg.group.tunnel',
+    settings: [
+      { key: 'tunnel.provider', label: 'cfg.tunnel_provider.label', description: 'cfg.tunnel_provider.desc',
+        type: 'select', options: ['none', 'cloudflare', 'ngrok', 'tailscale', 'custom'] },
+      { key: 'tunnel.public_url', label: 'cfg.tunnel_public_url.label', description: 'cfg.tunnel_public_url.desc', type: 'text' },
+    ]
+  },
+  {
+    group: 'cfg.group.gateway',
+    settings: [
+      { key: 'gateway.rate_limit', label: 'cfg.gateway_rate_limit.label', description: 'cfg.gateway_rate_limit.desc', type: 'number', min: 0 },
+      { key: 'gateway.max_connections', label: 'cfg.gateway_max_connections.label', description: 'cfg.gateway_max_connections.desc', type: 'number', min: 0 },
+    ]
+  },
+];
+
+function loadNetworkingSettings() {
+  var container = document.getElementById('settings-networking-content');
+  container.innerHTML = renderSettingsSkeleton(4);
+
+  apiFetch('/api/settings/export').then(function(data) {
+    var settings = data.settings || {};
+    container.innerHTML = '';
+    renderStructuredSettingsInto(container, NETWORKING_SETTINGS, settings, {});
+  }).catch(function(err) {
+    container.innerHTML = '<div class="empty-state">' + I18n.t('common.loadFailed') + ': '
+      + escapeHtml(err.message) + '</div>';
+  });
+}
 
 // --- Toasts ---
 
@@ -4297,6 +5345,8 @@ document.getElementById('wasm-install-btn').addEventListener('click', () => inst
 document.getElementById('mcp-add-btn').addEventListener('click', () => addMcpServer());
 document.getElementById('skill-search-btn').addEventListener('click', () => searchClawHub());
 document.getElementById('skill-install-btn').addEventListener('click', () => installSkillFromForm());
+document.getElementById('settings-export-btn').addEventListener('click', () => exportSettings());
+document.getElementById('settings-import-btn').addEventListener('click', () => importSettings());
 
 // --- Delegated Event Handlers (for dynamically generated HTML) ---
 
@@ -4364,4 +5414,126 @@ document.addEventListener('click', function(e) {
 
 document.getElementById('language-btn').addEventListener('click', function() {
   if (typeof toggleLanguageMenu === 'function') toggleLanguageMenu();
+});
+
+// --- Confirmation Modal ---
+
+var _confirmModalCallback = null;
+
+function showConfirmModal(title, message, onConfirm, confirmLabel, confirmClass) {
+  var modal = document.getElementById('confirm-modal');
+  document.getElementById('confirm-modal-title').textContent = title;
+  document.getElementById('confirm-modal-message').textContent = message || '';
+  document.getElementById('confirm-modal-message').style.display = message ? '' : 'none';
+  var btn = document.getElementById('confirm-modal-btn');
+  btn.textContent = confirmLabel || I18n.t('btn.confirm');
+  btn.className = confirmClass || 'btn-danger';
+  _confirmModalCallback = onConfirm;
+  modal.style.display = 'flex';
+  btn.focus();
+}
+
+function closeConfirmModal() {
+  document.getElementById('confirm-modal').style.display = 'none';
+  _confirmModalCallback = null;
+}
+
+document.getElementById('confirm-modal-btn').addEventListener('click', function() {
+  if (_confirmModalCallback) _confirmModalCallback();
+  closeConfirmModal();
+});
+document.getElementById('confirm-modal-cancel-btn').addEventListener('click', closeConfirmModal);
+document.getElementById('confirm-modal').addEventListener('click', function(e) {
+  if (e.target === this) closeConfirmModal();
+});
+document.addEventListener('keydown', function(e) {
+  if (e.key === 'Escape' && document.getElementById('confirm-modal').style.display === 'flex') {
+    closeConfirmModal();
+  }
+});
+
+// --- Settings Import/Export ---
+
+function exportSettings() {
+  apiFetch('/api/settings/export').then(function(data) {
+    var blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = 'ironclaw-settings.json';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    showToast(I18n.t('settings.exportSuccess'), 'success');
+  }).catch(function(err) {
+    showToast(I18n.t('settings.exportFailed', { message: err.message }), 'error');
+  });
+}
+
+function importSettings() {
+  var input = document.createElement('input');
+  input.type = 'file';
+  input.accept = '.json,application/json';
+  input.addEventListener('change', function() {
+    if (!input.files || !input.files[0]) return;
+    var reader = new FileReader();
+    reader.onload = function() {
+      try {
+        var data = JSON.parse(reader.result);
+        apiFetch('/api/settings/import', {
+          method: 'POST',
+          body: data,
+        }).then(function() {
+          showToast(I18n.t('settings.importSuccess'), 'success');
+          loadSettingsSubtab(currentSettingsSubtab);
+        }).catch(function(err) {
+          showToast(I18n.t('settings.importFailed', { message: err.message }), 'error');
+        });
+      } catch (e) {
+        showToast(I18n.t('settings.importFailed', { message: e.message }), 'error');
+      }
+    };
+    reader.readAsText(input.files[0]);
+  });
+  input.click();
+}
+
+// --- Settings Search ---
+
+document.getElementById('settings-search-input').addEventListener('input', function() {
+  var query = this.value.toLowerCase();
+  var activePanel = document.querySelector('.settings-subpanel.active');
+  if (!activePanel) return;
+  var rows = activePanel.querySelectorAll('.settings-row');
+  if (rows.length === 0) return;
+  var visibleCount = 0;
+  rows.forEach(function(row) {
+    var text = row.textContent.toLowerCase();
+    if (query === '' || text.indexOf(query) !== -1) {
+      row.classList.remove('search-hidden');
+      if (!row.classList.contains('hidden')) visibleCount++;
+    } else {
+      row.classList.add('search-hidden');
+    }
+  });
+  // Show/hide group titles based on visible children
+  var groups = activePanel.querySelectorAll('.settings-group');
+  groups.forEach(function(group) {
+    var visibleRows = group.querySelectorAll('.settings-row:not(.search-hidden):not(.hidden)');
+    if (visibleRows.length === 0 && query !== '') {
+      group.style.display = 'none';
+    } else {
+      group.style.display = '';
+    }
+  });
+  // Show/hide empty state
+  var existingEmpty = activePanel.querySelector('.settings-search-empty');
+  if (existingEmpty) existingEmpty.remove();
+  if (query !== '' && visibleCount === 0) {
+    var empty = document.createElement('div');
+    empty.className = 'settings-search-empty';
+    empty.textContent = I18n.t('settings.noMatchingSettings', { query: this.value });
+    activePanel.appendChild(empty);
+  }
 });
