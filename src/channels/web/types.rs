@@ -884,18 +884,7 @@ pub struct RoutineDetailResponse {
     pub run_count: u64,
     pub consecutive_failures: u32,
     pub created_at: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub full_job_permissions: Option<FullJobPermissionInfo>,
     pub recent_runs: Vec<RoutineRunInfo>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct FullJobPermissionInfo {
-    pub permission_mode: String,
-    pub default_permission_mode: String,
-    pub stored_tool_permissions: Vec<String>,
-    pub owner_allowed_tools: Vec<String>,
-    pub effective_tool_permissions: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
