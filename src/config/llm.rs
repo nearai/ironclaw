@@ -92,7 +92,7 @@ impl LlmConfig {
         // Always resolve NEAR AI config (used for embeddings even when not the primary backend)
         let nearai_api_key = optional_env("NEARAI_API_KEY")?.map(SecretString::from);
         let nearai = NearAiConfig {
-            model: Self::resolve_model("NEARAI_MODEL", settings, "zai-org/GLM-latest")?,
+            model: Self::resolve_model("NEARAI_MODEL", settings, crate::llm::DEFAULT_MODEL)?,
             cheap_model: optional_env("NEARAI_CHEAP_MODEL")?,
             base_url: optional_env("NEARAI_BASE_URL")?.unwrap_or_else(|| {
                 if nearai_api_key.is_some() {
