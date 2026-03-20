@@ -6,7 +6,7 @@ use std::time::Duration;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
-use crate::context::{JobContext, Memory};
+use crate::context::{JobContext, JobState, Memory};
 use crate::error::JobError;
 
 /// Manages contexts for multiple concurrent jobs.
@@ -46,12 +46,41 @@ impl ContextManager {
         title: impl Into<String>,
         description: impl Into<String>,
     ) -> Result<Uuid, JobError> {
-        // Hold write lock for the entire check-insert to prevent TOCTOU races
-        // where two concurrent calls both pass the parallel_count check.
+        let context = JobContext::with_user(user_id, title, description);
+        let job_id = context.job_id;
+        self.insert_context(context).await?;
+        Ok(job_id)
+    }
+
+    /// Register a sandbox job with a pre-determined ID.
+    ///
+    /// Unlike `create_job_for_user` (which generates its own UUID), this method
+    /// accepts an existing `job_id` — used by `execute_sandbox()` which creates
+    /// the UUID before the container so it can be shared with Docker labels and
+    /// DB persistence.
+    ///
+    /// The job starts in `InProgress` state since the container is about to be
+    /// created. Counts against `max_jobs` like any other job.
+    pub async fn register_sandbox_job(
+        &self,
+        job_id: Uuid,
+        user_id: impl Into<String>,
+        title: impl Into<String>,
+        description: impl Into<String>,
+    ) -> Result<(), JobError> {
+        let mut context = JobContext::with_user(user_id, title, description);
+        context.job_id = job_id;
+        context.state = JobState::InProgress;
+        context.started_at = Some(chrono::Utc::now());
+        self.insert_context(context).await
+    }
+
+    /// Check max_jobs limit, insert context, and allocate memory.
+    ///
+    /// Holds the write lock for the entire check-insert to prevent TOCTOU
+    /// races where two concurrent calls both pass the parallel_count check.
+    async fn insert_context(&self, context: JobContext) -> Result<(), JobError> {
         let mut contexts = self.contexts.write().await;
-        // Only count jobs that consume execution slots (Pending, InProgress, Stuck).
-        // Completed and Submitted jobs are no longer actively executing and shouldn't
-        // block new job creation.
         let parallel_count = contexts
             .values()
             .filter(|c| c.state.is_parallel_blocking())
@@ -61,15 +90,16 @@ impl ContextManager {
             return Err(JobError::MaxJobsExceeded { max: self.max_jobs });
         }
 
-        let context = JobContext::with_user(user_id, title, description);
         let job_id = context.job_id;
         contexts.insert(job_id, context);
         drop(contexts);
 
-        let memory = Memory::new(job_id);
-        self.memories.write().await.insert(job_id, memory);
+        self.memories
+            .write()
+            .await
+            .insert(job_id, Memory::new(job_id));
 
-        Ok(job_id)
+        Ok(())
     }
 
     /// Get a job context by ID.
@@ -1261,5 +1291,88 @@ mod tests {
                 panic!("Unexpected error: {:?}", e);
             }
         }
+    }
+
+    // === Regression: sandbox jobs must be visible to query tools ===
+    // Before the fix, execute_sandbox() only persisted to DB but never
+    // registered in ContextManager, making sandbox jobs invisible to
+    // list_jobs, job_status, job_events, and resolve_job_id.
+
+    #[tokio::test]
+    async fn register_sandbox_job_visible_to_queries() {
+        let manager = ContextManager::new(5);
+        let job_id = Uuid::new_v4();
+
+        manager
+            .register_sandbox_job(
+                job_id,
+                "user-42",
+                "Run tests",
+                "Execute test suite in sandbox",
+            )
+            .await
+            .unwrap();
+
+        // Job should be retrievable by ID (used by job_status, job_events)
+        let ctx = manager.get_context(job_id).await.unwrap();
+        assert_eq!(ctx.job_id, job_id);
+        assert_eq!(ctx.user_id, "user-42");
+        assert_eq!(ctx.title, "Run tests");
+        assert_eq!(ctx.state, JobState::InProgress);
+        assert!(ctx.started_at.is_some());
+
+        // Job should appear in all_jobs (used by resolve_job_id prefix matching)
+        let all = manager.all_jobs().await;
+        assert!(all.contains(&job_id));
+
+        // Job should appear in user-scoped listing (used by list_jobs)
+        let user_jobs = manager.all_jobs_for("user-42").await;
+        assert!(user_jobs.contains(&job_id));
+
+        // Job should appear in active jobs listing
+        let active = manager.active_jobs_for("user-42").await;
+        assert!(active.contains(&job_id));
+    }
+
+    #[tokio::test]
+    async fn register_sandbox_job_respects_max_jobs() {
+        let manager = ContextManager::new(2);
+
+        // Fill up the slots with sandbox jobs
+        manager
+            .register_sandbox_job(Uuid::new_v4(), "user-1", "Job 1", "desc")
+            .await
+            .unwrap();
+        manager
+            .register_sandbox_job(Uuid::new_v4(), "user-1", "Job 2", "desc")
+            .await
+            .unwrap();
+
+        // Third should fail
+        let result = manager
+            .register_sandbox_job(Uuid::new_v4(), "user-1", "Job 3", "desc")
+            .await;
+        assert!(matches!(result, Err(JobError::MaxJobsExceeded { max: 2 })));
+    }
+
+    #[tokio::test]
+    async fn register_sandbox_job_transitions_correctly() {
+        let manager = ContextManager::new(5);
+        let job_id = Uuid::new_v4();
+
+        manager
+            .register_sandbox_job(job_id, "user-1", "Task", "desc")
+            .await
+            .unwrap();
+
+        // Should be able to transition InProgress -> Completed
+        manager
+            .update_context(job_id, |ctx| ctx.transition_to(JobState::Completed, None))
+            .await
+            .unwrap()
+            .unwrap();
+
+        let ctx = manager.get_context(job_id).await.unwrap();
+        assert_eq!(ctx.state, JobState::Completed);
     }
 }
