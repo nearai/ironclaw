@@ -553,7 +553,7 @@ fn build_rig_request(
         chat_history,
         documents: Vec::new(),
         tools,
-        temperature: temperature.map(|t| round_f32_to_f64(t)),
+        temperature: temperature.map(round_f32_to_f64),
         max_tokens: max_tokens.map(|t| t as u64),
         tool_choice,
         additional_params,
