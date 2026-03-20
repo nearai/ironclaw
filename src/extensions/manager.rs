@@ -1031,10 +1031,29 @@ impl ExtensionManager {
         }
 
         let Ok(mut parsed) = url::Url::parse(&auth_url) else {
-            return auth_url.replace(
-                &format!("state={}", urlencoding::encode(expected_state)),
-                &format!("state={}", urlencoding::encode(hosted_state)),
-            );
+            let Some((base, query)) = auth_url.split_once('?') else {
+                tracing::warn!(
+                    auth_url = %auth_url,
+                    "Failed to parse OAuth auth_url and no query string was available to rewrite"
+                );
+                return auth_url;
+            };
+
+            let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+            let mut replaced = false;
+            for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
+                if key == "state" {
+                    replaced = true;
+                    serializer.append_pair("state", hosted_state);
+                } else {
+                    serializer.append_pair(&key, &value);
+                }
+            }
+            if !replaced {
+                serializer.append_pair("state", hosted_state);
+            }
+
+            return format!("{base}?{}", serializer.finish());
         };
 
         let mut replaced = false;
@@ -7070,6 +7089,15 @@ mod tests {
                 "new-hosted-state",
             ),
             "https://auth.example.com/authorize?client_id=abc&state=new-hosted-state&hint=state%3Dkeep"
+        );
+    }
+
+    #[test]
+    fn rewrite_oauth_state_param_rewrites_query_for_unparseable_urls() {
+        let auth_url = "not-a-url?client_id=abc&state=old-state&hint=state%3Dkeep".to_string();
+        assert_eq!(
+            ExtensionManager::rewrite_oauth_state_param(auth_url.clone(), "old-state", "new-state"),
+            "not-a-url?client_id=abc&state=new-state&hint=state%3Dkeep"
         );
     }
 

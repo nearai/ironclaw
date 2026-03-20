@@ -577,7 +577,10 @@ pub fn encode_hosted_oauth_state(flow_id: &str, instance_name: Option<&str>) -> 
 }
 
 /// Decode hosted OAuth state in either the new versioned format or the
-/// legacy `instance:nonce`/`nonce` forms.
+/// legacy `instance:nonce` form.
+///
+/// Bare raw states without an instance prefix are intentionally rejected to
+/// avoid ambiguous callback routing in hosted deployments.
 pub fn decode_hosted_oauth_state(state: &str) -> Result<DecodedHostedOAuthState, String> {
     if let Some(rest) = state.strip_prefix(&format!("{HOSTED_STATE_PREFIX}."))
         && let Some((payload_b64, checksum)) = rest.rsplit_once('.')
@@ -617,11 +620,15 @@ pub fn decode_hosted_oauth_state(state: &str) -> Result<DecodedHostedOAuthState,
         return Err("Hosted OAuth state is empty".to_string());
     }
 
-    Ok(DecodedHostedOAuthState {
-        flow_id: state.to_string(),
-        instance_name: None,
-        is_legacy: true,
-    })
+    if state.starts_with(HOSTED_STATE_PREFIX) {
+        return Ok(DecodedHostedOAuthState {
+            flow_id: state.to_string(),
+            instance_name: None,
+            is_legacy: true,
+        });
+    }
+
+    Err("Hosted OAuth state is missing a legacy instance prefix; raw legacy states are no longer supported".to_string())
 }
 
 /// Build the hosted callback state used by the public OAuth callback endpoint.
@@ -1179,11 +1186,6 @@ mod tests {
         assert_eq!(decoded.flow_id, "abc123");
         assert_eq!(decoded.instance_name.as_deref(), Some("kind-deer"));
         assert!(decoded.is_legacy);
-
-        let decoded = decode_hosted_oauth_state("abc123").expect("legacy raw");
-        assert_eq!(decoded.flow_id, "abc123");
-        assert_eq!(decoded.instance_name, None);
-        assert!(decoded.is_legacy);
     }
 
     #[test]
@@ -1195,6 +1197,17 @@ mod tests {
         assert_eq!(decoded.flow_id, "ic2.provider-owned-state");
         assert_eq!(decoded.instance_name, None);
         assert!(decoded.is_legacy);
+    }
+
+    #[test]
+    fn test_decode_hosted_oauth_state_rejects_raw_legacy_state() {
+        use crate::cli::oauth_defaults::decode_hosted_oauth_state;
+
+        let err = decode_hosted_oauth_state("abc123").expect_err("raw legacy state should fail");
+        assert!(
+            err.contains("legacy instance prefix"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
