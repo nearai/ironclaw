@@ -246,8 +246,8 @@ impl NearAiConfig {
         } else {
             "https://private.near.ai"
         };
-        let base_url =
-            std::env::var("NEARAI_BASE_URL").unwrap_or_else(|_| default_base.to_string());
+        let base_url = crate::config::helpers::env_or_override("NEARAI_BASE_URL")
+            .unwrap_or_else(|| default_base.to_string());
 
         Self {
             model: String::new(),
