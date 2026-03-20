@@ -1,0 +1,113 @@
+{
+  "version": "0.1.0",
+  "wit_version": "0.3.0",
+  "description": "NEAR 1Click Swap tool. Lists supported tokens across blockchains, requests cross-chain swap quotes, submits deposit transaction hashes to speed up processing, and checks swap execution status via the Defuse 1Click API (chaindefuser.com). No API key required.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "action": {
+        "type": "string",
+        "enum": ["get_tokens", "get_quote", "submit_tx_hash", "get_status"],
+        "description": "Operation to perform: 'get_tokens' lists supported tokens, 'get_quote' requests a swap quote, 'submit_tx_hash' notifies the system of a deposit TX to speed up processing, 'get_status' checks swap execution status"
+      },
+      "dry": {
+        "type": "boolean",
+        "description": "[get_quote] Simulate without generating a real deposit address"
+      },
+      "swap_type": {
+        "type": "string",
+        "enum": ["EXACT_INPUT", "EXACT_OUTPUT", "FLEX_INPUT", "ANY_INPUT"],
+        "description": "[get_quote] Swap type: EXACT_INPUT fixes input amount, EXACT_OUTPUT fixes output amount"
+      },
+      "slippage_tolerance": {
+        "type": "integer",
+        "description": "[get_quote] Slippage tolerance in basis points (100 = 1%, 50 = 0.5%)",
+        "minimum": 0
+      },
+      "origin_asset": {
+        "type": "string",
+        "description": "[get_quote] Source asset ID (e.g. 'nep141:wrap.near', 'nep141:usdt.tether-token.near')"
+      },
+      "deposit_type": {
+        "type": "string",
+        "enum": ["ORIGIN_CHAIN", "INTENTS"],
+        "description": "[get_quote] How the deposit is made: ORIGIN_CHAIN means on-chain deposit, INTENTS uses the intents protocol"
+      },
+      "destination_asset": {
+        "type": "string",
+        "description": "[get_quote] Target asset ID (e.g. 'nep141:aurora')"
+      },
+      "amount": {
+        "type": "string",
+        "description": "[get_quote] Amount in the token's smallest unit (e.g. '1000000000000000000000000' for 1 wNEAR with 24 decimals)"
+      },
+      "refund_to": {
+        "type": "string",
+        "description": "[get_quote] Address to refund to on failure"
+      },
+      "refund_type": {
+        "type": "string",
+        "enum": ["ORIGIN_CHAIN", "INTENTS"],
+        "description": "[get_quote] How refunds are sent: ORIGIN_CHAIN or INTENTS"
+      },
+      "recipient": {
+        "type": "string",
+        "description": "[get_quote] Destination recipient address"
+      },
+      "recipient_type": {
+        "type": "string",
+        "enum": ["DESTINATION_CHAIN", "INTENTS"],
+        "description": "[get_quote] How the output is delivered: DESTINATION_CHAIN or INTENTS"
+      },
+      "deadline": {
+        "type": "string",
+        "description": "[get_quote] ISO 8601 datetime when the deposit becomes inactive (e.g. '2026-03-19T00:00:00Z')"
+      },
+      "referral": {
+        "type": "string",
+        "description": "[get_quote] Optional referral identifier"
+      },
+      "tx_hash": {
+        "type": "string",
+        "description": "[submit_tx_hash] Blockchain transaction hash of the deposit"
+      },
+      "near_sender_account": {
+        "type": "string",
+        "description": "[submit_tx_hash] Sender account, required only for NEAR blockchain transactions"
+      },
+      "memo": {
+        "type": "string",
+        "description": "[submit_tx_hash] Memo used when submitting the deposit, if any"
+      },
+      "deposit_address": {
+        "type": "string",
+        "description": "[submit_tx_hash, get_status] Deposit address returned by get_quote"
+      },
+      "deposit_memo": {
+        "type": "string",
+        "description": "[get_status] Deposit memo if one was included in the quote response"
+      }
+    },
+    "required": ["action"],
+    "additionalProperties": false
+  },
+  "capabilities": {
+    "http": {
+      "allowlist": [
+        {
+          "host": "1click.chaindefuser.com",
+          "path_prefix": "/v0/",
+          "methods": ["GET", "POST"]
+        }
+      ],
+      "rate_limit": {
+        "requests_per_minute": 30,
+        "requests_per_hour": 300
+      },
+      "timeout_secs": 30
+    }
+  },
+  "setup": {
+    "required_secrets": []
+  }
+}
