@@ -8,10 +8,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDateTime, Utc};
 use clap::{Args, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
 
+use crate::cli::import_claude_code::{ClaudeCodeImporter, default_claude_code_path};
+use crate::cli::import_claude_web::ClaudeWebImporter;
 use crate::config::Config;
 
 #[cfg(feature = "import")]
@@ -89,9 +91,8 @@ impl ImportSource {
     /// Whether this build includes a parser for this history source.
     pub fn supports_history_import(self) -> bool {
         match self {
-            Self::ClaudeCode | Self::ClaudeWeb | Self::CodexCli | Self::ChatGpt | Self::Gemini => {
-                false
-            }
+            Self::ClaudeCode | Self::ClaudeWeb => true,
+            Self::CodexCli | Self::ChatGpt | Self::Gemini => false,
         }
     }
 }
@@ -407,9 +408,8 @@ fn print_history_import_summary(source: ImportSource, stats: &ImportStats) {
 pub fn autodetect_import_sources() -> Vec<AutoDetectedImportSource> {
     let mut detected = Vec::new();
 
-    if ImportSource::ClaudeCode.supports_history_import()
-        && let Some(path) = default_claude_code_path().filter(|path| path.exists())
-    {
+    if ImportSource::ClaudeCode.supports_history_import() {
+        let path = default_claude_code_path();
         let file_count = count_files_with_extension(&path, "jsonl", 10_000);
         if file_count > 0 {
             detected.push(AutoDetectedImportSource {
@@ -435,15 +435,12 @@ pub fn autodetect_import_sources() -> Vec<AutoDetectedImportSource> {
     }
 
     if ImportSource::ClaudeWeb.supports_history_import()
-        && let Some(path) = detect_latest_zip(|name| {
-            let lower = name.to_ascii_lowercase();
-            lower.contains("claude") && lower.ends_with(".zip")
-        })
+        && let Some(path) = detect_latest_claude_web_export()
     {
         detected.push(AutoDetectedImportSource {
             source: ImportSource::ClaudeWeb,
             path,
-            note: "Found matching ZIP in Downloads".to_string(),
+            note: "Found Claude export ZIP in Downloads".to_string(),
         });
     }
 
@@ -498,9 +495,14 @@ fn resolve_source_path(
 
     match source {
         ImportSource::ClaudeCode => {
-            default_claude_code_path().ok_or_else(|| ImportError::NotFound {
-                path: "~/.claude/projects".to_string(),
-            })
+            let path = default_claude_code_path();
+            if path.exists() {
+                Ok(path)
+            } else {
+                Err(ImportError::NotFound {
+                    path: "~/.claude/projects".to_string(),
+                })
+            }
         }
         ImportSource::CodexCli => default_codex_cli_path().ok_or_else(|| ImportError::NotFound {
             path: "~/.codex/sessions or ~/.config/codex/sessions".to_string(),
@@ -518,7 +520,13 @@ fn resolve_source_path(
 }
 
 fn importer_for_source(source: ImportSource) -> Box<dyn Importer> {
-    Box::new(UnimplementedImporter { source })
+    match source {
+        ImportSource::ClaudeCode => Box::new(ClaudeCodeImporter),
+        ImportSource::ClaudeWeb => Box::new(ClaudeWebImporter),
+        ImportSource::CodexCli | ImportSource::ChatGpt | ImportSource::Gemini => {
+            Box::new(UnimplementedImporter { source })
+        }
+    }
 }
 
 struct UnimplementedImporter {
@@ -538,10 +546,6 @@ impl Importer for UnimplementedImporter {
             ),
         })
     }
-}
-
-fn default_claude_code_path() -> Option<PathBuf> {
-    home_dir().map(|home| home.join(".claude").join("projects"))
 }
 
 fn default_codex_cli_path() -> Option<PathBuf> {
@@ -591,6 +595,82 @@ fn detect_latest_zip(predicate: impl Fn(&str) -> bool) -> Option<PathBuf> {
 
     matches.sort_by_key(|(modified, _)| Reverse(*modified));
     matches.into_iter().map(|(_, path)| path).next()
+}
+
+fn detect_latest_claude_web_export() -> Option<PathBuf> {
+    let downloads_dir = home_dir()?.join("Downloads");
+    let entries = fs::read_dir(downloads_dir).ok()?;
+
+    let mut zip_paths = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let is_zip = path
+            .extension()
+            .and_then(|value| value.to_str())
+            .map(|value| value.eq_ignore_ascii_case("zip"))
+            .unwrap_or(false);
+        if !is_zip {
+            continue;
+        }
+
+        let modified = entry
+            .metadata()
+            .ok()
+            .and_then(|metadata| metadata.modified().ok())
+            .unwrap_or(SystemTime::UNIX_EPOCH);
+        zip_paths.push((modified, path));
+    }
+
+    zip_paths.sort_by_key(|(modified, _)| Reverse(*modified));
+    zip_paths.into_iter().find_map(|(_, path)| {
+        if is_likely_claude_web_export_zip(&path) {
+            Some(path)
+        } else {
+            None
+        }
+    })
+}
+
+fn is_likely_claude_web_export_zip(path: &Path) -> bool {
+    let file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(_) => return false,
+    };
+    let mut archive = match zip::ZipArchive::new(file) {
+        Ok(archive) => archive,
+        Err(_) => return false,
+    };
+
+    let mut has_conversations = false;
+    let mut has_projects = false;
+    let mut has_users = false;
+
+    for index in 0..archive.len() {
+        let Ok(entry) = archive.by_index(index) else {
+            continue;
+        };
+        let name = entry
+            .name()
+            .rsplit('/')
+            .next()
+            .unwrap_or(entry.name())
+            .to_ascii_lowercase();
+        match name.as_str() {
+            "conversations.json" => has_conversations = true,
+            "projects.json" => has_projects = true,
+            "users.json" => has_users = true,
+            _ => {}
+        }
+
+        if has_conversations && (has_projects || has_users) {
+            return true;
+        }
+    }
+
+    false
 }
 
 fn count_files_with_extension(root: &Path, extension: &str, limit: usize) -> usize {
@@ -713,6 +793,42 @@ fn slugify(input: &str) -> String {
     } else {
         output.to_string()
     }
+}
+
+pub(crate) fn parse_timestamp(raw: &str) -> Option<DateTime<Utc>> {
+    if let Ok(dt) = DateTime::parse_from_rfc3339(raw) {
+        return Some(dt.with_timezone(&Utc));
+    }
+
+    let zoned_formats = [
+        "%Y-%m-%d %H:%M:%S%.f%z",
+        "%Y-%m-%dT%H:%M:%S%.f%z",
+        "%Y-%m-%d %H:%M:%S%z",
+        "%Y-%m-%dT%H:%M:%S%z",
+    ];
+    for format in zoned_formats {
+        if let Ok(dt) = DateTime::parse_from_str(raw, format) {
+            return Some(dt.with_timezone(&Utc));
+        }
+    }
+
+    let naive_formats = [
+        "%Y-%m-%d %H:%M:%S%.f",
+        "%Y-%m-%dT%H:%M:%S%.f",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%dT%H:%M:%S",
+    ];
+    for format in naive_formats {
+        if let Ok(dt) = NaiveDateTime::parse_from_str(raw, format) {
+            return Some(DateTime::<Utc>::from_naive_utc_and_offset(dt, Utc));
+        }
+    }
+
+    None
+}
+
+pub(crate) fn truncate_chars(input: &str, max_chars: usize) -> String {
+    input.chars().take(max_chars).collect()
 }
 
 #[cfg(feature = "import")]

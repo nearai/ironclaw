@@ -19,6 +19,8 @@ mod completion;
 mod config;
 mod doctor;
 pub mod import;
+mod import_claude_code;
+mod import_claude_web;
 mod logs;
 mod mcp;
 pub mod memory;

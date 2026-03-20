@@ -1,0 +1,2 @@
+{"type":"human","text":"How do we optimize this Rust function?","timestamp":"2025-05-14T10:23:45.123Z"}
+{"type":"assistant","text":"Start by profiling and then reduce allocations.","timestamp":"2025-05-14T10:23:52.456Z"}
