@@ -221,6 +221,29 @@ impl SessionManager {
         }
     }
 
+    /// Check whether a thread is already registered for the given user/channel.
+    ///
+    /// This is a cheap read-only lookup used by approval routing to avoid
+    /// taking the session write lock on the common path where the approval
+    /// thread is already mapped.
+    pub async fn is_thread_registered(
+        &self,
+        user_id: &str,
+        channel: &str,
+        thread_id: Uuid,
+    ) -> bool {
+        let key = ThreadKey {
+            user_id: user_id.to_string(),
+            channel: channel.to_string(),
+            external_thread_id: Some(thread_id.to_string()),
+        };
+
+        let thread_map = self.thread_map.read().await;
+        thread_map
+            .get(&key)
+            .is_some_and(|mapped| *mapped == thread_id)
+    }
+
     /// Get undo manager for a thread.
     pub async fn get_undo_manager(&self, thread_id: Uuid) -> Arc<Mutex<UndoManager>> {
         // Fast path
@@ -666,6 +689,37 @@ mod tests {
             let sessions = manager.sessions.read().await;
             assert!(sessions.contains_key("user-new"));
         }
+    }
+
+    #[tokio::test]
+    async fn test_is_thread_registered() {
+        use crate::agent::session::{Session, Thread};
+
+        let manager = SessionManager::new();
+        let tid = Uuid::new_v4();
+        let session = Arc::new(Mutex::new(Session::new("user-reg")));
+
+        {
+            let mut sess = session.lock().await;
+            let thread = Thread::with_id(tid, sess.id);
+            sess.threads.insert(tid, thread);
+        }
+
+        assert!(
+            !manager
+                .is_thread_registered("user-reg", "gateway", tid)
+                .await
+        );
+
+        manager
+            .register_thread("user-reg", "gateway", tid, Arc::clone(&session))
+            .await;
+
+        assert!(
+            manager
+                .is_thread_registered("user-reg", "gateway", tid)
+                .await
+        );
     }
 
     #[tokio::test]
