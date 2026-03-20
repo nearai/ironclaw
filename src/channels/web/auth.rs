@@ -75,6 +75,15 @@ struct CachedKey {
     fetched_at: Instant,
 }
 
+/// Tracks recent fetch failures to avoid hammering a downed JWKS endpoint.
+#[derive(Clone)]
+struct FailedFetch {
+    failed_at: Instant,
+}
+
+/// How long to suppress retries after a JWKS fetch failure.
+const FETCH_FAILURE_BACKOFF: Duration = Duration::from_secs(10);
+
 /// OIDC JWT authentication state.
 ///
 /// Holds the configuration, an HTTP client for JWKS fetches, and a
@@ -83,6 +92,8 @@ struct CachedKey {
 pub struct OidcState {
     config: GatewayOidcConfig,
     key_cache: Arc<RwLock<HashMap<String, CachedKey>>>,
+    /// Tracks recent fetch failures per kid to prevent retry storms.
+    fetch_failures: Arc<RwLock<HashMap<String, FailedFetch>>>,
     http_client: reqwest::Client,
 }
 
@@ -102,18 +113,28 @@ enum OidcError {
 }
 
 const KEY_CACHE_TTL: Duration = Duration::from_secs(3600);
+/// Maximum number of cached keys. Prevents memory exhaustion from
+/// attackers sending JWTs with many distinct `kid` values.
+const KEY_CACHE_MAX_ENTRIES: usize = 64;
 
 impl OidcState {
-    /// Build OIDC state from gateway config. Returns `None` if OIDC is not configured.
-    pub fn from_config(oidc: &GatewayOidcConfig) -> Self {
-        Self {
+    /// Build OIDC state from gateway config.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the reqwest HTTP client fails to build (e.g. TLS
+    /// backend unavailable).
+    pub fn from_config(oidc: &GatewayOidcConfig) -> Result<Self, String> {
+        let http_client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .map_err(|e| format!("failed to build OIDC HTTP client: {e}"))?;
+        Ok(Self {
             config: oidc.clone(),
             key_cache: Arc::new(RwLock::new(HashMap::new())),
-            http_client: reqwest::Client::builder()
-                .timeout(Duration::from_secs(10))
-                .build()
-                .expect("reqwest client must build"),
-        }
+            fetch_failures: Arc::new(RwLock::new(HashMap::new())),
+            http_client,
+        })
     }
 
     /// Header name containing the JWT.
@@ -171,18 +192,45 @@ impl OidcState {
         Ok((key, alg))
     }
 
-    /// HTTP GET helper with timeout and error status check.
+    /// Maximum JWKS response body size (256 KB). Prevents a compromised
+    /// endpoint from sending arbitrarily large payloads.
+    const MAX_JWKS_RESPONSE_BYTES: usize = 256 * 1024;
+
+    /// HTTP GET helper with timeout, error status check, and body size limit.
     async fn fetch_url_text(&self, url: &str) -> Result<String, OidcError> {
-        self.http_client
+        let response = self
+            .http_client
             .get(url)
             .send()
             .await
-            .map_err(|e| OidcError::KeyFetch(format!("HTTP request to {url}: {e}")))?
+            .map_err(|e| OidcError::KeyFetch(format!("HTTP request: {e}")))?
             .error_for_status()
-            .map_err(|e| OidcError::KeyFetch(format!("HTTP {url}: {e}")))?
-            .text()
+            .map_err(|e| OidcError::KeyFetch(format!("HTTP error: {e}")))?;
+
+        // Check Content-Length hint before downloading.
+        if let Some(len) = response.content_length()
+            && len as usize > Self::MAX_JWKS_RESPONSE_BYTES
+        {
+            return Err(OidcError::KeyFetch(format!(
+                "JWKS response too large ({len} bytes, max {})",
+                Self::MAX_JWKS_RESPONSE_BYTES
+            )));
+        }
+
+        let bytes = response
+            .bytes()
             .await
-            .map_err(|e| OidcError::KeyFetch(format!("reading body from {url}: {e}")))
+            .map_err(|e| OidcError::KeyFetch(format!("reading body: {e}")))?;
+        if bytes.len() > Self::MAX_JWKS_RESPONSE_BYTES {
+            return Err(OidcError::KeyFetch(format!(
+                "JWKS response too large ({} bytes, max {})",
+                bytes.len(),
+                Self::MAX_JWKS_RESPONSE_BYTES
+            )));
+        }
+
+        String::from_utf8(bytes.to_vec())
+            .map_err(|e| OidcError::KeyFetch(format!("response not UTF-8: {e}")))
     }
 
     /// Get the signing key for `kid`, using cache when available (1h TTL).
@@ -201,16 +249,65 @@ impl OidcState {
             }
         }
 
+        // Check recent fetch failure backoff to avoid hammering a downed endpoint.
+        {
+            let failures = self.fetch_failures.read().await;
+            if let Some(failed) = failures.get(kid)
+                && failed.failed_at.elapsed() < FETCH_FAILURE_BACKOFF
+            {
+                return Err(OidcError::KeyFetch(
+                    "JWKS fetch recently failed, backing off".to_string(),
+                ));
+            }
+        }
+
         // Slow path: fetch and cache.
-        let (key, resolved_alg) = if self.config.jwks_url.contains("{kid}") {
-            let url = self.config.jwks_url.replace("{kid}", kid);
-            let key = self.fetch_single_key(&url, alg).await?;
-            (key, alg)
+        let fetch_result = if self.config.jwks_url.contains("{kid}") {
+            // URL-encode the kid to prevent SSRF via crafted JWT headers.
+            let encoded_kid: String =
+                url::form_urlencoded::byte_serialize(kid.as_bytes()).collect();
+            let url = self.config.jwks_url.replace("{kid}", &encoded_kid);
+            self.fetch_single_key(&url, alg)
+                .await
+                .map(|key| (key, alg))
         } else {
-            self.fetch_jwks_key(&self.config.jwks_url, kid).await?
+            self.fetch_jwks_key(&self.config.jwks_url, kid).await
+        };
+
+        // Record failure for backoff before propagating error.
+        let (key, resolved_alg) = match fetch_result {
+            Ok(result) => {
+                // Clear any previous failure record.
+                self.fetch_failures.write().await.remove(kid);
+                result
+            }
+            Err(e) => {
+                self.fetch_failures.write().await.insert(
+                    kid.to_string(),
+                    FailedFetch {
+                        failed_at: Instant::now(),
+                    },
+                );
+                return Err(e);
+            }
         };
 
         let mut cache = self.key_cache.write().await;
+
+        // Evict expired entries and enforce max cache size to prevent
+        // memory exhaustion from attacker-controlled kid values.
+        cache.retain(|_, v| v.fetched_at.elapsed() < KEY_CACHE_TTL);
+        if cache.len() >= KEY_CACHE_MAX_ENTRIES {
+            // Evict the oldest entry.
+            if let Some(oldest_kid) = cache
+                .iter()
+                .min_by_key(|(_, v)| v.fetched_at)
+                .map(|(k, _)| k.clone())
+            {
+                cache.remove(&oldest_kid);
+            }
+        }
+
         cache.insert(
             kid.to_string(),
             CachedKey {
@@ -354,15 +451,19 @@ fn try_der_to_raw(der: &[u8], alg: Algorithm) -> Option<Vec<u8>> {
         return None;
     }
 
-    let mut pos = 2; // skip SEQUENCE tag + length
+    // Skip SEQUENCE tag + parse length (supports long-form DER lengths).
+    let mut pos = 1;
+    let _seq_len = parse_der_length(der, &mut pos)?;
 
     // Parse R INTEGER
     if pos >= der.len() || der[pos] != 0x02 {
         return None;
     }
     pos += 1;
-    let r_len = *der.get(pos)? as usize;
-    pos += 1;
+    let r_len = parse_der_length(der, &mut pos)?;
+    if r_len > component_len + 1 {
+        return None;
+    }
     let r_bytes = der.get(pos..pos + r_len)?;
     pos += r_len;
 
@@ -371,8 +472,10 @@ fn try_der_to_raw(der: &[u8], alg: Algorithm) -> Option<Vec<u8>> {
         return None;
     }
     pos += 1;
-    let s_len = *der.get(pos)? as usize;
-    pos += 1;
+    let s_len = parse_der_length(der, &mut pos)?;
+    if s_len > component_len + 1 {
+        return None;
+    }
     let s_bytes = der.get(pos..pos + s_len)?;
 
     // Strip leading zero padding from DER INTEGER values and left-pad
@@ -387,6 +490,29 @@ fn try_der_to_raw(der: &[u8], alg: Algorithm) -> Option<Vec<u8>> {
     raw[component_len - r.len()..component_len].copy_from_slice(r);
     raw[component_len * 2 - s.len()..].copy_from_slice(s);
     Some(raw)
+}
+
+/// Parse a DER length field, handling both short-form (< 128) and
+/// long-form (0x81 xx, 0x82 xx yy) encodings. Advances `pos` past
+/// the length bytes. Returns `None` for unsupported multi-byte lengths
+/// (> 2 bytes) or if the buffer is too short.
+fn parse_der_length(der: &[u8], pos: &mut usize) -> Option<usize> {
+    let b = *der.get(*pos)?;
+    *pos += 1;
+    if b < 0x80 {
+        Some(b as usize)
+    } else {
+        let num_bytes = (b & 0x7F) as usize;
+        if num_bytes == 0 || num_bytes > 2 {
+            return None;
+        }
+        let mut len: usize = 0;
+        for _ in 0..num_bytes {
+            len = len.checked_mul(256)?.checked_add(*der.get(*pos)? as usize)?;
+            *pos += 1;
+        }
+        Some(len)
+    }
 }
 
 /// Strip the leading zero byte that DER adds to unsigned INTEGERs when
@@ -849,6 +975,80 @@ mod tests {
         assert_eq!(strip_der_leading_zero(&[0x00, 0x80, 0x01]), &[0x80, 0x01]);
         assert_eq!(strip_der_leading_zero(&[0x80, 0x01]), &[0x80, 0x01]);
         assert_eq!(strip_der_leading_zero(&[0x00]), &[0x00]); // single zero stays
+    }
+
+    #[test]
+    fn test_parse_der_length_short_form() {
+        let data = [0x20]; // 32 in short form
+        let mut pos = 0;
+        assert_eq!(parse_der_length(&data, &mut pos), Some(32));
+        assert_eq!(pos, 1);
+    }
+
+    #[test]
+    fn test_parse_der_length_long_form_one_byte() {
+        // 0x81 0x80 = 128 in long form (1 extra length byte)
+        let data = [0x81, 0x80];
+        let mut pos = 0;
+        assert_eq!(parse_der_length(&data, &mut pos), Some(128));
+        assert_eq!(pos, 2);
+    }
+
+    #[test]
+    fn test_parse_der_length_long_form_two_bytes() {
+        // 0x82 0x01 0x00 = 256 in long form (2 extra length bytes)
+        let data = [0x82, 0x01, 0x00];
+        let mut pos = 0;
+        assert_eq!(parse_der_length(&data, &mut pos), Some(256));
+        assert_eq!(pos, 3);
+    }
+
+    #[test]
+    fn test_try_der_to_raw_long_form_sequence_length() {
+        // Build a DER signature where SEQUENCE length is >= 128 (uses long form).
+        // ES384: component_len=48, max R=49 (leading zero), max S=49.
+        // SEQUENCE content: 2+49 + 2+49 = 102 bytes, so total SEQUENCE = 102.
+        let r = {
+            let mut v = vec![0x00]; // leading zero
+            v.extend_from_slice(&[0xFF; 48]); // 48 bytes with high bits
+            v
+        };
+        let s = {
+            let mut v = vec![0x00]; // leading zero
+            v.extend_from_slice(&[0xAA; 48]);
+            v
+        };
+        let content_len = 2 + r.len() + 2 + s.len(); // 102
+        assert!(content_len < 128); // short form still works for ES384
+
+        // Force a case where total > 127: use ES384 with both R and S having 49 bytes
+        // content = (1+1+49) + (1+1+49) = 102. That's < 128, so let's construct
+        // a valid DER with 0x81 long-form length anyway to test the parser.
+        let mut der = vec![0x30, 0x81, content_len as u8];
+        der.push(0x02);
+        der.push(r.len() as u8);
+        der.extend_from_slice(&r);
+        der.push(0x02);
+        der.push(s.len() as u8);
+        der.extend_from_slice(&s);
+
+        let raw = try_der_to_raw(&der, Algorithm::ES384)
+            .expect("should parse DER with long-form sequence length");
+        assert_eq!(raw.len(), 96); // 48 * 2
+        // R should have leading zero stripped → first byte is 0xFF
+        assert_eq!(raw[0], 0xFF);
+        // S should have leading zero stripped → byte at offset 48 is 0xAA
+        assert_eq!(raw[48], 0xAA);
+    }
+
+    #[test]
+    fn test_kid_url_encoded_in_jwks_url() {
+        // Verify that special characters in kid are URL-encoded, not raw-substituted.
+        let encoded: String =
+            url::form_urlencoded::byte_serialize(b"../../evil?x=1").collect();
+        let url = "https://example.com/keys/{kid}".replace("{kid}", &encoded);
+        assert!(!url.contains("../"));
+        assert!(url.contains("%2F"));
     }
 
     #[test]

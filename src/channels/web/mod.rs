@@ -79,13 +79,21 @@ impl GatewayChannel {
             bytes.iter().map(|b| format!("{b:02x}")).collect()
         });
 
-        let oidc_state = config.oidc.as_ref().map(|oidc_config| {
-            tracing::info!(
-                header = %oidc_config.header,
-                jwks_url = %oidc_config.jwks_url,
-                "OIDC JWT authentication enabled"
-            );
-            auth::OidcState::from_config(oidc_config)
+        let oidc_state = config.oidc.as_ref().and_then(|oidc_config| {
+            match auth::OidcState::from_config(oidc_config) {
+                Ok(state) => {
+                    tracing::info!(
+                        header = %oidc_config.header,
+                        jwks_url = %oidc_config.jwks_url,
+                        "OIDC JWT authentication enabled"
+                    );
+                    Some(state)
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "Failed to initialize OIDC auth — falling back to token-only auth");
+                    None
+                }
+            }
         });
 
         let state = Arc::new(GatewayState {
