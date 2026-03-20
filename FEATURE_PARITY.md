@@ -465,7 +465,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Device pairing | ✅ | ❌ | |
 | Tailscale identity | ✅ | ❌ | |
 | Trusted-proxy auth | ✅ | ❌ | Header-based reverse proxy auth |
-| OAuth flows | ✅ | 🚧 | NEAR AI OAuth |
+| OAuth flows | ✅ | 🚧 | NEAR AI OAuth plus hosted extension/MCP OAuth broker; external auth-proxy rollout still pending |
 | DM pairing verification | ✅ | ✅ | ironclaw pairing approve, host APIs |
 | Allowlist/blocklist | ✅ | 🚧 | allow_from + pairing store |
 | Per-group tool policies | ✅ | ❌ | |

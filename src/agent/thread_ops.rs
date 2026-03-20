@@ -506,7 +506,8 @@ impl Agent {
                 let tool_name = pending.tool_name.clone();
                 let description = pending.description.clone();
                 let parameters = pending.display_parameters.clone();
-                thread.await_approval(pending);
+                let allow_always = pending.allow_always;
+                thread.await_approval(*pending);
                 let _ = self
                     .channels
                     .send_status(
@@ -516,6 +517,7 @@ impl Agent {
                             tool_name: tool_name.clone(),
                             description: description.clone(),
                             parameters: parameters.clone(),
+                            allow_always,
                         },
                         &message.metadata,
                     )
@@ -525,6 +527,7 @@ impl Agent {
                     tool_name,
                     description,
                     parameters,
+                    allow_always,
                 })
             }
             Err(e) => {
@@ -1121,28 +1124,31 @@ impl Agent {
                 usize,
                 crate::llm::ToolCall,
                 Arc<dyn crate::tools::Tool>,
+                bool, // allow_always
             )> = None;
 
             for (idx, tc) in deferred_tool_calls.iter().enumerate() {
                 if let Some(tool) = self.tools().get(&tc.name).await {
                     // Match dispatcher.rs: when auto_approve_tools is true, skip
                     // all approval checks (including ApprovalRequirement::Always).
-                    let needs_approval = if self.config.auto_approve_tools {
-                        false
+                    let (needs_approval, allow_always) = if self.config.auto_approve_tools {
+                        (false, true)
                     } else {
                         use crate::tools::ApprovalRequirement;
-                        match tool.requires_approval(&tc.arguments) {
+                        let requirement = tool.requires_approval(&tc.arguments);
+                        let needs = match requirement {
                             ApprovalRequirement::Never => false,
                             ApprovalRequirement::UnlessAutoApproved => {
                                 let sess = session.lock().await;
                                 !sess.is_tool_auto_approved(&tc.name)
                             }
                             ApprovalRequirement::Always => true,
-                        }
+                        };
+                        (needs, !matches!(requirement, ApprovalRequirement::Always))
                     };
 
                     if needs_approval {
-                        approval_needed = Some((idx, tc.clone(), tool));
+                        approval_needed = Some((idx, tc.clone(), tool, allow_always));
                         break; // remaining tools stay deferred
                     }
                 }
@@ -1350,7 +1356,7 @@ impl Agent {
             }
 
             // Handle approval if a tool needed it
-            if let Some((approval_idx, tc, tool)) = approval_needed {
+            if let Some((approval_idx, tc, tool, allow_always)) = approval_needed {
                 let new_pending = PendingApproval {
                     request_id: Uuid::new_v4(),
                     tool_name: tc.name.clone(),
@@ -1362,6 +1368,7 @@ impl Agent {
                     deferred_tool_calls: deferred_tool_calls[approval_idx + 1..].to_vec(),
                     // Carry forward the resolved timezone from the original pending approval
                     user_timezone: pending.user_timezone.clone(),
+                    allow_always,
                 };
 
                 let request_id = new_pending.request_id;
@@ -1385,6 +1392,7 @@ impl Agent {
                             tool_name: tool_name.clone(),
                             description: description.clone(),
                             parameters: parameters.clone(),
+                            allow_always,
                         },
                         &message.metadata,
                     )
@@ -1395,6 +1403,7 @@ impl Agent {
                     tool_name,
                     description,
                     parameters,
+                    allow_always,
                 });
             }
 
@@ -1463,7 +1472,8 @@ impl Agent {
                     let tool_name = new_pending.tool_name.clone();
                     let description = new_pending.description.clone();
                     let parameters = new_pending.display_parameters.clone();
-                    thread.await_approval(new_pending);
+                    let allow_always = new_pending.allow_always;
+                    thread.await_approval(*new_pending);
                     let _ = self
                         .channels
                         .send_status(
@@ -1473,6 +1483,7 @@ impl Agent {
                                 tool_name: tool_name.clone(),
                                 description: description.clone(),
                                 parameters: parameters.clone(),
+                                allow_always,
                             },
                             &message.metadata,
                         )
@@ -1482,6 +1493,7 @@ impl Agent {
                         tool_name,
                         description,
                         parameters,
+                        allow_always,
                     })
                 }
                 Err(e) => {
@@ -2002,6 +2014,7 @@ mod tests {
             context_messages: vec![],
             deferred_tool_calls: vec![],
             user_timezone: None,
+            allow_always: false,
         };
         thread.await_approval(pending);
 

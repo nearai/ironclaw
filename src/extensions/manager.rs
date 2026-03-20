@@ -45,6 +45,56 @@ struct PendingAuth {
     task_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
+struct HostedOAuthFlowStart {
+    name: String,
+    kind: ExtensionKind,
+    auth_url: String,
+    expected_state: String,
+    flow: crate::cli::oauth_defaults::PendingOAuthFlow,
+}
+
+fn hosted_proxy_client_secret(
+    client_secret: &Option<String>,
+    builtin: Option<&crate::cli::oauth_defaults::OAuthCredentials>,
+    exchange_proxy_configured: bool,
+) -> Option<String> {
+    if !exchange_proxy_configured {
+        return client_secret.clone();
+    }
+
+    let builtin_secret = builtin.map(|credentials| credentials.client_secret);
+    match (client_secret, builtin_secret) {
+        (Some(resolved), Some(baked_in)) if resolved == baked_in => None,
+        _ => client_secret.clone(),
+    }
+}
+
+fn normalize_oauth_callback_path(path: &str) -> String {
+    let trimmed_path = path.trim_end_matches('/');
+    if trimmed_path.is_empty() {
+        "/oauth/callback".to_string()
+    } else if trimmed_path.ends_with("/oauth/callback") {
+        trimmed_path.to_string()
+    } else {
+        format!("{trimmed_path}/oauth/callback")
+    }
+}
+
+fn normalize_hosted_callback_url(callback_url: &str) -> String {
+    if let Ok(mut parsed) = url::Url::parse(callback_url) {
+        let normalized_path = normalize_oauth_callback_path(parsed.path());
+        parsed.set_path(&normalized_path);
+        return parsed.to_string();
+    }
+
+    let normalized_callback_url = callback_url.trim_end_matches('/');
+    if normalized_callback_url.ends_with("/oauth/callback") {
+        normalized_callback_url.to_string()
+    } else {
+        format!("{normalized_callback_url}/oauth/callback")
+    }
+}
+
 /// Runtime infrastructure needed for hot-activating WASM channels.
 ///
 /// Set after construction via [`ExtensionManager::set_channel_runtime`] once the
@@ -361,6 +411,18 @@ pub struct ExtensionManager {
     /// Relay config captured at startup. Used by `auth_channel_relay` and
     /// `activate_channel_relay` instead of re-reading env vars.
     relay_config: Option<crate::config::RelayConfig>,
+    /// Shared event sender for the relay webhook endpoint.
+    /// Populated by `activate_channel_relay`, consumed by the web gateway's
+    /// `/relay/events` handler.
+    relay_event_tx: Arc<
+        tokio::sync::Mutex<
+            Option<tokio::sync::mpsc::Sender<crate::channels::relay::client::ChannelEvent>>,
+        >,
+    >,
+    /// Per-instance callback signing secret fetched from channel-relay at activation.
+    /// Stored here so the web gateway can verify incoming callbacks without
+    /// any env var or shared secret.
+    relay_signing_secret_cache: Arc<std::sync::Mutex<Option<Vec<u8>>>>,
     /// When `true`, OAuth flows always return an auth URL to the caller
     /// instead of opening a browser on the server via `open::that()`.
     /// Set by the web gateway at startup via `enable_gateway_mode()`.
@@ -446,6 +508,8 @@ impl ExtensionManager {
             pending_oauth_flows: crate::cli::oauth_defaults::new_pending_oauth_registry(),
             gateway_token: std::env::var("GATEWAY_AUTH_TOKEN").ok(),
             relay_config: crate::config::RelayConfig::from_env(),
+            relay_event_tx: Arc::new(tokio::sync::Mutex::new(None)),
+            relay_signing_secret_cache: Arc::new(std::sync::Mutex::new(None)),
             gateway_mode: std::sync::atomic::AtomicBool::new(false),
             gateway_base_url: RwLock::new(None),
             pending_telegram_verification: RwLock::new(HashMap::new()),
@@ -533,7 +597,9 @@ impl ExtensionManager {
     async fn gateway_callback_redirect_uri(&self) -> Option<String> {
         use crate::cli::oauth_defaults;
         if oauth_defaults::use_gateway_callback() {
-            return Some(format!("{}/oauth/callback", oauth_defaults::callback_url()));
+            return Some(normalize_hosted_callback_url(
+                &oauth_defaults::callback_url(),
+            ));
         }
         // Use gateway_base_url from enable_gateway_mode()
         if let Some(ref base) = *self.gateway_base_url.read().await {
@@ -562,6 +628,33 @@ impl ExtensionManager {
                 "CHANNEL_RELAY_URL and CHANNEL_RELAY_API_KEY must be set".to_string(),
             )
         })
+    }
+
+    /// Get the shared relay event sender for the webhook endpoint.
+    pub fn relay_event_tx(
+        &self,
+    ) -> Arc<
+        tokio::sync::Mutex<
+            Option<tokio::sync::mpsc::Sender<crate::channels::relay::client::ChannelEvent>>,
+        >,
+    > {
+        Arc::clone(&self.relay_event_tx)
+    }
+
+    /// Get the per-instance callback signing secret for webhook signature verification.
+    ///
+    /// Returns the secret that was fetched from channel-relay's
+    /// `/relay/signing-secret` endpoint during `activate_channel_relay`.
+    /// Returns `None` if the relay channel has not been activated yet.
+    pub fn relay_signing_secret(&self) -> Option<Vec<u8>> {
+        self.relay_signing_secret_cache.lock().ok()?.clone()
+    }
+
+    async fn clear_relay_webhook_state(&self) {
+        *self.relay_event_tx.lock().await = None;
+        if let Ok(mut cache) = self.relay_signing_secret_cache.lock() {
+            *cache = None;
+        }
     }
 
     /// Inject a registry entry for testing. The entry is added to the discovery
@@ -753,12 +846,25 @@ impl ExtensionManager {
         *self.relay_channel_manager.write().await = Some(channel_manager);
     }
 
-    /// Check if a channel name corresponds to a relay extension (has stored stream token).
+    /// Check if a channel name corresponds to a relay extension (has stored team_id
+    /// or is tracked in the installed relay extensions set).
     pub async fn is_relay_channel(&self, name: &str) -> bool {
-        self.secrets
-            .exists(&self.user_id, &format!("relay:{}:stream_token", name))
-            .await
-            .unwrap_or(false)
+        // Check in-memory installed set first (supports no-store mode)
+        if self.installed_relay_extensions.read().await.contains(name) {
+            return true;
+        }
+        // Then check persistent settings
+        if let Some(ref store) = self.store {
+            let team_id_key = format!("relay:{}:team_id", name);
+            store
+                .get_setting(&self.user_id, &team_id_key)
+                .await
+                .ok()
+                .flatten()
+                .is_some()
+        } else {
+            false
+        }
     }
 
     /// Restore persisted relay channels after startup.
@@ -868,6 +974,98 @@ impl ExtensionManager {
     /// by CSRF `state` parameter and complete the token exchange.
     pub fn pending_oauth_flows(&self) -> &crate::cli::oauth_defaults::PendingOAuthRegistry {
         &self.pending_oauth_flows
+    }
+
+    async fn clear_pending_extension_auth(&self, name: &str) {
+        {
+            let mut pending = self.pending_auth.write().await;
+            if let Some(old) = pending.remove(name)
+                && let Some(handle) = old.task_handle
+            {
+                handle.abort();
+            }
+        }
+
+        let mut flows = self.pending_oauth_flows.write().await;
+        flows.retain(|_, flow| flow.extension_name != name);
+    }
+
+    fn rewrite_oauth_state_param(
+        auth_url: String,
+        expected_state: &str,
+        hosted_state: &str,
+    ) -> String {
+        if hosted_state == expected_state {
+            return auth_url;
+        }
+
+        let Ok(mut parsed) = url::Url::parse(&auth_url) else {
+            return auth_url.replace(
+                &format!("state={}", urlencoding::encode(expected_state)),
+                &format!("state={}", urlencoding::encode(hosted_state)),
+            );
+        };
+
+        let mut replaced = false;
+        let pairs: Vec<(String, String)> = parsed
+            .query_pairs()
+            .map(|(key, value)| {
+                if key == "state" {
+                    replaced = true;
+                    (key.into_owned(), hosted_state.to_string())
+                } else {
+                    (key.into_owned(), value.into_owned())
+                }
+            })
+            .collect();
+
+        {
+            let mut query_pairs = parsed.query_pairs_mut();
+            query_pairs.clear();
+            for (key, value) in pairs {
+                query_pairs.append_pair(&key, &value);
+            }
+            if !replaced {
+                query_pairs.append_pair("state", hosted_state);
+            }
+        }
+
+        parsed.to_string()
+    }
+
+    async fn start_gateway_oauth_flow(&self, request: HostedOAuthFlowStart) -> AuthResult {
+        use crate::cli::oauth_defaults;
+
+        oauth_defaults::sweep_expired_flows(&self.pending_oauth_flows).await;
+
+        let hosted_state = oauth_defaults::build_platform_state(&request.expected_state);
+        let auth_url = Self::rewrite_oauth_state_param(
+            request.auth_url,
+            &request.expected_state,
+            &hosted_state,
+        );
+
+        self.pending_oauth_flows
+            .write()
+            .await
+            .insert(request.expected_state, request.flow);
+
+        self.pending_auth.write().await.insert(
+            request.name.clone(),
+            PendingAuth {
+                _name: request.name.clone(),
+                _kind: request.kind,
+                created_at: std::time::Instant::now(),
+                task_handle: None,
+            },
+        );
+
+        AuthResult::awaiting_authorization(
+            request.name,
+            request.kind,
+            auth_url,
+            "gateway".to_string(),
+        )
     }
 
     /// Broadcast an extension status change to the web UI via SSE.
@@ -1167,11 +1365,7 @@ impl ExtensionManager {
             let active_names = self.active_channel_names.read().await;
             for name in installed.iter() {
                 let active = active_names.contains(name);
-                let has_token = self
-                    .secrets
-                    .exists(&self.user_id, &format!("relay:{}:stream_token", name))
-                    .await
-                    .unwrap_or(false);
+                let has_token = self.is_relay_channel(name).await;
                 let registry_entry = self
                     .registry
                     .get_with_kind(name, Some(ExtensionKind::ChannelRelay))
@@ -1365,19 +1559,26 @@ impl ExtensionManager {
                 // Remove from active channels
                 self.active_channel_names.write().await.remove(name);
                 self.persist_active_channels().await;
+                self.activation_errors.write().await.remove(name);
 
-                // Remove stored stream token
-                let _ = self
-                    .secrets
-                    .delete(&self.user_id, &format!("relay:{}:stream_token", name))
-                    .await;
+                // Remove stored team_id
+                if let Some(ref store) = self.store {
+                    let _ = store
+                        .delete_setting(&self.user_id, &format!("relay:{}:team_id", name))
+                        .await;
+                }
 
-                // Shut down the channel (check both runtime paths for WASM+relay and relay-only modes)
+                // Stop webhook traffic before removing the channel from the managers.
+                self.clear_relay_webhook_state().await;
+
+                // Shut down and remove the channel (check both runtime paths for
+                // WASM+relay and relay-only modes).
                 let mut shut_down = false;
                 if let Some(ref rt) = *self.channel_runtime.read().await
                     && let Some(channel) = rt.channel_manager.get_channel(name).await
                 {
                     let _ = channel.shutdown().await;
+                    rt.channel_manager.remove(name).await;
                     shut_down = true;
                 }
                 if !shut_down
@@ -1385,6 +1586,7 @@ impl ExtensionManager {
                     && let Some(channel) = cm.get_channel(name).await
                 {
                     let _ = channel.shutdown().await;
+                    cm.remove(name).await;
                 }
 
                 Ok(format!("Removed channel relay '{}'", name))
@@ -2325,6 +2527,7 @@ impl ExtensionManager {
         use crate::cli::oauth_defaults;
 
         let is_gateway = self.should_use_gateway_mode();
+        self.clear_pending_extension_auth(name).await;
 
         // Build redirect URI: gateway uses the public callback URL,
         // local mode binds a random port.
@@ -2382,19 +2585,8 @@ impl ExtensionManager {
         let code_verifier = oauth_result.code_verifier;
 
         if is_gateway {
-            // Gateway mode: store pending flow for the /oauth/callback handler.
-            oauth_defaults::sweep_expired_flows(&self.pending_oauth_flows).await;
-
-            // Platform routing: prepend instance name to state
-            let platform_state = oauth_defaults::build_platform_state(&expected_state);
-            let auth_url = if platform_state != expected_state {
-                oauth_result.url.replace(
-                    &format!("state={}", urlencoding::encode(&expected_state)),
-                    &format!("state={}", urlencoding::encode(&platform_state)),
-                )
-            } else {
-                oauth_result.url
-            };
+            let mut token_exchange_extra_params = HashMap::new();
+            token_exchange_extra_params.insert("resource".to_string(), resource.clone());
 
             let flow = oauth_defaults::PendingOAuthFlow {
                 extension_name: name.to_string(),
@@ -2413,7 +2605,7 @@ impl ExtensionManager {
                 secrets: Arc::clone(&self.secrets),
                 sse_sender: self.sse_sender.read().await.clone(),
                 gateway_token: self.gateway_token.clone(),
-                resource: Some(resource),
+                token_exchange_extra_params,
                 client_id_secret_name: if server.oauth.is_none() {
                     Some(server.client_id_secret_name())
                 } else {
@@ -2422,27 +2614,15 @@ impl ExtensionManager {
                 created_at: std::time::Instant::now(),
             };
 
-            self.pending_oauth_flows
-                .write()
-                .await
-                .insert(expected_state, flow);
-
-            self.pending_auth.write().await.insert(
-                name.to_string(),
-                PendingAuth {
-                    _name: name.to_string(),
-                    _kind: ExtensionKind::McpServer,
-                    created_at: std::time::Instant::now(),
-                    task_handle: None,
-                },
-            );
-
-            Ok(AuthResult::awaiting_authorization(
-                name,
-                ExtensionKind::McpServer,
-                auth_url,
-                "gateway".to_string(),
-            ))
+            Ok(self
+                .start_gateway_oauth_flow(HostedOAuthFlowStart {
+                    name: name.to_string(),
+                    kind: ExtensionKind::McpServer,
+                    auth_url: oauth_result.url,
+                    expected_state,
+                    flow,
+                })
+                .await)
         } else {
             // Local mode: return URL for manual opening
             self.pending_auth.write().await.insert(
@@ -2849,9 +3029,10 @@ impl ExtensionManager {
                      Enter it in the Setup tab or set {} env var",
                     name, env_name
                 );
-                // Only mention the Google-specific build flag for Google providers
-                if auth.secret_name.to_lowercase().contains("google") {
-                    msg.push_str(", or build with IRONCLAW_GOOGLE_CLIENT_ID");
+                if let Some(override_env) =
+                    crate::cli::oauth_defaults::builtin_client_id_override_env(&auth.secret_name)
+                {
+                    msg.push_str(&format!(", or build with {override_env}"));
                 }
                 msg.push('.');
                 msg
@@ -2867,20 +3048,7 @@ impl ExtensionManager {
             )
             .await;
 
-        // Cancel any existing pending auth for this tool (frees port 9876 in TCP mode)
-        {
-            let mut pending = self.pending_auth.write().await;
-            if let Some(old) = pending.remove(name)
-                && let Some(handle) = old.task_handle
-            {
-                handle.abort();
-            }
-        }
-        // Also clean up any gateway-mode pending flows for this tool
-        {
-            let mut flows = self.pending_oauth_flows.write().await;
-            flows.retain(|_, flow| flow.extension_name != name);
-        }
+        self.clear_pending_extension_auth(name).await;
 
         let redirect_uri = self
             .gateway_callback_redirect_uri()
@@ -2911,30 +3079,24 @@ impl ExtensionManager {
             .unwrap_or_else(|| name.to_string());
 
         if self.should_use_gateway_mode() {
-            // Gateway mode: store pending flow state for the web gateway's
-            // `/oauth/callback` handler to complete the exchange. No TCP listener
-            // needed — the OAuth provider redirects to the gateway URL.
-            oauth_defaults::sweep_expired_flows(&self.pending_oauth_flows).await;
-
-            // Wrap the CSRF nonce with instance name for platform routing.
-            // Nginx at auth.DOMAIN parses `instance:nonce` to route the callback
-            // to the correct container. The flow is keyed by the raw nonce.
-            let platform_state = oauth_defaults::build_platform_state(&expected_state);
-            let auth_url = if platform_state != expected_state {
-                auth_url.replace(
-                    &format!("state={}", urlencoding::encode(&expected_state)),
-                    &format!("state={}", urlencoding::encode(&platform_state)),
-                )
-            } else {
-                auth_url
-            };
+            // When an exchange proxy is configured, omit the client_secret if it
+            // was resolved from built-in defaults (desktop app credentials). The
+            // proxy holds the correct web-app secret for platform-registered OAuth
+            // apps. Sending the desktop secret would cause a client_id/secret
+            // mismatch because the container's GOOGLE_OAUTH_CLIENT_ID is the web
+            // app, not the desktop app.
+            let proxy_client_secret = hosted_proxy_client_secret(
+                &client_secret,
+                builtin.as_ref(),
+                oauth_defaults::exchange_proxy_url().is_some(),
+            );
 
             let flow = oauth_defaults::PendingOAuthFlow {
                 extension_name: name.to_string(),
                 display_name: display_name.clone(),
                 token_url: oauth.token_url.clone(),
                 client_id: client_id.clone(),
-                client_secret: client_secret.clone(),
+                client_secret: proxy_client_secret,
                 redirect_uri: redirect_uri.clone(),
                 code_verifier,
                 access_token_field: oauth.access_token_field.clone(),
@@ -2946,35 +3108,20 @@ impl ExtensionManager {
                 secrets: Arc::clone(&self.secrets),
                 sse_sender: self.sse_sender.read().await.clone(),
                 gateway_token: self.gateway_token.clone(),
-                resource: None,
+                token_exchange_extra_params: std::collections::HashMap::new(),
                 client_id_secret_name: None,
                 created_at: std::time::Instant::now(),
             };
 
-            // Key by raw nonce (without instance prefix) — the callback handler
-            // strips the prefix before lookup.
-            self.pending_oauth_flows
-                .write()
-                .await
-                .insert(expected_state, flow);
-
-            // Register pending auth without a task handle (gateway handles completion)
-            self.pending_auth.write().await.insert(
-                name.to_string(),
-                PendingAuth {
-                    _name: name.to_string(),
-                    _kind: ExtensionKind::WasmTool,
-                    created_at: std::time::Instant::now(),
-                    task_handle: None,
-                },
-            );
-
-            Ok(AuthResult::awaiting_authorization(
-                name,
-                ExtensionKind::WasmTool,
-                auth_url,
-                "gateway".to_string(),
-            ))
+            Ok(self
+                .start_gateway_oauth_flow(HostedOAuthFlowStart {
+                    name: name.to_string(),
+                    kind: ExtensionKind::WasmTool,
+                    auth_url,
+                    expected_state,
+                    flow,
+                })
+                .await)
         } else {
             // TCP listener mode: bind port 9876 and spawn a background task
             // to wait for the callback. This is the original flow for local/desktop use.
@@ -3886,24 +4033,13 @@ impl ExtensionManager {
     /// For Telegram: accepts a bot token, registers it with channel-relay,
     /// and stores the returned stream token.
     async fn auth_channel_relay(&self, name: &str) -> Result<AuthResult, ExtensionError> {
-        // Check if already authenticated (stream token exists)
-        let token_key = format!("relay:{}:stream_token", name);
-        if self
-            .secrets
-            .exists(&self.user_id, &token_key)
-            .await
-            .unwrap_or(false)
-        {
+        // Check if already authenticated (has stored team_id)
+        if self.is_relay_channel(name).await {
             return Ok(AuthResult::authenticated(name, ExtensionKind::ChannelRelay));
         }
 
         // Use relay config captured at startup
         let relay_config = self.relay_config()?;
-
-        let instance_id = self.relay_instance_id(relay_config);
-        let user_id_uuid = std::env::var("IRONCLAW_USER_ID").unwrap_or_else(|_| {
-            uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_DNS, self.user_id.as_bytes()).to_string()
-        });
 
         let client = crate::channels::relay::RelayClient::new(
             relay_config.url.clone(),
@@ -3912,22 +4048,11 @@ impl ExtensionManager {
         )
         .map_err(|e| ExtensionError::Config(e.to_string()))?;
 
-        // OAuth redirect flow
-        let callback_base = self
-            .tunnel_url
-            .clone()
-            .or_else(|| relay_config.callback_url.clone())
-            .unwrap_or_else(|| {
-                let host = std::env::var("GATEWAY_HOST").unwrap_or_else(|_| "127.0.0.1".into());
-                let port = std::env::var("GATEWAY_PORT")
-                    .unwrap_or_else(|_| crate::config::DEFAULT_GATEWAY_PORT.to_string());
-                format!("http://{}:{}", host, port)
-            });
-
-        // Generate CSRF nonce for OAuth state parameter
+        // Generate CSRF nonce — IronClaw validates this on the callback to ensure
+        // the OAuth completion is legitimate. Channel-relay embeds it in the signed
+        // state and appends it to the post-OAuth redirect URL.
         let state_nonce = uuid::Uuid::new_v4().to_string();
         let state_key = format!("relay:{}:oauth_state", name);
-        // Delete any stale nonce before storing the new one
         let _ = self.secrets.delete(&self.user_id, &state_key).await;
         self.secrets
             .create(
@@ -3937,15 +4062,9 @@ impl ExtensionManager {
             .await
             .map_err(|e| ExtensionError::AuthFailed(format!("Failed to store OAuth state: {e}")))?;
 
-        let callback_url = format!(
-            "{}/oauth/slack/callback?state={}",
-            callback_base, state_nonce
-        );
-
-        match client
-            .initiate_oauth(&instance_id, &user_id_uuid, &callback_url)
-            .await
-        {
+        // Channel-relay derives all URLs from trusted instance_url in chat-api.
+        // We only pass the nonce for CSRF validation on the callback.
+        match client.initiate_oauth(Some(&state_nonce)).await {
             Ok(auth_url) => Ok(AuthResult::awaiting_authorization(
                 name,
                 ExtensionKind::ChannelRelay,
@@ -3958,29 +4077,17 @@ impl ExtensionManager {
 
     /// Activate a channel-relay extension.
     async fn activate_channel_relay(&self, name: &str) -> Result<ActivateResult, ExtensionError> {
-        let token_key = format!("relay:{}:stream_token", name);
         let team_id_key = format!("relay:{}:team_id", name);
 
-        // Check if we have a stream token
-        let stream_token = match self.secrets.get_decrypted(&self.user_id, &token_key).await {
-            Ok(secret) => secret.expose().to_string(),
-            Err(_) => {
-                return Err(ExtensionError::AuthRequired);
-            }
-        };
-
-        // Get team_id from settings
-        let team_id = if let Some(ref store) = self.store {
-            store
-                .get_setting(&self.user_id, &team_id_key)
-                .await
-                .ok()
-                .flatten()
-                .and_then(|v| v.as_str().map(|s| s.to_string()))
-                .unwrap_or_default()
-        } else {
-            String::new()
-        };
+        let store = self.store.as_ref().ok_or(ExtensionError::AuthRequired)?;
+        let team_id = store
+            .get_setting(&self.user_id, &team_id_key)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+            .filter(|s| !s.is_empty())
+            .ok_or(ExtensionError::AuthRequired)?;
 
         // Use relay config captured at startup
         let relay_config = self.relay_config()?;
@@ -3994,18 +4101,29 @@ impl ExtensionManager {
         )
         .map_err(|e| ExtensionError::ActivationFailed(e.to_string()))?;
 
+        // Fetch the per-instance signing secret from channel-relay.
+        // This must succeed — there is no fallback.
+        let signing_secret = client.get_signing_secret(&team_id).await.map_err(|e| {
+            ExtensionError::Config(format!("Failed to fetch relay signing secret: {e}"))
+        })?;
+
+        // Create the event channel for webhook callbacks
+        let (event_tx, event_rx) = tokio::sync::mpsc::channel(64);
+
         let channel = crate::channels::relay::RelayChannel::new_with_provider(
-            client,
+            client.clone(),
             crate::channels::relay::channel::RelayProvider::Slack,
-            stream_token,
-            team_id,
-            instance_id,
-            self.user_id.clone(),
-        )
-        .with_timeouts(
-            relay_config.stream_timeout_secs,
-            relay_config.backoff_initial_ms,
-            relay_config.backoff_max_ms,
+            team_id.clone(),
+            instance_id.clone(),
+            event_tx.clone(),
+            event_rx,
+        );
+
+        // Callback URL is now set during OAuth flow, not via PUT /callbacks.
+        // The relay webhook endpoint path is still needed for the web gateway.
+        tracing::info!(
+            webhook_path = %relay_config.webhook_path,
+            "Relay channel activated (callback URL set during OAuth)"
         );
 
         // Hot-add to channel manager
@@ -4018,6 +4136,13 @@ impl ExtensionManager {
             .hot_add(Box::new(channel))
             .await
             .map_err(|e| ExtensionError::ActivationFailed(e.to_string()))?;
+
+        if let Ok(mut cache) = self.relay_signing_secret_cache.lock() {
+            *cache = Some(signing_secret);
+        }
+
+        // Store the event sender so the web gateway's relay webhook endpoint can push events
+        *self.relay_event_tx.lock().await = Some(event_tx);
 
         // Mark as active
         self.active_channel_names
@@ -4041,11 +4166,11 @@ impl ExtensionManager {
 
     /// Activate a channel-relay extension from stored credentials (for startup reconnect).
     pub async fn activate_stored_relay(&self, name: &str) -> Result<(), ExtensionError> {
+        self.activate_channel_relay(name).await?;
         self.installed_relay_extensions
             .write()
             .await
             .insert(name.to_string());
-        self.activate_channel_relay(name).await?;
         Ok(())
     }
 
@@ -4076,13 +4201,8 @@ impl ExtensionManager {
         if self.installed_relay_extensions.read().await.contains(name) {
             return Ok(ExtensionKind::ChannelRelay);
         }
-        // Also check if there's a stored stream token (persisted across restarts)
-        if self
-            .secrets
-            .exists(&self.user_id, &format!("relay:{}:stream_token", name))
-            .await
-            .unwrap_or(false)
-        {
+        // Also check if there's a stored team_id (persisted across restarts)
+        if self.is_relay_channel(name).await {
             return Ok(ExtensionKind::ChannelRelay);
         }
 
@@ -5216,7 +5336,8 @@ mod tests {
     use crate::extensions::manager::{
         ChannelRuntimeState, FallbackDecision, TelegramBindingData, TelegramBindingResult,
         TelegramOwnerBindingState, build_wasm_channel_runtime_config_updates,
-        combine_install_errors, fallback_decision, infer_kind_from_url, send_telegram_text_message,
+        combine_install_errors, fallback_decision, hosted_proxy_client_secret, infer_kind_from_url,
+        normalize_hosted_callback_url, send_telegram_text_message,
         telegram_message_matches_verification_code,
     };
     use crate::extensions::{
@@ -6357,24 +6478,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_is_relay_channel_detects_stored_token() {
+    async fn test_is_relay_channel_returns_false_without_store() {
         let dir = tempfile::tempdir().expect("temp dir");
         let mgr = make_test_manager(None, dir.path().to_path_buf());
 
-        // No token stored → not a relay channel
+        // With no DB store, is_relay_channel always returns false
         assert!(!mgr.is_relay_channel("slack-relay").await);
+    }
 
-        // Store a stream token
-        mgr.secrets
-            .create(
-                "test",
-                crate::secrets::CreateSecretParams::new("relay:slack-relay:stream_token", "tok123"),
-            )
-            .await
-            .expect("store token");
+    #[tokio::test]
+    async fn test_activate_channel_relay_without_store_returns_auth_required() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mgr = make_test_manager(None, dir.path().to_path_buf());
 
-        // Now it's detected as a relay channel
-        assert!(mgr.is_relay_channel("slack-relay").await);
+        let err = mgr.activate_channel_relay("slack-relay").await.unwrap_err();
+        assert!(
+            matches!(err, ExtensionError::AuthRequired),
+            "expected AuthRequired, got: {err:?}"
+        );
     }
 
     #[tokio::test]
@@ -6390,18 +6511,25 @@ mod tests {
         cm.add(Box::new(stub)).await;
         mgr.set_relay_channel_manager(Arc::clone(&cm)).await;
 
-        // Mark as installed + store a token so determine_installed_kind finds it
+        // Mark as installed + store team_id so determine_installed_kind finds it
         mgr.installed_relay_extensions
             .write()
             .await
             .insert("slack-relay".to_string());
-        mgr.secrets
-            .create(
-                "test",
-                crate::secrets::CreateSecretParams::new("relay:slack-relay:stream_token", "tok123"),
-            )
-            .await
-            .expect("store token");
+        *mgr.relay_event_tx.lock().await = Some(tokio::sync::mpsc::channel(1).0);
+        if let Ok(mut cache) = mgr.relay_signing_secret_cache.lock() {
+            *cache = Some(vec![9u8; 32]);
+        }
+        if let Some(ref store) = mgr.store {
+            store
+                .set_setting(
+                    "test",
+                    "relay:slack-relay:team_id",
+                    &serde_json::json!("T123"),
+                )
+                .await
+                .expect("store team_id");
+        }
 
         // Verify channel exists before removal
         assert!(cm.get_channel("slack-relay").await.is_some());
@@ -6417,6 +6545,18 @@ mod tests {
                 .await
                 .contains("slack-relay"),
             "Should be removed from installed set"
+        );
+        assert!(
+            mgr.relay_event_tx.lock().await.is_none(),
+            "relay event sender should be cleared on remove"
+        );
+        assert!(
+            mgr.relay_signing_secret().is_none(),
+            "relay signing secret cache should be cleared on remove"
+        );
+        assert!(
+            cm.get_channel("slack-relay").await.is_none(),
+            "relay channel should be removed from the channel manager"
         );
     }
 
@@ -6466,7 +6606,7 @@ mod tests {
                 secrets: Arc::clone(&secrets),
                 sse_sender: None,
                 gateway_token: None,
-                resource: None,
+                token_exchange_extra_params: std::collections::HashMap::new(),
                 client_id_secret_name: None,
                 created_at: std::time::Instant::now(),
             },
@@ -6490,7 +6630,7 @@ mod tests {
                 secrets,
                 sse_sender: None,
                 gateway_token: None,
-                resource: None,
+                token_exchange_extra_params: std::collections::HashMap::new(),
                 client_id_secret_name: None,
                 created_at: std::time::Instant::now(),
             },
@@ -6657,9 +6797,6 @@ mod tests {
     // The root cause was that `should_use_gateway_mode()` only checked the
     // `IRONCLAW_OAUTH_CALLBACK_URL` env var, ignoring `self.tunnel_url`.
 
-    /// Serializes env-mutating tests to prevent parallel races.
-    static GATEWAY_ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     /// Build a minimal ExtensionManager with a custom tunnel_url.
     fn make_manager_with_tunnel(tunnel_url: Option<String>) -> ExtensionManager {
         use crate::secrets::{InMemorySecretsStore, SecretsCrypto};
@@ -6692,9 +6829,11 @@ mod tests {
 
     #[test]
     fn should_use_gateway_mode_true_for_tunnel_url() {
-        let _guard = GATEWAY_ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = crate::config::helpers::ENV_MUTEX
+            .lock()
+            .expect("env mutex poisoned");
         let original = std::env::var("IRONCLAW_OAUTH_CALLBACK_URL").ok();
-        // SAFETY: Under GATEWAY_ENV_MUTEX, no concurrent env access.
+        // SAFETY: Under ENV_MUTEX, no concurrent env access.
         unsafe {
             std::env::remove_var("IRONCLAW_OAUTH_CALLBACK_URL");
         }
@@ -6714,7 +6853,9 @@ mod tests {
 
     #[test]
     fn should_use_gateway_mode_false_without_tunnel() {
-        let _guard = GATEWAY_ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = crate::config::helpers::ENV_MUTEX
+            .lock()
+            .expect("env mutex poisoned");
         let original = std::env::var("IRONCLAW_OAUTH_CALLBACK_URL").ok();
         unsafe {
             std::env::remove_var("IRONCLAW_OAUTH_CALLBACK_URL");
@@ -6735,7 +6876,9 @@ mod tests {
 
     #[test]
     fn should_use_gateway_mode_false_for_loopback_tunnel() {
-        let _guard = GATEWAY_ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = crate::config::helpers::ENV_MUTEX
+            .lock()
+            .expect("env mutex poisoned");
         let original = std::env::var("IRONCLAW_OAUTH_CALLBACK_URL").ok();
         unsafe {
             std::env::remove_var("IRONCLAW_OAUTH_CALLBACK_URL");
@@ -6763,9 +6906,11 @@ mod tests {
 
     impl EnvGuard {
         fn new() -> Self {
-            let guard = GATEWAY_ENV_MUTEX.lock().expect("env mutex poisoned");
+            let guard = crate::config::helpers::ENV_MUTEX
+                .lock()
+                .expect("env mutex poisoned");
             let original = std::env::var("IRONCLAW_OAUTH_CALLBACK_URL").ok();
-            // SAFETY: Under GATEWAY_ENV_MUTEX, no concurrent env access.
+            // SAFETY: Under ENV_MUTEX, no concurrent env access.
             unsafe {
                 std::env::remove_var("IRONCLAW_OAUTH_CALLBACK_URL");
             }
@@ -6778,7 +6923,7 @@ mod tests {
 
     impl Drop for EnvGuard {
         fn drop(&mut self) {
-            // SAFETY: Under GATEWAY_ENV_MUTEX (still held by _mutex), no concurrent env access.
+            // SAFETY: Under ENV_MUTEX (still held by _mutex), no concurrent env access.
             unsafe {
                 if let Some(ref val) = self.original {
                     std::env::set_var("IRONCLAW_OAUTH_CALLBACK_URL", val);
@@ -6816,6 +6961,90 @@ mod tests {
         assert_eq!(
             mgr.gateway_callback_redirect_uri().await,
             Some("https://my-gateway.example.com/oauth/callback".to_string()),
+        );
+    }
+
+    #[test]
+    fn gateway_callback_redirect_uri_does_not_duplicate_callback_path_from_env() {
+        let _guard = crate::config::helpers::ENV_MUTEX
+            .lock()
+            .expect("env mutex poisoned");
+        let original = std::env::var("IRONCLAW_OAUTH_CALLBACK_URL").ok();
+        unsafe {
+            std::env::set_var(
+                "IRONCLAW_OAUTH_CALLBACK_URL",
+                "https://oauth.test.example/oauth/callback",
+            );
+        }
+
+        let mgr = make_manager_with_tunnel(None);
+        assert_eq!(
+            tokio_test::block_on(mgr.gateway_callback_redirect_uri()),
+            Some("https://oauth.test.example/oauth/callback".to_string()),
+        );
+
+        unsafe {
+            if let Some(val) = original {
+                std::env::set_var("IRONCLAW_OAUTH_CALLBACK_URL", val);
+            } else {
+                std::env::remove_var("IRONCLAW_OAUTH_CALLBACK_URL");
+            }
+        }
+    }
+
+    #[test]
+    fn gateway_callback_redirect_uri_trims_trailing_slash_from_env_callback() {
+        let _guard = crate::config::helpers::ENV_MUTEX
+            .lock()
+            .expect("env mutex poisoned");
+        let original = std::env::var("IRONCLAW_OAUTH_CALLBACK_URL").ok();
+        unsafe {
+            std::env::set_var(
+                "IRONCLAW_OAUTH_CALLBACK_URL",
+                "https://oauth.test.example/oauth/callback/",
+            );
+        }
+
+        let mgr = make_manager_with_tunnel(None);
+        assert_eq!(
+            tokio_test::block_on(mgr.gateway_callback_redirect_uri()),
+            Some("https://oauth.test.example/oauth/callback".to_string()),
+        );
+
+        unsafe {
+            if let Some(val) = original {
+                std::env::set_var("IRONCLAW_OAUTH_CALLBACK_URL", val);
+            } else {
+                std::env::remove_var("IRONCLAW_OAUTH_CALLBACK_URL");
+            }
+        }
+    }
+
+    #[test]
+    fn normalize_hosted_callback_url_preserves_query_params() {
+        assert_eq!(
+            normalize_hosted_callback_url("https://oauth.test.example?source=hosted"),
+            "https://oauth.test.example/oauth/callback?source=hosted"
+        );
+        assert_eq!(
+            normalize_hosted_callback_url(
+                "https://oauth.test.example/oauth/callback?source=hosted"
+            ),
+            "https://oauth.test.example/oauth/callback?source=hosted"
+        );
+    }
+
+    #[test]
+    fn rewrite_oauth_state_param_updates_only_state_query_param() {
+        let auth_url =
+            "https://auth.example.com/authorize?client_id=abc&state=old-state&hint=state%3Dkeep";
+        assert_eq!(
+            ExtensionManager::rewrite_oauth_state_param(
+                auth_url.to_string(),
+                "old-state",
+                "new-hosted-state",
+            ),
+            "https://auth.example.com/authorize?client_id=abc&state=new-hosted-state&hint=state%3Dkeep"
         );
     }
 
@@ -7172,5 +7401,72 @@ mod tests {
         if !url.contains("123456789:AABBccDDeeFFgg_Test-Token") {
             panic!("URL missing token: {url}"); // safety: test assertion
         }
+    }
+
+    // ── proxy_client_secret suppression ─────────────────────────────
+
+    #[test]
+    fn test_proxy_client_secret_suppressed_when_builtin_matches_with_exchange_proxy() {
+        let builtin = crate::cli::oauth_defaults::builtin_credentials("google_oauth_token");
+        let builtin_ref = builtin.as_ref();
+        let secret = Some(builtin_ref.unwrap().client_secret.to_string());
+
+        let result = hosted_proxy_client_secret(&secret, builtin_ref, true);
+        assert_eq!(
+            result, None,
+            "built-in desktop secret must be suppressed when the exchange proxy is configured"
+        );
+    }
+
+    #[test]
+    fn test_proxy_client_secret_kept_when_not_builtin_with_exchange_proxy() {
+        let builtin = crate::cli::oauth_defaults::builtin_credentials("google_oauth_token");
+        let secret = Some("user-entered-custom-secret".to_string());
+
+        let result = hosted_proxy_client_secret(&secret, builtin.as_ref(), true);
+        assert_eq!(
+            result,
+            Some("user-entered-custom-secret".to_string()),
+            "non-builtin secret must be kept even when the exchange proxy is configured"
+        );
+    }
+
+    #[test]
+    fn test_proxy_client_secret_kept_without_exchange_proxy_even_for_builtin_secret() {
+        let builtin = crate::cli::oauth_defaults::builtin_credentials("google_oauth_token");
+        let builtin_ref = builtin.as_ref();
+        let secret = Some(builtin_ref.unwrap().client_secret.to_string());
+
+        let result = hosted_proxy_client_secret(&secret, builtin_ref, false);
+        assert_eq!(
+            result, secret,
+            "built-in secret must be kept when the callback will exchange directly"
+        );
+    }
+
+    #[test]
+    fn test_proxy_client_secret_none_stays_none() {
+        let builtin = crate::cli::oauth_defaults::builtin_credentials("google_oauth_token");
+
+        let result = hosted_proxy_client_secret(&None, builtin.as_ref(), true);
+        assert_eq!(
+            result, None,
+            "None secret stays None even when the exchange proxy is configured"
+        );
+    }
+
+    #[test]
+    fn test_proxy_client_secret_no_builtin_provider() {
+        // MCP/non-Google providers have no builtin credentials
+        let builtin = crate::cli::oauth_defaults::builtin_credentials("mcp_notion_access_token");
+        assert!(builtin.is_none());
+
+        let secret = Some("dcr-secret".to_string());
+        let result = hosted_proxy_client_secret(&secret, builtin.as_ref(), true);
+        assert_eq!(
+            result,
+            Some("dcr-secret".to_string()),
+            "non-builtin provider secret must be kept"
+        );
     }
 }

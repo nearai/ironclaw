@@ -2123,6 +2123,7 @@ impl WasmChannel {
                 tool_name,
                 description,
                 parameters,
+                allow_always,
                 ..
             } => {
                 // WASM channels (Telegram, Slack, etc.) cannot render
@@ -2161,6 +2162,11 @@ impl WasmChannel {
                     })
                     .unwrap_or_default();
 
+                let reply_hint = if *allow_always {
+                    "Reply \"yes\" to approve, \"no\" to deny, or \"always\" to auto-approve."
+                } else {
+                    "Reply \"yes\" to approve or \"no\" to deny."
+                };
                 let prompt = format!(
                     "Approval needed: {tool_name}\n\
                      {description}\n\
@@ -2168,7 +2174,7 @@ impl WasmChannel {
                      Parameters:\n\
                      {params_preview}\n\
                      \n\
-                     Reply \"yes\" to approve, \"no\" to deny, or \"always\" to auto-approve."
+                     {reply_hint}"
                 );
 
                 let metadata_json = serde_json::to_string(metadata).unwrap_or_default();
@@ -3218,15 +3224,23 @@ fn status_to_wit(
             request_id,
             tool_name,
             description,
+            allow_always,
             ..
-        } => wit_channel::StatusUpdate {
-            status: wit_channel::StatusType::ApprovalNeeded,
-            message: format!(
-                "Approval needed for tool '{}'. {}\nRequest ID: {}\nReply with: yes (or /approve), no (or /deny), or always (or /always).",
-                tool_name, description, request_id
-            ),
-            metadata_json,
-        },
+        } => {
+            let reply_hint = if *allow_always {
+                "yes (or /approve), no (or /deny), or always (or /always)"
+            } else {
+                "yes (or /approve) or no (or /deny)"
+            };
+            wit_channel::StatusUpdate {
+                status: wit_channel::StatusType::ApprovalNeeded,
+                message: format!(
+                    "Approval needed for tool '{}'. {}\nRequest ID: {}\nReply with: {}.",
+                    tool_name, description, request_id, reply_hint
+                ),
+                metadata_json,
+            }
+        }
         StatusUpdate::JobStarted {
             job_id,
             title,
@@ -3907,6 +3921,7 @@ mod tests {
                     tool_name: "http_request".into(),
                     description: "Fetch weather".into(),
                     parameters: serde_json::json!({"url": "https://wttr.in"}),
+                    allow_always: true,
                 },
                 &metadata,
             )
@@ -4368,6 +4383,7 @@ mod tests {
                 tool_name: "http_request".to_string(),
                 description: "Fetch weather data".to_string(),
                 parameters: serde_json::json!({"url": "https://api.weather.test"}),
+                allow_always: true,
             },
             &metadata,
         )
@@ -4393,6 +4409,7 @@ mod tests {
                 tool_name: "http_request".to_string(),
                 description: "Fetch weather data".to_string(),
                 parameters: serde_json::json!({"url": "https://api.weather.test"}),
+                allow_always: true,
             },
             &metadata,
         )
