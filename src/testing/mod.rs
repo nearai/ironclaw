@@ -780,6 +780,32 @@ mod tests {
             .expect("page 1");
         assert_eq!(page1.len(), 3, "first page should have 3 messages");
         assert!(has_more, "should indicate more messages exist");
+        assert_eq!(
+            page1
+                .iter()
+                .map(|message| message.content.as_str())
+                .collect::<Vec<_>>(),
+            vec!["msg 2", "msg 3", "msg 4"]
+        );
+
+        let (page2, has_more) = db
+            .list_conversation_messages_paginated(
+                conv_id,
+                Some(crate::db::ConversationPageCursor::Sequence(
+                    page1.first().expect("page1 first message").sequence_num,
+                )),
+                3,
+            )
+            .await
+            .expect("page 2");
+        assert_eq!(
+            page2
+                .iter()
+                .map(|message| message.content.as_str())
+                .collect::<Vec<_>>(),
+            vec!["msg 0", "msg 1"]
+        );
+        assert!(!has_more, "second page should exhaust the conversation");
 
         // Verify all messages can be retrieved with a large limit.
         let (all, _) = db
@@ -791,10 +817,101 @@ mod tests {
         // Messages are returned oldest-first (ascending created_at).
         for w in all.windows(2) {
             assert!(
-                w[0].created_at <= w[1].created_at,
-                "messages should be in ascending created_at order"
+                w[0].sequence_num < w[1].sequence_num,
+                "messages should be in ascending explicit sequence order"
             );
         }
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_imported_messages_preserve_timestamps_and_sequence_order() {
+        use chrono::TimeZone as _;
+
+        let harness = TestHarnessBuilder::new().build().await;
+        let db = &harness.db;
+
+        let started_at = chrono::Utc.with_ymd_and_hms(2024, 1, 15, 10, 0, 0).unwrap();
+        let last_activity = chrono::Utc.with_ymd_and_hms(2024, 1, 15, 10, 5, 0).unwrap();
+        let shared_timestamp = chrono::Utc.with_ymd_and_hms(2024, 1, 15, 10, 0, 5).unwrap();
+        let final_timestamp = chrono::Utc
+            .with_ymd_and_hms(2024, 1, 15, 10, 4, 30)
+            .unwrap();
+
+        let conversation_id = db
+            .create_conversation_with_metadata_and_timestamps(
+                "imported",
+                "import-user",
+                &serde_json::json!({
+                    "import_source": "chatgpt",
+                    "import_source_id": "conv-preserve-1",
+                }),
+                started_at,
+                last_activity,
+            )
+            .await
+            .expect("create imported conversation");
+
+        db.add_conversation_message_with_metadata(
+            conversation_id,
+            "user",
+            "first",
+            shared_timestamp,
+            Some(0),
+        )
+        .await
+        .expect("insert first imported message");
+        db.add_conversation_message_with_metadata(
+            conversation_id,
+            "assistant",
+            "second",
+            shared_timestamp,
+            Some(1),
+        )
+        .await
+        .expect("insert second imported message");
+        db.add_conversation_message_with_metadata(
+            conversation_id,
+            "user",
+            "third",
+            final_timestamp,
+            Some(2),
+        )
+        .await
+        .expect("insert third imported message");
+
+        let summary = db
+            .list_conversations_all_channels("import-user", 10)
+            .await
+            .expect("list imported conversations")
+            .into_iter()
+            .find(|conversation| conversation.id == conversation_id)
+            .expect("imported conversation summary");
+        assert_eq!(summary.started_at, started_at);
+        assert_eq!(summary.last_activity, last_activity);
+
+        let messages = db
+            .list_conversation_messages(conversation_id)
+            .await
+            .expect("list imported messages");
+        assert_eq!(
+            messages
+                .iter()
+                .map(|message| (
+                    message.sequence_num,
+                    message.role.as_str(),
+                    message.content.as_str()
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                (0, "user", "first"),
+                (1, "assistant", "second"),
+                (2, "user", "third")
+            ]
+        );
+        assert_eq!(messages[0].created_at, shared_timestamp);
+        assert_eq!(messages[1].created_at, shared_timestamp);
+        assert_eq!(messages[2].created_at, final_timestamp);
     }
 
     #[cfg(feature = "libsql")]

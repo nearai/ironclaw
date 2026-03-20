@@ -46,7 +46,10 @@ use crate::channels::web::handlers::skills::{
 use crate::channels::web::log_layer::LogBroadcaster;
 use crate::channels::web::sse::SseManager;
 use crate::channels::web::types::*;
-use crate::channels::web::util::{build_turns_from_db_messages, truncate_preview};
+use crate::channels::web::util::{
+    build_turns_from_db_messages, history_cursor_from_message, parse_history_cursor,
+    truncate_preview,
+};
 use crate::db::Database;
 use crate::extensions::ExtensionManager;
 use crate::orchestrator::job_manager::ContainerJobManager;
@@ -1412,14 +1415,12 @@ async fn chat_history_handler(
         .before
         .as_deref()
         .map(|s| {
-            chrono::DateTime::parse_from_rfc3339(s)
-                .map(|dt| dt.with_timezone(&chrono::Utc))
-                .map_err(|_| {
-                    (
-                        StatusCode::BAD_REQUEST,
-                        "Invalid 'before' timestamp".to_string(),
-                    )
-                })
+            parse_history_cursor(s).map_err(|_| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    "Invalid 'before' cursor".to_string(),
+                )
+            })
         })
         .transpose()?;
 
@@ -1456,7 +1457,7 @@ async fn chat_history_handler(
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-        let oldest_timestamp = messages.first().map(|m| m.created_at.to_rfc3339());
+        let oldest_timestamp = messages.first().map(history_cursor_from_message);
         let turns = build_turns_from_db_messages(&messages);
         return Ok(Json(HistoryResponse {
             thread_id,
@@ -1528,7 +1529,7 @@ async fn chat_history_handler(
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
         if !messages.is_empty() {
-            let oldest_timestamp = messages.first().map(|m| m.created_at.to_rfc3339());
+            let oldest_timestamp = messages.first().map(history_cursor_from_message);
             let turns = build_turns_from_db_messages(&messages);
             return Ok(Json(HistoryResponse {
                 thread_id,
@@ -2663,24 +2664,28 @@ mod tests {
                 role: "user".to_string(),
                 content: "Hello".to_string(),
                 created_at: now,
+                sequence_num: 0,
             },
             crate::history::ConversationMessage {
                 id: Uuid::new_v4(),
                 role: "assistant".to_string(),
                 content: "Hi there!".to_string(),
                 created_at: now + chrono::TimeDelta::seconds(1),
+                sequence_num: 1,
             },
             crate::history::ConversationMessage {
                 id: Uuid::new_v4(),
                 role: "user".to_string(),
                 content: "How are you?".to_string(),
                 created_at: now + chrono::TimeDelta::seconds(2),
+                sequence_num: 2,
             },
             crate::history::ConversationMessage {
                 id: Uuid::new_v4(),
                 role: "assistant".to_string(),
                 content: "Doing well!".to_string(),
                 created_at: now + chrono::TimeDelta::seconds(3),
+                sequence_num: 3,
             },
         ];
 
@@ -2702,18 +2707,21 @@ mod tests {
                 role: "user".to_string(),
                 content: "Hello".to_string(),
                 created_at: now,
+                sequence_num: 0,
             },
             crate::history::ConversationMessage {
                 id: Uuid::new_v4(),
                 role: "assistant".to_string(),
                 content: "Hi!".to_string(),
                 created_at: now + chrono::TimeDelta::seconds(1),
+                sequence_num: 1,
             },
             crate::history::ConversationMessage {
                 id: Uuid::new_v4(),
                 role: "user".to_string(),
                 content: "Lost message".to_string(),
                 created_at: now + chrono::TimeDelta::seconds(2),
+                sequence_num: 2,
             },
         ];
 

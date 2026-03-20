@@ -18,7 +18,6 @@ mod channels;
 mod completion;
 mod config;
 mod doctor;
-#[cfg(feature = "import")]
 pub mod import;
 mod logs;
 mod mcp;
@@ -36,7 +35,6 @@ pub use channels::{ChannelsCommand, run_channels_command};
 pub use completion::Completion;
 pub use config::{ConfigCommand, run_config_command};
 pub use doctor::run_doctor_command;
-#[cfg(feature = "import")]
 pub use import::{ImportCommand, run_import_command};
 pub use logs::{LogsCommand, run_logs_command};
 pub use mcp::{McpCommand, run_mcp_command};
@@ -101,7 +99,7 @@ pub enum Command {
     /// Interactive onboarding wizard
     #[command(
         about = "Run interactive setup wizard",
-        long_about = "Guides through initial configuration.\nExamples:\n  ironclaw onboard --skip-auth  # Skip auth step\n  ironclaw onboard --channels-only  # Reconfigure channels\n  ironclaw onboard --provider-only  # Change LLM provider and model"
+        long_about = "Guides through initial configuration.\nExamples:\n  ironclaw onboard --skip-auth  # Skip auth step\n  ironclaw onboard --channels-only  # Reconfigure channels\n  ironclaw onboard --provider-only  # Change LLM provider and model\n  ironclaw onboard --import-history  # Force the import step"
     )]
     Onboard {
         /// Skip authentication (use existing session)
@@ -119,6 +117,10 @@ pub enum Command {
         /// Quick setup: auto-defaults everything except LLM provider and model
         #[arg(long, conflicts_with_all = ["channels_only", "provider_only"])]
         quick: bool,
+
+        /// Force the conversation-history import step even if nothing is detected
+        #[arg(long)]
+        import_history: bool,
     },
 
     /// Manage configuration settings
@@ -231,11 +233,10 @@ pub enum Command {
     Completion(Completion),
 
     /// Import data from other AI systems
-    #[cfg(feature = "import")]
     #[command(
         subcommand,
         about = "Import from other AI systems",
-        long_about = "Migrate data from other AI assistants like OpenClaw.\nExample: ironclaw import openclaw"
+        long_about = "Import conversation history or migrate data from other AI assistants.\nExamples:\n  ironclaw import claude-code\n  ironclaw import chatgpt ~/Downloads/export.zip\n  ironclaw import openclaw"
     )]
     Import(ImportCommand),
 

@@ -725,6 +725,35 @@ CREATE INDEX IF NOT EXISTS idx_routines_event_triggers
 PRAGMA foreign_keys=ON;
 "#,
     ),
+    (
+        14,
+        "conversation_message_sequence",
+        // Add stable sequence numbers to preserve message order independently
+        // from timestamps, then backfill existing rows in chronological order.
+        r#"
+ALTER TABLE conversation_messages ADD COLUMN sequence_num INTEGER;
+
+WITH ranked AS (
+    SELECT
+        id,
+        ROW_NUMBER() OVER (
+            PARTITION BY conversation_id
+            ORDER BY created_at ASC, id ASC
+        ) - 1 AS sequence_num
+    FROM conversation_messages
+)
+UPDATE conversation_messages
+SET sequence_num = (
+    SELECT ranked.sequence_num
+    FROM ranked
+    WHERE ranked.id = conversation_messages.id
+)
+WHERE sequence_num IS NULL;
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_conversation_messages_sequence
+    ON conversation_messages(conversation_id, sequence_num);
+"#,
+    ),
 ];
 
 /// Run incremental migrations that haven't been applied yet.
@@ -791,4 +820,116 @@ pub async fn run_incremental(conn: &libsql::Connection) -> Result<(), crate::err
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_v14_backfills_conversation_message_sequence_from_v13_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy_v13.db");
+        let db = libsql::Builder::new_local(&path).build().await.unwrap();
+        let conn = db.connect().unwrap();
+
+        conn.execute_batch(
+            r#"
+            CREATE TABLE _migrations (
+                version INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+            );
+
+            CREATE TABLE conversations (
+                id TEXT PRIMARY KEY,
+                channel TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                thread_id TEXT,
+                started_at TEXT NOT NULL,
+                last_activity TEXT NOT NULL,
+                metadata TEXT NOT NULL DEFAULT '{}'
+            );
+
+            CREATE TABLE conversation_messages (
+                id TEXT PRIMARY KEY,
+                conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+
+            INSERT INTO _migrations (version, name) VALUES
+                (9, 'flexible_embedding_dimension'),
+                (12, 'job_token_budget'),
+                (13, 'routine_notify_user_nullable');
+            "#,
+        )
+        .await
+        .unwrap();
+
+        let conversation_id = "00000000-0000-0000-0000-000000000100";
+        conn.execute(
+            "INSERT INTO conversations (id, channel, user_id, started_at, last_activity, metadata)
+             VALUES (?1, 'imported', 'legacy-user', '2024-01-15T10:00:00.000Z', '2024-01-15T10:10:00.000Z', '{}')",
+            libsql::params![conversation_id],
+        )
+        .await
+        .unwrap();
+
+        conn.execute(
+            "INSERT INTO conversation_messages (id, conversation_id, role, content, created_at)
+             VALUES (?1, ?2, 'assistant', 'second', '2024-01-15T10:00:05.000Z')",
+            libsql::params!["00000000-0000-0000-0000-000000000002", conversation_id],
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "INSERT INTO conversation_messages (id, conversation_id, role, content, created_at)
+             VALUES (?1, ?2, 'user', 'first', '2024-01-15T10:00:05.000Z')",
+            libsql::params!["00000000-0000-0000-0000-000000000001", conversation_id],
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "INSERT INTO conversation_messages (id, conversation_id, role, content, created_at)
+             VALUES (?1, ?2, 'user', 'third', '2024-01-15T10:04:30.000Z')",
+            libsql::params!["00000000-0000-0000-0000-000000000003", conversation_id],
+        )
+        .await
+        .unwrap();
+
+        run_incremental(&conn).await.unwrap();
+
+        let mut rows = conn
+            .query(
+                "SELECT content, sequence_num FROM conversation_messages ORDER BY sequence_num ASC",
+                (),
+            )
+            .await
+            .unwrap();
+
+        let mut actual = Vec::new();
+        while let Some(row) = rows.next().await.unwrap() {
+            actual.push((
+                row.get::<String>(0).unwrap_or_default(),
+                row.get::<i64>(1).unwrap_or_default(),
+            ));
+        }
+
+        assert_eq!(
+            actual,
+            vec![
+                ("first".to_string(), 0),
+                ("second".to_string(), 1),
+                ("third".to_string(), 2),
+            ]
+        );
+
+        let mut migration_rows = conn
+            .query("SELECT 1 FROM _migrations WHERE version = 14", ())
+            .await
+            .unwrap();
+        assert!(migration_rows.next().await.unwrap().is_some());
+    }
 }
