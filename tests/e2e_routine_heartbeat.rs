@@ -63,6 +63,7 @@ mod tests {
             _params: serde_json::Value,
             ctx: &JobContext,
         ) -> Result<ToolOutput, ToolError> {
+            let start = std::time::Instant::now();
             let current = self
                 .store
                 .get_setting(&ctx.user_id, OWNER_GATE_COUNT_SETTING_KEY)
@@ -83,10 +84,7 @@ mod tests {
                     ToolError::ExecutionFailed(format!("failed to persist owner gate count: {e}"))
                 })?;
 
-            Ok(ToolOutput::text(
-                "owner gate executed",
-                std::time::Instant::now().elapsed(),
-            ))
+            Ok(ToolOutput::text("owner gate executed", start.elapsed()))
         }
 
         fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
