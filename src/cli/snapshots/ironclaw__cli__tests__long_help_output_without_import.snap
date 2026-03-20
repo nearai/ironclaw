@@ -1,5 +1,6 @@
 ---
 source: src/cli/mod.rs
+assertion_line: 410
 expression: help
 ---
 IronClaw is a secure AI assistant. Use 'ironclaw <subcommand> --help' for details.
@@ -23,6 +24,7 @@ Commands:
   service     Manage OS service
   skills      Manage skills
   doctor      Run diagnostics
+  update      Check for a newer IronClaw release
   logs        View and manage gateway logs
   status      Show system status
   completion  Generate completions
