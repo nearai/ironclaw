@@ -545,51 +545,63 @@ mod tests {
         assert!(RoutineError::TruncatedResponse.is_retryable());
 
         // Hard failures should NOT be retryable
-        assert!(!RoutineError::Disabled {
-            name: "test".into()
-        }
-        .is_retryable());
-        assert!(!RoutineError::JobDispatchFailed {
-            reason: "no docker".into()
-        }
-        .is_retryable());
-        assert!(!RoutineError::Database {
-            reason: "conn refused".into()
-        }
-        .is_retryable());
-        assert!(!RoutineError::NotFound {
-            id: Uuid::new_v4()
-        }
-        .is_retryable());
-        assert!(!RoutineError::NotAuthorized {
-            id: Uuid::new_v4()
-        }
-        .is_retryable());
-        assert!(!RoutineError::MaxConcurrent {
-            name: "test".into()
-        }
-        .is_retryable());
-        assert!(!RoutineError::UnknownTriggerType {
-            trigger_type: "x".into()
-        }
-        .is_retryable());
-        assert!(!RoutineError::UnknownActionType {
-            action_type: "x".into()
-        }
-        .is_retryable());
-        assert!(!RoutineError::MissingField {
-            context: "c".into(),
-            field: "f".into()
-        }
-        .is_retryable());
-        assert!(!RoutineError::InvalidCron {
-            reason: "bad".into()
-        }
-        .is_retryable());
-        assert!(!RoutineError::UnknownRunStatus {
-            status: "bad".into()
-        }
-        .is_retryable());
+        assert!(
+            !RoutineError::Disabled {
+                name: "test".into()
+            }
+            .is_retryable()
+        );
+        assert!(
+            !RoutineError::JobDispatchFailed {
+                reason: "no docker".into()
+            }
+            .is_retryable()
+        );
+        assert!(
+            !RoutineError::Database {
+                reason: "conn refused".into()
+            }
+            .is_retryable()
+        );
+        assert!(!RoutineError::NotFound { id: Uuid::new_v4() }.is_retryable());
+        assert!(!RoutineError::NotAuthorized { id: Uuid::new_v4() }.is_retryable());
+        assert!(
+            !RoutineError::MaxConcurrent {
+                name: "test".into()
+            }
+            .is_retryable()
+        );
+        assert!(
+            !RoutineError::UnknownTriggerType {
+                trigger_type: "x".into()
+            }
+            .is_retryable()
+        );
+        assert!(
+            !RoutineError::UnknownActionType {
+                action_type: "x".into()
+            }
+            .is_retryable()
+        );
+        assert!(
+            !RoutineError::MissingField {
+                context: "c".into(),
+                field: "f".into()
+            }
+            .is_retryable()
+        );
+        assert!(
+            !RoutineError::InvalidCron {
+                reason: "bad".into()
+            }
+            .is_retryable()
+        );
+        assert!(
+            !RoutineError::UnknownRunStatus {
+                status: "bad".into()
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
