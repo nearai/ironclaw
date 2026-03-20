@@ -142,10 +142,30 @@ async fn async_main() -> anyhow::Result<()> {
         Some(Command::Login { openai_codex }) => {
             init_cli_tracing();
             if *openai_codex {
-                let config = Config::from_env()
-                    .await
-                    .map_err(|e| anyhow::anyhow!("{}", e))?;
-                let codex_config = config.llm.openai_codex.unwrap_or_default();
+                // Resolve codex config so OPENAI_CODEX_* env overrides are
+                // honoured even when LLM_BACKEND isn't set to openai_codex.
+                let codex_config = {
+                    let config = Config::from_env()
+                        .await
+                        .map_err(|e| anyhow::anyhow!("{}", e))?;
+                    config.llm.openai_codex.unwrap_or_else(|| {
+                        use ironclaw::llm::OpenAiCodexConfig;
+                        let mut cfg = OpenAiCodexConfig::default();
+                        if let Ok(v) = std::env::var("OPENAI_CODEX_AUTH_URL") {
+                            cfg.auth_endpoint = v;
+                        }
+                        if let Ok(v) = std::env::var("OPENAI_CODEX_API_URL") {
+                            cfg.api_base_url = v;
+                        }
+                        if let Ok(v) = std::env::var("OPENAI_CODEX_CLIENT_ID") {
+                            cfg.client_id = v;
+                        }
+                        if let Ok(v) = std::env::var("OPENAI_CODEX_SESSION_PATH") {
+                            cfg.session_path = std::path::PathBuf::from(v);
+                        }
+                        cfg
+                    })
+                };
                 let mgr = ironclaw::llm::OpenAiCodexSessionManager::new(codex_config)
                     .map_err(|e| anyhow::anyhow!("{}", e))?;
                 mgr.device_code_login()

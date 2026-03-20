@@ -463,6 +463,7 @@ impl OpenAiCodexSessionManager {
                 + chrono::Duration::seconds(if token_resp.expires_in > 0 {
                     token_resp.expires_in
                 } else {
+                    tracing::warn!("Token response has expires_in=0, defaulting to 3600s");
                     3600
                 } as i64),
             created_at: Utc::now(),
@@ -536,6 +537,7 @@ impl OpenAiCodexSessionManager {
                 + chrono::Duration::seconds(if token_resp.expires_in > 0 {
                     token_resp.expires_in
                 } else {
+                    tracing::warn!("Token response has expires_in=0, defaulting to 3600s");
                     3600
                 } as i64),
             created_at: Utc::now(),

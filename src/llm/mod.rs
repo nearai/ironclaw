@@ -524,7 +524,7 @@ pub async fn build_provider_chain(
     } else {
         create_llm_provider(config, session.clone()).await?
     };
-    tracing::info!("LLM provider initialized: {}", llm.model_name());
+    tracing::debug!("LLM provider initialized: {}", llm.model_name());
 
     // 1. Retry
     let retry_config = RetryConfig {

@@ -1096,7 +1096,8 @@ impl SetupWizard {
                     return Ok(());
                 }
                 if current == "openai_codex" {
-                    return self.setup_openai_codex().await;
+                    print_info("Keeping existing OpenAI Codex configuration.");
+                    return Ok(());
                 }
                 return self.run_provider_setup(&current, &registry).await;
             }
