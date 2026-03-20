@@ -697,11 +697,12 @@ pub fn content_hash(content: &str) -> u64 {
 /// - 6-field → append `*` (year)
 /// - 7-field → pass through unchanged
 pub fn normalize_cron_expression(schedule: &str) -> String {
-    let fields: Vec<&str> = schedule.split_whitespace().collect();
+    let trimmed = schedule.trim();
+    let fields: Vec<&str> = trimmed.split_whitespace().collect();
     match fields.len() {
-        5 => format!("0 {} *", schedule.trim()),
-        6 => format!("{} *", schedule.trim()),
-        _ => schedule.to_string(),
+        5 => format!("0 {} *", trimmed),
+        6 => format!("{} *", trimmed),
+        _ => trimmed.to_string(),
     }
 }
 

@@ -236,8 +236,7 @@ impl SetupWizard {
                 }
             }
 
-            if let Ok(api_key) = std::env::var("NEARAI_API_KEY")
-                && !api_key.is_empty()
+            if let Some(api_key) = crate::config::helpers::env_or_override("NEARAI_API_KEY")
                 && self.settings.llm_backend.as_deref() == Some("nearai")
             {
                 // NEARAI_API_KEY is set and backend auto-detected — skip interactive prompts
