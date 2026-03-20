@@ -5265,6 +5265,7 @@ document.getElementById('users-create-submit')?.addEventListener('click', functi
 let gatewayStatusInterval = null;
 let gatewayStatusData = null;
 let gatewayUpdateData = null;
+let gatewayUpdateError = null;
 let gatewayUpdatePromise = null;
 
 function startGatewayStatusPolling() {
@@ -5294,15 +5295,32 @@ function shortModelName(model) {
   return m;
 }
 
+function safeExternalUrl(url) {
+  if (!url) return null;
+  try {
+    var parsed = new URL(url, window.location.origin);
+    var protocol = parsed.protocol.toLowerCase();
+    if (protocol === 'http:' || protocol === 'https:') {
+      return parsed.href;
+    }
+  } catch (e) {}
+  return null;
+}
+
 function renderGatewayUpdateSection() {
-  if (gatewayUpdateData === null && !gatewayUpdatePromise) return '';
+  if (gatewayUpdateData === null && !gatewayUpdatePromise && !gatewayUpdateError) return '';
 
   var html = '';
   html += '<div class="gw-divider"></div>';
   html += '<div class="gw-section-label">Update</div>';
 
-  if (gatewayUpdatePromise && gatewayUpdateData === null) {
+  if (gatewayUpdatePromise && gatewayUpdateData === null && !gatewayUpdateError) {
     html += '<div class="gw-update-message">Checking for newer release…</div>';
+    return html;
+  }
+
+  if (gatewayUpdateError && gatewayUpdateData === null) {
+    html += '<div class="gw-update-message gw-update-error">' + escapeHtml(gatewayUpdateError) + '</div>';
     return html;
   }
 
@@ -5322,12 +5340,16 @@ function renderGatewayUpdateSection() {
     html += '<div class="gw-update-message gw-update-available">Update available</div>';
     if (gatewayUpdateData.release_name || gatewayUpdateData.release_url) {
       var releaseLabel = gatewayUpdateData.release_name ? escapeHtml(gatewayUpdateData.release_name) : 'Open release notes';
-      var releaseHref = escapeHtml(gatewayUpdateData.release_url || '#');
-      html += '<div class="gw-update-link-row">'
-        + '<a class="gw-update-link" href="' + releaseHref + '" target="_blank" rel="noopener noreferrer">'
-        + releaseLabel
-        + '</a>'
-        + '</div>';
+      var releaseHref = safeExternalUrl(gatewayUpdateData.release_url);
+      if (releaseHref) {
+        html += '<div class="gw-update-link-row">'
+          + '<a class="gw-update-link" href="' + escapeHtml(releaseHref) + '" target="_blank" rel="noopener noreferrer">'
+          + releaseLabel
+          + '</a>'
+          + '</div>';
+      } else {
+        html += '<div class="gw-update-message">' + releaseLabel + '</div>';
+      }
     }
   } else {
     html += '<div class="gw-update-message gw-update-ok">Up to date</div>';
@@ -5395,20 +5417,19 @@ function renderGatewayPopover() {
 function fetchGatewayUpdateStatus() {
   if (gatewayUpdatePromise) return gatewayUpdatePromise;
 
+  gatewayUpdateError = null;
   gatewayUpdatePromise = apiFetch('/api/gateway/update').then(function(data) {
     gatewayUpdateData = data;
     gatewayUpdatePromise = null;
+    gatewayUpdateError = null;
     renderGatewayPopover();
     return data;
   }).catch(function(err) {
-    gatewayUpdateData = {
-      current_version: gatewayStatusData && gatewayStatusData.version ? gatewayStatusData.version : null,
-      update_available: false,
-      error: err.message || String(err)
-    };
+    gatewayUpdateData = null;
+    gatewayUpdateError = err.message || String(err);
     gatewayUpdatePromise = null;
     renderGatewayPopover();
-    return gatewayUpdateData;
+    return null;
   });
 
   renderGatewayPopover();

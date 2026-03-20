@@ -4,6 +4,7 @@
 
 use semver::Version;
 use serde::Deserialize;
+use std::time::Duration;
 
 const GITHUB_LATEST_RELEASE_URL: &str =
     "https://api.github.com/repos/nearai/ironclaw/releases/latest";
@@ -54,6 +55,7 @@ pub async fn check_for_update(current: Version) -> anyhow::Result<ReleaseCheck> 
 
 async fn fetch_latest_release() -> anyhow::Result<GitHubRelease> {
     let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
         .user_agent(format!(
             "{}/{}",
             env!("CARGO_PKG_NAME"),
