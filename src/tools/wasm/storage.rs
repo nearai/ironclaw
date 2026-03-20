@@ -100,6 +100,7 @@ pub struct StoredWasmTool {
     pub user_id: String,
     pub name: String,
     pub version: String,
+    pub wit_version: String,
     pub description: String,
     pub parameters_schema: serde_json::Value,
     pub source_url: Option<String>,
@@ -244,6 +245,7 @@ pub struct StoreToolParams {
     pub user_id: String,
     pub name: String,
     pub version: String,
+    pub wit_version: String,
     pub description: String,
     pub wasm_binary: Vec<u8>,
     pub parameters_schema: serde_json::Value,
@@ -280,7 +282,7 @@ impl PostgresWasmToolStore {
 #[async_trait]
 impl WasmToolStore for PostgresWasmToolStore {
     async fn store(&self, params: StoreToolParams) -> Result<StoredWasmTool, WasmStorageError> {
-        let client = self
+        let mut client = self
             .pool
             .get()
             .await
@@ -290,22 +292,29 @@ impl WasmToolStore for PostgresWasmToolStore {
         let id = Uuid::new_v4();
         let now = Utc::now();
 
-        let row = client
+        // Wrap delete + insert in a transaction for atomicity
+        let tx = client
+            .transaction()
+            .await
+            .map_err(|e| WasmStorageError::Database(e.to_string()))?;
+
+        // Delete any existing version for this (user_id, name) — upgrade-in-place
+        tx.execute(
+            "DELETE FROM wasm_tools WHERE user_id = $1 AND name = $2",
+            &[&params.user_id, &params.name],
+        )
+        .await
+        .map_err(|e| WasmStorageError::Database(e.to_string()))?;
+
+        let row = tx
             .query_one(
                 r#"
                 INSERT INTO wasm_tools (
-                    id, user_id, name, version, description, wasm_binary, binary_hash,
+                    id, user_id, name, version, wit_version, description, wasm_binary, binary_hash,
                     parameters_schema, source_url, trust_level, status, created_at, updated_at
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'active', $11, $11)
-                ON CONFLICT (user_id, name, version) DO UPDATE SET
-                    description = EXCLUDED.description,
-                    wasm_binary = EXCLUDED.wasm_binary,
-                    binary_hash = EXCLUDED.binary_hash,
-                    parameters_schema = EXCLUDED.parameters_schema,
-                    source_url = EXCLUDED.source_url,
-                    updated_at = NOW()
-                RETURNING id, user_id, name, version, description, parameters_schema,
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'active', $12, $12)
+                RETURNING id, user_id, name, version, wit_version, description, parameters_schema,
                           source_url, trust_level, status, created_at, updated_at
                 "#,
                 &[
@@ -313,6 +322,7 @@ impl WasmToolStore for PostgresWasmToolStore {
                     &params.user_id,
                     &params.name,
                     &params.version,
+                    &params.wit_version,
                     &params.description,
                     &params.wasm_binary,
                     &binary_hash,
@@ -325,7 +335,13 @@ impl WasmToolStore for PostgresWasmToolStore {
             .await
             .map_err(|e| WasmStorageError::Database(e.to_string()))?;
 
-        row_to_tool(&row)
+        let tool = row_to_tool(&row)?;
+
+        tx.commit()
+            .await
+            .map_err(|e| WasmStorageError::Database(e.to_string()))?;
+
+        Ok(tool)
     }
 
     async fn get(&self, user_id: &str, name: &str) -> Result<StoredWasmTool, WasmStorageError> {
@@ -338,12 +354,10 @@ impl WasmToolStore for PostgresWasmToolStore {
         let row = client
             .query_opt(
                 r#"
-                SELECT id, user_id, name, version, description, parameters_schema,
+                SELECT id, user_id, name, version, wit_version, description, parameters_schema,
                        source_url, trust_level, status, created_at, updated_at
                 FROM wasm_tools
                 WHERE user_id = $1 AND name = $2 AND status = 'active'
-                ORDER BY version DESC
-                LIMIT 1
                 "#,
                 &[&user_id, &name],
             )
@@ -377,12 +391,10 @@ impl WasmToolStore for PostgresWasmToolStore {
         let row = client
             .query_opt(
                 r#"
-                SELECT id, user_id, name, version, description, wasm_binary, binary_hash,
+                SELECT id, user_id, name, version, wit_version, description, wasm_binary, binary_hash,
                        parameters_schema, source_url, trust_level, status, created_at, updated_at
                 FROM wasm_tools
                 WHERE user_id = $1 AND name = $2 AND status = 'active'
-                ORDER BY version DESC
-                LIMIT 1
                 "#,
                 &[&user_id, &name],
             )
@@ -482,11 +494,11 @@ impl WasmToolStore for PostgresWasmToolStore {
         let rows = client
             .query(
                 r#"
-                SELECT DISTINCT ON (name) id, user_id, name, version, description,
+                SELECT id, user_id, name, version, wit_version, description,
                        parameters_schema, source_url, trust_level, status, created_at, updated_at
                 FROM wasm_tools
                 WHERE user_id = $1
-                ORDER BY name, version DESC
+                ORDER BY name
                 "#,
                 &[&user_id],
             )
@@ -552,6 +564,7 @@ fn row_to_tool(row: &tokio_postgres::Row) -> Result<StoredWasmTool, WasmStorageE
         user_id: row.get("user_id"),
         name: row.get("name"),
         version: row.get("version"),
+        wit_version: row.get("wit_version"),
         description: row.get("description"),
         parameters_schema: row.get("parameters_schema"),
         source_url: row.get("source_url"),
@@ -605,33 +618,35 @@ impl WasmToolStore for LibSqlWasmToolStore {
         let schema_str = serde_json::to_string(&params.parameters_schema)
             .map_err(|e| WasmStorageError::InvalidData(e.to_string()))?;
 
-        // Wrap INSERT + read-back in a transaction to prevent TOCTOU races
+        // Wrap delete + INSERT + read-back in a transaction
         let conn = self.connect().await?;
         let tx = conn
             .transaction()
             .await
             .map_err(|e| WasmStorageError::Database(e.to_string()))?;
 
+        // Delete any existing version for this (user_id, name) — upgrade-in-place
+        tx.execute(
+            "DELETE FROM wasm_tools WHERE user_id = ?1 AND name = ?2",
+            libsql::params![params.user_id.as_str(), params.name.as_str()],
+        )
+        .await
+        .map_err(|e| WasmStorageError::Database(e.to_string()))?;
+
         tx.execute(
             r#"
                 INSERT INTO wasm_tools (
-                    id, user_id, name, version, description, wasm_binary, binary_hash,
+                    id, user_id, name, version, wit_version, description, wasm_binary, binary_hash,
                     parameters_schema, source_url, trust_level, status, created_at, updated_at
                 )
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'active', ?11, ?11)
-                ON CONFLICT (user_id, name, version) DO UPDATE SET
-                    description = excluded.description,
-                    wasm_binary = excluded.wasm_binary,
-                    binary_hash = excluded.binary_hash,
-                    parameters_schema = excluded.parameters_schema,
-                    source_url = excluded.source_url,
-                    updated_at = ?11
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 'active', ?12, ?12)
                 "#,
             libsql::params![
                 id.to_string(),
                 params.user_id.as_str(),
                 params.name.as_str(),
                 params.version.as_str(),
+                params.wit_version.as_str(),
                 params.description.as_str(),
                 libsql::Value::Blob(params.wasm_binary),
                 libsql::Value::Blob(binary_hash),
@@ -648,12 +663,10 @@ impl WasmToolStore for LibSqlWasmToolStore {
         let mut rows = tx
             .query(
                 r#"
-                SELECT id, user_id, name, version, description, parameters_schema,
+                SELECT id, user_id, name, version, wit_version, description, parameters_schema,
                        source_url, trust_level, status, created_at, updated_at
                 FROM wasm_tools
                 WHERE user_id = ?1 AND name = ?2
-                ORDER BY version DESC
-                LIMIT 1
                 "#,
                 libsql::params![params.user_id.as_str(), params.name.as_str()],
             )
@@ -682,12 +695,10 @@ impl WasmToolStore for LibSqlWasmToolStore {
         let mut rows = conn
             .query(
                 r#"
-                SELECT id, user_id, name, version, description, parameters_schema,
+                SELECT id, user_id, name, version, wit_version, description, parameters_schema,
                        source_url, trust_level, status, created_at, updated_at
                 FROM wasm_tools
                 WHERE user_id = ?1 AND name = ?2 AND status = 'active'
-                ORDER BY version DESC
-                LIMIT 1
                 "#,
                 libsql::params![user_id, name],
             )
@@ -720,12 +731,10 @@ impl WasmToolStore for LibSqlWasmToolStore {
         let mut rows = conn
             .query(
                 r#"
-                SELECT id, user_id, name, version, description, wasm_binary, binary_hash,
+                SELECT id, user_id, name, version, wit_version, description, wasm_binary, binary_hash,
                        parameters_schema, source_url, trust_level, status, created_at, updated_at
                 FROM wasm_tools
                 WHERE user_id = ?1 AND name = ?2 AND status = 'active'
-                ORDER BY version DESC
-                LIMIT 1
                 "#,
                 libsql::params![user_id, name],
             )
@@ -739,10 +748,10 @@ impl WasmToolStore for LibSqlWasmToolStore {
         {
             Some(row) => {
                 let wasm_binary: Vec<u8> = row
-                    .get(5)
+                    .get(6)
                     .map_err(|e| WasmStorageError::Database(e.to_string()))?;
                 let binary_hash: Vec<u8> = row
-                    .get(6)
+                    .get(7)
                     .map_err(|e| WasmStorageError::Database(e.to_string()))?;
 
                 if !verify_binary_integrity(&wasm_binary, &binary_hash) {
@@ -844,21 +853,14 @@ impl WasmToolStore for LibSqlWasmToolStore {
     }
 
     async fn list(&self, user_id: &str) -> Result<Vec<StoredWasmTool>, WasmStorageError> {
-        // SQLite doesn't have DISTINCT ON, so we use a subquery to get latest version per name
         let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 r#"
-                SELECT id, user_id, name, version, description, parameters_schema,
+                SELECT id, user_id, name, version, wit_version, description, parameters_schema,
                        source_url, trust_level, status, created_at, updated_at
                 FROM wasm_tools
                 WHERE user_id = ?1
-                  AND rowid IN (
-                      SELECT MAX(rowid)
-                      FROM wasm_tools
-                      WHERE user_id = ?1
-                      GROUP BY name
-                  )
                 ORDER BY name
                 "#,
                 libsql::params![user_id],
@@ -941,22 +943,22 @@ fn libsql_wasm_parse_ts(s: &str) -> Result<DateTime<Utc>, WasmStorageError> {
 }
 
 /// Parse a tool row with standard column order (no binary columns).
-/// Columns: id(0), user_id(1), name(2), version(3), description(4),
-///          parameters_schema(5), source_url(6), trust_level(7), status(8),
-///          created_at(9), updated_at(10)
+/// Columns: id(0), user_id(1), name(2), version(3), wit_version(4), description(5),
+///          parameters_schema(6), source_url(7), trust_level(8), status(9),
+///          created_at(10), updated_at(11)
 #[cfg(feature = "libsql")]
 fn libsql_row_to_tool(row: &libsql::Row) -> Result<StoredWasmTool, WasmStorageError> {
-    libsql_row_to_tool_at(row, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
+    libsql_row_to_tool_at(row, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11)
 }
 
 /// Parse a tool row when binary columns are present (get_with_binary query).
-/// Columns: id(0), user_id(1), name(2), version(3), description(4),
-///          wasm_binary(5), binary_hash(6),
-///          parameters_schema(7), source_url(8), trust_level(9), status(10),
-///          created_at(11), updated_at(12)
+/// Columns: id(0), user_id(1), name(2), version(3), wit_version(4), description(5),
+///          wasm_binary(6), binary_hash(7),
+///          parameters_schema(8), source_url(9), trust_level(10), status(11),
+///          created_at(12), updated_at(13)
 #[cfg(feature = "libsql")]
 fn libsql_row_to_tool_with_offset(row: &libsql::Row) -> Result<StoredWasmTool, WasmStorageError> {
-    libsql_row_to_tool_at(row, 0, 1, 2, 3, 4, 7, 8, 9, 10, 11, 12)
+    libsql_row_to_tool_at(row, 0, 1, 2, 3, 4, 5, 8, 9, 10, 11, 12, 13)
 }
 
 #[cfg(feature = "libsql")]
@@ -967,6 +969,7 @@ fn libsql_row_to_tool_at(
     user_id_idx: i32,
     name_idx: i32,
     version_idx: i32,
+    wit_version_idx: i32,
     description_idx: i32,
     schema_idx: i32,
     source_url_idx: i32,
@@ -1006,6 +1009,9 @@ fn libsql_row_to_tool_at(
             .map_err(|e| WasmStorageError::Database(e.to_string()))?,
         version: row
             .get(version_idx)
+            .map_err(|e| WasmStorageError::Database(e.to_string()))?,
+        wit_version: row
+            .get(wit_version_idx)
             .map_err(|e| WasmStorageError::Database(e.to_string()))?,
         description: row
             .get(description_idx)

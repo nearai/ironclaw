@@ -18,7 +18,7 @@
 //! - `Esc` - Interrupt current operation
 
 use std::borrow::Cow;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -200,6 +200,8 @@ fn format_json_params(params: &serde_json::Value, indent: &str) -> String {
 
 /// REPL channel with line editing and markdown rendering.
 pub struct ReplChannel {
+    /// Stable owner scope for this REPL instance.
+    user_id: String,
     /// Optional single message to send (for -m flag).
     single_message: Option<String>,
     /// Debug mode flag (shared with input thread).
@@ -213,7 +215,13 @@ pub struct ReplChannel {
 impl ReplChannel {
     /// Create a new REPL channel.
     pub fn new() -> Self {
+        Self::with_user_id("default")
+    }
+
+    /// Create a new REPL channel for a specific owner scope.
+    pub fn with_user_id(user_id: impl Into<String>) -> Self {
         Self {
+            user_id: user_id.into(),
             single_message: None,
             debug_mode: Arc::new(AtomicBool::new(false)),
             is_streaming: Arc::new(AtomicBool::new(false)),
@@ -223,7 +231,13 @@ impl ReplChannel {
 
     /// Create a REPL channel that sends a single message and exits.
     pub fn with_message(message: String) -> Self {
+        Self::with_message_for_user("default", message)
+    }
+
+    /// Create a REPL channel that sends a single message for a specific owner scope and exits.
+    pub fn with_message_for_user(user_id: impl Into<String>, message: String) -> Self {
         Self {
+            user_id: user_id.into(),
             single_message: Some(message),
             debug_mode: Arc::new(AtomicBool::new(false)),
             is_streaming: Arc::new(AtomicBool::new(false)),
@@ -292,15 +306,21 @@ impl Channel for ReplChannel {
     async fn start(&self) -> Result<MessageStream, ChannelError> {
         let (tx, rx) = mpsc::channel(32);
         let single_message = self.single_message.clone();
+        let user_id = self.user_id.clone();
         let debug_mode = Arc::clone(&self.debug_mode);
         let suppress_banner = Arc::clone(&self.suppress_banner);
         let esc_interrupt_triggered_for_thread = Arc::new(AtomicBool::new(false));
 
         std::thread::spawn(move || {
+            let sys_tz = crate::timezone::detect_system_timezone().name().to_string();
+
             // Single message mode: send it and return
             if let Some(msg) = single_message {
-                let incoming = IncomingMessage::new("repl", "default", &msg);
+                let incoming = IncomingMessage::new("repl", &user_id, &msg).with_timezone(&sys_tz);
                 let _ = tx.blocking_send(incoming);
+                // Ensure the agent exits after handling exactly one turn in -m mode,
+                // even when other channels (gateway/http) are enabled.
+                let _ = tx.blocking_send(IncomingMessage::new("repl", &user_id, "/quit"));
                 return;
             }
 
@@ -361,7 +381,8 @@ impl Channel for ReplChannel {
                             "/quit" | "/exit" => {
                                 // Forward shutdown command so the agent loop exits even
                                 // when other channels (e.g. web gateway) are still active.
-                                let msg = IncomingMessage::new("repl", "default", "/quit");
+                                let msg = IncomingMessage::new("repl", &user_id, "/quit")
+                                    .with_timezone(&sys_tz);
                                 let _ = tx.blocking_send(msg);
                                 break;
                             }
@@ -382,7 +403,8 @@ impl Channel for ReplChannel {
                             _ => {}
                         }
 
-                        let msg = IncomingMessage::new("repl", "default", line);
+                        let msg =
+                            IncomingMessage::new("repl", &user_id, line).with_timezone(&sys_tz);
                         if tx.blocking_send(msg).is_err() {
                             break;
                         }
@@ -390,21 +412,29 @@ impl Channel for ReplChannel {
                     Err(ReadlineError::Interrupted) => {
                         if esc_interrupt_triggered_for_thread.swap(false, Ordering::Relaxed) {
                             // Esc: interrupt current operation and keep REPL open.
-                            let msg = IncomingMessage::new("repl", "default", "/interrupt");
+                            let msg = IncomingMessage::new("repl", &user_id, "/interrupt")
+                                .with_timezone(&sys_tz);
                             if tx.blocking_send(msg).is_err() {
                                 break;
                             }
                         } else {
                             // Ctrl+C (VINTR): request graceful shutdown.
-                            let msg = IncomingMessage::new("repl", "default", "/quit");
+                            let msg = IncomingMessage::new("repl", &user_id, "/quit")
+                                .with_timezone(&sys_tz);
                             let _ = tx.blocking_send(msg);
                             break;
                         }
                     }
                     Err(ReadlineError::Eof) => {
-                        // Ctrl+D: send /quit so the agent loop runs graceful shutdown
-                        let msg = IncomingMessage::new("repl", "default", "/quit");
-                        let _ = tx.blocking_send(msg);
+                        // Ctrl+D in interactive mode: graceful shutdown.
+                        // In daemon mode (stdin = /dev/null, no TTY), EOF arrives
+                        // immediately — just drop the REPL thread silently so other
+                        // channels (gateway, telegram, …) keep running.
+                        if std::io::stdin().is_terminal() {
+                            let msg = IncomingMessage::new("repl", &user_id, "/quit")
+                                .with_timezone(&sys_tz);
+                            let _ = tx.blocking_send(msg);
+                        }
                         break;
                     }
                     Err(e) => {
@@ -466,7 +496,7 @@ impl Channel for ReplChannel {
             StatusUpdate::ToolStarted { name } => {
                 eprintln!("  \x1b[33m\u{25CB} {name}\x1b[0m");
             }
-            StatusUpdate::ToolCompleted { name, success } => {
+            StatusUpdate::ToolCompleted { name, success, .. } => {
                 if success {
                     eprintln!("  \x1b[32m\u{25CF} {name}\x1b[0m");
                 } else {
@@ -585,6 +615,16 @@ impl Channel for ReplChannel {
                     eprintln!("\x1b[31m  {extension_name}: {message}\x1b[0m");
                 }
             }
+            StatusUpdate::ImageGenerated { path, .. } => {
+                if let Some(ref p) = path {
+                    eprintln!("\x1b[36m  [image] {p}\x1b[0m");
+                } else {
+                    eprintln!("\x1b[36m  [image generated]\x1b[0m");
+                }
+            }
+            StatusUpdate::Suggestions { .. } => {
+                // Suggestions are only rendered by the web gateway
+            }
         }
         Ok(())
     }
@@ -612,5 +652,31 @@ impl Channel for ReplChannel {
 
     async fn shutdown(&self) -> Result<(), ChannelError> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use futures::StreamExt;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn single_message_mode_sends_message_then_quit() {
+        let repl = ReplChannel::with_message("hi".to_string());
+        let mut stream = repl.start().await.expect("repl start should succeed");
+
+        let first = stream.next().await.expect("first message missing");
+        assert_eq!(first.channel, "repl");
+        assert_eq!(first.content, "hi");
+
+        let second = stream.next().await.expect("quit message missing");
+        assert_eq!(second.channel, "repl");
+        assert_eq!(second.content, "/quit");
+
+        assert!(
+            stream.next().await.is_none(),
+            "stream should end after /quit"
+        );
     }
 }

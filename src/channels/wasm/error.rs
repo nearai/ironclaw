@@ -83,6 +83,9 @@ pub enum WasmChannelError {
 
     #[error("Channel {name} socket mode error: {reason}")]
     SocketMode { name: String, reason: String },
+
+    #[error("WIT version mismatch: {0}")]
+    IncompatibleWitVersion(String),
 }
 
 impl From<crate::tools::wasm::WasmError> for WasmChannelError {

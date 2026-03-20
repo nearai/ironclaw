@@ -154,7 +154,7 @@ impl HttpProxy {
                         }
                     }
                     _ = &mut shutdown_rx => {
-                        tracing::info!("Sandbox proxy shutting down");
+                        tracing::debug!("Sandbox proxy shutting down");
                         break;
                     }
                 }

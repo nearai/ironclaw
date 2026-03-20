@@ -309,6 +309,7 @@ async fn setup_tunnel_cloudflare() -> Result<TunnelSettings, ChannelSetupError> 
 /// Detect running cloudflared processes or managed services that could conflict
 /// with IronClaw's tunnel management.
 fn detect_existing_cloudflared() -> Option<String> {
+    #[allow(unused_mut)]
     let mut conflicts: Vec<String> = Vec::new();
 
     // Check for running cloudflared processes (all platforms)
@@ -517,7 +518,7 @@ pub async fn setup_http(secrets: &SecretsContext) -> Result<HttpSetupResult, Cha
             .save_secret("http_webhook_secret", &SecretString::from(secret))
             .await?;
         print_success("Webhook secret generated and saved to database");
-        print_info("Retrieve it later with: ironclaw secret get http_webhook_secret");
+        print_info(http_webhook_secret_hint());
     }
 
     print_success(&format!("HTTP webhook will listen on {}:{}", host, port));
@@ -532,6 +533,10 @@ pub async fn setup_http(secrets: &SecretsContext) -> Result<HttpSetupResult, Cha
 /// Generate a random webhook secret.
 pub fn generate_webhook_secret() -> String {
     generate_secret_with_length(32)
+}
+
+fn http_webhook_secret_hint() -> &'static str {
+    "The secret is stored in the encrypted secrets database and will be loaded automatically on startup."
 }
 
 fn validate_e164(account: &str) -> Result<(), String> {
@@ -803,13 +808,15 @@ pub async fn setup_wasm_channel(
         print_success(&format!("{} saved to database", secret_config.name));
     }
 
-    // TODO: Substitute secrets into the validation URL and make a
-    // GET request to verify the configured credentials actually work.
     if let Some(ref validation_endpoint) = setup.validation_endpoint {
-        print_info(&format!(
-            "Validation endpoint configured: {} (validation not yet implemented)",
-            validation_endpoint
-        ));
+        print_info("Validating configured credentials...");
+        match validate_channel_credentials(secrets, validation_endpoint).await {
+            Ok(()) => print_success("Credentials validated successfully"),
+            Err(e) => print_warning(&format!(
+                "Credential validation failed: {}. Setup will continue, but the channel may fail to start until the credentials are fixed.",
+                e
+            )),
+        }
     }
 
     print_success(&format!("{} channel configured", channel_name));
@@ -818,6 +825,225 @@ pub async fn setup_wasm_channel(
         enabled: true,
         channel_name: channel_name.to_string(),
     })
+}
+
+async fn validate_channel_credentials(
+    secrets: &SecretsContext,
+    validation_endpoint: &str,
+) -> Result<(), ChannelSetupError> {
+    let validation_url = substitute_validation_placeholders(secrets, validation_endpoint).await?;
+    let (parsed, resolved_addrs) = validate_public_https_url(&validation_url).await?;
+    let target = validation_target_display(&parsed);
+    let mut client_builder = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .redirect(reqwest::redirect::Policy::none());
+
+    if matches!(parsed.host(), Some(url::Host::Domain(_)))
+        && let Some(host) = parsed.host_str()
+    {
+        client_builder = client_builder.resolve_to_addrs(host, &resolved_addrs);
+    }
+
+    let client = client_builder
+        .build()
+        .map_err(|e| ChannelSetupError::Network(format!("Failed to build HTTP client: {}", e)))?;
+
+    let response = client.get(parsed.clone()).send().await.map_err(|e| {
+        ChannelSetupError::Network(format!(
+            "Validation request to {} failed: {}",
+            target,
+            describe_validation_request_error(&e)
+        ))
+    })?;
+
+    if response.status().is_success() {
+        Ok(())
+    } else {
+        Err(ChannelSetupError::Validation(format!(
+            "Validation endpoint returned HTTP {} from {}",
+            response.status(),
+            target
+        )))
+    }
+}
+
+async fn substitute_validation_placeholders(
+    secrets: &SecretsContext,
+    validation_endpoint: &str,
+) -> Result<String, ChannelSetupError> {
+    let mut resolved = validation_endpoint.to_string();
+    let placeholder_names: std::collections::BTreeSet<String> = validation_placeholder_regex()
+        .captures_iter(validation_endpoint)
+        .filter_map(|caps| caps.get(1).map(|m| m.as_str().to_string()))
+        .collect();
+
+    for secret_name in placeholder_names {
+        let secret_value = secrets.get_secret(&secret_name).await?;
+        let placeholder = format!("{{{}}}", secret_name);
+        let encoded_value = urlencoding::encode(secret_value.expose_secret());
+        resolved = resolved.replace(&placeholder, encoded_value.as_ref());
+    }
+
+    Ok(resolved)
+}
+
+async fn validate_public_https_url(
+    url: &str,
+) -> Result<(Url, Vec<std::net::SocketAddr>), ChannelSetupError> {
+    use std::net::{IpAddr, SocketAddr};
+
+    let parsed = Url::parse(url)
+        .map_err(|e| ChannelSetupError::Validation(format!("Invalid URL: {}", e)))?;
+
+    if parsed.scheme() != "https" {
+        return Err(ChannelSetupError::Validation(
+            "Validation endpoint must use https".to_string(),
+        ));
+    }
+
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(ChannelSetupError::Validation(
+            "Validation endpoint cannot contain userinfo".to_string(),
+        ));
+    }
+
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| ChannelSetupError::Validation("Validation URL missing host".to_string()))?;
+    let normalized_host = normalize_validation_domain(host);
+    let host_lower = normalized_host.to_ascii_lowercase();
+
+    if host_lower == "localhost" || host_lower.ends_with(".localhost") {
+        return Err(ChannelSetupError::Validation(
+            "Validation endpoint cannot target localhost".to_string(),
+        ));
+    }
+
+    let port = parsed.port_or_known_default().unwrap_or(443);
+
+    match parsed
+        .host()
+        .ok_or_else(|| ChannelSetupError::Validation("Validation URL missing host".to_string()))?
+    {
+        url::Host::Ipv4(v4) => {
+            let ip = IpAddr::V4(v4);
+            if is_disallowed_ip(&ip) {
+                return Err(ChannelSetupError::Validation(format!(
+                    "Validation endpoint cannot target private or local IP {}",
+                    ip
+                )));
+            }
+
+            Ok((parsed, vec![SocketAddr::new(ip, port)]))
+        }
+        url::Host::Ipv6(v6) => {
+            let ip = normalize_ip(IpAddr::V6(v6));
+            if is_disallowed_ip(&ip) {
+                return Err(ChannelSetupError::Validation(format!(
+                    "Validation endpoint cannot target private or local IP {}",
+                    ip
+                )));
+            }
+
+            Ok((parsed, vec![SocketAddr::new(ip, port)]))
+        }
+        url::Host::Domain(domain) => {
+            let addrs: Vec<SocketAddr> = tokio::net::lookup_host((normalized_host, port))
+                .await
+                .map_err(|e| {
+                    ChannelSetupError::Validation(format!(
+                        "DNS resolution failed for {}: {}",
+                        normalized_host, e
+                    ))
+                })?
+                .map(|addr| SocketAddr::new(normalize_ip(addr.ip()), addr.port()))
+                .collect();
+
+            if addrs.is_empty() {
+                return Err(ChannelSetupError::Validation(format!(
+                    "Validation hostname '{}' did not resolve to any IP addresses",
+                    domain
+                )));
+            }
+
+            for addr in &addrs {
+                if is_disallowed_ip(&addr.ip()) {
+                    return Err(ChannelSetupError::Validation(format!(
+                        "Validation hostname '{}' resolves to disallowed IP {}",
+                        domain,
+                        addr.ip()
+                    )));
+                }
+            }
+
+            Ok((parsed, addrs))
+        }
+    }
+}
+
+fn is_disallowed_ip(ip: &std::net::IpAddr) -> bool {
+    match normalize_ip(*ip) {
+        std::net::IpAddr::V4(v4) => {
+            v4.is_private()
+                || v4.is_loopback()
+                || v4.is_link_local()
+                || v4.is_multicast()
+                || v4.is_unspecified()
+                || v4 == std::net::Ipv4Addr::new(169, 254, 169, 254)
+                || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xC0) == 64)
+        }
+        std::net::IpAddr::V6(v6) => {
+            v6.is_loopback()
+                || v6.is_unique_local()
+                || v6.is_unicast_link_local()
+                || v6.is_multicast()
+                || v6.is_unspecified()
+        }
+    }
+}
+
+fn normalize_ip(ip: std::net::IpAddr) -> std::net::IpAddr {
+    match ip {
+        std::net::IpAddr::V6(v6) => v6
+            .to_ipv4_mapped()
+            .map(std::net::IpAddr::V4)
+            .unwrap_or(std::net::IpAddr::V6(v6)),
+        other => other,
+    }
+}
+
+fn normalize_validation_domain(host: &str) -> &str {
+    host.trim_end_matches('.')
+}
+
+fn validation_placeholder_regex() -> &'static regex::Regex {
+    static PLACEHOLDER_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    PLACEHOLDER_RE.get_or_init(|| {
+        regex::Regex::new(r"\{([A-Za-z0-9_]+)\}")
+            .expect("validation placeholder regex must compile") // safety: hardcoded literal
+    })
+}
+
+fn validation_target_display(parsed: &Url) -> String {
+    let host = parsed.host_str().unwrap_or("unknown host");
+    match parsed.port() {
+        Some(port) => format!("{}:{}", host, port),
+        None => host.to_string(),
+    }
+}
+
+fn describe_validation_request_error(error: &reqwest::Error) -> &'static str {
+    if error.is_timeout() {
+        "request timed out"
+    } else if error.is_redirect() {
+        "redirects are not allowed"
+    } else if error.is_connect() {
+        "connection failed"
+    } else if error.is_request() {
+        "request could not be sent"
+    } else {
+        "request failed"
+    }
 }
 
 /// Validate a Cloudflare tunnel token by briefly running `cloudflared`.
@@ -901,17 +1127,36 @@ fn validate_cloudflare_token_format(token: &str) -> bool {
 /// Generate a random secret of specified length (in bytes).
 fn generate_secret_with_length(length: usize) -> String {
     use rand::RngCore;
-    let mut rng = rand::thread_rng();
+    use rand::rngs::OsRng;
     let mut bytes = vec![0u8; length];
-    rng.fill_bytes(&mut bytes);
+    OsRng.fill_bytes(&mut bytes);
     bytes.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
 #[cfg(test)]
 mod tests {
     use base64::Engine;
+    use std::sync::Arc;
 
-    use crate::setup::channels::{generate_webhook_secret, validate_cloudflare_token_format};
+    use crate::secrets::{InMemorySecretsStore, SecretsCrypto, SecretsStore};
+    use crate::setup::channels::{
+        SecretsContext, generate_webhook_secret, http_webhook_secret_hint,
+        substitute_validation_placeholders, validate_cloudflare_token_format,
+        validate_public_https_url,
+    };
+
+    fn test_secrets_context() -> SecretsContext {
+        use secrecy::SecretString;
+
+        let crypto = Arc::new(
+            SecretsCrypto::new(SecretString::from(
+                "0123456789abcdef0123456789abcdef".to_string(),
+            ))
+            .unwrap(),
+        );
+        let store: Arc<dyn SecretsStore> = Arc::new(InMemorySecretsStore::new(crypto));
+        SecretsContext::from_store(store, "test-user")
+    }
 
     #[test]
     fn test_generate_webhook_secret() {
@@ -963,5 +1208,146 @@ mod tests {
     #[test]
     fn test_validate_cloudflare_token_empty() {
         assert!(!validate_cloudflare_token_format(""));
+    }
+
+    #[tokio::test]
+    async fn test_substitute_validation_placeholders() {
+        let secrets = test_secrets_context();
+        secrets
+            .save_secret(
+                "telegram_bot_token",
+                &secrecy::SecretString::from("abc123".to_string()),
+            )
+            .await
+            .unwrap();
+        secrets
+            .save_secret(
+                "workspace_id",
+                &secrecy::SecretString::from("ws_456".to_string()),
+            )
+            .await
+            .unwrap();
+
+        let resolved = substitute_validation_placeholders(
+            &secrets,
+            "https://api.example.com/{workspace_id}/verify?token={telegram_bot_token}",
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            resolved,
+            "https://api.example.com/ws_456/verify?token=abc123"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_substitute_validation_placeholders_url_encodes_secrets() {
+        let secrets = test_secrets_context();
+        secrets
+            .save_secret(
+                "telegram_bot_token",
+                &secrecy::SecretString::from("abc123?foo=1&bar=#baz/slash".to_string()),
+            )
+            .await
+            .unwrap();
+
+        let resolved = substitute_validation_placeholders(
+            &secrets,
+            "https://api.example.com/verify?token={telegram_bot_token}",
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            resolved,
+            "https://api.example.com/verify?token=abc123%3Ffoo%3D1%26bar%3D%23baz%2Fslash"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_substitute_validation_placeholders_missing_secret() {
+        let secrets = test_secrets_context();
+        let err = substitute_validation_placeholders(
+            &secrets,
+            "https://api.example.com/verify?token={missing_secret}",
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+
+        assert!(err.contains("Failed to read secret"));
+    }
+
+    #[tokio::test]
+    async fn test_validate_public_https_url_rejects_localhost() {
+        let err = validate_public_https_url("https://localhost/api")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("localhost"));
+    }
+
+    #[tokio::test]
+    async fn test_validate_public_https_url_rejects_localhost_with_trailing_dot() {
+        let err = validate_public_https_url("https://localhost./api")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("localhost"));
+    }
+
+    #[tokio::test]
+    async fn test_validate_public_https_url_rejects_private_ip() {
+        let err = validate_public_https_url("https://192.168.1.10/api")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("private or local IP"));
+    }
+
+    #[tokio::test]
+    async fn test_validate_public_https_url_rejects_ipv4_mapped_ipv6() {
+        let err = validate_public_https_url("https://[::ffff:127.0.0.1]/api")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("private or local IP"));
+    }
+
+    #[tokio::test]
+    async fn test_validate_public_https_url_rejects_http() {
+        let err = validate_public_https_url("http://example.com/api")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("must use https"));
+    }
+
+    #[tokio::test]
+    async fn test_validate_public_https_url_accepts_public_https_literal_ip() {
+        let (parsed, addrs) = validate_public_https_url("https://8.8.8.8/api")
+            .await
+            .unwrap();
+        assert_eq!(parsed.as_str(), "https://8.8.8.8/api");
+        assert_eq!(addrs.len(), 1);
+        assert_eq!(addrs[0].ip().to_string(), "8.8.8.8");
+    }
+
+    #[tokio::test]
+    async fn test_validate_public_https_url_fails_closed_on_dns_error() {
+        let err = validate_public_https_url("https://should-not-resolve.invalid/api")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("DNS resolution failed"));
+    }
+
+    #[test]
+    fn test_http_webhook_secret_hint_reflects_current_behavior() {
+        let hint = http_webhook_secret_hint();
+        assert!(hint.contains("encrypted secrets database"));
+        assert!(hint.contains("loaded automatically on startup"));
+        assert!(!hint.contains("ironclaw secret get"));
     }
 }

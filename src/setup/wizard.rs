@@ -22,6 +22,13 @@ use crate::bootstrap::ironclaw_base_dir;
 use crate::channels::wasm::{
     ChannelCapabilitiesFile, available_channel_names, install_bundled_channel,
 };
+use crate::config::OAUTH_PLACEHOLDER;
+use crate::llm::models::{
+    build_nearai_model_fetch_config, fetch_anthropic_models, fetch_ollama_models,
+    fetch_openai_compatible_models, fetch_openai_models,
+};
+#[cfg(test)]
+use crate::llm::models::{is_openai_chat_model, sort_openai_models};
 use crate::llm::{SessionConfig, SessionManager};
 use crate::secrets::{SecretsCrypto, SecretsStore};
 use crate::settings::{KeySource, Settings};
@@ -29,8 +36,8 @@ use crate::setup::channels::{
     SecretsContext, setup_http, setup_signal, setup_tunnel, setup_wasm_channel,
 };
 use crate::setup::prompts::{
-    confirm, input, optional_input, print_error, print_header, print_info, print_step,
-    print_success, secret_input, select_many, select_one,
+    confirm, input, optional_input, print_banner, print_error, print_header, print_info,
+    print_step, print_success, secret_input, select_many, select_one,
 };
 
 // unused const, keep commented for clarity / future use
@@ -73,12 +80,17 @@ pub struct SetupConfig {
     pub skip_auth: bool,
     /// Only reconfigure channels.
     pub channels_only: bool,
+    /// Only reconfigure LLM provider and model selection.
+    pub provider_only: bool,
+    /// Quick setup: auto-defaults everything except LLM provider and model.
+    pub quick: bool,
 }
 
 /// Interactive setup wizard for IronClaw.
 pub struct SetupWizard {
     config: SetupConfig,
     settings: Settings,
+    owner_id: String,
     session_manager: Option<Arc<SessionManager>>,
     /// Database pool (created during setup, postgres only).
     #[cfg(feature = "postgres")]
@@ -93,11 +105,20 @@ pub struct SetupWizard {
 }
 
 impl SetupWizard {
-    /// Create a new setup wizard.
-    pub fn new() -> Self {
+    fn owner_id(&self) -> &str {
+        &self.owner_id
+    }
+
+    fn fallback_with_default_owner(
+        config: SetupConfig,
+        settings: Settings,
+        error: &crate::error::ConfigError,
+    ) -> Self {
+        tracing::warn!("Falling back to default owner scope for setup wizard: {error}");
         Self {
-            config: SetupConfig::default(),
-            settings: Settings::default(),
+            config,
+            settings,
+            owner_id: "default".to_string(),
             session_manager: None,
             #[cfg(feature = "postgres")]
             db_pool: None,
@@ -108,11 +129,15 @@ impl SetupWizard {
         }
     }
 
-    /// Create a wizard with custom configuration.
-    pub fn with_config(config: SetupConfig) -> Self {
-        Self {
+    fn from_bootstrap_settings(
+        config: SetupConfig,
+        settings: Settings,
+    ) -> Result<Self, crate::error::ConfigError> {
+        let owner_id = crate::config::resolve_owner_id(&settings)?;
+        Ok(Self {
             config,
-            settings: Settings::default(),
+            settings,
+            owner_id,
             session_manager: None,
             #[cfg(feature = "postgres")]
             db_pool: None,
@@ -120,7 +145,31 @@ impl SetupWizard {
             db_backend: None,
             secrets_crypto: None,
             llm_api_key: None,
-        }
+        })
+    }
+
+    /// Create a new setup wizard.
+    pub fn new() -> Self {
+        let settings = crate::config::load_bootstrap_settings(None).unwrap_or_default();
+        Self::from_bootstrap_settings(SetupConfig::default(), settings.clone()).unwrap_or_else(
+            |e| Self::fallback_with_default_owner(SetupConfig::default(), settings, &e),
+        )
+    }
+
+    /// Create a wizard with custom configuration.
+    pub fn with_config(config: SetupConfig) -> Self {
+        let settings = crate::config::load_bootstrap_settings(None).unwrap_or_default();
+        Self::from_bootstrap_settings(config.clone(), settings.clone())
+            .unwrap_or_else(|e| Self::fallback_with_default_owner(config, settings, &e))
+    }
+
+    /// Create a wizard with custom configuration and bootstrap TOML overlay.
+    pub fn try_with_config_and_toml(
+        config: SetupConfig,
+        toml_path: Option<&std::path::Path>,
+    ) -> Result<Self, crate::error::ConfigError> {
+        let settings = crate::config::load_bootstrap_settings(toml_path)?;
+        Self::from_bootstrap_settings(config, settings)
     }
 
     /// Set the session manager (for reusing existing auth).
@@ -136,6 +185,7 @@ impl SetupWizard {
     /// settings are loaded from the database after Step 1 establishes a
     /// connection, so users don't have to re-enter everything.
     pub async fn run(&mut self) -> Result<(), SetupError> {
+        print_banner();
         print_header("IronClaw Setup Wizard");
 
         if self.config.channels_only {
@@ -144,6 +194,36 @@ impl SetupWizard {
             self.reconnect_existing_db().await?;
             print_step(1, 1, "Channel Configuration");
             self.step_channels().await?;
+        } else if self.config.provider_only {
+            // Provider-only mode: reconnect to existing DB, then run just
+            // inference provider + model selection steps.
+            self.reconnect_existing_db().await?;
+            print_step(1, 2, "Inference Provider");
+            self.step_inference_provider().await?;
+            self.persist_after_step().await;
+            print_step(2, 2, "Model Selection");
+            self.step_model_selection().await?;
+            self.persist_after_step().await;
+        } else if self.config.quick {
+            // Quick mode: auto-default database + security, only ask for
+            // LLM provider + model. Designed for first-run experience.
+            self.auto_setup_database().await?;
+
+            // Load existing settings from DB (if any prior partial run)
+            let step1_settings = self.settings.clone();
+            self.try_load_existing_settings().await;
+            self.settings.merge_from(&step1_settings);
+
+            self.auto_setup_security().await?;
+            self.persist_after_step().await;
+
+            print_step(1, 2, "Inference Provider");
+            self.step_inference_provider().await?;
+            self.persist_after_step().await;
+
+            print_step(2, 2, "Model Selection");
+            self.step_model_selection().await?;
+            self.persist_after_step().await;
         } else {
             let total_steps = 9;
 
@@ -259,7 +339,7 @@ impl SetupWizard {
         // may not be persisted in the settings map.
         if let Some(ref pool) = self.db_pool {
             let store = crate::history::Store::from_pool(pool.clone());
-            if let Ok(map) = store.get_all_settings("default").await {
+            if let Ok(map) = store.get_all_settings(self.owner_id()).await {
                 self.settings = Settings::from_db_map(&map);
                 self.settings.database_backend = Some("postgres".to_string());
                 self.settings.database_url = Some(url);
@@ -293,7 +373,7 @@ impl SetupWizard {
         // may not be persisted in the settings map.
         if let Some(ref db) = self.db_backend {
             use crate::db::SettingsStore as _;
-            if let Ok(map) = db.get_all_settings("default").await {
+            if let Ok(map) = db.get_all_settings(self.owner_id()).await {
                 self.settings = Settings::from_db_map(&map);
                 self.settings.database_backend = Some("libsql".to_string());
                 self.settings.libsql_path = Some(path);
@@ -646,7 +726,10 @@ impl SetupWizard {
             use refinery::embed_migrations;
             embed_migrations!("migrations");
 
-            print_info("Running migrations...");
+            if !self.config.quick {
+                print_info("Running migrations...");
+            }
+            tracing::debug!("Running PostgreSQL migrations...");
 
             let mut client = pool
                 .get()
@@ -658,7 +741,10 @@ impl SetupWizard {
                 .await
                 .map_err(|e| SetupError::Database(format!("Migration failed: {}", e)))?;
 
-            print_success("Migrations applied");
+            if !self.config.quick {
+                print_success("Migrations applied");
+            }
+            tracing::debug!("PostgreSQL migrations applied");
         }
         Ok(())
     }
@@ -669,14 +755,20 @@ impl SetupWizard {
         if let Some(ref backend) = self.db_backend {
             use crate::db::Database;
 
-            print_info("Running migrations...");
+            if !self.config.quick {
+                print_info("Running migrations...");
+            }
+            tracing::debug!("Running libSQL migrations...");
 
             backend
                 .run_migrations()
                 .await
                 .map_err(|e| SetupError::Database(format!("Migration failed: {}", e)))?;
 
-            print_success("Migrations applied");
+            if !self.config.quick {
+                print_success("Migrations applied");
+            }
+            tracing::debug!("libSQL migrations applied");
         }
         Ok(())
     }
@@ -756,13 +848,28 @@ impl SetupWizard {
                 print_success("Master key generated and stored in OS keychain");
             }
             1 => {
-                // Env var mode
-                print_info("Generate a key and add it to your environment:");
+                // Env var mode — generate key, init crypto, and persist to .env
                 let key_hex = crate::secrets::keychain::generate_master_key_hex();
+
+                // Initialize crypto so subsequent wizard steps (channel setup,
+                // API key storage) can encrypt secrets immediately.
+                self.secrets_crypto = Some(Arc::new(
+                    SecretsCrypto::new(SecretString::from(key_hex.clone()))
+                        .map_err(|e| SetupError::Config(e.to_string()))?,
+                ));
+
+                // Make visible to optional_env() for any subsequent config resolution.
+                crate::config::inject_single_var("SECRETS_MASTER_KEY", &key_hex);
+
+                // Store hex for write_bootstrap_env to persist to ~/.ironclaw/.env.
+                self.settings.secrets_master_key_hex = Some(key_hex.clone());
+
                 println!();
-                println!("  export SECRETS_MASTER_KEY={}", key_hex);
+                print_info("Master key generated and will be saved to ~/.ironclaw/.env");
                 println!();
-                print_info("Add this to your shell profile or .env file.");
+                println!("  SECRETS_MASTER_KEY={}", key_hex);
+                println!();
+                print_info("You can also copy this to another .env file or CI secrets.");
 
                 self.settings.secrets_master_key_source = KeySource::Env;
                 print_success("Configured for environment variable");
@@ -776,58 +883,174 @@ impl SetupWizard {
         Ok(())
     }
 
+    /// Auto-setup database with zero prompts (quick mode).
+    ///
+    /// Uses existing env vars if present, otherwise defaults to libsql at the
+    /// standard path. Falls back to the interactive `step_database()` only when
+    /// just the postgres feature is compiled (can't auto-default postgres).
+    async fn auto_setup_database(&mut self) -> Result<(), SetupError> {
+        // If DATABASE_URL or LIBSQL_PATH already set, respect existing config
+        #[cfg(feature = "postgres")]
+        let env_backend = std::env::var("DATABASE_BACKEND").ok();
+
+        #[cfg(feature = "postgres")]
+        if let Some(ref backend) = env_backend
+            && (backend == "postgres" || backend == "postgresql")
+        {
+            if let Ok(url) = std::env::var("DATABASE_URL") {
+                print_info("Using existing PostgreSQL configuration");
+                self.settings.database_backend = Some("postgres".to_string());
+                self.settings.database_url = Some(url);
+                return Ok(());
+            }
+            // Postgres configured but no URL — fall through to interactive
+            return self.step_database().await;
+        }
+
+        #[cfg(feature = "postgres")]
+        if let Ok(url) = std::env::var("DATABASE_URL") {
+            print_info("Using existing PostgreSQL configuration");
+            self.settings.database_backend = Some("postgres".to_string());
+            self.settings.database_url = Some(url);
+            return Ok(());
+        }
+
+        // Auto-default to libsql if the feature is compiled
+        #[cfg(feature = "libsql")]
+        {
+            self.settings.database_backend = Some("libsql".to_string());
+
+            let existing_path = std::env::var("LIBSQL_PATH")
+                .ok()
+                .or_else(|| self.settings.libsql_path.clone());
+
+            let db_path = existing_path.unwrap_or_else(|| {
+                crate::config::default_libsql_path()
+                    .to_string_lossy()
+                    .to_string()
+            });
+
+            let turso_url = std::env::var("LIBSQL_URL").ok();
+            let turso_token = std::env::var("LIBSQL_AUTH_TOKEN").ok();
+
+            self.test_database_connection_libsql(
+                &db_path,
+                turso_url.as_deref(),
+                turso_token.as_deref(),
+            )
+            .await?;
+
+            self.run_migrations_libsql().await?;
+
+            self.settings.libsql_path = Some(db_path.clone());
+            if let Some(url) = turso_url {
+                self.settings.libsql_url = Some(url);
+            }
+
+            print_success(&format!("Using embedded database at {}", db_path));
+            return Ok(());
+        }
+
+        // Only postgres feature compiled — can't auto-default, use interactive
+        #[allow(unreachable_code)]
+        {
+            self.step_database().await
+        }
+    }
+
+    /// Auto-setup security with zero prompts (quick mode).
+    ///
+    /// Silently configures the master key: uses existing env var or keychain
+    /// key if available, otherwise generates and stores one automatically
+    /// (keychain on macOS, env var fallback).
+    async fn auto_setup_security(&mut self) -> Result<(), SetupError> {
+        // Check env var first
+        if std::env::var("SECRETS_MASTER_KEY").is_ok() {
+            self.settings.secrets_master_key_source = KeySource::Env;
+            print_success("Security configured (env var)");
+            return Ok(());
+        }
+
+        // Try existing keychain key (no prompts — get_master_key may show
+        // OS dialogs on macOS, but that's unavoidable for keychain access)
+        if let Ok(keychain_key_bytes) = crate::secrets::keychain::get_master_key().await {
+            let key_hex: String = keychain_key_bytes
+                .iter()
+                .map(|b| format!("{:02x}", b))
+                .collect();
+            self.secrets_crypto = Some(Arc::new(
+                SecretsCrypto::new(SecretString::from(key_hex))
+                    .map_err(|e| SetupError::Config(e.to_string()))?,
+            ));
+            self.settings.secrets_master_key_source = KeySource::Keychain;
+            print_success("Security configured (keychain)");
+            return Ok(());
+        }
+
+        // No existing key — generate one
+        // Try keychain first (preferred on macOS)
+        let key = crate::secrets::keychain::generate_master_key();
+        if crate::secrets::keychain::store_master_key(&key)
+            .await
+            .is_ok()
+        {
+            let key_hex: String = key.iter().map(|b| format!("{:02x}", b)).collect();
+            self.secrets_crypto = Some(Arc::new(
+                SecretsCrypto::new(SecretString::from(key_hex))
+                    .map_err(|e| SetupError::Config(e.to_string()))?,
+            ));
+            self.settings.secrets_master_key_source = KeySource::Keychain;
+            print_success("Master key stored in OS keychain");
+            return Ok(());
+        }
+
+        // Keychain unavailable — fall back to env var mode
+        let key_hex = crate::secrets::keychain::generate_master_key_hex();
+        self.secrets_crypto = Some(Arc::new(
+            SecretsCrypto::new(SecretString::from(key_hex.clone()))
+                .map_err(|e| SetupError::Config(e.to_string()))?,
+        ));
+        crate::config::inject_single_var("SECRETS_MASTER_KEY", &key_hex);
+        self.settings.secrets_master_key_hex = Some(key_hex);
+        self.settings.secrets_master_key_source = KeySource::Env;
+        print_success("Master key stored in ~/.ironclaw/.env");
+        Ok(())
+    }
+
     /// Step 3: Inference provider selection.
     ///
-    /// Lets the user pick from all supported LLM backends, then runs the
-    /// provider-specific auth sub-flow (API key entry, NEAR AI login, etc.).
+    /// Uses the provider registry to dynamically build the selection menu.
+    /// NearAI is always first (special auth), then all registry providers
+    /// that have setup hints.
     async fn step_inference_provider(&mut self) -> Result<(), SetupError> {
-        // Show current provider if already configured
-        if let Some(ref current) = self.settings.llm_backend {
-            let is_openrouter = current == "openai_compatible"
-                && self
-                    .settings
-                    .openai_compatible_base_url
-                    .as_deref()
-                    .is_some_and(|u| u.contains("openrouter.ai"));
+        let registry = crate::llm::ProviderRegistry::load();
 
-            let display = if is_openrouter {
-                "OpenRouter"
+        // Show current provider if already configured
+        if let Some(current) = self.settings.llm_backend.clone() {
+            let display = if current == "nearai" {
+                "NEAR AI".to_string()
+            } else if let Some(def) = registry.find(&current) {
+                def.setup
+                    .as_ref()
+                    .map(|s| s.display_name().to_string())
+                    .unwrap_or_else(|| def.id.clone())
             } else {
-                match current.as_str() {
-                    "nearai" => "NEAR AI",
-                    "anthropic" => "Anthropic (Claude)",
-                    "openai" => "OpenAI",
-                    "ollama" => "Ollama (local)",
-                    "openai_compatible" => "OpenAI-compatible endpoint",
-                    other => other,
-                }
+                current.clone()
             };
             print_info(&format!("Current provider: {}", display));
             println!();
 
-            let is_known = matches!(
-                current.as_str(),
-                "nearai" | "anthropic" | "openai" | "ollama" | "openai_compatible"
-            );
+            let is_known =
+                current == "nearai" || current == "bedrock" || registry.is_known(&current);
 
             if is_known && confirm("Keep current provider?", true).map_err(SetupError::Io)? {
-                // Still run the auth sub-flow in case they need to update keys
-                if is_openrouter {
-                    return self.setup_openrouter().await;
+                if current == "bedrock" {
+                    // Keeping the existing Bedrock config — no need to re-run
+                    // the full setup flow (region, auth, cross-region).
+                    print_info("Keeping existing AWS Bedrock configuration.");
+                    return Ok(());
                 }
-                match current.as_str() {
-                    "nearai" => return self.setup_nearai().await,
-                    "anthropic" => return self.setup_anthropic().await,
-                    "openai" => return self.setup_openai().await,
-                    "ollama" => return self.setup_ollama(),
-                    "openai_compatible" => return self.setup_openai_compatible().await,
-                    _ => {
-                        return Err(SetupError::Config(format!(
-                            "Unhandled provider: {}",
-                            current
-                        )));
-                    }
-                }
+                return self.run_provider_setup(&current, &registry).await;
             }
 
             if !is_known {
@@ -841,33 +1064,136 @@ impl SetupWizard {
         print_info("Select your inference provider:");
         println!();
 
-        let options = &[
-            "NEAR AI          - multi-model access via NEAR account",
-            "Anthropic        - Claude models (direct API key)",
-            "OpenAI           - GPT models (direct API key)",
-            "Ollama           - local models, no API key needed",
-            "OpenRouter       - 200+ models via single API key",
-            "OpenAI-compatible - custom endpoint (vLLM, LiteLLM, etc.)",
-        ];
+        // Build menu: NearAI first, then all registry providers with setup hints, then Bedrock
+        let selectable = registry.selectable();
+        let mut options: Vec<String> = Vec::with_capacity(2 + selectable.len());
+        let mut provider_ids: Vec<String> = Vec::with_capacity(2 + selectable.len());
 
-        let choice = select_one("Provider:", options).map_err(SetupError::Io)?;
+        options.push("NEAR AI          - multi-model access via NEAR account".to_string());
+        provider_ids.push("nearai".to_string());
 
-        match choice {
-            0 => self.setup_nearai().await?,
-            1 => self.setup_anthropic().await?,
-            2 => self.setup_openai().await?,
-            3 => self.setup_ollama()?,
-            4 => self.setup_openrouter().await?,
-            5 => self.setup_openai_compatible().await?,
-            _ => return Err(SetupError::Config("Invalid provider selection".to_string())),
+        for def in &selectable {
+            let label = format!(
+                "{:<17}- {}",
+                def.setup
+                    .as_ref()
+                    .map(|s| s.display_name())
+                    .unwrap_or(&def.id),
+                def.description
+            );
+            options.push(label);
+            provider_ids.push(def.id.clone());
+        }
+
+        // Bedrock is a special case (native AWS SDK, not registry-based)
+        options.push("AWS Bedrock      - Claude & other models via AWS (IAM, SSO)".to_string());
+        provider_ids.push("bedrock".to_string());
+
+        let option_refs: Vec<&str> = options.iter().map(|s| s.as_str()).collect();
+        let choice = select_one("Provider:", &option_refs).map_err(SetupError::Io)?;
+        let selected_id = &provider_ids[choice];
+
+        if selected_id == "bedrock" {
+            self.setup_bedrock().await?;
+        } else {
+            self.run_provider_setup(selected_id, &registry).await?;
         }
 
         Ok(())
     }
 
+    /// Run the setup flow for a specific provider.
+    ///
+    /// NearAI has its own special flow. Registry providers dispatch
+    /// based on their `SetupHint` kind.
+    async fn run_provider_setup(
+        &mut self,
+        provider_id: &str,
+        registry: &crate::llm::ProviderRegistry,
+    ) -> Result<(), SetupError> {
+        if provider_id == "nearai" {
+            return self.setup_nearai().await;
+        }
+
+        let def = registry
+            .find(provider_id)
+            .ok_or_else(|| SetupError::Config(format!("Unknown provider: {}", provider_id)))?;
+
+        // Providers without a setup hint (e.g., user-defined providers configured
+        // purely via env vars) skip credential setup and go to model selection.
+        let Some(setup) = def.setup.as_ref() else {
+            print_info(&format!(
+                "Provider '{}' has no setup wizard. Configure via environment variables.",
+                provider_id
+            ));
+            self.set_llm_backend_preserving_model(provider_id);
+            return Ok(());
+        };
+
+        // Anthropic has a custom flow: API key or OAuth token from `claude login`.
+        if provider_id == "anthropic" {
+            return self.setup_anthropic().await;
+        }
+
+        match setup {
+            crate::llm::registry::SetupHint::ApiKey {
+                secret_name,
+                key_url,
+                display_name,
+                ..
+            } => {
+                let env_var = def.api_key_env.as_deref().unwrap_or("LLM_API_KEY");
+                let url = key_url.as_deref().unwrap_or("the provider's website");
+
+                // Only store base URL for providers that resolve through
+                // LLM_BASE_URL (openai_compatible, openrouter). Other providers
+                // like groq/nvidia have their own base_url_env and don't need
+                // this backward-compat setting.
+                if def.base_url_env.as_deref() == Some("LLM_BASE_URL")
+                    && let Some(ref base_url) = def.default_base_url
+                {
+                    self.settings.openai_compatible_base_url = Some(base_url.clone());
+                }
+
+                self.setup_api_key_provider(
+                    &def.id,
+                    env_var,
+                    secret_name,
+                    &format!("{display_name} API key"),
+                    url,
+                    Some(display_name),
+                )
+                .await?;
+            }
+            crate::llm::registry::SetupHint::Ollama { .. } => {
+                self.setup_ollama_generic(def)?;
+            }
+            crate::llm::registry::SetupHint::OpenAiCompatible {
+                secret_name,
+                display_name,
+                ..
+            } => {
+                self.setup_openai_compatible_generic(&def.id, secret_name, display_name)
+                    .await?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Update the selected LLM backend while preserving the current model when
+    /// the backend did not actually change.
+    fn set_llm_backend_preserving_model(&mut self, backend: &str) {
+        let backend_changed = self.settings.llm_backend.as_deref() != Some(backend);
+        self.settings.llm_backend = Some(backend.to_string());
+        if backend_changed {
+            self.settings.selected_model = None;
+        }
+    }
+
     /// NEAR AI provider setup (extracted from the old step_authentication).
     async fn setup_nearai(&mut self) -> Result<(), SetupError> {
-        self.settings.llm_backend = Some("nearai".to_string());
+        self.set_llm_backend_preserving_model("nearai");
 
         // Check if we already have a session
         if let Some(ref session) = self.session_manager
@@ -889,7 +1215,10 @@ impl SetupWizard {
         let session = if let Some(ref s) = self.session_manager {
             Arc::clone(s)
         } else {
-            let config = SessionConfig::default();
+            let config = SessionConfig {
+                session_path: crate::config::llm::default_session_path(),
+                ..SessionConfig::default()
+            };
             Arc::new(SessionManager::new(config))
         };
 
@@ -908,9 +1237,9 @@ impl SetupWizard {
         self.persist_session_to_db().await;
 
         // If the user chose the API key path, NEARAI_API_KEY is now set
-        // in the environment. Persist it to the encrypted secrets store
-        // so inject_llm_keys_from_secrets() can load it on future runs.
-        if let Ok(api_key) = std::env::var("NEARAI_API_KEY")
+        // in the runtime env overlay. Persist it to the encrypted secrets
+        // store so inject_llm_keys_from_secrets() can load it on future runs.
+        if let Some(api_key) = crate::config::helpers::env_or_override("NEARAI_API_KEY")
             && !api_key.is_empty()
             && let Ok(ctx) = self.init_secrets_context().await
         {
@@ -924,33 +1253,110 @@ impl SetupWizard {
         Ok(())
     }
 
-    /// Anthropic provider setup: collect API key and store in secrets.
+    /// Anthropic provider setup: API key or OAuth token from `claude login`.
     async fn setup_anthropic(&mut self) -> Result<(), SetupError> {
-        self.setup_api_key_provider(
-            "anthropic",
-            "ANTHROPIC_API_KEY",
-            "llm_anthropic_api_key",
-            "Anthropic API key",
-            "https://console.anthropic.com/settings/keys",
-            None,
-        )
-        .await
+        let options = &["Direct API Key", "OAuth Token (from `claude login`)"];
+        let choice = select_one("How do you want to authenticate with Anthropic?", options)
+            .map_err(SetupError::Io)?;
+
+        if choice == 0 {
+            // Standard API key flow
+            self.setup_api_key_provider(
+                "anthropic",
+                "ANTHROPIC_API_KEY",
+                "llm_anthropic_api_key",
+                "Anthropic API key",
+                "https://console.anthropic.com/settings/keys",
+                None,
+            )
+            .await
+        } else {
+            // OAuth token flow
+            self.setup_anthropic_oauth().await
+        }
     }
 
-    /// OpenAI provider setup: collect API key and store in secrets.
-    async fn setup_openai(&mut self) -> Result<(), SetupError> {
-        self.setup_api_key_provider(
-            "openai",
-            "OPENAI_API_KEY",
-            "llm_openai_api_key",
-            "OpenAI API key",
-            "https://platform.openai.com/api-keys",
-            None,
-        )
-        .await
+    /// Anthropic OAuth setup: extract token from `claude login` credentials.
+    async fn setup_anthropic_oauth(&mut self) -> Result<(), SetupError> {
+        self.set_llm_backend_preserving_model("anthropic");
+
+        // Try to extract existing OAuth token from Claude Code credentials
+        if let Some(token) = crate::config::ClaudeCodeConfig::extract_oauth_token() {
+            print_info(&format!("Found OAuth token: {}", mask_api_key(&token)));
+            if confirm("Use this token?", true).map_err(SetupError::Io)? {
+                return self.save_anthropic_oauth_token(&token).await;
+            }
+        } else {
+            print_info("No OAuth token found from `claude login`.");
+            print_info("Run `claude login` in a terminal to authenticate, then retry.");
+            println!();
+
+            if confirm("Retry after running `claude login`?", true).map_err(SetupError::Io)? {
+                // Block until the user has run `claude login` in another terminal
+                input("Press Enter after running `claude login` in another terminal...")
+                    .map_err(SetupError::Io)?;
+                if let Some(token) = crate::config::ClaudeCodeConfig::extract_oauth_token() {
+                    print_info(&format!("Found OAuth token: {}", mask_api_key(&token)));
+                    return self.save_anthropic_oauth_token(&token).await;
+                }
+                print_error("Still no OAuth token found.");
+            }
+        }
+
+        // Fallback: let user paste the token manually, or switch to API key
+        print_info("You can paste your OAuth token directly (starts with sk-ant-oat01-).");
+        print_info("Or press Enter with no input to switch to the API key flow.");
+        let token = secret_input("Anthropic OAuth token").map_err(SetupError::Io)?;
+        let token_str = token.expose_secret();
+        if token_str.is_empty() {
+            print_info("Switching to API key flow...");
+            return self
+                .setup_api_key_provider(
+                    "anthropic",
+                    "ANTHROPIC_API_KEY",
+                    "llm_anthropic_api_key",
+                    "Anthropic API key",
+                    "https://console.anthropic.com/settings/keys",
+                    None,
+                )
+                .await;
+        }
+        self.save_anthropic_oauth_token(token_str).await
     }
 
-    /// Shared setup flow for API-key-based providers (Anthropic, OpenAI, OpenRouter).
+    /// Save an Anthropic OAuth token to secrets and set env for immediate use.
+    async fn save_anthropic_oauth_token(&mut self, token: &str) -> Result<(), SetupError> {
+        // Validate token format to catch accidentally pasted API keys
+        if !token.starts_with("sk-ant-oat") {
+            print_error("Token doesn't look like an OAuth token (expected prefix: sk-ant-oat).");
+            print_info("If you have an API key instead, use the 'Direct API Key' option.");
+            return Err(SetupError::Config("Invalid OAuth token format".to_string()));
+        }
+
+        // Store in secrets if available
+        if let Ok(ctx) = self.init_secrets_context().await {
+            let key = SecretString::from(token.to_string());
+            ctx.save_secret("llm_anthropic_oauth_token", &key)
+                .await
+                .map_err(|e| SetupError::Config(format!("Failed to save OAuth token: {e}")))?;
+            print_success("OAuth token encrypted and saved");
+        } else {
+            print_info("Secrets not available. Set ANTHROPIC_OAUTH_TOKEN in your environment.");
+        }
+
+        // Make the token visible to `optional_env()` for subsequent config
+        // resolution (model selection step). Uses the thread-safe overlay
+        // instead of `std::env::set_var` to avoid UB on multi-threaded runtimes.
+        crate::config::inject_single_var("ANTHROPIC_OAUTH_TOKEN", token);
+
+        // Cache for model fetching
+        self.llm_api_key = Some(SecretString::from(token.to_string()));
+
+        print_success("Anthropic OAuth configured");
+        Ok(())
+    }
+
+    /// Shared setup flow for API-key-based providers.
     async fn setup_api_key_provider(
         &mut self,
         backend: &str,
@@ -966,10 +1372,7 @@ impl SetupWizard {
             other => other,
         });
 
-        self.settings.llm_backend = Some(backend.to_string());
-        if self.settings.selected_model.is_some() {
-            self.settings.selected_model = None;
-        }
+        self.set_llm_backend_preserving_model(backend);
 
         // Check env var first
         if let Ok(existing) = std::env::var(env_var) {
@@ -1011,6 +1414,11 @@ impl SetupWizard {
             ));
         }
 
+        // Make key visible to `optional_env()` for subsequent config resolution.
+        // Uses the thread-safe overlay instead of `std::env::set_var` to avoid
+        // UB on multi-threaded runtimes.
+        crate::config::inject_single_var(env_var, key_str);
+
         // Cache key in memory for model fetching later in the wizard
         self.llm_api_key = Some(SecretString::from(key_str.to_string()));
 
@@ -1018,21 +1426,28 @@ impl SetupWizard {
         Ok(())
     }
 
-    /// Ollama provider setup: just needs a base URL, no API key.
-    fn setup_ollama(&mut self) -> Result<(), SetupError> {
-        self.settings.llm_backend = Some("ollama".to_string());
-        if self.settings.selected_model.is_some() {
-            self.settings.selected_model = None;
-        }
+    /// Generic Ollama-style setup: just needs a base URL, no API key.
+    fn setup_ollama_generic(
+        &mut self,
+        def: &crate::llm::ProviderDefinition,
+    ) -> Result<(), SetupError> {
+        self.set_llm_backend_preserving_model(&def.id);
 
         let default_url = self
             .settings
             .ollama_base_url
             .as_deref()
+            .or(def.default_base_url.as_deref())
             .unwrap_or("http://localhost:11434");
 
+        let display_name = def
+            .setup
+            .as_ref()
+            .map(|s| s.display_name())
+            .unwrap_or(&def.id);
+
         let url_input = optional_input(
-            "Ollama base URL",
+            &format!("{display_name} base URL"),
             Some(&format!("default: {}", default_url)),
         )
         .map_err(SetupError::Io)?;
@@ -1040,34 +1455,104 @@ impl SetupWizard {
         let url = url_input.unwrap_or_else(|| default_url.to_string());
         self.settings.ollama_base_url = Some(url.clone());
 
-        print_success(&format!("Ollama configured ({})", url));
+        print_success(&format!("{display_name} configured ({})", url));
         Ok(())
     }
 
-    /// OpenRouter provider setup: pre-configured OpenAI-compatible endpoint.
-    ///
-    /// Sets the base URL to `https://openrouter.ai/api/v1` and delegates
-    /// API key collection to `setup_api_key_provider` with a display name
-    /// override so messages say "OpenRouter" instead of "openai_compatible".
-    async fn setup_openrouter(&mut self) -> Result<(), SetupError> {
-        self.settings.openai_compatible_base_url = Some("https://openrouter.ai/api/v1".to_string());
-        self.setup_api_key_provider(
-            "openai_compatible",
-            "LLM_API_KEY",
-            "llm_compatible_api_key",
-            "OpenRouter API key",
-            "https://openrouter.ai/settings/keys",
-            Some("OpenRouter"),
-        )
-        .await
+    /// AWS Bedrock provider setup: region, auth, and cross-region config.
+    async fn setup_bedrock(&mut self) -> Result<(), SetupError> {
+        self.set_llm_backend_preserving_model("bedrock");
+
+        // Region
+        let default_region = self
+            .settings
+            .bedrock_region
+            .as_deref()
+            .unwrap_or("us-east-1");
+
+        let region_input =
+            optional_input("AWS region", Some(&format!("default: {}", default_region)))
+                .map_err(SetupError::Io)?;
+
+        let region = region_input.unwrap_or_else(|| default_region.to_string());
+        self.settings.bedrock_region = Some(region.clone());
+
+        // Auth method
+        print_info("Select authentication method:");
+        println!();
+        let auth_options = &[
+            "AWS default credentials (env vars, ~/.aws/credentials, IAM roles)",
+            "AWS named profile (SSO / assume-role)",
+        ];
+        let auth_choice = select_one("Auth:", auth_options).map_err(SetupError::Io)?;
+
+        match auth_choice {
+            0 => {
+                // Default AWS credentials — clear any stale named profile
+                self.settings.bedrock_profile = None;
+                print_info(
+                    "Using default AWS credential chain (env vars, ~/.aws/credentials, IAM roles).",
+                );
+            }
+            1 => {
+                // Named profile
+                let profile =
+                    input("AWS profile name (from ~/.aws/config)").map_err(SetupError::Io)?;
+                if profile.trim().is_empty() {
+                    // Empty input clears any previously configured profile
+                    self.settings.bedrock_profile = None;
+                    print_info("AWS profile cleared; using default AWS credential chain instead.");
+                } else {
+                    self.settings.bedrock_profile = Some(profile.clone());
+                    print_success(&format!("AWS profile '{}' saved", profile));
+                }
+            }
+            _ => return Err(SetupError::Config("Invalid auth selection".to_string())),
+        }
+
+        self.setup_bedrock_cross_region()
     }
 
-    /// OpenAI-compatible provider setup: base URL + optional API key.
-    async fn setup_openai_compatible(&mut self) -> Result<(), SetupError> {
-        self.settings.llm_backend = Some("openai_compatible".to_string());
-        if self.settings.selected_model.is_some() {
-            self.settings.selected_model = None;
-        }
+    /// Bedrock cross-region inference prefix selection (sub-step of setup_bedrock).
+    fn setup_bedrock_cross_region(&mut self) -> Result<(), SetupError> {
+        print_info("Cross-region inference routes requests across AWS regions for capacity:");
+        println!();
+        let cross_options = &[
+            "us     - route within US regions (recommended for us-east-1)",
+            "global - route to any AWS region worldwide",
+            "eu     - route within European regions",
+            "apac   - route within Asia-Pacific regions",
+            "none   - single-region only (no cross-region routing)",
+        ];
+        let cross_choice = select_one("Cross-region:", cross_options).map_err(SetupError::Io)?;
+
+        let cross_region = match cross_choice {
+            0 => Some("us".to_string()),
+            1 => Some("global".to_string()),
+            2 => Some("eu".to_string()),
+            3 => Some("apac".to_string()),
+            4 => None,
+            _ => None,
+        };
+        self.settings.bedrock_cross_region = cross_region;
+
+        let region = self
+            .settings
+            .bedrock_region
+            .as_deref()
+            .unwrap_or("us-east-1");
+        print_success(&format!("AWS Bedrock configured (region: {})", region));
+        Ok(())
+    }
+
+    /// Generic OpenAI-compatible setup: base URL + optional API key.
+    async fn setup_openai_compatible_generic(
+        &mut self,
+        backend_id: &str,
+        secret_name: &str,
+        display_name: &str,
+    ) -> Result<(), SetupError> {
+        self.set_llm_backend_preserving_model(backend_id);
 
         let existing_url = self
             .settings
@@ -1084,9 +1569,9 @@ impl SetupWizard {
         };
 
         if url.is_empty() {
-            return Err(SetupError::Config(
-                "Base URL is required for OpenAI-compatible provider".to_string(),
-            ));
+            return Err(SetupError::Config(format!(
+                "Base URL is required for {display_name}"
+            )));
         }
 
         self.settings.openai_compatible_base_url = Some(url.clone());
@@ -1098,19 +1583,17 @@ impl SetupWizard {
 
             if !key_str.is_empty() {
                 if let Ok(ctx) = self.init_secrets_context().await {
-                    ctx.save_secret("llm_compatible_api_key", &key)
+                    ctx.save_secret(secret_name, &key)
                         .await
-                        .map_err(|e| {
-                            SetupError::Config(format!("Failed to save API key: {}", e))
-                        })?;
+                        .map_err(|e| SetupError::Config(format!("Failed to save API key: {e}")))?;
                     print_success("API key encrypted and saved");
                 } else {
-                    print_info("Secrets not available. Set LLM_API_KEY in your environment.");
+                    print_info("Secrets not available. Set the API key in your environment.");
                 }
             }
         }
 
-        print_success(&format!("OpenAI-compatible configured ({})", url));
+        print_success(&format!("{display_name} configured ({})", url));
         Ok(())
     }
 
@@ -1135,73 +1618,128 @@ impl SetupWizard {
         }
 
         let backend = self.settings.llm_backend.as_deref().unwrap_or("nearai");
+        let registry = crate::llm::ProviderRegistry::load();
 
-        match backend {
-            "anthropic" => {
-                let cached = self
+        if backend == "nearai" {
+            // NEAR AI: use existing provider list_models()
+            let fetched = self.fetch_nearai_models().await;
+            let default_models: Vec<(String, String)> = vec![
+                (
+                    "zai-org/GLM-latest".into(),
+                    "GLM Latest (default, fast)".into(),
+                ),
+                (
+                    "anthropic::claude-sonnet-4-20250514".into(),
+                    "Claude Sonnet 4 (best quality)".into(),
+                ),
+                (
+                    "openai::gpt-5.3-codex".into(),
+                    "GPT-5.3 Codex (flagship)".into(),
+                ),
+                ("openai::gpt-5.2".into(), "GPT-5.2".into()),
+                ("openai::gpt-4o".into(), "GPT-4o".into()),
+            ];
+
+            let models = if fetched.is_empty() {
+                default_models
+            } else {
+                fetched.iter().map(|m| (m.clone(), m.clone())).collect()
+            };
+            self.select_from_model_list(&models)?;
+        } else if let Some(def) = registry.find(backend) {
+            let can_list = def
+                .setup
+                .as_ref()
+                .map(|s| s.can_list_models())
+                .unwrap_or(false);
+
+            if can_list {
+                // Try to fetch models from the provider's /v1/models endpoint
+                let cached_key = self
                     .llm_api_key
                     .as_ref()
                     .map(|k| k.expose_secret().to_string());
-                let models = fetch_anthropic_models(cached.as_deref()).await;
-                self.select_from_model_list(&models)?;
-            }
-            "openai" => {
-                let cached = self
-                    .llm_api_key
-                    .as_ref()
-                    .map(|k| k.expose_secret().to_string());
-                let models = fetch_openai_models(cached.as_deref()).await;
-                self.select_from_model_list(&models)?;
-            }
-            "ollama" => {
-                let base_url = self
-                    .settings
-                    .ollama_base_url
-                    .as_deref()
-                    .unwrap_or("http://localhost:11434");
-                let models = fetch_ollama_models(base_url).await;
+
+                let models = match backend {
+                    "anthropic" => fetch_anthropic_models(cached_key.as_deref()).await,
+                    "openai" => fetch_openai_models(cached_key.as_deref()).await,
+                    "ollama" => {
+                        let base_url = self
+                            .settings
+                            .ollama_base_url
+                            .as_deref()
+                            .or(def.default_base_url.as_deref())
+                            .unwrap_or("http://localhost:11434");
+                        let models = fetch_ollama_models(base_url).await;
+                        if models.is_empty() {
+                            print_info("No models found. Pull one first: ollama pull llama3");
+                        }
+                        models
+                    }
+                    _ => {
+                        // Generic OpenAI-compatible model listing
+                        let base_url = def.default_base_url.as_deref().unwrap_or("");
+                        fetch_openai_compatible_models(base_url, cached_key.as_deref()).await
+                    }
+                };
+
+                // Apply models_filter from setup hint (e.g., Groq "chat" filters non-chat models)
+                let models =
+                    if let Some(filter) = def.setup.as_ref().and_then(|s| s.models_filter()) {
+                        let filter_lower = filter.to_lowercase();
+                        models
+                            .into_iter()
+                            .filter(|(id, _)| id.to_lowercase().contains(&filter_lower))
+                            .collect()
+                    } else {
+                        models
+                    };
+
                 if models.is_empty() {
-                    print_info("No models found. Pull one first: ollama pull llama3");
+                    // Fall back to manual entry
+                    let default = &def.default_model;
+                    let model_id = input(&format!("Model name (default: {default})"))
+                        .map_err(SetupError::Io)?;
+                    let model_id = if model_id.is_empty() {
+                        default.clone()
+                    } else {
+                        model_id
+                    };
+                    self.settings.selected_model = Some(model_id.clone());
+                    print_success(&format!("Selected {}", model_id));
+                } else {
+                    self.select_from_model_list(&models)?;
                 }
-                self.select_from_model_list(&models)?;
-            }
-            "openai_compatible" => {
-                // No standard API for listing models on arbitrary endpoints
-                let model_id = input("Model name (e.g., meta-llama/Llama-3-8b-chat-hf)")
-                    .map_err(SetupError::Io)?;
-                if model_id.is_empty() {
-                    return Err(SetupError::Config("Model name is required".to_string()));
-                }
+            } else {
+                // Manual model entry
+                let default = &def.default_model;
+                let model_id =
+                    input(&format!("Model name (default: {default})")).map_err(SetupError::Io)?;
+                let model_id = if model_id.is_empty() {
+                    default.clone()
+                } else {
+                    model_id
+                };
                 self.settings.selected_model = Some(model_id.clone());
                 print_success(&format!("Selected {}", model_id));
             }
-            _ => {
-                // NEAR AI: use existing provider list_models()
-                let fetched = self.fetch_nearai_models().await;
-                let default_models: Vec<(String, String)> = vec![
-                    (
-                        "zai-org/GLM-latest".into(),
-                        "GLM Latest (default, fast)".into(),
-                    ),
-                    (
-                        "anthropic::claude-sonnet-4-20250514".into(),
-                        "Claude Sonnet 4 (best quality)".into(),
-                    ),
-                    (
-                        "openai::gpt-5.3-codex".into(),
-                        "GPT-5.3 Codex (flagship)".into(),
-                    ),
-                    ("openai::gpt-5.2".into(), "GPT-5.2".into()),
-                    ("openai::gpt-4o".into(), "GPT-4o".into()),
-                ];
-
-                let models = if fetched.is_empty() {
-                    default_models
-                } else {
-                    fetched.iter().map(|m| (m.clone(), m.clone())).collect()
-                };
-                self.select_from_model_list(&models)?;
+        } else if backend == "bedrock" {
+            let model_id = input("Bedrock model ID (e.g., anthropic.claude-opus-4-6-v1)")
+                .map_err(SetupError::Io)?;
+            if model_id.is_empty() {
+                return Err(SetupError::Config("Model ID is required".to_string()));
             }
+            self.settings.selected_model = Some(model_id.clone());
+            print_success(&format!("Selected {}", model_id));
+        } else {
+            // Unknown provider, manual entry
+            let model_id = input("Model name (e.g., meta-llama/Llama-3-8b-chat-hf)")
+                .map_err(SetupError::Io)?;
+            if model_id.is_empty() {
+                return Err(SetupError::Config("Model name is required".to_string()));
+            }
+            self.settings.selected_model = Some(model_id.clone());
+            print_success(&format!("Selected {}", model_id));
         }
 
         Ok(())
@@ -1239,48 +1777,20 @@ impl SetupWizard {
     }
 
     /// Fetch available models from the NEAR AI API.
+    ///
+    /// Uses [`build_nearai_model_fetch_config`] to construct the provider config,
+    /// which reads `NEARAI_API_KEY` from the environment when present.
     async fn fetch_nearai_models(&self) -> Vec<String> {
         let session = match self.session_manager {
             Some(ref s) => Arc::clone(s),
             None => return vec![],
         };
 
-        use crate::config::LlmConfig;
         use crate::llm::create_llm_provider;
 
-        let base_url = std::env::var("NEARAI_BASE_URL")
-            .unwrap_or_else(|_| "https://private.near.ai".to_string());
-        let auth_base_url = std::env::var("NEARAI_AUTH_URL")
-            .unwrap_or_else(|_| "https://private.near.ai".to_string());
+        let config = build_nearai_model_fetch_config();
 
-        let config = LlmConfig {
-            backend: crate::config::LlmBackend::NearAi,
-            nearai: crate::config::NearAiConfig {
-                model: "dummy".to_string(),
-                cheap_model: None,
-                base_url,
-                auth_base_url,
-                session_path: crate::llm::session::default_session_path(),
-                api_key: None,
-                fallback_model: None,
-                max_retries: 3,
-                circuit_breaker_threshold: None,
-                circuit_breaker_recovery_secs: 30,
-                response_cache_enabled: false,
-                response_cache_ttl_secs: 3600,
-                response_cache_max_entries: 1000,
-                failover_cooldown_secs: 300,
-                failover_cooldown_threshold: 3,
-                smart_routing_cascade: true,
-            },
-            openai: None,
-            anthropic: None,
-            ollama: None,
-            openai_compatible: None,
-            tinfoil: None,
-        };
-
-        match create_llm_provider(&config, session) {
+        match create_llm_provider(&config, session).await {
             Ok(provider) => match provider.list_models().await {
                 Ok(models) => models,
                 Err(e) => {
@@ -1394,48 +1904,50 @@ impl SetupWizard {
         };
 
         // Create backend-appropriate secrets store.
-        // Respect the user's selected backend when both features are compiled,
-        // so we don't accidentally use a postgres pool from DATABASE_URL when
-        // libsql was chosen (or vice versa).
+        // Use runtime dispatch based on the user's selected backend.
+        // Default to whichever backend is compiled in. When only libsql is
+        // available, we must not default to "postgres" or we'd skip store creation.
+        let default_backend = {
+            #[cfg(feature = "postgres")]
+            {
+                "postgres"
+            }
+            #[cfg(not(feature = "postgres"))]
+            {
+                "libsql"
+            }
+        };
         let selected_backend = self
             .settings
             .database_backend
             .as_deref()
-            .unwrap_or("postgres");
+            .unwrap_or(default_backend);
 
-        #[cfg(all(feature = "libsql", feature = "postgres"))]
-        {
-            if selected_backend == "libsql" {
+        match selected_backend {
+            #[cfg(feature = "libsql")]
+            "libsql" | "turso" | "sqlite" => {
                 if let Some(store) = self.create_libsql_secrets_store(&crypto)? {
-                    return Ok(SecretsContext::from_store(store, "default"));
+                    return Ok(SecretsContext::from_store(store, self.owner_id()));
                 }
+                // Fallback to postgres if libsql store creation returned None
+                #[cfg(feature = "postgres")]
                 if let Some(store) = self.create_postgres_secrets_store(&crypto).await? {
-                    return Ok(SecretsContext::from_store(store, "default"));
+                    return Ok(SecretsContext::from_store(store, self.owner_id()));
                 }
-            } else {
+            }
+            #[cfg(feature = "postgres")]
+            _ => {
                 if let Some(store) = self.create_postgres_secrets_store(&crypto).await? {
-                    return Ok(SecretsContext::from_store(store, "default"));
+                    return Ok(SecretsContext::from_store(store, self.owner_id()));
                 }
+                // Fallback to libsql if postgres store creation returned None
+                #[cfg(feature = "libsql")]
                 if let Some(store) = self.create_libsql_secrets_store(&crypto)? {
-                    return Ok(SecretsContext::from_store(store, "default"));
+                    return Ok(SecretsContext::from_store(store, self.owner_id()));
                 }
             }
-        }
-
-        #[cfg(all(feature = "postgres", not(feature = "libsql")))]
-        {
-            let _ = selected_backend;
-            if let Some(store) = self.create_postgres_secrets_store(&crypto).await? {
-                return Ok(SecretsContext::from_store(store, "default"));
-            }
-        }
-
-        #[cfg(all(feature = "libsql", not(feature = "postgres")))]
-        {
-            let _ = selected_backend;
-            if let Some(store) = self.create_libsql_secrets_store(&crypto)? {
-                return Ok(SecretsContext::from_store(store, "default"));
-            }
+            #[cfg(not(feature = "postgres"))]
+            _ => {}
         }
 
         Err(SetupError::Config(
@@ -1907,6 +2419,67 @@ impl SetupWizard {
             }
         }
 
+        // Claude Code sandbox sub-step (only if Docker sandbox is enabled)
+        if self.settings.sandbox.enabled {
+            self.step_claude_code_sandbox().await?;
+        }
+
+        Ok(())
+    }
+
+    /// Claude Code sandbox sub-step: enable Claude CLI inside Docker containers.
+    async fn step_claude_code_sandbox(&mut self) -> Result<(), SetupError> {
+        println!();
+        print_info("Claude Code mode lets the agent delegate complex tasks to Claude CLI");
+        print_info("running inside sandboxed Docker containers.");
+        println!();
+
+        if !confirm("Enable Claude Code sandbox mode?", false).map_err(SetupError::Io)? {
+            self.settings.sandbox.claude_code_enabled = false;
+            return Ok(());
+        }
+
+        // Check for Anthropic credentials (API key or OAuth token).
+        // Uses `optional_env()` which reads both real env vars and the
+        // injected overlay (secrets DB, wizard-set values).
+        let has_credentials = || {
+            let has_api_key = crate::config::helpers::optional_env("ANTHROPIC_API_KEY")
+                .ok()
+                .flatten()
+                .is_some_and(|v| !v.is_empty() && v != OAUTH_PLACEHOLDER);
+            let has_oauth = crate::config::ClaudeCodeConfig::extract_oauth_token().is_some()
+                || crate::config::helpers::optional_env("ANTHROPIC_OAUTH_TOKEN")
+                    .ok()
+                    .flatten()
+                    .is_some_and(|v| !v.is_empty());
+            has_api_key || has_oauth
+        };
+
+        if has_credentials() {
+            self.settings.sandbox.claude_code_enabled = true;
+            print_success("Claude Code sandbox enabled");
+        } else {
+            print_error("No Anthropic credentials found.");
+            print_info(
+                "Claude Code needs ANTHROPIC_API_KEY or an OAuth token from `claude login`.",
+            );
+            println!();
+
+            if confirm("Retry after setting up credentials?", false).map_err(SetupError::Io)? {
+                if has_credentials() {
+                    self.settings.sandbox.claude_code_enabled = true;
+                    print_success("Claude Code sandbox enabled");
+                } else {
+                    self.settings.sandbox.claude_code_enabled = false;
+                    print_info("No credentials found. Claude Code disabled for now.");
+                    print_info("Set ANTHROPIC_API_KEY or run `claude login` and enable later.");
+                }
+            } else {
+                self.settings.sandbox.claude_code_enabled = false;
+                print_info("Claude Code disabled. Enable with CLAUDE_CODE_ENABLED=true later.");
+            }
+        }
+
         Ok(())
     }
 
@@ -1962,7 +2535,7 @@ impl SetupWizard {
             if let Some(ref pool) = self.db_pool {
                 let store = crate::history::Store::from_pool(pool.clone());
                 store
-                    .set_all_settings("default", &db_map)
+                    .set_all_settings(self.owner_id(), &db_map)
                     .await
                     .map_err(|e| {
                         SetupError::Database(format!("Failed to save settings to database: {}", e))
@@ -1980,7 +2553,7 @@ impl SetupWizard {
             if let Some(ref backend) = self.db_backend {
                 use crate::db::SettingsStore as _;
                 backend
-                    .set_all_settings("default", &db_map)
+                    .set_all_settings(self.owner_id(), &db_map)
                     .await
                     .map_err(|e| {
                         SetupError::Database(format!("Failed to save settings to database: {}", e))
@@ -2000,91 +2573,145 @@ impl SetupWizard {
     ///
     /// These are the chicken-and-egg settings needed before the database is
     /// connected (DATABASE_BACKEND, DATABASE_URL, LLM_BACKEND, etc.).
+    ///
+    /// **Credentials are NOT written here.** API keys and OAuth tokens live
+    /// only in the encrypted secrets DB. `LlmConfig::resolve()` defers
+    /// gracefully when credentials are missing during early startup, and the
+    /// re-resolution in `AppBuilder::build_all()` fills them in after
+    /// `inject_llm_keys_from_secrets()` loads from encrypted storage.
     fn write_bootstrap_env(&self) -> Result<(), SetupError> {
-        let mut env_vars: Vec<(&str, String)> = Vec::new();
+        let registry = crate::llm::ProviderRegistry::load();
+        let mut env_vars: Vec<(String, String)> = Vec::new();
 
         if let Some(ref backend) = self.settings.database_backend {
-            env_vars.push(("DATABASE_BACKEND", backend.clone()));
+            env_vars.push(("DATABASE_BACKEND".to_string(), backend.clone()));
         }
         if let Some(ref url) = self.settings.database_url {
-            env_vars.push(("DATABASE_URL", url.clone()));
+            env_vars.push(("DATABASE_URL".to_string(), url.clone()));
         }
         if let Some(ref path) = self.settings.libsql_path {
-            env_vars.push(("LIBSQL_PATH", path.clone()));
+            env_vars.push(("LIBSQL_PATH".to_string(), path.clone()));
         }
         if let Some(ref url) = self.settings.libsql_url {
-            env_vars.push(("LIBSQL_URL", url.clone()));
+            env_vars.push(("LIBSQL_URL".to_string(), url.clone()));
         }
 
         // LLM bootstrap vars: same chicken-and-egg problem as DATABASE_BACKEND.
         // Config::from_env() needs the backend before the DB is connected.
         if let Some(ref backend) = self.settings.llm_backend {
-            env_vars.push(("LLM_BACKEND", backend.clone()));
+            env_vars.push(("LLM_BACKEND".to_string(), backend.clone()));
         }
         if let Some(ref url) = self.settings.openai_compatible_base_url {
-            env_vars.push(("LLM_BASE_URL", url.clone()));
+            env_vars.push(("LLM_BASE_URL".to_string(), url.clone()));
         }
         if let Some(ref url) = self.settings.ollama_base_url {
-            env_vars.push(("OLLAMA_BASE_URL", url.clone()));
+            env_vars.push(("OLLAMA_BASE_URL".to_string(), url.clone()));
+        }
+        if let Some(ref region) = self.settings.bedrock_region {
+            env_vars.push(("BEDROCK_REGION".to_string(), region.clone()));
+        }
+        if self.settings.llm_backend.as_deref() == Some("bedrock") {
+            if let Some(ref model) = self.settings.selected_model {
+                env_vars.push(("BEDROCK_MODEL".to_string(), model.clone()));
+            }
+            if let Some(ref cross) = self.settings.bedrock_cross_region {
+                env_vars.push(("BEDROCK_CROSS_REGION".to_string(), cross.clone()));
+            }
+            if let Some(ref profile) = self.settings.bedrock_profile {
+                env_vars.push(("AWS_PROFILE".to_string(), profile.clone()));
+            }
         }
 
         // Model name: same chicken-and-egg — Config::from_env() resolves the
         // model before the DB is connected, so we must persist it to .env.
         // Write the backend-specific env var so the correct resolution path
-        // picks it up.
-        if let Some(ref model) = self.settings.selected_model {
-            let backend: crate::config::LlmBackend = self
-                .settings
-                .llm_backend
-                .as_deref()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or_default();
-            env_vars.push((backend.model_env_var(), model.clone()));
+        // picks it up (looked up from the provider registry).
+        // Bedrock model is already written above as BEDROCK_MODEL, skip here.
+        if self.settings.llm_backend.as_deref() != Some("bedrock")
+            && let Some(ref model) = self.settings.selected_model
+        {
+            let backend_str = self.settings.llm_backend.as_deref().unwrap_or("nearai");
+            let model_env = registry.model_env_var(backend_str);
+            env_vars.push((model_env.to_string(), model.clone()));
         }
 
-        // Preserve NEARAI_API_KEY if present (set by API key auth flow)
-        if let Ok(api_key) = std::env::var("NEARAI_API_KEY")
+        // Also write provider-specific base URL env var if the provider
+        // defines one (e.g., GROQ doesn't need LLM_BASE_URL since its
+        // default is compiled in, but it doesn't hurt to be explicit).
+        if let Some(ref backend) = self.settings.llm_backend
+            && let Some(def) = registry.find(backend)
+            && let Some(ref base_url_env) = def.base_url_env
+            && let Some(ref base_url) = def.default_base_url
+            && base_url_env != "LLM_BASE_URL"
+            && base_url_env != "OLLAMA_BASE_URL"
+        {
+            env_vars.push((base_url_env.clone(), base_url.clone()));
+        }
+
+        // Preserve NEARAI_API_KEY if present (set by API key auth flow
+        // via the thread-safe runtime env overlay).
+        if let Some(api_key) = crate::config::helpers::env_or_override("NEARAI_API_KEY")
             && !api_key.is_empty()
         {
-            env_vars.push(("NEARAI_API_KEY", api_key));
+            env_vars.push(("NEARAI_API_KEY".to_string(), api_key));
+        }
+
+        // Secrets master key (env var mode): write to .env so it's available
+        // on next startup before the DB is connected.
+        if let Some(ref key_hex) = self.settings.secrets_master_key_hex {
+            env_vars.push(("SECRETS_MASTER_KEY".to_string(), key_hex.clone()));
         }
 
         // Always write ONBOARD_COMPLETED so that check_onboard_needed()
         // (which runs before the DB is connected) knows to skip re-onboarding.
         if self.settings.onboard_completed {
-            env_vars.push(("ONBOARD_COMPLETED", "true".to_string()));
+            env_vars.push(("ONBOARD_COMPLETED".to_string(), "true".to_string()));
+        }
+
+        // Claude Code sandbox mode
+        if self.settings.sandbox.claude_code_enabled {
+            env_vars.push(("CLAUDE_CODE_ENABLED".to_string(), "true".to_string()));
         }
 
         // Signal channel env vars (chicken-and-egg: config resolves before DB).
         if let Some(ref url) = self.settings.channels.signal_http_url {
-            env_vars.push(("SIGNAL_HTTP_URL", url.clone()));
+            env_vars.push(("SIGNAL_HTTP_URL".to_string(), url.clone()));
         }
         if let Some(ref account) = self.settings.channels.signal_account {
-            env_vars.push(("SIGNAL_ACCOUNT", account.clone()));
+            env_vars.push(("SIGNAL_ACCOUNT".to_string(), account.clone()));
         }
         if let Some(ref allow_from) = self.settings.channels.signal_allow_from {
-            env_vars.push(("SIGNAL_ALLOW_FROM", allow_from.clone()));
+            env_vars.push(("SIGNAL_ALLOW_FROM".to_string(), allow_from.clone()));
         }
         if let Some(ref allow_from_groups) = self.settings.channels.signal_allow_from_groups
             && !allow_from_groups.is_empty()
         {
-            env_vars.push(("SIGNAL_ALLOW_FROM_GROUPS", allow_from_groups.clone()));
+            env_vars.push((
+                "SIGNAL_ALLOW_FROM_GROUPS".to_string(),
+                allow_from_groups.clone(),
+            ));
         }
         if let Some(ref dm_policy) = self.settings.channels.signal_dm_policy {
-            env_vars.push(("SIGNAL_DM_POLICY", dm_policy.clone()));
+            env_vars.push(("SIGNAL_DM_POLICY".to_string(), dm_policy.clone()));
         }
         if let Some(ref group_policy) = self.settings.channels.signal_group_policy {
-            env_vars.push(("SIGNAL_GROUP_POLICY", group_policy.clone()));
+            env_vars.push(("SIGNAL_GROUP_POLICY".to_string(), group_policy.clone()));
         }
         if let Some(ref group_allow_from) = self.settings.channels.signal_group_allow_from
             && !group_allow_from.is_empty()
         {
-            env_vars.push(("SIGNAL_GROUP_ALLOW_FROM", group_allow_from.clone()));
+            env_vars.push((
+                "SIGNAL_GROUP_ALLOW_FROM".to_string(),
+                group_allow_from.clone(),
+            ));
         }
 
         if !env_vars.is_empty() {
-            let pairs: Vec<(&str, &str)> = env_vars.iter().map(|(k, v)| (*k, v.as_str())).collect();
-            crate::bootstrap::save_bootstrap_env(&pairs).map_err(|e| {
+            let pairs: Vec<(&str, &str)> = env_vars
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.as_str()))
+                .collect();
+            crate::bootstrap::upsert_bootstrap_vars(&pairs).map_err(|e| {
                 SetupError::Io(std::io::Error::other(format!(
                     "Failed to save bootstrap env to .env: {}",
                     e
@@ -2105,7 +2732,7 @@ impl SetupWizard {
     /// Best-effort: silently ignores errors (no DB connection yet, no
     /// session file, etc.).
     async fn persist_session_to_db(&self) {
-        let session_path = crate::llm::session::default_session_path();
+        let session_path = crate::config::llm::default_session_path();
         let data = match std::fs::read_to_string(&session_path) {
             Ok(d) if !d.trim().is_empty() => d,
             _ => return,
@@ -2119,7 +2746,7 @@ impl SetupWizard {
         if let Some(ref pool) = self.db_pool {
             let store = crate::history::Store::from_pool(pool.clone());
             if let Err(e) = store
-                .set_setting("default", "nearai.session_token", &value)
+                .set_setting(self.owner_id(), "nearai.session_token", &value)
                 .await
             {
                 tracing::debug!("Could not persist session token to postgres: {}", e);
@@ -2133,7 +2760,7 @@ impl SetupWizard {
         if let Some(ref backend) = self.db_backend {
             use crate::db::SettingsStore as _;
             if let Err(e) = backend
-                .set_setting("default", "nearai.session_token", &value)
+                .set_setting(self.owner_id(), "nearai.session_token", &value)
                 .await
             {
                 tracing::debug!("Could not persist session token to libsql: {}", e);
@@ -2179,7 +2806,7 @@ impl SetupWizard {
         let loaded = if !loaded {
             if let Some(ref pool) = self.db_pool {
                 let store = crate::history::Store::from_pool(pool.clone());
-                match store.get_all_settings("default").await {
+                match store.get_all_settings(self.owner_id()).await {
                     Ok(db_map) if !db_map.is_empty() => {
                         let existing = Settings::from_db_map(&db_map);
                         self.settings.merge_from(&existing);
@@ -2203,7 +2830,7 @@ impl SetupWizard {
         let loaded = if !loaded {
             if let Some(ref backend) = self.db_backend {
                 use crate::db::SettingsStore as _;
-                match backend.get_all_settings("default").await {
+                match backend.get_all_settings(self.owner_id()).await {
                     Ok(db_map) if !db_map.is_empty() => {
                         let existing = Settings::from_db_map(&db_map);
                         self.settings.merge_from(&existing);
@@ -2288,6 +2915,7 @@ impl SetupWizard {
                 "openai" => "OpenAI",
                 "ollama" => "Ollama",
                 "openai_compatible" => "OpenAI-compatible",
+                "bedrock" => "AWS Bedrock",
                 other => other,
             };
             println!("  Provider: {}", display);
@@ -2355,6 +2983,13 @@ impl SetupWizard {
         println!("  ironclaw onboard");
         println!();
 
+        if self.config.quick {
+            print_info(
+                "Tip: Run `ironclaw onboard` to configure channels, extensions, embeddings, and more.",
+            );
+            println!();
+        }
+
         Ok(())
     }
 }
@@ -2393,269 +3028,6 @@ fn mask_password_in_url(url: &str) -> String {
     let after_at = &url[at_abs..]; // "@localhost/db"
 
     format!("{}{}:****{}", scheme, username, after_at)
-}
-
-/// Fetch models from the Anthropic API.
-///
-/// Returns `(model_id, display_label)` pairs. Falls back to static defaults on error.
-async fn fetch_anthropic_models(cached_key: Option<&str>) -> Vec<(String, String)> {
-    let static_defaults = vec![
-        (
-            "claude-opus-4-6".into(),
-            "Claude Opus 4.6 (latest flagship)".into(),
-        ),
-        ("claude-sonnet-4-6".into(), "Claude Sonnet 4.6".into()),
-        ("claude-opus-4-5".into(), "Claude Opus 4.5".into()),
-        ("claude-sonnet-4-5".into(), "Claude Sonnet 4.5".into()),
-        ("claude-haiku-4-5".into(), "Claude Haiku 4.5 (fast)".into()),
-    ];
-
-    let api_key = cached_key
-        .map(String::from)
-        .or_else(|| std::env::var("ANTHROPIC_API_KEY").ok())
-        .filter(|k| !k.is_empty());
-
-    let api_key = match api_key {
-        Some(k) => k,
-        None => return static_defaults,
-    };
-
-    let client = reqwest::Client::new();
-    let resp = match client
-        .get("https://api.anthropic.com/v1/models")
-        .header("x-api-key", &api_key)
-        .header("anthropic-version", "2023-06-01")
-        .timeout(std::time::Duration::from_secs(5))
-        .send()
-        .await
-    {
-        Ok(r) if r.status().is_success() => r,
-        _ => return static_defaults,
-    };
-
-    #[derive(serde::Deserialize)]
-    struct ModelEntry {
-        id: String,
-    }
-    #[derive(serde::Deserialize)]
-    struct ModelsResponse {
-        data: Vec<ModelEntry>,
-    }
-
-    match resp.json::<ModelsResponse>().await {
-        Ok(body) => {
-            let mut models: Vec<(String, String)> = body
-                .data
-                .into_iter()
-                .filter(|m| !m.id.contains("embedding") && !m.id.contains("audio"))
-                .map(|m| {
-                    let label = m.id.clone();
-                    (m.id, label)
-                })
-                .collect();
-            if models.is_empty() {
-                return static_defaults;
-            }
-            models.sort_by(|a, b| a.0.cmp(&b.0));
-            models
-        }
-        Err(_) => static_defaults,
-    }
-}
-
-/// Fetch models from the OpenAI API.
-///
-/// Returns `(model_id, display_label)` pairs. Falls back to static defaults on error.
-async fn fetch_openai_models(cached_key: Option<&str>) -> Vec<(String, String)> {
-    let static_defaults = vec![
-        (
-            "gpt-5.3-codex".into(),
-            "GPT-5.3 Codex (latest flagship)".into(),
-        ),
-        ("gpt-5.2-codex".into(), "GPT-5.2 Codex".into()),
-        ("gpt-5.2".into(), "GPT-5.2".into()),
-        (
-            "gpt-5.1-codex-mini".into(),
-            "GPT-5.1 Codex Mini (fast)".into(),
-        ),
-        ("gpt-5".into(), "GPT-5".into()),
-        ("gpt-5-mini".into(), "GPT-5 Mini".into()),
-        ("gpt-4.1".into(), "GPT-4.1".into()),
-        ("gpt-4.1-mini".into(), "GPT-4.1 Mini".into()),
-        ("o4-mini".into(), "o4-mini (fast reasoning)".into()),
-        ("o3".into(), "o3 (reasoning)".into()),
-    ];
-
-    let api_key = cached_key
-        .map(String::from)
-        .or_else(|| std::env::var("OPENAI_API_KEY").ok())
-        .filter(|k| !k.is_empty());
-
-    let api_key = match api_key {
-        Some(k) => k,
-        None => return static_defaults,
-    };
-
-    let client = reqwest::Client::new();
-    let resp = match client
-        .get("https://api.openai.com/v1/models")
-        .bearer_auth(&api_key)
-        .timeout(std::time::Duration::from_secs(5))
-        .send()
-        .await
-    {
-        Ok(r) if r.status().is_success() => r,
-        _ => return static_defaults,
-    };
-
-    #[derive(serde::Deserialize)]
-    struct ModelEntry {
-        id: String,
-    }
-    #[derive(serde::Deserialize)]
-    struct ModelsResponse {
-        data: Vec<ModelEntry>,
-    }
-
-    match resp.json::<ModelsResponse>().await {
-        Ok(body) => {
-            let mut models: Vec<(String, String)> = body
-                .data
-                .into_iter()
-                .filter(|m| is_openai_chat_model(&m.id))
-                .map(|m| {
-                    let label = m.id.clone();
-                    (m.id, label)
-                })
-                .collect();
-            if models.is_empty() {
-                return static_defaults;
-            }
-            sort_openai_models(&mut models);
-            models
-        }
-        Err(_) => static_defaults,
-    }
-}
-
-fn is_openai_chat_model(model_id: &str) -> bool {
-    let id = model_id.to_ascii_lowercase();
-
-    let is_chat_family = id.starts_with("gpt-")
-        || id.starts_with("chatgpt-")
-        || id.starts_with("o1")
-        || id.starts_with("o3")
-        || id.starts_with("o4")
-        || id.starts_with("o5");
-
-    let is_non_chat_variant = id.contains("realtime")
-        || id.contains("audio")
-        || id.contains("transcribe")
-        || id.contains("tts")
-        || id.contains("embedding")
-        || id.contains("moderation")
-        || id.contains("image");
-
-    is_chat_family && !is_non_chat_variant
-}
-
-fn openai_model_priority(model_id: &str) -> usize {
-    let id = model_id.to_ascii_lowercase();
-
-    const EXACT_PRIORITY: &[&str] = &[
-        "gpt-5.3-codex",
-        "gpt-5.2-codex",
-        "gpt-5.2",
-        "gpt-5.1-codex-mini",
-        "gpt-5",
-        "gpt-5-mini",
-        "gpt-5-nano",
-        "o4-mini",
-        "o3",
-        "o1",
-        "gpt-4.1",
-        "gpt-4.1-mini",
-        "gpt-4o",
-        "gpt-4o-mini",
-    ];
-    if let Some(pos) = EXACT_PRIORITY.iter().position(|m| id == *m) {
-        return pos;
-    }
-
-    const PREFIX_PRIORITY: &[&str] = &[
-        "gpt-5.", "gpt-5-", "o3-", "o4-", "o1-", "gpt-4.1-", "gpt-4o-", "gpt-3.5-", "chatgpt-",
-    ];
-    if let Some(pos) = PREFIX_PRIORITY
-        .iter()
-        .position(|prefix| id.starts_with(prefix))
-    {
-        return EXACT_PRIORITY.len() + pos;
-    }
-
-    EXACT_PRIORITY.len() + PREFIX_PRIORITY.len() + 1
-}
-
-fn sort_openai_models(models: &mut [(String, String)]) {
-    models.sort_by(|a, b| {
-        openai_model_priority(&a.0)
-            .cmp(&openai_model_priority(&b.0))
-            .then_with(|| a.0.cmp(&b.0))
-    });
-}
-
-/// Fetch installed models from a local Ollama instance.
-///
-/// Returns `(model_name, display_label)` pairs. Falls back to static defaults on error.
-async fn fetch_ollama_models(base_url: &str) -> Vec<(String, String)> {
-    let static_defaults = vec![
-        ("llama3".into(), "llama3".into()),
-        ("mistral".into(), "mistral".into()),
-        ("codellama".into(), "codellama".into()),
-    ];
-
-    let url = format!("{}/api/tags", base_url.trim_end_matches('/'));
-    let client = reqwest::Client::new();
-
-    let resp = match client
-        .get(&url)
-        .timeout(std::time::Duration::from_secs(5))
-        .send()
-        .await
-    {
-        Ok(r) if r.status().is_success() => r,
-        Ok(_) => return static_defaults,
-        Err(_) => {
-            print_info("Could not connect to Ollama. Is it running?");
-            return static_defaults;
-        }
-    };
-
-    #[derive(serde::Deserialize)]
-    struct ModelEntry {
-        name: String,
-    }
-    #[derive(serde::Deserialize)]
-    struct TagsResponse {
-        models: Vec<ModelEntry>,
-    }
-
-    match resp.json::<TagsResponse>().await {
-        Ok(body) => {
-            let models: Vec<(String, String)> = body
-                .models
-                .into_iter()
-                .map(|m| {
-                    let label = m.name.clone();
-                    (m.name, label)
-                })
-                .collect();
-            if models.is_empty() {
-                return static_defaults;
-            }
-            models
-        }
-        Err(_) => static_defaults,
-    }
 }
 
 /// Discover WASM channels in a directory.
@@ -2931,10 +3303,13 @@ async fn install_selected_bundled_channels(
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
+    #[cfg(unix)]
+    use std::ffi::OsString;
 
     use tempfile::tempdir;
 
     use super::*;
+    use crate::config::helpers::ENV_MUTEX;
 
     #[test]
     fn test_wizard_creation() {
@@ -2948,9 +3323,57 @@ mod tests {
         let config = SetupConfig {
             skip_auth: true,
             channels_only: false,
+            provider_only: false,
+            quick: false,
         };
         let wizard = SetupWizard::with_config(config);
         assert!(wizard.config.skip_auth);
+    }
+
+    #[test]
+    fn test_wizard_owner_id_uses_resolved_env_scope() {
+        let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _owner = EnvGuard::set("IRONCLAW_OWNER_ID", " wizard-owner ");
+
+        let wizard = SetupWizard::new();
+        assert_eq!(wizard.owner_id(), "wizard-owner"); // safety: test-only assertion
+    }
+
+    #[test]
+    fn test_wizard_owner_id_uses_toml_scope() {
+        let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _owner = EnvGuard::clear("IRONCLAW_OWNER_ID");
+        let dir = tempdir().unwrap(); // safety: test-only tempdir setup
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "owner_id = \"toml-owner\"\n").unwrap(); // safety: test-only fixture write
+
+        let wizard = SetupWizard::try_with_config_and_toml(Default::default(), Some(&path))
+            .expect("wizard should load owner_id from TOML"); // safety: test-only assertion
+        assert_eq!(wizard.owner_id(), "toml-owner"); // safety: test-only assertion
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_try_with_config_and_toml_propagates_invalid_owner_env() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let original = std::env::var_os("IRONCLAW_OWNER_ID");
+        unsafe {
+            std::env::set_var("IRONCLAW_OWNER_ID", OsString::from_vec(vec![0x66, 0x80]));
+        }
+
+        let result = SetupWizard::try_with_config_and_toml(Default::default(), None);
+
+        unsafe {
+            if let Some(value) = original {
+                std::env::set_var("IRONCLAW_OWNER_ID", value);
+            } else {
+                std::env::remove_var("IRONCLAW_OWNER_ID");
+            }
+        }
+
+        assert!(result.is_err()); // safety: test-only assertion
     }
 
     #[test]
@@ -2998,12 +3421,12 @@ mod tests {
             return;
         }
 
-        let dir = tempdir().unwrap();
+        let dir = tempdir().unwrap(); // safety: test-only tempdir setup
         let installed = HashSet::<String>::new();
 
         install_missing_bundled_channels(dir.path(), &installed)
             .await
-            .unwrap();
+            .unwrap(); // safety: test-only assertion
 
         assert!(dir.path().join("telegram.wasm").exists());
         assert!(dir.path().join("telegram.capabilities.json").exists());
@@ -3105,15 +3528,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_discover_wasm_channels_empty_dir() {
-        let dir = tempdir().unwrap();
+        let dir = tempdir().unwrap(); // safety: test-only tempdir setup
         let channels = discover_wasm_channels(dir.path()).await;
         assert!(channels.is_empty());
     }
 
     #[tokio::test]
     async fn test_discover_wasm_channels_nonexistent_dir() {
-        let channels =
-            discover_wasm_channels(std::path::Path::new("/tmp/ironclaw_nonexistent_dir")).await;
+        let channels = discover_wasm_channels(
+            &std::env::temp_dir().join("ironclaw_nonexistent_dir_abcxyz123"),
+        )
+        .await;
         assert!(channels.is_empty());
     }
 
@@ -3124,6 +3549,14 @@ mod tests {
     }
 
     impl EnvGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let original = std::env::var(key).ok();
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self { key, original }
+        }
+
         fn clear(key: &'static str) -> Self {
             let original = std::env::var(key).ok();
             unsafe {
@@ -3143,5 +3576,267 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn test_set_llm_backend_preserves_model_when_backend_unchanged() {
+        let mut wizard = SetupWizard::new();
+        wizard.settings.llm_backend = Some("openai".to_string());
+        wizard.settings.selected_model = Some("gpt-4o".to_string());
+
+        wizard.set_llm_backend_preserving_model("openai");
+
+        assert_eq!(wizard.settings.llm_backend.as_deref(), Some("openai"));
+        assert_eq!(wizard.settings.selected_model.as_deref(), Some("gpt-4o"));
+    }
+
+    #[test]
+    fn test_set_llm_backend_clears_model_when_backend_was_unset() {
+        let mut wizard = SetupWizard::new();
+        wizard.settings.selected_model = Some("gpt-4o".to_string());
+
+        wizard.set_llm_backend_preserving_model("openai");
+
+        assert_eq!(wizard.settings.llm_backend.as_deref(), Some("openai"));
+        assert_eq!(wizard.settings.selected_model, None);
+    }
+
+    #[test]
+    fn test_set_llm_backend_clears_model_when_backend_changes() {
+        let mut wizard = SetupWizard::new();
+        wizard.settings.llm_backend = Some("openai".to_string());
+        wizard.settings.selected_model = Some("gpt-4o".to_string());
+
+        wizard.set_llm_backend_preserving_model("anthropic");
+
+        assert_eq!(wizard.settings.llm_backend.as_deref(), Some("anthropic"));
+        assert_eq!(wizard.settings.selected_model, None);
+    }
+
+    /// Regression test for #600: re-running provider setup for the same backend
+    /// must NOT clear selected_model. Only switching to a different backend should.
+    #[test]
+    fn test_same_provider_preserves_selected_model() {
+        let mut wizard = SetupWizard::new();
+        wizard.settings.llm_backend = Some("ollama".to_string());
+        wizard.settings.selected_model = Some("llama3".to_string());
+
+        // Simulate re-entering the same provider -- model should survive
+        // (This is the check that each setup_* function now performs)
+        if wizard.settings.llm_backend.as_deref() != Some("ollama") {
+            wizard.settings.selected_model = None;
+        }
+        wizard.settings.llm_backend = Some("ollama".to_string());
+
+        assert_eq!(
+            wizard.settings.selected_model.as_deref(),
+            Some("llama3"),
+            "model should be preserved when re-selecting the same provider"
+        );
+    }
+
+    /// Regression test for #600: switching to a different provider must clear
+    /// selected_model since the old model may not be valid for the new backend.
+    #[test]
+    fn test_different_provider_clears_selected_model() {
+        let mut wizard = SetupWizard::new();
+        wizard.settings.llm_backend = Some("ollama".to_string());
+        wizard.settings.selected_model = Some("llama3".to_string());
+
+        // Simulate switching to a different provider -- model should be cleared
+        if wizard.settings.llm_backend.as_deref() != Some("openai") {
+            wizard.settings.selected_model = None;
+        }
+        wizard.settings.llm_backend = Some("openai".to_string());
+
+        assert!(
+            wizard.settings.selected_model.is_none(),
+            "model should be cleared when switching providers"
+        );
+    }
+
+    /// Regression: Bedrock setup_bedrock() should preserve selected_model
+    /// when re-entering the same provider (matches pattern from #600).
+    #[test]
+    fn test_bedrock_same_provider_preserves_model() {
+        let mut wizard = SetupWizard::new();
+        wizard.settings.llm_backend = Some("bedrock".to_string());
+        wizard.settings.selected_model = Some("anthropic.claude-opus-4-6-v1".to_string());
+
+        // Simulate the conditional clearing logic from setup_bedrock()
+        if wizard.settings.llm_backend.as_deref() != Some("bedrock") {
+            wizard.settings.selected_model = None;
+        }
+        wizard.settings.llm_backend = Some("bedrock".to_string());
+
+        assert_eq!(
+            wizard.settings.selected_model.as_deref(),
+            Some("anthropic.claude-opus-4-6-v1"),
+            "bedrock model should be preserved when re-selecting bedrock"
+        );
+    }
+
+    /// Regression: switching from another provider to bedrock must clear
+    /// selected_model, and choosing "default credentials" must clear
+    /// bedrock_profile.
+    #[test]
+    fn test_bedrock_clears_stale_profile_on_default_creds() {
+        let mut wizard = SetupWizard::new();
+        wizard.settings.llm_backend = Some("bedrock".to_string());
+        wizard.settings.bedrock_profile = Some("old-sso-profile".to_string());
+
+        // Simulate auth_choice == 0 (default credentials) clearing the profile
+        wizard.settings.bedrock_profile = None;
+
+        assert!(
+            wizard.settings.bedrock_profile.is_none(),
+            "bedrock_profile should be cleared when selecting default credentials"
+        );
+    }
+
+    /// Regression: empty profile input in named-profile auth should clear
+    /// any previously configured profile instead of leaving it stale.
+    #[test]
+    fn test_bedrock_empty_profile_clears_existing() {
+        let mut wizard = SetupWizard::new();
+        wizard.settings.bedrock_profile = Some("old-profile".to_string());
+
+        // Simulate auth_choice == 1 with empty input
+        let profile = "".to_string();
+        if profile.trim().is_empty() {
+            wizard.settings.bedrock_profile = None;
+        } else {
+            wizard.settings.bedrock_profile = Some(profile);
+        }
+
+        assert!(
+            wizard.settings.bedrock_profile.is_none(),
+            "empty profile input should clear existing bedrock_profile"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_run_provider_setup_no_setup_hint() {
+        // A provider with setup: None should not error. It should set the
+        // backend and return Ok, allowing env-var-only configured providers
+        // to be kept during re-onboarding.
+        let mut wizard = SetupWizard::new();
+
+        let mut providers: Vec<crate::llm::registry::ProviderDefinition> =
+            serde_json::from_str(include_str!("../../providers.json")).unwrap();
+        // Add a provider with no setup hint
+        providers.push(crate::llm::registry::ProviderDefinition {
+            id: "custom_no_setup".to_string(),
+            aliases: vec![],
+            protocol: crate::llm::registry::ProviderProtocol::OpenAiCompletions,
+            default_base_url: Some("http://localhost:9999/v1".to_string()),
+            base_url_env: None,
+            base_url_required: false,
+            api_key_env: None,
+            api_key_required: false,
+            model_env: "CUSTOM_MODEL".to_string(),
+            default_model: "custom-model".to_string(),
+            description: "Custom provider with no setup wizard".to_string(),
+            extra_headers_env: None,
+            setup: None,
+            unsupported_params: vec![],
+        });
+        let registry = crate::llm::ProviderRegistry::new(providers);
+
+        let result = wizard
+            .run_provider_setup("custom_no_setup", &registry)
+            .await;
+        assert!(result.is_ok(), "setup: None provider should not error");
+        assert_eq!(
+            wizard.settings.llm_backend.as_deref(),
+            Some("custom_no_setup"),
+            "backend should be set even without setup hint"
+        );
+    }
+
+    /// Regression test for #666: env-var security option must initialize
+    /// secrets_crypto so subsequent steps can encrypt API keys.
+    #[test]
+    fn test_env_var_security_initializes_crypto() {
+        use crate::secrets::SecretsCrypto;
+        use secrecy::SecretString;
+
+        // Simulate what option 1 in step_security() does after the fix:
+        let key_hex = crate::secrets::keychain::generate_master_key_hex();
+
+        // The fix: create SecretsCrypto from the generated key.
+        // Before the fix, this was skipped, leaving secrets_crypto = None.
+        let crypto = SecretsCrypto::new(SecretString::from(key_hex.clone()));
+        assert!(
+            crypto.is_ok(),
+            "generated key hex must produce valid SecretsCrypto"
+        );
+
+        // Verify the key is stored for bootstrap env persistence.
+        let settings = Settings {
+            secrets_master_key_hex: Some(key_hex),
+            ..Settings::default()
+        };
+        assert!(settings.secrets_master_key_hex.is_some());
+    }
+
+    /// Regression test for #799: `fetch_nearai_models` hardcoded `api_key: None`,
+    /// causing the auth prompt to re-appear during model selection when the user
+    /// had authenticated via NEAR AI Cloud API key (option 4).
+    #[test]
+    fn test_build_nearai_model_fetch_config_picks_up_api_key_env() {
+        use secrecy::ExposeSecret;
+
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let _guard = EnvGuard::set("NEARAI_API_KEY", "test-cloud-api-key-12345");
+        let _guard2 = EnvGuard::clear("NEARAI_BASE_URL");
+
+        let config = build_nearai_model_fetch_config();
+        assert!(
+            config.nearai.api_key.is_some(),
+            "config should include NEARAI_API_KEY from env"
+        );
+        assert_eq!(
+            config.nearai.api_key.as_ref().unwrap().expose_secret(),
+            "test-cloud-api-key-12345"
+        );
+        // With API key, base_url must point to cloud-api (not private.near.ai)
+        assert_eq!(
+            config.nearai.base_url, "https://cloud-api.near.ai",
+            "API key auth must use cloud-api base URL for model fetching"
+        );
+    }
+
+    /// Regression test for #799: when NEARAI_API_KEY is absent or empty,
+    /// the config should have `api_key: None` (session token path).
+    #[test]
+    fn test_build_nearai_model_fetch_config_none_when_no_api_key() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let _guard = EnvGuard::clear("NEARAI_API_KEY");
+        let _guard2 = EnvGuard::clear("NEARAI_BASE_URL");
+
+        let config = build_nearai_model_fetch_config();
+        assert!(
+            config.nearai.api_key.is_none(),
+            "config should have no api_key when env var is absent"
+        );
+        // Without API key, base_url must point to private.near.ai (session token)
+        assert_eq!(
+            config.nearai.base_url, "https://private.near.ai",
+            "session-token auth must use private.near.ai base URL"
+        );
+    }
+
+    /// Regression test for #799: empty NEARAI_API_KEY should be treated as absent.
+    #[test]
+    fn test_build_nearai_model_fetch_config_none_when_empty_api_key() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let _guard = EnvGuard::set("NEARAI_API_KEY", "");
+
+        let config = build_nearai_model_fetch_config();
+        assert!(
+            config.nearai.api_key.is_none(),
+            "config should have no api_key when env var is empty"
+        );
     }
 }

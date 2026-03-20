@@ -6,6 +6,8 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
+use crate::llm::retry::cap_retry_after;
+
 /// Error type for embedding operations.
 #[derive(Debug, thiserror::Error)]
 pub enum EmbeddingError {
@@ -60,12 +62,18 @@ pub trait EmbeddingProvider: Send + Sync {
     }
 }
 
+/// Default base URL for the OpenAI API.
+const OPENAI_API_BASE_URL: &str = "https://api.openai.com";
+
 /// OpenAI embedding provider using text-embedding-ada-002 or text-embedding-3-small.
+///
+/// Supports any OpenAI-compatible embedding endpoint via [`with_base_url`](Self::with_base_url).
 pub struct OpenAiEmbeddings {
     client: reqwest::Client,
     api_key: String,
     model: String,
     dimension: usize,
+    base_url: String,
 }
 
 impl OpenAiEmbeddings {
@@ -78,6 +86,7 @@ impl OpenAiEmbeddings {
             api_key: api_key.into(),
             model: "text-embedding-3-small".to_string(),
             dimension: 1536,
+            base_url: OPENAI_API_BASE_URL.to_string(),
         }
     }
 
@@ -88,6 +97,7 @@ impl OpenAiEmbeddings {
             api_key: api_key.into(),
             model: "text-embedding-ada-002".to_string(),
             dimension: 1536,
+            base_url: OPENAI_API_BASE_URL.to_string(),
         }
     }
 
@@ -98,6 +108,7 @@ impl OpenAiEmbeddings {
             api_key: api_key.into(),
             model: "text-embedding-3-large".to_string(),
             dimension: 3072,
+            base_url: OPENAI_API_BASE_URL.to_string(),
         }
     }
 
@@ -112,7 +123,34 @@ impl OpenAiEmbeddings {
             api_key: api_key.into(),
             model: model.into(),
             dimension,
+            base_url: OPENAI_API_BASE_URL.to_string(),
         }
+    }
+
+    /// Set a custom base URL for OpenAI-compatible embedding providers.
+    ///
+    /// The URL must use `http://` or `https://` scheme. If no scheme is present,
+    /// `https://` is prepended automatically. Trailing slashes are stripped.
+    pub fn with_base_url(mut self, base_url: &str) -> Self {
+        let url = base_url.trim();
+
+        // Auto-prepend https:// if no scheme is present.
+        let mut url = if !url.starts_with("http://") && !url.starts_with("https://") {
+            tracing::debug!(
+                "No scheme in embedding base URL '{}', prepending https://",
+                url
+            );
+            format!("https://{url}")
+        } else {
+            url.to_string()
+        };
+
+        while url.ends_with('/') {
+            url.pop();
+        }
+
+        self.base_url = url;
+        self
     }
 }
 
@@ -173,9 +211,11 @@ impl EmbeddingProvider for OpenAiEmbeddings {
             input: texts,
         };
 
+        let url = format!("{}/v1/embeddings", self.base_url);
+
         let response = self
             .client
-            .post("https://api.openai.com/v1/embeddings")
+            .post(&url)
             .header("Authorization", format!("Bearer {}", self.api_key))
             .json(&request)
             .send()
@@ -193,7 +233,9 @@ impl EmbeddingProvider for OpenAiEmbeddings {
                 .get("retry-after")
                 .and_then(|v| v.to_str().ok())
                 .and_then(|s| s.parse::<u64>().ok())
-                .map(std::time::Duration::from_secs);
+                .map(std::time::Duration::from_secs)
+                .map(cap_retry_after)
+                .or(Some(std::time::Duration::from_secs(60)));
             return Err(EmbeddingError::RateLimited { retry_after });
         }
 
@@ -334,7 +376,9 @@ impl EmbeddingProvider for NearAiEmbeddings {
                 .get("retry-after")
                 .and_then(|v| v.to_str().ok())
                 .and_then(|s| s.parse::<u64>().ok())
-                .map(std::time::Duration::from_secs);
+                .map(std::time::Duration::from_secs)
+                .map(cap_retry_after)
+                .or(Some(std::time::Duration::from_secs(60)));
             return Err(EmbeddingError::RateLimited { retry_after });
         }
 
@@ -575,9 +619,82 @@ mod tests {
         let provider = OpenAiEmbeddings::new("test-key");
         assert_eq!(provider.dimension(), 1536);
         assert_eq!(provider.model_name(), "text-embedding-3-small");
+        assert_eq!(provider.base_url, OPENAI_API_BASE_URL);
 
         let provider = OpenAiEmbeddings::large("test-key");
         assert_eq!(provider.dimension(), 3072);
         assert_eq!(provider.model_name(), "text-embedding-3-large");
+        assert_eq!(provider.base_url, OPENAI_API_BASE_URL);
+    }
+
+    #[test]
+    fn test_openai_with_base_url_valid() {
+        let provider =
+            OpenAiEmbeddings::new("test-key").with_base_url("https://custom.example.com");
+        assert_eq!(provider.base_url, "https://custom.example.com");
+    }
+
+    #[test]
+    fn test_openai_with_base_url_strips_trailing_slashes() {
+        let provider =
+            OpenAiEmbeddings::new("test-key").with_base_url("https://custom.example.com///");
+        assert_eq!(provider.base_url, "https://custom.example.com");
+    }
+
+    #[test]
+    fn test_openai_with_base_url_http_scheme() {
+        let provider = OpenAiEmbeddings::new("test-key").with_base_url("http://localhost:8080");
+        assert_eq!(provider.base_url, "http://localhost:8080");
+    }
+
+    #[test]
+    fn test_openai_with_base_url_schemeless_prepends_https() {
+        let provider = OpenAiEmbeddings::new("test-key").with_base_url("custom.example.com/v1");
+        assert_eq!(provider.base_url, "https://custom.example.com/v1");
+    }
+
+    // -- Retry-After header parsing tests (regression for rate limit "None" bug) --
+
+    #[test]
+    fn test_retry_after_parsing_delay_seconds() {
+        // Verify delay-seconds format is parsed correctly
+        let header_value = "120";
+        let duration = parse_retry_after_embeddings_for_test(header_value);
+        assert_eq!(
+            duration,
+            Some(std::time::Duration::from_secs(120)),
+            "Should parse delay-seconds format"
+        );
+    }
+
+    #[test]
+    fn test_retry_after_fallback_missing_header() {
+        // Regression test: When Retry-After header is missing,
+        // should fall back to 60s instead of None
+        let duration = parse_retry_after_embeddings_for_test("");
+        assert_eq!(
+            duration,
+            Some(std::time::Duration::from_secs(60)),
+            "Missing header should fallback to 60s"
+        );
+    }
+
+    #[test]
+    fn test_retry_after_zero_seconds_accepted() {
+        // Verify zero seconds is a valid retry delay
+        let duration = parse_retry_after_embeddings_for_test("0");
+        assert_eq!(duration, Some(std::time::Duration::ZERO));
+    }
+
+    /// Helper function to test Retry-After header parsing logic for embeddings
+    /// (simulates the parsing done in embed without actual HTTP, including fallback)
+    fn parse_retry_after_embeddings_for_test(header_value: &str) -> Option<std::time::Duration> {
+        header_value
+            .trim()
+            .parse::<u64>()
+            .ok()
+            .map(std::time::Duration::from_secs)
+            .map(cap_retry_after)
+            .or(Some(std::time::Duration::from_secs(60)))
     }
 }

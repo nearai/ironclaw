@@ -44,6 +44,8 @@ pub struct WasmChannelRouter {
     secret_headers: RwLock<HashMap<String, String>>,
     /// Ed25519 public keys for signature verification by channel name (hex-encoded).
     signature_keys: RwLock<HashMap<String, String>>,
+    /// HMAC-SHA256 signing secrets for signature verification by channel name (Slack-style).
+    hmac_secrets: RwLock<HashMap<String, String>>,
 }
 
 impl WasmChannelRouter {
@@ -55,6 +57,7 @@ impl WasmChannelRouter {
             secrets: RwLock::new(HashMap::new()),
             secret_headers: RwLock::new(HashMap::new()),
             signature_keys: RwLock::new(HashMap::new()),
+            hmac_secrets: RwLock::new(HashMap::new()),
         }
     }
 
@@ -134,6 +137,7 @@ impl WasmChannelRouter {
         self.secrets.write().await.remove(channel_name);
         self.secret_headers.write().await.remove(channel_name);
         self.signature_keys.write().await.remove(channel_name);
+        self.hmac_secrets.write().await.remove(channel_name);
 
         // Remove all paths for this channel
         self.path_to_channel
@@ -207,6 +211,24 @@ impl WasmChannelRouter {
     /// Returns `None` if no key is registered (no signature check needed).
     pub async fn get_signature_key(&self, channel_name: &str) -> Option<String> {
         self.signature_keys.read().await.get(channel_name).cloned()
+    }
+
+    /// Register an HMAC-SHA256 signing secret for signature verification.
+    ///
+    /// Channels with a registered secret will have Slack-style HMAC-SHA256
+    /// signature validation performed before forwarding to WASM.
+    pub async fn register_hmac_secret(&self, channel_name: &str, secret: &str) {
+        self.hmac_secrets
+            .write()
+            .await
+            .insert(channel_name.to_string(), secret.to_string());
+    }
+
+    /// Get the HMAC signing secret for a channel.
+    ///
+    /// Returns `None` if no secret is registered (no HMAC check needed).
+    pub async fn get_hmac_secret(&self, channel_name: &str) -> Option<String> {
+        self.hmac_secrets.read().await.get(channel_name).cloned()
     }
 }
 
@@ -427,6 +449,57 @@ async fn webhook_handler(
         }
     }
 
+    // HMAC-SHA256 signature verification (Slack-style)
+    if let Some(hmac_secret) = state.router.get_hmac_secret(channel_name).await {
+        let timestamp = headers
+            .get("x-slack-request-timestamp")
+            .and_then(|v| v.to_str().ok());
+        let sig_header = headers
+            .get("x-slack-signature")
+            .and_then(|v| v.to_str().ok());
+
+        match (timestamp, sig_header) {
+            (Some(ts), Some(sig)) => {
+                let now_secs = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() as i64;
+
+                if !crate::channels::wasm::signature::verify_slack_signature(
+                    &hmac_secret,
+                    ts,
+                    &body,
+                    sig,
+                    now_secs,
+                ) {
+                    tracing::warn!(
+                        channel = %channel_name,
+                        "HMAC-SHA256 signature verification failed"
+                    );
+                    return (
+                        StatusCode::UNAUTHORIZED,
+                        Json(serde_json::json!({
+                            "error": "Invalid Slack signature"
+                        })),
+                    );
+                }
+                tracing::debug!(channel = %channel_name, "HMAC-SHA256 signature verified");
+            }
+            _ => {
+                tracing::warn!(
+                    channel = %channel_name,
+                    "Slack signature headers missing but secret is registered"
+                );
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    Json(serde_json::json!({
+                        "error": "Missing Slack signature headers"
+                    })),
+                );
+            }
+        }
+    }
+
     // Convert headers to HashMap
     let headers_map: HashMap<String, String> = headers
         .iter()
@@ -599,6 +672,7 @@ mod tests {
             runtime,
             prepared,
             capabilities,
+            "default",
             "{}".to_string(),
             Arc::new(PairingStore::new()),
             None,
@@ -731,7 +805,59 @@ mod tests {
         assert_eq!(router.get_secret_header("slack").await, "X-Webhook-Secret");
     }
 
-    // ── Category 3: Router Signature Key Management ─────────────────────
+    // ── Category 3: Router HMAC Secret Management ───────────────────────
+
+    #[tokio::test]
+    async fn test_register_and_get_hmac_secret() {
+        let router = WasmChannelRouter::new();
+        let channel = create_test_channel("slack");
+
+        router.register(channel, vec![], None, None).await;
+
+        let hmac_secret = "my-slack-signing-secret";
+        router.register_hmac_secret("slack", hmac_secret).await;
+
+        let retrieved = router.get_hmac_secret("slack").await;
+        assert_eq!(retrieved, Some(hmac_secret.to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_no_hmac_secret_returns_none() {
+        let router = WasmChannelRouter::new();
+        let channel = create_test_channel("slack");
+        router.register(channel, vec![], None, None).await;
+
+        // Slack has no HMAC secret registered
+        let secret = router.get_hmac_secret("slack").await;
+        assert!(secret.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_unregister_removes_hmac_secret() {
+        let router = WasmChannelRouter::new();
+        let channel = create_test_channel("slack");
+
+        let endpoints = vec![RegisteredEndpoint {
+            channel_name: "slack".to_string(),
+            path: "/webhook/slack".to_string(),
+            methods: vec!["POST".to_string()],
+            require_secret: false,
+        }];
+
+        router.register(channel, endpoints, None, None).await;
+        router.register_hmac_secret("slack", "signing-secret").await;
+
+        // Secret should exist
+        assert!(router.get_hmac_secret("slack").await.is_some());
+
+        // Unregister
+        router.unregister("slack").await;
+
+        // Secret should be gone
+        assert!(router.get_hmac_secret("slack").await.is_none());
+    }
+
+    // ── Category 4: Router Signature Key Management ─────────────────────
 
     #[tokio::test]
     async fn test_register_and_get_signature_key() {
@@ -1161,6 +1287,217 @@ mod tests {
             resp.status(),
             StatusCode::UNAUTHORIZED,
             "Valid secret + valid signature should not return 401"
+        );
+    }
+
+    // ── HMAC-SHA256 Webhook Signature Tests ────────────────────────────
+
+    /// Helper to create a router with a registered channel at /webhook/slack.
+    async fn setup_slack_router() -> (Arc<WasmChannelRouter>, AxumRouter) {
+        let wasm_router = Arc::new(WasmChannelRouter::new());
+        let channel = create_test_channel("slack");
+
+        let endpoints = vec![RegisteredEndpoint {
+            channel_name: "slack".to_string(),
+            path: "/webhook/slack".to_string(),
+            methods: vec!["POST".to_string()],
+            require_secret: false,
+        }];
+
+        wasm_router.register(channel, endpoints, None, None).await;
+
+        let app = create_wasm_channel_router(wasm_router.clone(), None);
+        (wasm_router, app)
+    }
+
+    /// Helper: compute expected Slack signature for testing.
+    fn slack_signature(signing_secret: &str, timestamp: &str, body: &[u8]) -> String {
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+
+        let mut basestring = Vec::new();
+        basestring.extend_from_slice(b"v0:");
+        basestring.extend_from_slice(timestamp.as_bytes());
+        basestring.push(b':');
+        basestring.extend_from_slice(body);
+
+        let mut mac = Hmac::<Sha256>::new_from_slice(signing_secret.as_bytes()).unwrap();
+        mac.update(&basestring);
+        let computed = mac.finalize().into_bytes();
+        format!("v0={}", hex::encode(computed))
+    }
+
+    #[tokio::test]
+    async fn test_webhook_hmac_rejects_missing_sig_headers() {
+        let (wasm_router, app) = setup_slack_router().await;
+
+        wasm_router
+            .register_hmac_secret("slack", "my-signing-secret")
+            .await;
+
+        // Send request without HMAC signature headers
+        let req = Request::builder()
+            .method("POST")
+            .uri("/webhook/slack")
+            .header("content-type", "application/json")
+            .body(Body::from("token=xyzz0WbapA4vBCDEFasx0q6G"))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "Missing HMAC signature headers should return 401"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_webhook_hmac_rejects_invalid_signature() {
+        let (wasm_router, app) = setup_slack_router().await;
+
+        wasm_router
+            .register_hmac_secret("slack", "my-signing-secret")
+            .await;
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/webhook/slack")
+            .header("content-type", "application/json")
+            .header("x-slack-request-timestamp", "1234567890")
+            .header("x-slack-signature", "v0=deadbeefdeadbeef")
+            .body(Body::from("token=xyzz0WbapA4vBCDEFasx0q6G"))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "Invalid HMAC signature should return 401"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_webhook_hmac_accepts_valid_signature() {
+        let (wasm_router, app) = setup_slack_router().await;
+
+        let signing_secret = "my-signing-secret";
+        wasm_router
+            .register_hmac_secret("slack", signing_secret)
+            .await;
+
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let timestamp = now_secs.to_string();
+        let body = b"token=xyzz0WbapA4vBCDEFasx0q6G";
+
+        let signature = slack_signature(signing_secret, &timestamp, body);
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/webhook/slack")
+            .header("content-type", "application/json")
+            .header("x-slack-request-timestamp", &timestamp)
+            .header("x-slack-signature", &signature)
+            .body(Body::from(&body[..]))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        // Should NOT be 401 — signature is valid (may be 500 since no WASM module)
+        assert_ne!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "Valid HMAC signature should not return 401"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_webhook_hmac_skips_check_for_no_secret() {
+        let (_wasm_router, app) = setup_slack_router().await;
+
+        // No HMAC secret registered — should not require signature
+        let req = Request::builder()
+            .method("POST")
+            .uri("/webhook/slack")
+            .header("content-type", "application/json")
+            .body(Body::from("token=xyzz0WbapA4vBCDEFasx0q6G"))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        // Should NOT be 401 (may be 500 since no WASM module, but not auth failure)
+        assert_ne!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "No HMAC secret registered — should skip check"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_webhook_hmac_uses_correct_body() {
+        let (wasm_router, app) = setup_slack_router().await;
+
+        let signing_secret = "my-signing-secret";
+        wasm_router
+            .register_hmac_secret("slack", signing_secret)
+            .await;
+
+        let timestamp = "1234567890";
+        let body_a = b"token=xyzz0WbapA4vBCDEFasx0q6G";
+        let body_b = b"token=MODIFIED";
+
+        // Sign body A
+        let signature = slack_signature(signing_secret, timestamp, body_a);
+
+        // But send body B
+        let req = Request::builder()
+            .method("POST")
+            .uri("/webhook/slack")
+            .header("content-type", "application/json")
+            .header("x-slack-request-timestamp", timestamp)
+            .header("x-slack-signature", &signature)
+            .body(Body::from(&body_b[..]))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "Signature for different body should return 401"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_webhook_hmac_uses_correct_timestamp() {
+        let (wasm_router, app) = setup_slack_router().await;
+
+        let signing_secret = "my-signing-secret";
+        wasm_router
+            .register_hmac_secret("slack", signing_secret)
+            .await;
+
+        let timestamp_a = "1234567890";
+        let timestamp_b = "9999999999";
+        let body = b"token=xyzz0WbapA4vBCDEFasx0q6G";
+
+        // Sign with timestamp A
+        let signature = slack_signature(signing_secret, timestamp_a, body);
+
+        // But send timestamp B in the header
+        let req = Request::builder()
+            .method("POST")
+            .uri("/webhook/slack")
+            .header("content-type", "application/json")
+            .header("x-slack-request-timestamp", timestamp_b)
+            .header("x-slack-signature", &signature)
+            .body(Body::from(&body[..]))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "Signature with mismatched timestamp should return 401"
         );
     }
 }

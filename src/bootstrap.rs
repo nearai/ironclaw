@@ -116,9 +116,18 @@ pub fn load_ironclaw_env() {
             .join(".ironclaw")
             .join("ironclaw.db");
         if default_db.exists() {
-            // SAFETY: `load_ironclaw_env` is called from a synchronous `fn main()`
-            // before the Tokio runtime is started, so no other threads exist yet.
-            unsafe { std::env::set_var("DATABASE_BACKEND", "libsql") };
+            if tokio::runtime::Handle::try_current().is_ok() {
+                // Tokio runtime is active (multi-threaded); std::env::set_var is UB here.
+                // Fall back to the thread-safe runtime overlay so the value is always set.
+                tracing::warn!(
+                    "load_ironclaw_env called with active Tokio runtime; \
+                     using runtime env overlay for DATABASE_BACKEND"
+                );
+                crate::config::set_runtime_env("DATABASE_BACKEND", "libsql");
+            } else {
+                // SAFETY: No Tokio runtime = no other threads = safe to call set_var.
+                unsafe { std::env::set_var("DATABASE_BACKEND", "libsql") };
+            }
         }
     }
 }
@@ -194,6 +203,58 @@ pub fn save_bootstrap_env_to(path: &std::path::Path, vars: &[(&str, &str)]) -> s
         content.push_str(&format!("{}=\"{}\"\n", key, escaped));
     }
     std::fs::write(path, &content)?;
+    restrict_file_permissions(path)?;
+    Ok(())
+}
+
+/// Update or add multiple variables in `~/.ironclaw/.env`, preserving existing content.
+///
+/// Like `upsert_bootstrap_var` but batched — replaces lines for any key in `vars`
+/// and preserves all other existing lines. Use this instead of `save_bootstrap_env`
+/// when you want to update specific keys without destroying user-added variables.
+pub fn upsert_bootstrap_vars(vars: &[(&str, &str)]) -> std::io::Result<()> {
+    upsert_bootstrap_vars_to(&ironclaw_env_path(), vars)
+}
+
+/// Update or add multiple variables at an arbitrary path (testable variant).
+pub fn upsert_bootstrap_vars_to(
+    path: &std::path::Path,
+    vars: &[(&str, &str)],
+) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let keys_being_written: std::collections::HashSet<&str> =
+        vars.iter().map(|(k, _)| *k).collect();
+
+    let existing = match std::fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e),
+    };
+
+    let mut result = String::new();
+    for line in existing.lines() {
+        // Extract key from lines matching `KEY=...`
+        let is_overwritten = line
+            .split_once('=')
+            .map(|(k, _)| keys_being_written.contains(k.trim()))
+            .unwrap_or(false);
+
+        if !is_overwritten {
+            result.push_str(line);
+            result.push('\n');
+        }
+    }
+
+    // Append all new key=value pairs
+    for (key, value) in vars {
+        let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+        result.push_str(&format!("{}=\"{}\"\n", key, escaped));
+    }
+
+    std::fs::write(path, &result)?;
     restrict_file_permissions(path)?;
     Ok(())
 }
@@ -414,10 +475,103 @@ pub enum MigrationError {
     Io(String),
 }
 
+// ── PID Lock ──────────────────────────────────────────────────────────────
+
+/// Path to the PID lock file: `~/.ironclaw/ironclaw.pid`.
+pub fn pid_lock_path() -> PathBuf {
+    ironclaw_base_dir().join("ironclaw.pid")
+}
+
+/// A PID-based lock that prevents multiple IronClaw instances from running
+/// simultaneously.
+///
+/// Uses `fs4::try_lock_exclusive()` for atomic locking (no TOCTOU race),
+/// then writes the current PID into the locked file for diagnostics.
+/// The OS-level lock is held for the lifetime of this struct and
+/// automatically released on drop (along with the PID file cleanup).
+#[derive(Debug)]
+pub struct PidLock {
+    path: PathBuf,
+    /// Held open to maintain the OS-level exclusive lock.
+    _file: std::fs::File,
+}
+
+/// Errors from PID lock acquisition.
+#[derive(Debug, thiserror::Error)]
+pub enum PidLockError {
+    #[error("Another IronClaw instance is already running (PID {pid})")]
+    AlreadyRunning { pid: u32 },
+    #[error("Failed to acquire PID lock: {0}")]
+    Io(#[from] std::io::Error),
+}
+
+impl PidLock {
+    /// Try to acquire the PID lock.
+    ///
+    /// Uses an exclusive file lock (`flock`/`LockFileEx`) so that two
+    /// concurrent processes cannot both acquire the lock — no TOCTOU race.
+    /// If the lock file exists but the holding process is gone (stale),
+    /// the lock is reclaimed automatically by the OS.
+    pub fn acquire() -> Result<Self, PidLockError> {
+        Self::acquire_at(pid_lock_path())
+    }
+
+    /// Acquire at a specific path (for testing).
+    fn acquire_at(path: PathBuf) -> Result<Self, PidLockError> {
+        use fs4::FileExt;
+        use std::fs::OpenOptions;
+        use std::io::Write;
+
+        // Ensure parent directory exists
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        // Open (or create) the lock file
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)?;
+
+        // Try non-blocking exclusive lock — if another process holds it,
+        // this fails immediately instead of blocking.
+        if let Err(e) = file.try_lock_exclusive() {
+            if e.kind() == std::io::ErrorKind::WouldBlock {
+                // Lock held by another process — read its PID for the error message
+                let pid = std::fs::read_to_string(&path)
+                    .ok()
+                    .and_then(|s| s.trim().parse::<u32>().ok())
+                    .unwrap_or(0);
+                return Err(PidLockError::AlreadyRunning { pid });
+            }
+            // Other errors (permissions, unsupported filesystem, etc.)
+            return Err(PidLockError::Io(e));
+        }
+
+        // We hold the exclusive lock — write our PID
+        file.set_len(0)?; // truncate
+        write!(file, "{}", std::process::id())?;
+
+        Ok(PidLock { path, _file: file })
+    }
+}
+
+impl Drop for PidLock {
+    fn drop(&mut self) {
+        // Remove the PID file; the OS-level lock is released when _file is dropped.
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
     use std::sync::Mutex;
+    use std::thread;
+    use std::time::{Duration, Instant};
     use tempfile::tempdir;
 
     static ENV_MUTEX: Mutex<()> = Mutex::new(());
@@ -985,5 +1139,267 @@ INJECTED="pwned"#;
             // SAFETY: ENV_MUTEX ensures single-threaded access to env vars in tests
             unsafe { std::env::remove_var("IRONCLAW_BASE_DIR") };
         }
+    }
+
+    // ── PID Lock tests ───────────────────────────────────────────────
+
+    #[test]
+    fn test_pid_lock_acquire_and_drop() {
+        let dir = tempdir().unwrap();
+        let pid_path = dir.path().join("ironclaw.pid");
+
+        // Acquire lock
+        let lock = PidLock::acquire_at(pid_path.clone()).unwrap();
+        assert!(pid_path.exists());
+
+        // PID file should contain our PID
+        let contents = std::fs::read_to_string(&pid_path).unwrap();
+        assert_eq!(contents.trim().parse::<u32>().unwrap(), std::process::id());
+
+        // Drop should remove the file
+        drop(lock);
+        assert!(!pid_path.exists());
+    }
+
+    #[test]
+    fn test_pid_lock_rejects_second_acquire() {
+        let dir = tempdir().unwrap();
+        let pid_path = dir.path().join("ironclaw.pid");
+
+        // First lock succeeds
+        let _lock1 = PidLock::acquire_at(pid_path.clone()).unwrap();
+
+        // Second acquire on same file must fail (exclusive flock held)
+        let result = PidLock::acquire_at(pid_path.clone());
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            PidLockError::AlreadyRunning { pid } => {
+                assert_eq!(pid, std::process::id());
+            }
+            other => panic!("expected AlreadyRunning, got: {}", other),
+        }
+    }
+
+    #[test]
+    fn test_pid_lock_reclaims_after_drop() {
+        let dir = tempdir().unwrap();
+        let pid_path = dir.path().join("ironclaw.pid");
+
+        // Acquire and release
+        let lock = PidLock::acquire_at(pid_path.clone()).unwrap();
+        drop(lock);
+
+        // Should succeed — OS lock was released on drop
+        let lock2 = PidLock::acquire_at(pid_path).unwrap();
+        drop(lock2);
+    }
+
+    #[test]
+    fn test_pid_lock_reclaims_stale_file_without_flock() {
+        let dir = tempdir().unwrap();
+        let pid_path = dir.path().join("ironclaw.pid");
+
+        // Write a stale PID file manually (no flock held)
+        std::fs::write(&pid_path, "4294967294").unwrap();
+
+        // Should succeed because no OS lock is held on the file
+        let lock = PidLock::acquire_at(pid_path.clone()).unwrap();
+        let contents = std::fs::read_to_string(&pid_path).unwrap();
+        assert_eq!(contents.trim().parse::<u32>().unwrap(), std::process::id());
+        drop(lock);
+    }
+
+    #[test]
+    fn test_pid_lock_handles_corrupt_pid_file() {
+        let dir = tempdir().unwrap();
+        let pid_path = dir.path().join("ironclaw.pid");
+
+        // Write garbage (no flock held)
+        std::fs::write(&pid_path, "not-a-number").unwrap();
+
+        // Should succeed — no OS lock held, file is reclaimed
+        let lock = PidLock::acquire_at(pid_path).unwrap();
+        drop(lock);
+    }
+
+    #[test]
+    fn test_pid_lock_creates_parent_dirs() {
+        let dir = tempdir().unwrap();
+        let pid_path = dir.path().join("nested").join("deep").join("ironclaw.pid");
+
+        let lock = PidLock::acquire_at(pid_path.clone()).unwrap();
+        assert!(pid_path.exists());
+        drop(lock);
+    }
+
+    #[test]
+    fn test_pid_lock_child_helper_holds_lock() {
+        if std::env::var("IRONCLAW_PID_LOCK_CHILD").ok().as_deref() != Some("1") {
+            return;
+        }
+
+        let pid_path = PathBuf::from(
+            std::env::var("IRONCLAW_PID_LOCK_PATH").expect("IRONCLAW_PID_LOCK_PATH missing"),
+        );
+        let hold_ms = std::env::var("IRONCLAW_PID_LOCK_HOLD_MS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(3000);
+
+        let _lock = PidLock::acquire_at(pid_path).expect("child failed to acquire pid lock");
+        thread::sleep(Duration::from_millis(hold_ms));
+    }
+
+    #[test]
+    fn test_pid_lock_rejects_lock_held_by_other_process() {
+        let dir = tempdir().unwrap();
+        let pid_path = dir.path().join("ironclaw.pid");
+
+        let current_exe = std::env::current_exe().unwrap();
+        let mut child = Command::new(current_exe)
+            .args([
+                "--exact",
+                "bootstrap::tests::test_pid_lock_child_helper_holds_lock",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env("IRONCLAW_PID_LOCK_CHILD", "1")
+            .env("IRONCLAW_PID_LOCK_PATH", pid_path.display().to_string())
+            .env("IRONCLAW_PID_LOCK_HOLD_MS", "3000")
+            .spawn()
+            .unwrap();
+
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_secs(2) {
+            if pid_path.exists() {
+                break;
+            }
+            if let Some(status) = child.try_wait().unwrap() {
+                panic!("child exited before acquiring lock: {}", status);
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            pid_path.exists(),
+            "child did not create lock file in time: {}",
+            pid_path.display()
+        );
+
+        let result = PidLock::acquire_at(pid_path.clone());
+        match result.unwrap_err() {
+            PidLockError::AlreadyRunning { .. } => {}
+            other => panic!("expected AlreadyRunning, got: {}", other),
+        }
+
+        let status = child.wait().unwrap();
+        assert!(status.success(), "child process failed: {}", status);
+
+        // After the child exits, lock should be released and reacquirable.
+        let lock = PidLock::acquire_at(pid_path).unwrap();
+        drop(lock);
+    }
+
+    #[test]
+    fn upsert_bootstrap_vars_preserves_unknown_keys() {
+        let dir = tempdir().unwrap();
+        let env_path = dir.path().join(".env");
+
+        // Simulate a user-edited .env with custom vars
+        let initial =
+            "HTTP_HOST=\"0.0.0.0\"\nDATABASE_BACKEND=\"postgres\"\nCUSTOM_VAR=\"keep_me\"\n";
+        std::fs::write(&env_path, initial).unwrap();
+
+        // Upsert wizard vars — should preserve HTTP_HOST and CUSTOM_VAR
+        let vars = [("DATABASE_BACKEND", "libsql"), ("LLM_BACKEND", "openai")];
+        upsert_bootstrap_vars_to(&env_path, &vars).unwrap();
+
+        let parsed: Vec<(String, String)> = dotenvy::from_path_iter(&env_path)
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+
+        assert_eq!(
+            parsed.len(),
+            4,
+            "should have 4 vars (2 preserved + 2 upserted)"
+        );
+
+        // User-added vars must be preserved
+        assert!(
+            parsed
+                .iter()
+                .any(|(k, v)| k == "HTTP_HOST" && v == "0.0.0.0"),
+            "HTTP_HOST must be preserved"
+        );
+        assert!(
+            parsed
+                .iter()
+                .any(|(k, v)| k == "CUSTOM_VAR" && v == "keep_me"),
+            "CUSTOM_VAR must be preserved"
+        );
+
+        // Wizard vars must be updated/added
+        assert!(
+            parsed
+                .iter()
+                .any(|(k, v)| k == "DATABASE_BACKEND" && v == "libsql"),
+            "DATABASE_BACKEND must be updated to libsql"
+        );
+        assert!(
+            parsed
+                .iter()
+                .any(|(k, v)| k == "LLM_BACKEND" && v == "openai"),
+            "LLM_BACKEND must be added"
+        );
+
+        // Now update LLM_BACKEND and verify HTTP_HOST still preserved
+        let vars2 = [("LLM_BACKEND", "anthropic")];
+        upsert_bootstrap_vars_to(&env_path, &vars2).unwrap();
+
+        let parsed2: Vec<(String, String)> = dotenvy::from_path_iter(&env_path)
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+
+        assert_eq!(
+            parsed2.len(),
+            4,
+            "should still have 4 vars after second upsert"
+        );
+        assert!(
+            parsed2
+                .iter()
+                .any(|(k, v)| k == "HTTP_HOST" && v == "0.0.0.0"),
+            "HTTP_HOST must still be preserved after second upsert"
+        );
+        assert!(
+            parsed2
+                .iter()
+                .any(|(k, v)| k == "LLM_BACKEND" && v == "anthropic"),
+            "LLM_BACKEND must be updated to anthropic"
+        );
+    }
+
+    #[test]
+    fn upsert_bootstrap_vars_creates_file_if_missing() {
+        let dir = tempdir().unwrap();
+        let env_path = dir.path().join("subdir").join(".env");
+
+        // File doesn't exist yet
+        assert!(!env_path.exists());
+
+        let vars = [("DATABASE_BACKEND", "libsql")];
+        upsert_bootstrap_vars_to(&env_path, &vars).unwrap();
+
+        assert!(env_path.exists());
+        let parsed: Vec<(String, String)> = dotenvy::from_path_iter(&env_path)
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(
+            parsed[0],
+            ("DATABASE_BACKEND".to_string(), "libsql".to_string())
+        );
     }
 }

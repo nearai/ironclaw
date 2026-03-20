@@ -65,7 +65,20 @@ fn install_macos() -> Result<()> {
     let stdout = logs_dir.join("daemon.stdout.log");
     let stderr = logs_dir.join("daemon.stderr.log");
 
-    let plist = format!(
+    let plist = macos_plist_content(
+        &exe.display().to_string(),
+        &stdout.display().to_string(),
+        &stderr.display().to_string(),
+    );
+
+    std::fs::write(&file, plist)?;
+    println!("Installed launchd service: {}", file.display());
+    println!("  Start with: ironclaw service start");
+    Ok(())
+}
+
+fn macos_plist_content(exe: &str, stdout: &str, stderr: &str) -> String {
+    format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -81,6 +94,11 @@ fn install_macos() -> Result<()> {
   <true/>
   <key>KeepAlive</key>
   <true/>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>CLI_ENABLED</key>
+    <string>false</string>
+  </dict>
   <key>StandardOutPath</key>
   <string>{stdout}</string>
   <key>StandardErrorPath</key>
@@ -89,15 +107,10 @@ fn install_macos() -> Result<()> {
 </plist>
 "#,
         label = SERVICE_LABEL,
-        exe = xml_escape(&exe.display().to_string()),
-        stdout = xml_escape(&stdout.display().to_string()),
-        stderr = xml_escape(&stderr.display().to_string()),
-    );
-
-    std::fs::write(&file, plist)?;
-    println!("Installed launchd service: {}", file.display());
-    println!("  Start with: ironclaw service start");
-    Ok(())
+        exe = xml_escape(exe),
+        stdout = xml_escape(stdout),
+        stderr = xml_escape(stderr),
+    )
 }
 
 fn install_linux() -> Result<()> {
@@ -114,6 +127,7 @@ fn install_linux() -> Result<()> {
          \n\
          [Service]\n\
          Type=simple\n\
+         Environment=\"CLI_ENABLED=false\"\n\
          ExecStart=\"{exe}\" run\n\
          Restart=always\n\
          RestartSec=3\n\
@@ -354,5 +368,12 @@ mod tests {
         let path = ironclaw_logs_dir();
         let s = path.to_string_lossy();
         assert!(s.ends_with(".ironclaw/logs"), "unexpected path: {s}");
+    }
+
+    #[test]
+    fn macos_plist_sets_cli_enabled_false() {
+        let plist = macos_plist_content("/tmp/ironclaw", "/tmp/stdout.log", "/tmp/stderr.log");
+        assert!(plist.contains("<key>EnvironmentVariables</key>"));
+        assert!(plist.contains("    <key>CLI_ENABLED</key>\n    <string>false</string>"));
     }
 }

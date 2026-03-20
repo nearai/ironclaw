@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+set -euo pipefail
+# Pre-push hook: runs quality gate before pushing
+# Skip with: git push --no-verify
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+SCRIPT_DIR="$REPO_ROOT/scripts/ci"
+
+# Default: baseline quality gate
+"$SCRIPT_DIR/quality_gate.sh"
+
+# Optional strict delta lint (env-gated)
+if [ "${IRONCLAW_STRICT_DELTA_LINT:-0}" = "1" ]; then
+    "$SCRIPT_DIR/delta_lint.sh" "$1"
+elif [ "${IRONCLAW_STRICT_LINT:-0}" = "1" ]; then
+    echo "==> clippy (strict: all warnings)"
+    cargo clippy --locked --all-targets -- -D warnings
+fi

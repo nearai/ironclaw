@@ -99,7 +99,7 @@ impl ConversationStore for PgBackend {
         channel: &str,
         user_id: &str,
         thread_id: Option<&str>,
-    ) -> Result<(), DatabaseError> {
+    ) -> Result<bool, DatabaseError> {
         self.store
             .ensure_conversation(id, channel, user_id, thread_id)
             .await
@@ -113,6 +113,36 @@ impl ConversationStore for PgBackend {
     ) -> Result<Vec<ConversationSummary>, DatabaseError> {
         self.store
             .list_conversations_with_preview(user_id, channel, limit)
+            .await
+    }
+
+    async fn list_conversations_all_channels(
+        &self,
+        user_id: &str,
+        limit: i64,
+    ) -> Result<Vec<ConversationSummary>, DatabaseError> {
+        self.store
+            .list_conversations_all_channels(user_id, limit)
+            .await
+    }
+
+    async fn get_or_create_routine_conversation(
+        &self,
+        routine_id: Uuid,
+        routine_name: &str,
+        user_id: &str,
+    ) -> Result<Uuid, DatabaseError> {
+        self.store
+            .get_or_create_routine_conversation(routine_id, routine_name, user_id)
+            .await
+    }
+
+    async fn get_or_create_heartbeat_conversation(
+        &self,
+        user_id: &str,
+    ) -> Result<Uuid, DatabaseError> {
+        self.store
+            .get_or_create_heartbeat_conversation(user_id)
             .await
     }
 
@@ -457,12 +487,25 @@ impl RoutineStore for PgBackend {
         self.store.count_running_routine_runs(routine_id).await
     }
 
+    async fn count_running_routine_runs_batch(
+        &self,
+        routine_ids: &[Uuid],
+    ) -> Result<std::collections::HashMap<Uuid, i64>, DatabaseError> {
+        self.store
+            .count_running_routine_runs_batch(routine_ids)
+            .await
+    }
+
     async fn link_routine_run_to_job(
         &self,
         run_id: Uuid,
         job_id: Uuid,
     ) -> Result<(), DatabaseError> {
         self.store.link_routine_run_to_job(run_id, job_id).await
+    }
+
+    async fn list_dispatched_routine_runs(&self) -> Result<Vec<RoutineRun>, DatabaseError> {
+        self.store.list_dispatched_routine_runs().await
     }
 }
 

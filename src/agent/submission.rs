@@ -14,6 +14,7 @@ impl SubmissionParser {
     pub fn parse(content: &str) -> Submission {
         let trimmed = content.trim();
         let lower = trimmed.to_lowercase();
+        tracing::debug!("[SubmissionParser::parse] Parsing input: {:?}", trimmed);
 
         // Control commands (exact match or prefix)
         if lower == "/undo" {
@@ -88,6 +89,13 @@ impl SubmissionParser {
         if lower == "/debug" {
             return Submission::SystemCommand {
                 command: "debug".to_string(),
+                args: vec![],
+            };
+        }
+        if lower == "/restart" {
+            tracing::debug!("[SubmissionParser::parse] Recognized /restart command");
+            return Submission::SystemCommand {
+                command: "restart".to_string(),
                 args: vec![],
             };
         }
@@ -417,6 +425,14 @@ impl SubmissionResult {
     pub fn error(message: impl Into<String>) -> Self {
         Self::Error {
             message: message.into(),
+        }
+    }
+
+    /// Create a non-error status message (e.g., for blocking states like approval waiting).
+    /// Uses Ok variant to avoid "Error:" prefix in rendering.
+    pub fn pending(message: impl Into<String>) -> Self {
+        Self::Ok {
+            message: Some(message.into()),
         }
     }
 }

@@ -110,7 +110,9 @@ impl exports::near::agent::tool::Guest for GmailTool {
     fn description() -> String {
         "Gmail integration for reading, searching, sending, drafting, and replying to emails. \
          Supports Gmail search query syntax (is:unread, from:, subject:, after:, etc.). \
-         Requires a Google OAuth token with gmail.modify and gmail.compose scopes."
+         Requires a Google OAuth token with gmail.modify and gmail.compose scopes. \
+         To discover all available API operations, use http GET to fetch \
+         <https://www.googleapis.com/discovery/v1/apis/gmail/v1/rest> (public, no auth needed)."
             .to_string()
     }
 }

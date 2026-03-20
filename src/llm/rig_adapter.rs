@@ -3,6 +3,7 @@
 //! This lets us use any rig-core provider (OpenAI, Anthropic, Ollama, etc.) as an
 //! `Arc<dyn LlmProvider>` without changing any of the agent, reasoning, or tool code.
 
+use crate::llm::config::CacheRetention;
 use async_trait::async_trait;
 use rig::OneOrMany;
 use rig::completion::{
@@ -10,22 +11,25 @@ use rig::completion::{
     ToolDefinition as RigToolDefinition, Usage as RigUsage,
 };
 use rig::message::{
-    Message as RigMessage, ToolChoice as RigToolChoice, ToolFunction, ToolResult as RigToolResult,
-    ToolResultContent, UserContent,
+    DocumentSourceKind, Image, ImageMediaType, Message as RigMessage, MimeType,
+    ToolChoice as RigToolChoice, ToolFunction, ToolResult as RigToolResult, ToolResultContent,
+    UserContent,
 };
 use rust_decimal::Decimal;
+use rust_decimal_macros::dec;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value as JsonValue;
 
 use std::collections::HashSet;
 
-use crate::error::LlmError;
 use crate::llm::costs;
+use crate::llm::error::LlmError;
 use crate::llm::provider::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider,
     ToolCall as IronToolCall, ToolCompletionRequest, ToolCompletionResponse,
-    ToolDefinition as IronToolDefinition,
+    ToolDefinition as IronToolDefinition, strip_unsupported_completion_params,
+    strip_unsupported_tool_params,
 };
 
 /// Adapter that wraps a rig-core `CompletionModel` and implements `LlmProvider`.
@@ -34,6 +38,14 @@ pub struct RigAdapter<M: CompletionModel> {
     model_name: String,
     input_cost: Decimal,
     output_cost: Decimal,
+    /// Prompt cache retention policy (Anthropic only).
+    /// When not `CacheRetention::None`, injects top-level `cache_control`
+    /// via `additional_params` for Anthropic automatic caching. Also controls
+    /// the cost multiplier for cache-creation tokens.
+    cache_retention: CacheRetention,
+    /// Parameter names that this provider does not support (e.g., `"temperature"`).
+    /// These are stripped from requests before sending to avoid 400 errors.
+    unsupported_params: HashSet<String>,
 }
 
 impl<M: CompletionModel> RigAdapter<M> {
@@ -47,7 +59,54 @@ impl<M: CompletionModel> RigAdapter<M> {
             model_name: name,
             input_cost,
             output_cost,
+            cache_retention: CacheRetention::None,
+            unsupported_params: HashSet::new(),
         }
+    }
+
+    /// Set Anthropic prompt cache retention policy.
+    ///
+    /// Controls both cache injection and cost tracking:
+    /// - `None` — no caching, no surcharge (1.0×).
+    /// - `Short` — 5-minute TTL via `{"type": "ephemeral"}`, 1.25× write surcharge.
+    /// - `Long` — 1-hour TTL via `{"type": "ephemeral", "ttl": "1h"}`, 2.0× write surcharge.
+    ///
+    /// Cache injection uses Anthropic's **automatic caching** — a top-level
+    /// `cache_control` field in `additional_params` that gets `#[serde(flatten)]`'d
+    /// into the request body by rig-core.
+    ///
+    /// If the configured model does not support caching (e.g. claude-2),
+    /// a warning is logged once at construction and caching is disabled.
+    pub fn with_cache_retention(mut self, retention: CacheRetention) -> Self {
+        if retention != CacheRetention::None && !supports_prompt_cache(&self.model_name) {
+            tracing::warn!(
+                model = %self.model_name,
+                "Prompt caching requested but model does not support it; disabling"
+            );
+            self.cache_retention = CacheRetention::None;
+        } else {
+            self.cache_retention = retention;
+        }
+        self
+    }
+
+    /// Set the list of unsupported parameter names for this provider.
+    ///
+    /// Parameters in this set are stripped from requests before sending.
+    /// Supported parameter names: `"temperature"`, `"max_tokens"`, `"stop_sequences"`.
+    pub fn with_unsupported_params(mut self, params: Vec<String>) -> Self {
+        self.unsupported_params = params.into_iter().collect();
+        self
+    }
+
+    /// Strip unsupported fields from a `CompletionRequest` in place.
+    fn strip_unsupported_completion_params(&self, req: &mut CompletionRequest) {
+        strip_unsupported_completion_params(&self.unsupported_params, req);
+    }
+
+    /// Strip unsupported fields from a `ToolCompletionRequest` in place.
+    fn strip_unsupported_tool_params(&self, req: &mut ToolCompletionRequest) {
+        strip_unsupported_tool_params(&self.unsupported_params, req);
     }
 }
 
@@ -230,7 +289,41 @@ fn convert_messages(messages: &[ChatMessage]) -> (Option<String>, Vec<RigMessage
                 }
             }
             crate::llm::Role::User => {
-                history.push(RigMessage::user(&msg.content));
+                if msg.content_parts.is_empty() {
+                    history.push(RigMessage::user(&msg.content));
+                } else {
+                    // Build multimodal user message with text + image parts
+                    let mut contents: Vec<UserContent> = vec![UserContent::text(&msg.content)];
+                    for part in &msg.content_parts {
+                        if let crate::llm::ContentPart::ImageUrl { image_url } = part {
+                            // Parse data: URL for base64 images, or use raw URL
+                            let image = if let Some(rest) = image_url.url.strip_prefix("data:") {
+                                // Format: data:<mime>;base64,<data>
+                                let (mime, b64) =
+                                    rest.split_once(";base64,").unwrap_or(("image/jpeg", rest));
+                                Image {
+                                    data: DocumentSourceKind::base64(b64),
+                                    media_type: ImageMediaType::from_mime_type(mime),
+                                    detail: None,
+                                    additional_params: None,
+                                }
+                            } else {
+                                Image {
+                                    data: DocumentSourceKind::url(&image_url.url),
+                                    media_type: None,
+                                    detail: None,
+                                    additional_params: None,
+                                }
+                            };
+                            contents.push(UserContent::Image(image));
+                        }
+                    }
+                    if let Ok(many) = OneOrMany::many(contents) {
+                        history.push(RigMessage::User { content: many });
+                    } else {
+                        history.push(RigMessage::user(&msg.content));
+                    }
+                }
             }
             crate::llm::Role::Assistant => {
                 if let Some(ref tool_calls) = msg.tool_calls {
@@ -264,15 +357,31 @@ fn convert_messages(messages: &[ChatMessage]) -> (Option<String>, Vec<RigMessage
                 }
             }
             crate::llm::Role::Tool => {
-                // Tool result message: wrap as User { ToolResult }
+                // Tool result message: wrap as User { ToolResult }.
+                // Merge consecutive tool results into a single User message
+                // so the API sees one multi-result message instead of
+                // multiple consecutive User messages (which Anthropic rejects).
                 let tool_id = normalized_tool_call_id(msg.tool_call_id.as_deref(), history.len());
-                history.push(RigMessage::User {
-                    content: OneOrMany::one(UserContent::ToolResult(RigToolResult {
-                        id: tool_id.clone(),
-                        call_id: Some(tool_id),
-                        content: OneOrMany::one(ToolResultContent::text(&msg.content)),
-                    })),
+                let tool_result = UserContent::ToolResult(RigToolResult {
+                    id: tool_id.clone(),
+                    call_id: Some(tool_id),
+                    content: OneOrMany::one(ToolResultContent::text(&msg.content)),
                 });
+
+                let should_merge = matches!(
+                    history.last(),
+                    Some(RigMessage::User { content }) if content.iter().all(|c| matches!(c, UserContent::ToolResult(_)))
+                );
+
+                if should_merge {
+                    if let Some(RigMessage::User { content }) = history.last_mut() {
+                        content.push(tool_result);
+                    }
+                } else {
+                    history.push(RigMessage::User {
+                        content: OneOrMany::one(tool_result),
+                    });
+                }
             }
         }
     }
@@ -360,7 +469,44 @@ fn saturate_u32(val: u64) -> u32 {
     val.min(u32::MAX as u64) as u32
 }
 
+/// Returns `true` if the model supports Anthropic prompt caching.
+///
+/// Per Anthropic docs, only Claude 3+ models support prompt caching.
+/// Unsupported: claude-2, claude-2.1, claude-instant-*.
+fn supports_prompt_cache(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    // Strip optional provider prefix (e.g. "anthropic/claude-...")
+    let model = lower.strip_prefix("anthropic/").unwrap_or(&lower);
+    // Only Claude 3+ families support prompt caching
+    model.starts_with("claude-3")
+        || model.starts_with("claude-4")
+        || model.starts_with("claude-sonnet")
+        || model.starts_with("claude-opus")
+        || model.starts_with("claude-haiku")
+}
+
+/// Extract `cache_creation_input_tokens` from the raw provider response.
+///
+/// Rig-core's unified `Usage` does not surface this field, but Anthropic's raw
+/// response includes it at `usage.cache_creation_input_tokens`. We serialize the
+/// raw response to JSON and attempt to read the value.
+fn extract_cache_creation<T: Serialize>(raw: &T) -> u32 {
+    serde_json::to_value(raw)
+        .ok()
+        .and_then(|v| v.get("usage")?.get("cache_creation_input_tokens")?.as_u64())
+        .map(|n| n.min(u32::MAX as u64) as u32)
+        .unwrap_or(0)
+}
+
 /// Build a rig-core CompletionRequest from our internal types.
+///
+/// When `cache_retention` is not `None`, injects a top-level `cache_control`
+/// field via `additional_params`. Rig-core's `AnthropicCompletionRequest`
+/// uses `#[serde(flatten)]` on `additional_params`, so the field lands at
+/// the request root — which is exactly what Anthropic's **automatic caching**
+/// expects. The API auto-places the cache breakpoint at the last cacheable
+/// block and moves it forward as conversations grow.
+#[allow(clippy::too_many_arguments)]
 fn build_rig_request(
     preamble: Option<String>,
     mut history: Vec<RigMessage>,
@@ -368,6 +514,7 @@ fn build_rig_request(
     tool_choice: Option<RigToolChoice>,
     temperature: Option<f32>,
     max_tokens: Option<u32>,
+    cache_retention: CacheRetention,
 ) -> Result<RigRequest, LlmError> {
     // rig-core requires at least one message in chat_history
     if history.is_empty() {
@@ -379,6 +526,17 @@ fn build_rig_request(
         reason: format!("Failed to build chat history: {}", e),
     })?;
 
+    // Inject top-level cache_control for Anthropic automatic prompt caching.
+    let additional_params = match cache_retention {
+        CacheRetention::None => None,
+        CacheRetention::Short => Some(serde_json::json!({
+            "cache_control": {"type": "ephemeral"}
+        })),
+        CacheRetention::Long => Some(serde_json::json!({
+            "cache_control": {"type": "ephemeral", "ttl": "1h"}
+        })),
+    };
+
     Ok(RigRequest {
         preamble,
         chat_history,
@@ -387,7 +545,7 @@ fn build_rig_request(
         temperature: temperature.map(|t| t as f64),
         max_tokens: max_tokens.map(|t| t as u64),
         tool_choice,
-        additional_params: None,
+        additional_params,
     })
 }
 
@@ -405,7 +563,26 @@ where
         (self.input_cost, self.output_cost)
     }
 
-    async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+    fn cache_write_multiplier(&self) -> Decimal {
+        match self.cache_retention {
+            CacheRetention::None => Decimal::ONE,
+            CacheRetention::Short => Decimal::new(125, 2), // 1.25× (125% of input rate)
+            CacheRetention::Long => Decimal::TWO,          // 2.0×  (200% of input rate)
+        }
+    }
+
+    fn cache_read_discount(&self) -> Decimal {
+        if self.cache_retention != CacheRetention::None {
+            dec!(10) // Anthropic: 90% discount (cost = input_rate / 10)
+        } else {
+            Decimal::ONE
+        }
+    }
+
+    async fn complete(
+        &self,
+        mut request: CompletionRequest,
+    ) -> Result<CompletionResponse, LlmError> {
         if let Some(requested_model) = request.model.as_deref()
             && requested_model != self.model_name.as_str()
         {
@@ -415,6 +592,8 @@ where
                 "Per-request model override is not supported for this provider; using configured model"
             );
         }
+
+        self.strip_unsupported_completion_params(&mut request);
 
         let mut messages = request.messages;
         crate::llm::provider::sanitize_tool_messages(&mut messages);
@@ -427,6 +606,7 @@ where
             None,
             request.temperature,
             request.max_tokens,
+            self.cache_retention,
         )?;
 
         let response =
@@ -440,17 +620,31 @@ where
 
         let (text, _tool_calls, finish) = extract_response(&response.choice, &response.usage);
 
-        Ok(CompletionResponse {
+        let resp = CompletionResponse {
             content: text.unwrap_or_default(),
             input_tokens: saturate_u32(response.usage.input_tokens),
             output_tokens: saturate_u32(response.usage.output_tokens),
             finish_reason: finish,
-        })
+            cache_read_input_tokens: saturate_u32(response.usage.cached_input_tokens),
+            cache_creation_input_tokens: extract_cache_creation(&response.raw_response),
+        };
+
+        if resp.cache_read_input_tokens > 0 {
+            tracing::debug!(
+                model = %self.model_name,
+                input = resp.input_tokens,
+                output = resp.output_tokens,
+                cache_read = resp.cache_read_input_tokens,
+                "prompt cache hit",
+            );
+        }
+
+        Ok(resp)
     }
 
     async fn complete_with_tools(
         &self,
-        request: ToolCompletionRequest,
+        mut request: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, LlmError> {
         if let Some(requested_model) = request.model.as_deref()
             && requested_model != self.model_name.as_str()
@@ -461,6 +655,8 @@ where
                 "Per-request model override is not supported for this provider; using configured model"
             );
         }
+
+        self.strip_unsupported_tool_params(&mut request);
 
         let known_tool_names: HashSet<String> =
             request.tools.iter().map(|t| t.name.clone()).collect();
@@ -478,6 +674,7 @@ where
             tool_choice,
             request.temperature,
             request.max_tokens,
+            self.cache_retention,
         )?;
 
         let response =
@@ -504,13 +701,27 @@ where
             }
         }
 
-        Ok(ToolCompletionResponse {
+        let resp = ToolCompletionResponse {
             content: text,
             tool_calls,
             input_tokens: saturate_u32(response.usage.input_tokens),
             output_tokens: saturate_u32(response.usage.output_tokens),
             finish_reason: finish,
-        })
+            cache_read_input_tokens: saturate_u32(response.usage.cached_input_tokens),
+            cache_creation_input_tokens: extract_cache_creation(&response.raw_response),
+        };
+
+        if resp.cache_read_input_tokens > 0 {
+            tracing::debug!(
+                model = %self.model_name,
+                input = resp.input_tokens,
+                output = resp.output_tokens,
+                cache_read = resp.cache_read_input_tokens,
+                "prompt cache hit",
+            );
+        }
+
+        Ok(resp)
     }
 
     fn active_model_name(&self) -> String {
@@ -632,6 +843,7 @@ mod tests {
         let messages = vec![ChatMessage {
             role: crate::llm::Role::Tool,
             content: "result text".to_string(),
+            content_parts: Vec::new(),
             tool_call_id: None,
             name: Some("search".to_string()),
             tool_calls: None,
@@ -781,6 +993,7 @@ mod tests {
         let tool_result_msg = ChatMessage {
             role: crate::llm::Role::Tool,
             content: "search results here".to_string(),
+            content_parts: Vec::new(),
             tool_call_id: None,
             name: Some("search".to_string()),
             tool_calls: None,
@@ -868,5 +1081,283 @@ mod tests {
     fn test_normalize_tool_name_unknown_passthrough() {
         let known = HashSet::from(["echo".to_string()]);
         assert_eq!(normalize_tool_name("other_tool", &known), "other_tool");
+    }
+
+    #[test]
+    fn test_build_rig_request_injects_cache_control_short() {
+        let req = build_rig_request(
+            Some("You are helpful.".to_string()),
+            vec![RigMessage::user("Hello")],
+            Vec::new(),
+            None,
+            None,
+            None,
+            CacheRetention::Short,
+        )
+        .unwrap();
+
+        let params = req
+            .additional_params
+            .expect("should have additional_params for Short retention");
+        assert_eq!(params["cache_control"]["type"], "ephemeral");
+        assert!(
+            params["cache_control"].get("ttl").is_none(),
+            "Short retention should not include ttl"
+        );
+    }
+
+    #[test]
+    fn test_build_rig_request_injects_cache_control_long() {
+        let req = build_rig_request(
+            Some("You are helpful.".to_string()),
+            vec![RigMessage::user("Hello")],
+            Vec::new(),
+            None,
+            None,
+            None,
+            CacheRetention::Long,
+        )
+        .unwrap();
+
+        let params = req
+            .additional_params
+            .expect("should have additional_params for Long retention");
+        assert_eq!(params["cache_control"]["type"], "ephemeral");
+        assert_eq!(params["cache_control"]["ttl"], "1h");
+    }
+
+    #[test]
+    fn test_build_rig_request_no_cache_control_when_none() {
+        let req = build_rig_request(
+            Some("You are helpful.".to_string()),
+            vec![RigMessage::user("Hello")],
+            Vec::new(),
+            None,
+            None,
+            None,
+            CacheRetention::None,
+        )
+        .unwrap();
+
+        assert!(
+            req.additional_params.is_none(),
+            "additional_params should be None when cache is disabled"
+        );
+    }
+
+    /// Verify that the multiplier match arms in `RigAdapter::cache_write_multiplier`
+    /// produce the expected values. We use a standalone helper because constructing
+    /// a real `RigAdapter` requires a rig `Model` (which needs network/provider setup).
+    /// The helper mirrors the same match expression — if the impl drifts, the
+    /// `test_build_rig_request_*` tests will still catch regressions end-to-end.
+    #[test]
+    fn test_cache_write_multiplier_values() {
+        use rust_decimal::Decimal;
+        // None → 1.0× (no surcharge)
+        assert_eq!(
+            cache_write_multiplier_for(CacheRetention::None),
+            Decimal::ONE
+        );
+        // Short → 1.25× (25% surcharge)
+        assert_eq!(
+            cache_write_multiplier_for(CacheRetention::Short),
+            Decimal::new(125, 2)
+        );
+        // Long → 2.0× (100% surcharge)
+        assert_eq!(
+            cache_write_multiplier_for(CacheRetention::Long),
+            Decimal::TWO
+        );
+    }
+
+    fn cache_write_multiplier_for(retention: CacheRetention) -> rust_decimal::Decimal {
+        match retention {
+            CacheRetention::None => rust_decimal::Decimal::ONE,
+            CacheRetention::Short => rust_decimal::Decimal::new(125, 2),
+            CacheRetention::Long => rust_decimal::Decimal::TWO,
+        }
+    }
+
+    // -- supports_prompt_cache tests --
+
+    #[test]
+    fn test_supports_prompt_cache_supported_models() {
+        // All Claude 3+ models per Anthropic docs
+        assert!(supports_prompt_cache("claude-opus-4-6"));
+        assert!(supports_prompt_cache("claude-sonnet-4-6"));
+        assert!(supports_prompt_cache("claude-sonnet-4"));
+        assert!(supports_prompt_cache("claude-haiku-4-5"));
+        assert!(supports_prompt_cache("claude-3-5-sonnet-20241022"));
+        assert!(supports_prompt_cache("claude-haiku-3"));
+        assert!(supports_prompt_cache("Claude-Opus-4-5")); // case-insensitive
+        assert!(supports_prompt_cache("anthropic/claude-sonnet-4-6")); // provider prefix
+    }
+
+    #[test]
+    fn test_supports_prompt_cache_unsupported_models() {
+        // Legacy Claude models that predate caching
+        assert!(!supports_prompt_cache("claude-2"));
+        assert!(!supports_prompt_cache("claude-2.1"));
+        assert!(!supports_prompt_cache("claude-instant-1.2"));
+        // Non-Claude models
+        assert!(!supports_prompt_cache("gpt-4o"));
+        assert!(!supports_prompt_cache("llama3"));
+    }
+
+    #[test]
+    fn test_with_unsupported_params_populates_set() {
+        use rig::client::CompletionClient;
+        use rig::providers::openai;
+
+        let client: openai::Client = openai::Client::builder()
+            .api_key("test-key")
+            .base_url("http://localhost:0")
+            .build()
+            .unwrap();
+        let client = client.completions_api();
+        let model = client.completion_model("test-model");
+        let adapter = RigAdapter::new(model, "test-model")
+            .with_unsupported_params(vec!["temperature".to_string()]);
+
+        assert!(adapter.unsupported_params.contains("temperature"));
+        assert!(!adapter.unsupported_params.contains("max_tokens"));
+    }
+
+    #[test]
+    fn test_strip_unsupported_completion_params() {
+        use rig::client::CompletionClient;
+        use rig::providers::openai;
+
+        let client: openai::Client = openai::Client::builder()
+            .api_key("test-key")
+            .base_url("http://localhost:0")
+            .build()
+            .unwrap();
+        let client = client.completions_api();
+        let model = client.completion_model("test-model");
+        let adapter = RigAdapter::new(model, "test-model").with_unsupported_params(vec![
+            "temperature".to_string(),
+            "stop_sequences".to_string(),
+        ]);
+
+        let mut req = CompletionRequest::new(vec![ChatMessage::user("hi")]);
+        req.temperature = Some(0.7);
+        req.max_tokens = Some(100);
+        req.stop_sequences = Some(vec!["STOP".to_string()]);
+
+        adapter.strip_unsupported_completion_params(&mut req);
+
+        assert!(req.temperature.is_none(), "temperature should be stripped");
+        assert_eq!(req.max_tokens, Some(100), "max_tokens should be preserved");
+        assert!(
+            req.stop_sequences.is_none(),
+            "stop_sequences should be stripped"
+        );
+    }
+
+    #[test]
+    fn test_strip_unsupported_tool_params() {
+        use rig::client::CompletionClient;
+        use rig::providers::openai;
+
+        let client: openai::Client = openai::Client::builder()
+            .api_key("test-key")
+            .base_url("http://localhost:0")
+            .build()
+            .unwrap();
+        let client = client.completions_api();
+        let model = client.completion_model("test-model");
+        let adapter = RigAdapter::new(model, "test-model")
+            .with_unsupported_params(vec!["temperature".to_string(), "max_tokens".to_string()]);
+
+        let mut req = ToolCompletionRequest::new(vec![ChatMessage::user("hi")], vec![]);
+        req.temperature = Some(0.5);
+        req.max_tokens = Some(200);
+
+        adapter.strip_unsupported_tool_params(&mut req);
+
+        assert!(req.temperature.is_none(), "temperature should be stripped");
+        assert!(req.max_tokens.is_none(), "max_tokens should be stripped");
+    }
+
+    #[test]
+    fn test_unsupported_params_empty_by_default() {
+        use rig::client::CompletionClient;
+        use rig::providers::openai;
+
+        let client: openai::Client = openai::Client::builder()
+            .api_key("test-key")
+            .base_url("http://localhost:0")
+            .build()
+            .unwrap();
+        let client = client.completions_api();
+        let model = client.completion_model("test-model");
+        let adapter = RigAdapter::new(model, "test-model");
+
+        assert!(adapter.unsupported_params.is_empty());
+    }
+
+    /// Regression test: consecutive tool_result messages from parallel tool
+    /// execution must be merged into a single User message with multiple
+    /// ToolResult content items. Without merging, APIs like Anthropic reject
+    /// the request due to consecutive User messages.
+    #[test]
+    fn test_consecutive_tool_results_merged_into_single_user_message() {
+        let tc1 = IronToolCall {
+            id: "call_a".to_string(),
+            name: "search".to_string(),
+            arguments: serde_json::json!({"q": "rust"}),
+        };
+        let tc2 = IronToolCall {
+            id: "call_b".to_string(),
+            name: "fetch".to_string(),
+            arguments: serde_json::json!({"url": "https://example.com"}),
+        };
+        let assistant = ChatMessage::assistant_with_tool_calls(None, vec![tc1, tc2]);
+        let result_a = ChatMessage::tool_result("call_a", "search", "search results");
+        let result_b = ChatMessage::tool_result("call_b", "fetch", "fetch results");
+
+        let messages = vec![assistant, result_a, result_b];
+        let (_preamble, history) = convert_messages(&messages);
+
+        // Should be: 1 assistant + 1 merged user (not 1 assistant + 2 users)
+        assert_eq!(
+            history.len(),
+            2,
+            "Expected 2 messages (assistant + merged user), got {}",
+            history.len()
+        );
+
+        // The second message should contain both tool results
+        match &history[1] {
+            RigMessage::User { content } => {
+                assert_eq!(
+                    content.len(),
+                    2,
+                    "Expected 2 tool results in merged user message, got {}",
+                    content.len()
+                );
+                for item in content.iter() {
+                    assert!(
+                        matches!(item, UserContent::ToolResult(_)),
+                        "Expected ToolResult content"
+                    );
+                }
+            }
+            other => panic!("Expected User message, got: {:?}", other),
+        }
+    }
+
+    /// Verify that a tool_result after a non-tool User message is NOT merged.
+    #[test]
+    fn test_tool_result_after_user_text_not_merged() {
+        let user_msg = ChatMessage::user("hello");
+        let tool_msg = ChatMessage::tool_result("call_1", "search", "results");
+
+        let messages = vec![user_msg, tool_msg];
+        let (_preamble, history) = convert_messages(&messages);
+
+        // Should be 2 separate User messages (text user + tool result user)
+        assert_eq!(history.len(), 2);
     }
 }

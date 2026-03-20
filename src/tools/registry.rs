@@ -10,20 +10,22 @@ use crate::db::Database;
 use crate::extensions::ExtensionManager;
 use crate::llm::{LlmProvider, ToolDefinition};
 use crate::orchestrator::job_manager::ContainerJobManager;
-use crate::safety::SafetyLayer;
 use crate::secrets::SecretsStore;
 use crate::skills::catalog::SkillCatalog;
 use crate::skills::registry::SkillRegistry;
-use crate::tools::builder::{BuildSoftwareTool, BuilderConfig, LlmSoftwareBuilder};
+use crate::tools::builder::{
+    BuildSoftwareTool, BuilderConfig, LlmSoftwareBuilder, SoftwareBuilder,
+};
 use crate::tools::builtin::{
-    ApplyPatchTool, CancelJobTool, CreateJobTool, EchoTool, HttpTool, JobEventsTool, JobPromptTool,
-    JobStatusTool, JsonTool, ListDirTool, ListJobsTool, MemoryReadTool, MemorySearchTool,
-    MemoryTreeTool, MemoryWriteTool, PromptQueue, ReadFileTool, ShellTool, SkillInstallTool,
-    SkillListTool, SkillRemoveTool, SkillSearchTool, TimeTool, ToolActivateTool, ToolAuthTool,
-    ToolInstallTool, ToolListTool, ToolRemoveTool, ToolSearchTool, WebFetchTool, WriteFileTool,
+    ApplyPatchTool, CancelJobTool, CreateJobTool, EchoTool, ExtensionInfoTool, HttpTool,
+    JobEventsTool, JobPromptTool, JobStatusTool, JsonTool, ListDirTool, ListJobsTool,
+    MemoryReadTool, MemorySearchTool, MemoryTreeTool, MemoryWriteTool, PromptQueue, ReadFileTool,
+    ShellTool, SkillInstallTool, SkillListTool, SkillRemoveTool, SkillSearchTool, TimeTool,
+    ToolActivateTool, ToolAuthTool, ToolInstallTool, ToolListTool, ToolRemoveTool, ToolSearchTool,
+    ToolUpgradeTool, WriteFileTool,
 };
 use crate::tools::rate_limiter::RateLimiter;
-use crate::tools::tool::{Tool, ToolDomain};
+use crate::tools::tool::{ApprovalRequirement, Tool, ToolDomain};
 use crate::tools::wasm::{
     Capabilities, OAuthRefreshConfig, ResourceLimits, SharedCredentialRegistry, WasmError,
     WasmStorageError, WasmToolRuntime, WasmToolStore, WasmToolWrapper,
@@ -62,13 +64,20 @@ const PROTECTED_TOOL_NAMES: &[&str] = &[
     "routine_list",
     "routine_update",
     "routine_delete",
+    "routine_fire",
     "routine_history",
+    "event_emit",
     "skill_list",
     "skill_search",
     "skill_install",
     "skill_remove",
     "message",
     "web_fetch",
+    "restart",
+    "image_generate",
+    "image_edit",
+    "image_analyze",
+    "tool_info",
 ];
 
 /// Registry of available tools.
@@ -87,6 +96,15 @@ pub struct ToolRegistry {
 }
 
 impl ToolRegistry {
+    fn tool_definition(tool: &Arc<dyn Tool>) -> ToolDefinition {
+        let schema = tool.schema();
+        ToolDefinition {
+            name: schema.name,
+            description: schema.description,
+            parameters: schema.parameters,
+        }
+    }
+
     /// Create a new empty registry.
     pub fn new() -> Self {
         Self {
@@ -131,7 +149,7 @@ impl ToolRegistry {
             return;
         }
         self.tools.write().await.insert(name.clone(), tool);
-        tracing::debug!("Registered tool: {}", name);
+        tracing::trace!("Registered tool: {}", name);
     }
 
     /// Register a tool (sync version for startup, marks as built-in).
@@ -156,7 +174,8 @@ impl ToolRegistry {
 
     /// Get a tool by name.
     pub async fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
-        self.tools.read().await.get(name).cloned()
+        let tools = self.tools.read().await;
+        tools.get(name).map(Arc::clone)
     }
 
     /// Check if a tool exists.
@@ -167,6 +186,18 @@ impl ToolRegistry {
     /// List all tool names.
     pub async fn list(&self) -> Vec<String> {
         self.tools.read().await.keys().cloned().collect()
+    }
+
+    /// Retain only tools whose names are in the given allowlist.
+    ///
+    /// If `names` is empty, this is a no-op (all tools are kept).
+    pub async fn retain_only(&self, names: &[&str]) {
+        if names.is_empty() {
+            return;
+        }
+        let names_set: std::collections::HashSet<&str> = names.iter().copied().collect();
+        let mut tools = self.tools.write().await;
+        tools.retain(|k, _| names_set.contains(k.as_str()));
     }
 
     /// Get the number of registered tools.
@@ -181,16 +212,15 @@ impl ToolRegistry {
 
     /// Get tool definitions for LLM function calling.
     pub async fn tool_definitions(&self) -> Vec<ToolDefinition> {
-        self.tools
+        let mut defs: Vec<ToolDefinition> = self
+            .tools
             .read()
             .await
             .values()
-            .map(|tool| ToolDefinition {
-                name: tool.name().to_string(),
-                description: tool.description().to_string(),
-                parameters: tool.parameters_schema(),
-            })
-            .collect()
+            .map(Self::tool_definition)
+            .collect();
+        defs.sort_unstable_by(|a, b| a.name.cmp(&b.name));
+        defs
     }
 
     /// Get tool definitions for specific tools.
@@ -198,12 +228,7 @@ impl ToolRegistry {
         let tools = self.tools.read().await;
         names
             .iter()
-            .filter_map(|name| tools.get(*name))
-            .map(|tool| ToolDefinition {
-                name: tool.name().to_string(),
-                description: tool.description().to_string(),
-                parameters: tool.parameters_schema(),
-            })
+            .filter_map(|name| tools.get(*name).map(Self::tool_definition))
             .collect()
     }
 
@@ -218,9 +243,19 @@ impl ToolRegistry {
             http = http.with_credentials(Arc::clone(cr), Arc::clone(ss));
         }
         self.register_sync(Arc::new(http));
-        self.register_sync(Arc::new(WebFetchTool::new()));
 
-        tracing::info!("Registered {} built-in tools", self.count());
+        tracing::debug!("Registered {} built-in tools", self.count());
+    }
+
+    /// Register the `tool_info` discovery tool.
+    ///
+    /// Requires `Arc<Self>` so the tool can query the registry for other tools'
+    /// schemas at runtime. Call after `register_builtin_tools()`.
+    pub fn register_tool_info(self: &Arc<Self>) {
+        use crate::tools::builtin::ToolInfoTool;
+        let tool = ToolInfoTool::new(Arc::downgrade(self));
+        self.register_sync(Arc::new(tool));
+        tracing::debug!("Registered tool_info discovery tool");
     }
 
     /// Register only orchestrator-domain tools (safe for the main process).
@@ -248,12 +283,36 @@ impl ToolRegistry {
             .await
             .values()
             .filter(|tool| tool.domain() == domain)
-            .map(|tool| ToolDefinition {
-                name: tool.name().to_string(),
-                description: tool.description().to_string(),
-                parameters: tool.parameters_schema(),
-            })
+            .map(Self::tool_definition)
             .collect()
+    }
+
+    /// Get tool definitions excluding specific tools by name.
+    ///
+    /// Used by lightweight routines to filter out denylisted and approval-gated tools
+    /// so the LLM only sees tools it is actually allowed to call.
+    pub async fn tool_definitions_excluding(&self, deny: &[&str]) -> Vec<ToolDefinition> {
+        let empty_params = serde_json::Value::Object(serde_json::Map::new());
+        let mut defs: Vec<ToolDefinition> = self
+            .tools
+            .read()
+            .await
+            .values()
+            .filter(|tool| {
+                // Exclude denylisted tools
+                if deny.contains(&tool.name()) {
+                    return false;
+                }
+                // Exclude tools that require approval
+                matches!(
+                    tool.requires_approval(&empty_params),
+                    ApprovalRequirement::Never
+                )
+            })
+            .map(Self::tool_definition)
+            .collect();
+        defs.sort_unstable_by(|a, b| a.name.cmp(&b.name));
+        defs
     }
 
     /// Register development tools for building software.
@@ -268,7 +327,7 @@ impl ToolRegistry {
         self.register_sync(Arc::new(ListDirTool::new()));
         self.register_sync(Arc::new(ApplyPatchTool::new()));
 
-        tracing::info!("Registered 5 development tools");
+        tracing::debug!("Registered 5 development tools");
     }
 
     /// Register memory tools with a workspace.
@@ -281,7 +340,7 @@ impl ToolRegistry {
         self.register_sync(Arc::new(MemoryReadTool::new(Arc::clone(&workspace))));
         self.register_sync(Arc::new(MemoryTreeTool::new(workspace)));
 
-        tracing::info!("Registered 4 memory tools");
+        tracing::debug!("Registered 4 memory tools");
     }
 
     /// Register job management tools.
@@ -343,7 +402,21 @@ impl ToolRegistry {
             job_tool_count += 1;
         }
 
-        tracing::info!("Registered {} job management tools", job_tool_count);
+        tracing::debug!("Registered {} job management tools", job_tool_count);
+    }
+
+    /// Register secret management tools (list, delete).
+    ///
+    /// These allow the LLM to persist API keys and tokens encrypted in the database.
+    /// Values are never returned to the LLM; only names and metadata are exposed.
+    pub fn register_secrets_tools(
+        &self,
+        store: Arc<dyn crate::secrets::SecretsStore + Send + Sync>,
+    ) {
+        use crate::tools::builtin::{SecretDeleteTool, SecretListTool};
+        self.register_sync(Arc::new(SecretListTool::new(Arc::clone(&store))));
+        self.register_sync(Arc::new(SecretDeleteTool::new(store)));
+        tracing::debug!("Registered 2 secret management tools (list, delete)");
     }
 
     /// Register extension management tools (search, install, auth, activate, list, remove).
@@ -355,8 +428,10 @@ impl ToolRegistry {
         self.register_sync(Arc::new(ToolAuthTool::new(Arc::clone(&manager))));
         self.register_sync(Arc::new(ToolActivateTool::new(Arc::clone(&manager))));
         self.register_sync(Arc::new(ToolListTool::new(Arc::clone(&manager))));
-        self.register_sync(Arc::new(ToolRemoveTool::new(manager)));
-        tracing::info!("Registered 6 extension management tools");
+        self.register_sync(Arc::new(ToolRemoveTool::new(Arc::clone(&manager))));
+        self.register_sync(Arc::new(ToolUpgradeTool::new(Arc::clone(&manager))));
+        self.register_sync(Arc::new(ExtensionInfoTool::new(manager)));
+        tracing::debug!("Registered 8 extension management tools");
     }
 
     /// Register skill management tools (list, search, install, remove).
@@ -377,7 +452,7 @@ impl ToolRegistry {
             Arc::clone(&catalog),
         )));
         self.register_sync(Arc::new(SkillRemoveTool::new(registry)));
-        tracing::info!("Registered 4 skill management tools");
+        tracing::debug!("Registered 4 skill management tools");
     }
 
     /// Register routine management tools.
@@ -390,8 +465,8 @@ impl ToolRegistry {
         engine: Arc<crate::agent::routine_engine::RoutineEngine>,
     ) {
         use crate::tools::builtin::{
-            RoutineCreateTool, RoutineDeleteTool, RoutineHistoryTool, RoutineListTool,
-            RoutineUpdateTool,
+            EventEmitTool, RoutineCreateTool, RoutineDeleteTool, RoutineFireTool,
+            RoutineHistoryTool, RoutineListTool, RoutineUpdateTool,
         };
         self.register_sync(Arc::new(RoutineCreateTool::new(
             Arc::clone(&store),
@@ -406,17 +481,27 @@ impl ToolRegistry {
             Arc::clone(&store),
             Arc::clone(&engine),
         )));
+        self.register_sync(Arc::new(RoutineFireTool::new(
+            Arc::clone(&store),
+            Arc::clone(&engine),
+        )));
         self.register_sync(Arc::new(RoutineHistoryTool::new(store)));
-        tracing::info!("Registered 5 routine management tools");
+        self.register_sync(Arc::new(EventEmitTool::new(engine)));
+        tracing::debug!("Registered 7 routine management tools");
     }
 
     /// Register message tool for sending messages to channels.
     pub async fn register_message_tools(
         &self,
         channel_manager: Arc<crate::channels::ChannelManager>,
+        extension_manager: Option<Arc<crate::extensions::ExtensionManager>>,
     ) {
         use crate::tools::builtin::MessageTool;
-        let tool = Arc::new(MessageTool::new(channel_manager));
+        let mut tool = MessageTool::new(channel_manager);
+        if let Some(extension_manager) = extension_manager {
+            tool = tool.with_extension_manager(extension_manager);
+        }
+        let tool = Arc::new(tool);
         *self.message_tool.write().await = Some(Arc::clone(&tool));
         self.tools
             .write()
@@ -426,7 +511,7 @@ impl ToolRegistry {
             .write()
             .await
             .insert("message".to_string());
-        tracing::info!("Registered message tool");
+        tracing::debug!("Registered message tool");
     }
 
     /// Set the default channel and target for the message tool.
@@ -435,6 +520,52 @@ impl ToolRegistry {
         if let Some(tool) = self.message_tool.read().await.as_ref() {
             tool.set_context(channel, target).await;
         }
+    }
+
+    /// Register image generation and editing tools.
+    ///
+    /// These tools allow the LLM to generate and edit images using cloud APIs.
+    /// Requires an API base URL, API key, and model name for the image generation backend.
+    pub fn register_image_tools(
+        &self,
+        api_base_url: String,
+        api_key: String,
+        gen_model: String,
+        base_dir: Option<std::path::PathBuf>,
+    ) {
+        use crate::tools::builtin::{ImageEditTool, ImageGenerateTool};
+        self.register_sync(Arc::new(ImageGenerateTool::new(
+            api_base_url.clone(),
+            api_key.clone(),
+            gen_model.clone(),
+        )));
+        self.register_sync(Arc::new(ImageEditTool::new(
+            api_base_url,
+            api_key,
+            gen_model,
+            base_dir,
+        )));
+        tracing::debug!("Registered 2 image tools (generate, edit)");
+    }
+
+    /// Register vision/image analysis tools.
+    ///
+    /// These tools allow the LLM to analyze images using a vision-capable model.
+    pub fn register_vision_tools(
+        &self,
+        api_base_url: String,
+        api_key: String,
+        vision_model: String,
+        base_dir: Option<std::path::PathBuf>,
+    ) {
+        use crate::tools::builtin::ImageAnalyzeTool;
+        self.register_sync(Arc::new(ImageAnalyzeTool::new(
+            api_base_url,
+            api_key,
+            vision_model,
+            base_dir,
+        )));
+        tracing::debug!("Registered 1 vision tool (analyze)");
     }
 
     /// Register the software builder tool.
@@ -446,25 +577,24 @@ impl ToolRegistry {
     pub async fn register_builder_tool(
         self: &Arc<Self>,
         llm: Arc<dyn LlmProvider>,
-        safety: Arc<SafetyLayer>,
         config: Option<BuilderConfig>,
-    ) {
+    ) -> Arc<dyn SoftwareBuilder> {
         // First register dev tools needed by the builder
         self.register_dev_tools();
 
-        // Create the builder (arg order: config, llm, safety, tools)
-        let builder = Arc::new(LlmSoftwareBuilder::new(
+        // Create the builder (arg order: config, llm, tools)
+        let builder: Arc<dyn SoftwareBuilder> = Arc::new(LlmSoftwareBuilder::new(
             config.unwrap_or_default(),
             llm,
-            safety,
             Arc::clone(self),
         ));
 
         // Register the build_software tool
-        self.register(Arc::new(BuildSoftwareTool::new(builder)))
+        self.register(Arc::new(BuildSoftwareTool::new(Arc::clone(&builder))))
             .await;
 
         tracing::info!("Registered software builder tool");
+        builder
     }
 
     /// Register a WASM tool from bytes.
@@ -534,7 +664,7 @@ impl ToolRegistry {
             );
         }
 
-        tracing::info!(name = reg.name, "Registered WASM tool");
+        tracing::debug!(name = reg.name, "Registered WASM tool");
         Ok(())
     }
 
@@ -591,7 +721,7 @@ impl ToolRegistry {
         .await
         .map_err(WasmRegistrationError::Wasm)?;
 
-        tracing::info!(
+        tracing::debug!(
             name = tool_with_binary.tool.name,
             user_id = user_id,
             trust_level = %tool_with_binary.tool.trust_level,
@@ -652,6 +782,7 @@ impl std::fmt::Debug for ToolRegistry {
 mod tests {
     use super::*;
     use crate::tools::registry::EchoTool;
+    use crate::tools::tool::ToolDiscoverySummary;
 
     #[tokio::test]
     async fn test_register_and_get() {
@@ -680,6 +811,71 @@ mod tests {
         let defs = registry.tool_definitions().await;
         assert_eq!(defs.len(), 1);
         assert_eq!(defs[0].name, "echo");
+    }
+
+    #[tokio::test]
+    async fn test_tool_definitions_use_tool_schema() {
+        struct DiscoveryTool;
+
+        #[async_trait::async_trait]
+        impl Tool for DiscoveryTool {
+            fn name(&self) -> &str {
+                "discovery_tool"
+            }
+
+            fn description(&self) -> &str {
+                "Discovery test tool"
+            }
+
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string" }
+                    }
+                })
+            }
+
+            fn discovery_schema(&self) -> serde_json::Value {
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string" },
+                        "extra": { "type": "string" }
+                    }
+                })
+            }
+
+            fn discovery_summary(&self) -> Option<ToolDiscoverySummary> {
+                Some(ToolDiscoverySummary {
+                    notes: vec!["extra guidance".into()],
+                    ..ToolDiscoverySummary::default()
+                })
+            }
+
+            async fn execute(
+                &self,
+                _params: serde_json::Value,
+                _ctx: &crate::context::JobContext,
+            ) -> Result<crate::tools::tool::ToolOutput, crate::tools::tool::ToolError> {
+                unreachable!()
+            }
+        }
+
+        let registry = ToolRegistry::new();
+        registry.register(Arc::new(DiscoveryTool)).await;
+
+        let defs = registry.tool_definitions().await;
+        let def = defs
+            .iter()
+            .find(|def| def.name == "discovery_tool")
+            .expect("tool definition should be present");
+        assert!(
+            def.description.contains("tool_info"),
+            "live tool definition should include schema hint: {}",
+            def.description
+        );
+        assert!(def.parameters.get("extra").is_none());
     }
 
     #[tokio::test]
@@ -730,5 +926,112 @@ mod tests {
             .to_string();
         assert_eq!(desc, original_desc);
         assert_ne!(desc, "EVIL SHADOW");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_register_and_read_no_panic() {
+        use std::sync::Arc as StdArc;
+
+        let registry = StdArc::new(ToolRegistry::new());
+        registry.register_builtin_tools();
+
+        // Spawn concurrent readers and check they don't panic
+        let mut handles = Vec::new();
+
+        // Readers
+        for _ in 0..10 {
+            let reg = StdArc::clone(&registry);
+            handles.push(tokio::spawn(async move {
+                let tools = reg.all().await;
+                assert!(!tools.is_empty());
+                let names = reg.list().await;
+                assert!(!names.is_empty());
+                let _ = reg.get("echo").await;
+                let _ = reg.has("echo").await;
+                let _ = reg.tool_definitions().await;
+            }));
+        }
+
+        // Concurrent register attempts (will be rejected as shadowing)
+        for _ in 0..5 {
+            let reg = StdArc::clone(&registry);
+            handles.push(tokio::spawn(async move {
+                // This will be rejected (echo is protected) but should not panic
+                reg.register(Arc::new(EchoTool)).await;
+            }));
+        }
+
+        for handle in handles {
+            handle.await.expect("task should not panic");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_tool_definitions_sorted_alphabetically() {
+        // Create tools with names that would NOT be alphabetical if inserted in this order.
+        struct ToolZ;
+        struct ToolA;
+        struct ToolM;
+
+        macro_rules! impl_tool {
+            ($ty:ident, $name:expr) => {
+                #[async_trait::async_trait]
+                impl Tool for $ty {
+                    fn name(&self) -> &str {
+                        $name
+                    }
+                    fn description(&self) -> &str {
+                        $name
+                    }
+                    fn parameters_schema(&self) -> serde_json::Value {
+                        serde_json::json!({})
+                    }
+                    async fn execute(
+                        &self,
+                        _: serde_json::Value,
+                        _: &crate::context::JobContext,
+                    ) -> Result<crate::tools::tool::ToolOutput, crate::tools::tool::ToolError> {
+                        unreachable!()
+                    }
+                }
+            };
+        }
+
+        impl_tool!(ToolZ, "zebra");
+        impl_tool!(ToolA, "alpha");
+        impl_tool!(ToolM, "middle");
+
+        let registry = ToolRegistry::new();
+        // Register in non-alphabetical order
+        registry.register(Arc::new(ToolZ)).await;
+        registry.register(Arc::new(ToolA)).await;
+        registry.register(Arc::new(ToolM)).await;
+
+        let defs = registry.tool_definitions().await;
+        let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(names, vec!["alpha", "middle", "zebra"]);
+    }
+
+    #[tokio::test]
+    async fn test_retain_only_filters_tools() {
+        let registry = ToolRegistry::new();
+        registry.register_builtin_tools();
+        let all = registry.list().await;
+        assert!(all.len() > 2, "expected multiple built-in tools");
+        registry.retain_only(&["echo", "time"]).await;
+        let remaining = registry.list().await;
+        assert_eq!(remaining.len(), 2);
+        assert!(remaining.contains(&"echo".to_string()));
+        assert!(remaining.contains(&"time".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_retain_only_empty_is_noop() {
+        let registry = ToolRegistry::new();
+        registry.register_builtin_tools();
+        let before = registry.list().await.len();
+        registry.retain_only(&[]).await;
+        let after = registry.list().await.len();
+        assert_eq!(before, after);
     }
 }

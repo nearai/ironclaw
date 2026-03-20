@@ -55,7 +55,9 @@ pub use embeddings::{
 };
 #[cfg(feature = "postgres")]
 pub use repository::Repository;
-pub use search::{RankedResult, SearchConfig, SearchResult, reciprocal_rank_fusion};
+pub use search::{
+    FusionStrategy, RankedResult, SearchConfig, SearchResult, fuse_results, reciprocal_rank_fusion,
+};
 
 use std::sync::Arc;
 
@@ -332,6 +334,8 @@ pub struct Workspace {
     storage: WorkspaceStorage,
     /// Embedding provider for semantic search.
     embeddings: Option<Arc<dyn EmbeddingProvider>>,
+    /// Default search configuration applied to all queries.
+    search_defaults: SearchConfig,
 }
 
 impl Workspace {
@@ -343,6 +347,7 @@ impl Workspace {
             agent_id: None,
             storage: WorkspaceStorage::Repo(Repository::new(pool)),
             embeddings: None,
+            search_defaults: SearchConfig::default(),
         }
     }
 
@@ -355,6 +360,7 @@ impl Workspace {
             agent_id: None,
             storage: WorkspaceStorage::Db(db),
             embeddings: None,
+            search_defaults: SearchConfig::default(),
         }
     }
 
@@ -367,6 +373,16 @@ impl Workspace {
     /// Set the embedding provider for semantic search.
     pub fn with_embeddings(mut self, provider: Arc<dyn EmbeddingProvider>) -> Self {
         self.embeddings = Some(provider);
+        self
+    }
+
+    /// Set the default search configuration from workspace search config.
+    pub fn with_search_config(mut self, config: &crate::config::WorkspaceSearchConfig) -> Self {
+        self.search_defaults = SearchConfig::default()
+            .with_fusion_strategy(config.fusion_strategy)
+            .with_rrf_k(config.rrf_k)
+            .with_fts_weight(config.fts_weight)
+            .with_vector_weight(config.vector_weight);
         self
     }
 
@@ -565,11 +581,26 @@ impl Workspace {
     ///
     /// Daily logs are raw, append-only notes for the current day.
     pub async fn append_daily_log(&self, entry: &str) -> Result<(), WorkspaceError> {
-        let today = Utc::now().date_naive();
+        self.append_daily_log_tz(entry, chrono_tz::Tz::UTC)
+            .await
+            .map(|_| ())
+    }
+
+    /// Append an entry to today's daily log using the given timezone.
+    ///
+    /// Returns the path that was written to (e.g. `daily/2024-01-15.md`).
+    pub async fn append_daily_log_tz(
+        &self,
+        entry: &str,
+        tz: chrono_tz::Tz,
+    ) -> Result<String, WorkspaceError> {
+        let now = crate::timezone::now_in_tz(tz);
+        let today = now.date_naive();
         let path = format!("daily/{}.md", today.format("%Y-%m-%d"));
-        let timestamp = Utc::now().format("%H:%M:%S");
+        let timestamp = now.format("%H:%M:%S");
         let timestamped_entry = format!("[{}] {}", timestamp, entry);
-        self.append(&path, &timestamped_entry).await
+        self.append(&path, &timestamped_entry).await?;
+        Ok(path)
     }
 
     // ==================== System Prompt ====================
@@ -584,6 +615,18 @@ impl Workspace {
         self.system_prompt_for_context(false).await
     }
 
+    /// Build the system prompt with timezone-aware daily log dates.
+    ///
+    /// Uses the given timezone to determine "today" and "yesterday" for daily log injection.
+    pub async fn system_prompt_for_context_tz(
+        &self,
+        is_group_chat: bool,
+        tz: chrono_tz::Tz,
+    ) -> Result<String, WorkspaceError> {
+        self.system_prompt_for_context_inner(is_group_chat, Some(tz))
+            .await
+    }
+
     /// Build the system prompt, optionally excluding personal memory.
     ///
     /// When `is_group_chat` is true, MEMORY.md is excluded to prevent
@@ -591,6 +634,16 @@ impl Workspace {
     pub async fn system_prompt_for_context(
         &self,
         is_group_chat: bool,
+    ) -> Result<String, WorkspaceError> {
+        self.system_prompt_for_context_inner(is_group_chat, None)
+            .await
+    }
+
+    /// Inner implementation for system prompt building.
+    async fn system_prompt_for_context_inner(
+        &self,
+        is_group_chat: bool,
+        tz: Option<chrono_tz::Tz>,
     ) -> Result<String, WorkspaceError> {
         let mut parts = Vec::new();
 
@@ -645,7 +698,10 @@ impl Workspace {
         }
 
         // Add today's memory context (last 2 days of daily logs)
-        let today = Utc::now().date_naive();
+        let today = match tz {
+            Some(t) => crate::timezone::today_in_tz(t),
+            None => Utc::now().date_naive(),
+        };
         let yesterday = today.pred_opt().unwrap_or(today);
 
         for date in [today, yesterday] {
@@ -669,13 +725,13 @@ impl Workspace {
     /// Hybrid search across all memory documents.
     ///
     /// Combines full-text search (BM25) with semantic search (vector similarity)
-    /// using Reciprocal Rank Fusion (RRF).
+    /// using the configured fusion strategy.
     pub async fn search(
         &self,
         query: &str,
         limit: usize,
     ) -> Result<Vec<SearchResult>, WorkspaceError> {
-        self.search_with_config(query, SearchConfig::default().with_limit(limit))
+        self.search_with_config(query, self.search_defaults.clone().with_limit(limit))
             .await
     }
 
@@ -847,13 +903,13 @@ impl Workspace {
                 Ok(_) => continue,
                 Err(WorkspaceError::DocumentNotFound { .. }) => {}
                 Err(e) => {
-                    tracing::warn!("Failed to check {}: {}", path, e);
+                    tracing::debug!("Failed to check {}: {}", path, e);
                     continue;
                 }
             }
 
             if let Err(e) = self.write(path, content).await {
-                tracing::warn!("Failed to seed {}: {}", path, e);
+                tracing::debug!("Failed to seed {}: {}", path, e);
             } else {
                 count += 1;
             }
@@ -937,7 +993,7 @@ impl Workspace {
                 Ok(_) => continue,
                 Err(WorkspaceError::DocumentNotFound { .. }) => {}
                 Err(e) => {
-                    tracing::warn!("Failed to check {}: {}", file_name, e);
+                    tracing::trace!("Failed to check {}: {}", file_name, e);
                     continue;
                 }
             }

@@ -10,7 +10,7 @@ file first, then adjust the code to match.
 ## Entry Points
 
 ```
-ironclaw onboard [--skip-auth] [--channels-only]
+ironclaw onboard [--skip-auth] [--channels-only] [--provider-only] [--quick]
 ```
 
 Explicit invocation. Loads `.env` files, runs the wizard, exits.
@@ -25,6 +25,8 @@ the wizard). Otherwise triggers when no database is configured:
 - `DATABASE_URL` env var is set
 - `LIBSQL_PATH` env var is set
 - `~/.ironclaw/ironclaw.db` exists on disk
+
+Auto-triggered onboarding uses **quick mode** by default.
 
 The `--no-onboard` CLI flag suppresses auto-detection.
 
@@ -50,7 +52,41 @@ The `--no-onboard` CLI flag suppresses auto-detection.
 
 ---
 
-## The 8-Step Wizard
+## Quick Mode
+
+Quick mode (`--quick` flag, or auto-triggered on first run) provides a
+near-instant onboarding experience by auto-defaulting everything except
+the LLM provider and model selection.
+
+```
+auto_setup_database()    → libsql at ~/.ironclaw/ironclaw.db (zero prompts)
+auto_setup_security()    → keychain or env var (zero prompts)
+Step 1/2: Inference Provider  ← only interactive step
+Step 2/2: Model Selection     ← only interactive step
+       ↓
+   save_and_summarize()      → includes tip to run `ironclaw onboard`
+```
+
+**`auto_setup_database()`:** Uses existing env vars if set (`DATABASE_URL`
+for postgres, `LIBSQL_PATH` for libsql) without prompting. Otherwise
+defaults to libsql at `~/.ironclaw/ironclaw.db`, creates the database,
+and runs migrations silently. Falls back to interactive mode only when
+just the postgres feature is compiled and no `DATABASE_URL` is set.
+
+**`auto_setup_security()`:** Checks for existing `SECRETS_MASTER_KEY`
+env var or OS keychain key. If neither exists, generates a new key and
+stores it in the keychain (macOS) or env var (Linux/other). Zero prompts
+except unavoidable macOS keychain dialogs.
+
+**`.env` preservation (fix for #751):** `write_bootstrap_env()` now uses
+`upsert_bootstrap_vars()` instead of `save_bootstrap_env()`, preserving
+user-added variables like `HTTP_HOST` across re-onboarding.
+
+The full 9-step wizard remains available via `ironclaw onboard`.
+
+---
+
+## The 9-Step Wizard
 
 ### Overview
 
@@ -62,7 +98,8 @@ Step 4: Model Selection
 Step 5: Embeddings
 Step 6: Channel Configuration
 Step 7: Extensions (tools)
-Step 8: Background Tasks (heartbeat)
+Step 8: Docker Sandbox
+Step 9: Background Tasks (heartbeat)
        ↓
    save_and_summarize()
 ```
@@ -77,6 +114,13 @@ Step 8: Background Tasks (heartbeat)
 
 **Goal:** Select backend, establish connection, run migrations.
 
+**Init delegation:** Backend-specific connection logic lives in `src/db/mod.rs`
+(`connect_without_migrations()`), not in the wizard. The wizard calls
+`test_database_connection()` which delegates to the db module factory. Feature-flag
+branching (`#[cfg(feature = ...)]`) is confined to `src/db/mod.rs`. PostgreSQL
+validation (version >= 15, pgvector) is handled by `validate_postgres()` in
+`src/db/mod.rs`.
+
 **Decision tree:**
 
 ```
@@ -84,26 +128,23 @@ Both features compiled?
 ├─ Yes → DATABASE_BACKEND env var set?
 │  ├─ Yes → use that backend
 │  └─ No  → interactive selection (PostgreSQL vs libSQL)
-├─ Only postgres feature → step_database_postgres()
-└─ Only libsql feature  → step_database_libsql()
+├─ Only postgres feature → prompt for DATABASE_URL, test connection
+└─ Only libsql feature  → prompt for path, test connection
 ```
 
-**PostgreSQL path** (`step_database_postgres`):
+**PostgreSQL path:**
 1. Check `DATABASE_URL` from env or settings
-2. Test connection (creates `deadpool_postgres::Pool`)
-3. Optionally run refinery migrations
-4. Store pool in `self.db_pool`
+2. Test connection via `connect_without_migrations()` (validates version, pgvector)
+3. Optionally run migrations
 
-**libSQL path** (`step_database_libsql`):
+**libSQL path:**
 1. Offer local path (default: `~/.ironclaw/ironclaw.db`)
 2. Optional Turso cloud sync (URL + auth token)
-3. Test connection (creates `LibSqlBackend`)
+3. Test connection via `connect_without_migrations()`
 4. Always run migrations (idempotent CREATE IF NOT EXISTS)
-5. Store backend in `self.db_backend`
 
-**Invariant:** After Step 1, exactly one of `self.db_pool` or
-`self.db_backend` is `Some`. This is required for settings persistence
-in `save_and_summarize()`.
+**Invariant:** After Step 1, `self.db` is `Some(Arc<dyn Database>)`.
+This is required for settings persistence in `save_and_summarize()`.
 
 ---
 
@@ -172,24 +213,26 @@ env-var mode or skipped secrets.
 | Anthropic | API key | `anthropic_api_key` | `ANTHROPIC_API_KEY` |
 | OpenAI | API key | `openai_api_key` | `OPENAI_API_KEY` |
 | Ollama | None | - | - |
-| OpenRouter¹ | API key | `llm_compatible_api_key` | `LLM_API_KEY` |
-| OpenAI-compatible¹ | Optional API key | `llm_compatible_api_key` | `LLM_API_KEY` |
+| OpenRouter | API key | `llm_openrouter_api_key` | `OPENROUTER_API_KEY` |
+| OpenAI-compatible | Optional API key | `llm_compatible_api_key` | `LLM_API_KEY` |
+| AWS Bedrock | AWS credentials (IAM, SSO, instance roles) | - | - |
 
-¹ OpenRouter and OpenAI-compatible share the same secret name and env var because
-OpenRouter is stored as `llm_backend = "openai_compatible"` under the hood.
-Switching between them overwrites the same credential slot.
+**OpenRouter** is a standalone registry provider (`providers.json` id `"openrouter"`)
+with its own secret name and env var. It is **not** stored as `openai_compatible`.
 
-**OpenRouter** (`setup_openrouter`):
-- Pre-configured OpenAI-compatible preset with base URL `https://openrouter.ai/api/v1`
-- Delegates to `setup_api_key_provider()` with a display name override ("OpenRouter")
-- Sets `llm_backend = "openai_compatible"` and `openai_compatible_base_url` automatically
-- Clears `selected_model` so Step 4 prompts for a model name (manual text input, no API-based model fetching)
+**OpenRouter** (`setup.kind = "api_key"` in `providers.json`):
+- Standalone provider with base URL `https://openrouter.ai/api/v1`
+- Delegates to `setup_api_key_provider()` with display name "OpenRouter"
+- API key is required (`api_key_required: true`)
+- Default model: `openai/gpt-4o`
 
 **API-key providers** (`setup_api_key_provider`):
 1. Check env var → if set, ask to reuse, persist to secrets store
 2. Otherwise prompt for key entry via `secret_input()`
 3. Store encrypted in secrets via `init_secrets_context()`
 4. **Cache key in `self.llm_api_key`** for model fetching in Step 4
+5. Preserve `selected_model` on a same-backend re-run; clear it only when
+   switching to a different backend
 
 **NEAR AI** (`setup_nearai`):
 - Calls `session_manager.ensure_authenticated()` which shows the auth menu:
@@ -299,7 +342,7 @@ key first, then falls back to the standard env var.
 1. Check `self.secrets_crypto` (set in Step 2) → use if available
 2. Else try `SECRETS_MASTER_KEY` env var
 3. Else try `get_master_key()` from keychain (only in `channels_only` mode)
-4. Create backend-appropriate secrets store (respects selected database backend)
+4. Create secrets store using `self.db` (`Arc<dyn Database>`)
 
 ---
 
@@ -479,7 +522,7 @@ pub struct Settings {
     pub secrets_master_key_source: KeySource, // Keychain | Env | None
 
     // Step 3: Inference
-    pub llm_backend: Option<String>,         // "nearai" | "anthropic" | "openai" | "ollama" | "openai_compatible"
+    pub llm_backend: Option<String>,         // "nearai" | "anthropic" | "openai" | "ollama" | "openai_compatible" | "bedrock"
     pub ollama_base_url: Option<String>,
     pub openai_compatible_base_url: Option<String>,
 
