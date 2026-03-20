@@ -1089,36 +1089,66 @@ async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) 
     // Increment running count (atomic: survives panics in the execution below)
     ctx.running_count.fetch_add(1, Ordering::Relaxed);
 
-    let result = match &routine.action {
-        RoutineAction::Lightweight {
-            prompt,
-            context_paths,
-            max_tokens,
-            use_tools,
-            max_tool_rounds,
-        } => {
-            execute_lightweight(
-                &ctx,
-                &routine,
-                prompt,
-                context_paths,
-                *max_tokens,
-                *use_tools,
-                *max_tool_rounds,
-            )
-            .await
-        }
-        RoutineAction::FullJob {
-            title,
-            description,
-            max_iterations,
-        } => {
-            let execution = FullJobExecutionConfig {
-                title,
-                description,
-                max_iterations: *max_iterations,
+    // Retry constants for transient lightweight execution failures.
+    const MAX_RETRIES: u32 = 3;
+    const BASE_DELAY_MS: u64 = 1000;
+
+    let is_lightweight = matches!(routine.action, RoutineAction::Lightweight { .. });
+
+    let result = {
+        let mut attempt = 0u32;
+        loop {
+            let execution_result = match &routine.action {
+                RoutineAction::Lightweight {
+                    prompt,
+                    context_paths,
+                    max_tokens,
+                    use_tools,
+                    max_tool_rounds,
+                } => {
+                    execute_lightweight(
+                        &ctx,
+                        &routine,
+                        prompt,
+                        context_paths,
+                        *max_tokens,
+                        *use_tools,
+                        *max_tool_rounds,
+                    )
+                    .await
+                }
+                RoutineAction::FullJob {
+                    title,
+                    description,
+                    max_iterations,
+                } => {
+                    let execution = FullJobExecutionConfig {
+                        title,
+                        description,
+                        max_iterations: *max_iterations,
+                    };
+                    execute_full_job(&ctx, &routine, &run, &execution).await
+                }
             };
-            execute_full_job(&ctx, &routine, &run, &execution).await
+
+            match execution_result {
+                Ok(outcome) => break Ok(outcome),
+                Err(ref e) if is_lightweight && e.is_retryable() && attempt < MAX_RETRIES => {
+                    attempt += 1;
+                    let delay = Duration::from_millis(
+                        BASE_DELAY_MS.saturating_mul(2u64.saturating_pow(attempt - 1)),
+                    );
+                    tracing::warn!(
+                        routine = %routine.name,
+                        attempt = attempt,
+                        max_retries = MAX_RETRIES,
+                        delay_ms = delay.as_millis() as u64,
+                        "Transient routine error, retrying: {}", e
+                    );
+                    tokio::time::sleep(delay).await;
+                }
+                Err(e) => break Err(e),
+            }
         }
     };
 
@@ -1828,6 +1858,7 @@ async fn execute_routine_tool(
 }
 
 /// Send a notification based on the routine's notify config and run status.
+#[allow(clippy::too_many_arguments)]
 async fn send_notification(
     tx: &mpsc::Sender<OutgoingResponse>,
     notify: &NotifyConfig,
@@ -2510,6 +2541,50 @@ mod tests {
                 "{:?} should not finalize the routine run",
                 state
             );
+        }
+    }
+
+    /// Regression test for #1320: transient errors are retried for lightweight
+    /// routines but not for full-job routines or hard failures.
+    #[test]
+    fn test_retry_classification_for_routine_errors() {
+        use crate::error::RoutineError;
+
+        // Transient errors (retryable for lightweight routines)
+        let transient_errors: Vec<RoutineError> = vec![
+            RoutineError::LlmFailed {
+                reason: "rate limit".into(),
+            },
+            RoutineError::EmptyResponse,
+            RoutineError::TruncatedResponse,
+        ];
+        for err in &transient_errors {
+            assert!(err.is_retryable(), "{} should be retryable", err);
+        }
+
+        // Hard failures (never retried)
+        let hard_errors: Vec<RoutineError> = vec![
+            RoutineError::Disabled {
+                name: "test".into(),
+            },
+            RoutineError::NotFound {
+                id: uuid::Uuid::new_v4(),
+            },
+            RoutineError::NotAuthorized {
+                id: uuid::Uuid::new_v4(),
+            },
+            RoutineError::MaxConcurrent {
+                name: "test".into(),
+            },
+            RoutineError::JobDispatchFailed {
+                reason: "no docker".into(),
+            },
+            RoutineError::Database {
+                reason: "connection refused".into(),
+            },
+        ];
+        for err in &hard_errors {
+            assert!(!err.is_retryable(), "{} should NOT be retryable", err);
         }
     }
 

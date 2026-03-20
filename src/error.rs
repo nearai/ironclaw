@@ -407,6 +407,21 @@ pub enum RoutineError {
     TruncatedResponse,
 }
 
+impl RoutineError {
+    /// Whether this error is transient and worth retrying with backoff.
+    ///
+    /// Retryable: LLM failures, empty responses, truncated responses.
+    /// Non-retryable: configuration errors, authorization, resource limits, DB errors.
+    pub fn is_retryable(&self) -> bool {
+        matches!(
+            self,
+            RoutineError::LlmFailed { .. }
+                | RoutineError::EmptyResponse
+                | RoutineError::TruncatedResponse
+        )
+    }
+}
+
 /// Result type alias for the agent.
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -512,6 +527,66 @@ mod tests {
         };
         let msg = err.to_string();
         assert!(msg.contains("bad format"), "Should mention reason: {msg}");
+    }
+
+    #[test]
+    fn routine_error_retryable_classification() {
+        // Transient errors should be retryable
+        assert!(
+            RoutineError::LlmFailed {
+                reason: "timeout".into()
+            }
+            .is_retryable()
+        );
+        assert!(RoutineError::EmptyResponse.is_retryable());
+        assert!(RoutineError::TruncatedResponse.is_retryable());
+
+        // Hard failures should NOT be retryable
+        assert!(!RoutineError::Disabled {
+            name: "test".into()
+        }
+        .is_retryable());
+        assert!(!RoutineError::JobDispatchFailed {
+            reason: "no docker".into()
+        }
+        .is_retryable());
+        assert!(!RoutineError::Database {
+            reason: "conn refused".into()
+        }
+        .is_retryable());
+        assert!(!RoutineError::NotFound {
+            id: Uuid::new_v4()
+        }
+        .is_retryable());
+        assert!(!RoutineError::NotAuthorized {
+            id: Uuid::new_v4()
+        }
+        .is_retryable());
+        assert!(!RoutineError::MaxConcurrent {
+            name: "test".into()
+        }
+        .is_retryable());
+        assert!(!RoutineError::UnknownTriggerType {
+            trigger_type: "x".into()
+        }
+        .is_retryable());
+        assert!(!RoutineError::UnknownActionType {
+            action_type: "x".into()
+        }
+        .is_retryable());
+        assert!(!RoutineError::MissingField {
+            context: "c".into(),
+            field: "f".into()
+        }
+        .is_retryable());
+        assert!(!RoutineError::InvalidCron {
+            reason: "bad".into()
+        }
+        .is_retryable());
+        assert!(!RoutineError::UnknownRunStatus {
+            status: "bad".into()
+        }
+        .is_retryable());
     }
 
     #[test]
