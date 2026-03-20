@@ -35,7 +35,8 @@ use crate::settings::Settings;
 pub use self::agent::AgentConfig;
 pub use self::builder::BuilderModeConfig;
 pub use self::channels::{
-    ChannelsConfig, CliConfig, DEFAULT_GATEWAY_PORT, GatewayConfig, HttpConfig, SignalConfig,
+    ChannelsConfig, CliConfig, DEFAULT_GATEWAY_PORT, GatewayConfig, GatewayOidcConfig, HttpConfig,
+    SignalConfig,
 };
 pub use self::database::{DatabaseBackend, DatabaseConfig, SslMode, default_libsql_path};
 pub use self::embeddings::EmbeddingsConfig;

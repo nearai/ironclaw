@@ -218,7 +218,7 @@ async fn start_test_server_with_provider(
     });
 
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-    let bound_addr = start_server(addr, state.clone(), AUTH_TOKEN.to_string())
+    let bound_addr = start_server(addr, state.clone(), AUTH_TOKEN.to_string(), None)
         .await
         .expect("Failed to start test server");
 
@@ -710,7 +710,7 @@ async fn test_no_llm_provider_returns_503() {
     });
 
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-    let bound_addr = start_server(addr, state, AUTH_TOKEN.to_string())
+    let bound_addr = start_server(addr, state, AUTH_TOKEN.to_string(), None)
         .await
         .unwrap();
 
@@ -741,6 +741,7 @@ async fn test_chat_completions_body_too_large() {
         .build();
     let auth_state = ironclaw::channels::web::auth::AuthState {
         token: AUTH_TOKEN.to_string(),
+        oidc: None,
     };
 
     let app = Router::new()

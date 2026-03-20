@@ -100,7 +100,13 @@ document.getElementById('token-input').addEventListener('keydown', (e) => {
   if (e.key === 'Enter') authenticate();
 });
 
-// Auto-authenticate from URL param or saved session
+// Auto-authenticate from URL param, saved session, or OIDC proxy header.
+//
+// When behind a reverse proxy that injects auth (e.g., AWS ALB with OIDC),
+// the proxy already authenticates every request. We probe /api/gateway/status
+// without a token — if the proxy's header lets us through, skip the login
+// screen entirely. The sentinel token `__oidc__` tells apiFetch and SSE
+// setup to omit the Authorization header (the proxy provides auth).
 (function autoAuth() {
   const params = new URLSearchParams(window.location.search);
   const urlToken = params.get('token');
@@ -112,12 +118,21 @@ document.getElementById('token-input').addEventListener('keydown', (e) => {
   const saved = sessionStorage.getItem('ironclaw_token');
   if (saved) {
     document.getElementById('token-input').value = saved;
-    // Hide auth screen immediately to prevent flash, authenticate() will
-    // restore it if the token turns out to be invalid.
     document.getElementById('auth-screen').style.display = 'none';
     document.getElementById('app').style.display = 'flex';
     authenticate();
+    return;
   }
+  // Probe for proxy-injected OIDC auth (no token needed from the client).
+  fetch('/api/gateway/status', { credentials: 'include' }).then(function(r) {
+    if (r.ok) {
+      token = '__oidc__';
+      sessionStorage.setItem('ironclaw_token', token);
+      document.getElementById('auth-screen').style.display = 'none';
+      document.getElementById('app').style.display = 'flex';
+      initApp();
+    }
+  }).catch(function() { /* proxy auth not available, show login */ });
 })();
 
 // --- API helper ---
@@ -125,7 +140,10 @@ document.getElementById('token-input').addEventListener('keydown', (e) => {
 function apiFetch(path, options) {
   const opts = options || {};
   opts.headers = opts.headers || {};
-  opts.headers['Authorization'] = 'Bearer ' + token;
+  // In OIDC mode the reverse proxy provides auth; skip the Authorization header.
+  if (token && token !== '__oidc__') {
+    opts.headers['Authorization'] = 'Bearer ' + token;
+  }
   if (opts.body && typeof opts.body === 'object') {
     opts.headers['Content-Type'] = 'application/json';
     opts.body = JSON.stringify(opts.body);
@@ -234,7 +252,11 @@ function updateRestartButtonVisibility() {
 function connectSSE() {
   if (eventSource) eventSource.close();
 
-  eventSource = new EventSource('/api/chat/events?token=' + encodeURIComponent(token));
+  // In OIDC mode the reverse proxy provides auth; no query token needed.
+  const chatSseUrl = (token && token !== '__oidc__')
+    ? '/api/chat/events?token=' + encodeURIComponent(token)
+    : '/api/chat/events';
+  eventSource = new EventSource(chatSseUrl);
 
   eventSource.onopen = () => {
     document.getElementById('sse-dot').classList.remove('disconnected');
@@ -2138,7 +2160,10 @@ let logBuffer = []; // buffer while paused
 function connectLogSSE() {
   if (logEventSource) logEventSource.close();
 
-  logEventSource = new EventSource('/api/logs/events?token=' + encodeURIComponent(token));
+  const logSseUrl = (token && token !== '__oidc__')
+    ? '/api/logs/events?token=' + encodeURIComponent(token)
+    : '/api/logs/events';
+  logEventSource = new EventSource(logSseUrl);
 
   logEventSource.addEventListener('log', (e) => {
     const entry = JSON.parse(e.data);

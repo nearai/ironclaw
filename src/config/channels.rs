@@ -45,6 +45,26 @@ pub struct GatewayConfig {
     /// Bearer token for authentication. Random hex generated at startup if unset.
     pub auth_token: Option<String>,
     pub user_id: String,
+    /// OIDC JWT authentication (e.g., behind AWS ALB with Okta).
+    pub oidc: Option<GatewayOidcConfig>,
+}
+
+/// OIDC JWT authentication configuration for the web gateway.
+///
+/// When enabled, the gateway accepts signed JWTs from a configurable HTTP
+/// header (e.g., `x-amzn-oidc-data` from AWS ALB). Keys are fetched from
+/// a JWKS endpoint and cached for 1 hour.
+#[derive(Debug, Clone)]
+pub struct GatewayOidcConfig {
+    /// HTTP header containing the JWT (default: `x-amzn-oidc-data`).
+    pub header: String,
+    /// JWKS URL for key discovery. Supports `{kid}` placeholder for
+    /// ALB-style per-key PEM endpoints, and standard `/.well-known/jwks.json`.
+    pub jwks_url: String,
+    /// Expected `iss` claim. Validated if set.
+    pub issuer: Option<String>,
+    /// Expected `aud` claim. Validated if set.
+    pub audience: Option<String>,
 }
 
 /// Signal channel configuration (signal-cli daemon HTTP/JSON-RPC).
@@ -111,6 +131,23 @@ impl ChannelsConfig {
 
         let gateway_enabled = parse_bool_env("GATEWAY_ENABLED", cs.gateway_enabled)?;
         let gateway = if gateway_enabled {
+            let oidc_enabled = parse_bool_env("GATEWAY_OIDC_ENABLED", false)?;
+            let oidc = if oidc_enabled {
+                let jwks_url =
+                    optional_env("GATEWAY_OIDC_JWKS_URL")?.ok_or(ConfigError::InvalidValue {
+                        key: "GATEWAY_OIDC_JWKS_URL".to_string(),
+                        message: "required when GATEWAY_OIDC_ENABLED=true".to_string(),
+                    })?;
+                Some(GatewayOidcConfig {
+                    header: optional_env("GATEWAY_OIDC_HEADER")?
+                        .unwrap_or_else(|| "x-amzn-oidc-data".to_string()),
+                    jwks_url,
+                    issuer: optional_env("GATEWAY_OIDC_ISSUER")?,
+                    audience: optional_env("GATEWAY_OIDC_AUDIENCE")?,
+                })
+            } else {
+                None
+            };
             Some(GatewayConfig {
                 host: optional_env("GATEWAY_HOST")?
                     .or_else(|| cs.gateway_host.clone())
@@ -122,6 +159,7 @@ impl ChannelsConfig {
                 auth_token: optional_env("GATEWAY_AUTH_TOKEN")?
                     .or_else(|| cs.gateway_auth_token.clone()),
                 user_id: owner_id.to_string(),
+                oidc,
             })
         } else {
             None
@@ -277,6 +315,7 @@ mod tests {
             port: 3000,
             auth_token: Some("tok-abc".to_string()),
             user_id: "default".to_string(),
+            oidc: None,
         };
         assert_eq!(cfg.host, "127.0.0.1");
         assert_eq!(cfg.port, 3000);
@@ -291,6 +330,7 @@ mod tests {
             port: 3001,
             auth_token: None,
             user_id: "anon".to_string(),
+            oidc: None,
         };
         assert!(cfg.auth_token.is_none());
     }
