@@ -7,17 +7,18 @@ use std::sync::Arc;
 
 use clap::Subcommand;
 
-use crate::workspace::{EmbeddingProvider, SearchConfig, Workspace};
+use crate::workspace::{EmbeddingCacheConfig, EmbeddingProvider, SearchConfig, Workspace};
 
 /// Run a memory command using the Database trait (works with any backend).
 pub async fn run_memory_command_with_db(
     cmd: MemoryCommand,
     db: std::sync::Arc<dyn crate::db::Database>,
     embeddings: Option<Arc<dyn EmbeddingProvider>>,
+    cache_config: EmbeddingCacheConfig,
 ) -> anyhow::Result<()> {
     let mut workspace = Workspace::new_with_db("default", db);
     if let Some(emb) = embeddings {
-        workspace = workspace.with_embeddings(emb);
+        workspace = workspace.with_embeddings_cached(emb, cache_config);
     }
 
     match cmd {
@@ -85,10 +86,11 @@ pub async fn run_memory_command(
     cmd: MemoryCommand,
     pool: deadpool_postgres::Pool,
     embeddings: Option<Arc<dyn EmbeddingProvider>>,
+    cache_config: EmbeddingCacheConfig,
 ) -> anyhow::Result<()> {
     let mut workspace = Workspace::new("default", pool);
     if let Some(emb) = embeddings {
-        workspace = workspace.with_embeddings(emb);
+        workspace = workspace.with_embeddings_cached(emb, cache_config);
     }
 
     match cmd {

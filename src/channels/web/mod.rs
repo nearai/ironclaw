@@ -374,6 +374,7 @@ impl Channel for GatewayChannel {
                 tool_name,
                 description,
                 parameters,
+                allow_always,
             } => SseEvent::ApprovalNeeded {
                 request_id,
                 tool_name,
@@ -381,6 +382,7 @@ impl Channel for GatewayChannel {
                 parameters: serde_json::to_string_pretty(&parameters)
                     .unwrap_or_else(|_| parameters.to_string()),
                 thread_id,
+                allow_always,
             },
             StatusUpdate::AuthRequired {
                 extension_name,

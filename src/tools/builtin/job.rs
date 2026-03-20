@@ -1005,7 +1005,8 @@ impl Tool for JobStatusTool {
                     "created_at": job_ctx.created_at.to_rfc3339(),
                     "started_at": job_ctx.started_at.map(|t| t.to_rfc3339()),
                     "completed_at": job_ctx.completed_at.map(|t| t.to_rfc3339()),
-                    "actual_cost": job_ctx.actual_cost.to_string()
+                    "actual_cost": job_ctx.actual_cost.to_string(),
+                    "fallback_deliverable": job_ctx.metadata.get("fallback_deliverable"),
                 });
                 Ok(ToolOutput::success(result, start.elapsed()))
             }
@@ -1384,7 +1385,7 @@ mod tests {
         let tool = CreateJobTool::new(manager.clone());
 
         // Without sandbox deps, it should use the local path
-        assert!(!tool.sandbox_enabled());
+        assert!(!tool.sandbox_enabled()); // safety: test
 
         let params = serde_json::json!({
             "title": "Test Job",
@@ -1392,12 +1393,13 @@ mod tests {
         });
 
         let ctx = JobContext::default();
-        let result = tool.execute(params, &ctx).await.unwrap();
+        let result = tool.execute(params, &ctx).await.unwrap(); // safety: test
 
-        let job_id = result.result.get("job_id").unwrap().as_str().unwrap();
-        assert!(!job_id.is_empty());
+        let job_id = result.result.get("job_id").unwrap().as_str().unwrap(); // safety: test
+        assert!(!job_id.is_empty()); // safety: test
         assert_eq!(
-            result.result.get("status").unwrap().as_str().unwrap(),
+            /* safety: test */
+            result.result.get("status").unwrap().as_str().unwrap(), // safety: test
             "pending"
         );
     }
@@ -1409,11 +1411,11 @@ mod tests {
         // Without sandbox
         let tool = CreateJobTool::new(Arc::clone(&manager));
         let schema = tool.parameters_schema();
-        let props = schema.get("properties").unwrap().as_object().unwrap();
-        assert!(props.contains_key("title"));
-        assert!(props.contains_key("description"));
-        assert!(!props.contains_key("wait"));
-        assert!(!props.contains_key("mode"));
+        let props = schema.get("properties").unwrap().as_object().unwrap(); // safety: test
+        assert!(props.contains_key("title")); // safety: test
+        assert!(props.contains_key("description")); // safety: test
+        assert!(!props.contains_key("wait")); // safety: test
+        assert!(!props.contains_key("mode")); // safety: test
     }
 
     #[test]
@@ -1422,7 +1424,7 @@ mod tests {
 
         // Without sandbox: default timeout
         let tool = CreateJobTool::new(Arc::clone(&manager));
-        assert_eq!(tool.execution_timeout(), Duration::from_secs(30));
+        assert_eq!(tool.execution_timeout(), Duration::from_secs(30)); // safety: test
     }
 
     #[tokio::test]
@@ -1455,23 +1457,23 @@ mod tests {
         let manager = Arc::new(ContextManager::new(5));
 
         // Create some jobs
-        manager.create_job("Job 1", "Desc 1").await.unwrap();
-        manager.create_job("Job 2", "Desc 2").await.unwrap();
+        manager.create_job("Job 1", "Desc 1").await.unwrap(); // safety: test
+        manager.create_job("Job 2", "Desc 2").await.unwrap(); // safety: test
 
         let tool = ListJobsTool::new(manager);
 
         let params = serde_json::json!({});
         let ctx = JobContext::default();
-        let result = tool.execute(params, &ctx).await.unwrap();
+        let result = tool.execute(params, &ctx).await.unwrap(); // safety: test
 
-        let jobs = result.result.get("jobs").unwrap().as_array().unwrap();
-        assert_eq!(jobs.len(), 2);
+        let jobs = result.result.get("jobs").unwrap().as_array().unwrap(); // safety: test
+        assert_eq!(jobs.len(), 2); // safety: test
     }
 
     #[tokio::test]
     async fn test_job_status_tool() {
         let manager = Arc::new(ContextManager::new(5));
-        let job_id = manager.create_job("Test Job", "Description").await.unwrap();
+        let job_id = manager.create_job("Test Job", "Description").await.unwrap(); // safety: test
 
         let tool = JobStatusTool::new(manager);
 
@@ -1479,10 +1481,11 @@ mod tests {
             "job_id": job_id.to_string()
         });
         let ctx = JobContext::default();
-        let result = tool.execute(params, &ctx).await.unwrap();
+        let result = tool.execute(params, &ctx).await.unwrap(); // safety: test
 
         assert_eq!(
-            result.result.get("title").unwrap().as_str().unwrap(),
+            /* safety: test */
+            result.result.get("title").unwrap().as_str().unwrap(), // safety: test
             "Test Job"
         );
     }
@@ -1496,8 +1499,9 @@ mod tests {
         let missing_title = tool
             .execute(serde_json::json!({ "description": "A test job" }), &ctx)
             .await;
-        assert!(missing_title.is_err());
+        assert!(missing_title.is_err()); // safety: test
         assert!(
+            /* safety: test */
             missing_title
                 .unwrap_err()
                 .to_string()
@@ -1507,8 +1511,9 @@ mod tests {
         let missing_description = tool
             .execute(serde_json::json!({ "title": "Test Job" }), &ctx)
             .await;
-        assert!(missing_description.is_err());
+        assert!(missing_description.is_err()); // safety: test
         assert!(
+            /* safety: test */
             missing_description
                 .unwrap_err()
                 .to_string()
@@ -1522,19 +1527,19 @@ mod tests {
         let pending_id = manager
             .create_job_for_user("default", "Pending Job", "Todo")
             .await
-            .unwrap();
+            .unwrap(); // safety: test
         let completed_id = manager
             .create_job_for_user("default", "Completed Job", "Done")
             .await
-            .unwrap();
+            .unwrap(); // safety: test
         let failed_id = manager
             .create_job_for_user("default", "Failed Job", "Oops")
             .await
-            .unwrap();
+            .unwrap(); // safety: test
         manager
             .create_job_for_user("other-user", "Other User Job", "Ignore")
             .await
-            .unwrap();
+            .unwrap(); // safety: test
 
         manager
             .update_context(completed_id, |ctx| {
@@ -1542,41 +1547,44 @@ mod tests {
                 ctx.transition_to(JobState::Completed, Some("done".to_string()))
             })
             .await
-            .unwrap()
-            .unwrap();
+            .unwrap() // safety: test
+            .unwrap(); // safety: test
         manager
             .update_context(failed_id, |ctx| {
                 ctx.transition_to(JobState::InProgress, None)?;
                 ctx.transition_to(JobState::Failed, Some("boom".to_string()))
             })
             .await
-            .unwrap()
-            .unwrap();
+            .unwrap() // safety: test
+            .unwrap(); // safety: test
 
         let tool = ListJobsTool::new(Arc::clone(&manager));
         let ctx = JobContext::default();
-        let result = tool.execute(serde_json::json!({}), &ctx).await.unwrap();
+        let result = tool.execute(serde_json::json!({}), &ctx).await.unwrap(); // safety: test
 
-        let jobs = result.result.get("jobs").unwrap().as_array().unwrap();
-        assert_eq!(jobs.len(), 3);
+        let jobs = result.result.get("jobs").unwrap().as_array().unwrap(); // safety: test
+        assert_eq!(jobs.len(), 3); // safety: test
         assert!(jobs.iter().any(|job| {
+            // safety: test
             job.get("job_id").and_then(|v| v.as_str()) == Some(&pending_id.to_string())
                 && job.get("status").and_then(|v| v.as_str()) == Some("Pending")
         }));
         assert!(jobs.iter().any(|job| {
+            // safety: test
             job.get("job_id").and_then(|v| v.as_str()) == Some(&completed_id.to_string())
                 && job.get("status").and_then(|v| v.as_str()) == Some("Completed")
         }));
         assert!(jobs.iter().any(|job| {
+            // safety: test
             job.get("job_id").and_then(|v| v.as_str()) == Some(&failed_id.to_string())
                 && job.get("status").and_then(|v| v.as_str()) == Some("Failed")
         }));
 
-        let summary = result.result.get("summary").unwrap();
-        assert_eq!(summary.get("total").and_then(|v| v.as_u64()), Some(3));
-        assert_eq!(summary.get("pending").and_then(|v| v.as_u64()), Some(1));
-        assert_eq!(summary.get("completed").and_then(|v| v.as_u64()), Some(1));
-        assert_eq!(summary.get("failed").and_then(|v| v.as_u64()), Some(1));
+        let summary = result.result.get("summary").unwrap(); // safety: test
+        assert_eq!(summary.get("total").and_then(|v| v.as_u64()), Some(3)); // safety: test
+        assert_eq!(summary.get("pending").and_then(|v| v.as_u64()), Some(1)); // safety: test
+        assert_eq!(summary.get("completed").and_then(|v| v.as_u64()), Some(1)); // safety: test
+        assert_eq!(summary.get("failed").and_then(|v| v.as_u64()), Some(1)); // safety: test
     }
 
     #[tokio::test]
@@ -1585,29 +1593,30 @@ mod tests {
         let job_id = manager
             .create_job_for_user("default", "Transition Job", "Track me")
             .await
-            .unwrap();
+            .unwrap(); // safety: test
         manager
             .update_context(job_id, |ctx| {
                 ctx.transition_to(JobState::InProgress, Some("started".to_string()))?;
                 ctx.transition_to(JobState::Completed, Some("finished".to_string()))
             })
             .await
-            .unwrap()
-            .unwrap();
+            .unwrap() // safety: test
+            .unwrap(); // safety: test
 
         let tool = JobStatusTool::new(Arc::clone(&manager));
         let ctx = JobContext::default();
         let result = tool
             .execute(serde_json::json!({ "job_id": job_id.to_string() }), &ctx)
             .await
-            .unwrap();
+            .unwrap(); // safety: test
 
         assert_eq!(
+            /* safety: test */
             result.result.get("status").and_then(|v| v.as_str()),
             Some("Completed")
         );
-        assert!(result.result.get("started_at").unwrap().is_string());
-        assert!(result.result.get("completed_at").unwrap().is_string());
+        assert!(result.result.get("started_at").unwrap().is_string()); // safety: test
+        assert!(result.result.get("completed_at").unwrap().is_string()); // safety: test
     }
 
     #[tokio::test]
@@ -1616,26 +1625,27 @@ mod tests {
         let job_id = manager
             .create_job_for_user("default", "Running Job", "In progress")
             .await
-            .unwrap();
+            .unwrap(); // safety: test
         manager
             .update_context(job_id, |ctx| ctx.transition_to(JobState::InProgress, None))
             .await
-            .unwrap()
-            .unwrap();
+            .unwrap() // safety: test
+            .unwrap(); // safety: test
 
         let tool = CancelJobTool::new(Arc::clone(&manager));
         let ctx = JobContext::default();
         let result = tool
             .execute(serde_json::json!({ "job_id": job_id.to_string() }), &ctx)
             .await
-            .unwrap();
+            .unwrap(); // safety: test
 
         assert_eq!(
+            /* safety: test */
             result.result.get("status").and_then(|v| v.as_str()),
             Some("cancelled")
         );
-        let updated = manager.get_context(job_id).await.unwrap();
-        assert_eq!(updated.state, JobState::Cancelled);
+        let updated = manager.get_context(job_id).await.unwrap(); // safety: test
+        assert_eq!(updated.state, JobState::Cancelled); // safety: test
     }
 
     #[tokio::test]
@@ -1644,39 +1654,81 @@ mod tests {
         let job_id = manager
             .create_job_for_user("default", "Completed Job", "Already done")
             .await
-            .unwrap();
+            .unwrap(); // safety: test
         manager
             .update_context(job_id, |ctx| {
                 ctx.transition_to(JobState::InProgress, None)?;
                 ctx.transition_to(JobState::Completed, Some("done".to_string()))
             })
             .await
-            .unwrap()
-            .unwrap();
+            .unwrap() // safety: test
+            .unwrap(); // safety: test
 
         let tool = CancelJobTool::new(Arc::clone(&manager));
         let ctx = JobContext::default();
         let result = tool
             .execute(serde_json::json!({ "job_id": job_id.to_string() }), &ctx)
             .await
-            .unwrap();
+            .unwrap(); // safety: test
 
-        let error = result.result.get("error").and_then(|v| v.as_str()).unwrap();
-        assert!(error.contains("Cannot cancel job"));
-        assert!(error.contains("completed"));
+        let error = result.result.get("error").and_then(|v| v.as_str()).unwrap(); // safety: test
+        assert!(error.contains("Cannot cancel job")); // safety: test
+        assert!(error.contains("completed")); // safety: test
+    }
+
+    #[tokio::test]
+    async fn test_job_status_includes_fallback_deliverable() {
+        let manager = Arc::new(ContextManager::new(5));
+        let job_id = manager
+            .create_job_for_user("default", "Failing Job", "Will fail")
+            .await
+            .unwrap(); // safety: test
+
+        // Inject a real FallbackDeliverable into the job metadata.
+        let fallback = serde_json::json!({
+            "partial": true,
+            "failure_reason": "max iterations",
+            "last_action": null,
+            "action_stats": { "total": 5, "successful": 3, "failed": 2 },
+            "tokens_used": 1000,
+            "cost": "0.05",
+            "elapsed_secs": 12.5,
+            "repair_attempts": 1,
+        });
+        manager
+            .update_context(job_id, |ctx| {
+                ctx.metadata = serde_json::json!({ "fallback_deliverable": fallback.clone() });
+                Ok::<(), String>(())
+            })
+            .await
+            .unwrap() // safety: test
+            .unwrap(); // safety: test
+
+        let tool = JobStatusTool::new(manager);
+        let params = serde_json::json!({ "job_id": job_id.to_string() });
+        let ctx = JobContext::default();
+        let result = tool.execute(params, &ctx).await.unwrap(); // safety: test
+
+        let fb = result.result.get("fallback_deliverable").unwrap(); // safety: test
+        assert_eq!(fb.get("partial").unwrap(), true); // safety: test
+        assert_eq!(fb.get("failure_reason").unwrap(), "max iterations"); // safety: test
+        let stats = fb.get("action_stats").unwrap(); // safety: test
+        assert_eq!(stats.get("total").unwrap(), 5); // safety: test
+        assert_eq!(stats.get("successful").unwrap(), 3); // safety: test
+        assert_eq!(stats.get("failed").unwrap(), 2); // safety: test
     }
 
     #[test]
     fn test_resolve_project_dir_auto() {
         let project_id = Uuid::new_v4();
-        let (dir, browse_id) = resolve_project_dir(None, project_id).unwrap();
-        assert!(dir.exists());
-        assert!(dir.ends_with(project_id.to_string()));
-        assert_eq!(browse_id, project_id.to_string());
+        let (dir, browse_id) = resolve_project_dir(None, project_id).unwrap(); // safety: test
+        assert!(dir.exists()); // safety: test
+        assert!(dir.ends_with(project_id.to_string())); // safety: test
+        assert_eq!(browse_id, project_id.to_string()); // safety: test
 
         // Must be under the projects base
-        let base = projects_base().canonicalize().unwrap();
-        assert!(dir.starts_with(&base));
+        let base = projects_base().canonicalize().unwrap(); // safety: test
+        assert!(dir.starts_with(&base)); // safety: test
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1684,33 +1736,34 @@ mod tests {
     #[test]
     fn test_resolve_project_dir_explicit_under_base() {
         let base = projects_base();
-        std::fs::create_dir_all(&base).unwrap();
+        std::fs::create_dir_all(&base).unwrap(); // safety: test
         let explicit = base.join("test_explicit_project");
         // Explicit paths must already exist (no auto-create).
-        std::fs::create_dir_all(&explicit).unwrap();
+        std::fs::create_dir_all(&explicit).unwrap(); // safety: test
         let project_id = Uuid::new_v4();
 
-        let (dir, browse_id) = resolve_project_dir(Some(explicit.clone()), project_id).unwrap();
-        assert!(dir.exists());
-        assert_eq!(browse_id, "test_explicit_project");
+        let (dir, browse_id) = resolve_project_dir(Some(explicit.clone()), project_id).unwrap(); // safety: test
+        assert!(dir.exists()); // safety: test
+        assert_eq!(browse_id, "test_explicit_project"); // safety: test
 
-        let canonical_base = base.canonicalize().unwrap();
-        assert!(dir.starts_with(&canonical_base));
+        let canonical_base = base.canonicalize().unwrap(); // safety: test
+        assert!(dir.starts_with(&canonical_base)); // safety: test
 
         let _ = std::fs::remove_dir_all(&explicit);
     }
 
     #[test]
     fn test_resolve_project_dir_rejects_outside_base() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = tempfile::tempdir().unwrap(); // safety: test
         let escape_attempt = tmp.path().join("evil_project");
         // Don't create it: explicit paths that don't exist are rejected
         // before the prefix check even runs.
 
         let result = resolve_project_dir(Some(escape_attempt), Uuid::new_v4());
-        assert!(result.is_err());
+        assert!(result.is_err()); // safety: test
         let err = result.unwrap_err().to_string();
         assert!(
+            /* safety: test */
             err.contains("does not exist"),
             "expected 'does not exist' error, got: {}",
             err
@@ -1720,13 +1773,14 @@ mod tests {
     #[test]
     fn test_resolve_project_dir_rejects_outside_base_existing() {
         // A directory that exists but is outside the projects base.
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = tempfile::tempdir().unwrap(); // safety: test
         let outside = tmp.path().to_path_buf();
 
         let result = resolve_project_dir(Some(outside), Uuid::new_v4());
-        assert!(result.is_err());
+        assert!(result.is_err()); // safety: test
         let err = result.unwrap_err().to_string();
         assert!(
+            /* safety: test */
             err.contains("must be under"),
             "expected 'must be under' error, got: {}",
             err
@@ -1740,7 +1794,7 @@ mod tests {
         let traversal = base.join("legit").join("..").join("..").join(".ssh");
 
         let result = resolve_project_dir(Some(traversal), Uuid::new_v4());
-        assert!(result.is_err(), "traversal path should be rejected");
+        assert!(result.is_err(), "traversal path should be rejected"); // safety: test
 
         // Traversal path that actually resolves gets the prefix check.
         // `base/../` resolves to the parent of projects base, which is outside.
@@ -1748,7 +1802,7 @@ mod tests {
         std::fs::create_dir_all(&base_parent).ok();
         if base_parent.exists() {
             let result = resolve_project_dir(Some(base_parent.clone()), Uuid::new_v4());
-            assert!(result.is_err(), "path outside base should be rejected");
+            assert!(result.is_err(), "path outside base should be rejected"); // safety: test
             let _ = std::fs::remove_dir_all(&base_parent);
         }
     }
@@ -1762,8 +1816,9 @@ mod tests {
         ));
         let tool = CreateJobTool::new(manager).with_sandbox(jm, None);
         let schema = tool.parameters_schema();
-        let props = schema.get("properties").unwrap().as_object().unwrap();
+        let props = schema.get("properties").unwrap().as_object().unwrap(); // safety: test
         assert!(
+            /* safety: test */
             props.contains_key("project_dir"),
             "sandbox schema must expose project_dir"
         );
@@ -1778,8 +1833,9 @@ mod tests {
         ));
         let tool = CreateJobTool::new(manager).with_sandbox(jm, None);
         let schema = tool.parameters_schema();
-        let props = schema.get("properties").unwrap().as_object().unwrap();
+        let props = schema.get("properties").unwrap().as_object().unwrap(); // safety: test
         assert!(
+            /* safety: test */
             props.contains_key("credentials"),
             "sandbox schema must expose credentials"
         );
@@ -1792,13 +1848,13 @@ mod tests {
 
         // No credentials parameter
         let params = serde_json::json!({"title": "t", "description": "d"});
-        let grants = tool.parse_credentials(&params, "user1").await.unwrap();
-        assert!(grants.is_empty());
+        let grants = tool.parse_credentials(&params, "user1").await.unwrap(); // safety: test
+        assert!(grants.is_empty()); // safety: test
 
         // Empty credentials object
         let params = serde_json::json!({"credentials": {}});
-        let grants = tool.parse_credentials(&params, "user1").await.unwrap();
-        assert!(grants.is_empty());
+        let grants = tool.parse_credentials(&params, "user1").await.unwrap(); // safety: test
+        assert!(grants.is_empty()); // safety: test
     }
 
     #[tokio::test]
@@ -1808,9 +1864,10 @@ mod tests {
 
         let params = serde_json::json!({"credentials": {"my_secret": "MY_SECRET"}});
         let result = tool.parse_credentials(&params, "user1").await;
-        assert!(result.is_err());
+        assert!(result.is_err()); // safety: test
         let err = result.unwrap_err().to_string();
         assert!(
+            /* safety: test */
             err.contains("no secrets store"),
             "expected 'no secrets store' error, got: {}",
             err
@@ -1828,9 +1885,10 @@ mod tests {
 
         let params = serde_json::json!({"credentials": {"nonexistent_secret": "SOME_VAR"}});
         let result = tool.parse_credentials(&params, "user1").await;
-        assert!(result.is_err());
+        assert!(result.is_err()); // safety: test
         let err = result.unwrap_err().to_string();
         assert!(
+            /* safety: test */
             err.contains("not found"),
             "expected 'not found' error, got: {}",
             err
@@ -1852,17 +1910,17 @@ mod tests {
                 CreateSecretParams::new("github_token", TEST_GITHUB_TOKEN),
             )
             .await
-            .unwrap();
+            .unwrap(); // safety: test
 
         let tool = CreateJobTool::new(manager).with_secrets(Arc::clone(&secrets));
 
         let params = serde_json::json!({
             "credentials": {"github_token": "GITHUB_TOKEN"}
         });
-        let grants = tool.parse_credentials(&params, "user1").await.unwrap();
-        assert_eq!(grants.len(), 1);
-        assert_eq!(grants[0].secret_name, "github_token");
-        assert_eq!(grants[0].env_var, "GITHUB_TOKEN");
+        let grants = tool.parse_credentials(&params, "user1").await.unwrap(); // safety: test
+        assert_eq!(grants.len(), 1); // safety: test
+        assert_eq!(grants[0].secret_name, "github_token"); // safety: test
+        assert_eq!(grants[0].env_var, "GITHUB_TOKEN"); // safety: test
     }
 
     fn test_prompt_tool(queue: PromptQueue) -> JobPromptTool {
@@ -1876,7 +1934,7 @@ mod tests {
         let job_id = cm
             .create_job_for_user("default", "Test Job", "desc")
             .await
-            .unwrap();
+            .unwrap(); // safety: test
 
         let queue: PromptQueue =
             Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
@@ -1889,18 +1947,19 @@ mod tests {
         });
 
         let ctx = JobContext::default();
-        let result = tool.execute(params, &ctx).await.unwrap();
+        let result = tool.execute(params, &ctx).await.unwrap(); // safety: test
 
         assert_eq!(
-            result.result.get("status").unwrap().as_str().unwrap(),
+            /* safety: test */
+            result.result.get("status").unwrap().as_str().unwrap(), // safety: test
             "queued"
         );
 
         let q = queue.lock().await;
-        let prompts = q.get(&job_id).unwrap();
-        assert_eq!(prompts.len(), 1);
-        assert_eq!(prompts[0].content, "What's the status?");
-        assert!(!prompts[0].done);
+        let prompts = q.get(&job_id).unwrap(); // safety: test
+        assert_eq!(prompts.len(), 1); // safety: test
+        assert_eq!(prompts[0].content, "What's the status?"); // safety: test
+        assert!(!prompts[0].done); // safety: test
     }
 
     #[tokio::test]
@@ -1910,6 +1969,7 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
         let tool = test_prompt_tool(queue);
         assert_eq!(
+            /* safety: test */
             tool.requires_approval(&serde_json::json!({})),
             ApprovalRequirement::UnlessAutoApproved
         );
@@ -1928,7 +1988,7 @@ mod tests {
 
         let ctx = JobContext::default();
         let result = tool.execute(params, &ctx).await;
-        assert!(result.is_err());
+        assert!(result.is_err()); // safety: test
     }
 
     #[tokio::test]
@@ -1943,7 +2003,7 @@ mod tests {
 
         let ctx = JobContext::default();
         let result = tool.execute(params, &ctx).await;
-        assert!(result.is_err());
+        assert!(result.is_err()); // safety: test
     }
 
     #[tokio::test]
@@ -1958,7 +2018,7 @@ mod tests {
         let job_id = cm
             .create_job_for_user("owner-user", "Secret Job", "classified")
             .await
-            .unwrap();
+            .unwrap(); // safety: test
 
         // We need a Store to construct the tool, but creating one requires
         // a database URL. Instead, test the ownership logic directly:
@@ -1968,9 +2028,9 @@ mod tests {
             ..Default::default()
         };
 
-        let job_ctx = cm.get_context(job_id).await.unwrap();
-        assert_ne!(job_ctx.user_id, attacker_ctx.user_id);
-        assert_eq!(job_ctx.user_id, "owner-user");
+        let job_ctx = cm.get_context(job_id).await.unwrap(); // safety: test
+        assert_ne!(job_ctx.user_id, attacker_ctx.user_id); // safety: test
+        assert_eq!(job_ctx.user_id, "owner-user"); // safety: test
     }
 
     #[test]
@@ -1991,12 +2051,12 @@ mod tests {
             "required": ["job_id"]
         });
 
-        let props = schema.get("properties").unwrap().as_object().unwrap();
-        assert!(props.contains_key("job_id"));
-        assert!(props.contains_key("limit"));
-        let required = schema.get("required").unwrap().as_array().unwrap();
-        assert_eq!(required.len(), 1);
-        assert_eq!(required[0].as_str().unwrap(), "job_id");
+        let props = schema.get("properties").unwrap().as_object().unwrap(); // safety: test
+        assert!(props.contains_key("job_id")); // safety: test
+        assert!(props.contains_key("limit")); // safety: test
+        let required = schema.get("required").unwrap().as_array().unwrap(); // safety: test
+        assert_eq!(required.len(), 1); // safety: test
+        assert_eq!(required[0].as_str().unwrap(), "job_id"); // safety: test
     }
 
     #[tokio::test]
@@ -2005,7 +2065,7 @@ mod tests {
         let job_id = cm
             .create_job_for_user("owner-user", "Test Job", "desc")
             .await
-            .unwrap();
+            .unwrap(); // safety: test
 
         let queue: PromptQueue =
             Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
@@ -2023,9 +2083,10 @@ mod tests {
         };
 
         let result = tool.execute(params, &ctx).await;
-        assert!(result.is_err());
+        assert!(result.is_err()); // safety: test
         let err = result.unwrap_err().to_string();
         assert!(
+            /* safety: test */
             err.contains("does not belong to current user"),
             "expected ownership error, got: {}",
             err
@@ -2035,33 +2096,34 @@ mod tests {
     #[tokio::test]
     async fn test_resolve_job_id_full_uuid() {
         let cm = ContextManager::new(5);
-        let job_id = cm.create_job("Test", "Desc").await.unwrap();
+        let job_id = cm.create_job("Test", "Desc").await.unwrap(); // safety: test
 
-        let resolved = resolve_job_id(&job_id.to_string(), &cm).await.unwrap();
-        assert_eq!(resolved, job_id);
+        let resolved = resolve_job_id(&job_id.to_string(), &cm).await.unwrap(); // safety: test
+        assert_eq!(resolved, job_id); // safety: test
     }
 
     #[tokio::test]
     async fn test_resolve_job_id_short_prefix() {
         let cm = ContextManager::new(5);
-        let job_id = cm.create_job("Test", "Desc").await.unwrap();
+        let job_id = cm.create_job("Test", "Desc").await.unwrap(); // safety: test
 
         // Use first 8 hex chars (without dashes)
         let hex = job_id.to_string().replace('-', "");
         let prefix = &hex[..8];
-        let resolved = resolve_job_id(prefix, &cm).await.unwrap();
-        assert_eq!(resolved, job_id);
+        let resolved = resolve_job_id(prefix, &cm).await.unwrap(); // safety: test
+        assert_eq!(resolved, job_id); // safety: test
     }
 
     #[tokio::test]
     async fn test_resolve_job_id_no_match() {
         let cm = ContextManager::new(5);
-        cm.create_job("Test", "Desc").await.unwrap();
+        cm.create_job("Test", "Desc").await.unwrap(); // safety: test
 
         let result = resolve_job_id("00000000", &cm).await;
-        assert!(result.is_err());
+        assert!(result.is_err()); // safety: test
         let err = result.unwrap_err().to_string();
         assert!(
+            /* safety: test */
             err.contains("no job found"),
             "expected 'no job found', got: {}",
             err
@@ -2072,6 +2134,6 @@ mod tests {
     async fn test_resolve_job_id_invalid_input() {
         let cm = ContextManager::new(5);
         let result = resolve_job_id("not-hex-at-all!", &cm).await;
-        assert!(result.is_err());
+        assert!(result.is_err()); // safety: test
     }
 }
