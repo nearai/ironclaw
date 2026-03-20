@@ -10,8 +10,6 @@ pub const DID_KEY_METHOD: &str = "did:key";
 /// Multicodec varint prefix for `ed25519-pub`.
 const ED25519_PUB_MULTICODEC_PREFIX: [u8; 2] = [0xed, 0x01];
 
-const BASE58BTC_ALPHABET: &[u8; 58] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
-
 /// Generate a fresh Ed25519 secret key.
 pub fn generate_secret_key() -> [u8; 32] {
     let mut bytes = [0u8; 32];
@@ -31,7 +29,7 @@ pub fn public_key_multibase(secret_key: &[u8; 32]) -> String {
     let mut payload = Vec::with_capacity(ED25519_PUB_MULTICODEC_PREFIX.len() + public_key.len());
     payload.extend_from_slice(&ED25519_PUB_MULTICODEC_PREFIX);
     payload.extend_from_slice(&public_key);
-    format!("z{}", encode_base58btc(&payload))
+    format!("z{}", bs58::encode(payload).into_string())
 }
 
 /// Build the DID string from the public key multibase value.
@@ -42,36 +40,6 @@ pub fn did_from_public_key_multibase(public_key_multibase: &str) -> String {
 /// Build the verification method ID for the current key.
 pub fn key_id(did: &str, public_key_multibase: &str) -> String {
     format!("{did}#{public_key_multibase}")
-}
-
-fn encode_base58btc(input: &[u8]) -> String {
-    if input.is_empty() {
-        return String::new();
-    }
-
-    let mut digits = vec![0u8];
-    for &byte in input {
-        let mut carry = u32::from(byte);
-        for digit in &mut digits {
-            let value = (u32::from(*digit) << 8) + carry;
-            *digit = (value % 58) as u8;
-            carry = value / 58;
-        }
-        while carry > 0 {
-            digits.push((carry % 58) as u8);
-            carry /= 58;
-        }
-    }
-
-    let mut encoded = String::new();
-    for _ in input.iter().take_while(|&&b| b == 0) {
-        encoded.push('1');
-    }
-    for digit in digits.iter().rev() {
-        encoded.push(BASE58BTC_ALPHABET[*digit as usize] as char);
-    }
-
-    encoded
 }
 
 #[cfg(test)]

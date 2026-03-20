@@ -3,7 +3,7 @@
 use clap::Subcommand;
 
 /// DID-related CLI commands.
-#[derive(Subcommand, Debug, Clone)]
+#[derive(Subcommand, Debug, Clone, Copy)]
 pub enum DidCommand {
     /// Show the current instance DID.
     Show,

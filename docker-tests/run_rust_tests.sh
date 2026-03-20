@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_DIR="$(cd "$ROOT_DIR/.." && pwd)"
-IMAGE_NAME="ironclaw-pr1-tdd"
+IMAGE_NAME="ironclaw-rust-tests"
 
 DEFAULT_CMD=(
   cargo test --test anp_identity_integration --no-default-features --features libsql
@@ -16,12 +16,12 @@ else
 fi
 
 docker pull rust:1.92-slim-bookworm >/dev/null || true
-docker build -t "$IMAGE_NAME" -f "$ROOT_DIR/Dockerfile.pr1-tdd" "$ROOT_DIR" >/dev/null
+docker build -t "$IMAGE_NAME" -f "$ROOT_DIR/Dockerfile.rust-tests" "$ROOT_DIR" >/dev/null
 
 docker run --rm \
   -v "$REPO_DIR:/workspace" \
-  -v ironclaw-pr1-tdd-cargo:/cargo \
-  -v ironclaw-pr1-tdd-target:/target \
+  -v ironclaw-rust-tests-cargo:/cargo \
+  -v ironclaw-rust-tests-target:/target \
   -w /workspace \
   -e CARGO_HOME=/cargo \
   -e CARGO_TARGET_DIR=/target \
