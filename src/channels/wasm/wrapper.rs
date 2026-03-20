@@ -564,7 +564,7 @@ impl near::agent::channel_host::Host for ChannelStoreData {
             if let Ok(body_str) = std::str::from_utf8(&body)
                 && !should_skip_response_leak_scan(&url)
             {
-                leak_detector
+                LeakDetector::new()
                     .scan_and_clean(body_str)
                     .map_err(|e| format!("Potential secret leak in response: {}", e))?;
             }
