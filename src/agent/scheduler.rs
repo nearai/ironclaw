@@ -19,7 +19,7 @@ use crate::hooks::HookRegistry;
 use crate::llm::LlmProvider;
 use crate::safety::SafetyLayer;
 use crate::tools::{
-    ApprovalContext, ToolRegistry, autonomous_allowed_tool_names, autonomous_unavailable_message,
+    ApprovalContext, ToolRegistry, autonomous_allowed_tool_names, autonomous_unavailable_error,
     prepare_tool_params,
 };
 use crate::worker::job::{Worker, WorkerDeps};
@@ -146,7 +146,7 @@ impl Scheduler {
     /// Dispatch a job with an explicit approval context for autonomous execution.
     ///
     /// Same as `dispatch_job`, but the worker will use the given `ApprovalContext`
-    /// to determine which tools are pre-approved (instead of blocking all non-`Never` tools).
+    /// to determine the explicit autonomous allowlist for that job.
     pub async fn dispatch_job_with_context(
         &self,
         user_id: &str,
@@ -544,11 +544,7 @@ impl Scheduler {
         let blocked =
             ApprovalContext::is_blocked_or_default(&approval_context, tool_name, requirement);
         if blocked {
-            return Err(crate::error::ToolError::ExecutionFailed {
-                name: tool_name.to_string(),
-                reason: autonomous_unavailable_message(tool_name, &job_ctx.user_id),
-            }
-            .into());
+            return Err(autonomous_unavailable_error(tool_name, &job_ctx.user_id).into());
         }
 
         // Delegate to shared tool execution pipeline

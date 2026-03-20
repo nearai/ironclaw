@@ -22,8 +22,8 @@ mod registry;
 mod tool;
 
 pub use autonomy::{
-    AUTONOMOUS_TOOL_DENYLIST, autonomous_allowed_tool_names, autonomous_unavailable_message,
-    is_autonomous_tool_denylisted,
+    AUTONOMOUS_TOOL_DENYLIST, autonomous_allowed_tool_names, autonomous_unavailable_error,
+    autonomous_unavailable_message, is_autonomous_tool_denylisted,
 };
 pub use builder::{
     BuildPhase, BuildRequirement, BuildResult, BuildSoftwareTool, BuilderConfig, Language,

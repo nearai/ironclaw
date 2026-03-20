@@ -83,7 +83,7 @@ const PROTECTED_TOOL_NAMES: &[&str] = &[
 /// Registry of available tools.
 pub struct ToolRegistry {
     tools: RwLock<HashMap<String, Arc<dyn Tool>>>,
-    /// Tracks which names were registered as built-in (protected from shadowing).
+    /// Tracks which names were registered via the built-in startup path.
     builtin_names: RwLock<std::collections::HashSet<String>>,
     /// Shared credential registry populated by WASM tools, consumed by HTTP tool.
     credential_registry: Option<Arc<SharedCredentialRegistry>>,
@@ -138,10 +138,12 @@ impl ToolRegistry {
         &self.rate_limiter
     }
 
-    /// Register a tool. Rejects dynamic tools that try to shadow a built-in name.
+    /// Register a tool. Rejects dynamic tools that try to shadow a protected built-in name.
     pub async fn register(&self, tool: Arc<dyn Tool>) {
         let name = tool.name().to_string();
-        if self.builtin_names.read().await.contains(&name) {
+        if PROTECTED_TOOL_NAMES.contains(&name.as_str())
+            && self.builtin_names.read().await.contains(&name)
+        {
             tracing::warn!(
                 tool = %name,
                 "Rejected tool registration: would shadow a built-in tool"
@@ -157,10 +159,7 @@ impl ToolRegistry {
         let name = tool.name().to_string();
         if let Ok(mut tools) = self.tools.try_write() {
             tools.insert(name.clone(), tool);
-            // Mark as built-in so it can't be shadowed later
-            if PROTECTED_TOOL_NAMES.contains(&name.as_str())
-                && let Ok(mut builtins) = self.builtin_names.try_write()
-            {
+            if let Ok(mut builtins) = self.builtin_names.try_write() {
                 builtins.insert(name.clone());
             }
             tracing::debug!("Registered tool: {}", name);
@@ -886,7 +885,7 @@ mod tests {
     #[tokio::test]
     async fn test_builtin_tool_cannot_be_shadowed() {
         let registry = ToolRegistry::new();
-        // Register echo as built-in (uses register_sync which marks protected names)
+        // Register echo as built-in (uses register_sync and echo is protected).
         registry.register_sync(Arc::new(EchoTool));
         assert!(registry.has("echo").await);
 
@@ -931,6 +930,37 @@ mod tests {
             .to_string();
         assert_eq!(desc, original_desc);
         assert_ne!(desc, "EVIL SHADOW");
+    }
+
+    #[tokio::test]
+    async fn test_builtin_tool_names_include_non_protected_sync_tools() {
+        struct NonProtectedBuiltin;
+
+        #[async_trait::async_trait]
+        impl Tool for NonProtectedBuiltin {
+            fn name(&self) -> &str {
+                "owner_gate"
+            }
+            fn description(&self) -> &str {
+                "test builtin"
+            }
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({})
+            }
+            async fn execute(
+                &self,
+                _params: serde_json::Value,
+                _ctx: &crate::context::JobContext,
+            ) -> Result<crate::tools::tool::ToolOutput, crate::tools::tool::ToolError> {
+                unreachable!()
+            }
+        }
+
+        let registry = ToolRegistry::new();
+        registry.register_sync(Arc::new(NonProtectedBuiltin));
+
+        let builtins = registry.builtin_tool_names().await;
+        assert!(builtins.contains("owner_gate"));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

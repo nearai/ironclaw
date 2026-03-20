@@ -37,6 +37,13 @@ pub fn autonomous_unavailable_message(tool_name: &str, owner_id: &str) -> String
     }
 }
 
+pub fn autonomous_unavailable_error(tool_name: &str, owner_id: &str) -> crate::error::ToolError {
+    crate::error::ToolError::AutonomousUnavailable {
+        name: tool_name.to_string(),
+        reason: autonomous_unavailable_message(tool_name, owner_id),
+    }
+}
+
 pub async fn autonomous_allowed_tool_names(
     tools: &Arc<ToolRegistry>,
     extension_manager: Option<&Arc<ExtensionManager>>,
@@ -162,7 +169,9 @@ mod tests {
         let temp_dir = tempfile::tempdir().expect("tempdir");
         let tools_dir = temp_dir.path().join("wasm-tools");
         let tools = Arc::new(ToolRegistry::new());
-        tools.register_sync(Arc::new(FakeTool { name: "owner_gate" }));
+        tools
+            .register(Arc::new(FakeTool { name: "owner_gate" }))
+            .await;
         write_test_extension_wasm(&tools_dir, "owner_gate").await;
         let manager = make_extension_manager(tools.clone(), &tools_dir, "default");
 
@@ -188,7 +197,9 @@ mod tests {
         let temp_dir = tempfile::tempdir().expect("tempdir");
         let tools_dir = temp_dir.path().join("wasm-tools");
         let tools = Arc::new(ToolRegistry::new());
-        tools.register_sync(Arc::new(FakeTool { name: "owner_gate" }));
+        tools
+            .register(Arc::new(FakeTool { name: "owner_gate" }))
+            .await;
         write_test_extension_wasm(&tools_dir, "owner_gate").await;
         let manager = make_extension_manager(tools.clone(), &tools_dir, "someone-else");
 

@@ -168,6 +168,9 @@ pub enum ToolError {
     #[error("Tool {name} requires authentication")]
     AuthRequired { name: String },
 
+    #[error("Tool {name} is not available for autonomous execution: {reason}")]
+    AutonomousUnavailable { name: String, reason: String },
+
     #[error("Tool {name} is rate limited, retry after {retry_after:?}")]
     RateLimited {
         name: String,

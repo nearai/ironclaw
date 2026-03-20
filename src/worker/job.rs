@@ -31,8 +31,7 @@ use crate::safety::SafetyLayer;
 use crate::tools::execute::process_tool_result;
 use crate::tools::rate_limiter::RateLimitResult;
 use crate::tools::{
-    ApprovalContext, ToolRegistry, autonomous_unavailable_message, prepare_tool_params,
-    redact_params,
+    ApprovalContext, ToolRegistry, autonomous_unavailable_error, prepare_tool_params, redact_params,
 };
 
 /// Shared dependencies for worker execution.
@@ -502,11 +501,7 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
         let blocked =
             ApprovalContext::is_blocked_or_default(&deps.approval_context, tool_name, requirement);
         if blocked {
-            return Err(crate::error::ToolError::ExecutionFailed {
-                name: tool_name.to_string(),
-                reason: autonomous_unavailable_message(tool_name, &job_ctx.user_id),
-            }
-            .into());
+            return Err(autonomous_unavailable_error(tool_name, &job_ctx.user_id).into());
         }
 
         // Check per-tool rate limit before running hooks or executing (cheaper check first)
@@ -812,14 +807,10 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                     }),
                 );
 
-                let is_autonomous_unavailable = matches!(
+                if matches!(
                     &e,
-                    Error::Tool(crate::error::ToolError::ExecutionFailed { reason, .. })
-                        if reason.contains("not available in autonomous jobs or routines")
-                            || reason.contains("not currently available for owner")
-                );
-
-                if is_autonomous_unavailable {
+                    Error::Tool(crate::error::ToolError::AutonomousUnavailable { .. })
+                ) {
                     Err(e)
                 } else {
                     Ok(())
@@ -1876,6 +1867,25 @@ mod tests {
             result.is_ok(),
             "Always tool should be allowed with permission"
         );
+    }
+
+    #[tokio::test]
+    async fn test_approval_context_returns_structured_autonomous_unavailable_error() {
+        let worker = make_worker_with_approval(
+            vec![Arc::new(AlwaysApprovalTool)],
+            Some(crate::tools::ApprovalContext::autonomous()),
+        )
+        .await;
+
+        let result = worker
+            .execute_tool("always_approval", &serde_json::json!({}))
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(Error::Tool(crate::error::ToolError::AutonomousUnavailable { name, .. }))
+                if name == "always_approval"
+        ));
     }
 
     #[tokio::test]

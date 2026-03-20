@@ -469,17 +469,26 @@ impl ExtensionManager {
 
     pub async fn active_tool_names(&self) -> HashSet<String> {
         let mut names = HashSet::new();
-        if let Ok(extensions) = self.list(None, false).await {
-            for extension in extensions {
-                match extension.kind {
-                    ExtensionKind::WasmTool if extension.active => {
-                        names.insert(extension.name);
+        match self.list(None, false).await {
+            Ok(extensions) => {
+                for extension in extensions {
+                    match extension.kind {
+                        ExtensionKind::WasmTool if extension.active => {
+                            names.insert(extension.name);
+                        }
+                        ExtensionKind::McpServer if extension.active => {
+                            names.extend(extension.tools);
+                        }
+                        _ => {}
                     }
-                    ExtensionKind::McpServer if extension.active => {
-                        names.extend(extension.tools);
-                    }
-                    _ => {}
                 }
+            }
+            Err(err) => {
+                tracing::warn!(
+                    owner_id = %self.user_id,
+                    "Failed to list active extensions while resolving autonomous tool scope: {}",
+                    err
+                );
             }
         }
         names
