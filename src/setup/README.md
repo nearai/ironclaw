@@ -210,8 +210,8 @@ env-var mode or skipped secrets.
 |----------|-------------|-------------|---------|
 | NEAR AI Chat | Browser OAuth or session token | - | `NEARAI_SESSION_TOKEN` |
 | NEAR AI Cloud | API key | `llm_nearai_api_key` | `NEARAI_API_KEY` |
-| Anthropic | API key | `anthropic_api_key` | `ANTHROPIC_API_KEY` |
-| OpenAI | API key | `openai_api_key` | `OPENAI_API_KEY` |
+| Anthropic | API key | `llm_anthropic_api_key` | `ANTHROPIC_API_KEY` |
+| OpenAI | API key | `llm_openai_api_key` | `OPENAI_API_KEY` |
 | Ollama | None | - | - |
 | OpenRouter | API key | `llm_openrouter_api_key` | `OPENROUTER_API_KEY` |
 | OpenAI-compatible | Optional API key | `llm_compatible_api_key` | `LLM_API_KEY` |
@@ -481,16 +481,19 @@ Final step of the wizard:
 4. Print configuration summary
 ```
 
-Bootstrap vars written to `~/.ironclaw/.env`:
+Bootstrap vars written to `~/.ironclaw/.env` (only true chicken-and-egg vars
+that are needed before the DB is connected):
 - `DATABASE_BACKEND` (always)
 - `DATABASE_URL` (if postgres)
 - `LIBSQL_PATH` (if libsql)
 - `LIBSQL_URL` (if turso sync)
-- `LLM_BACKEND` (always, when set)
-- `LLM_BASE_URL` (if openai_compatible)
-- `OLLAMA_BASE_URL` (if ollama)
-- `NEARAI_API_KEY` (if API key auth path)
+- `SECRETS_MASTER_KEY` (if env key source selected in Step 2)
 - `ONBOARD_COMPLETED` (always, "true")
+
+LLM settings (`LLM_BACKEND`, `LLM_BASE_URL`, model, API keys) are persisted
+to the DB via `persist_settings()` and loaded by `Config::from_db_with_toml()`
+after connection. API keys are stored encrypted in the secrets DB and injected
+via `inject_llm_keys_from_secrets()`.
 
 **Invariant:** Both Layer 1 and Layer 2 must be written. If the database
 write fails, the wizard returns an error and the `.env` file is not written.

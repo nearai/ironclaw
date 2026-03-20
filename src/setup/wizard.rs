@@ -2580,7 +2580,6 @@ impl SetupWizard {
     /// re-resolution in `AppBuilder::build_all()` fills them in after
     /// `inject_llm_keys_from_secrets()` loads from encrypted storage.
     fn write_bootstrap_env(&self) -> Result<(), SetupError> {
-        let registry = crate::llm::ProviderRegistry::load();
         let mut env_vars: Vec<(String, String)> = Vec::new();
 
         if let Some(ref backend) = self.settings.database_backend {
@@ -2594,66 +2593,6 @@ impl SetupWizard {
         }
         if let Some(ref url) = self.settings.libsql_url {
             env_vars.push(("LIBSQL_URL".to_string(), url.clone()));
-        }
-
-        // LLM bootstrap vars: same chicken-and-egg problem as DATABASE_BACKEND.
-        // Config::from_env() needs the backend before the DB is connected.
-        if let Some(ref backend) = self.settings.llm_backend {
-            env_vars.push(("LLM_BACKEND".to_string(), backend.clone()));
-        }
-        if let Some(ref url) = self.settings.openai_compatible_base_url {
-            env_vars.push(("LLM_BASE_URL".to_string(), url.clone()));
-        }
-        if let Some(ref url) = self.settings.ollama_base_url {
-            env_vars.push(("OLLAMA_BASE_URL".to_string(), url.clone()));
-        }
-        if let Some(ref region) = self.settings.bedrock_region {
-            env_vars.push(("BEDROCK_REGION".to_string(), region.clone()));
-        }
-        if self.settings.llm_backend.as_deref() == Some("bedrock") {
-            if let Some(ref model) = self.settings.selected_model {
-                env_vars.push(("BEDROCK_MODEL".to_string(), model.clone()));
-            }
-            if let Some(ref cross) = self.settings.bedrock_cross_region {
-                env_vars.push(("BEDROCK_CROSS_REGION".to_string(), cross.clone()));
-            }
-            if let Some(ref profile) = self.settings.bedrock_profile {
-                env_vars.push(("AWS_PROFILE".to_string(), profile.clone()));
-            }
-        }
-
-        // Model name: same chicken-and-egg — Config::from_env() resolves the
-        // model before the DB is connected, so we must persist it to .env.
-        // Write the backend-specific env var so the correct resolution path
-        // picks it up (looked up from the provider registry).
-        // Bedrock model is already written above as BEDROCK_MODEL, skip here.
-        if self.settings.llm_backend.as_deref() != Some("bedrock")
-            && let Some(ref model) = self.settings.selected_model
-        {
-            let backend_str = self.settings.llm_backend.as_deref().unwrap_or("nearai");
-            let model_env = registry.model_env_var(backend_str);
-            env_vars.push((model_env.to_string(), model.clone()));
-        }
-
-        // Also write provider-specific base URL env var if the provider
-        // defines one (e.g., GROQ doesn't need LLM_BASE_URL since its
-        // default is compiled in, but it doesn't hurt to be explicit).
-        if let Some(ref backend) = self.settings.llm_backend
-            && let Some(def) = registry.find(backend)
-            && let Some(ref base_url_env) = def.base_url_env
-            && let Some(ref base_url) = def.default_base_url
-            && base_url_env != "LLM_BASE_URL"
-            && base_url_env != "OLLAMA_BASE_URL"
-        {
-            env_vars.push((base_url_env.clone(), base_url.clone()));
-        }
-
-        // Preserve NEARAI_API_KEY if present (set by API key auth flow
-        // via the thread-safe runtime env overlay).
-        if let Some(api_key) = crate::config::helpers::env_or_override("NEARAI_API_KEY")
-            && !api_key.is_empty()
-        {
-            env_vars.push(("NEARAI_API_KEY".to_string(), api_key));
         }
 
         // Secrets master key (env var mode): write to .env so it's available
