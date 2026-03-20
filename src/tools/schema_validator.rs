@@ -62,6 +62,15 @@ fn has_object_combinator_variants(schema: &serde_json::Value) -> bool {
 fn check_object_schema(schema: &serde_json::Value, path: &str) -> Vec<String> {
     let mut errors = Vec::new();
 
+    // Report non-array combinator values as errors.
+    for key in ["oneOf", "anyOf", "allOf"] {
+        if let Some(val) = schema.get(key)
+            && !val.is_array()
+        {
+            errors.push(format!("{path}: \"{key}\" must be an array"));
+        }
+    }
+
     let has_combinators = has_object_combinator_variants(schema);
 
     // Rule 1: must have "type": "object" (unless combinators define the structure)

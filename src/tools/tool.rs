@@ -492,6 +492,15 @@ fn validate_tool_schema_inner(schema: &serde_json::Value, path: &str, depth: usi
         return errors;
     }
 
+    // Report non-array combinator values as errors.
+    for key in ["oneOf", "anyOf", "allOf"] {
+        if let Some(val) = schema.get(key)
+            && !val.is_array()
+        {
+            errors.push(format!("{path}: \"{key}\" must be an array"));
+        }
+    }
+
     let has_combinators = has_object_combinator_variants(schema);
 
     // Rule 1: must have "type": "object" at this level (unless combinators define the structure)
