@@ -25,23 +25,23 @@ fn default_channels_dir() -> PathBuf {
 
 /// Resolve a capabilities file for `name`.
 ///
-/// The primary lookup is the requested directory (or the default tools
-/// directory). If no explicit directory was provided, fall back to the default
-/// channels directory so `ironclaw tool auth <channel>` works for installed
-/// WASM channels whose capabilities live alongside the channel artifact.
+/// The primary lookup is the requested directory. If no explicit directory was
+/// provided, prefer the default channels directory so registry-installed WASM
+/// channels win over same-named tools. Fall back to the tools directory only
+/// if the channel-scoped file is absent.
 fn resolve_capabilities_path_in_base(base_dir: &Path, name: &str, dir: Option<PathBuf>) -> PathBuf {
-    let primary_dir = dir.clone().unwrap_or_else(|| base_dir.join("tools"));
+    let primary_dir = dir.clone().unwrap_or_else(|| base_dir.join("channels"));
     let primary_path = primary_dir.join(format!("{}.capabilities.json", name));
     if primary_path.exists() {
         return primary_path;
     }
 
     if dir.is_none() {
-        let channel_path = base_dir
-            .join("channels")
+        let tool_path = base_dir
+            .join("tools")
             .join(format!("{}.capabilities.json", name));
-        if channel_path.exists() {
-            return channel_path;
+        if tool_path.exists() {
+            return tool_path;
         }
     }
 
@@ -1190,14 +1190,54 @@ mod tests {
             std::env::temp_dir().join(format!("ironclaw-tool-auth-test-{}", uuid::Uuid::new_v4()));
         let tools_dir = base.join("tools");
         let channels_dir = base.join("channels");
-        std::fs::create_dir_all(&tools_dir).expect("create tools dir");
-        std::fs::create_dir_all(&channels_dir).expect("create channels dir");
+        assert!(
+            std::fs::create_dir_all(&tools_dir).is_ok(),
+            "create tools dir"
+        );
+        assert!(
+            std::fs::create_dir_all(&channels_dir).is_ok(),
+            "create channels dir"
+        );
 
         let caps_path = channels_dir.join("telegram.capabilities.json");
-        std::fs::write(&caps_path, "{}").expect("write caps");
+        assert!(std::fs::write(&caps_path, "{}").is_ok(), "write caps");
 
         let resolved = resolve_capabilities_path_in_base(&base, "telegram", None);
         assert_eq!(resolved, caps_path);
+
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn test_resolve_capabilities_path_prefers_channels_dir_on_collision() {
+        let base = std::env::temp_dir().join(format!(
+            "ironclaw-tool-auth-test-collision-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let tools_dir = base.join("tools");
+        let channels_dir = base.join("channels");
+        assert!(
+            std::fs::create_dir_all(&tools_dir).is_ok(),
+            "create tools dir"
+        );
+        assert!(
+            std::fs::create_dir_all(&channels_dir).is_ok(),
+            "create channels dir"
+        );
+
+        let tool_caps = tools_dir.join("telegram.capabilities.json");
+        let channel_caps = channels_dir.join("telegram.capabilities.json");
+        assert!(
+            std::fs::write(&tool_caps, "{\"kind\":\"tool\"}").is_ok(),
+            "write tool caps"
+        );
+        assert!(
+            std::fs::write(&channel_caps, "{\"kind\":\"channel\"}").is_ok(),
+            "write channel caps"
+        );
+
+        let resolved = resolve_capabilities_path_in_base(&base, "telegram", None);
+        assert_eq!(resolved, channel_caps);
 
         let _ = std::fs::remove_dir_all(base);
     }
