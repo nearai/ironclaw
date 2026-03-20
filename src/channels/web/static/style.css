@@ -4506,6 +4506,39 @@ mark {
   padding: 1px 0 4px 0;
 }
 
+.gw-update-message {
+  font-size: 11px;
+  color: var(--text-secondary);
+  padding: 3px 0 2px 0;
+}
+
+.gw-update-message.gw-update-available {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.gw-update-message.gw-update-error {
+  color: var(--danger, #f87171);
+}
+
+.gw-update-message.gw-update-ok {
+  color: var(--text-secondary);
+}
+
+.gw-update-link-row {
+  margin-top: 2px;
+}
+
+.gw-update-link {
+  color: var(--accent);
+  font-size: 11px;
+  text-decoration: none;
+}
+
+.gw-update-link:hover {
+  text-decoration: underline;
+}
+
 /* --- Extension install form --- */
 
 .ext-install-form {

@@ -26,6 +26,7 @@ Commands:
   hooks       Manage lifecycle hooks
   models      Manage LLM providers and models
   doctor      Run diagnostics
+  update      Check for a newer IronClaw release
   logs        View and manage gateway logs
   status      Show system status
   completion  Generate completions
