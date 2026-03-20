@@ -720,6 +720,90 @@ impl RoutineEngine {
         Ok(run_id)
     }
 
+    /// Fire a routine from a webhook trigger.
+    ///
+    /// Similar to `fire_manual` but records the trigger as `"webhook"` with the
+    /// webhook path as detail. Skips ownership check (auth is via webhook secret).
+    /// Enforces enabled check, cooldown, and concurrent run limit.
+    pub async fn fire_webhook(
+        &self,
+        routine_id: Uuid,
+        webhook_path: &str,
+    ) -> Result<Uuid, RoutineError> {
+        let routine = self
+            .store
+            .get_routine(routine_id)
+            .await
+            .map_err(|e| RoutineError::Database {
+                reason: e.to_string(),
+            })?
+            .ok_or(RoutineError::NotFound { id: routine_id })?;
+
+        if !routine.enabled {
+            return Err(RoutineError::Disabled {
+                name: routine.name.clone(),
+            });
+        }
+
+        if !self.check_cooldown(&routine) {
+            return Err(RoutineError::Cooldown {
+                name: routine.name.clone(),
+            });
+        }
+
+        if !self.check_concurrent(&routine).await {
+            return Err(RoutineError::MaxConcurrent {
+                name: routine.name.clone(),
+            });
+        }
+
+        if self.running_count.load(Ordering::Relaxed) >= self.config.max_concurrent_routines {
+            return Err(RoutineError::MaxConcurrent {
+                name: routine.name.clone(),
+            });
+        }
+
+        let run_id = Uuid::new_v4();
+        let run = RoutineRun {
+            id: run_id,
+            routine_id: routine.id,
+            trigger_type: "webhook".to_string(),
+            trigger_detail: Some(webhook_path.to_string()),
+            started_at: Utc::now(),
+            completed_at: None,
+            status: RunStatus::Running,
+            result_summary: None,
+            tokens_used: None,
+            job_id: None,
+            created_at: Utc::now(),
+        };
+
+        if let Err(e) = self.store.create_routine_run(&run).await {
+            return Err(RoutineError::Database {
+                reason: format!("failed to create run record: {e}"),
+            });
+        }
+
+        let engine = EngineContext {
+            config: self.config.clone(),
+            store: self.store.clone(),
+            llm: self.llm.clone(),
+            workspace: self.workspace.clone(),
+            notify_tx: self.notify_tx.clone(),
+            running_count: self.running_count.clone(),
+            scheduler: self.scheduler.clone(),
+            tools: self.tools.clone(),
+            safety: self.safety.clone(),
+            sandbox_readiness: self.sandbox_readiness,
+        };
+
+        tokio::spawn(async move {
+            execute_routine(engine, routine, run).await;
+        });
+
+        Ok(run_id)
+    }
+
     /// Spawn a fire in a background task.
     fn spawn_fire(&self, routine: Routine, trigger_type: &str, trigger_detail: Option<String>) {
         let run = RoutineRun {
