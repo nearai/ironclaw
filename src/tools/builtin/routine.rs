@@ -690,8 +690,18 @@ fn string_array_field(params: &Value, group: &str, field: &str, aliases: &[&str]
                 .find_map(|alias| params.get(*alias).and_then(Value::as_array))
         })
         .map(|arr| {
+            let mut seen = std::collections::HashSet::new();
             arr.iter()
-                .filter_map(|value| value.as_str().map(String::from))
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .filter_map(|value| {
+                    if seen.insert(value.to_string()) {
+                        Some(value.to_string())
+                    } else {
+                        None
+                    }
+                })
                 .collect()
         })
         .unwrap_or_default()
@@ -1837,6 +1847,37 @@ mod tests {
         assert_eq!(
             parsed.execution.context_paths,
             vec!["context/deploy.md".to_string()],
+        );
+    }
+
+    #[test]
+    fn parses_context_paths_with_trim_drop_empty_and_stable_dedupe() {
+        let params = serde_json::json!({
+            "name": "deploy-watch",
+            "prompt": "Look for deploy requests.",
+            "request": {
+                "kind": "manual"
+            },
+            "execution": {
+                "context_paths": [
+                    " context/deploy.md ",
+                    "",
+                    "   ",
+                    "context/deploy.md",
+                    "context/notes.md"
+                ]
+            }
+        });
+
+        let parsed =
+            parse_routine_create_request(&params).expect("parse context_paths normalization");
+
+        assert_eq!(
+            parsed.execution.context_paths,
+            vec![
+                "context/deploy.md".to_string(),
+                "context/notes.md".to_string()
+            ],
         );
     }
 
