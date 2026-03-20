@@ -1744,7 +1744,10 @@ async fn send_notification(
     let message = match summary {
         Some(s) => {
             let sanitized = sanitize_summary(s);
-            format!("{} *Routine '{}'*: {}\n\n{}", icon, routine_name, label, sanitized)
+            format!(
+                "{} *Routine '{}'*: {}\n\n{}",
+                icon, routine_name, label, sanitized
+            )
         }
         None => format!("{} *Routine '{}'*: {}", icon, routine_name, label),
     };
@@ -2337,7 +2340,10 @@ mod tests {
             result.len() <= 503,
             "Truncated summary should be at most 503 bytes (500 + '...')"
         );
-        assert!(result.ends_with("..."), "Truncated summary should end with ellipsis");
+        assert!(
+            result.ends_with("..."),
+            "Truncated summary should end with ellipsis"
+        );
     }
 
     #[test]
@@ -2346,7 +2352,10 @@ mod tests {
 
         assert_eq!(status_display_label(RunStatus::Ok), "Completed");
         assert_eq!(status_display_label(RunStatus::Failed), "Failed");
-        assert_eq!(status_display_label(RunStatus::Attention), "Needs attention");
+        assert_eq!(
+            status_display_label(RunStatus::Attention),
+            "Needs attention"
+        );
         assert_eq!(status_display_label(RunStatus::Running), "Running");
     }
 
