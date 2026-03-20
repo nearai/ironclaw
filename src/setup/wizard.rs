@@ -3,7 +3,7 @@
 //! The wizard guides users through:
 //! 1. Database connection
 //! 2. Security (secrets master key)
-//! 3. Inference provider (NEAR AI, Anthropic, OpenAI, Ollama, OpenAI-compatible)
+//! 3. Inference provider (NEAR AI, Anthropic, OpenAI, OpenAI Codex, Ollama, OpenAI-compatible)
 //! 4. Model selection
 //! 5. Embeddings
 //! 6. Channel configuration
@@ -1083,14 +1083,20 @@ impl SetupWizard {
             print_info(&format!("Current provider: {}", display));
             println!();
 
-            let is_known =
-                current == "nearai" || current == "bedrock" || registry.is_known(&current);
+            let is_known = current == "nearai"
+                || current == "bedrock"
+                || current == "openai_codex"
+                || registry.is_known(&current);
 
             if is_known && confirm("Keep current provider?", true).map_err(SetupError::Io)? {
                 if current == "bedrock" {
                     // Keeping the existing Bedrock config — no need to re-run
                     // the full setup flow (region, auth, cross-region).
                     print_info("Keeping existing AWS Bedrock configuration.");
+                    return Ok(());
+                }
+                if current == "openai_codex" {
+                    print_info("Keeping existing OpenAI Codex configuration.");
                     return Ok(());
                 }
                 return self.run_provider_setup(&current, &registry).await;
@@ -1107,13 +1113,16 @@ impl SetupWizard {
         print_info("Select your inference provider:");
         println!();
 
-        // Build menu: NearAI first, then all registry providers with setup hints, then Bedrock
+        // Build menu: NearAI first, then OpenAI Codex, then registry providers, then Bedrock
         let selectable = registry.selectable();
         let mut options: Vec<String> = Vec::with_capacity(2 + selectable.len());
         let mut provider_ids: Vec<String> = Vec::with_capacity(2 + selectable.len());
 
         options.push("NEAR AI          - multi-model access via NEAR account".to_string());
         provider_ids.push("nearai".to_string());
+
+        options.push("OpenAI Codex     - ChatGPT subscription (Plus/Pro/Max)".to_string());
+        provider_ids.push("openai_codex".to_string());
 
         for def in &selectable {
             let label = format!(
@@ -1156,6 +1165,10 @@ impl SetupWizard {
     ) -> Result<(), SetupError> {
         if provider_id == "nearai" {
             return self.setup_nearai().await;
+        }
+
+        if provider_id == "openai_codex" {
+            return self.setup_openai_codex().await;
         }
 
         let def = registry
@@ -1487,6 +1500,29 @@ impl SetupWizard {
         self.llm_api_key = Some(SecretString::from(key_str.to_string()));
 
         print_success(&format!("{display_name} configured"));
+        Ok(())
+    }
+
+    /// OpenAI Codex (ChatGPT subscription) setup: device code OAuth flow.
+    async fn setup_openai_codex(&mut self) -> Result<(), SetupError> {
+        self.settings.llm_backend = Some("openai_codex".to_string());
+        if self.settings.selected_model.is_some() {
+            self.settings.selected_model = None;
+        }
+
+        use crate::config::OpenAiCodexConfig;
+        use crate::llm::OpenAiCodexSessionManager;
+
+        let config = OpenAiCodexConfig::default();
+
+        let mgr = OpenAiCodexSessionManager::new(config).map_err(|e| {
+            SetupError::Config(format!("OpenAI Codex session manager init failed: {}", e))
+        })?;
+        mgr.device_code_login().await.map_err(|e| {
+            SetupError::Config(format!("OpenAI Codex authentication failed: {}", e))
+        })?;
+
+        print_success("OpenAI Codex configured (ChatGPT subscription)");
         Ok(())
     }
 
@@ -2963,6 +2999,7 @@ impl SetupWizard {
                 "ollama" => "Ollama",
                 "openai_compatible" => "OpenAI-compatible",
                 "bedrock" => "AWS Bedrock",
+                "openai_codex" => "OpenAI Codex",
                 other => other,
             };
             println!("  Provider: {}", display);
