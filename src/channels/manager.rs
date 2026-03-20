@@ -239,6 +239,11 @@ impl ChannelManager {
     pub async fn get_channel(&self, name: &str) -> Option<Arc<dyn Channel>> {
         self.channels.read().await.get(name).cloned()
     }
+
+    /// Remove a channel from the manager.
+    pub async fn remove(&self, name: &str) -> Option<Arc<dyn Channel>> {
+        self.channels.write().await.remove(name)
+    }
 }
 
 impl Default for ChannelManager {

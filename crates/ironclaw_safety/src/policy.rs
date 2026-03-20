@@ -300,4 +300,236 @@ mod tests {
         assert!(result.is_ok());
         assert!(result.unwrap().matches("hello  world"));
     }
+
+    /// Adversarial tests for policy regex patterns.
+    /// See <https://github.com/nearai/ironclaw/issues/1025>.
+    mod adversarial {
+        use super::*;
+
+        // ── A. Regex backtracking / performance guards ───────────────
+
+        #[test]
+        fn excessive_urls_pattern_100kb_near_miss() {
+            let policy = Policy::default();
+            // True near-miss: groups of exactly 9 URLs (pattern requires {10,})
+            // separated by a non-whitespace fence "|||". The pattern's `\s*`
+            // cannot consume "|||", so each group of 9 URLs is an independent
+            // near-miss that matches 9 repetitions but fails to reach 10.
+            let group = "https://example.com/path ".repeat(9);
+            let chunk = format!("{group}|||");
+            let payload = chunk.repeat(440);
+            assert!(payload.len() > 100_000);
+
+            let start = std::time::Instant::now();
+            let violations = policy.check(&payload);
+            let elapsed = start.elapsed();
+            assert!(
+                elapsed.as_millis() < 500,
+                "excessive_urls pattern took {}ms on 100KB near-miss",
+                elapsed.as_millis()
+            );
+            // Verify it is indeed a near-miss: the pattern should NOT match
+            assert!(
+                !violations.iter().any(|r| r.id == "excessive_urls"),
+                "9 URLs per group separated by non-whitespace should not trigger excessive_urls"
+            );
+        }
+
+        #[test]
+        fn obfuscated_string_pattern_100kb_near_miss() {
+            let policy = Policy::default();
+            // True near-miss: 499-char strings (just under 500 threshold)
+            // separated by spaces. Each run nearly matches `[^\s]{500,}` but
+            // falls 1 char short.
+            let chunk = format!("{} ", "a".repeat(499));
+            let payload = chunk.repeat(201);
+            assert!(payload.len() > 100_000);
+
+            let start = std::time::Instant::now();
+            let violations = policy.check(&payload);
+            let elapsed = start.elapsed();
+            assert!(
+                elapsed.as_millis() < 500,
+                "obfuscated_string pattern took {}ms on 100KB near-miss",
+                elapsed.as_millis()
+            );
+            assert!(
+                violations.is_empty() || !violations.iter().any(|r| r.id == "obfuscated_string"),
+                "499-char runs should not trigger obfuscated_string (threshold is 500)"
+            );
+        }
+
+        #[test]
+        fn shell_injection_pattern_100kb_near_miss() {
+            let policy = Policy::default();
+            // Near-miss: semicolons followed by "rm" without "-rf"
+            let payload = "; rm \n".repeat(20_000);
+            assert!(payload.len() > 100_000);
+
+            let start = std::time::Instant::now();
+            let _violations = policy.check(&payload);
+            let elapsed = start.elapsed();
+            assert!(
+                elapsed.as_millis() < 500,
+                "shell_injection pattern took {}ms on 100KB near-miss",
+                elapsed.as_millis()
+            );
+        }
+
+        #[test]
+        fn sql_pattern_100kb_near_miss() {
+            let policy = Policy::default();
+            // Near-miss: "DROP " repeated without "TABLE"
+            let payload = "DROP \n".repeat(20_000);
+            assert!(payload.len() > 100_000);
+
+            let start = std::time::Instant::now();
+            let _violations = policy.check(&payload);
+            let elapsed = start.elapsed();
+            assert!(
+                elapsed.as_millis() < 500,
+                "sql_pattern took {}ms on 100KB near-miss",
+                elapsed.as_millis()
+            );
+        }
+
+        #[test]
+        fn crypto_key_pattern_100kb_near_miss() {
+            let policy = Policy::default();
+            // Near-miss: "private key" followed by short hex (< 64 chars)
+            let chunk = "private key abcdef0123456789\n";
+            let payload = chunk.repeat(4000);
+            assert!(payload.len() > 100_000);
+
+            let start = std::time::Instant::now();
+            let _violations = policy.check(&payload);
+            let elapsed = start.elapsed();
+            assert!(
+                elapsed.as_millis() < 500,
+                "crypto_private_key pattern took {}ms on 100KB near-miss",
+                elapsed.as_millis()
+            );
+        }
+
+        #[test]
+        fn system_file_access_pattern_100kb_near_miss() {
+            let policy = Policy::default();
+            // Near-miss: "/etc/" without "passwd" or "shadow"
+            let chunk = "/etc/hostname\n";
+            let payload = chunk.repeat(8000);
+            assert!(payload.len() > 100_000);
+
+            let start = std::time::Instant::now();
+            let _violations = policy.check(&payload);
+            let elapsed = start.elapsed();
+            assert!(
+                elapsed.as_millis() < 500,
+                "system_file_access pattern took {}ms on 100KB near-miss",
+                elapsed.as_millis()
+            );
+        }
+
+        #[test]
+        fn encoded_exploit_pattern_100kb_near_miss() {
+            let policy = Policy::default();
+            // Near-miss: "eval" without "(" and "base64" without "_decode"
+            let chunk = "eval base64 atob\n";
+            let payload = chunk.repeat(6500);
+            assert!(payload.len() > 100_000);
+
+            let start = std::time::Instant::now();
+            let _violations = policy.check(&payload);
+            let elapsed = start.elapsed();
+            assert!(
+                elapsed.as_millis() < 500,
+                "encoded_exploit pattern took {}ms on 100KB near-miss",
+                elapsed.as_millis()
+            );
+        }
+
+        // ── B. Unicode edge cases ────────────────────────────────────
+
+        #[test]
+        fn rtl_override_does_not_hide_system_files() {
+            let policy = Policy::default();
+            let input = "\u{202E}/etc/passwd";
+            assert!(
+                policy.is_blocked(input),
+                "RTL override should not prevent system file detection"
+            );
+        }
+
+        #[test]
+        fn zero_width_space_in_sql_pattern() {
+            let policy = Policy::default();
+            // ZWSP inserted: "DROP\u{200B} TABLE"
+            let input = "DROP\u{200B} TABLE users;";
+            let violations = policy.check(input);
+            // ZWSP breaks the \s+ match between DROP and TABLE.
+            // Document: this is a known bypass vector for regex-based detection.
+            assert!(
+                !violations.iter().any(|r| r.id == "sql_pattern"),
+                "ZWSP between DROP and TABLE breaks regex \\s+ match — known bypass"
+            );
+        }
+
+        #[test]
+        fn zwnj_in_shell_injection_pattern() {
+            let policy = Policy::default();
+            // ZWNJ (\u{200C}) inserted into "; rm -rf"
+            let input = "; rm\u{200C} -rf /";
+            let is_blocked = policy.is_blocked(input);
+            // ZWNJ breaks the \s* match between "rm" and "-rf".
+            // Document: ZWNJ is a known bypass vector for regex-based detection.
+            assert!(
+                !is_blocked,
+                "ZWNJ between 'rm' and '-rf' breaks regex \\s* match — known bypass"
+            );
+        }
+
+        #[test]
+        fn emoji_in_path_does_not_panic() {
+            let policy = Policy::default();
+            let input = "Check /etc/passwd 👀🔑";
+            assert!(policy.is_blocked(input));
+        }
+
+        #[test]
+        fn multibyte_chars_in_long_string() {
+            let policy = Policy::default();
+            // 500+ chars of 3-byte UTF-8 without spaces — should trigger obfuscated_string
+            let payload = "中".repeat(501);
+            let violations = policy.check(&payload);
+            assert!(
+                !violations.is_empty(),
+                "500+ multibyte chars without spaces should trigger obfuscated_string"
+            );
+        }
+
+        // ── C. Control character variants ────────────────────────────
+
+        #[test]
+        fn control_chars_around_blocked_content() {
+            let policy = Policy::default();
+            for byte in [0x01u8, 0x02, 0x0B, 0x0C, 0x1F] {
+                let input = format!("{}; rm -rf /{}", char::from(byte), char::from(byte));
+                assert!(
+                    policy.is_blocked(&input),
+                    "control char 0x{:02X} should not prevent shell injection detection",
+                    byte
+                );
+            }
+        }
+
+        #[test]
+        fn bom_prefix_does_not_hide_sql_injection() {
+            let policy = Policy::default();
+            let input = "\u{FEFF}DROP TABLE users;";
+            let violations = policy.check(input);
+            assert!(
+                !violations.is_empty(),
+                "BOM prefix should not prevent SQL pattern detection"
+            );
+        }
+    }
 }

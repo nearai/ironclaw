@@ -382,6 +382,8 @@ pub enum SubmissionResult {
         description: String,
         /// Parameters being passed.
         parameters: serde_json::Value,
+        /// Whether "always" auto-approve should be offered to the user.
+        allow_always: bool,
     },
 
     /// Successfully processed (for control commands).
@@ -425,6 +427,14 @@ impl SubmissionResult {
     pub fn error(message: impl Into<String>) -> Self {
         Self::Error {
             message: message.into(),
+        }
+    }
+
+    /// Create a non-error status message (e.g., for blocking states like approval waiting).
+    /// Uses Ok variant to avoid "Error:" prefix in rendering.
+    pub fn pending(message: impl Into<String>) -> Self {
+        Self::Ok {
+            message: Some(message.into()),
         }
     }
 }

@@ -29,21 +29,35 @@
         "type": "tool_calls",
         "tool_calls": [
           {
+            "id": "call_tool_info_routine_create",
+            "name": "tool_info",
+            "arguments": { "name": "routine_create", "detail": "summary" }
+          }
+        ],
+        "input_tokens": 160,
+        "output_tokens": 25
+      }
+    },
+    {
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
             "id": "call_tool_info_time",
             "name": "tool_info",
             "arguments": { "name": "time", "include_schema": true }
           }
         ],
-        "input_tokens": 200,
+        "input_tokens": 240,
         "output_tokens": 20
       }
     },
     {
       "response": {
         "type": "text",
-        "content": "I found the info for both tools. The echo tool has a 'message' parameter. The time tool accepts an 'operation' parameter with options like 'now', 'parse', and 'diff'.",
-        "input_tokens": 400,
-        "output_tokens": 40
+        "content": "I found the info for all three tools. The echo tool has a 'message' parameter. routine_create's summary explains that cron needs request.schedule, message_event needs request.pattern, and system_event needs request.source plus request.event_type. The time tool accepts an 'operation' parameter with options like 'now', 'parse', and 'diff'.",
+        "input_tokens": 520,
+        "output_tokens": 60
       }
     }
   ]

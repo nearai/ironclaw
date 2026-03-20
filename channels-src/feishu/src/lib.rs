@@ -33,8 +33,8 @@ use serde::{Deserialize, Serialize};
 
 // Re-export generated types
 use exports::near::agent::channel::{
-    AgentResponse, Attachment, ChannelConfig, Guest, HttpEndpointConfig, IncomingHttpRequest,
-    OutgoingHttpResponse, PollConfig, StatusUpdate,
+    AgentResponse, ChannelConfig, Guest, HttpEndpointConfig, IncomingHttpRequest,
+    OutgoingHttpResponse, StatusUpdate,
 };
 use near::agent::channel_host::{self, EmittedMessage};
 
@@ -206,9 +206,17 @@ struct FeishuApiResponse<T> {
     data: Option<T>,
 }
 
-/// Tenant access token response.
+/// Tenant access token response (flat format).
+///
+/// Unlike most Feishu APIs that nest results under `data`, the
+/// `/auth/v3/tenant_access_token/internal` endpoint returns `code`, `msg`,
+/// `tenant_access_token`, and `expire` at the top level.
 #[derive(Debug, Deserialize)]
-struct TenantAccessTokenData {
+struct TenantAccessTokenResponse {
+    #[serde(default)]
+    code: i32,
+    #[serde(default)]
+    msg: String,
     tenant_access_token: String,
     expire: i64,
 }
@@ -268,7 +276,7 @@ fn default_api_base() -> String {
 
 struct FeishuChannel;
 
-export_sandboxed_channel!(FeishuChannel);
+export!(FeishuChannel);
 
 impl Guest for FeishuChannel {
     fn on_start(config_json: String) -> Result<ChannelConfig, String> {
@@ -373,10 +381,7 @@ impl Guest for FeishuChannel {
                     channel_host::LogLevel::Info,
                     "Handling URL verification challenge",
                 );
-                return json_response(
-                    200,
-                    serde_json::json!({ "challenge": challenge }),
-                );
+                return json_response(200, serde_json::json!({ "challenge": challenge }));
             }
         }
 
@@ -467,7 +472,10 @@ fn handle_message_event(event_data: &serde_json::Value) {
             if !allow_list.is_empty() && !allow_list.iter().any(|id| id == sender_id) {
                 channel_host::log(
                     channel_host::LogLevel::Debug,
-                    &format!("Ignoring message from user not in allow_from: {}", sender_id),
+                    &format!(
+                        "Ignoring message from user not in allow_from: {}",
+                        sender_id
+                    ),
                 );
                 return;
             }
@@ -475,19 +483,15 @@ fn handle_message_event(event_data: &serde_json::Value) {
     }
 
     // DM pairing check for p2p chats.
-    let chat_type = msg_event
-        .message
-        .chat_type
-        .as_deref()
-        .unwrap_or("unknown");
+    let chat_type = msg_event.message.chat_type.as_deref().unwrap_or("unknown");
 
     if chat_type == "p2p" {
-        let dm_policy = channel_host::workspace_read(DM_POLICY_PATH)
-            .unwrap_or_else(|| "pairing".to_string());
+        let dm_policy =
+            channel_host::workspace_read(DM_POLICY_PATH).unwrap_or_else(|| "pairing".to_string());
 
         if dm_policy == "pairing" {
             let sender_name = sender_id.to_string();
-            match channel_host::pairing_is_allowed("feishu", sender_id, &sender_name) {
+            match channel_host::pairing_is_allowed("feishu", sender_id, Some(&sender_name)) {
                 Ok(true) => {}
                 Ok(false) => {
                     // Upsert a pairing request.
@@ -538,8 +542,7 @@ fn handle_message_event(event_data: &serde_json::Value) {
         chat_type: chat_type.to_string(),
     };
 
-    let metadata_json =
-        serde_json::to_string(&metadata).unwrap_or_else(|_| "{}".to_string());
+    let metadata_json = serde_json::to_string(&metadata).unwrap_or_else(|_| "{}".to_string());
 
     // Determine thread ID from reply chain.
     let thread_id = msg_event
@@ -550,7 +553,7 @@ fn handle_message_event(event_data: &serde_json::Value) {
         .map(|s| s.to_string());
 
     // Emit message to the agent.
-    channel_host::emit_message(EmittedMessage {
+    channel_host::emit_message(&EmittedMessage {
         user_id: sender_id.to_string(),
         user_name: None,
         content: text,
@@ -597,10 +600,7 @@ fn send_reply(message_id: &str, content: &str) -> Result<(), String> {
 
     let token = get_valid_token(&api_base)?;
 
-    let url = format!(
-        "{}/open-apis/im/v1/messages/{}/reply",
-        api_base, message_id
-    );
+    let url = format!("{}/open-apis/im/v1/messages/{}/reply", api_base, message_id);
 
     let body = ReplyMessageBody {
         msg_type: "text".to_string(),
@@ -619,7 +619,7 @@ fn send_reply(message_id: &str, content: &str) -> Result<(), String> {
         "POST",
         &url,
         &headers.to_string(),
-        Some(&body_json),
+        Some(body_json.as_bytes()),
         Some(10_000),
     );
 
@@ -679,7 +679,7 @@ fn send_message(receive_id: &str, receive_id_type: &str, content: &str) -> Resul
         "POST",
         &url,
         &headers.to_string(),
-        Some(&body_json),
+        Some(body_json.as_bytes()),
         Some(10_000),
     );
 
@@ -759,11 +759,12 @@ fn obtain_tenant_token(api_base: &str) -> Result<String, String> {
         "Content-Type": "application/json; charset=utf-8",
     });
 
+    let body_bytes = body.to_string();
     let result = channel_host::http_request(
         "POST",
         &url,
         &headers.to_string(),
-        Some(&body.to_string()),
+        Some(body_bytes.as_bytes()),
         Some(10_000),
     );
 
@@ -777,9 +778,8 @@ fn obtain_tenant_token(api_base: &str) -> Result<String, String> {
                 ));
             }
 
-            let token_resp: FeishuApiResponse<TenantAccessTokenData> =
-                serde_json::from_slice(&response.body)
-                    .map_err(|e| format!("Failed to parse token response: {}", e))?;
+            let token_resp: TenantAccessTokenResponse = serde_json::from_slice(&response.body)
+                .map_err(|e| format!("Failed to parse token response: {}", e))?;
 
             if token_resp.code != 0 {
                 return Err(format!(
@@ -788,26 +788,33 @@ fn obtain_tenant_token(api_base: &str) -> Result<String, String> {
                 ));
             }
 
-            let data = token_resp
-                .data
-                .ok_or_else(|| "Token response missing data".to_string())?;
+            if token_resp.tenant_access_token.is_empty() {
+                return Err("Token response missing tenant_access_token".to_string());
+            }
+
+            if token_resp.expire <= 0 {
+                return Err(format!(
+                    "Token response has invalid expire value: {}",
+                    token_resp.expire
+                ));
+            }
 
             // Cache the token with expiry.
             let now = channel_host::now_millis();
-            let expiry = now + (data.expire as u64) * 1000;
+            let expiry = now.saturating_add((token_resp.expire as u64).saturating_mul(1000));
 
-            let _ = channel_host::workspace_write(TOKEN_PATH, &data.tenant_access_token);
+            let _ = channel_host::workspace_write(TOKEN_PATH, &token_resp.tenant_access_token);
             let _ = channel_host::workspace_write(TOKEN_EXPIRY_PATH, &expiry.to_string());
 
             channel_host::log(
                 channel_host::LogLevel::Debug,
                 &format!(
                     "Tenant access token refreshed, expires in {}s",
-                    data.expire
+                    token_resp.expire
                 ),
             );
 
-            Ok(data.tenant_access_token)
+            Ok(token_resp.tenant_access_token)
         }
         Err(e) => Err(format!("Token exchange request failed: {}", e)),
     }
@@ -827,5 +834,62 @@ fn json_response(status: u16, body: serde_json::Value) -> OutgoingHttpResponse {
         })
         .to_string(),
         body: body_bytes,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_flat_token_response() {
+        let json = r#"{
+            "code": 0,
+            "msg": "ok",
+            "tenant_access_token": "t-abc123",
+            "expire": 7200
+        }"#;
+        let resp: TenantAccessTokenResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.code, 0);
+        assert_eq!(resp.msg, "ok");
+        assert_eq!(resp.tenant_access_token, "t-abc123");
+        assert_eq!(resp.expire, 7200);
+    }
+
+    #[test]
+    fn parse_token_response_rejects_missing_token() {
+        let json = r#"{"code": 0, "msg": "ok", "expire": 7200}"#;
+        let result: Result<TenantAccessTokenResponse, _> = serde_json::from_str(json);
+        assert!(result.is_err(), "should fail when tenant_access_token is missing");
+    }
+
+    #[test]
+    fn parse_token_response_rejects_missing_expire() {
+        let json = r#"{"code": 0, "msg": "ok", "tenant_access_token": "t-abc"}"#;
+        let result: Result<TenantAccessTokenResponse, _> = serde_json::from_str(json);
+        assert!(result.is_err(), "should fail when expire is missing");
+    }
+
+    #[test]
+    fn parse_token_response_defaults_code_and_msg() {
+        let json = r#"{"tenant_access_token": "t-abc", "expire": 3600}"#;
+        let resp: TenantAccessTokenResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.code, 0);
+        assert_eq!(resp.msg, "");
+        assert_eq!(resp.tenant_access_token, "t-abc");
+        assert_eq!(resp.expire, 3600);
+    }
+
+    #[test]
+    fn parse_token_error_response() {
+        let json = r#"{
+            "code": 10003,
+            "msg": "invalid app_id",
+            "tenant_access_token": "",
+            "expire": 0
+        }"#;
+        let resp: TenantAccessTokenResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.code, 10003);
+        assert!(resp.tenant_access_token.is_empty());
     }
 }
