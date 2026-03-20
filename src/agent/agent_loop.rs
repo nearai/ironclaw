@@ -1261,8 +1261,7 @@ mod tests {
 
     #[test]
     fn chat_tool_execution_metadata_falls_back_to_user_scope_without_route() {
-        let message =
-            IncomingMessage::new("gateway", "owner-scope", "hello").with_sender_id("gateway-user");
+        let message = IncomingMessage::new("gateway", "owner-scope", "hello").with_sender_id("");
 
         let metadata = chat_tool_execution_metadata(&message);
         assert_eq!(
@@ -1271,9 +1270,12 @@ mod tests {
         ); // safety: test-only assertion
         assert_eq!(
             metadata.get("notify_user").and_then(|v| v.as_str()),
-            Some("gateway-user")
+            Some("owner-scope")
         ); // safety: test-only assertion
-        assert!(metadata.get("notify_thread_id").is_some()); // safety: test-only assertion
+        assert_eq!(
+            metadata.get("notify_thread_id"),
+            Some(&serde_json::Value::Null)
+        ); // safety: test-only assertion
     }
 
     #[test]
