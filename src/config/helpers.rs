@@ -247,9 +247,16 @@ pub(crate) fn validate_base_url(url: &str, field_name: &str) -> Result<(), Confi
                     v4.is_private()
                         || v4.is_loopback()
                         || v4.is_link_local()
+                        || v4.is_multicast()
+                        || v4.is_unspecified()
                         || v4 == Ipv4Addr::new(169, 254, 169, 254)
+                        || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xC0) == 64) // CGN
                 } else {
-                    v6.is_loopback() || v6.is_unspecified() || (v6.octets()[0] & 0xfe) == 0xfc // ULA (fc00::/7)
+                    v6.is_loopback()
+                        || v6.is_unspecified()
+                        || (v6.octets()[0] & 0xfe) == 0xfc // ULA (fc00::/7)
+                        || (v6.segments()[0] & 0xffc0) == 0xfe80 // link-local (fe80::/10)
+                        || v6.octets()[0] == 0xff // multicast (ff00::/8)
                 }
             }
         }
@@ -269,27 +276,46 @@ pub(crate) fn validate_base_url(url: &str, field_name: &str) -> Result<(), Confi
             });
         }
     } else {
-        // Hostname — resolve and check all resulting IPs.
+        // Hostname — resolve and check all resulting IPs as defense-in-depth.
+        // NOTE: This does NOT fully prevent DNS rebinding attacks (the hostname
+        // could resolve to a different IP at request time). Full protection
+        // would require pinning the resolved IP in the HTTP client's connector.
+        // This validation catches the common case of misconfigured or malicious URLs.
+        //
+        // NOTE: `to_socket_addrs()` performs blocking DNS resolution. This is
+        // acceptable because `validate_base_url` runs at config-load time only,
+        // before the async runtime is fully driving I/O. If this ever moves to
+        // a hot path, wrap in `tokio::task::spawn_blocking` or use
+        // `tokio::net::lookup_host`.
         use std::net::ToSocketAddrs;
         let port = parsed.port().unwrap_or(443);
-        if let Ok(addrs) = (host, port).to_socket_addrs() {
-            for addr in addrs {
-                if is_dangerous_ip(&addr.ip()) {
-                    return Err(ConfigError::InvalidValue {
-                        key: field_name.to_string(),
-                        message: format!(
-                            "hostname '{}' resolves to private/internal IP '{}'. \
-                             This is blocked to prevent SSRF attacks.",
-                            host,
-                            addr.ip()
-                        ),
-                    });
+        match (host, port).to_socket_addrs() {
+            Ok(addrs) => {
+                for addr in addrs {
+                    if is_dangerous_ip(&addr.ip()) {
+                        return Err(ConfigError::InvalidValue {
+                            key: field_name.to_string(),
+                            message: format!(
+                                "hostname '{}' resolves to private/internal IP '{}'. \
+                                 This is blocked to prevent SSRF attacks.",
+                                host,
+                                addr.ip()
+                            ),
+                        });
+                    }
                 }
             }
+            Err(e) => {
+                return Err(ConfigError::InvalidValue {
+                    key: field_name.to_string(),
+                    message: format!(
+                        "failed to resolve hostname '{}': {}. \
+                         Base URLs must be resolvable at config time.",
+                        host, e
+                    ),
+                });
+            }
         }
-        // If DNS resolution fails, allow it — the HTTP request will fail
-        // later with a clear connection error. We don't want to block
-        // startup when DNS is temporarily unavailable.
     }
 
     Ok(())
@@ -350,8 +376,9 @@ mod tests {
 
     #[test]
     fn validate_base_url_allows_https() {
-        assert!(validate_base_url("https://api.example.com", "TEST").is_ok());
-        assert!(validate_base_url("https://api.example.com/v1", "TEST").is_ok());
+        // Use IP literals to avoid DNS resolution in sandboxed test environments.
+        assert!(validate_base_url("https://8.8.8.8", "TEST").is_ok());
+        assert!(validate_base_url("https://8.8.8.8/v1", "TEST").is_ok());
     }
 
     #[test]
@@ -409,9 +436,8 @@ mod tests {
     #[test]
     fn validate_base_url_handles_url_with_credentials() {
         // URLs with embedded credentials — validate_base_url checks the host,
-        // not the credentials. The host is a valid public HTTPS endpoint.
-        let result = validate_base_url("https://user:pass@api.example.com", "TEST");
-        // Should succeed since the host itself is a valid public HTTPS endpoint.
+        // not the credentials. Use IP literal to avoid DNS in sandboxed envs.
+        let result = validate_base_url("https://user:pass@8.8.8.8", "TEST");
         assert!(result.is_ok());
     }
 
@@ -420,5 +446,47 @@ mod tests {
         assert!(validate_base_url("", "TEST").is_err());
         assert!(validate_base_url("not-a-url", "TEST").is_err());
         assert!(validate_base_url("://missing-scheme", "TEST").is_err());
+    }
+
+    #[test]
+    fn validate_base_url_rejects_unspecified_ipv4() {
+        assert!(validate_base_url("https://0.0.0.0", "TEST").is_err());
+    }
+
+    #[test]
+    fn validate_base_url_rejects_ipv6_loopback_https() {
+        // IPv6 loopback is allowed over HTTP (localhost equivalent),
+        // but must be rejected over HTTPS as a dangerous IP.
+        assert!(validate_base_url("https://[::1]", "TEST").is_err());
+    }
+
+    #[test]
+    fn validate_base_url_rejects_ipv6_link_local() {
+        // fe80::/10 — link-local addresses
+        assert!(validate_base_url("https://[fe80::1]", "TEST").is_err());
+    }
+
+    #[test]
+    fn validate_base_url_rejects_ipv6_multicast() {
+        // ff00::/8 — multicast addresses
+        assert!(validate_base_url("https://[ff02::1]", "TEST").is_err());
+    }
+
+    #[test]
+    fn validate_base_url_rejects_ipv6_unspecified() {
+        // :: — unspecified address
+        assert!(validate_base_url("https://[::]", "TEST").is_err());
+    }
+
+    #[test]
+    fn validate_base_url_rejects_dns_failure() {
+        // .invalid TLD is guaranteed to never resolve (RFC 6761)
+        let result = validate_base_url("https://ssrf-test.invalid", "TEST");
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("failed to resolve"),
+            "Expected DNS resolution failure, got: {err}"
+        );
     }
 }

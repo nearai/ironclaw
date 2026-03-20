@@ -33,7 +33,7 @@ pub async fn run_doctor_command() -> anyhow::Result<()> {
 
     check(
         "NEAR AI session",
-        check_nearai_session().await,
+        check_nearai_session(&settings).await,
         &mut passed,
         &mut failed,
         &mut skipped,
@@ -215,7 +215,22 @@ fn check_settings_file() -> CheckResult {
 
 // ── NEAR AI session ─────────────────────────────────────────
 
-async fn check_nearai_session() -> CheckResult {
+async fn check_nearai_session(settings: &Settings) -> CheckResult {
+    // Skip entirely when the configured backend is not NEAR AI.
+    let llm_config = match crate::config::LlmConfig::resolve(settings) {
+        Ok(config) => config,
+        Err(e) => {
+            // check_llm_config will report the full error; just skip here.
+            return CheckResult::Skip(format!("LLM config error: {e}"));
+        }
+    };
+    if llm_config.backend != "nearai" {
+        return CheckResult::Skip(format!(
+            "not using NEAR AI backend (backend={})",
+            llm_config.backend
+        ));
+    }
+
     // Check if session file exists
     let session_path = crate::config::llm::default_session_path();
     if !session_path.exists() {
@@ -620,9 +635,50 @@ mod tests {
 
     #[tokio::test]
     async fn check_nearai_session_does_not_panic() {
-        let result = check_nearai_session().await;
+        let settings = Settings::default();
+        let result = check_nearai_session(&settings).await;
         match result {
             CheckResult::Pass(_) | CheckResult::Fail(_) | CheckResult::Skip(_) => {}
+        }
+    }
+
+    #[test]
+    fn check_nearai_session_skips_for_non_nearai_backend() {
+        struct EnvGuard(&'static str, Option<String>);
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                // SAFETY: Under ENV_MUTEX.
+                unsafe {
+                    match &self.1 {
+                        Some(val) => std::env::set_var(self.0, val),
+                        None => std::env::remove_var(self.0),
+                    }
+                }
+            }
+        }
+
+        let _mutex = crate::config::helpers::ENV_MUTEX.lock().expect("env mutex");
+        let prev = std::env::var("LLM_BACKEND").ok();
+        // SAFETY: Under ENV_MUTEX, no concurrent env access.
+        unsafe {
+            std::env::set_var("LLM_BACKEND", "anthropic");
+        }
+        let _env_guard = EnvGuard("LLM_BACKEND", prev);
+
+        let settings = Settings::default();
+        let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+        let result = rt.block_on(check_nearai_session(&settings));
+        match result {
+            CheckResult::Skip(msg) => {
+                assert!(
+                    msg.contains("backend=anthropic"),
+                    "expected backend name in skip message, got: {msg}"
+                );
+            }
+            other => panic!(
+                "expected Skip for non-nearai backend, got: {}",
+                format_result(&other)
+            ),
         }
     }
 

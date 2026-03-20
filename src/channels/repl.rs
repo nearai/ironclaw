@@ -539,6 +539,7 @@ impl Channel for ReplChannel {
                 tool_name,
                 description,
                 parameters,
+                allow_always,
             } => {
                 let term_width = crossterm::terminal::size()
                     .map(|(w, _)| w as usize)
@@ -582,9 +583,13 @@ impl Channel for ReplChannel {
                 }
 
                 eprintln!("  \u{2502}");
-                eprintln!(
-                    "  \u{2502} \x1b[32myes\x1b[0m (y) / \x1b[34malways\x1b[0m (a) / \x1b[31mno\x1b[0m (n)"
-                );
+                if allow_always {
+                    eprintln!(
+                        "  \u{2502} \x1b[32myes\x1b[0m (y) / \x1b[34malways\x1b[0m (a) / \x1b[31mno\x1b[0m (n)"
+                    );
+                } else {
+                    eprintln!("  \u{2502} \x1b[32myes\x1b[0m (y) / \x1b[31mno\x1b[0m (n)");
+                }
                 eprintln!("  {bot_border}");
                 eprintln!();
             }
