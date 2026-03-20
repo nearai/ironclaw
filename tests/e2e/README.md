@@ -164,5 +164,7 @@ await page.evaluate("""
 """)
 ```
 
-This is the pattern used in `test_tool_approval.py` and parts of
-`test_extensions.py` (auth card, configure modal).
+This is the pattern used in most of `test_tool_approval.py` and parts of
+`test_extensions.py` (auth card, configure modal). The waiting-approval
+regression in `test_tool_approval.py` uses a real tool call instead so it can
+exercise backend approval state.
