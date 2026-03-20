@@ -1048,9 +1048,12 @@ impl ExtensionManager {
                 } else {
                     serializer.append_pair(&key, &value);
                 }
-        let Ok(mut parsed) = url::Url::parse(&auth_url) else {
-            tracing::error!("Failed to parse auth_url: {}", auth_url);
-            return auth_url;
+            }
+            if !replaced {
+                serializer.append_pair("state", hosted_state);
+            }
+
+            return format!("{base}?{}", serializer.finish());
         };
 
         let mut replaced = false;
