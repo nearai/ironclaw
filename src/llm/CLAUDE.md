@@ -13,6 +13,9 @@ Multi-provider LLM integration with circuit breaker, retry, failover, and respon
 | `nearai_chat.rs` | NEAR AI Chat Completions provider (dual auth: session token or API key) |
 | `codex_auth.rs` | Reads Codex CLI `auth.json`, extracts tokens, refreshes ChatGPT OAuth access tokens |
 | `codex_chatgpt.rs` | Custom Responses API provider for Codex ChatGPT backend (`/backend-api/codex`) |
+| `openai_codex_provider.rs` | OpenAI Codex Responses API client (SSE streaming, JWT auth, subscription billing) |
+| `openai_codex_session.rs` | OAuth 2.0 session manager for OpenAI Codex (device code flow, token persistence) |
+| `token_refreshing.rs` | Token-refreshing `LlmProvider` decorator for OpenAI Codex (pre-emptive refresh, zero-cost billing) |
 | `reasoning.rs` | `Reasoning` struct, `ReasoningContext`, `RespondResult`, `ActionPlan`, `ToolSelection`; thinking-tag stripping; `SILENT_REPLY_TOKEN` |
 | `session.rs` | NEAR AI session token management with disk + DB persistence, OAuth login flow |
 | `circuit_breaker.rs` | Circuit breaker: Closed → Open → HalfOpen state machine |
@@ -38,6 +41,7 @@ Set via `LLM_BACKEND` env var:
 | `openai_compatible` | Any OpenAI-compatible endpoint | `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL` |
 | `tinfoil` | Tinfoil TEE inference | `TINFOIL_API_KEY`, `TINFOIL_MODEL` |
 | `bedrock` | AWS Bedrock (requires `--features bedrock`) | `BEDROCK_REGION`, `BEDROCK_MODEL`, `AWS_PROFILE` |
+| `openai_codex` | OpenAI Codex (ChatGPT subscription) | `OPENAI_CODEX_MODEL`, `OPENAI_CODEX_CLIENT_ID` |
 
 Codex auth reuse:
 - Set `LLM_USE_CODEX_AUTH=true` to load credentials from `~/.codex/auth.json` (override with `CODEX_AUTH_PATH`).
@@ -148,9 +152,27 @@ To add a new provider:
 
 Set `LLM_EXTRA_HEADERS=Key:Value,Key2:Value2` to inject headers into every request. Useful for OpenRouter attribution (`HTTP-Referer`, `X-Title`). Invalid header names/values are skipped with a warning (not a fatal error).
 
+## OpenAI Codex Provider
+
+Uses the Responses API at `chatgpt.com/backend-api/codex/responses` with ChatGPT subscription OAuth tokens (zero API cost — billing through subscription).
+
+**Auth flow:** Device code OAuth via `auth.openai.com/api/accounts/deviceauth/*` endpoints. On first run, displays a code for the user to enter at a URL. Tokens are persisted to `~/.ironclaw/openai_codex_session.json` (mode 0600) and auto-refreshed before expiry.
+
+**Provider chain:** `OpenAiCodexProvider` → `TokenRefreshingProvider` (pre-emptive refresh + retry on 401) → standard decorator chain. The `TokenRefreshingProvider` intercepts `AuthFailed`/`SessionExpired` errors, refreshes the OAuth token, and retries once.
+
+**Key differences from other providers:**
+- Uses Responses API (not Chat Completions) — SSE streaming with different event types
+- System messages are sent as `instructions` field, not in `input` array
+- Tool schemas are normalized via `normalize_schema_strict()` for OpenAI strict mode
+- `cost_per_token()` returns `(0, 0)` — subscription-based billing
+- `set_model()` returns error — model is fixed at construction time
+- Image attachments are silently dropped with a warning log
+
+**Env vars:** `OPENAI_CODEX_MODEL` (default: `gpt-5.3-codex`), `OPENAI_CODEX_CLIENT_ID`, `OPENAI_CODEX_AUTH_URL`, `OPENAI_CODEX_API_URL`.
+
 ## Provider Chain Construction
 
-`build_provider_chain()` in `mod.rs` is the single source of truth for assembling decorators. The chain is:
+`build_provider_chain()` in `mod.rs` is the single source of truth for assembling decorators. It creates the base provider (dispatching to `create_openai_codex_provider()` for codex, `create_llm_provider()` for everything else), then applies all decorators inline:
 
 ```
 Raw provider
