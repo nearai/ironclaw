@@ -361,6 +361,9 @@ enum TelegramStatusAction {
 
 const TELEGRAM_STATUS_MAX_CHARS: usize = 600;
 
+/// Maximum characters per Telegram message (Telegram's hard API limit).
+const TELEGRAM_MAX_MESSAGE_LEN: usize = 4096;
+
 fn truncate_status_message(input: &str, max_chars: usize) -> String {
     let mut iter = input.chars();
     let truncated: String = iter.by_ref().take(max_chars).collect();
@@ -1223,6 +1226,59 @@ fn send_document(
 /// Image MIME types that Telegram's sendPhoto API supports.
 const PHOTO_MIME_TYPES: &[&str] = &["image/jpeg", "image/png", "image/gif", "image/webp"];
 
+/// Split `text` into chunks of at most `max_chars` Unicode scalar values.
+///
+/// Prefers paragraph breaks (`\n\n`), then single newlines, then hard-splits
+/// at the character limit to avoid Telegram's 4096-character message rejection.
+fn split_message(text: &str, max_chars: usize) -> Vec<String> {
+    if text.chars().count() <= max_chars {
+        return vec![text.to_string()];
+    }
+
+    let mut chunks: Vec<String> = Vec::new();
+    let mut remaining = text;
+
+    while !remaining.is_empty() {
+        if remaining.chars().count() <= max_chars {
+            chunks.push(remaining.to_string());
+            break;
+        }
+
+        // Byte offset just past the max_chars'th character.
+        let limit_byte = remaining
+            .char_indices()
+            .nth(max_chars)
+            .map(|(i, _)| i)
+            .unwrap_or(remaining.len());
+
+        let window = &remaining[..limit_byte];
+
+        // Prefer splitting at the last paragraph break, then single newline.
+        let split_at = if let Some(pos) = window.rfind("\n\n") {
+            pos + 2
+        } else if let Some(pos) = window.rfind('\n') {
+            pos + 1
+        } else {
+            limit_byte
+        };
+
+        // Guard: if split_at is 0 (text starts with a blank line), hard-split.
+        let split_at = if split_at == 0 { limit_byte } else { split_at };
+
+        chunks.push(remaining[..split_at].to_string());
+        remaining = &remaining[split_at..];
+    }
+
+    // Drop whitespace-only chunks that add no value.
+    chunks.retain(|c| !c.trim().is_empty());
+
+    if chunks.is_empty() {
+        chunks.push(text.to_string());
+    }
+
+    chunks
+}
+
 /// Send a full agent response (attachments + text) to a chat.
 ///
 /// Shared implementation for both `on_respond` and `on_broadcast`.
@@ -1242,26 +1298,25 @@ fn send_response(
         return Ok(());
     }
 
-    // Try Markdown, fall back to plain text on parse errors
-    match send_message(
-        chat_id,
-        &response.content,
-        reply_to_message_id,
-        Some("Markdown"),
-        message_thread_id,
-    ) {
-        Ok(_) => Ok(()),
-        Err(SendError::ParseEntities(_)) => send_message(
-            chat_id,
-            &response.content,
-            reply_to_message_id,
-            None,
-            message_thread_id,
-        )
-        .map(|_| ())
-        .map_err(|e| format!("Plain-text retry also failed: {}", e)),
-        Err(e) => Err(e.to_string()),
+    // Split long responses into chunks to stay within Telegram's 4096-char limit.
+    let chunks = split_message(&response.content, TELEGRAM_MAX_MESSAGE_LEN);
+    for (i, chunk) in chunks.iter().enumerate() {
+        // Only the first chunk replies to the original message.
+        let reply_id = if i == 0 { reply_to_message_id } else { None };
+
+        // Try Markdown, fall back to plain text on parse errors.
+        match send_message(chat_id, chunk, reply_id, Some("Markdown"), message_thread_id) {
+            Ok(_) => {}
+            Err(SendError::ParseEntities(_)) => {
+                send_message(chat_id, chunk, reply_id, None, message_thread_id)
+                    .map(|_| ())
+                    .map_err(|e| format!("Plain-text retry also failed: {}", e))?;
+            }
+            Err(e) => return Err(e.to_string()),
+        }
     }
+
+    Ok(())
 }
 
 /// Send a single attachment, choosing sendPhoto or sendDocument based on MIME type.
@@ -2819,5 +2874,58 @@ mod tests {
     fn test_max_download_size_constant() {
         // Verify the constant is 20 MB, matching the Slack channel limit
         assert_eq!(MAX_DOWNLOAD_SIZE_BYTES, 20 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_split_message_short() {
+        // Under the limit: returned as-is
+        let chunks = split_message("Hello, world!", 4096);
+        assert_eq!(chunks, vec!["Hello, world!"]);
+    }
+
+    #[test]
+    fn test_split_message_exact_limit() {
+        let text: String = "a".repeat(4096);
+        let chunks = split_message(&text, 4096);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].chars().count(), 4096);
+    }
+
+    #[test]
+    fn test_split_message_over_limit_hard() {
+        // No newlines — must hard-split
+        let text: String = "x".repeat(5000);
+        let chunks = split_message(&text, 4096);
+        assert_eq!(chunks.len(), 2);
+        assert!(chunks[0].chars().count() <= 4096);
+        assert!(chunks[1].chars().count() <= 4096);
+        assert_eq!(chunks.iter().map(|c| c.chars().count()).sum::<usize>(), 5000);
+    }
+
+    #[test]
+    fn test_split_message_paragraph_break() {
+        // Prefers splitting at \n\n within the window
+        let first = "A".repeat(3000);
+        let second = "B".repeat(3000);
+        let text = format!("{}\n\n{}", first, second);
+        let chunks = split_message(&text, 4096);
+        assert_eq!(chunks.len(), 2);
+        // first chunk should end with the paragraph text (≤4096 chars)
+        assert!(chunks[0].chars().count() <= 4096);
+        assert!(chunks[1].chars().count() <= 4096);
+    }
+
+    #[test]
+    fn test_split_message_cjk() {
+        // CJK characters are multi-byte UTF-8 but count as 1 char each
+        let text: String = "中".repeat(5000);
+        let chunks = split_message(&text, 4096);
+        for chunk in &chunks {
+            assert!(chunk.chars().count() <= 4096);
+        }
+        assert_eq!(
+            chunks.iter().map(|c| c.chars().count()).sum::<usize>(),
+            5000
+        );
     }
 }
