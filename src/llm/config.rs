@@ -204,8 +204,7 @@ impl NearAiConfig {
     /// appropriate base URL (cloud-api when API key is present,
     /// private.near.ai for session-token auth).
     pub(crate) fn for_model_discovery() -> Self {
-        let api_key = std::env::var("NEARAI_API_KEY")
-            .ok()
+        let api_key = crate::config::helpers::env_or_override("NEARAI_API_KEY")
             .filter(|k| !k.is_empty())
             .map(SecretString::from);
 

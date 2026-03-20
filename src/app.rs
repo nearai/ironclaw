@@ -723,6 +723,17 @@ impl AppBuilder {
             dev_loaded_tool_names,
         ) = self.init_extensions(&tools, &hooks).await?;
 
+        // Load bootstrap-completed flag from settings so that existing users
+        // who already completed onboarding don't re-get bootstrap injection.
+        if let Some(ref ws) = workspace {
+            let toml_path = crate::settings::Settings::default_toml_path();
+            if let Ok(Some(settings)) = crate::settings::Settings::load_toml(&toml_path)
+                && settings.profile_onboarding_completed
+            {
+                ws.mark_bootstrap_completed();
+            }
+        }
+
         // Seed workspace and backfill embeddings
         if let Some(ref ws) = workspace {
             // Import workspace files from disk FIRST if WORKSPACE_IMPORT_DIR is set.

@@ -21,7 +21,7 @@ use uuid::Uuid;
 use crate::agent::routine::{
     FullJobPermissionDefaultMode, FullJobPermissionMode, NotifyConfig, Routine, RoutineAction,
     RoutineGuardrails, Trigger, load_full_job_permission_settings, next_cron_fire,
-    normalize_tool_names,
+    normalize_cron_expression, normalize_tool_names,
 };
 use crate::agent::routine_engine::RoutineEngine;
 use crate::context::JobContext;
@@ -1539,7 +1539,10 @@ impl Tool for RoutineUpdateTool {
             })
             .transpose()?;
 
-        let new_schedule = params.get("schedule").and_then(|v| v.as_str());
+        let new_schedule = params
+            .get("schedule")
+            .and_then(|v| v.as_str())
+            .map(normalize_cron_expression);
 
         if new_schedule.is_some() || new_timezone.is_some() {
             // Extract existing cron fields (cloned to avoid borrow conflict)
@@ -1549,7 +1552,7 @@ impl Tool for RoutineUpdateTool {
             };
 
             if let Some((old_schedule, old_tz)) = existing_cron {
-                let effective_schedule = new_schedule.unwrap_or(&old_schedule);
+                let effective_schedule = new_schedule.as_deref().unwrap_or(&old_schedule);
                 let effective_tz = new_timezone.or(old_tz);
                 // Validate
                 next_cron_fire(effective_schedule, effective_tz.as_deref()).map_err(|e| {
