@@ -47,6 +47,10 @@ enum NormalizedTriggerRequest {
         event_type: String,
         filters: HashMap<String, String>,
     },
+    Webhook {
+        path: Option<String>,
+        secret: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -827,6 +831,11 @@ fn parse_routine_trigger(params: &Value) -> Result<NormalizedTriggerRequest, Too
                 filters,
             })
         }
+        "webhook" => {
+            let path = string_field(params, "request", "path", &["webhook_path"]);
+            let secret = string_field(params, "request", "secret", &["webhook_secret"]);
+            Ok(NormalizedTriggerRequest::Webhook { path, secret })
+        }
         other => Err(ToolError::InvalidParameters(format!(
             "unknown request.kind: {other}"
         ))),
@@ -914,6 +923,10 @@ fn build_routine_trigger(trigger: &NormalizedTriggerRequest) -> Trigger {
             source: source.clone(),
             event_type: event_type.clone(),
             filters: filters.clone(),
+        },
+        NormalizedTriggerRequest::Webhook { path, secret } => Trigger::Webhook {
+            path: path.clone(),
+            secret: secret.clone(),
         },
     }
 }

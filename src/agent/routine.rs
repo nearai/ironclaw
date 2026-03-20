@@ -79,6 +79,13 @@ pub enum Trigger {
         #[serde(default)]
         filters: std::collections::HashMap<String, String>,
     },
+    /// Fire on incoming webhook POST to /api/webhooks/{path}.
+    Webhook {
+        /// Optional webhook path suffix (defaults to routine id).
+        path: Option<String>,
+        /// Optional shared secret for HMAC validation.
+        secret: Option<String>,
+    },
     /// Only fires via tool call or CLI.
     Manual,
 }
@@ -90,6 +97,7 @@ impl Trigger {
             Trigger::Cron { .. } => "cron",
             Trigger::Event { .. } => "event",
             Trigger::SystemEvent { .. } => "system_event",
+            Trigger::Webhook { .. } => "webhook",
             Trigger::Manual => "manual",
         }
     }
@@ -171,6 +179,17 @@ impl Trigger {
                     filters,
                 })
             }
+            "webhook" => {
+                let path = config
+                    .get("path")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                let secret = config
+                    .get("secret")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                Ok(Trigger::Webhook { path, secret })
+            }
             "manual" => Ok(Trigger::Manual),
             other => Err(RoutineError::UnknownTriggerType {
                 trigger_type: other.to_string(),
@@ -197,6 +216,10 @@ impl Trigger {
                 "source": source,
                 "event_type": event_type,
                 "filters": filters,
+            }),
+            Trigger::Webhook { path, secret } => serde_json::json!({
+                "path": path,
+                "secret": secret,
             }),
             Trigger::Manual => serde_json::json!({}),
         }
@@ -961,6 +984,14 @@ mod tests {
             }
             .type_tag(),
             "system_event"
+        );
+        assert_eq!(
+            Trigger::Webhook {
+                path: None,
+                secret: None,
+            }
+            .type_tag(),
+            "webhook"
         );
         assert_eq!(Trigger::Manual.type_tag(), "manual");
     }
