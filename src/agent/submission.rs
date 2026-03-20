@@ -382,6 +382,8 @@ pub enum SubmissionResult {
         description: String,
         /// Parameters being passed.
         parameters: serde_json::Value,
+        /// Whether "always" auto-approve should be offered to the user.
+        allow_always: bool,
     },
 
     /// Successfully processed (for control commands).
