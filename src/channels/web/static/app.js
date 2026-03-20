@@ -1138,18 +1138,19 @@ function showApproval(data) {
   approveBtn.textContent = I18n.t('approval.approve');
   approveBtn.addEventListener('click', () => sendApprovalAction(data.request_id, 'approve'));
 
-  const alwaysBtn = document.createElement('button');
-  alwaysBtn.className = 'always';
-  alwaysBtn.textContent = I18n.t('approval.always');
-  alwaysBtn.addEventListener('click', () => sendApprovalAction(data.request_id, 'always'));
-
   const denyBtn = document.createElement('button');
   denyBtn.className = 'deny';
   denyBtn.textContent = I18n.t('approval.deny');
   denyBtn.addEventListener('click', () => sendApprovalAction(data.request_id, 'deny'));
 
   actions.appendChild(approveBtn);
-  actions.appendChild(alwaysBtn);
+  if (data.allow_always !== false) {
+    const alwaysBtn = document.createElement('button');
+    alwaysBtn.className = 'always';
+    alwaysBtn.textContent = I18n.t('approval.always');
+    alwaysBtn.addEventListener('click', () => sendApprovalAction(data.request_id, 'always'));
+    actions.appendChild(alwaysBtn);
+  }
   actions.appendChild(denyBtn);
   card.appendChild(actions);
 
