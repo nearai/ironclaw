@@ -4705,6 +4705,8 @@ var INFERENCE_SETTINGS = [
       { key: 'llm_backend', label: 'cfg.llm_backend.label', description: 'cfg.llm_backend.desc',
         type: 'select', options: ['nearai', 'anthropic', 'openai', 'ollama', 'openai_compatible', 'tinfoil', 'bedrock'] },
       { key: 'selected_model', label: 'cfg.selected_model.label', description: 'cfg.selected_model.desc', type: 'text' },
+      { key: 'cheap_model', label: 'cfg.cheap_model.label', description: 'cfg.cheap_model.desc', type: 'text' },
+      { key: 'smart_routing_cascade', label: 'cfg.smart_routing_cascade.label', description: 'cfg.smart_routing_cascade.desc', type: 'boolean' },
       { key: 'ollama_base_url', label: 'cfg.ollama_base_url.label', description: 'cfg.ollama_base_url.desc', type: 'text',
         showWhen: { key: 'llm_backend', value: 'ollama' } },
       { key: 'openai_compatible_base_url', label: 'cfg.openai_compatible_base_url.label', description: 'cfg.openai_compatible_base_url.desc', type: 'text',
@@ -5097,7 +5099,7 @@ function renderStructuredSettingsRow(def, value, activeValue) {
   return row;
 }
 
-var RESTART_REQUIRED_KEYS = ['llm_backend', 'selected_model', 'ollama_base_url', 'openai_compatible_base_url',
+var RESTART_REQUIRED_KEYS = ['llm_backend', 'selected_model', 'cheap_model', 'smart_routing_cascade', 'ollama_base_url', 'openai_compatible_base_url',
   'bedrock_region', 'bedrock_cross_region', 'bedrock_profile', 'embeddings.enabled', 'embeddings.provider', 'embeddings.model',
   'agent.auto_approve_tools', 'tunnel.provider', 'tunnel.public_url', 'gateway.rate_limit', 'gateway.max_connections'];
 
