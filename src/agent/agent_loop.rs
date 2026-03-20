@@ -54,14 +54,63 @@ pub(crate) fn truncate_for_preview(output: &str, max_chars: usize) -> String {
     }
 }
 
+#[cfg(test)]
 fn resolve_routine_notification_user(metadata: &serde_json::Value) -> Option<String> {
-    metadata
-        .get("notify_user")
-        .and_then(|value| value.as_str())
-        .or_else(|| metadata.get("owner_id").and_then(|value| value.as_str()))
+    resolve_owner_scope_notification_user(
+        metadata.get("notify_user").and_then(|value| value.as_str()),
+        metadata.get("owner_id").and_then(|value| value.as_str()),
+    )
+}
+
+fn trimmed_option(value: Option<&str>) -> Option<String> {
+    value
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
+}
+
+fn resolve_owner_scope_notification_user(
+    explicit_user: Option<&str>,
+    owner_fallback: Option<&str>,
+) -> Option<String> {
+    trimmed_option(explicit_user).or_else(|| trimmed_option(owner_fallback))
+}
+
+async fn resolve_channel_notification_user(
+    extension_manager: Option<&Arc<ExtensionManager>>,
+    channel: Option<&str>,
+    explicit_user: Option<&str>,
+    owner_fallback: Option<&str>,
+) -> Option<String> {
+    if let Some(user) = trimmed_option(explicit_user) {
+        return Some(user);
+    }
+
+    if let Some(channel_name) = trimmed_option(channel)
+        && let Some(extension_manager) = extension_manager
+        && let Some(target) = extension_manager
+            .notification_target_for_channel(&channel_name)
+            .await
+    {
+        return Some(target);
+    }
+
+    resolve_owner_scope_notification_user(explicit_user, owner_fallback)
+}
+
+async fn resolve_routine_notification_target(
+    extension_manager: Option<&Arc<ExtensionManager>>,
+    metadata: &serde_json::Value,
+) -> Option<String> {
+    resolve_channel_notification_user(
+        extension_manager,
+        metadata
+            .get("notify_channel")
+            .and_then(|value| value.as_str()),
+        metadata.get("notify_user").and_then(|value| value.as_str()),
+        metadata.get("owner_id").and_then(|value| value.as_str()),
+    )
+    .await
 }
 
 fn should_fallback_routine_notification(error: &ChannelError) -> bool {
@@ -99,6 +148,8 @@ pub struct AgentDeps {
     pub document_extraction: Option<Arc<crate::document_extraction::DocumentExtractionMiddleware>>,
     /// Sandbox readiness state for full-job routine dispatch.
     pub sandbox_readiness: crate::agent::routine_engine::SandboxReadiness,
+    /// Software builder for self-repair tool rebuilding.
+    pub builder: Option<Arc<dyn crate::tools::SoftwareBuilder>>,
 }
 
 /// The main agent that coordinates all components.
@@ -114,9 +165,10 @@ pub struct Agent {
     pub(super) heartbeat_config: Option<HeartbeatConfig>,
     pub(super) hygiene_config: Option<crate::config::HygieneConfig>,
     pub(super) routine_config: Option<RoutineConfig>,
-    /// Optional slot to expose the routine engine to the gateway for manual triggering.
+    /// Shared routine-engine slot used for internal event matching and for exposing
+    /// the engine to gateway/manual trigger entry points.
     pub(super) routine_engine_slot:
-        Option<Arc<tokio::sync::RwLock<Option<Arc<crate::agent::routine_engine::RoutineEngine>>>>>,
+        Arc<tokio::sync::RwLock<Option<Arc<crate::agent::routine_engine::RoutineEngine>>>>,
 }
 
 impl Agent {
@@ -181,16 +233,21 @@ impl Agent {
             heartbeat_config,
             hygiene_config,
             routine_config,
-            routine_engine_slot: None,
+            routine_engine_slot: Arc::new(tokio::sync::RwLock::new(None)),
         }
     }
 
-    /// Set the routine engine slot for exposing the engine to the gateway.
+    /// Replace the routine-engine slot with a shared one so the gateway and
+    /// agent reference the same engine.
     pub fn set_routine_engine_slot(
         &mut self,
         slot: Arc<tokio::sync::RwLock<Option<Arc<crate::agent::routine_engine::RoutineEngine>>>>,
     ) {
-        self.routine_engine_slot = Some(slot);
+        self.routine_engine_slot = slot;
+    }
+
+    async fn routine_engine(&self) -> Option<Arc<crate::agent::routine_engine::RoutineEngine>> {
+        self.routine_engine_slot.read().await.clone()
     }
 
     // Convenience accessors
@@ -287,11 +344,18 @@ impl Agent {
         let mut message_stream = self.channels.start_all().await?;
 
         // Start self-repair task with notification forwarding
-        let repair = Arc::new(DefaultSelfRepair::new(
+        let mut self_repair = DefaultSelfRepair::new(
             self.context_manager.clone(),
             self.config.stuck_threshold,
             self.config.max_repair_attempts,
-        ));
+        );
+        if let Some(ref store) = self.deps.store {
+            self_repair = self_repair.with_store(Arc::clone(store));
+        }
+        if let Some(ref builder) = self.deps.builder {
+            self_repair = self_repair.with_builder(Arc::clone(builder), Arc::clone(self.tools()));
+        }
+        let repair = Arc::new(self_repair);
         let repair_interval = self.config.repair_check_interval;
         let repair_channels = self.channels.clone();
         let repair_owner_id = self.owner_id().to_string();
@@ -397,11 +461,13 @@ impl Agent {
                         .timezone
                         .clone()
                         .or_else(|| Some(self.config.default_timezone.clone()));
-                    if let Some(channel) = &hb_config.notify_channel {
-                        let user = hb_config
-                            .notify_user
-                            .clone()
-                            .unwrap_or_else(|| self.owner_id().to_string());
+                    let heartbeat_notify_user = resolve_owner_scope_notification_user(
+                        hb_config.notify_user.as_deref(),
+                        Some(self.owner_id()),
+                    );
+                    if let Some(channel) = &hb_config.notify_channel
+                        && let Some(user) = heartbeat_notify_user.as_deref()
+                    {
                         config = config.with_notify(user, channel);
                     }
 
@@ -411,26 +477,32 @@ impl Agent {
 
                     // Spawn notification forwarder that routes through channel manager
                     let notify_channel = hb_config.notify_channel.clone();
-                    let notify_user = hb_config
-                        .notify_user
-                        .clone()
-                        .unwrap_or_else(|| self.owner_id().to_string());
+                    let notify_target = resolve_channel_notification_user(
+                        self.deps.extension_manager.as_ref(),
+                        hb_config.notify_channel.as_deref(),
+                        hb_config.notify_user.as_deref(),
+                        Some(self.owner_id()),
+                    )
+                    .await;
+                    let notify_user = heartbeat_notify_user;
                     let channels = self.channels.clone();
                     tokio::spawn(async move {
                         while let Some(response) = notify_rx.recv().await {
                             // Try the configured channel first, fall back to
                             // broadcasting on all channels.
-                            let targeted_ok = if let Some(ref channel) = notify_channel {
+                            let targeted_ok = if let Some(ref channel) = notify_channel
+                                && let Some(ref user) = notify_target
+                            {
                                 channels
-                                    .broadcast(channel, &notify_user, response.clone())
+                                    .broadcast(channel, user, response.clone())
                                     .await
                                     .is_ok()
                             } else {
                                 false
                             };
 
-                            if !targeted_ok {
-                                let results = channels.broadcast_all(&notify_user, response).await;
+                            if !targeted_ok && let Some(ref user) = notify_user {
+                                let results = channels.broadcast_all(user, response).await;
                                 for (ch, result) in results {
                                     if let Err(e) = result {
                                         tracing::warn!(
@@ -499,6 +571,7 @@ impl Agent {
 
                     // Spawn notification forwarder (mirrors heartbeat pattern)
                     let channels = self.channels.clone();
+                    let extension_manager = self.deps.extension_manager.clone();
                     tokio::spawn(async move {
                         while let Some(response) = notify_rx.recv().await {
                             let notify_channel = response
@@ -506,7 +579,18 @@ impl Agent {
                                 .get("notify_channel")
                                 .and_then(|v| v.as_str())
                                 .map(|s| s.to_string());
-                            let Some(user) = resolve_routine_notification_user(&response.metadata)
+                            let fallback_user = resolve_owner_scope_notification_user(
+                                response
+                                    .metadata
+                                    .get("notify_user")
+                                    .and_then(|v| v.as_str()),
+                                response.metadata.get("owner_id").and_then(|v| v.as_str()),
+                            );
+                            let Some(user) = resolve_routine_notification_target(
+                                extension_manager.as_ref(),
+                                &response.metadata,
+                            )
+                            .await
                             else {
                                 tracing::warn!(
                                     notify_channel = ?notify_channel,
@@ -540,7 +624,7 @@ impl Agent {
                                 false
                             };
 
-                            if !targeted_ok {
+                            if !targeted_ok && let Some(user) = fallback_user {
                                 let results = channels.broadcast_all(&user, response).await;
                                 for (ch, result) in results {
                                     if let Err(e) = result {
@@ -567,9 +651,7 @@ impl Agent {
                     // via a local to use in the message loop below.
 
                     // Expose engine to gateway for manual triggering
-                    if let Some(ref slot) = self.routine_engine_slot {
-                        *slot.write().await = Some(Arc::clone(&engine));
-                    }
+                    *self.routine_engine_slot.write().await = Some(Arc::clone(&engine));
 
                     tracing::debug!(
                         "Routines enabled: cron ticker every {}s, max {} concurrent",
@@ -588,9 +670,6 @@ impl Agent {
         } else {
             None
         };
-
-        // Extract engine ref for use in message loop
-        let routine_engine_for_loop = routine_handle.as_ref().map(|(_, e)| Arc::clone(e));
 
         // Main message loop
         tracing::debug!("Agent {} ready and listening", self.config.name);
@@ -697,14 +776,6 @@ impl Agent {
                             "Failed to send error response to channel"
                         );
                     }
-                }
-            }
-
-            // Check event triggers (cheap in-memory regex, fires async if matched)
-            if let Some(ref engine) = routine_engine_for_loop {
-                let fired = engine.check_event_triggers(&message).await;
-                if fired > 0 {
-                    tracing::debug!("Fired {} event-triggered routines", fired);
                 }
             }
         }
@@ -950,6 +1021,24 @@ impl Agent {
             message.channel,
             message.content.len()
         );
+
+        if !message.is_internal
+            && let Submission::UserInput { ref content } = submission
+            && let Some(engine) = self.routine_engine().await
+        {
+            let fired = engine
+                .check_event_triggers(&message.user_id, &message.channel, content)
+                .await;
+            if fired > 0 {
+                tracing::debug!(
+                    channel = %message.channel,
+                    user = %message.user_id,
+                    fired,
+                    "Consumed inbound user message with matching event-triggered routine(s)"
+                );
+                return Ok(Some(String::new()));
+            }
+        }
 
         // Process based on submission type
         let result = match submission {

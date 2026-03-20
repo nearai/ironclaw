@@ -33,17 +33,28 @@ _TELEGRAM_ACTIVE = {
 }
 
 
-async def go_to_extensions(page):
-    await page.locator(SEL["tab_button"].format(tab="extensions")).click()
-    await page.locator(SEL["tab_panel"].format(tab="extensions")).wait_for(
+async def go_to_channels(page):
+    """Navigate to Settings → Channels subtab (where wasm_channel extensions live)."""
+    await page.locator(SEL["tab_button"].format(tab="settings")).click()
+    await page.locator(SEL["settings_subtab"].format(subtab="channels")).click()
+    await page.locator(SEL["settings_subpanel"].format(subtab="channels")).wait_for(
         state="visible", timeout=5000
     )
-    await page.locator(
-        f"{SEL['extensions_list']} .empty-state, {SEL['ext_card_installed']}"
-    ).first.wait_for(state="visible", timeout=8000)
+    # Wait for the Telegram card specifically (built-in cards render first)
+    await page.locator(SEL["channels_ext_card"], has_text="Telegram").wait_for(
+        state="visible", timeout=8000
+    )
 
 
-async def mock_extension_lists(page, ext_handler):
+async def _default_gateway_status_handler(route):
+    await route.fulfill(
+        status=200,
+        content_type="application/json",
+        body=json.dumps({"enabled_channels": [], "sse_connections": 0, "ws_connections": 0}),
+    )
+
+
+async def mock_extension_lists(page, ext_handler, *, gateway_status_handler=None):
     async def handle_ext_list(route):
         path = route.request.url.split("?")[0]
         if path.endswith("/api/extensions"):
@@ -69,6 +80,10 @@ async def mock_extension_lists(page, ext_handler):
     await page.route("**/api/extensions*", handle_ext_list)
     await page.route("**/api/extensions/tools", handle_tools)
     await page.route("**/api/extensions/registry", handle_registry)
+    await page.route(
+        "**/api/gateway/status",
+        gateway_status_handler or _default_gateway_status_handler,
+    )
 
 
 async def wait_for_toast(page, text: str, *, timeout: int = 5000):
@@ -106,9 +121,9 @@ async def test_telegram_setup_modal_shows_bot_token_field(page):
 
     await mock_extension_lists(page, handle_ext_list)
     await page.route("**/api/extensions/telegram/setup", handle_setup)
-    await go_to_extensions(page)
+    await go_to_channels(page)
 
-    card = page.locator(SEL["ext_card_installed"]).first
+    card = page.locator(SEL["channels_ext_card"], has_text="Telegram")
     await card.locator(SEL["ext_configure_btn"], has_text="Setup").click()
 
     modal = page.locator(SEL["configure_modal"])
@@ -125,6 +140,8 @@ async def test_telegram_hot_activation_transitions_installed_to_active(page):
     phase = {"value": "installed"}
     captured_setup_payloads = []
     post_count = {"value": 0}
+    second_request_started = asyncio.Event()
+    allow_second_response = asyncio.Event()
 
     async def handle_ext_list(route):
         extensions = {
@@ -170,16 +187,18 @@ async def test_telegram_hot_activation_transitions_installed_to_active(page):
                     {
                         "success": True,
                         "activated": False,
-                        "message": "Configuration saved for 'telegram'. Send `/start iclaw-7qk2m9` to @test_hot_bot, then click Verify owner.",
+                        "message": "Configuration saved for 'telegram'. Send `/start iclaw-7qk2m9` to @test_hot_bot in Telegram. IronClaw will finish setup automatically.",
                         "verification": {
                             "code": "iclaw-7qk2m9",
-                            "instructions": "Send `/start iclaw-7qk2m9` to @test_hot_bot, then click Verify owner.",
+                            "instructions": "Send `/start iclaw-7qk2m9` to @test_hot_bot in Telegram. IronClaw will finish setup automatically.",
                             "deep_link": "https://t.me/test_hot_bot?start=iclaw-7qk2m9",
                         },
                     }
                 ),
             )
         else:
+            second_request_started.set()
+            await allow_second_response.wait()
             await route.fulfill(
                 status=200,
                 content_type="application/json",
@@ -194,25 +213,28 @@ async def test_telegram_hot_activation_transitions_installed_to_active(page):
 
     await mock_extension_lists(page, handle_ext_list)
     await page.route("**/api/extensions/telegram/setup", handle_setup)
-    await go_to_extensions(page)
+    await go_to_channels(page)
 
-    card = page.locator(SEL["ext_card_installed"]).first
+    card = page.locator(SEL["channels_ext_card"], has_text="Telegram")
     await card.locator(SEL["ext_configure_btn"], has_text="Setup").click()
 
     modal = page.locator(SEL["configure_modal"])
     await modal.wait_for(state="visible", timeout=5000)
     await modal.locator(_CONFIGURE_SECRET_INPUT).fill("123456789:ABCdefGhI")
     await modal.locator(_CONFIGURE_SAVE_BUTTON).click()
-    await modal.locator(_CONFIGURE_SAVE_BUTTON, has_text="Verify owner").wait_for(
+    await second_request_started.wait()
+    await modal.locator(".configure-inline-status", has_text="Waiting for Telegram owner verification...").wait_for(
         state="visible", timeout=5000
     )
-    assert "Verify owner" in (
-        await modal.locator(_CONFIGURE_SAVE_BUTTON).text_content()
-    )
     assert "iclaw-7qk2m9" in (await modal.text_content())
+    assert "/start iclaw-7qk2m9" in (await modal.text_content())
     assert await modal.locator(".configure-verification-link").count() == 1
+    await modal.locator(_CONFIGURE_SAVE_BUTTON).wait_for(state="hidden", timeout=5000)
 
-    await modal.locator(_CONFIGURE_SAVE_BUTTON).click()
+    await page.locator(SEL["configure_overlay"]).click(position={"x": 1, "y": 1})
+    assert await page.locator(SEL["configure_overlay"]).is_visible()
+
+    allow_second_response.set()
     await page.locator(SEL["configure_overlay"]).wait_for(state="hidden", timeout=5000)
 
     phase["value"] = "active"

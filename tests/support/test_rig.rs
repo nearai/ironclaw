@@ -644,6 +644,7 @@ impl TestRigBuilder {
             transcription: None,
             document_extraction: None,
             sandbox_readiness: ironclaw::agent::SandboxReadiness::Available, // tests don't use real Docker
+            builder: None,
         };
 
         // 7. Create TestChannel and ChannelManager.
@@ -655,7 +656,7 @@ impl TestRigBuilder {
 
         // 7b. Register message tool so routines can send messages to channels.
         deps.tools
-            .register_message_tools(Arc::clone(&channels))
+            .register_message_tools(Arc::clone(&channels), deps.extension_manager.clone())
             .await;
 
         // 8. Create Agent.

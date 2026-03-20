@@ -13,6 +13,10 @@ mod support;
 mod tests {
     use std::time::Duration;
 
+    use chrono::Utc;
+    use ironclaw::agent::routine::{
+        FullJobPermissionMode, NotifyConfig, Routine, RoutineAction, RoutineGuardrails, Trigger,
+    };
     use uuid::Uuid;
 
     use crate::support::gateway_workflow_harness::GatewayWorkflowHarness;
@@ -255,6 +259,108 @@ mod tests {
         assert!(
             detail["next_fire_at"].as_str().is_some(),
             "expected next_fire_at to be recomputed when re-enabling cron routine, got {detail}"
+        );
+
+        harness.shutdown().await;
+        mock.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn routines_detail_exposes_full_job_permission_resolution() {
+        let mock = MockOpenAiServerBuilder::new()
+            .with_default_response(MockOpenAiResponse::Text("ack".to_string()))
+            .start()
+            .await;
+
+        let harness =
+            GatewayWorkflowHarness::start_openai_compatible(&mock.openai_base_url(), "mock-model")
+                .await;
+
+        harness
+            .db
+            .set_setting(
+                &harness.user_id,
+                ironclaw::agent::routine::FULL_JOB_OWNER_ALLOWED_TOOLS_SETTING_KEY,
+                &serde_json::json!(["shell", "http"]),
+            )
+            .await
+            .expect("set owner allowlist");
+        harness
+            .db
+            .set_setting(
+                &harness.user_id,
+                ironclaw::agent::routine::FULL_JOB_DEFAULT_PERMISSION_MODE_SETTING_KEY,
+                &serde_json::json!("copy_owner"),
+            )
+            .await
+            .expect("set owner default mode");
+
+        let routine = Routine {
+            id: Uuid::new_v4(),
+            name: "wf-full-job-permissions".to_string(),
+            description: "Permission detail regression test".to_string(),
+            user_id: harness.user_id.clone(),
+            enabled: true,
+            trigger: Trigger::Manual,
+            action: RoutineAction::FullJob {
+                title: "permission-detail".to_string(),
+                description: "Check effective permission detail".to_string(),
+                max_iterations: 3,
+                tool_permissions: vec!["message".to_string()],
+                permission_mode: FullJobPermissionMode::InheritOwner,
+            },
+            guardrails: RoutineGuardrails {
+                cooldown: Duration::from_secs(0),
+                max_concurrent: 1,
+                dedup_window: None,
+            },
+            notify: NotifyConfig::default(),
+            last_run_at: None,
+            next_fire_at: None,
+            run_count: 0,
+            consecutive_failures: 0,
+            state: serde_json::json!({}),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        harness
+            .db
+            .create_routine(&routine)
+            .await
+            .expect("create routine");
+
+        let detail = harness
+            .client
+            .get(format!(
+                "{}/api/routines/{}",
+                harness.base_url(),
+                routine.id
+            ))
+            .bearer_auth(&harness.auth_token)
+            .send()
+            .await
+            .expect("detail request failed")
+            .error_for_status()
+            .expect("detail non-2xx")
+            .json::<serde_json::Value>()
+            .await
+            .expect("invalid detail response");
+
+        assert_eq!(
+            detail["full_job_permissions"]["permission_mode"].as_str(),
+            Some("inherit_owner")
+        );
+        assert_eq!(
+            detail["full_job_permissions"]["default_permission_mode"].as_str(),
+            Some("copy_owner")
+        );
+        assert_eq!(
+            detail["full_job_permissions"]["owner_allowed_tools"],
+            serde_json::json!(["shell", "http"])
+        );
+        assert_eq!(
+            detail["full_job_permissions"]["effective_tool_permissions"],
+            serde_json::json!(["shell", "http", "message"])
         );
 
         harness.shutdown().await;

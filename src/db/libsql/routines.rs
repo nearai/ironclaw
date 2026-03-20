@@ -462,6 +462,21 @@ impl RoutineStore for LibSqlBackend {
         Ok(counts)
     }
 
+    async fn link_routine_run_to_job(
+        &self,
+        run_id: Uuid,
+        job_id: Uuid,
+    ) -> Result<(), DatabaseError> {
+        let conn = self.connect().await?;
+        conn.execute(
+            "UPDATE routine_runs SET job_id = ?1 WHERE id = ?2",
+            params![job_id.to_string(), run_id.to_string()],
+        )
+        .await
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        Ok(())
+    }
+
     async fn list_dispatched_routine_runs(&self) -> Result<Vec<RoutineRun>, DatabaseError> {
         let conn = self.connect().await?;
         let mut rows = conn
@@ -484,20 +499,5 @@ impl RoutineStore for LibSqlBackend {
             runs.push(row_to_routine_run_libsql(&row)?);
         }
         Ok(runs)
-    }
-
-    async fn link_routine_run_to_job(
-        &self,
-        run_id: Uuid,
-        job_id: Uuid,
-    ) -> Result<(), DatabaseError> {
-        let conn = self.connect().await?;
-        conn.execute(
-            "UPDATE routine_runs SET job_id = ?1 WHERE id = ?2",
-            params![job_id.to_string(), run_id.to_string()],
-        )
-        .await
-        .map_err(|e| DatabaseError::Query(e.to_string()))?;
-        Ok(())
     }
 }

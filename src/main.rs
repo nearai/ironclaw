@@ -338,6 +338,17 @@ async fn async_main() -> anyhow::Result<()> {
     }));
 
     // Load WASM channels and register their webhook routes.
+    // Ensure the channels directory exists so the WASM runtime initializes even when
+    // no channels are installed yet — hot-activation needs the runtime to be available.
+    if config.channels.wasm_channels_enabled
+        && let Err(e) = std::fs::create_dir_all(&config.channels.wasm_channels_dir)
+    {
+        tracing::warn!(
+            path = %config.channels.wasm_channels_dir.display(),
+            error = %e,
+            "Failed to create WASM channels directory"
+        );
+    }
     if config.channels.wasm_channels_enabled && config.channels.wasm_channels_dir.exists() {
         let wasm_result = ironclaw::channels::wasm::setup_wasm_channels(
             &config,
@@ -526,6 +537,16 @@ async fn async_main() -> anyhow::Result<()> {
             gw = gw.with_skill_catalog(Arc::clone(sc));
         }
         gw = gw.with_cost_guard(Arc::clone(&components.cost_guard));
+        {
+            let active_model = components.llm.model_name().to_string();
+            let mut enabled = channel_names.clone();
+            enabled.push("gateway".into());
+            gw = gw.with_active_config(ironclaw::channels::web::server::ActiveConfigSnapshot {
+                llm_backend: config.llm.backend.to_string(),
+                llm_model: active_model,
+                enabled_channels: enabled,
+            });
+        }
         if config.sandbox.enabled {
             gw = gw.with_prompt_queue(Arc::clone(&prompt_queue));
 
@@ -635,7 +656,7 @@ async fn async_main() -> anyhow::Result<()> {
     // Register message tool for sending messages to connected channels
     components
         .tools
-        .register_message_tools(Arc::clone(&channels))
+        .register_message_tools(Arc::clone(&channels), components.extension_manager.clone())
         .await;
 
     // Wire up channel runtime for hot-activation of WASM channels.
@@ -749,6 +770,7 @@ async fn async_main() -> anyhow::Result<()> {
         } else {
             ironclaw::agent::routine_engine::SandboxReadiness::DockerUnavailable
         },
+        builder: components.builder,
     };
 
     let channels_for_warnings = Arc::clone(&channels);

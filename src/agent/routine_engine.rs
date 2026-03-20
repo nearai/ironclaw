@@ -10,6 +10,7 @@
 //! Lightweight routines execute inline (single LLM call, no scheduler slot).
 //! Full-job routines are delegated to the existing `Scheduler`.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -21,9 +22,10 @@ use uuid::Uuid;
 
 use crate::agent::Scheduler;
 use crate::agent::routine::{
-    NotifyConfig, Routine, RoutineAction, RoutineRun, RunStatus, Trigger, next_cron_fire,
+    NotifyConfig, Routine, RoutineAction, RoutineRun, RunStatus, Trigger,
+    effective_full_job_tool_permissions, load_full_job_permission_settings, next_cron_fire,
 };
-use crate::channels::{IncomingMessage, OutgoingResponse};
+use crate::channels::OutgoingResponse;
 use crate::config::RoutineConfig;
 use crate::context::{JobContext, JobState};
 use crate::db::Database;
@@ -31,11 +33,11 @@ use crate::error::RoutineError;
 use crate::llm::{
     ChatMessage, CompletionRequest, FinishReason, LlmProvider, ToolCall, ToolCompletionRequest,
 };
-use crate::safety::SafetyLayer;
 use crate::tools::{
     ApprovalContext, ApprovalRequirement, ToolError, ToolRegistry, prepare_tool_params,
 };
 use crate::workspace::Workspace;
+use ironclaw_safety::SafetyLayer;
 
 enum EventMatcher {
     Message { routine: Routine, regex: Regex },
@@ -73,6 +75,10 @@ pub struct RoutineEngine {
     safety: Arc<SafetyLayer>,
     /// Sandbox readiness state for full-job dispatch.
     sandbox_readiness: SandboxReadiness,
+    /// Timestamp when this engine instance was created. Used by
+    /// `sync_dispatched_runs` to distinguish orphaned runs (from a previous
+    /// process) from actively-watched runs (from this process).
+    boot_time: chrono::DateTime<Utc>,
 }
 
 impl RoutineEngine {
@@ -100,7 +106,14 @@ impl RoutineEngine {
             tools,
             safety,
             sandbox_readiness,
+            boot_time: Utc::now(),
         }
+    }
+
+    /// Expose the running count for integration tests.
+    #[doc(hidden)]
+    pub fn running_count_for_test(&self) -> &Arc<AtomicUsize> {
+        &self.running_count
     }
 
     /// Refresh the in-memory event trigger cache from DB.
@@ -150,10 +163,19 @@ impl RoutineEngine {
 
     /// Check incoming message against event triggers. Returns number of routines fired.
     ///
-    /// Called synchronously from the main loop after handle_message(). The actual
-    /// execution is spawned async so this returns quickly.
-    pub async fn check_event_triggers(&self, message: &IncomingMessage) -> usize {
+    /// Accepts only the three fields needed for matching (user scope, channel,
+    /// message content) so callers never need to clone a full `IncomingMessage`.
+    pub async fn check_event_triggers(&self, user_id: &str, channel: &str, content: &str) -> usize {
         let cache = self.event_cache.read().await;
+
+        // Early return if there are no message matchers at all.
+        if !cache
+            .iter()
+            .any(|m| matches!(m, EventMatcher::Message { .. }))
+        {
+            return 0;
+        }
+
         let mut fired = 0;
 
         // Collect routine IDs for batch query
@@ -170,16 +192,9 @@ impl RoutineEngine {
         }
 
         // Single batch query instead of N queries
-        let concurrent_counts = match self
-            .store
-            .count_running_routine_runs_batch(&routine_ids)
-            .await
-        {
-            Ok(counts) => counts,
-            Err(e) => {
-                tracing::error!("Failed to batch-load concurrent counts: {}", e);
-                return 0;
-            }
+        let concurrent_counts = match self.batch_concurrent_counts(&routine_ids).await {
+            Some(counts) => counts,
+            None => return 0,
         };
 
         for matcher in cache.iter() {
@@ -188,7 +203,7 @@ impl RoutineEngine {
                 EventMatcher::System { .. } => continue,
             };
 
-            if routine.user_id != message.user_id {
+            if routine.user_id != user_id {
                 continue;
             }
 
@@ -196,13 +211,13 @@ impl RoutineEngine {
             if let Trigger::Event {
                 channel: Some(ch), ..
             } = &routine.trigger
-                && ch != &message.channel
+                && ch != channel
             {
                 continue;
             }
 
             // Regex match
-            if !re.is_match(&message.content) {
+            if !re.is_match(content) {
                 continue;
             }
 
@@ -225,7 +240,7 @@ impl RoutineEngine {
                 continue;
             }
 
-            let detail = truncate(&message.content, 200);
+            let detail = truncate(content, 200);
             self.spawn_fire(routine.clone(), "event", Some(detail));
             fired += 1;
         }
@@ -244,6 +259,15 @@ impl RoutineEngine {
         user_id: Option<&str>,
     ) -> usize {
         let cache = self.event_cache.read().await;
+
+        // Early return if there are no system-event matchers at all.
+        if !cache
+            .iter()
+            .any(|m| matches!(m, EventMatcher::System { .. }))
+        {
+            return 0;
+        }
+
         let mut fired = 0;
 
         // Collect routine IDs for batch query
@@ -260,19 +284,9 @@ impl RoutineEngine {
         }
 
         // Single batch query instead of N queries
-        let concurrent_counts = match self
-            .store
-            .count_running_routine_runs_batch(&routine_ids)
-            .await
-        {
-            Ok(counts) => counts,
-            Err(e) => {
-                tracing::error!(
-                    "Failed to batch-load concurrent counts for system events: {}",
-                    e
-                );
-                return 0;
-            }
+        let concurrent_counts = match self.batch_concurrent_counts(&routine_ids).await {
+            Some(counts) => counts,
+            None => return 0,
         };
 
         for matcher in cache.iter() {
@@ -346,6 +360,23 @@ impl RoutineEngine {
         fired
     }
 
+    /// Batch-load concurrent run counts for a set of routine IDs.
+    ///
+    /// Returns `None` on database error (already logged).
+    async fn batch_concurrent_counts(&self, routine_ids: &[Uuid]) -> Option<HashMap<Uuid, i64>> {
+        match self
+            .store
+            .count_running_routine_runs_batch(routine_ids)
+            .await
+        {
+            Ok(counts) => Some(counts),
+            Err(e) => {
+                tracing::error!("Failed to batch-load concurrent counts: {}", e);
+                None
+            }
+        }
+    }
+
     /// Check all due cron routines and fire them. Called by the cron ticker.
     pub async fn check_cron_triggers(&self) {
         let routines = match self.store.list_due_cron_routines().await {
@@ -380,30 +411,52 @@ impl RoutineEngine {
         }
     }
 
-    /// Sync dispatched routine runs with their linked background job status.
+    /// Reconcile orphaned full_job routine runs with their linked job outcomes.
     ///
-    /// Full-job routines are fire-and-forget: the routine run is created with
-    /// `Running` status when the job is dispatched, but the run record is never
-    /// updated when the background job completes or fails. This method checks
-    /// all `Running` routine runs that have a linked job, queries the job's
-    /// current state, and updates the routine run accordingly.
+    /// Called on each cron tick. Finds routine runs that are still `running`
+    /// with a linked `job_id`, checks the job state, and finalizes the run
+    /// when the job reaches a completed or terminal state.
+    ///
+    /// Only processes runs started **before** this engine's boot time, so it
+    /// never races with `FullJobWatcher` instances from the current process.
+    /// This makes it safe to call on every tick as a crash-recovery mechanism.
     pub async fn sync_dispatched_runs(&self) {
         let runs = match self.store.list_dispatched_routine_runs().await {
             Ok(r) => r,
             Err(e) => {
-                tracing::debug!("Failed to list dispatched routine runs: {}", e);
+                tracing::error!("Failed to list dispatched routine runs: {}", e);
                 return;
             }
         };
 
-        for run in runs {
-            let Some(job_id) = run.job_id else {
-                continue;
+        // Only process runs from a previous process instance. Runs started
+        // after boot_time are actively watched by a FullJobWatcher in this
+        // process and should not be finalized here.
+        let orphaned: Vec<_> = runs
+            .into_iter()
+            .filter(|r| r.started_at < self.boot_time)
+            .collect();
+
+        if orphaned.is_empty() {
+            return;
+        }
+
+        tracing::info!(
+            "Recovering {} orphaned dispatched routine runs",
+            orphaned.len()
+        );
+
+        for run in orphaned {
+            let job_id = match run.job_id {
+                Some(id) => id,
+                None => continue, // Should not happen (query filters), but guard anyway
             };
 
+            // Fetch the linked job
             let job = match self.store.get_job(job_id).await {
                 Ok(Some(j)) => j,
                 Ok(None) => {
+                    // Orphaned: job record was deleted or never persisted
                     tracing::warn!(
                         run_id = %run.id,
                         job_id = %job_id,
@@ -412,64 +465,54 @@ impl RoutineEngine {
                     self.complete_dispatched_run(
                         &run,
                         RunStatus::Failed,
-                        "Linked job not found (may have been deleted)",
+                        &format!("Linked job {job_id} not found (orphaned)"),
                     )
                     .await;
                     continue;
                 }
                 Err(e) => {
-                    tracing::debug!(
+                    tracing::error!(
                         run_id = %run.id,
                         job_id = %job_id,
-                        "Failed to query linked job: {}", e
+                        "Failed to fetch linked job: {}", e
                     );
                     continue;
                 }
             };
 
-            // Sanitize the last transition reason: truncate to prevent oversized
-            // notifications and strip control characters to prevent injection.
-            let last_reason = job
-                .transitions
-                .last()
-                .and_then(|t| t.reason.clone())
-                .map(|r| sanitize_summary(&r));
-
-            let (new_status, summary) = match job.state {
-                JobState::Completed => {
-                    let summary =
-                        last_reason.unwrap_or_else(|| "Job completed successfully".to_string());
-                    (RunStatus::Ok, summary)
+            // Map job state to final run status
+            let final_status = match job.state {
+                JobState::Completed | JobState::Submitted | JobState::Accepted => {
+                    Some(RunStatus::Ok)
                 }
-                JobState::Failed => {
-                    let summary = last_reason
-                        .unwrap_or_else(|| "Job failed (no error message recorded)".to_string());
-                    (RunStatus::Failed, summary)
-                }
-                JobState::Cancelled => (RunStatus::Failed, "Job was cancelled".to_string()),
-                // Still in progress — Submitted and Accepted can still transition
-                // to Failed, so treat them like Pending/InProgress.
-                JobState::Pending
-                | JobState::InProgress
-                | JobState::Stuck
-                | JobState::Submitted
-                | JobState::Accepted => continue,
+                JobState::Failed | JobState::Cancelled => Some(RunStatus::Failed),
+                // Pending, InProgress, Stuck — still running
+                _ => None,
             };
 
-            tracing::info!(
-                run_id = %run.id,
-                job_id = %job_id,
-                status = %new_status,
-                "Syncing dispatched routine run with completed job"
-            );
+            let status = match final_status {
+                Some(s) => s,
+                None => continue, // Job still active, check again next tick
+            };
 
-            self.complete_dispatched_run(&run, new_status, &summary)
-                .await;
+            // Build summary
+            let summary = if status == RunStatus::Failed {
+                match self.store.get_agent_job_failure_reason(job_id).await {
+                    Ok(Some(reason)) => format!("Job {job_id} failed: {reason}"),
+                    _ => format!("Job {job_id} {}", job.state),
+                }
+            } else {
+                format!("Job {job_id} completed successfully")
+            };
+
+            self.complete_dispatched_run(&run, status, &summary).await;
         }
     }
 
-    /// Complete a dispatched routine run and send the appropriate notification.
+    /// Finalize a dispatched routine run: update DB, update routine runtime,
+    /// persist to conversation thread, and send notification.
     async fn complete_dispatched_run(&self, run: &RoutineRun, status: RunStatus, summary: &str) {
+        // Complete the run record in DB
         if let Err(e) = self
             .store
             .complete_routine_run(run.id, status, Some(summary), None)
@@ -477,37 +520,119 @@ impl RoutineEngine {
         {
             tracing::error!(
                 run_id = %run.id,
-                "Failed to update dispatched routine run: {}", e
+                "Failed to complete dispatched routine run: {}", e
             );
             return;
         }
 
-        match self.store.get_routine(run.routine_id).await {
-            Ok(Some(routine)) => {
-                send_notification(
-                    &self.notify_tx,
-                    &routine.notify,
-                    &routine.user_id,
-                    &routine.name,
-                    status,
-                    Some(summary),
-                    None,
-                )
-                .await;
-            }
+        tracing::info!(
+            run_id = %run.id,
+            status = %status,
+            "Finalized dispatched routine run"
+        );
+
+        // Load the routine to update consecutive_failures and send notification
+        let routine = match self.store.get_routine(run.routine_id).await {
+            Ok(Some(r)) => r,
             Ok(None) => {
-                tracing::debug!(
+                tracing::warn!(
+                    run_id = %run.id,
                     routine_id = %run.routine_id,
-                    "Routine not found for notification (may have been deleted)"
+                    "Routine not found for dispatched run finalization"
                 );
+                return;
             }
             Err(e) => {
-                tracing::debug!(
-                    routine_id = %run.routine_id,
-                    "Failed to look up routine for notification: {}", e
+                tracing::error!(
+                    run_id = %run.id,
+                    "Failed to load routine for dispatched run: {}", e
                 );
+                return;
             }
+        };
+
+        // Update runtime fields. In crash recovery, execute_routine() never
+        // reached its normal runtime update, so we must advance all fields here.
+        let new_failures = if status == RunStatus::Failed {
+            routine.consecutive_failures + 1
+        } else {
+            0
+        };
+
+        let now = Utc::now();
+        let next_fire = if let Trigger::Cron {
+            ref schedule,
+            ref timezone,
+        } = routine.trigger
+        {
+            next_cron_fire(schedule, timezone.as_deref()).unwrap_or(None)
+        } else {
+            None
+        };
+
+        if let Err(e) = self
+            .store
+            .update_routine_runtime(
+                routine.id,
+                now,
+                next_fire,
+                routine.run_count + 1,
+                new_failures,
+                &routine.state,
+            )
+            .await
+        {
+            tracing::error!(
+                routine = %routine.name,
+                "Failed to update routine runtime after dispatched run: {}", e
+            );
         }
+
+        // Persist result to the routine's conversation thread
+        let thread_id = match self
+            .store
+            .get_or_create_routine_conversation(routine.id, &routine.name, &routine.user_id)
+            .await
+        {
+            Ok(conv_id) => {
+                let msg = format!("[dispatched] {}: {}", status, summary);
+                if let Err(e) = self
+                    .store
+                    .add_conversation_message(conv_id, "assistant", &msg)
+                    .await
+                {
+                    tracing::error!(
+                        routine = %routine.name,
+                        "Failed to persist dispatched run message: {}", e
+                    );
+                }
+                Some(conv_id.to_string())
+            }
+            Err(e) => {
+                tracing::error!(
+                    routine = %routine.name,
+                    "Failed to get routine conversation: {}", e
+                );
+                None
+            }
+        };
+
+        // Send notification
+        send_notification(
+            &self.notify_tx,
+            &routine.notify,
+            &routine.user_id,
+            &routine.name,
+            status,
+            Some(summary),
+            thread_id.as_deref(),
+        )
+        .await;
+
+        // Note: we do NOT decrement running_count here. In normal flow,
+        // execute_routine() handles that after FullJobWatcher returns.
+        // This sync path only runs for crash recovery (process restarted),
+        // where running_count was already reset to 0.
     }
 
     /// Fire a routine manually (from tool call or CLI).
@@ -655,6 +780,92 @@ impl RoutineEngine {
     }
 }
 
+/// Watches a dispatched full_job until the linked scheduler job completes.
+///
+/// Polls `store.get_job(job_id)` at a fixed interval until the job leaves
+/// an active state (Pending/InProgress/Stuck). Maps the final `JobState` to
+/// a `RunStatus` for the routine run.
+struct FullJobWatcher {
+    store: Arc<dyn Database>,
+    job_id: Uuid,
+    routine_name: String,
+}
+
+impl FullJobWatcher {
+    /// Poll interval between DB checks.
+    const POLL_INTERVAL: Duration = Duration::from_secs(5);
+    /// Safety ceiling: 24 hours, derived from POLL_INTERVAL.
+    const MAX_POLLS: u32 = (24 * 60 * 60) / Self::POLL_INTERVAL.as_secs() as u32;
+
+    fn new(store: Arc<dyn Database>, job_id: Uuid, routine_name: String) -> Self {
+        Self {
+            store,
+            job_id,
+            routine_name,
+        }
+    }
+
+    /// Block until the linked job finishes and return the mapped status + summary.
+    async fn wait_for_completion(&self) -> (RunStatus, Option<String>) {
+        let mut polls = 0u32;
+
+        let final_status = loop {
+            // Check job state before sleeping so we finalize promptly
+            // if the job is already done (e.g. fast-failing jobs).
+            match self.store.get_job(self.job_id).await {
+                Ok(Some(job_ctx)) => {
+                    // Use is_parallel_blocking (Pending/InProgress/Stuck) instead
+                    // of is_active (!is_terminal) because routine jobs typically
+                    // stop at Completed — which is NOT terminal but IS finished
+                    // from an execution standpoint.
+                    if !job_ctx.state.is_parallel_blocking() {
+                        break Self::map_job_state(&job_ctx.state);
+                    }
+                }
+                Ok(None) => {
+                    tracing::warn!(
+                        routine = %self.routine_name,
+                        job_id = %self.job_id,
+                        "full_job disappeared from DB while polling"
+                    );
+                    break RunStatus::Failed;
+                }
+                Err(e) => {
+                    tracing::error!(
+                        routine = %self.routine_name,
+                        job_id = %self.job_id,
+                        "Error polling full_job state: {}", e
+                    );
+                    break RunStatus::Failed;
+                }
+            }
+
+            polls += 1;
+            if polls >= Self::MAX_POLLS {
+                tracing::error!(
+                    routine = %self.routine_name,
+                    job_id = %self.job_id,
+                    "full_job timed out after 24 hours, treating as failed"
+                );
+                break RunStatus::Failed;
+            }
+
+            tokio::time::sleep(Self::POLL_INTERVAL).await;
+        };
+
+        let summary = format!("Job {} finished ({})", self.job_id, final_status);
+        (final_status, Some(summary))
+    }
+
+    fn map_job_state(state: &crate::context::JobState) -> RunStatus {
+        use crate::context::JobState;
+        match state {
+            JobState::Failed | JobState::Cancelled => RunStatus::Failed,
+            _ => RunStatus::Ok, // Completed / Submitted / Accepted
+        }
+    }
+}
+
 /// Shared context passed to the execution function.
 struct EngineContext {
     config: RoutineConfig,
@@ -698,17 +909,16 @@ async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) 
             description,
             max_iterations,
             tool_permissions,
+            permission_mode,
         } => {
-            execute_full_job(
-                &ctx,
-                &routine,
-                &run,
+            let execution = FullJobExecutionConfig {
                 title,
                 description,
-                *max_iterations,
+                max_iterations: *max_iterations,
                 tool_permissions,
-            )
-            .await
+                permission_mode: *permission_mode,
+            };
+            execute_full_job(&ctx, &routine, &run, &execution).await
         }
     };
 
@@ -830,16 +1040,23 @@ fn sanitize_routine_name(name: &str) -> String {
 ///
 /// Fire-and-forget: creates a job via `Scheduler::dispatch_job` (which handles
 /// creation, metadata, persistence, and scheduling), links the routine run to
-/// the job, and returns immediately. The job runs independently via the
-/// existing Worker/Scheduler with full tool access.
+/// the job, then watches it via `FullJobWatcher` until it reaches a
+/// non-active state (not Pending/InProgress/Stuck). Returns the final
+/// `RunStatus` mapped from the job outcome. This keeps the routine run
+/// active for the full job lifetime so concurrency guardrails apply.
+struct FullJobExecutionConfig<'a> {
+    title: &'a str,
+    description: &'a str,
+    max_iterations: u32,
+    tool_permissions: &'a [String],
+    permission_mode: crate::agent::routine::FullJobPermissionMode,
+}
+
 async fn execute_full_job(
     ctx: &EngineContext,
     routine: &Routine,
     run: &RoutineRun,
-    title: &str,
-    description: &str,
-    max_iterations: u32,
-    tool_permissions: &[String],
+    execution: &FullJobExecutionConfig<'_>,
 ) -> Result<(RunStatus, Option<String>, Option<i32>), RoutineError> {
     match ctx.sandbox_readiness {
         SandboxReadiness::Available => {}
@@ -866,8 +1083,10 @@ async fn execute_full_job(
             reason: "scheduler not available".to_string(),
         })?;
 
-    let mut metadata =
-        serde_json::json!({ "max_iterations": max_iterations, "owner_id": routine.user_id });
+    let mut metadata = serde_json::json!({
+        "max_iterations": execution.max_iterations,
+        "owner_id": routine.user_id
+    });
     // Carry the routine's notify config in job metadata so the message tool
     // can resolve channel/target per-job without global state mutation.
     if let Some(channel) = &routine.notify.channel {
@@ -875,15 +1094,38 @@ async fn execute_full_job(
     }
     metadata["notify_user"] = serde_json::json!(&routine.notify.user);
 
+    let effective_permissions = match execution.permission_mode {
+        crate::agent::routine::FullJobPermissionMode::Explicit => {
+            effective_full_job_tool_permissions(
+                execution.permission_mode,
+                execution.tool_permissions,
+                &[],
+            )
+        }
+        crate::agent::routine::FullJobPermissionMode::InheritOwner => {
+            let owner_permissions =
+                load_full_job_permission_settings(ctx.store.as_ref(), &routine.user_id)
+                    .await
+                    .map_err(|e| RoutineError::Database {
+                        reason: format!("failed to load routine permission settings: {e}"),
+                    })?;
+            effective_full_job_tool_permissions(
+                execution.permission_mode,
+                execution.tool_permissions,
+                &owner_permissions.owner_allowed_tools,
+            )
+        }
+    };
+
     // Build approval context: UnlessAutoApproved tools are auto-approved for routines;
-    // Always tools require explicit listing in tool_permissions.
-    let approval_context = ApprovalContext::autonomous_with_tools(tool_permissions.iter().cloned());
+    // Always tools require explicit listing in the resolved effective permissions.
+    let approval_context = ApprovalContext::autonomous_with_tools(effective_permissions);
 
     let job_id = scheduler
         .dispatch_job_with_context(
             &routine.user_id,
-            title,
-            description,
+            execution.title,
+            execution.description,
             Some(metadata),
             approval_context,
         )
@@ -892,25 +1134,30 @@ async fn execute_full_job(
             reason: format!("failed to dispatch job: {e}"),
         })?;
 
-    // Link the routine run to the dispatched job
-    if let Err(e) = ctx.store.link_routine_run_to_job(run.id, job_id).await {
-        tracing::error!(
-            routine = %routine.name,
-            "Failed to link run to job: {}", e
-        );
-    }
+    // Link the routine run to the dispatched job.
+    // This MUST succeed — if it fails, sync_dispatched_runs() will never find
+    // this run (it filters on job_id IS NOT NULL), leaving it stuck as 'running'
+    // with running_count permanently elevated.
+    ctx.store
+        .link_routine_run_to_job(run.id, job_id)
+        .await
+        .map_err(|e| RoutineError::Database {
+            reason: format!("failed to link run to job: {e}"),
+        })?;
 
     tracing::info!(
         routine = %routine.name,
         job_id = %job_id,
-        max_iterations = max_iterations,
-        "Dispatched full job for routine"
+        max_iterations = execution.max_iterations,
+        "Dispatched full job for routine, watching for completion"
     );
 
-    let summary = format!(
-        "Dispatched job {job_id} for full execution with tool access (max_iterations: {max_iterations}). Status will be updated when the job completes."
-    );
-    Ok((RunStatus::Running, Some(summary), None))
+    // Watch the job until it finishes — keeps the routine run active
+    // so concurrency guardrails (running_count, routine_runs status)
+    // remain enforced for the full job lifetime.
+    let watcher = FullJobWatcher::new(ctx.store.clone(), job_id, routine.name.clone());
+    let (status, summary) = watcher.wait_for_completion().await;
+    Ok((status, summary, None))
 }
 
 /// Execute a lightweight routine with optional tool support.
@@ -950,23 +1197,12 @@ async fn execute_lightweight(
         Err(_) => None,
     };
 
-    // Build the user-facing prompt
-    let mut full_prompt = String::new();
-    full_prompt.push_str(prompt);
-
-    if !context_parts.is_empty() {
-        full_prompt.push_str("\n\n---\n\n# Context\n\n");
-        full_prompt.push_str(&context_parts.join("\n\n"));
-    }
-
-    if let Some(state) = &state_content {
-        full_prompt.push_str("\n\n---\n\n# Previous State\n\n");
-        full_prompt.push_str(state);
-    }
-
-    full_prompt.push_str(
-        "\n\n---\n\nIf nothing needs attention, reply EXACTLY with: ROUTINE_OK\n\
-         If something needs attention, provide a concise summary.",
+    let full_prompt = build_lightweight_prompt(
+        prompt,
+        &context_parts,
+        state_content.as_deref(),
+        &routine.notify,
+        use_tools,
     );
 
     // Get system prompt
@@ -1008,6 +1244,65 @@ async fn execute_lightweight(
         )
         .await
     }
+}
+
+fn build_lightweight_prompt(
+    prompt: &str,
+    context_parts: &[String],
+    state_content: Option<&str>,
+    notify: &NotifyConfig,
+    use_tools: bool,
+) -> String {
+    let mut full_prompt = String::new();
+    full_prompt.push_str(prompt);
+
+    if notify.on_attention {
+        full_prompt.push_str("\n\n---\n\n# Delivery\n\n");
+        full_prompt.push_str(
+            "If you reply with anything other than ROUTINE_OK, the host will deliver your \
+             reply as the routine notification. Return the message exactly as it should be sent.\n",
+        );
+
+        if let Some(channel) = notify.channel.as_deref() {
+            full_prompt.push_str(&format!(
+                "The configured delivery channel for this routine is `{channel}`.\n"
+            ));
+        }
+
+        if let Some(user) = notify.user.as_deref() {
+            full_prompt.push_str(&format!(
+                "The configured delivery target for this routine is `{user}`.\n"
+            ));
+        }
+
+        full_prompt.push_str(
+            "Do not claim you lack messaging integrations or ask the user to set one up when \
+             a plain reply is sufficient.\n",
+        );
+    }
+
+    if !use_tools {
+        full_prompt.push_str(
+            "\nTools are disabled for this routine run. Do not ask to call tools or describe tool limitations unless they prevent a necessary external action.\n",
+        );
+    }
+
+    if !context_parts.is_empty() {
+        full_prompt.push_str("\n\n---\n\n# Context\n\n");
+        full_prompt.push_str(&context_parts.join("\n\n"));
+    }
+
+    if let Some(state) = state_content {
+        full_prompt.push_str("\n\n---\n\n# Previous State\n\n");
+        full_prompt.push_str(state);
+    }
+
+    full_prompt.push_str(
+        "\n\n---\n\nIf nothing needs attention, reply EXACTLY with: ROUTINE_OK\n\
+         If something needs attention, provide a concise summary.",
+    );
+
+    full_prompt
 }
 
 /// Execute a lightweight routine without tool support (original single-call behavior).
@@ -1067,8 +1362,8 @@ fn handle_text_response(
         };
     }
 
-    // Check for the "nothing to do" sentinel
-    if content == "ROUTINE_OK" || content.contains("ROUTINE_OK") {
+    // Check for the "nothing to do" sentinel (exact match on trimmed content).
+    if content == "ROUTINE_OK" {
         let total_tokens = Some((total_input_tokens + total_output_tokens) as i32);
         return Ok((RunStatus::Ok, None, total_tokens));
     }
@@ -1434,14 +1729,22 @@ pub fn spawn_cron_ticker(
     interval: Duration,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        // Run one check immediately so routines due at startup don't wait
-        // an extra full polling interval.
+        // Recover orphaned runs from a previous process crash before
+        // dispatching any new work, so we don't confuse fresh dispatches
+        // with crash orphans.
+        engine.sync_dispatched_runs().await;
+
+        // Run one cron check immediately so routines due at startup don't
+        // wait an extra full polling interval.
         engine.check_cron_triggers().await;
 
         let mut ticker = tokio::time::interval(interval);
 
         loop {
             ticker.tick().await;
+            // Sync first: only processes runs from before boot_time, so it
+            // never races with FullJobWatcher instances from this process.
+            engine.sync_dispatched_runs().await;
             engine.check_cron_triggers().await;
             engine.sync_dispatched_runs().await;
         }
@@ -1464,6 +1767,7 @@ fn truncate(s: &str, max: usize) -> String {
 /// 2. Strip HTML tags to prevent injection in web-rendered notifications
 /// 3. Collapse multiple whitespace/newlines to single spaces for cleaner output
 /// 4. Truncate to 500 chars to prevent oversized notifications
+#[cfg(test)]
 fn sanitize_summary(s: &str) -> String {
     // Strip control characters (keep newline for now, collapse later)
     let no_control: String = s
@@ -1491,6 +1795,7 @@ fn sanitize_summary(s: &str) -> String {
 }
 
 /// Remove HTML/XML tags from a string.
+#[cfg(test)]
 fn strip_html_tags(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
     let mut in_tag = false;
@@ -1601,21 +1906,77 @@ mod tests {
     }
 
     #[test]
+    fn test_build_lightweight_prompt_explains_delivery_and_disabled_tools() {
+        let notify = NotifyConfig {
+            channel: Some("telegram".to_string()),
+            user: Some("default".to_string()),
+            on_attention: true,
+            on_failure: true,
+            on_success: false,
+        };
+
+        let prompt = super::build_lightweight_prompt(
+            "Send a Telegram reminder message to the user.",
+            &[],
+            None,
+            &notify,
+            false,
+        );
+
+        assert!(
+            prompt.contains("the host will deliver your reply as the routine notification"),
+            "delivery guidance should explain host delivery: {prompt}",
+        );
+        assert!(
+            prompt.contains("configured delivery channel for this routine is `telegram`"),
+            "delivery guidance should mention telegram channel: {prompt}",
+        );
+        assert!(
+            prompt.contains("Do not claim you lack messaging integrations"),
+            "delivery guidance should suppress fake setup chatter: {prompt}",
+        );
+        assert!(
+            prompt.contains("Tools are disabled for this routine run"),
+            "prompt should explain that tools are disabled: {prompt}",
+        );
+    }
+
+    #[test]
+    fn test_build_lightweight_prompt_skips_delivery_block_when_attention_notifications_disabled() {
+        let notify = NotifyConfig {
+            on_attention: false,
+            ..NotifyConfig::default()
+        };
+
+        let prompt = super::build_lightweight_prompt("Check inbox.", &[], None, &notify, true);
+
+        assert!(
+            !prompt.contains("# Delivery"),
+            "prompt should not include delivery guidance when attention notifications are off: {prompt}",
+        );
+        assert!(
+            !prompt.contains("Tools are disabled for this routine run"),
+            "prompt should not claim tools are disabled when they are enabled: {prompt}",
+        );
+    }
+
+    #[test]
     fn test_routine_sentinel_detection_exact_match() {
-        // The execute_lightweight_no_tools checks: content == "ROUTINE_OK" || content.contains("ROUTINE_OK")
-        // After trim(), whitespace is removed
+        // Sentinel detection uses exact match on trimmed content to avoid
+        // false positives from substrings like "NOT_ROUTINE_OK".
         let test_cases = vec![
             ("ROUTINE_OK", true),
             ("  ROUTINE_OK  ", true), // After trim, whitespace is removed so matches
-            ("something ROUTINE_OK something", true),
-            ("ROUTINE_OK is done", true),
-            ("done ROUTINE_OK", true),
+            ("something ROUTINE_OK something", false), // substring no longer matches
+            ("ROUTINE_OK is done", false), // substring no longer matches
+            ("done ROUTINE_OK", false), // substring no longer matches
+            ("NOT_ROUTINE_OK", false), // exact match prevents this
             ("no sentinel here", false),
         ];
 
         for (content, should_match) in test_cases {
             let trimmed = content.trim();
-            let matches = trimmed == "ROUTINE_OK" || trimmed.contains("ROUTINE_OK");
+            let matches = trimmed == "ROUTINE_OK";
             assert_eq!(
                 matches, should_match,
                 "Content '{}' sentinel detection should be {}, got {}",
@@ -1786,58 +2147,86 @@ mod tests {
         assert!(msg.contains("SANDBOX_ENABLED"));
     }
 
-    /// Regression test for #697: full_job routines were immediately marked Ok
-    /// on dispatch, so failures/completions were never synced back.
+    /// Regression test for #1317: FullJobWatcher maps terminal job states correctly.
+    #[test]
+    fn test_full_job_watcher_state_mapping() {
+        use crate::context::JobState;
+
+        // Failed/Cancelled → RunStatus::Failed
+        assert_eq!(
+            super::FullJobWatcher::map_job_state(&JobState::Failed),
+            RunStatus::Failed
+        );
+        assert_eq!(
+            super::FullJobWatcher::map_job_state(&JobState::Cancelled),
+            RunStatus::Failed
+        );
+
+        // All other non-active states → RunStatus::Ok
+        assert_eq!(
+            super::FullJobWatcher::map_job_state(&JobState::Completed),
+            RunStatus::Ok
+        );
+        assert_eq!(
+            super::FullJobWatcher::map_job_state(&JobState::Accepted),
+            RunStatus::Ok
+        );
+    }
+
+    /// Verify that job state to run status mapping covers all expected cases.
     #[test]
     fn test_job_state_to_run_status_mapping() {
         use crate::context::JobState;
 
-        let map_state = |state: JobState, reason: Option<&str>| -> Option<(RunStatus, String)> {
-            let last_reason = reason.map(|s| s.to_string());
-            match state {
-                JobState::Completed | JobState::Accepted => {
-                    let summary =
-                        last_reason.unwrap_or_else(|| "Job completed successfully".to_string());
-                    Some((RunStatus::Ok, summary))
+        // Success states
+        for state in [JobState::Completed, JobState::Submitted, JobState::Accepted] {
+            let status = match state {
+                JobState::Completed | JobState::Submitted | JobState::Accepted => {
+                    Some(RunStatus::Ok)
                 }
-                JobState::Failed => {
-                    let summary = last_reason
-                        .unwrap_or_else(|| "Job failed (no error message recorded)".to_string());
-                    Some((RunStatus::Failed, summary))
+                JobState::Failed | JobState::Cancelled => Some(RunStatus::Failed),
+                _ => None,
+            };
+            assert_eq!(
+                status,
+                Some(RunStatus::Ok),
+                "{:?} should map to RunStatus::Ok",
+                state
+            );
+        }
+
+        // Failure states
+        for state in [JobState::Failed, JobState::Cancelled] {
+            let status = match state {
+                JobState::Completed | JobState::Submitted | JobState::Accepted => {
+                    Some(RunStatus::Ok)
                 }
-                JobState::Cancelled => Some((RunStatus::Failed, "Job was cancelled".to_string())),
-                // Submitted can still transition to Failed, so treat as in-progress
-                JobState::Pending
-                | JobState::InProgress
-                | JobState::Stuck
-                | JobState::Submitted => None,
-            }
-        };
+                JobState::Failed | JobState::Cancelled => Some(RunStatus::Failed),
+                _ => None,
+            };
+            assert_eq!(
+                status,
+                Some(RunStatus::Failed),
+                "{:?} should map to RunStatus::Failed",
+                state
+            );
+        }
 
-        // Terminal success states
-        let (status, _) = map_state(JobState::Completed, None).unwrap();
-        assert_eq!(status, RunStatus::Ok);
-
-        let (status, _) = map_state(JobState::Accepted, None).unwrap();
-        assert_eq!(status, RunStatus::Ok);
-
-        // Terminal failure states
-        let (status, summary) = map_state(JobState::Failed, Some("OOM killed")).unwrap();
-        assert_eq!(status, RunStatus::Failed);
-        assert_eq!(summary, "OOM killed");
-
-        let (status, summary) = map_state(JobState::Failed, None).unwrap();
-        assert_eq!(status, RunStatus::Failed);
-        assert!(summary.contains("no error message"));
-
-        let (status, _) = map_state(JobState::Cancelled, None).unwrap();
-        assert_eq!(status, RunStatus::Failed);
-
-        // In-progress states (including Submitted which can still fail)
-        assert!(map_state(JobState::Pending, None).is_none());
-        assert!(map_state(JobState::InProgress, None).is_none());
-        assert!(map_state(JobState::Stuck, None).is_none());
-        assert!(map_state(JobState::Submitted, None).is_none());
+        // Active states (should not finalize)
+        for state in [JobState::Pending, JobState::InProgress, JobState::Stuck] {
+            let status = match state {
+                JobState::Completed | JobState::Submitted | JobState::Accepted => {
+                    Some(RunStatus::Ok)
+                }
+                JobState::Failed | JobState::Cancelled => Some(RunStatus::Failed),
+                _ => None,
+            };
+            assert_eq!(
+                status, None,
+                "{:?} should not finalize the routine run",
+                state
+            );
+        }
     }
 
     #[test]

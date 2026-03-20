@@ -492,8 +492,16 @@ impl near::agent::channel_host::Host for ChannelStoreData {
                 tracing::debug!(body = %truncated, "Response body");
             }
 
-            // Leak detection on response body (best-effort)
-            if let Ok(body_str) = std::str::from_utf8(&body) {
+            // Leak detection on response body (best-effort).
+            //
+            // Telegram `getUpdates` is special: it is inbound polling data, so
+            // user-pasted secrets can legitimately appear in the response body.
+            // Those messages are still checked later by the inbound message
+            // safety layer before they reach the LLM, so we allow the polling
+            // response to continue here to avoid poisoning the offset state.
+            if let Ok(body_str) = std::str::from_utf8(&body)
+                && !should_skip_response_leak_scan(&url)
+            {
                 leak_detector
                     .scan_and_clean(body_str)
                     .map_err(|e| format!("Potential secret leak in response: {}", e))?;
@@ -2035,6 +2043,7 @@ impl WasmChannel {
                 tool_name,
                 description,
                 parameters,
+                allow_always,
                 ..
             } => {
                 // WASM channels (Telegram, Slack, etc.) cannot render
@@ -2073,6 +2082,11 @@ impl WasmChannel {
                     })
                     .unwrap_or_default();
 
+                let reply_hint = if *allow_always {
+                    "Reply \"yes\" to approve, \"no\" to deny, or \"always\" to auto-approve."
+                } else {
+                    "Reply \"yes\" to approve or \"no\" to deny."
+                };
                 let prompt = format!(
                     "Approval needed: {tool_name}\n\
                      {description}\n\
@@ -2080,7 +2094,7 @@ impl WasmChannel {
                      Parameters:\n\
                      {params_preview}\n\
                      \n\
-                     Reply \"yes\" to approve, \"no\" to deny, or \"always\" to auto-approve."
+                     {reply_hint}"
                 );
 
                 let metadata_json = serde_json::to_string(metadata).unwrap_or_default();
@@ -2973,15 +2987,23 @@ fn status_to_wit(
             request_id,
             tool_name,
             description,
+            allow_always,
             ..
-        } => wit_channel::StatusUpdate {
-            status: wit_channel::StatusType::ApprovalNeeded,
-            message: format!(
-                "Approval needed for tool '{}'. {}\nRequest ID: {}\nReply with: yes (or /approve), no (or /deny), or always (or /always).",
-                tool_name, description, request_id
-            ),
-            metadata_json,
-        },
+        } => {
+            let reply_hint = if *allow_always {
+                "yes (or /approve), no (or /deny), or always (or /always)"
+            } else {
+                "yes (or /approve) or no (or /deny)"
+            };
+            wit_channel::StatusUpdate {
+                status: wit_channel::StatusType::ApprovalNeeded,
+                message: format!(
+                    "Approval needed for tool '{}'. {}\nRequest ID: {}\nReply with: {}.",
+                    tool_name, description, request_id, reply_hint
+                ),
+                metadata_json,
+            }
+        }
         StatusUpdate::JobStarted {
             job_id,
             title,
@@ -3119,6 +3141,19 @@ fn extract_host_from_url(url: &str) -> Option<String> {
             .and_then(|v| v.strip_suffix(']'))
             .unwrap_or(h)
             .to_lowercase()
+    })
+}
+
+fn should_skip_response_leak_scan(url: &str) -> bool {
+    url::Url::parse(url).is_ok_and(|parsed| {
+        matches!(parsed.scheme(), "http" | "https")
+            && parsed
+                .host_str()
+                .is_some_and(|host| host.eq_ignore_ascii_case("api.telegram.org"))
+            && parsed
+                .path_segments()
+                .and_then(|segments| segments.rev().find(|segment| !segment.is_empty()))
+                .is_some_and(|segment| segment == "getUpdates")
     })
 }
 
@@ -3649,6 +3684,7 @@ mod tests {
                     tool_name: "http_request".into(),
                     description: "Fetch weather".into(),
                     parameters: serde_json::json!({"url": "https://wttr.in"}),
+                    allow_always: true,
                 },
                 &metadata,
             )
@@ -4110,6 +4146,7 @@ mod tests {
                 tool_name: "http_request".to_string(),
                 description: "Fetch weather data".to_string(),
                 parameters: serde_json::json!({"url": "https://api.weather.test"}),
+                allow_always: true,
             },
             &metadata,
         )
@@ -4135,6 +4172,7 @@ mod tests {
                 tool_name: "http_request".to_string(),
                 description: "Fetch weather data".to_string(),
                 parameters: serde_json::json!({"url": "https://api.weather.test"}),
+                allow_always: true,
             },
             &metadata,
         )
@@ -4384,6 +4422,22 @@ mod tests {
 
         let input = "should not match anything";
         assert_eq!(store.redact_credentials(input), input);
+    }
+
+    #[test]
+    fn test_should_skip_response_leak_scan_only_for_telegram_getupdates() {
+        use super::should_skip_response_leak_scan;
+
+        assert!(should_skip_response_leak_scan(
+            "https://api.telegram.org/bot123/getUpdates?offset=1"
+        ));
+        assert!(!should_skip_response_leak_scan(
+            "https://api.telegram.org/bot123/sendMessage"
+        ));
+        assert!(!should_skip_response_leak_scan(
+            "https://api.example.com/getUpdates"
+        ));
+        assert!(!should_skip_response_leak_scan("not a url"));
     }
 
     /// Verify that WASM HTTP host functions work using a dedicated
