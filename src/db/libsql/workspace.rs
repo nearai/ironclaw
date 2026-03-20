@@ -36,6 +36,7 @@ pub(crate) fn resolve_embedding_dimension() -> Option<usize> {
         .unwrap_or(false);
 
     if !enabled {
+        tracing::info!("Vector index setup skipped (EMBEDDING_ENABLED not set in env)");
         return None;
     }
 
@@ -66,6 +67,11 @@ impl LibSqlBackend {
     /// metadata row where `name` stores the dimension as a string. Version 0
     /// is never used by incremental migrations (which start at 9), so there
     /// is no collision. If the stored dimension matches, this is a no-op.
+    ///
+    /// **Precondition:** `run_migrations()` must have been called first so that
+    /// the `_migrations` table exists. This is guaranteed when called from
+    /// `Database::run_migrations()`, but callers using this directly must
+    /// ensure migrations have run.
     pub async fn ensure_vector_index(&self, dimension: usize) -> Result<(), DatabaseError> {
         if dimension == 0 || dimension > 65536 {
             return Err(DatabaseError::Migration(format!(
@@ -76,6 +82,8 @@ impl LibSqlBackend {
         let conn = self.connect().await?;
 
         // Check current dimension from _migrations version=0 (reserved metadata row).
+        // The block scope ensures `rows` is dropped before `conn.transaction()` —
+        // holding a result set open would cause "database table is locked" errors.
         let current_dim = {
             let mut rows = conn
                 .query("SELECT name FROM _migrations WHERE version = 0", ())
@@ -153,7 +161,9 @@ impl LibSqlBackend {
         })?;
 
         // 4. Copy data — embeddings with wrong byte length get NULLed
-        //    (they will be re-embedded on next background pass)
+        //    (they will be re-embedded on next background pass).
+        //    _rowid is explicitly preserved so the FTS5 content table
+        //    (memory_chunks_fts, content_rowid='_rowid') stays in sync.
         let expected_bytes = dimension * 4;
         let copy_sql = format!(
             "INSERT INTO memory_chunks_new
@@ -606,6 +616,9 @@ impl WorkspaceStore for LibSqlBackend {
                 reason: e.to_string(),
             })?;
         let id = Uuid::new_v4();
+        // Note: embedding dimension is not validated here — the F32_BLOB(N)
+        // column type created by ensure_vector_index() enforces byte length at
+        // the libSQL level and will reject mismatched dimensions.
         let embedding_blob = embedding.map(|e| {
             let bytes: Vec<u8> = e.iter().flat_map(|f| f.to_le_bytes()).collect();
             bytes
@@ -1000,5 +1013,74 @@ mod tests {
             "result should have a vector_rank"
         );
         assert_eq!(first.content, "quantum computing research");
+    }
+
+    mod resolve_dimension {
+        use super::*;
+        use crate::config::helpers::ENV_MUTEX;
+
+        fn clear_embedding_env() {
+            // SAFETY: called under ENV_MUTEX
+            unsafe {
+                std::env::remove_var("EMBEDDING_ENABLED");
+                std::env::remove_var("EMBEDDING_DIMENSION");
+                std::env::remove_var("EMBEDDING_MODEL");
+            }
+        }
+
+        #[test]
+        fn returns_none_when_disabled() {
+            let _guard = ENV_MUTEX.lock().expect("env mutex");
+            clear_embedding_env();
+            assert!(resolve_embedding_dimension().is_none());
+        }
+
+        #[test]
+        fn returns_explicit_dimension() {
+            let _guard = ENV_MUTEX.lock().expect("env mutex");
+            clear_embedding_env();
+            // SAFETY: under ENV_MUTEX
+            unsafe {
+                std::env::set_var("EMBEDDING_ENABLED", "true");
+                std::env::set_var("EMBEDDING_DIMENSION", "768");
+            }
+            assert_eq!(resolve_embedding_dimension(), Some(768));
+            unsafe {
+                std::env::remove_var("EMBEDDING_ENABLED");
+                std::env::remove_var("EMBEDDING_DIMENSION");
+            }
+        }
+
+        #[test]
+        fn infers_from_model() {
+            let _guard = ENV_MUTEX.lock().expect("env mutex");
+            clear_embedding_env();
+            // SAFETY: under ENV_MUTEX
+            unsafe {
+                std::env::set_var("EMBEDDING_ENABLED", "1");
+                std::env::set_var("EMBEDDING_MODEL", "all-minilm");
+            }
+            assert_eq!(resolve_embedding_dimension(), Some(384));
+            unsafe {
+                std::env::remove_var("EMBEDDING_ENABLED");
+                std::env::remove_var("EMBEDDING_MODEL");
+            }
+        }
+
+        #[test]
+        fn defaults_to_1536_for_unknown_model() {
+            let _guard = ENV_MUTEX.lock().expect("env mutex");
+            clear_embedding_env();
+            // SAFETY: under ENV_MUTEX
+            unsafe {
+                std::env::set_var("EMBEDDING_ENABLED", "true");
+                std::env::set_var("EMBEDDING_MODEL", "some-unknown-model");
+            }
+            assert_eq!(resolve_embedding_dimension(), Some(1536));
+            unsafe {
+                std::env::remove_var("EMBEDDING_ENABLED");
+                std::env::remove_var("EMBEDDING_MODEL");
+            }
+        }
     }
 }
