@@ -1229,6 +1229,19 @@ impl Agent {
                     result = self
                         .process_user_input(&queued_msg, session.clone(), thread_id, &next_content)
                         .await;
+
+                    // If processing failed, re-queue the drained content so it
+                    // isn't lost. It will be picked up on the next successful turn.
+                    if !matches!(&result, Ok(SubmissionResult::Response { .. })) {
+                        let mut sess = session.lock().await;
+                        if let Some(thread) = sess.threads.get_mut(&thread_id) {
+                            thread.requeue_drained(next_content);
+                            tracing::debug!(
+                                thread_id = %thread_id,
+                                "Re-queued drained content after non-Response result"
+                            );
+                        }
+                    }
                 }
 
                 result

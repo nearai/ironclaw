@@ -309,6 +309,13 @@ impl Thread {
         Some(parts.join("\n"))
     }
 
+    /// Re-queue previously drained content at the front of the queue.
+    /// Used to preserve user input when the drain loop fails to process
+    /// merged messages (soft error, hard error, interrupt).
+    pub fn requeue_drained(&mut self, content: String) {
+        self.pending_messages.push_front(content);
+    }
+
     /// Start a new turn with user input.
     pub fn start_turn(&mut self, user_input: impl Into<String>) -> &mut Turn {
         let turn_number = self.turns.len();
@@ -1572,5 +1579,23 @@ mod tests {
 
         // Queue is empty after drain
         assert!(thread.drain_pending_messages().is_none());
+    }
+
+    #[test]
+    fn test_requeue_drained_preserves_content_at_front() {
+        let mut thread = Thread::new(Uuid::new_v4());
+
+        // Re-queue into empty queue
+        thread.requeue_drained("failed batch".to_string());
+        assert_eq!(thread.pending_messages.len(), 1);
+        assert_eq!(thread.pending_messages[0], "failed batch");
+
+        // New messages go behind the re-queued content
+        thread.queue_message("new msg".to_string());
+        assert_eq!(thread.pending_messages.len(), 2);
+
+        // Drain should return re-queued content first (front of queue)
+        let merged = thread.drain_pending_messages().unwrap();
+        assert_eq!(merged, "failed batch\nnew msg");
     }
 }
