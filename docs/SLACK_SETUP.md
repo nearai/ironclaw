@@ -13,7 +13,8 @@ This guide covers first-time setup of the Slack WASM channel for IronClaw in bot
 - [Webhook Mode](#webhook-mode)
 - [Socket Mode](#socket-mode)
 - [6. Optional Access Control](#6-optional-access-control)
-- [7. Example Slack App Manifest](#7-example-slack-app-manifest)
+- [7. Behavior Scenarios](#7-behavior-scenarios)
+- [8. Example Slack App Manifest](#8-example-slack-app-manifest)
 - [Slash Commands and Interactivity](#slash-commands-and-interactivity)
 - [Troubleshooting](#troubleshooting)
 - [References](#references)
@@ -273,7 +274,180 @@ Slack-specific policy options live in `~/.ironclaw/channels/slack.capabilities.j
 
 There is currently no dedicated `ironclaw config set ...` path for `dm_policy` or `allow_from`; those remain channel manifest config.
 
-## 7. Example Slack App Manifest
+## 7. Behavior Scenarios
+
+The Slack channel uses three main controls for access behavior:
+
+- `channels.wasm_channel_owner_ids.slack`: host-level owner restriction
+- `config.dm_policy` in `~/.ironclaw/channels/slack.capabilities.json`: DM access policy
+- `config.allow_from` in `~/.ironclaw/channels/slack.capabilities.json`: pre-approved Slack user IDs for DMs
+
+Important behavior rules:
+
+- `dm_policy` applies only to DMs
+- channel messages bypass DM pairing logic when no owner binding is set
+- `owner_id` overrides everything and applies to DMs, public channels, and private channels
+
+### Scenario 1: Default Configuration
+
+Expected config:
+
+- `channels.wasm_channel_owner_ids.slack` is unset
+- `config.owner_id` is `null`
+- `config.dm_policy` is `"pairing"`
+- `config.allow_from` is `[]`
+
+Expected behavior:
+
+- DMs: unknown users get a pairing code and must be approved before future DMs are delivered
+- Public Channels: users can talk to IronClaw by `@mention` and continue in thread replies
+- Private Channels: users can talk to IronClaw the same way if the app is in the channel and Slack events/scopes are configured
+
+Commands to inspect this scenario:
+
+```bash
+ironclaw config get channels.wasm_channel_owner_ids.slack
+ironclaw pairing list slack
+sed -n '1,220p' ~/.ironclaw/channels/slack.capabilities.json
+cat ~/.ironclaw/slack-allowFrom.json
+cat ~/.ironclaw/slack-pairing.json
+```
+
+What to expect:
+
+- `ironclaw config get channels.wasm_channel_owner_ids.slack` returns `Setting not found`
+- `ironclaw pairing list slack` usually shows no pending requests until someone sends a DM
+- `slack.capabilities.json` shows `dm_policy` as `"pairing"`
+- `slack-allowFrom.json` is empty or does not exist yet
+
+### Scenario 2: Owner Only Allowed to Talk to IronClaw
+
+Set the owner binding:
+
+```bash
+ironclaw config set channels.wasm_channel_owner_ids.slack 123456789
+```
+
+Expected behavior:
+
+- DMs: only that Slack user can message IronClaw
+- Public Channels: only that Slack user can `@mention` IronClaw or continue thread replies
+- Private Channels: only that Slack user can `@mention` IronClaw or continue thread replies
+
+What changes:
+
+- DM pairing is effectively bypassed because the owner check runs first
+- `allow_from` does not help non-owner users once an owner binding is set
+
+Commands to inspect this scenario:
+
+```bash
+ironclaw config get channels.wasm_channel_owner_ids.slack
+ironclaw pairing list slack
+sed -n '1,220p' ~/.ironclaw/channels/slack.capabilities.json
+```
+
+What to expect:
+
+- `ironclaw config get channels.wasm_channel_owner_ids.slack` returns the configured Slack user ID
+- `ironclaw pairing list slack` is usually irrelevant because non-owner users are rejected before DM pairing logic matters
+- `slack.capabilities.json` may still say `dm_policy: "pairing"`, but the owner restriction takes precedence
+
+### Scenario 3: Owner Only Plus Specific Allowed Users
+
+There are two distinct cases:
+
+1. Host-level owner binding is set
+2. `allow_from` contains additional Slack user IDs
+
+Example owner binding:
+
+```bash
+ironclaw config set channels.wasm_channel_owner_ids.slack 123456789
+```
+
+Example manifest config:
+
+```json
+{
+  "config": {
+    "owner_id": null,
+    "dm_policy": "allowlist",
+    "allow_from": ["U11111111", "U22222222"]
+  }
+}
+```
+
+Expected behavior:
+
+- DMs: only the owner can talk to IronClaw
+- Public Channels: only the owner can talk to IronClaw
+- Private Channels: only the owner can talk to IronClaw
+
+Why:
+
+- once the owner binding is set, the owner check runs first and blocks everyone else
+- additional users in `allow_from` do not override the owner restriction
+
+Commands to inspect this scenario:
+
+```bash
+ironclaw config get channels.wasm_channel_owner_ids.slack
+sed -n '1,220p' ~/.ironclaw/channels/slack.capabilities.json
+cat ~/.ironclaw/slack-allowFrom.json
+```
+
+What to expect:
+
+- the owner binding is set in `ironclaw config`
+- `allow_from` may contain extra users in the manifest or pairing store
+- despite that, only the owner can successfully message the channel
+
+### Can I Allow Specific Users Without Setting an Owner?
+
+Yes, for DMs only.
+
+Example manifest config:
+
+```json
+{
+  "config": {
+    "owner_id": null,
+    "dm_policy": "allowlist",
+    "allow_from": ["U11111111", "U22222222"]
+  }
+}
+```
+
+Behavior:
+
+- DMs: only the listed users can message IronClaw
+- Public Channels: any user can still talk to IronClaw by default
+- Private Channels: any user can still talk to IronClaw by default
+
+### Is There Channel-Level Pairing or Per-Channel User Access?
+
+No. The current Slack channel does not support channel-level pairing or per-channel access rules.
+
+There is currently no built-in way to say:
+
+- user A may talk in channel X
+- user B may talk in channel Y
+- only approved users may talk in a specific public or private Slack channel
+
+Current access controls are only:
+
+- global owner restriction for the whole Slack channel
+- DM policy (`open`, `allowlist`, `pairing`)
+- DM allowlist / approved paired users
+
+So today:
+
+- DMs can be gated
+- channel messages are globally allowed unless an owner binding is set
+- there is no channel-specific allowlist or channel-specific pairing
+
+## 8. Example Slack App Manifest
 
 Replacement tokens:
 
