@@ -1,6 +1,18 @@
 {
   "version": "0.2.0",
   "wit_version": "0.3.0",
+  "description": "View, create, update, and delete Google Calendar events. Supports timed events, all-day events, attendees, locations, and free text search.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "action": {
+        "type": "string",
+        "description": "The operation to perform",
+        "enum": ["list_events", "get_event", "create_event", "update_event", "delete_event"]
+      }
+    },
+    "required": ["action"]
+  },
   "http": {
     "allowlist": [
       {
@@ -52,7 +64,7 @@
       },
       {
         "name": "google_oauth_client_secret",
-        "prompt": "Google OAuth Client Secret"
+        "prompt": "Google OAuth Client Secret (from console.cloud.google.com/apis/credentials)"
       }
     ]
   }

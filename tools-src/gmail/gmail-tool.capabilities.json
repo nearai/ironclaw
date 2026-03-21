@@ -1,6 +1,18 @@
 {
   "version": "0.2.0",
   "wit_version": "0.3.0",
+  "description": "Read, search, send, draft, and reply to emails via Gmail. Supports Gmail search query syntax (is:unread, from:, subject:, after:, etc.).",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "action": {
+        "type": "string",
+        "description": "The operation to perform",
+        "enum": ["list_messages", "get_message", "send_message", "create_draft", "reply_to_message", "trash_message"]
+      }
+    },
+    "required": ["action"]
+  },
   "http": {
     "allowlist": [
       {
@@ -53,7 +65,7 @@
       },
       {
         "name": "google_oauth_client_secret",
-        "prompt": "Google OAuth Client Secret"
+        "prompt": "Google OAuth Client Secret (from console.cloud.google.com/apis/credentials)"
       }
     ]
   }

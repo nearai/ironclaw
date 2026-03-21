@@ -1,6 +1,18 @@
 {
   "version": "0.2.0",
   "wit_version": "0.3.0",
+  "description": "Send messages, list channels, read history, add reactions, and get user information in Slack.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "action": {
+        "type": "string",
+        "description": "The operation to perform",
+        "enum": ["send_message", "list_channels", "get_channel_history", "post_reaction", "get_user_info"]
+      }
+    },
+    "required": ["action"]
+  },
   "http": {
     "allowlist": [
       {
@@ -57,7 +69,7 @@
       },
       {
         "name": "slack_oauth_client_secret",
-        "prompt": "Slack OAuth Client Secret"
+        "prompt": "Slack OAuth Client Secret (from api.slack.com/apps > Basic Information)"
       }
     ]
   }

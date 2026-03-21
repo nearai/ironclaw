@@ -21,7 +21,7 @@
       },
       {
         "name": "feishu_app_secret",
-        "prompt": "Enter your Feishu/Lark App Secret",
+        "prompt": "Enter your Feishu/Lark App Secret (from your app settings at open.feishu.cn)",
         "optional": false
       },
       {

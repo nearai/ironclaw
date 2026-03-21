@@ -1,6 +1,18 @@
 {
   "version": "0.2.0",
   "wit_version": "0.3.0",
+  "description": "Create, read, edit, and format Google Docs documents. Supports text insert/delete/replace, formatting (bold, italic, font, color, size), paragraph styling, tables, and lists.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "action": {
+        "type": "string",
+        "description": "The operation to perform",
+        "enum": ["create_document", "get_document", "read_content", "insert_text", "delete_content", "replace_text", "format_text", "format_paragraph", "insert_table", "create_list", "batch_update"]
+      }
+    },
+    "required": ["action"]
+  },
   "http": {
     "allowlist": [
       {
@@ -52,7 +64,7 @@
       },
       {
         "name": "google_oauth_client_secret",
-        "prompt": "Google OAuth Client Secret"
+        "prompt": "Google OAuth Client Secret (from console.cloud.google.com/apis/credentials)"
       }
     ]
   }
