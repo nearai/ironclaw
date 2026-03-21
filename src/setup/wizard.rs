@@ -3,7 +3,7 @@
 //! The wizard guides users through:
 //! 1. Database connection
 //! 2. Security (secrets master key)
-//! 3. Inference provider (NEAR AI, Anthropic, OpenAI, OpenAI Codex, Ollama, OpenAI-compatible)
+//! 3. Inference provider (NEAR AI, Anthropic, OpenAI, GitHub Copilot, OpenAI Codex, Ollama, OpenAI-compatible)
 //! 4. Model selection
 //! 5. Embeddings
 //! 6. Channel configuration
@@ -1191,6 +1191,10 @@ impl SetupWizard {
             return self.setup_anthropic().await;
         }
 
+        if provider_id == "github_copilot" {
+            return self.setup_github_copilot().await;
+        }
+
         match setup {
             crate::llm::registry::SetupHint::ApiKey {
                 secret_name,
@@ -1351,6 +1355,100 @@ impl SetupWizard {
             // OAuth token flow
             self.setup_anthropic_oauth().await
         }
+    }
+
+    async fn setup_github_copilot(&mut self) -> Result<(), SetupError> {
+        print_info("GitHub Copilot authentication:");
+        let options = &[
+            "GitHub device login (recommended)",
+            "Paste an existing token (from IDE or personal access token)",
+        ];
+        let choice = select_one("Auth method:", options).map_err(SetupError::Io)?;
+        match choice {
+            0 => self.setup_github_copilot_device_login().await,
+            _ => self.setup_github_copilot_paste_token().await,
+        }
+    }
+
+    async fn setup_github_copilot_paste_token(&mut self) -> Result<(), SetupError> {
+        self.set_llm_backend_preserving_model("github_copilot");
+
+        print_info("Paste your GitHub token (requires an active Copilot subscription).");
+        print_info("Sources: `gh auth token`, or the oauth_token field in");
+        print_info("~/.config/github-copilot/apps.json (VS Code) or ~/.config/gh/hosts.yml.");
+        let token_secret = secret_input("GitHub Copilot token").map_err(SetupError::Io)?;
+        let token = token_secret.expose_secret().trim().to_string();
+        if token.is_empty() {
+            return Err(SetupError::Auth("No token provided".to_string()));
+        }
+
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
+            .build()
+            .map_err(|e| SetupError::Auth(format!("Failed to create HTTP client: {e}")))?;
+
+        self.save_github_copilot_token(&client, &token).await
+    }
+
+    async fn setup_github_copilot_device_login(&mut self) -> Result<(), SetupError> {
+        self.set_llm_backend_preserving_model("github_copilot");
+
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
+            .build()
+            .map_err(|e| SetupError::Auth(format!("Failed to create HTTP client: {e}")))?;
+
+        let device = crate::llm::github_copilot_auth::request_device_code(&client)
+            .await
+            .map_err(|e| SetupError::Auth(e.to_string()))?;
+
+        print_info("Authorize IronClaw with GitHub Copilot in your browser.");
+        print_info(&format!("Verification URL: {}", device.verification_uri));
+        print_info(&format!("One-time code: {}", device.user_code));
+
+        if let Err(e) = open::that(&device.verification_uri) {
+            tracing::debug!(
+                url = %device.verification_uri,
+                error = %e,
+                "Failed to open GitHub Copilot device login URL"
+            );
+            print_info("Open the URL above manually if your browser did not launch.");
+        } else {
+            print_info("Opened your browser to GitHub device login.");
+        }
+
+        print_info("Waiting for GitHub authorization...");
+        let token = crate::llm::github_copilot_auth::wait_for_device_login(&client, &device)
+            .await
+            .map_err(|e| SetupError::Auth(e.to_string()))?;
+
+        self.save_github_copilot_token(&client, &token).await
+    }
+
+    async fn save_github_copilot_token(
+        &mut self,
+        client: &reqwest::Client,
+        token: &str,
+    ) -> Result<(), SetupError> {
+        crate::llm::github_copilot_auth::validate_token(client, token)
+            .await
+            .map_err(|e| SetupError::Auth(e.to_string()))?;
+
+        if let Ok(ctx) = self.init_secrets_context().await {
+            let key = SecretString::from(token.to_string());
+            ctx.save_secret("llm_github_copilot_token", &key)
+                .await
+                .map_err(|e| SetupError::Config(format!("Failed to save GitHub token: {e}")))?;
+            print_success("GitHub Copilot token encrypted and saved");
+        } else {
+            print_info("Secrets not available. Set GITHUB_COPILOT_TOKEN in your environment.");
+        }
+
+        crate::config::inject_single_var("GITHUB_COPILOT_TOKEN", token);
+        self.llm_api_key = Some(SecretString::from(token.to_string()));
+
+        print_success("GitHub Copilot configured");
+        Ok(())
     }
 
     /// Anthropic OAuth setup: extract token from `claude login` credentials.
@@ -3505,6 +3603,36 @@ mod tests {
         assert!(
             models.iter().any(|(id, _)| id.contains("gpt")),
             "static defaults should include a GPT model"
+        );
+    }
+
+    #[test]
+    fn test_github_copilot_setup_preserves_model_for_same_backend() {
+        let mut wizard = SetupWizard::new();
+        wizard.settings.llm_backend = Some("github_copilot".to_string());
+        wizard.settings.selected_model = Some("gpt-4o".to_string());
+
+        wizard.set_llm_backend_preserving_model("github_copilot");
+
+        assert_eq!(wizard.settings.selected_model.as_deref(), Some("gpt-4o"));
+        assert_eq!(
+            wizard.settings.llm_backend.as_deref(),
+            Some("github_copilot")
+        );
+    }
+
+    #[test]
+    fn test_github_copilot_setup_clears_stale_model_on_switch() {
+        let mut wizard = SetupWizard::new();
+        wizard.settings.llm_backend = Some("openai".to_string());
+        wizard.settings.selected_model = Some("gpt-5".to_string());
+
+        wizard.set_llm_backend_preserving_model("github_copilot");
+
+        assert!(wizard.settings.selected_model.is_none());
+        assert_eq!(
+            wizard.settings.llm_backend.as_deref(),
+            Some("github_copilot")
         );
     }
 

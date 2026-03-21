@@ -168,7 +168,7 @@ written to `~/.ironclaw/.env` so they are available before the database connects
 ### Alternative LLM Providers
 
 IronClaw defaults to NEAR AI but supports many LLM providers out of the box.
-Built-in providers include **Anthropic**, **OpenAI**, **Google Gemini**, **MiniMax**,
+Built-in providers include **Anthropic**, **OpenAI**, **GitHub Copilot**, **Google Gemini**, **MiniMax**,
 **Mistral**, and **Ollama** (local). OpenAI-compatible services like **OpenRouter**
 (300+ models), **Together AI**, **Fireworks AI**, and self-hosted servers (**vLLM**,
 **LiteLLM**) are also supported.

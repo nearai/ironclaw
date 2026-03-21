@@ -18,6 +18,8 @@ pub mod config;
 pub mod costs;
 pub mod error;
 pub mod failover;
+mod github_copilot;
+pub(crate) mod github_copilot_auth;
 mod nearai_chat;
 pub mod oauth_helpers;
 pub mod openai_codex_provider;
@@ -171,6 +173,17 @@ fn create_registry_provider(
         ProviderProtocol::OpenAiCompletions => create_openai_compat_from_registry(config),
         ProviderProtocol::Anthropic => create_anthropic_from_registry(config),
         ProviderProtocol::Ollama => create_ollama_from_registry(config),
+        ProviderProtocol::GithubCopilot => {
+            let provider =
+                github_copilot::GithubCopilotProvider::new(config, request_timeout_secs)?;
+            tracing::debug!(
+                provider = %config.provider_id,
+                model = %config.model,
+                base_url = %config.base_url,
+                "Using GitHub Copilot provider (token exchange)"
+            );
+            Ok(Arc::new(provider))
+        }
     }
 }
 
