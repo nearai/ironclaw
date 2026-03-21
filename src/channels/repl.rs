@@ -256,29 +256,27 @@ fn run_approval_selector(allow_always: bool) -> Option<&'static str> {
     let mut w = io::stderr();
     let _ = execute!(w, cursor::MoveUp(total_lines));
     let _ = execute!(w, terminal::Clear(ClearType::FromCursorDown));
-    if let Some(action) = result {
-        let label = options
+    let (label, color) = if let Some(action) = result {
+        let l = options
             .iter()
             .find(|o| o.as_input() == action)
             .unwrap_or(&options[0]);
-        let _ = writeln!(
-            w,
-            "  {}└{} {}● {label}{}",
-            fmt::accent(),
-            fmt::reset(),
-            fmt::success(),
-            fmt::reset()
-        );
+        let c = if action == "n" {
+            fmt::error()
+        } else {
+            fmt::success()
+        };
+        (l.to_string(), c)
     } else {
-        let _ = writeln!(
-            w,
-            "  {}└{} {}● Deny (n){}",
-            fmt::accent(),
-            fmt::reset(),
-            fmt::error(),
-            fmt::reset()
-        );
-    }
+        (ApprovalAction::Deny.to_string(), fmt::error())
+    };
+    let _ = writeln!(
+        w,
+        "  {}└{} {color}● {label}{}",
+        fmt::accent(),
+        fmt::reset(),
+        fmt::reset()
+    );
 
     result
 }

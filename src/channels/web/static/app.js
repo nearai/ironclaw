@@ -755,9 +755,7 @@ function sendMessage() {
       retryLink.textContent = 'Retry';
       retryLink.addEventListener('click', (e) => {
         e.preventDefault();
-        userMsg.classList.remove('send-failed');
-        userMsg.style.borderStyle = '';
-        retryLink.remove();
+        if (userMsg.parentNode) userMsg.parentNode.removeChild(userMsg);
         input.value = content;
         sendMessage();
       });

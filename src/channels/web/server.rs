@@ -412,7 +412,7 @@ pub async fn start_server(
                  script-src 'self' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com; \
                  style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; \
                  font-src https://fonts.gstatic.com; \
-                 connect-src 'self' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com; \
+                 connect-src 'self'; \
                  img-src 'self' data:; \
                  object-src 'none'; \
                  frame-ancestors 'none'; \
