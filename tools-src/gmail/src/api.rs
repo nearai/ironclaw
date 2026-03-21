@@ -15,6 +15,10 @@ fn api_call(method: &str, path: &str, body: Option<&str>) -> Result<String, Stri
 
     let headers = if body.is_some() {
         r#"{"Content-Type": "application/json"}"#
+    } else if method == "POST" {
+        // Gmail API requires Content-Length for POST requests with no body
+        // (e.g., trash_message). Without it, the API returns 411.
+        r#"{"Content-Length": "0"}"#
     } else {
         "{}"
     };
