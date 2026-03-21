@@ -31,7 +31,7 @@ IronClaw operates across four trust boundaries:
 | Listener | Default Port | Default Bind | Auth Mechanism | Config Env Var | Source |
 |----------|-------------|-------------|----------------|----------------|--------|
 | Web Gateway | 3000 | `127.0.0.1` | Bearer token (constant-time) | `GATEWAY_HOST`, `GATEWAY_PORT`, `GATEWAY_AUTH_TOKEN` | `server.rs` — `start_server()` |
-| HTTP Webhook Server | 8080 | `0.0.0.0` | Shared secret (body field) | `HTTP_HOST`, `HTTP_PORT`, `HTTP_WEBHOOK_SECRET` | `webhook_server.rs` — `start()` |
+| HTTP Webhook Server | 8080 | `0.0.0.0` (Unix-like) / `127.0.0.1` (Windows) | Shared secret (body field) | `HTTP_HOST`, `HTTP_PORT`, `HTTP_WEBHOOK_SECRET` | `webhook_server.rs` — `start()` |
 | Orchestrator Internal API | 50051 | `127.0.0.1` (macOS/Win) / `0.0.0.0` (Linux) | Per-job bearer token (constant-time) | `ORCHESTRATOR_PORT` | `api.rs` — `OrchestratorApi::start()` |
 | OAuth Callback Listener | 9876 | `127.0.0.1` | None (ephemeral, 5-min timeout) | N/A (hardcoded) | `oauth_defaults.rs` — `bind_callback_listener()` |
 | Sandbox HTTP Proxy | OS-assigned (ephemeral) | `127.0.0.1` | None (loopback only) | N/A (auto-assigned) | `proxy/http.rs` — `SandboxProxy::start()` |
@@ -134,11 +134,11 @@ Shutdown is triggered via a `oneshot::Sender` stored in `GatewayState::shutdown_
 
 ### Bind Address
 
-Configurable via `HTTP_HOST` (default `0.0.0.0`) and `HTTP_PORT` (default `8080`).
+Configurable via `HTTP_HOST` (default `0.0.0.0` on Unix-like systems / `127.0.0.1` on Windows) and `HTTP_PORT` (default `8080`).
 
-**WARNING:** The default bind address is `0.0.0.0`, meaning the webhook server listens on **all interfaces** by default. This is intentional (webhooks must be reachable from external services like Telegram/Slack), but operators should be aware of the exposure.
+**WARNING:** On Unix-like systems the default bind address is `0.0.0.0`, meaning the webhook server listens on **all interfaces** by default. This is intentional (webhooks must be reachable from external services like Telegram/Slack), but operators should be aware of the exposure. Windows defaults to `127.0.0.1` to avoid the webhook server bind failure reported in `#1403`.
 
-**Reference:** `src/config.rs` — `http_host` default (`"0.0.0.0"`), `http_port` default (`8080`)
+**Reference:** `src/config.rs` — `http_host` default (`"0.0.0.0"` on Unix-like systems / `"127.0.0.1"` on Windows), `http_port` default (`8080`)
 
 ### Authentication
 
@@ -507,7 +507,7 @@ Sandbox containers route all HTTP traffic through the proxy, which enforces a do
 
 **Severity:** Low
 **Location:** `src/config.rs`, `src/main.rs`
-**Status:** Mitigated — a `tracing::warn!` is now emitted at startup when the webhook server binds to an unspecified address (`0.0.0.0` or `::`), advising operators to set `HTTP_HOST=127.0.0.1` to restrict to localhost. The default bind address remains `0.0.0.0`, so webhook exposure is still controlled by operator configuration and external network controls (firewalls, ingress rules).
+**Status:** Mitigated — a `tracing::warn!` is now emitted at startup when the webhook server binds to an unspecified address (`0.0.0.0` or `::`), advising operators to set `HTTP_HOST=127.0.0.1` to restrict to localhost. Windows now defaults to `127.0.0.1` for the webhook server to avoid the bind failure reported in `#1403`; Unix-like systems still default to `0.0.0.0`, so webhook exposure remains controlled by operator configuration and external network controls (firewalls, ingress rules).
 
 #### F-5. ~~Missing security headers on web gateway~~ (Mitigated)
 

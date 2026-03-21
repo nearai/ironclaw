@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use secrecy::SecretString;
@@ -100,7 +101,7 @@ impl ChannelsConfig {
             Some(HttpConfig {
                 host: optional_env("HTTP_HOST")?
                     .or_else(|| cs.http_host.clone())
-                    .unwrap_or_else(|| "0.0.0.0".to_string()),
+                    .unwrap_or_else(|| default_http_host().to_string()),
                 port: parse_optional_env("HTTP_PORT", cs.http_port.unwrap_or(8080))?,
                 webhook_secret: optional_env("HTTP_WEBHOOK_SECRET")?.map(SecretString::from),
                 user_id: owner_id.to_string(),
@@ -233,6 +234,26 @@ fn default_channels_dir() -> PathBuf {
     ironclaw_base_dir().join("channels")
 }
 
+#[cfg(windows)]
+pub(crate) fn default_http_host() -> &'static str {
+    "127.0.0.1"
+}
+
+#[cfg(not(windows))]
+pub(crate) fn default_http_host() -> &'static str {
+    "0.0.0.0"
+}
+
+#[cfg(windows)]
+pub(crate) fn default_webhook_bind_addr(port: u16) -> SocketAddr {
+    SocketAddr::from(([127, 0, 0, 1], port))
+}
+
+#[cfg(not(windows))]
+pub(crate) fn default_webhook_bind_addr(port: u16) -> SocketAddr {
+    SocketAddr::from(([0, 0, 0, 0], port))
+}
+
 #[cfg(test)]
 mod tests {
     use crate::config::channels::*;
@@ -260,6 +281,27 @@ mod tests {
         assert_eq!(cfg.port, 8080);
         assert!(cfg.webhook_secret.is_none());
         assert_eq!(cfg.user_id, "http");
+    }
+
+    #[test]
+    fn default_http_host_matches_platform() {
+        #[cfg(windows)]
+        {
+            assert_eq!(default_http_host(), "127.0.0.1");
+            assert_eq!(
+                default_webhook_bind_addr(8080),
+                SocketAddr::from(([127, 0, 0, 1], 8080))
+            );
+        }
+
+        #[cfg(not(windows))]
+        {
+            assert_eq!(default_http_host(), "0.0.0.0");
+            assert_eq!(
+                default_webhook_bind_addr(8080),
+                SocketAddr::from(([0, 0, 0, 0], 8080))
+            );
+        }
     }
 
     #[test]

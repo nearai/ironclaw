@@ -23,7 +23,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Single-user system | ✅ | ✅ | Explicit instance owner scope for persistent routines, secrets, jobs, settings, extensions, and workspace memory |
 | Multi-agent routing | ✅ | ❌ | Workspace isolation per-agent |
 | Session-based messaging | ✅ | ✅ | Owner scope is separate from sender identity and conversation scope |
-| Loopback-first networking | ✅ | ✅ | HTTP binds to 0.0.0.0 but can be configured |
+| Loopback-first networking | ✅ | ✅ | HTTP binds to 0.0.0.0 on Unix-like systems / 127.0.0.1 on Windows |
 
 ### Owner: _Unassigned_
 
@@ -475,7 +475,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | SSRF protection | ✅ | ✅ | WASM allowlist |
 | SSRF IPv6 transition bypass block | ✅ | ❌ | Block IPv4-mapped IPv6 bypasses |
 | Cron webhook SSRF guard | ✅ | ❌ | SSRF checks on webhook delivery |
-| Loopback-first | ✅ | 🚧 | HTTP binds 0.0.0.0 |
+| Loopback-first | ✅ | 🚧 | HTTP binds 0.0.0.0 on Unix-like systems / 127.0.0.1 on Windows |
 | Docker sandbox | ✅ | ✅ | Orchestrator/worker containers |
 | Podman support | ✅ | ❌ | Alternative to Docker |
 | WASM sandbox | ❌ | ✅ | IronClaw innovation |

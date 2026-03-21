@@ -18,7 +18,7 @@ use ironclaw::{
         Cli, Command, run_mcp_command, run_pairing_command, run_service_command,
         run_status_command, run_tool_command,
     },
-    config::Config,
+    config::{Config, default_webhook_bind_addr},
     hooks::bootstrap_hooks,
     llm::create_session_manager,
     orchestrator::{ReaperConfig, SandboxReaper},
@@ -467,8 +467,7 @@ async fn async_main() -> anyhow::Result<()> {
     let webhook_server: Option<Arc<tokio::sync::Mutex<WebhookServer>>> = if !webhook_routes
         .is_empty()
     {
-        let addr =
-            webhook_server_addr.unwrap_or_else(|| std::net::SocketAddr::from(([0, 0, 0, 0], 8080)));
+        let addr = webhook_server_addr.unwrap_or_else(|| default_webhook_bind_addr(8080));
         if addr.ip().is_unspecified() {
             tracing::warn!(
                 "Webhook server is binding to {} — it will be reachable from all network interfaces. \

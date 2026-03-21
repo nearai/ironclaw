@@ -13,6 +13,7 @@ use secrecy::{ExposeSecret, SecretString};
 use url::Url;
 use uuid::Uuid;
 
+use crate::config::default_http_host;
 #[cfg(feature = "postgres")]
 use crate::secrets::SecretsCrypto;
 use crate::secrets::{CreateSecretParams, SecretsStore};
@@ -508,8 +509,10 @@ pub async fn setup_http(secrets: &SecretsContext) -> Result<HttpSetupResult, Cha
         print_info("Note: Ports below 1024 may require root privileges");
     }
 
+    let default_host = default_http_host();
+    let host_hint = format!("default: {}", default_host);
     let host =
-        optional_input("Host", Some("default: 0.0.0.0"))?.unwrap_or_else(|| "0.0.0.0".to_string());
+        optional_input("Host", Some(&host_hint))?.unwrap_or_else(|| default_host.to_string());
 
     // Generate a webhook secret
     if confirm("Generate a webhook secret for authentication?", true)? {
