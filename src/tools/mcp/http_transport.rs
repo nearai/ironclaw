@@ -130,6 +130,18 @@ impl McpTransport for HttpMcpTransport {
             )));
         }
 
+        // 202 Accepted with no body is the standard Streamable HTTP response
+        // for JSON-RPC notifications (e.g. `notifications/initialized`).
+        // Return an empty McpResponse since no result is expected.
+        if response.status() == reqwest::StatusCode::ACCEPTED {
+            return Ok(McpResponse {
+                jsonrpc: "2.0".to_string(),
+                id: request.id,
+                result: None,
+                error: None,
+            });
+        }
+
         // Determine response format from Content-Type.
         let content_type = response
             .headers()
@@ -482,6 +494,34 @@ mod tests {
         // Per-request headers are inserted after custom headers via HeaderMap::insert,
         // which replaces any existing entry for the same key.
         assert_eq!(echoed["authorization"], "Bearer oauth-token");
+    }
+
+    /// Regression test for #1436: 202 Accepted responses for notifications
+    /// were parsed as JSON, causing "Failed to parse MCP response" errors
+    /// that broke the MCP session handshake.
+    #[tokio::test]
+    async fn test_wire_202_accepted_for_notification() {
+        use axum::{Router, http::StatusCode, routing::post};
+        use tokio::net::TcpListener;
+
+        async fn accept_notification() -> StatusCode {
+            StatusCode::ACCEPTED
+        }
+
+        let app = Router::new().route("/", post(accept_notification));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = format!("http://127.0.0.1:{}", addr.port());
+
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let transport = HttpMcpTransport::new(&url, "test-202");
+        let request = McpRequest::initialized_notification();
+        let response = transport.send(&request, &HashMap::new()).await.unwrap();
+        assert!(response.result.is_none());
+        assert!(response.error.is_none());
     }
 
     #[tokio::test]
