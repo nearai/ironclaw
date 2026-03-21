@@ -296,6 +296,12 @@ impl Repository {
         value: &str,
     ) -> Result<Vec<MemoryDocument>, WorkspaceError> {
         let conn = self.conn().await?;
+        let mut filter = serde_json::Map::new();
+        filter.insert(
+            key.to_string(),
+            serde_json::Value::String(value.to_string()),
+        );
+        let filter = serde_json::Value::Object(filter);
 
         let rows = conn
             .query(
@@ -305,10 +311,10 @@ impl Repository {
                 FROM memory_documents
                 WHERE user_id = $1
                   AND agent_id IS NOT DISTINCT FROM $2
-                  AND metadata ->> $3 = $4
+                  AND metadata @> $3::jsonb
                 ORDER BY updated_at DESC
                 "#,
-                &[&user_id, &agent_id, &key, &value],
+                &[&user_id, &agent_id, &filter],
             )
             .await
             .map_err(|e| WorkspaceError::SearchFailed {

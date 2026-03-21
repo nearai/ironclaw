@@ -589,10 +589,19 @@ impl Workspace {
         content: &str,
         metadata: serde_json::Value,
     ) -> Result<MemoryDocument, WorkspaceError> {
-        let doc = self.write(path, content).await?;
+        let path = normalize_path(path);
+        if is_system_prompt_file(&path) && !content.is_empty() {
+            reject_if_injected(&path, content)?;
+        }
+        let doc = self
+            .storage
+            .get_or_create_document_by_path(&self.user_id, self.agent_id, &path)
+            .await?;
+        self.storage.update_document(doc.id, content).await?;
         self.storage
             .update_document_metadata(doc.id, &metadata)
             .await?;
+        self.reindex_document(doc.id).await?;
         self.storage.get_document_by_id(doc.id).await
     }
 
