@@ -84,6 +84,15 @@ pub struct Settings {
     #[serde(default)]
     pub selected_model: Option<String>,
 
+    /// Cheap/fast model for smart routing (lightweight tasks like heartbeat, routing).
+    #[serde(default)]
+    pub cheap_model: Option<String>,
+
+    /// Enable cascade mode for smart routing (retry with primary if cheap model
+    /// response seems uncertain). When None, defaults to true.
+    #[serde(default)]
+    pub smart_routing_cascade: Option<bool>,
+
     // === Step 5: Embeddings ===
     /// Embeddings configuration.
     #[serde(default)]
