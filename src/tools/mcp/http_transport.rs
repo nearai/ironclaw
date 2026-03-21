@@ -526,29 +526,42 @@ mod tests {
         }
 
         let app = Router::new().route("/", post(accepted));
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test accepted server");
+        let addr = listener
+            .local_addr()
+            .expect("resolve accepted server address");
         let url = format!("http://127.0.0.1:{}", addr.port());
 
         let handle = tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
+            axum::serve(listener, app)
+                .await
+                .expect("serve accepted test server");
         });
 
         (url, handle)
+    }
+
+    fn notification_request(method: &str) -> McpRequest {
+        McpRequest {
+            jsonrpc: "2.0".to_string(),
+            id: None,
+            method: method.to_string(),
+            params: None,
+        }
     }
 
     #[tokio::test]
     async fn test_accepted_notification_returns_empty_response() {
         let (url, _handle) = spawn_accepted_server().await;
         let transport = HttpMcpTransport::new(&url, "accepted-test");
-        let request = McpRequest {
-            jsonrpc: "2.0".to_string(),
-            id: None,
-            method: "notifications/initialized".to_string(),
-            params: None,
-        };
+        let request = notification_request("notifications/initialized");
 
-        let response = transport.send(&request, &HashMap::new()).await.unwrap();
+        let response = transport
+            .send(&request, &HashMap::new())
+            .await
+            .expect("202 notification response");
         assert_eq!(response.jsonrpc, "2.0");
         assert_eq!(response.id, request.id);
         assert!(response.result.is_none());
