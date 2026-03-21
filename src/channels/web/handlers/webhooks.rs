@@ -232,8 +232,9 @@ mod tests {
             &hmac_headers(br#"{"event":"push"}"#, "different-secret")?,
             br#"{"event":"push"}"#,
         );
-        let (status, _) = result.unwrap_err();
+        let (status, msg) = result.unwrap_err();
         assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(msg, "Webhook authentication failed");
         Ok(())
     }
 
