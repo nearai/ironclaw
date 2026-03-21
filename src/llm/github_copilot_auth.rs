@@ -354,13 +354,14 @@ pub async fn exchange_copilot_token(
     client: &reqwest::Client,
     oauth_token: &str,
 ) -> Result<CopilotTokenResponse, GithubCopilotAuthError> {
+    let token_trimmed = oauth_token.trim();
     let mut request = client
         .get(GITHUB_COPILOT_TOKEN_URL)
         .header(reqwest::header::ACCEPT, "application/json")
         // GitHub Copilot uses `token` auth scheme, not `Bearer`
         .header(
             reqwest::header::AUTHORIZATION,
-            format!("token {oauth_token}"),
+            format!("token {token_trimmed}"),
         )
         .timeout(Duration::from_secs(15));
 

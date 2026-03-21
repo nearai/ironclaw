@@ -163,8 +163,9 @@ impl GithubCopilotProvider {
                 self.token_manager.invalidate().await;
                 let fresh = self.token_manager.get_token().await.map_err(|e| {
                     tracing::warn!(error = %e, "Copilot: re-exchange after 401 failed");
-                    LlmError::AuthFailed {
+                    LlmError::RequestFailed {
                         provider: "github_copilot".to_string(),
+                        reason: format!("Token re-exchange after 401 failed: {e}"),
                     }
                 })?;
                 let mut retry_req = self
@@ -197,6 +198,11 @@ impl GithubCopilotProvider {
                         }
                     });
                 }
+                let retry_status = retry.status();
+                tracing::warn!(
+                    status = %retry_status,
+                    "Copilot: 401 retry also failed"
+                );
                 return Err(LlmError::AuthFailed {
                     provider: "github_copilot".to_string(),
                 });
