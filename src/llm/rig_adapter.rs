@@ -132,7 +132,7 @@ fn round_f32_to_f64(val: f32) -> f64 {
 ///
 /// This is applied as a clone-and-transform at the provider boundary so the
 /// original tool definitions remain unchanged for other providers.
-fn normalize_schema_strict(schema: &JsonValue) -> JsonValue {
+pub(crate) fn normalize_schema_strict(schema: &JsonValue) -> JsonValue {
     let mut schema = schema.clone();
     normalize_schema_recursive(&mut schema);
     schema

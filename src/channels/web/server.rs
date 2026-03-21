@@ -190,6 +190,8 @@ pub struct GatewayState {
     pub chat_rate_limiter: RateLimiter,
     /// Rate limiter for OAuth callback endpoints (10 requests per 60 seconds).
     pub oauth_rate_limiter: RateLimiter,
+    /// Rate limiter for webhook trigger endpoints (10 requests per 60 seconds).
+    pub webhook_rate_limiter: RateLimiter,
     /// Registry catalog entries for the available extensions API.
     /// Populated at startup from `registry/` manifests, independent of extension manager.
     pub registry_entries: Vec<crate::extensions::RegistryEntry>,
@@ -233,7 +235,11 @@ pub async fn start_server(
             "/oauth/slack/callback",
             get(slack_relay_oauth_callback_handler),
         )
-        .route("/relay/events", post(relay_events_handler));
+        .route("/relay/events", post(relay_events_handler))
+        .route(
+            "/api/webhooks/{path}",
+            post(crate::channels::web::handlers::webhooks::webhook_trigger_handler),
+        );
 
     // Protected routes (require auth)
     let auth_state = AuthState { token: auth_token };
@@ -344,6 +350,7 @@ pub async fn start_server(
         .route("/", get(index_handler))
         .route("/style.css", get(css_handler))
         .route("/app.js", get(js_handler))
+        .route("/theme-init.js", get(theme_init_handler))
         .route("/favicon.ico", get(favicon_handler))
         .route("/i18n/index.js", get(i18n_index_handler))
         .route("/i18n/en.js", get(i18n_en_handler))
@@ -462,6 +469,16 @@ async fn js_handler() -> impl IntoResponse {
             (header::CACHE_CONTROL, "no-cache"),
         ],
         include_str!("static/app.js"),
+    )
+}
+
+async fn theme_init_handler() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "application/javascript"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        include_str!("static/theme-init.js"),
     )
 }
 
@@ -2823,6 +2840,7 @@ mod tests {
             scheduler: None,
             chat_rate_limiter: RateLimiter::new(30, 60),
             oauth_rate_limiter: RateLimiter::new(10, 60),
+            webhook_rate_limiter: RateLimiter::new(10, 60),
             registry_entries: vec![],
             cost_guard: None,
             routine_engine: Arc::new(tokio::sync::RwLock::new(None)),

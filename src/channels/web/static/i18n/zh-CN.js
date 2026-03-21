@@ -24,6 +24,12 @@ I18n.register('zh-CN', {
   'restart.progressSubtitle': '请等待进程重启...',
   'restart.checkLogs': '重启完成后，请查看日志标签页了解详情。',
   
+  // 主题
+  'theme.tooltipDark': '主题：深色（点击切换浅色）',
+  'theme.tooltipLight': '主题：浅色（点击切换跟随系统）',
+  'theme.tooltipSystem': '主题：跟随系统（点击切换深色）',
+  'theme.announce': '主题：{mode}',
+
   // 标签页
   'tab.chat': '聊天',
   'tab.memory': '记忆',
@@ -474,10 +480,6 @@ I18n.register('zh-CN', {
   'cfg.routines_max_concurrent.desc': '同时运行的最大定时任务数',
   'cfg.routines_cooldown.label': '默认冷却时间',
   'cfg.routines_cooldown.desc': '定时任务触发间的最小秒数',
-  'cfg.routines_full_job_default_mode.label': '完整任务默认权限模式',
-  'cfg.routines_full_job_default_mode.desc': '新建 full_job 定时任务的默认权限行为。未设置时使用 inherit_owner。',
-  'cfg.routines_full_job_owner_tools.label': '完整任务所有者允许工具',
-  'cfg.routines_full_job_owner_tools.desc': '逗号分隔的工具名列表，full_job 定时任务可在运行时继承这些工具权限。',
 
   // 安全设置
   'cfg.safety_max_output.label': '最大输出长度',

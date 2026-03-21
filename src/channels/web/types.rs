@@ -814,6 +814,14 @@ impl RoutineInfo {
                 String::new(),
                 format!("event: {}.{}", source, event_type),
             ),
+            crate::agent::routine::Trigger::Webhook { path, .. } => {
+                let p = path.as_deref().unwrap_or("default");
+                (
+                    "webhook".to_string(),
+                    String::new(),
+                    format!("webhook: /api/webhooks/{}", p),
+                )
+            }
             crate::agent::routine::Trigger::Manual => (
                 "manual".to_string(),
                 String::new(),
@@ -884,18 +892,7 @@ pub struct RoutineDetailResponse {
     pub run_count: u64,
     pub consecutive_failures: u32,
     pub created_at: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub full_job_permissions: Option<FullJobPermissionInfo>,
     pub recent_runs: Vec<RoutineRunInfo>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct FullJobPermissionInfo {
-    pub permission_mode: String,
-    pub default_permission_mode: String,
-    pub stored_tool_permissions: Vec<String>,
-    pub owner_allowed_tools: Vec<String>,
-    pub effective_tool_permissions: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]

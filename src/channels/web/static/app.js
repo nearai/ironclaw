@@ -1,5 +1,69 @@
 // IronClaw Web Gateway - Client
 
+// --- Theme Management (dark / light / system) ---
+// Icon switching is handled by pure CSS via data-theme-mode on <html>.
+
+function getSystemTheme() {
+  return window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+}
+
+const VALID_THEME_MODES = { dark: true, light: true, system: true };
+
+function getThemeMode() {
+  const stored = localStorage.getItem('ironclaw-theme');
+  return (stored && VALID_THEME_MODES[stored]) ? stored : 'system';
+}
+
+function resolveTheme(mode) {
+  return mode === 'system' ? getSystemTheme() : mode;
+}
+
+function applyTheme(mode) {
+  const resolved = resolveTheme(mode);
+  document.documentElement.setAttribute('data-theme', resolved);
+  document.documentElement.setAttribute('data-theme-mode', mode);
+  const titleKeys = { dark: 'theme.tooltipDark', light: 'theme.tooltipLight', system: 'theme.tooltipSystem' };
+  const btn = document.getElementById('theme-toggle');
+  if (btn) btn.title = (typeof I18n !== 'undefined' && titleKeys[mode]) ? I18n.t(titleKeys[mode]) : ('Theme: ' + mode);
+  const announce = document.getElementById('theme-announce');
+  if (announce) announce.textContent = (typeof I18n !== 'undefined') ? I18n.t('theme.announce', { mode: mode }) : ('Theme: ' + mode);
+}
+
+function toggleTheme() {
+  const cycle = { dark: 'light', light: 'system', system: 'dark' };
+  const current = getThemeMode();
+  const next = cycle[current] || 'dark';
+  localStorage.setItem('ironclaw-theme', next);
+  applyTheme(next);
+}
+
+// Apply theme immediately (FOUC prevention is done via inline script in <head>,
+// but we call again here to ensure tooltip is set after DOM is ready).
+applyTheme(getThemeMode());
+
+// Delay enabling theme transition to avoid flash on initial load.
+requestAnimationFrame(function() {
+  requestAnimationFrame(function() {
+    document.body.classList.add('theme-transition');
+  });
+});
+
+// Listen for OS theme changes — only re-apply when in 'system' mode.
+const mql = window.matchMedia('(prefers-color-scheme: light)');
+const onSchemeChange = function() {
+  if (getThemeMode() === 'system') {
+    applyTheme('system');
+  }
+};
+if (mql.addEventListener) {
+  mql.addEventListener('change', onSchemeChange);
+} else if (mql.addListener) {
+  mql.addListener(onSchemeChange);
+}
+
+// Bind theme toggle button (CSP-compliant — no inline onclick).
+document.getElementById('theme-toggle').addEventListener('click', toggleTheme);
+
 let token = '';
 let eventSource = null;
 let logEventSource = null;
@@ -3878,18 +3942,6 @@ function renderRoutineDetail(routine) {
       + '<pre class="action-json">' + escapeHtml(JSON.stringify(routine.trigger, null, 2)) + '</pre></div>';
   }
 
-  // Action config
-  if (routine.full_job_permissions) {
-    html += '<div class="job-description"><h3>Full Job Permissions</h3>'
-      + '<div class="job-meta-grid">'
-      + metaItem('Mode', routine.full_job_permissions.permission_mode)
-      + metaItem('Owner Default', routine.full_job_permissions.default_permission_mode)
-      + metaItem('Inherited Tools', (routine.full_job_permissions.owner_allowed_tools || []).join(', ') || '-')
-      + metaItem('Stored Tools', (routine.full_job_permissions.stored_tool_permissions || []).join(', ') || '-')
-      + metaItem('Effective Tools', (routine.full_job_permissions.effective_tool_permissions || []).join(', ') || '-')
-      + '</div></div>';
-  }
-
   html += '<div class="job-description"><h3>Action</h3>'
     + '<pre class="action-json">' + escapeHtml(JSON.stringify(routine.action, null, 2)) + '</pre></div>';
 
@@ -4724,10 +4776,6 @@ var AGENT_SETTINGS = [
     settings: [
       { key: 'routines.max_concurrent', label: 'cfg.routines_max_concurrent.label', description: 'cfg.routines_max_concurrent.desc', type: 'number', min: 0 },
       { key: 'routines.default_cooldown_secs', label: 'cfg.routines_cooldown.label', description: 'cfg.routines_cooldown.desc', type: 'number', min: 0 },
-      { key: 'routines.full_job_default_permission_mode', label: 'cfg.routines_full_job_default_mode.label', description: 'cfg.routines_full_job_default_mode.desc',
-        type: 'select', options: ['inherit_owner', 'explicit', 'copy_owner'] },
-      { key: 'routines.full_job_owner_allowed_tools', label: 'cfg.routines_full_job_owner_tools.label', description: 'cfg.routines_full_job_owner_tools.desc',
-        type: 'list', placeholder: 'shell, http' },
     ]
   },
   {

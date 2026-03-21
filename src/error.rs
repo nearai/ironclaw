@@ -168,6 +168,9 @@ pub enum ToolError {
     #[error("Tool {name} requires authentication")]
     AuthRequired { name: String },
 
+    #[error("Tool {name} is not available for autonomous execution: {reason}")]
+    AutonomousUnavailable { name: String, reason: String },
+
     #[error("Tool {name} is rate limited, retry after {retry_after:?}")]
     RateLimited {
         name: String,
@@ -372,6 +375,9 @@ pub enum RoutineError {
 
     #[error("Not authorized to trigger routine {id}")]
     NotAuthorized { id: Uuid },
+
+    #[error("Routine {name} is in cooldown period")]
+    Cooldown { name: String },
 
     #[error("Routine {name} at max concurrent runs")]
     MaxConcurrent { name: String },
