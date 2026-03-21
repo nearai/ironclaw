@@ -951,6 +951,14 @@ impl ExtensionManager {
             tracing::warn!("inject_mcp_client called with empty name; ignoring");
             return;
         }
+        if let Err(e) = Self::validate_extension_name(&name) {
+            tracing::warn!(
+                error = %e,
+                name = %name,
+                "inject_mcp_client called with invalid name; ignoring"
+            );
+            return;
+        }
         self.mcp_clients.write().await.insert(name, client);
     }
 
