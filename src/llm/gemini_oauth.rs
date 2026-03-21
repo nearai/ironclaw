@@ -1007,10 +1007,7 @@ impl GeminiOauthProvider {
     fn curate_contents(contents: &[serde_json::Value]) -> Vec<serde_json::Value> {
         let mut curated = Vec::new();
         for entry in contents {
-            let role = entry
-                .get("role")
-                .and_then(|r| r.as_str())
-                .unwrap_or("");
+            let role = entry.get("role").and_then(|r| r.as_str()).unwrap_or("");
 
             if role != "model" {
                 // Always keep non-model turns (user, tool-response)
@@ -1040,10 +1037,7 @@ impl GeminiOauthProvider {
                             .get("thought")
                             .and_then(|t| t.as_bool())
                             .unwrap_or(false);
-                        if !is_thought
-                            && text.is_empty()
-                            && part.get("functionCall").is_none()
-                        {
+                        if !is_thought && text.is_empty() && part.get("functionCall").is_none() {
                             return false;
                         }
                     }
