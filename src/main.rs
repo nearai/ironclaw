@@ -1212,6 +1212,17 @@ async fn async_main() -> anyhow::Result<()> {
     // Clone context_manager for the reaper before it's moved into Agent::new()
     let reaper_context_manager = Arc::clone(&components.context_manager);
 
+    // Load channel routing config from database before components.db is moved
+    let channel_routing_config = if let Some(ref db) = components.db {
+        ironclaw::agent::channel_routing::ChannelRoutingConfig::load_from_store(
+            db.as_ref(),
+            "default",
+        )
+        .await
+    } else {
+        None
+    };
+
     // Capture settings store for SIGHUP handler before AppComponents is consumed.
     // Prefer the workspace-backed adapter (so SIGHUP-driven config reloads pick
     // up settings written through the workspace) and fall back to the raw db
@@ -1275,15 +1286,12 @@ async fn async_main() -> anyhow::Result<()> {
             ironclaw::agent::routine_engine::SandboxReadiness::DockerUnavailable
         },
         builder: components.builder,
-llm_backend: config.llm.backend.clone(),
+        llm_backend: config.llm.backend.clone(),
         tenant_rates: Arc::new(ironclaw::tenant::TenantRateRegistry::new(
             config.agent.max_llm_concurrent_per_user.unwrap_or(4),
             config.agent.max_jobs_concurrent_per_user.unwrap_or(3),
         )),
-    channel_routing: ironclaw::agent::channel_routing::ChannelRoutingConfig::load(
-            &ironclaw::bootstrap::ironclaw_base_dir(),
-        )
-        .map(Arc::new),
+        channel_routing: Arc::new(tokio::sync::RwLock::new(channel_routing_config)),
     };
 
     let channels_for_warnings = Arc::clone(&channels);
