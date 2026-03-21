@@ -1001,16 +1001,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_builtin_tool_cannot_be_shadowed() {
+    async fn test_builtin_tool_cannot_be_shadowed() -> Result<(), Box<dyn std::error::Error>> {
         let registry = ToolRegistry::new();
         // Register echo as built-in (uses register_sync and echo is protected).
         registry.register_sync(Arc::new(EchoTool));
-        assert!(registry.has("echo").await);
+        if !registry.has("echo").await {
+            return Err(std::io::Error::other("echo should be present").into());
+        }
 
-        let Some(original_tool) = registry.get("echo").await else {
-            assert!(false, "echo should be present");
-            return;
-        };
+        let original_tool = registry
+            .get("echo")
+            .await
+            .ok_or_else(|| std::io::Error::other("echo should be present"))?;
         let original_desc = original_tool.description().to_string();
 
         // Create a fake tool that tries to shadow "echo"
@@ -1039,17 +1041,23 @@ mod tests {
         registry.register(Arc::new(FakeEcho)).await;
 
         // The original should still be there
-        let Some(current_tool) = registry.get("echo").await else {
-            assert!(false, "echo should be present");
-            return;
-        };
+        let current_tool = registry
+            .get("echo")
+            .await
+            .ok_or_else(|| std::io::Error::other("echo should be present"))?;
         let desc = current_tool.description().to_string();
-        assert_eq!(desc, original_desc);
-        assert_ne!(desc, "EVIL SHADOW");
+        if desc != original_desc {
+            return Err(std::io::Error::other("echo description changed unexpectedly").into());
+        }
+        if desc == "EVIL SHADOW" {
+            return Err(std::io::Error::other("shadow tool replaced built-in echo").into());
+        }
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_builtin_tool_names_include_non_protected_sync_tools() {
+    async fn test_builtin_tool_names_include_non_protected_sync_tools()
+    -> Result<(), Box<dyn std::error::Error>> {
         struct NonProtectedBuiltin;
 
         #[async_trait::async_trait]
@@ -1076,7 +1084,10 @@ mod tests {
         registry.register_sync(Arc::new(NonProtectedBuiltin));
 
         let builtins = registry.builtin_tool_names().await;
-        assert!(builtins.contains("owner_gate"));
+        if !builtins.contains("owner_gate") {
+            return Err(std::io::Error::other("owner_gate should be tracked as builtin").into());
+        }
+        Ok(())
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1094,12 +1105,17 @@ mod tests {
             let reg = StdArc::clone(&registry);
             handles.push(tokio::spawn(async move {
                 let tools = reg.all().await;
-                assert!(!tools.is_empty());
+                if tools.is_empty() {
+                    return Err(std::io::Error::other("tools should not be empty"));
+                }
                 let names = reg.list().await;
-                assert!(!names.is_empty());
+                if names.is_empty() {
+                    return Err(std::io::Error::other("names should not be empty"));
+                }
                 let _ = reg.get("echo").await;
                 let _ = reg.has("echo").await;
                 let _ = reg.tool_definitions().await;
+                Ok::<(), std::io::Error>(())
             }));
         }
 
@@ -1109,6 +1125,7 @@ mod tests {
             handles.push(tokio::spawn(async move {
                 // This will be rejected (echo is protected) but should not panic
                 reg.register(Arc::new(EchoTool)).await;
+                Ok::<(), std::io::Error>(())
             }));
         }
 
