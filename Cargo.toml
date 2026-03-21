@@ -162,6 +162,9 @@ tar = "0.4"
 pdf-extract = "0.7"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 
+# WebSocket client for Slack Socket Mode
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-native-roots"] }
+
 # HTTP proxy for sandboxed network access
 hyper = { version = "1.5", features = ["server", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["server", "tokio", "http1", "http2"] }

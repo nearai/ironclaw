@@ -49,6 +49,9 @@ pub struct ChannelCapabilities {
 
     /// Callback timeout duration.
     pub callback_timeout: Duration,
+
+    /// Socket Mode configuration (WebSocket-based event delivery).
+    pub socket_mode: Option<SocketModeConfig>,
 }
 
 impl Default for ChannelCapabilities {
@@ -62,6 +65,7 @@ impl Default for ChannelCapabilities {
             emit_rate_limit: EmitRateLimitConfig::default(),
             max_message_size: 64 * 1024, // 64 KB
             callback_timeout: Duration::from_secs(30),
+            socket_mode: None,
         }
     }
 }
@@ -155,6 +159,25 @@ impl ChannelCapabilities {
         // Prefix with channel namespace
         Ok(self.prefix_workspace_path(path))
     }
+}
+
+/// Runtime configuration for Socket Mode (WebSocket-based event delivery).
+///
+/// When present, the host manages a persistent WebSocket connection to the
+/// messaging platform and bridges events into the WASM `on_http_request` callback.
+#[derive(Debug, Clone)]
+pub struct SocketModeConfig {
+    /// URL for obtaining a WebSocket connection URL (e.g., `apps.connections.open`).
+    pub open_url: String,
+
+    /// Secret name for the app-level token used to authenticate the connection.
+    pub app_token_secret: String,
+
+    /// Base reconnect delay in milliseconds.
+    pub reconnect_delay_ms: u64,
+
+    /// Maximum number of reconnection attempts before giving up.
+    pub max_reconnect_attempts: u32,
 }
 
 /// Configuration for an HTTP endpoint the channel wants to register.

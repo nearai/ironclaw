@@ -88,6 +88,7 @@ mod runtime;
 mod schema;
 pub mod setup;
 pub(crate) mod signature;
+mod socket_bridge;
 #[allow(dead_code)]
 pub(crate) mod storage;
 mod telegram_host_config;
@@ -95,7 +96,9 @@ mod wrapper;
 
 // Core types
 pub use bundled::{available_channel_names, bundled_channel_names, install_bundled_channel};
-pub use capabilities::{ChannelCapabilities, EmitRateLimitConfig, HttpEndpointConfig, PollConfig};
+pub use capabilities::{
+    ChannelCapabilities, EmitRateLimitConfig, HttpEndpointConfig, PollConfig, SocketModeConfig,
+};
 pub use error::WasmChannelError;
 pub use host::{ChannelEmitRateLimiter, ChannelHostState, EmittedMessage};
 pub use loader::{

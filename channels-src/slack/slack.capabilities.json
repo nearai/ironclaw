@@ -13,8 +13,13 @@
       },
       {
         "name": "slack_signing_secret",
-        "prompt": "Enter your Slack App Signing Secret (found under Basic Information > App Credentials in your Slack App settings).",
-        "optional": false
+        "prompt": "Enter your Slack App Signing Secret (found under Basic Information > App Credentials in your Slack App settings). Required for webhook mode, optional if you only use Socket Mode.",
+        "optional": true
+      },
+      {
+        "name": "slack_app_token",
+        "prompt": "Enter your Slack App-Level Token (xapp-...) for Socket Mode (optional).",
+        "optional": true
       }
     ],
     "setup_url": "https://api.slack.com/apps"
@@ -22,13 +27,14 @@
   "capabilities": {
     "http": {
       "allowlist": [
-        { "host": "slack.com", "path_prefix": "/api/" }
+        { "host": "slack.com", "path_prefix": "/api/" },
+        { "host": "files.slack.com" }
       ],
       "credentials": {
         "slack_bot": {
           "secret_name": "slack_bot_token",
           "location": { "type": "bearer" },
-          "host_patterns": ["slack.com"]
+          "host_patterns": ["slack.com", "files.slack.com"]
         }
       },
       "rate_limit": {
@@ -49,6 +55,12 @@
       },
       "webhook": {
         "hmac_secret_name": "slack_signing_secret"
+      },
+      "socket_mode": {
+        "open_url": "https://slack.com/api/apps.connections.open",
+        "app_token_secret": "slack_app_token",
+        "reconnect_delay_ms": 5000,
+        "max_reconnect_attempts": 10
       }
     }
   },

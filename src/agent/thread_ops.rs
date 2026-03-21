@@ -868,26 +868,78 @@ impl Agent {
         approved: bool,
         always: bool,
     ) -> Result<SubmissionResult, Error> {
-        // Get pending approval for this thread
-        let pending = {
+        // Get pending approval for this thread, or search other threads in the
+        // session. This handles the common case in Slack/Telegram DMs where the
+        // approval prompt is sent as a threaded reply but the user responds in
+        // the main chat, creating a different thread key.
+        let (pending, actual_thread_id) = {
             let mut sess = session.lock().await;
-            let thread = sess
-                .threads
-                .get_mut(&thread_id)
-                .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
 
-            if thread.state != ThreadState::AwaitingApproval {
-                // Stale or duplicate approval (tool already executed) — silently ignore.
-                tracing::debug!(
-                    %thread_id,
-                    state = ?thread.state,
-                    "Ignoring stale approval: thread not in AwaitingApproval state"
-                );
-                return Ok(SubmissionResult::ok_with_message(""));
+            // Check the target thread's state first (immutable borrow).
+            let target_state = sess.threads.get(&thread_id).map(|t| t.state);
+
+            match target_state {
+                Some(ThreadState::AwaitingApproval) => {
+                    // Target thread is awaiting approval — take it directly.
+                    let thread = sess.threads.get_mut(&thread_id).unwrap();
+                    let p = thread.take_pending_approval();
+                    if p.is_some() {
+                        (p, thread_id)
+                    } else {
+                        (None, thread_id)
+                    }
+                }
+                Some(state) => {
+                    // Resolved thread isn't awaiting approval — search session
+                    // for any thread that is (single-user assistant typically
+                    // has only one pending approval at a time).
+                    let mut awaiting: Vec<Uuid> = Vec::new();
+                    for (&tid, t) in sess.threads.iter() {
+                        if tid != thread_id && t.state == ThreadState::AwaitingApproval {
+                            awaiting.push(tid);
+                        }
+                    }
+
+                    if awaiting.is_empty() {
+                        // Stale or duplicate approval (tool already executed) — silently ignore.
+                        tracing::debug!(
+                            %thread_id,
+                            ?state,
+                            "Ignoring stale approval: no thread in AwaitingApproval state"
+                        );
+                        return Ok(SubmissionResult::ok_with_message(""));
+                    }
+
+                    if awaiting.len() > 1 {
+                        tracing::warn!(
+                            session_id = %sess.id,
+                            count = awaiting.len(),
+                            thread_ids = ?awaiting,
+                            "Multiple threads awaiting approval; picking earliest by ID"
+                        );
+                    }
+
+                    // Sort for deterministic selection regardless of HashMap order
+                    awaiting.sort();
+                    let target_tid = awaiting[0];
+
+                    let t = sess.threads.get_mut(&target_tid).unwrap();
+                    let p = t.take_pending_approval();
+                    match p {
+                        Some(pending) => (Some(pending), target_tid),
+                        None => {
+                            return Ok(SubmissionResult::error("No pending approval request."));
+                        }
+                    }
+                }
+                None => {
+                    return Err(Error::from(crate::error::JobError::NotFound {
+                        id: thread_id,
+                    }));
+                }
             }
-
-            thread.take_pending_approval()
         };
+        let thread_id = actual_thread_id;
 
         let pending = match pending {
             Some(p) => p,

@@ -4,8 +4,9 @@
 .env.*
 !.env.example
 
-# Claude Code worktrees and lock files
+# Claude Code worktrees, local notes, and lock files
 .claude/worktrees/
+.claude/docs/
 .claude/scheduled_tasks.lock
 
 # Sidecar tool data

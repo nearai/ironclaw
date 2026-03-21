@@ -2830,16 +2830,21 @@ impl ExtensionManager {
         if required.is_empty() {
             return ToolAuthState::NoAuth;
         }
-
-        let all_provided = futures::future::join_all(
-            required
-                .iter()
-                .map(|s| self.secrets.exists(&self.user_id, &s.name)),
-        )
-        .await
-        .into_iter()
-        .all(|r| r.unwrap_or(false));
-
+        let mut all_provided = true;
+        for secret in required {
+            let in_store = self
+                .secrets
+                .exists(&self.user_id, &secret.name)
+                .await
+                .unwrap_or(false);
+            let in_env = std::env::var(secret.name.to_uppercase())
+                .map(|v| !v.is_empty())
+                .unwrap_or(false);
+            if !in_store && !in_env {
+                all_provided = false;
+                break;
+            }
+        }
         if all_provided {
             ToolAuthState::Ready
         } else {
