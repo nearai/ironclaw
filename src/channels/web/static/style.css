@@ -1380,7 +1380,7 @@ body {
   border-color: var(--border);
 }
 
-.auth-card .auth-actions button.auth-oauth {
+.auth-card .auth-actions .auth-oauth {
   background: var(--success);
   border-color: var(--success);
   color: var(--text-on-accent);
