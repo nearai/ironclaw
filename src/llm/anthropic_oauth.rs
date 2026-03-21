@@ -22,7 +22,6 @@ use crate::llm::provider::{
     ToolCompletionRequest, ToolCompletionResponse, strip_unsupported_completion_params,
     strip_unsupported_tool_params,
 };
-
 const ANTHROPIC_API_URL: &str = "https://api.anthropic.com/v1/messages";
 /// OAuth beta requires 2023-06-01; the 2024-10-22 version is not valid with the beta flag.
 const ANTHROPIC_API_VERSION: &str = "2023-06-01";
@@ -143,12 +142,9 @@ impl AnthropicOAuthProvider {
 
         if !status.is_success() {
             // Parse Retry-After header before consuming the body.
-            let retry_after = response
-                .headers()
-                .get("retry-after")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.parse::<u64>().ok())
-                .map(std::time::Duration::from_secs);
+            let retry_after = Some(crate::llm::retry::parse_retry_after(
+                response.headers().get("retry-after"),
+            ));
 
             let response_text = response
                 .text()

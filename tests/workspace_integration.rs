@@ -308,7 +308,7 @@ async fn test_workspace_hybrid_search_with_mock_embeddings() {
 
     // Create workspace with mock embeddings (1536 dimensions to match OpenAI)
     let embeddings = Arc::new(MockEmbeddings::new(1536));
-    let workspace = Workspace::new(user_id, pool.clone()).with_embeddings(embeddings);
+    let workspace = Workspace::new(user_id, pool.clone()).with_embeddings_uncached(embeddings);
 
     // Write documents
     workspace

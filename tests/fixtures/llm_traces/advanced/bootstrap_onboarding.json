@@ -1,0 +1,122 @@
+{
+  "model_name": "bootstrap-onboarding-flow",
+  "expects": {
+    "tools_used": ["memory_write"],
+    "all_tools_succeeded": true,
+    "min_responses": 2
+  },
+  "turns": [
+    {
+      "user_input": "Hey! I'm Alex, a backend engineer working on distributed systems. I like direct, concise communication.",
+      "steps": [
+        {
+          "request_hint": { "last_user_message_contains": "Alex" },
+          "response": {
+            "type": "text",
+            "content": "Nice to meet you, Alex. Distributed systems — solid domain. I'll keep things direct.\n\nWhat's on your plate right now that I can help with? And any tools or services you use daily that I should know about?",
+            "input_tokens": 800,
+            "output_tokens": 40
+          }
+        }
+      ]
+    },
+    {
+      "user_input": "I mainly use GitHub and Slack. I need help staying on top of PRs and incident response.",
+      "steps": [
+        {
+          "request_hint": { "last_user_message_contains": "GitHub" },
+          "response": {
+            "type": "text",
+            "content": "Got it — GitHub PRs and incident response are your priorities. I can set up routines for both.\n\nOne more thing: when something goes wrong at work, what's your instinct — jump in and debug, or step back and coordinate?",
+            "input_tokens": 900,
+            "output_tokens": 45
+          }
+        }
+      ]
+    },
+    {
+      "user_input": "I usually jump in and start debugging. I'm pretty hands-on.",
+      "steps": [
+        {
+          "request_hint": { "last_user_message_contains": "debugging" },
+          "response": {
+            "type": "tool_calls",
+            "tool_calls": [
+              {
+                "id": "call_profile_write",
+                "name": "memory_write",
+                "arguments": {
+                  "content": "{\"version\":2,\"preferred_name\":\"Alex\",\"personality\":{\"empathy\":50,\"problem_solving\":50,\"emotional_intelligence\":50,\"adaptability\":50,\"communication\":50},\"communication\":{\"detail_level\":\"concise\",\"formality\":\"casual\",\"tone\":\"direct\",\"learning_style\":\"unknown\",\"social_energy\":\"unknown\",\"decision_making\":\"unknown\",\"pace\":\"fast\",\"response_speed\":\"unknown\"},\"cohort\":{\"cohort\":\"other\",\"confidence\":0,\"indicators\":[]},\"behavior\":{\"frictions\":[],\"desired_outcomes\":[],\"time_wasters\":[],\"pain_points\":[\"staying on top of PRs\",\"incident response\"],\"strengths\":[],\"suggested_support\":[]},\"friendship\":{\"style\":\"unknown\",\"values\":[],\"support_style\":\"unknown\",\"qualities\":{\"user_values\":[],\"friends_appreciate\":[],\"consistency_pattern\":null,\"primary_role\":null,\"secondary_roles\":[],\"challenging_aspects\":[]}},\"assistance\":{\"proactivity\":\"moderate\",\"formality\":\"unknown\",\"focus_areas\":[],\"routines\":[],\"goals\":[\"PR management\",\"incident response\"],\"interaction_style\":\"unknown\",\"notification_preferences\":\"moderate\"},\"context\":{\"profession\":\"backend engineer\",\"interests\":[\"distributed systems\"],\"life_stage\":null,\"challenges\":[]},\"relationship_values\":{\"primary\":[],\"secondary\":[],\"deal_breakers\":[]},\"interaction_preferences\":{\"proactivity_style\":\"reactive\",\"feedback_style\":\"direct\",\"decision_making\":\"guided\"},\"analysis_metadata\":{\"message_count\":0,\"analysis_date\":null,\"time_range\":null,\"model_used\":null,\"confidence_score\":0.0,\"analysis_method\":null,\"update_type\":null},\"confidence\":0.5,\"created_at\":\"2026-03-19T00:00:00Z\",\"updated_at\":\"2026-03-19T00:00:00Z\"}",
+                  "target": "context/profile.json",
+                  "append": false
+                }
+              }
+            ],
+            "input_tokens": 1000,
+            "output_tokens": 300
+          }
+        },
+        {
+          "response": {
+            "type": "tool_calls",
+            "tool_calls": [
+              {
+                "id": "call_memory_save",
+                "name": "memory_write",
+                "arguments": {
+                  "content": "User: Alex, backend engineer. Uses GitHub and Slack daily. Priorities: PR management, incident response. Communication: direct, concise, casual. Hands-on debugger.",
+                  "target": "daily_log"
+                }
+              }
+            ],
+            "input_tokens": 1100,
+            "output_tokens": 50
+          }
+        },
+        {
+          "response": {
+            "type": "tool_calls",
+            "tool_calls": [
+              {
+                "id": "call_identity_write",
+                "name": "memory_write",
+                "arguments": {
+                  "content": "# Identity\n\nName: Claw\nVibe: Sharp, efficient, no-nonsense\nEmoji: ⚡",
+                  "target": "IDENTITY.md",
+                  "append": false
+                }
+              }
+            ],
+            "input_tokens": 1200,
+            "output_tokens": 30
+          }
+        },
+        {
+          "response": {
+            "type": "tool_calls",
+            "tool_calls": [
+              {
+                "id": "call_bootstrap_clear",
+                "name": "memory_write",
+                "arguments": {
+                  "content": "",
+                  "target": "bootstrap"
+                }
+              }
+            ],
+            "input_tokens": 1300,
+            "output_tokens": 20
+          }
+        },
+        {
+          "response": {
+            "type": "text",
+            "content": "All set, Alex. I'm Claw — I'll keep things fast and direct.\n\nI've saved your profile and preferences. Want me to set up a morning PR review routine for your GitHub repos?",
+            "input_tokens": 1400,
+            "output_tokens": 35
+          }
+        }
+      ]
+    }
+  ]
+}

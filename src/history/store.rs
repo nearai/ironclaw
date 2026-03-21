@@ -1105,6 +1105,22 @@ impl Store {
         rows.iter().map(row_to_routine).collect()
     }
 
+    /// Find an enabled webhook routine by its configured path (or fallback to ID).
+    pub async fn get_webhook_routine_by_path(
+        &self,
+        path: &str,
+    ) -> Result<Option<Routine>, DatabaseError> {
+        let conn = self.conn().await?;
+        let row = conn
+            .query_opt(
+                "SELECT * FROM routines WHERE enabled AND trigger_type = 'webhook' \
+                 AND (trigger_config->>'path' = $1 OR (trigger_config->>'path' IS NULL AND id::text = $1))",
+                &[&path],
+            )
+            .await?;
+        row.as_ref().map(row_to_routine).transpose()
+    }
+
     /// List all enabled cron routines whose next_fire_at <= now.
     pub async fn list_due_cron_routines(&self) -> Result<Vec<Routine>, DatabaseError> {
         let conn = self.conn().await?;
@@ -1347,6 +1363,18 @@ impl Store {
         )
         .await?;
         Ok(())
+    }
+
+    /// List routine runs dispatched as full_job that have not yet been finalized.
+    pub async fn list_dispatched_routine_runs(&self) -> Result<Vec<RoutineRun>, DatabaseError> {
+        let conn = self.conn().await?;
+        let rows = conn
+            .query(
+                "SELECT * FROM routine_runs WHERE status = 'running' AND job_id IS NOT NULL",
+                &[],
+            )
+            .await?;
+        rows.iter().map(row_to_routine_run).collect()
     }
 }
 

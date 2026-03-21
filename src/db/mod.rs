@@ -525,6 +525,14 @@ pub trait RoutineStore: Send + Sync {
         run_id: Uuid,
         job_id: Uuid,
     ) -> Result<(), DatabaseError>;
+    async fn get_webhook_routine_by_path(
+        &self,
+        path: &str,
+    ) -> Result<Option<Routine>, DatabaseError>;
+
+    /// List routine runs that were dispatched as full_job but have not yet
+    /// been finalized (status='running' with a linked job_id).
+    async fn list_dispatched_routine_runs(&self) -> Result<Vec<RoutineRun>, DatabaseError>;
 }
 
 #[async_trait]

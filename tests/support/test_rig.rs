@@ -354,6 +354,7 @@ pub struct TestRigBuilder {
     enable_routines: bool,
     http_exchanges: Vec<HttpExchange>,
     extra_tools: Vec<Arc<dyn Tool>>,
+    keep_bootstrap: bool,
 }
 
 impl TestRigBuilder {
@@ -369,6 +370,7 @@ impl TestRigBuilder {
             enable_routines: false,
             http_exchanges: Vec::new(),
             extra_tools: Vec::new(),
+            keep_bootstrap: false,
         }
     }
 
@@ -426,6 +428,12 @@ impl TestRigBuilder {
         self
     }
 
+    /// Keep `bootstrap_pending` so the proactive greeting fires on startup.
+    pub fn with_bootstrap(mut self) -> Self {
+        self.keep_bootstrap = true;
+        self
+    }
+
     /// Add pre-recorded HTTP exchanges for the `ReplayingHttpInterceptor`.
     ///
     /// When set, all `http` tool calls will return these responses in order
@@ -457,6 +465,7 @@ impl TestRigBuilder {
             enable_routines,
             http_exchanges: explicit_http_exchanges,
             extra_tools,
+            keep_bootstrap,
         } = self;
 
         // 1. Create temp dir + libSQL database + run migrations.
@@ -537,6 +546,12 @@ impl TestRigBuilder {
             .await
             .expect("AppBuilder::build_all() failed in test rig");
 
+        // Clear bootstrap flag so tests don't get an unexpected proactive greeting
+        // (unless the test explicitly wants to test the bootstrap flow).
+        if !keep_bootstrap && let Some(ref ws) = components.workspace {
+            ws.take_bootstrap_pending();
+        }
+
         // AppBuilder may re-resolve config from env/TOML and override test defaults.
         // Force test-rig agent flags to the requested deterministic values.
         components.config.agent.auto_approve_tools = auto_approve_tools.unwrap_or(true);
@@ -576,8 +591,10 @@ impl TestRigBuilder {
                     Arc::clone(ws),
                     notify_tx,
                     None,
+                    None,
                     components.tools.clone(),
                     components.safety.clone(),
+                    ironclaw::agent::SandboxReadiness::Available, // tests don't use real Docker
                 ));
                 components
                     .tools
@@ -642,10 +659,18 @@ impl TestRigBuilder {
             },
             transcription: None,
             document_extraction: None,
+            sandbox_readiness: ironclaw::agent::SandboxReadiness::Available, // tests don't use real Docker
+            builder: None,
         };
 
         // 7. Create TestChannel and ChannelManager.
-        let test_channel = Arc::new(TestChannel::new());
+        // When testing bootstrap, the channel must be named "gateway" because
+        // the bootstrap greeting targets only the gateway channel.
+        let test_channel = if keep_bootstrap {
+            Arc::new(TestChannel::new().with_name("gateway"))
+        } else {
+            Arc::new(TestChannel::new())
+        };
         let handle = TestChannelHandle::new(Arc::clone(&test_channel));
         let channel_manager = ChannelManager::new();
         channel_manager.add(Box::new(handle)).await;
@@ -653,7 +678,7 @@ impl TestRigBuilder {
 
         // 7b. Register message tool so routines can send messages to channels.
         deps.tools
-            .register_message_tools(Arc::clone(&channels))
+            .register_message_tools(Arc::clone(&channels), deps.extension_manager.clone())
             .await;
 
         // 8. Create Agent.
