@@ -591,7 +591,11 @@ impl AppBuilder {
                                 }
                                 Ok(None) => {}
                                 Err(e) => {
-                                    tracing::warn!("MCP server loading task panicked: {}", e);
+                                    if e.is_panic() {
+                                        tracing::error!("MCP server loading task panicked: {}", e);
+                                    } else {
+                                        tracing::warn!("MCP server loading task failed: {}", e);
+                                    }
                                 }
                             }
                         }

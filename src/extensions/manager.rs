@@ -942,7 +942,15 @@ impl ExtensionManager {
     /// Startup-loaded MCP clients register their tools in `ToolRegistry` but are
     /// otherwise dropped. This method stores the client so that `list()` reports
     /// accurate "connected" status and reconnection/session management works.
-    pub async fn inject_mcp_client(&self, name: String, client: Arc<crate::tools::mcp::McpClient>) {
+    pub(crate) async fn inject_mcp_client(
+        &self,
+        name: String,
+        client: Arc<crate::tools::mcp::McpClient>,
+    ) {
+        if name.is_empty() {
+            tracing::warn!("inject_mcp_client called with empty name; ignoring");
+            return;
+        }
         self.mcp_clients.write().await.insert(name, client);
     }
 
