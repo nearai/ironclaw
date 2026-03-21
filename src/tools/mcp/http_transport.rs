@@ -130,6 +130,16 @@ impl McpTransport for HttpMcpTransport {
             )));
         }
 
+        // MCP notifications commonly acknowledge with 202 Accepted and no body.
+        if response.status() == reqwest::StatusCode::ACCEPTED {
+            return Ok(McpResponse {
+                jsonrpc: "2.0".to_string(),
+                id: request.id,
+                result: None,
+                error: None,
+            });
+        }
+
         // Determine response format from Content-Type.
         let content_type = response
             .headers()
@@ -505,5 +515,43 @@ mod tests {
 
         let echoed = response.result.unwrap();
         assert_eq!(echoed["authorization"], "Bearer custom-token");
+    }
+
+    async fn spawn_accepted_server() -> (String, tokio::task::JoinHandle<()>) {
+        use axum::{Router, routing::post};
+        use tokio::net::TcpListener;
+
+        async fn accepted() -> axum::http::StatusCode {
+            axum::http::StatusCode::ACCEPTED
+        }
+
+        let app = Router::new().route("/", post(accepted));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = format!("http://127.0.0.1:{}", addr.port());
+
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        (url, handle)
+    }
+
+    #[tokio::test]
+    async fn test_accepted_notification_returns_empty_response() {
+        let (url, _handle) = spawn_accepted_server().await;
+        let transport = HttpMcpTransport::new(&url, "accepted-test");
+        let request = McpRequest {
+            jsonrpc: "2.0".to_string(),
+            id: None,
+            method: "notifications/initialized".to_string(),
+            params: None,
+        };
+
+        let response = transport.send(&request, &HashMap::new()).await.unwrap();
+        assert_eq!(response.jsonrpc, "2.0");
+        assert_eq!(response.id, request.id);
+        assert!(response.result.is_none());
+        assert!(response.error.is_none());
     }
 }
