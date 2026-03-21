@@ -312,15 +312,23 @@ impl AppBuilder {
             .create_provider(&self.config.llm.nearai.base_url, self.session.clone());
 
         // Register memory tools if database is available
+        let workspace_user_id = self
+            .config
+            .channels
+            .gateway
+            .as_ref()
+            .map(|gw| gw.user_id.as_str())
+            .unwrap_or("default");
         let workspace = if let Some(ref db) = self.db {
             let emb_cache_config = EmbeddingCacheConfig {
                 max_entries: self.config.embeddings.cache_size,
             };
-            let mut ws = Workspace::new_with_db(&self.config.owner_id, db.clone())
+            let mut ws = Workspace::new_with_db(workspace_user_id, db.clone())
                 .with_search_config(&self.config.search);
             if let Some(ref emb) = embeddings {
                 ws = ws.with_embeddings_cached(emb.clone(), emb_cache_config);
             }
+            ws = ws.with_memory_layers(self.config.workspace.memory_layers.clone());
             let ws = Arc::new(ws);
             tools.register_memory_tools(Arc::clone(&ws));
             Some(ws)
