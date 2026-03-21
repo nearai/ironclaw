@@ -299,15 +299,12 @@ mod tests {
 
         // SAFETY: Under ENV_MUTEX, no concurrent env access.
         unsafe {
-            std::env::set_var("EMBEDDING_BASE_URL", "https://custom.example.com");
+            std::env::set_var("EMBEDDING_BASE_URL", "https://8.8.8.8");
         }
 
         let settings = Settings::default();
         let config = EmbeddingsConfig::resolve(&settings).expect("resolve should succeed");
-        assert_eq!(
-            config.openai_base_url.as_deref(),
-            Some("https://custom.example.com")
-        );
+        assert_eq!(config.openai_base_url.as_deref(), Some("https://8.8.8.8"));
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("EMBEDDING_BASE_URL");

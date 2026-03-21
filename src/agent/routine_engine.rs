@@ -22,19 +22,20 @@ use uuid::Uuid;
 
 use crate::agent::Scheduler;
 use crate::agent::routine::{
-    NotifyConfig, Routine, RoutineAction, RoutineRun, RunStatus, Trigger,
-    effective_full_job_tool_permissions, load_full_job_permission_settings, next_cron_fire,
+    NotifyConfig, Routine, RoutineAction, RoutineRun, RunStatus, Trigger, next_cron_fire,
 };
 use crate::channels::OutgoingResponse;
 use crate::config::RoutineConfig;
 use crate::context::{JobContext, JobState};
 use crate::db::Database;
 use crate::error::RoutineError;
+use crate::extensions::ExtensionManager;
 use crate::llm::{
     ChatMessage, CompletionRequest, FinishReason, LlmProvider, ToolCall, ToolCompletionRequest,
 };
 use crate::tools::{
-    ApprovalContext, ApprovalRequirement, ToolError, ToolRegistry, prepare_tool_params,
+    ToolError, ToolRegistry, autonomous_allowed_tool_names, autonomous_unavailable_message,
+    prepare_tool_params,
 };
 use crate::workspace::Workspace;
 use ironclaw_safety::SafetyLayer;
@@ -69,6 +70,8 @@ pub struct RoutineEngine {
     event_cache: Arc<RwLock<Vec<EventMatcher>>>,
     /// Scheduler for dispatching jobs (FullJob mode).
     scheduler: Option<Arc<Scheduler>>,
+    /// Owner-scoped extension activation state for autonomous tool resolution.
+    extension_manager: Option<Arc<ExtensionManager>>,
     /// Tool registry for lightweight routine tool execution.
     tools: Arc<ToolRegistry>,
     /// Safety layer for tool output sanitization.
@@ -90,6 +93,7 @@ impl RoutineEngine {
         workspace: Arc<Workspace>,
         notify_tx: mpsc::Sender<OutgoingResponse>,
         scheduler: Option<Arc<Scheduler>>,
+        extension_manager: Option<Arc<ExtensionManager>>,
         tools: Arc<ToolRegistry>,
         safety: Arc<SafetyLayer>,
         sandbox_readiness: SandboxReadiness,
@@ -103,6 +107,7 @@ impl RoutineEngine {
             running_count: Arc::new(AtomicUsize::new(0)),
             event_cache: Arc::new(RwLock::new(Vec::new())),
             scheduler,
+            extension_manager,
             tools,
             safety,
             sandbox_readiness,
@@ -702,6 +707,92 @@ impl RoutineEngine {
             notify_tx: self.notify_tx.clone(),
             running_count: self.running_count.clone(),
             scheduler: self.scheduler.clone(),
+            extension_manager: self.extension_manager.clone(),
+            tools: self.tools.clone(),
+            safety: self.safety.clone(),
+            sandbox_readiness: self.sandbox_readiness,
+        };
+
+        tokio::spawn(async move {
+            execute_routine(engine, routine, run).await;
+        });
+
+        Ok(run_id)
+    }
+
+    /// Fire a routine from a webhook trigger.
+    ///
+    /// Similar to `fire_manual` but records the trigger as `"webhook"` with the
+    /// webhook path as detail. Skips ownership check (auth is via webhook secret).
+    /// Enforces enabled check, cooldown, and concurrent run limit.
+    pub async fn fire_webhook(
+        &self,
+        routine_id: Uuid,
+        webhook_path: &str,
+    ) -> Result<Uuid, RoutineError> {
+        let routine = self
+            .store
+            .get_routine(routine_id)
+            .await
+            .map_err(|e| RoutineError::Database {
+                reason: e.to_string(),
+            })?
+            .ok_or(RoutineError::NotFound { id: routine_id })?;
+
+        if !routine.enabled {
+            return Err(RoutineError::Disabled {
+                name: routine.name.clone(),
+            });
+        }
+
+        if !self.check_cooldown(&routine) {
+            return Err(RoutineError::Cooldown {
+                name: routine.name.clone(),
+            });
+        }
+
+        if !self.check_concurrent(&routine).await {
+            return Err(RoutineError::MaxConcurrent {
+                name: routine.name.clone(),
+            });
+        }
+
+        if self.running_count.load(Ordering::Relaxed) >= self.config.max_concurrent_routines {
+            return Err(RoutineError::MaxConcurrent {
+                name: routine.name.clone(),
+            });
+        }
+
+        let run_id = Uuid::new_v4();
+        let run = RoutineRun {
+            id: run_id,
+            routine_id: routine.id,
+            trigger_type: "webhook".to_string(),
+            trigger_detail: Some(webhook_path.to_string()),
+            started_at: Utc::now(),
+            completed_at: None,
+            status: RunStatus::Running,
+            result_summary: None,
+            tokens_used: None,
+            job_id: None,
+            created_at: Utc::now(),
+        };
+
+        if let Err(e) = self.store.create_routine_run(&run).await {
+            return Err(RoutineError::Database {
+                reason: format!("failed to create run record: {e}"),
+            });
+        }
+
+        let engine = EngineContext {
+            config: self.config.clone(),
+            store: self.store.clone(),
+            llm: self.llm.clone(),
+            workspace: self.workspace.clone(),
+            notify_tx: self.notify_tx.clone(),
+            running_count: self.running_count.clone(),
+            scheduler: self.scheduler.clone(),
+            extension_manager: self.extension_manager.clone(),
             tools: self.tools.clone(),
             safety: self.safety.clone(),
             sandbox_readiness: self.sandbox_readiness,
@@ -738,6 +829,7 @@ impl RoutineEngine {
             notify_tx: self.notify_tx.clone(),
             running_count: self.running_count.clone(),
             scheduler: self.scheduler.clone(),
+            extension_manager: self.extension_manager.clone(),
             tools: self.tools.clone(),
             safety: self.safety.clone(),
             sandbox_readiness: self.sandbox_readiness,
@@ -875,6 +967,7 @@ struct EngineContext {
     notify_tx: mpsc::Sender<OutgoingResponse>,
     running_count: Arc<AtomicUsize>,
     scheduler: Option<Arc<Scheduler>>,
+    extension_manager: Option<Arc<ExtensionManager>>,
     tools: Arc<ToolRegistry>,
     safety: Arc<SafetyLayer>,
     sandbox_readiness: SandboxReadiness,
@@ -908,15 +1001,11 @@ async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) 
             title,
             description,
             max_iterations,
-            tool_permissions,
-            permission_mode,
         } => {
             let execution = FullJobExecutionConfig {
                 title,
                 description,
                 max_iterations: *max_iterations,
-                tool_permissions,
-                permission_mode: *permission_mode,
             };
             execute_full_job(&ctx, &routine, &run, &execution).await
         }
@@ -1048,8 +1137,6 @@ struct FullJobExecutionConfig<'a> {
     title: &'a str,
     description: &'a str,
     max_iterations: u32,
-    tool_permissions: &'a [String],
-    permission_mode: crate::agent::routine::FullJobPermissionMode,
 }
 
 async fn execute_full_job(
@@ -1094,40 +1181,12 @@ async fn execute_full_job(
     }
     metadata["notify_user"] = serde_json::json!(&routine.notify.user);
 
-    let effective_permissions = match execution.permission_mode {
-        crate::agent::routine::FullJobPermissionMode::Explicit => {
-            effective_full_job_tool_permissions(
-                execution.permission_mode,
-                execution.tool_permissions,
-                &[],
-            )
-        }
-        crate::agent::routine::FullJobPermissionMode::InheritOwner => {
-            let owner_permissions =
-                load_full_job_permission_settings(ctx.store.as_ref(), &routine.user_id)
-                    .await
-                    .map_err(|e| RoutineError::Database {
-                        reason: format!("failed to load routine permission settings: {e}"),
-                    })?;
-            effective_full_job_tool_permissions(
-                execution.permission_mode,
-                execution.tool_permissions,
-                &owner_permissions.owner_allowed_tools,
-            )
-        }
-    };
-
-    // Build approval context: UnlessAutoApproved tools are auto-approved for routines;
-    // Always tools require explicit listing in the resolved effective permissions.
-    let approval_context = ApprovalContext::autonomous_with_tools(effective_permissions);
-
     let job_id = scheduler
-        .dispatch_job_with_context(
+        .dispatch_job(
             &routine.user_id,
             execution.title,
             execution.description,
             Some(metadata),
-            approval_context,
         )
         .await
         .map_err(|e| RoutineError::JobDispatchFailed {
@@ -1416,6 +1475,9 @@ async fn execute_lightweight_with_tools(
         description: routine.name.clone(),
         ..Default::default()
     };
+    let allowed_tools =
+        autonomous_allowed_tool_names(&ctx.tools, ctx.extension_manager.as_ref(), &routine.user_id)
+            .await;
 
     loop {
         iteration += 1;
@@ -1450,8 +1512,11 @@ async fn execute_lightweight_with_tools(
             // Tool-enabled iteration
             let tool_defs = ctx
                 .tools
-                .tool_definitions_excluding(ROUTINE_TOOL_DENYLIST)
-                .await;
+                .tool_definitions()
+                .await
+                .into_iter()
+                .filter(|tool| allowed_tools.contains(&tool.name))
+                .collect();
 
             let request_messages = snapshot_messages_for_tool_iteration(&messages);
             let request = ToolCompletionRequest::new(request_messages, tool_defs)
@@ -1486,7 +1551,7 @@ async fn execute_lightweight_with_tools(
 
             // Execute tools sequentially
             for tc in response.tool_calls {
-                let result = execute_routine_tool(ctx, &job_ctx, &tc).await;
+                let result = execute_routine_tool(ctx, &job_ctx, &allowed_tools, &tc).await;
 
                 // Sanitize and wrap result (including errors)
                 let result_content = match result {
@@ -1555,31 +1620,16 @@ fn snapshot_messages_for_tool_iteration(messages: &[ChatMessage]) -> Vec<ChatMes
     snapshot
 }
 
-/// Tools that must never be callable from lightweight routines.
-///
-/// These tools pose autonomy-escalation risks: a routine could self-replicate,
-/// modify its own triggers/prompts, delete other routines, or restart the agent.
-const ROUTINE_TOOL_DENYLIST: &[&str] = &[
-    "routine_create",
-    "routine_update",
-    "routine_delete",
-    "routine_fire",
-    "restart",
-];
-
 /// Execute a single tool for a lightweight routine.
 async fn execute_routine_tool(
     ctx: &EngineContext,
     job_ctx: &JobContext,
+    allowed_tools: &std::collections::HashSet<String>,
     tc: &ToolCall,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-    // Block tools that pose autonomy-escalation risks
-    if ROUTINE_TOOL_DENYLIST.contains(&tc.name.as_str()) {
-        return Err(format!(
-            "Tool '{}' is not available in lightweight routines",
-            tc.name
-        )
-        .into());
+    if !allowed_tools.contains(&tc.name) {
+        let message = autonomous_unavailable_message(&tc.name, &job_ctx.user_id);
+        return Err(message.into());
     }
 
     // Check if tool exists
@@ -1589,22 +1639,6 @@ async fn execute_routine_tool(
         .await
         .ok_or_else(|| format!("Tool '{}' not found", tc.name))?;
     let normalized_params = prepare_tool_params(tool.as_ref(), &tc.arguments);
-
-    // Check approval requirement: only allow Never tools in lightweight routines.
-    // UnlessAutoApproved and Always tools are blocked to prevent prompt injection attacks.
-    // Lightweight routines can be triggered by external events and may process untrusted data,
-    // making them vulnerable to prompt injection that could trick the LLM into calling
-    // sensitive tools. Blocking these tools entirely is the safest approach.
-    match tool.requires_approval(&normalized_params) {
-        ApprovalRequirement::Never => {}
-        ApprovalRequirement::UnlessAutoApproved | ApprovalRequirement::Always => {
-            return Err(format!(
-                "Tool '{}' requires manual approval and cannot be used in lightweight routines",
-                tc.name
-            )
-            .into());
-        }
-    }
 
     // Validate tool parameters
     let validation = ctx
@@ -2021,8 +2055,8 @@ mod tests {
         ];
         for tool in &denylisted {
             assert!(
-                super::ROUTINE_TOOL_DENYLIST.contains(tool),
-                "Tool '{}' should be in ROUTINE_TOOL_DENYLIST",
+                crate::tools::AUTONOMOUS_TOOL_DENYLIST.contains(tool),
+                "Tool '{}' should be in AUTONOMOUS_TOOL_DENYLIST",
                 tool
             );
         }
@@ -2033,8 +2067,8 @@ mod tests {
         let allowed = vec!["echo", "time", "json", "http", "memory_search", "shell"];
         for tool in &allowed {
             assert!(
-                !super::ROUTINE_TOOL_DENYLIST.contains(tool),
-                "Tool '{}' should NOT be in ROUTINE_TOOL_DENYLIST",
+                !crate::tools::AUTONOMOUS_TOOL_DENYLIST.contains(tool),
+                "Tool '{}' should NOT be in AUTONOMOUS_TOOL_DENYLIST",
                 tool
             );
         }

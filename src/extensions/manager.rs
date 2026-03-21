@@ -463,6 +463,37 @@ fn sanitize_url_for_logging(url: &str) -> String {
 }
 
 impl ExtensionManager {
+    pub fn owner_id(&self) -> &str {
+        &self.user_id
+    }
+
+    pub async fn active_tool_names(&self) -> HashSet<String> {
+        let mut names = HashSet::new();
+        match self.list(None, false).await {
+            Ok(extensions) => {
+                for extension in extensions {
+                    match extension.kind {
+                        ExtensionKind::WasmTool if extension.active => {
+                            names.insert(extension.name);
+                        }
+                        ExtensionKind::McpServer if extension.active => {
+                            names.extend(extension.tools);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Err(err) => {
+                tracing::warn!(
+                    owner_id = %self.user_id,
+                    "Failed to list active extensions while resolving autonomous tool scope: {}",
+                    err
+                );
+            }
+        }
+        names
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         mcp_session_manager: Arc<McpSessionManager>,
@@ -904,6 +935,31 @@ impl ExtensionManager {
     /// Access the secrets store (used by OAuth callback handlers).
     pub fn secrets(&self) -> &Arc<dyn SecretsStore + Send + Sync> {
         &self.secrets
+    }
+
+    /// Inject a pre-created MCP client (from startup loading) into the manager.
+    ///
+    /// Startup-loaded MCP clients register their tools in `ToolRegistry` but are
+    /// otherwise dropped. This method stores the client so that `list()` reports
+    /// accurate "connected" status and reconnection/session management works.
+    pub(crate) async fn inject_mcp_client(
+        &self,
+        name: String,
+        client: Arc<crate::tools::mcp::McpClient>,
+    ) {
+        if name.is_empty() {
+            tracing::warn!("inject_mcp_client called with empty name; ignoring");
+            return;
+        }
+        if let Err(e) = Self::validate_extension_name(&name) {
+            tracing::warn!(
+                error = %e,
+                name = %name,
+                "inject_mcp_client called with invalid name; ignoring"
+            );
+            return;
+        }
+        self.mcp_clients.write().await.insert(name, client);
     }
 
     /// Register channel names that were loaded at startup.

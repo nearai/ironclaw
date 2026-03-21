@@ -30,7 +30,9 @@ use crate::llm::{
 use crate::safety::SafetyLayer;
 use crate::tools::execute::process_tool_result;
 use crate::tools::rate_limiter::RateLimitResult;
-use crate::tools::{ApprovalContext, ToolRegistry, prepare_tool_params, redact_params};
+use crate::tools::{
+    ApprovalContext, ToolRegistry, autonomous_unavailable_error, prepare_tool_params, redact_params,
+};
 
 /// Shared dependencies for worker execution.
 ///
@@ -486,22 +488,20 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
 
         let normalized_params = prepare_tool_params(tool.as_ref(), params);
 
+        // Fetch job context early so we have the real user_id for approval, hooks,
+        // and rate limiting decisions.
+        let mut job_ctx = deps.context_manager.get_context(job_id).await?;
+        // Propagate http_interceptor for trace recording/replay
+        if job_ctx.http_interceptor.is_none() {
+            job_ctx.http_interceptor = deps.http_interceptor.clone();
+        }
+
         // Check approval: use context-aware check if available, else block all non-Never tools
         let requirement = tool.requires_approval(&normalized_params);
         let blocked =
             ApprovalContext::is_blocked_or_default(&deps.approval_context, tool_name, requirement);
         if blocked {
-            return Err(crate::error::ToolError::AuthRequired {
-                name: tool_name.to_string(),
-            }
-            .into());
-        }
-
-        // Fetch job context early so we have the real user_id for hooks and rate limiting
-        let mut job_ctx = deps.context_manager.get_context(job_id).await?;
-        // Propagate http_interceptor for trace recording/replay
-        if job_ctx.http_interceptor.is_none() {
-            job_ctx.http_interceptor = deps.http_interceptor.clone();
+            return Err(autonomous_unavailable_error(tool_name, &job_ctx.user_id).into());
         }
 
         // Check per-tool rate limit before running hooks or executing (cheaper check first)
@@ -761,12 +761,12 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
         );
         reason_ctx.messages.push(message);
 
-        match &result {
+        match result {
             Ok(raw_output) => {
                 let sanitized = self
                     .deps
                     .safety
-                    .sanitize_tool_output(&selection.tool_name, raw_output);
+                    .sanitize_tool_output(&selection.tool_name, &raw_output);
                 self.log_event(
                     "tool_result",
                     serde_json::json!({
@@ -807,7 +807,14 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                     }),
                 );
 
-                Ok(())
+                if matches!(
+                    &e,
+                    Error::Tool(crate::error::ToolError::AutonomousUnavailable { .. })
+                ) {
+                    Err(e)
+                } else {
+                    Ok(())
+                }
             }
         }
     }
@@ -1802,7 +1809,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_approval_context_unblocks_unless_auto_approved() {
+    async fn test_approval_context_requires_explicit_allowed_tool_names() {
         let worker_blocked = make_worker_with_approval(vec![Arc::new(ApprovalTool)], None).await;
         let result = worker_blocked
             .execute_tool("needs_approval", &serde_json::json!({}))
@@ -1815,13 +1822,18 @@ mod tests {
 
         let worker_allowed = make_worker_with_approval(
             vec![Arc::new(ApprovalTool)],
-            Some(crate::tools::ApprovalContext::autonomous()),
+            Some(crate::tools::ApprovalContext::autonomous_with_tools([
+                "needs_approval".to_string(),
+            ])),
         )
         .await;
         let result = worker_allowed
             .execute_tool("needs_approval", &serde_json::json!({}))
             .await;
-        assert!(result.is_ok(), "Should be allowed with autonomous context"); // safety: test
+        assert!(
+            result.is_ok(),
+            "Should be allowed when the tool is in the autonomous scope"
+        ); // safety: test
     }
 
     #[tokio::test]
@@ -1855,6 +1867,25 @@ mod tests {
             result.is_ok(),
             "Always tool should be allowed with permission"
         );
+    }
+
+    #[tokio::test]
+    async fn test_approval_context_returns_structured_autonomous_unavailable_error() {
+        let worker = make_worker_with_approval(
+            vec![Arc::new(AlwaysApprovalTool)],
+            Some(crate::tools::ApprovalContext::autonomous()),
+        )
+        .await;
+
+        let result = worker
+            .execute_tool("always_approval", &serde_json::json!({}))
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(Error::Tool(crate::error::ToolError::AutonomousUnavailable { name, .. }))
+                if name == "always_approval"
+        ));
     }
 
     #[tokio::test]

@@ -302,12 +302,30 @@ pub struct MemoryReadResponse {
 pub struct MemoryWriteRequest {
     pub path: String,
     pub content: String,
+    /// Optional layer to write to. When present, uses `write_to_layer()`
+    /// which enables privacy classification and redirect.
+    pub layer: Option<String>,
+    /// When true and a layer is specified, appends to existing content
+    /// instead of replacing it.
+    #[serde(default)]
+    pub append: bool,
+    /// Skip privacy classification and write directly to the specified layer.
+    #[serde(default)]
+    pub force: bool,
 }
 
 #[derive(Debug, Serialize)]
 pub struct MemoryWriteResponse {
     pub path: String,
     pub status: &'static str,
+    /// Whether the write was redirected to a different layer (e.g., sensitive
+    /// content redirected from shared to private).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub redirected: Option<bool>,
+    /// The layer the content was actually written to (may differ from requested
+    /// layer if privacy redirect occurred).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actual_layer: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -814,6 +832,14 @@ impl RoutineInfo {
                 String::new(),
                 format!("event: {}.{}", source, event_type),
             ),
+            crate::agent::routine::Trigger::Webhook { path, .. } => {
+                let p = path.as_deref().unwrap_or("default");
+                (
+                    "webhook".to_string(),
+                    String::new(),
+                    format!("webhook: /api/webhooks/{}", p),
+                )
+            }
             crate::agent::routine::Trigger::Manual => (
                 "manual".to_string(),
                 String::new(),
@@ -884,18 +910,7 @@ pub struct RoutineDetailResponse {
     pub run_count: u64,
     pub consecutive_failures: u32,
     pub created_at: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub full_job_permissions: Option<FullJobPermissionInfo>,
     pub recent_runs: Vec<RoutineRunInfo>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct FullJobPermissionInfo {
-    pub permission_mode: String,
-    pub default_permission_mode: String,
-    pub stored_tool_permissions: Vec<String>,
-    pub owner_allowed_tools: Vec<String>,
-    pub effective_tool_permissions: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
