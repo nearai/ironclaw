@@ -3848,9 +3848,18 @@ impl ExtensionManager {
                     .env_var
                     .as_ref()
                     .is_some_and(|v| std::env::var(v).is_ok());
-            return if has_token {
-                ToolAuthState::Ready
-            } else if auth.oauth.is_some() {
+            if has_token {
+                if let Some(ref oauth) = auth.oauth {
+                    let merged = self
+                        .collect_shared_scopes(&auth.secret_name, &oauth.scopes)
+                        .await;
+                    if self.needs_scope_expansion(&auth.secret_name, &merged).await {
+                        return ToolAuthState::NeedsAuth;
+                    }
+                }
+                return ToolAuthState::Ready;
+            }
+            return if auth.oauth.is_some() {
                 ToolAuthState::NeedsAuth
             } else {
                 ToolAuthState::NeedsSetup
@@ -6335,7 +6344,8 @@ mod tests {
         telegram_message_matches_verification_code,
     };
     use crate::extensions::{
-        ExtensionError, ExtensionKind, ExtensionSource, InstallResult, VerificationChallenge,
+        ExtensionError, ExtensionKind, ExtensionSource, InstallResult, ToolAuthState,
+        VerificationChallenge,
     };
     use crate::pairing::PairingStore;
     use crate::secrets::CreateSecretParams;
@@ -9020,5 +9030,110 @@ mod tests {
             Some("dcr-secret".to_string()),
             "non-builtin provider secret must be kept"
         );
+    }
+
+    #[tokio::test]
+    async fn test_shared_google_oauth_status_requires_scope_expansion_for_second_tool()
+    -> Result<(), String> {
+        let dir = tempfile::tempdir().map_err(|err| format!("temp dir: {err}"))?;
+        let tools_dir = dir.path().join("tools");
+        std::fs::create_dir_all(&tools_dir).map_err(|err| format!("tools dir: {err}"))?;
+
+        for (name, scope) in [("google-docs", "https://www.googleapis.com/auth/documents")] {
+            std::fs::write(tools_dir.join(format!("{name}.wasm")), b"\0asm")
+                .map_err(|err| format!("write {name}.wasm: {err}"))?;
+
+            let caps = serde_json::json!({
+                "auth": {
+                    "secret_name": "google_oauth_token",
+                    "display_name": "Google",
+                    "oauth": {
+                        "authorization_url": "https://accounts.google.com/o/oauth2/v2/auth",
+                        "token_url": "https://oauth2.googleapis.com/token",
+                        "client_id_env": "GOOGLE_OAUTH_CLIENT_ID",
+                        "client_secret_env": "GOOGLE_OAUTH_CLIENT_SECRET",
+                        "scopes": [scope],
+                        "use_pkce": false,
+                        "extra_params": {
+                            "access_type": "offline",
+                            "prompt": "consent"
+                        }
+                    },
+                    "env_var": "GOOGLE_OAUTH_TOKEN"
+                }
+            });
+            std::fs::write(
+                tools_dir.join(format!("{name}.capabilities.json")),
+                serde_json::to_vec(&caps).map_err(|err| format!("serialize {name}: {err}"))?,
+            )
+            .map_err(|err| format!("write {name}.capabilities.json: {err}"))?;
+        }
+
+        let mgr = make_test_manager(None, tools_dir.clone());
+        mgr.secrets
+            .create(
+                "test",
+                crate::secrets::CreateSecretParams::new("google_oauth_token", "token")
+                    .with_provider("google-docs"),
+            )
+            .await
+            .map_err(|err| format!("store token: {err}"))?;
+        mgr.secrets
+            .create(
+                "test",
+                crate::secrets::CreateSecretParams::new(
+                    "google_oauth_token_scopes",
+                    "https://www.googleapis.com/auth/documents",
+                )
+                .with_provider("google-docs"),
+            )
+            .await
+            .map_err(|err| format!("store scopes: {err}"))?;
+
+        assert_eq!(
+            mgr.check_tool_auth_status("google-docs").await,
+            ToolAuthState::Ready
+        );
+
+        std::fs::write(tools_dir.join("google-slides.wasm"), b"\0asm")
+            .map_err(|err| format!("write google-slides.wasm: {err}"))?;
+        let slides_caps = serde_json::json!({
+            "auth": {
+                "secret_name": "google_oauth_token",
+                "display_name": "Google",
+                "oauth": {
+                    "authorization_url": "https://accounts.google.com/o/oauth2/v2/auth",
+                    "token_url": "https://oauth2.googleapis.com/token",
+                    "client_id_env": "GOOGLE_OAUTH_CLIENT_ID",
+                    "client_secret_env": "GOOGLE_OAUTH_CLIENT_SECRET",
+                    "scopes": ["https://www.googleapis.com/auth/presentations"],
+                    "use_pkce": false,
+                    "extra_params": {
+                        "access_type": "offline",
+                        "prompt": "consent"
+                    }
+                },
+                "env_var": "GOOGLE_OAUTH_TOKEN"
+            }
+        });
+        std::fs::write(
+            tools_dir.join("google-slides.capabilities.json"),
+            serde_json::to_vec(&slides_caps)
+                .map_err(|err| format!("serialize google-slides: {err}"))?,
+        )
+        .map_err(|err| format!("write google-slides.capabilities.json: {err}"))?;
+
+        assert_eq!(
+            mgr.check_tool_auth_status("google-docs").await,
+            ToolAuthState::NeedsAuth,
+            "adding the second shared-auth Google tool should require reauth for the existing tool"
+        );
+        assert_eq!(
+            mgr.check_tool_auth_status("google-slides").await,
+            ToolAuthState::NeedsAuth,
+            "second Google tool should require scope expansion when the shared token lacks its scope",
+        );
+
+        Ok(())
     }
 }
