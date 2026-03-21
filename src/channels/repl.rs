@@ -156,9 +156,9 @@ enum ApprovalAction {
 impl std::fmt::Display for ApprovalAction {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Approve => write!(f, "approve"),
-            Self::Always => write!(f, "always approve"),
-            Self::Deny => write!(f, "deny"),
+            Self::Approve => write!(f, "Approve (y)"),
+            Self::Always => write!(f, "Always approve (a)"),
+            Self::Deny => write!(f, "Deny (n)"),
         }
     }
 }
@@ -190,18 +190,21 @@ fn run_approval_selector(allow_always: bool) -> Option<&'static str> {
     };
 
     let mut render_config = RenderConfig::default_colored();
-    render_config.prompt_prefix = Styled::new("◆").with_fg(Color::DarkGreen);
-    render_config.answered_prompt_prefix = Styled::new("◇").with_fg(Color::DarkGreen);
-    render_config.highlighted_option_prefix = Styled::new("● ").with_fg(Color::DarkGreen);
-    render_config.scroll_up_prefix = Styled::new("↑ ").with_fg(Color::DarkGrey);
-    render_config.scroll_down_prefix = Styled::new("↓ ").with_fg(Color::DarkGrey);
+    render_config.prompt_prefix = Styled::new("│  ").with_fg(Color::DarkCyan);
+    render_config.answered_prompt_prefix = Styled::new("└  ").with_fg(Color::DarkCyan);
+    render_config.highlighted_option_prefix = Styled::new("●  ").with_fg(Color::LightGreen);
+    render_config.scroll_up_prefix = Styled::new("↑  ").with_fg(Color::DarkGrey);
+    render_config.scroll_down_prefix = Styled::new("↓  ").with_fg(Color::DarkGrey);
     render_config.selected_option = Some(StyleSheet::new());
     render_config.option = StyleSheet::new().with_fg(Color::DarkGrey);
+    render_config.prompt = StyleSheet::new().with_fg(Color::DarkGrey);
+    render_config.answer = StyleSheet::new().with_fg(Color::LightGreen);
+    render_config.help_message = StyleSheet::new().with_fg(Color::DarkGrey);
 
-    match Select::new("Choose action:", options)
+    match Select::new("", options)
         .with_render_config(render_config)
         .without_filtering()
-        .with_help_message("↑↓ to move, enter to select, or type y/a/n")
+        .with_help_message("↑↓ enter to select")
         .prompt()
     {
         Ok(action) => Some(action.as_input()),
@@ -673,36 +676,32 @@ impl Channel for ReplChannel {
             StatusUpdate::ApprovalNeeded {
                 request_id: _,
                 tool_name,
-                description,
+                description: _,
                 parameters,
                 allow_always,
             } => {
                 self.clear_transient();
-                let term_width = fmt::term_width();
-                let rule_width = (term_width.saturating_sub(4)).clamp(40, 64);
+                let pipe = format!("{}│{}", fmt::accent(), fmt::reset());
 
-                // Header rule
-                let label = format!(
-                    " {}{tool_name}{} requires approval ",
-                    fmt::warning(),
+                // Header: ◆ tool requires approval
+                eprintln!();
+                eprintln!(
+                    "  {}\u{25C6}  {}{tool_name}{} requires approval",
+                    fmt::accent(),
+                    fmt::bold(),
                     fmt::reset()
                 );
-                // Visual length of label (excluding ANSI escapes)
-                let label_visual_len = tool_name.len() + " requires approval ".len() + 2;
-                let rule_fill = rule_width.saturating_sub(label_visual_len + 1);
-                let top_rule = format!("\u{2500}{label}{}", "\u{2500}".repeat(rule_fill));
 
-                eprintln!();
-                eprintln!("  {top_rule}");
-                eprintln!();
-                eprintln!("  {}{description}{}", fmt::dim(), fmt::reset());
-                eprintln!();
-
-                // Params
-                let param_lines = format_json_params(&parameters, "    ");
-                for line in param_lines.lines() {
-                    eprintln!("{line}");
+                // Params: │  key  value
+                let param_lines =
+                    format_json_params(&parameters, &format!("  {pipe}  "));
+                if !param_lines.is_empty() {
+                    eprintln!("  {pipe}");
+                    for line in param_lines.lines() {
+                        eprintln!("{line}");
+                    }
                 }
+                eprintln!("  {pipe}");
                 // Run interactive selector directly from send_status
                 // stdin is already locked by Thinking/ToolStarted, so the
                 // readline thread is not competing for stdin.
