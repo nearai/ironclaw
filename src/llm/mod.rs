@@ -174,7 +174,8 @@ fn create_registry_provider(
         ProviderProtocol::Anthropic => create_anthropic_from_registry(config),
         ProviderProtocol::Ollama => create_ollama_from_registry(config),
         ProviderProtocol::GithubCopilot => {
-            let provider = github_copilot::GithubCopilotProvider::new(config)?;
+            let provider =
+                github_copilot::GithubCopilotProvider::new(config, request_timeout_secs)?;
             tracing::debug!(
                 provider = %config.provider_id,
                 model = %config.model,

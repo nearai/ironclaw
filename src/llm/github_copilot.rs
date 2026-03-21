@@ -41,7 +41,10 @@ pub struct GithubCopilotProvider {
 }
 
 impl GithubCopilotProvider {
-    pub fn new(config: &RegistryProviderConfig) -> Result<Self, LlmError> {
+    pub fn new(
+        config: &RegistryProviderConfig,
+        request_timeout_secs: u64,
+    ) -> Result<Self, LlmError> {
         let oauth_token = config
             .api_key
             .as_ref()
@@ -54,7 +57,7 @@ impl GithubCopilotProvider {
             })?;
 
         let client = Client::builder()
-            .timeout(std::time::Duration::from_secs(120))
+            .timeout(std::time::Duration::from_secs(request_timeout_secs))
             .build()
             .map_err(|e| LlmError::RequestFailed {
                 provider: "github_copilot".to_string(),
@@ -208,6 +211,7 @@ impl LlmProvider for GithubCopilotProvider {
             messages,
             max_tokens: req.max_tokens,
             temperature: req.temperature,
+            stop: req.stop_sequences,
             tools: None,
             tool_choice: None,
         };
@@ -285,6 +289,7 @@ impl LlmProvider for GithubCopilotProvider {
             messages,
             max_tokens: req.max_tokens,
             temperature: req.temperature,
+            stop: req.stop_sequences,
             tools: if tools.is_empty() { None } else { Some(tools) },
             tool_choice,
         };
@@ -374,6 +379,8 @@ struct OpenAiRequest {
     max_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stop: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tools: Option<Vec<OpenAiTool>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -501,7 +508,10 @@ fn convert_messages(messages: Vec<ChatMessage>) -> Vec<OpenAiMessage> {
                 let content = if msg.content_parts.is_empty() {
                     Some(OpenAiContent::Text(msg.content))
                 } else {
-                    let mut parts = vec![OpenAiContentPart::Text { text: msg.content }];
+                    let mut parts = Vec::with_capacity(1 + msg.content_parts.len());
+                    if !msg.content.is_empty() {
+                        parts.push(OpenAiContentPart::Text { text: msg.content });
+                    }
                     for part in msg.content_parts {
                         match part {
                             ContentPart::Text { text } => {

@@ -1373,9 +1373,9 @@ impl SetupWizard {
     async fn setup_github_copilot_paste_token(&mut self) -> Result<(), SetupError> {
         self.set_llm_backend_preserving_model("github_copilot");
 
-        print_info(
-            "Paste your GitHub Copilot OAuth token (e.g. from ~/.config/github-copilot/apps.json).",
-        );
+        print_info("Paste your GitHub Copilot token.");
+        print_info("You can find the oauth_token inside ~/.config/github-copilot/apps.json,");
+        print_info("or generate a personal access token at https://github.com/settings/tokens.");
         let token_secret = secret_input("GitHub Copilot token").map_err(SetupError::Io)?;
         let token = token_secret.expose_secret().trim().to_string();
         if token.is_empty() {
