@@ -36,12 +36,12 @@
 //! When sandbox is available and enabled:
 //! - Commands run inside ephemeral Docker containers
 //! - Network traffic goes through a validating proxy
-//! - Credentials are injected by the proxy, never exposed to commands
+//! - Explicitly requested credentials can be injected into the command env
 //!
 //! When sandbox is unavailable:
 //! - Commands run directly on host with scrubbed environment
 //! - Only safe env vars (PATH, HOME, LANG, etc.) forwarded to child processes
-//! - API keys, session tokens, and credentials are NOT inherited
+//! - API keys, session tokens, and credentials are not inherited unless requested
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -55,6 +55,7 @@ use tokio::process::Command;
 
 use crate::context::JobContext;
 use crate::sandbox::{SandboxManager, SandboxPolicy};
+use crate::secrets::SecretsStore;
 use crate::tools::tool::{
     ApprovalRequirement, Tool, ToolDomain, ToolError, ToolOutput, require_str,
 };
@@ -193,6 +194,22 @@ const SAFE_ENV_VARS: &[&str] = &[
     "ProgramFiles",
     "ProgramFiles(x86)",
     "WINDIR",
+];
+
+/// Environment variable names that must never receive secret injection.
+const DANGEROUS_ENV_VARS: &[&str] = &[
+    "PATH",
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "SHELL",
+    "PWD",
+    "TMPDIR",
+    "TMP",
+    "TEMP",
+    "LD_PRELOAD",
+    "DYLD_INSERT_LIBRARIES",
+    "DYLD_FORCE_FLAT_NAMESPACE",
 ];
 
 /// Check whether a shell command contains patterns that must never be auto-approved.
@@ -362,6 +379,8 @@ pub struct ShellTool {
     sandbox: Option<Arc<SandboxManager>>,
     /// Sandbox policy to use when sandbox is available.
     sandbox_policy: SandboxPolicy,
+    /// Secrets store for credential injection into shell commands.
+    secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
 }
 
 impl std::fmt::Debug for ShellTool {
@@ -372,6 +391,7 @@ impl std::fmt::Debug for ShellTool {
             .field("allow_dangerous", &self.allow_dangerous)
             .field("sandbox", &self.sandbox.is_some())
             .field("sandbox_policy", &self.sandbox_policy)
+            .field("secrets_store", &self.secrets_store.is_some())
             .finish()
     }
 }
@@ -385,6 +405,7 @@ impl ShellTool {
             allow_dangerous: false,
             sandbox: None,
             sandbox_policy: SandboxPolicy::ReadOnly,
+            secrets_store: None,
         }
     }
 
@@ -409,6 +430,15 @@ impl ShellTool {
     /// Set the sandbox policy.
     pub fn with_sandbox_policy(mut self, policy: SandboxPolicy) -> Self {
         self.sandbox_policy = policy;
+        self
+    }
+
+    /// Inject a secrets store so shell commands can request credentials.
+    pub fn with_secrets_store(
+        mut self,
+        secrets_store: Arc<dyn SecretsStore + Send + Sync>,
+    ) -> Self {
+        self.secrets_store = Some(secrets_store);
         self
     }
 
@@ -440,16 +470,12 @@ impl ShellTool {
         cmd: &str,
         workdir: &Path,
         timeout: Duration,
+        extra_env: &HashMap<String, String>,
     ) -> Result<(String, i64), ToolError> {
         // Override sandbox config timeout if needed
         let result = tokio::time::timeout(timeout, async {
             sandbox
-                .execute_with_policy(
-                    cmd,
-                    workdir,
-                    self.sandbox_policy,
-                    std::collections::HashMap::new(),
-                )
+                .execute_with_policy(cmd, workdir, self.sandbox_policy, extra_env.clone())
                 .await
         })
         .await;
@@ -619,7 +645,7 @@ impl ShellTool {
             && (sandbox.is_initialized() || sandbox.config().enabled)
         {
             return self
-                .execute_sandboxed(sandbox, cmd, &cwd, timeout_duration)
+                .execute_sandboxed(sandbox, cmd, &cwd, timeout_duration, extra_env)
                 .await;
         }
 
@@ -629,6 +655,103 @@ impl ShellTool {
             .await?;
         Ok((output, code as i64))
     }
+}
+
+fn validate_env_var_name(name: &str) -> Result<(), ToolError> {
+    if name.is_empty() {
+        return Err(ToolError::InvalidParameters(
+            "env var name cannot be empty".into(),
+        ));
+    }
+
+    let valid = name
+        .bytes()
+        .enumerate()
+        .all(|(i, b)| matches!(b, b'A'..=b'Z' | b'_') || (i > 0 && b.is_ascii_digit()));
+
+    if !valid {
+        return Err(ToolError::InvalidParameters(format!(
+            "env var '{}' must match [A-Z_][A-Z0-9_]* (uppercase, underscores, digits)",
+            name
+        )));
+    }
+
+    if DANGEROUS_ENV_VARS.contains(&name) {
+        return Err(ToolError::InvalidParameters(format!(
+            "env var '{}' is on the denylist (could hijack process behavior)",
+            name
+        )));
+    }
+
+    Ok(())
+}
+
+async fn parse_credentials(
+    secrets_store: Option<&Arc<dyn SecretsStore + Send + Sync>>,
+    params: &serde_json::Value,
+    user_id: &str,
+) -> Result<HashMap<String, String>, ToolError> {
+    let creds_obj = match params.get("credentials").and_then(|v| v.as_object()) {
+        Some(obj) if !obj.is_empty() => obj,
+        _ => return Ok(HashMap::new()),
+    };
+
+    const MAX_CREDENTIAL_GRANTS: usize = 20;
+    if creds_obj.len() > MAX_CREDENTIAL_GRANTS {
+        return Err(ToolError::InvalidParameters(format!(
+            "too many credential grants ({}, max {})",
+            creds_obj.len(),
+            MAX_CREDENTIAL_GRANTS
+        )));
+    }
+
+    let secrets = match secrets_store {
+        Some(s) => s,
+        None => {
+            return Err(ToolError::ExecutionFailed(
+                "credentials requested but no secrets store is configured. \
+                 Set SECRETS_MASTER_KEY to enable credential management."
+                    .to_string(),
+            ));
+        }
+    };
+
+    let mut extra_env = HashMap::with_capacity(creds_obj.len());
+    for (secret_name, env_var_value) in creds_obj {
+        let env_var = env_var_value.as_str().ok_or_else(|| {
+            ToolError::InvalidParameters(format!(
+                "credential env var for '{}' must be a string",
+                secret_name
+            ))
+        })?;
+
+        validate_env_var_name(env_var)?;
+
+        let exists = secrets.exists(user_id, secret_name).await.map_err(|e| {
+            ToolError::ExecutionFailed(format!("failed to check secret '{}': {}", secret_name, e))
+        })?;
+
+        if !exists {
+            return Err(ToolError::ExecutionFailed(format!(
+                "secret '{}' not found. Store it first via 'ironclaw tool auth' or the web UI.",
+                secret_name
+            )));
+        }
+
+        let secret = secrets
+            .get_decrypted(user_id, secret_name)
+            .await
+            .map_err(|e| {
+                ToolError::ExecutionFailed(format!(
+                    "failed to retrieve secret '{}': {}",
+                    secret_name, e
+                ))
+            })?;
+
+        extra_env.insert(env_var.to_string(), secret.expose().to_string());
+    }
+
+    Ok(extra_env)
 }
 
 impl Default for ShellTool {
@@ -664,6 +787,10 @@ impl Tool for ShellTool {
                 "timeout": {
                     "type": "integer",
                     "description": "Timeout in seconds (optional, default 120)"
+                },
+                "credentials": {
+                    "type": "object",
+                    "description": "Optional map of secret names to env var names. Each secret must exist in the secrets store."
                 }
             },
             "required": ["command"]
@@ -679,10 +806,15 @@ impl Tool for ShellTool {
 
         let workdir = params.get("workdir").and_then(|v| v.as_str());
         let timeout = params.get("timeout").and_then(|v| v.as_u64());
+        let credential_env =
+            parse_credentials(self.secrets_store.as_ref(), &params, &ctx.user_id).await?;
+
+        let mut extra_env = (*ctx.extra_env).clone();
+        extra_env.extend(credential_env);
 
         let start = std::time::Instant::now();
         let (output, exit_code) = self
-            .execute_command(command, workdir, timeout, &ctx.extra_env)
+            .execute_command(command, workdir, timeout, &extra_env)
             .await?;
         let duration = start.elapsed();
 
@@ -760,6 +892,10 @@ fn truncate_for_error(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    use crate::secrets::{CreateSecretParams, SecretsStore};
+    use crate::testing::credentials::{TEST_GITHUB_TOKEN, test_secrets_store};
 
     #[tokio::test]
     async fn test_echo_command() {
@@ -774,6 +910,40 @@ mod tests {
         let output = result.result.get("output").unwrap().as_str().unwrap();
         assert!(output.contains("hello"));
         assert_eq!(result.result.get("exit_code").unwrap().as_i64().unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_shell_injects_requested_credentials() -> Result<(), String> {
+        let store = test_secrets_store();
+        store
+            .create(
+                "user1",
+                CreateSecretParams::new("github_token", TEST_GITHUB_TOKEN),
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let tool = ShellTool::new().with_secrets_store(Arc::new(store));
+        let ctx = JobContext::with_user("user1", "Credential test", "Credential test");
+
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "command": "printenv GITHUB_TOKEN",
+                    "credentials": {"github_token": "GITHUB_TOKEN"}
+                }),
+                &ctx,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let output = result
+            .result
+            .get("output")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        assert!(output.contains(TEST_GITHUB_TOKEN));
+        Ok(())
     }
 
     #[test]
