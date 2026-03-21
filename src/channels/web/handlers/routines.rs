@@ -137,6 +137,7 @@ pub async fn routines_detail_handler(
 
 pub async fn routines_trigger_handler(
     State(state): State<Arc<GatewayState>>,
+    crate::channels::web::auth::AuthenticatedUser(user): crate::channels::web::auth::AuthenticatedUser,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     // Clone the Arc out of the lock to avoid holding the RwLock across .await.
@@ -152,7 +153,7 @@ pub async fn routines_trigger_handler(
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid routine ID".to_string()))?;
 
     let run_id = engine
-        .fire_manual(routine_id, Some(&state.user_id))
+        .fire_manual(routine_id, Some(&user.user_id))
         .await
         .map_err(|e| (routine_error_status(&e), e.to_string()))?;
 

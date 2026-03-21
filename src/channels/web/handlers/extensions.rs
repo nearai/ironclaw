@@ -8,11 +8,13 @@ use axum::{
     http::StatusCode,
 };
 
+use crate::channels::web::auth::AuthenticatedUser;
 use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::*;
 
 pub async fn extensions_list_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
 ) -> Result<Json<ExtensionListResponse>, (StatusCode, String)> {
     let ext_mgr = state.extension_manager.as_ref().ok_or((
         StatusCode::NOT_IMPLEMENTED,
@@ -20,7 +22,7 @@ pub async fn extensions_list_handler(
     ))?;
 
     let installed = ext_mgr
-        .list(None, false)
+        .list(None, false, &user.user_id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
@@ -100,6 +102,7 @@ pub async fn extensions_tools_handler(
 
 pub async fn extensions_install_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
     Json(req): Json<InstallExtensionRequest>,
 ) -> Result<Json<ActionResponse>, (StatusCode, String)> {
     let ext_mgr = state.extension_manager.as_ref().ok_or((
@@ -116,7 +119,7 @@ pub async fn extensions_install_handler(
     });
 
     match ext_mgr
-        .install(&req.name, req.url.as_deref(), kind_hint)
+        .install(&req.name, req.url.as_deref(), kind_hint, &user.user_id)
         .await
     {
         Ok(result) => Ok(Json(ActionResponse::ok(result.message))),
@@ -126,6 +129,7 @@ pub async fn extensions_install_handler(
 
 pub async fn extensions_remove_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
     Path(name): Path<String>,
 ) -> Result<Json<ActionResponse>, (StatusCode, String)> {
     let ext_mgr = state.extension_manager.as_ref().ok_or((
@@ -133,7 +137,7 @@ pub async fn extensions_remove_handler(
         "Extension manager not available (secrets store required)".to_string(),
     ))?;
 
-    match ext_mgr.remove(&name).await {
+    match ext_mgr.remove(&name, &user.user_id).await {
         Ok(message) => Ok(Json(ActionResponse::ok(message))),
         Err(e) => Ok(Json(ActionResponse::fail(e.to_string()))),
     }

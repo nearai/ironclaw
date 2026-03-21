@@ -24,7 +24,7 @@ mod skills;
 mod transcription;
 mod tunnel;
 mod wasm;
-mod workspace;
+pub(crate) mod workspace;
 
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex, Once};
@@ -178,9 +178,7 @@ impl Config {
             },
             transcription: TranscriptionConfig::default(),
             search: WorkspaceSearchConfig::default(),
-            workspace: WorkspaceConfig {
-                memory_layers: vec![],
-            },
+            workspace: WorkspaceConfig::default(),
             observability: crate::observability::ObservabilityConfig::default(),
             relay: None,
         }
@@ -313,11 +311,14 @@ impl Config {
 
         let tunnel = TunnelConfig::resolve(settings)?;
         let channels = ChannelsConfig::resolve(settings, &owner_id)?;
+
+        // Resolve workspace config using the gateway user_id for default layers.
         let workspace_user_id = channels
             .gateway
             .as_ref()
-            .map(|gw| gw.user_id.clone())
-            .unwrap_or_else(|| "default".to_string());
+            .map(|gw| gw.user_id.as_str())
+            .unwrap_or("default");
+        let workspace = WorkspaceConfig::resolve(workspace_user_id)?;
 
         Ok(Self {
             owner_id: owner_id.clone(),
@@ -339,7 +340,7 @@ impl Config {
             skills: SkillsConfig::resolve()?,
             transcription: TranscriptionConfig::resolve(settings)?,
             search: WorkspaceSearchConfig::resolve()?,
-            workspace: WorkspaceConfig::resolve(&workspace_user_id)?,
+            workspace,
             observability: crate::observability::ObservabilityConfig {
                 backend: std::env::var("OBSERVABILITY_BACKEND").unwrap_or_else(|_| "none".into()),
             },
