@@ -837,7 +837,7 @@ impl Tool for HttpTool {
             }));
 
         if has_credentials {
-            return ApprovalRequirement::Always;
+            return ApprovalRequirement::UnlessAutoApproved;
         }
 
         // GET requests (or missing method, since GET is the default) are low-risk
@@ -1093,25 +1093,31 @@ mod tests {
     }
 
     #[test]
-    fn test_auth_header_object_format_returns_always() {
+    fn test_auth_header_object_format_returns_unless_auto_approved() {
         let tool = HttpTool::new();
         let params = serde_json::json!({
             "method": "GET",
             "url": "https://api.example.com/data",
             "headers": {"Authorization": "Bearer token123"}
         });
-        assert_eq!(tool.requires_approval(&params), ApprovalRequirement::Always);
+        assert_eq!(
+            tool.requires_approval(&params),
+            ApprovalRequirement::UnlessAutoApproved
+        );
     }
 
     #[test]
-    fn test_auth_header_array_format_returns_always() {
+    fn test_auth_header_array_format_returns_unless_auto_approved() {
         let tool = HttpTool::new();
         let params = serde_json::json!({
             "method": "GET",
             "url": "https://api.example.com/data",
             "headers": [{"name": "Authorization", "value": "Bearer token123"}]
         });
-        assert_eq!(tool.requires_approval(&params), ApprovalRequirement::Always);
+        assert_eq!(
+            tool.requires_approval(&params),
+            ApprovalRequirement::UnlessAutoApproved
+        );
     }
 
     #[test]
@@ -1124,7 +1130,10 @@ mod tests {
             "url": "https://example.com",
             "headers": {"AUTHORIZATION": "Bearer x"}
         });
-        assert_eq!(tool.requires_approval(&params), ApprovalRequirement::Always);
+        assert_eq!(
+            tool.requires_approval(&params),
+            ApprovalRequirement::UnlessAutoApproved
+        );
 
         // Array format with mixed case
         let params = serde_json::json!({
@@ -1132,7 +1141,10 @@ mod tests {
             "url": "https://example.com",
             "headers": [{"name": "X-Api-Key", "value": "key123"}]
         });
-        assert_eq!(tool.requires_approval(&params), ApprovalRequirement::Always);
+        assert_eq!(
+            tool.requires_approval(&params),
+            ApprovalRequirement::UnlessAutoApproved
+        );
     }
 
     #[test]
@@ -1161,8 +1173,8 @@ mod tests {
             });
             assert_eq!(
                 tool.requires_approval(&params),
-                ApprovalRequirement::Always,
-                "Header '{}' should trigger Always approval",
+                ApprovalRequirement::UnlessAutoApproved,
+                "Header '{}' should trigger UnlessAutoApproved approval",
                 header_name
             );
         }
@@ -1203,7 +1215,7 @@ mod tests {
     // ── Credential registry approval tests ─────────────────────────────
 
     #[test]
-    fn test_host_with_credential_mapping_returns_always() {
+    fn test_host_with_credential_mapping_returns_unless_auto_approved() {
         use crate::secrets::CredentialMapping;
         use crate::tools::wasm::SharedCredentialRegistry;
 
@@ -1223,7 +1235,10 @@ mod tests {
             "method": "GET",
             "url": "https://api.openai.com/v1/models"
         });
-        assert_eq!(tool.requires_approval(&params), ApprovalRequirement::Always);
+        assert_eq!(
+            tool.requires_approval(&params),
+            ApprovalRequirement::UnlessAutoApproved
+        );
     }
 
     #[test]
@@ -1243,24 +1258,55 @@ mod tests {
     }
 
     #[test]
-    fn test_url_query_param_credential_returns_always() {
+    fn test_url_query_param_credential_returns_unless_auto_approved() {
         let tool = HttpTool::new();
         let params = serde_json::json!({
             "method": "GET",
             "url": "https://api.example.com/data?api_key=secret123"
         });
-        assert_eq!(tool.requires_approval(&params), ApprovalRequirement::Always);
+        assert_eq!(
+            tool.requires_approval(&params),
+            ApprovalRequirement::UnlessAutoApproved
+        );
     }
 
     #[test]
-    fn test_bearer_value_in_custom_header_returns_always() {
+    fn test_bearer_value_in_custom_header_returns_unless_auto_approved() {
         let tool = HttpTool::new();
         let params = serde_json::json!({
             "method": "GET",
             "url": "https://example.com",
             "headers": {"X-Custom": format!("Bearer {TEST_OPENAI_API_KEY}")}
         });
-        assert_eq!(tool.requires_approval(&params), ApprovalRequirement::Always);
+        assert_eq!(
+            tool.requires_approval(&params),
+            ApprovalRequirement::UnlessAutoApproved
+        );
+    }
+
+    /// Regression test: credentialed HTTP requests must return
+    /// `UnlessAutoApproved` (not `Always`) so that the session auto-approve
+    /// set is respected when the user says "always".
+    #[test]
+    fn test_credentialed_requests_respect_auto_approve() {
+        let tool = HttpTool::new();
+
+        // Manual credentials (Authorization header)
+        let params = serde_json::json!({
+            "method": "GET",
+            "url": "https://api.github.com/orgs/Casa",
+            "headers": {"Authorization": "Bearer ghp_abc123"}
+        });
+        // Must NOT be Always — Always ignores the session auto-approve set
+        assert_ne!(
+            tool.requires_approval(&params),
+            ApprovalRequirement::Always,
+            "Credentialed HTTP requests must not return Always; use UnlessAutoApproved"
+        );
+        assert_eq!(
+            tool.requires_approval(&params),
+            ApprovalRequirement::UnlessAutoApproved,
+        );
     }
 
     #[test]

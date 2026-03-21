@@ -112,6 +112,16 @@ impl<M: CompletionModel> RigAdapter<M> {
 
 // -- Type conversion helpers --
 
+/// Round an f32 to f64 without precision artifacts.
+///
+/// Direct `f32 as f64` preserves the binary representation, producing values
+/// like `0.699999988079071` instead of `0.7`. Some providers (e.g. Zhipu/GLM)
+/// reject these values with a 400 error. Rounding to 6 decimal places removes
+/// the artifact while preserving all meaningful precision for temperature.
+fn round_f32_to_f64(val: f32) -> f64 {
+    ((val as f64) * 1_000_000.0).round() / 1_000_000.0
+}
+
 /// Normalize a JSON Schema for OpenAI strict mode compliance.
 ///
 /// OpenAI strict function calling requires:
@@ -122,7 +132,7 @@ impl<M: CompletionModel> RigAdapter<M> {
 ///
 /// This is applied as a clone-and-transform at the provider boundary so the
 /// original tool definitions remain unchanged for other providers.
-fn normalize_schema_strict(schema: &JsonValue) -> JsonValue {
+pub(crate) fn normalize_schema_strict(schema: &JsonValue) -> JsonValue {
     let mut schema = schema.clone();
     normalize_schema_recursive(&mut schema);
     schema
@@ -542,7 +552,7 @@ fn build_rig_request(
         chat_history,
         documents: Vec::new(),
         tools,
-        temperature: temperature.map(|t| t as f64),
+        temperature: temperature.map(round_f32_to_f64),
         max_tokens: max_tokens.map(|t| t as u64),
         tool_choice,
         additional_params,
@@ -766,6 +776,17 @@ fn normalize_tool_name(name: &str, known_tools: &HashSet<String>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_round_f32_to_f64_no_precision_artifacts() {
+        // Direct f32->f64 cast produces 0.699999988079071 instead of 0.7
+        assert_eq!(round_f32_to_f64(0.7_f32), 0.7_f64);
+        assert_eq!(round_f32_to_f64(0.5_f32), 0.5_f64);
+        assert_eq!(round_f32_to_f64(1.0_f32), 1.0_f64);
+        assert_eq!(round_f32_to_f64(0.0_f32), 0.0_f64);
+        // Original cast produces artifacts — our fix should not
+        assert_ne!(0.7_f32 as f64, 0.7_f64);
+    }
 
     #[test]
     fn test_convert_messages_system_to_preamble() {

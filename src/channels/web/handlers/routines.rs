@@ -303,7 +303,9 @@ fn routine_error_status(err: &RoutineError) -> StatusCode {
     match err {
         RoutineError::NotFound { .. } => StatusCode::NOT_FOUND,
         RoutineError::NotAuthorized { .. } => StatusCode::FORBIDDEN,
-        RoutineError::Disabled { .. } | RoutineError::MaxConcurrent { .. } => StatusCode::CONFLICT,
+        RoutineError::Disabled { .. }
+        | RoutineError::Cooldown { .. }
+        | RoutineError::MaxConcurrent { .. } => StatusCode::CONFLICT,
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     }
 }

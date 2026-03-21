@@ -230,10 +230,12 @@ impl GatewayWorkflowHarness {
             skill_catalog: components.skill_catalog.clone(),
             chat_rate_limiter: RateLimiter::new(120, 60),
             oauth_rate_limiter: RateLimiter::new(10, 60),
+            webhook_rate_limiter: RateLimiter::new(10, 60),
             registry_entries: Vec::new(),
             cost_guard: Some(Arc::clone(&components.cost_guard)),
             routine_engine: Arc::clone(&routine_slot),
             startup_time: Instant::now(),
+            active_config: ironclaw::channels::web::server::ActiveConfigSnapshot::default(),
         });
 
         let mut agent = Agent::new(
@@ -256,6 +258,8 @@ impl GatewayWorkflowHarness {
                 http_interceptor: None,
                 transcription: None,
                 document_extraction: None,
+                sandbox_readiness: ironclaw::agent::SandboxReadiness::DisabledByConfig,
+                builder: None,
             },
             channels,
             None,

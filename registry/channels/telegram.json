@@ -2,7 +2,7 @@
   "name": "telegram",
   "display_name": "Telegram Channel",
   "kind": "channel",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "wit_version": "0.3.0",
   "description": "Talk to your agent through a Telegram bot",
   "keywords": [
@@ -18,8 +18,8 @@
   },
   "artifacts": {
     "wasm32-wasip2": {
-      "url": "https://github.com/nearai/ironclaw/releases/download/v0.18.0/telegram-0.2.3-wasm32-wasip2.tar.gz",
-      "sha256": "b9a83d5a2d1285ce0ec116b354336a1f245f893291ccb01dffbcaccf89d72aed"
+      "url": "https://github.com/nearai/ironclaw/releases/download/v0.19.0/channel-telegram-0.2.4-wasm32-wasip2.tar.gz",
+      "sha256": "a7cb300ec1c946831cfceaa95c1dc8f30d0f42a3924f3cb5de8098821573f4b8"
     }
   },
   "auth_summary": {

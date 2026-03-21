@@ -503,6 +503,17 @@ impl RoutineStore for PgBackend {
     ) -> Result<(), DatabaseError> {
         self.store.link_routine_run_to_job(run_id, job_id).await
     }
+
+    async fn get_webhook_routine_by_path(
+        &self,
+        path: &str,
+    ) -> Result<Option<Routine>, DatabaseError> {
+        self.store.get_webhook_routine_by_path(path).await
+    }
+
+    async fn list_dispatched_routine_runs(&self) -> Result<Vec<RoutineRun>, DatabaseError> {
+        self.store.list_dispatched_routine_runs().await
+    }
 }
 
 // ==================== ToolFailureStore ====================
