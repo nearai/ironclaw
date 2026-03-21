@@ -165,6 +165,7 @@ pub struct LlmConfig {
     pub provider: Option<RegistryProviderConfig>,
     /// AWS Bedrock config (populated when backend=bedrock, requires --features bedrock).
     pub bedrock: Option<BedrockConfig>,
+    pub aliyun: Option<AliyunConfig>,
     /// OpenAI Codex config (populated when backend=openai_codex).
     pub openai_codex: Option<OpenAiCodexConfig>,
     /// HTTP request timeout in seconds for LLM API calls.
@@ -266,4 +267,13 @@ impl NearAiConfig {
             smart_routing_cascade: true,
         }
     }
+}
+
+/// Aliyun Coding Plan configuration.
+#[derive(Debug, Clone)]
+pub struct AliyunConfig {
+    pub model: String,
+    pub base_url: String,
+    pub api_key: Option<SecretString>,
+    pub timeout_secs: u64,
 }

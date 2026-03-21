@@ -697,7 +697,9 @@ impl AppBuilder {
         if self.config.llm.backend != "nearai"
             && self.config.llm.backend != "bedrock"
             && self.config.llm.backend != "openai_codex"
+            && self.config.llm.backend != "aliyun"
             && self.config.llm.provider.is_none()
+            && self.config.llm.aliyun.is_none()
         {
             let backend = &self.config.llm.backend;
             anyhow::bail!(
