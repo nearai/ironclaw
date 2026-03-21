@@ -700,10 +700,10 @@ mod tests {
     /// chose postgres when both features were enabled (PR #209).
     #[cfg(feature = "libsql")]
     #[tokio::test]
-    async fn test_create_secrets_store_libsql_backend() {
+    async fn test_create_secrets_store_libsql_backend() -> Result<(), Box<dyn std::error::Error>> {
         use secrecy::SecretString;
 
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = tempfile::tempdir()?;
         let db_path = tmp.path().join("test.db");
 
         let config = crate::config::DatabaseConfig {
@@ -717,18 +717,13 @@ mod tests {
         };
 
         let master_key = SecretString::from("a]".repeat(16));
-        let crypto = Arc::new(crate::secrets::SecretsCrypto::new(master_key).unwrap());
+        let crypto = Arc::new(crate::secrets::SecretsCrypto::new(master_key)?);
 
-        let store = create_secrets_store(&config, crypto).await;
-        assert!(
-            store.is_ok(),
-            "create_secrets_store should succeed for libsql backend"
-        );
+        let store = create_secrets_store(&config, crypto).await?;
 
         // Verify basic operation works
-        let store = store.unwrap();
-        let exists = store.exists("test_user", "nonexistent_secret").await;
-        assert!(exists.is_ok());
-        assert!(!exists.unwrap());
+        let exists = store.exists("test_user", "nonexistent_secret").await?;
+        assert!(!exists);
+        Ok(())
     }
 }

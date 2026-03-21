@@ -2048,17 +2048,15 @@ impl Store {
 
         let conn = self.conn().await?;
         let consumed_at = Utc::now();
-        for notification_id in notification_ids {
-            conn.execute(
-                r#"
-                UPDATE conversation_notifications
-                SET consumed_at = $2
-                WHERE id = $1 AND consumed_at IS NULL
-                "#,
-                &[notification_id, &consumed_at],
-            )
-            .await?;
-        }
+        conn.execute(
+            r#"
+            UPDATE conversation_notifications
+            SET consumed_at = $2
+            WHERE id = ANY($1) AND consumed_at IS NULL
+            "#,
+            &[&notification_ids, &consumed_at],
+        )
+        .await?;
         Ok(())
     }
 }
@@ -2374,30 +2372,28 @@ mod tests {
     #[cfg(feature = "postgres")]
     #[tokio::test]
     #[ignore]
-    async fn test_save_job_persists_user_id() {
+    async fn test_save_job_persists_user_id() -> Result<(), Box<dyn std::error::Error>> {
         use crate::config::Config;
         use crate::context::JobContext;
 
         let _ = dotenvy::dotenv();
-        let config = Config::from_env().await.expect("Failed to load config");
-        let store = Store::new(&config.database)
-            .await
-            .expect("Failed to connect to database");
-        store
-            .run_migrations()
-            .await
-            .expect("Failed to run migrations");
+        let config = Config::from_env().await?;
+        let store = Store::new(&config.database).await?;
+        store.run_migrations().await?;
 
         let ctx = JobContext::with_user("test-user-42", "PG user_id test", "regression test");
-        store.save_job(&ctx).await.unwrap();
+        store.save_job(&ctx).await?;
 
-        let loaded = store.get_job(ctx.job_id).await.unwrap().unwrap();
+        let loaded = store
+            .get_job(ctx.job_id)
+            .await?
+            .ok_or_else(|| std::io::Error::other("expected saved job to load"))?;
         assert_eq!(loaded.user_id, "test-user-42");
 
         // Clean up
-        let conn = store.conn().await.unwrap();
+        let conn = store.conn().await?;
         conn.execute("DELETE FROM agent_jobs WHERE id = $1", &[&ctx.job_id])
-            .await
-            .unwrap();
+            .await?;
+        Ok(())
     }
 }

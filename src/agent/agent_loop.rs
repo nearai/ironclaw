@@ -157,7 +157,7 @@ async fn persist_routine_notification(
                 .and_then(|value| value.as_str())
         })
         .unwrap_or("routine");
-    let expires_at = Some(chrono::Utc::now() + chrono::TimeDelta::seconds(7 * 24 * 60 * 60));
+    let expires_at = Some(chrono::Utc::now() + chrono::TimeDelta::days(7));
     let metadata = response.metadata.clone();
 
     if let Err(e) = store
@@ -742,13 +742,23 @@ impl Agent {
                                     }
                                 }
                             } else if targeted_ok {
-                                persist_routine_notification(
-                                    store.clone(),
-                                    notify_channel.as_deref().unwrap_or(""),
-                                    &user,
-                                    &response,
-                                )
-                                .await;
+                                if let Some(channel) = notify_channel
+                                    .as_deref()
+                                    .filter(|channel| !channel.is_empty())
+                                {
+                                    persist_routine_notification(
+                                        store.clone(),
+                                        channel,
+                                        &user,
+                                        &response,
+                                    )
+                                    .await;
+                                } else {
+                                    tracing::warn!(
+                                        user = %user,
+                                        "Skipping routine notification persistence: missing notify channel"
+                                    );
+                                }
                             }
                         }
                     });

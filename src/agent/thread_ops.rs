@@ -1899,7 +1899,8 @@ mod tests {
     }
 
     #[test]
-    fn test_rebuild_chat_messages_with_enriched_tool_calls() {
+    fn test_rebuild_chat_messages_with_enriched_tool_calls()
+    -> Result<(), Box<dyn std::error::Error>> {
         let tool_json = serde_json::json!([
             {
                 "name": "memory_search",
@@ -1931,7 +1932,9 @@ mod tests {
         // assistant with tool_calls
         assert_eq!(result[1].role, crate::llm::Role::Assistant);
         assert!(result[1].tool_calls.is_some());
-        let tcs = result[1].tool_calls.as_ref().unwrap();
+        let tcs = result[1].tool_calls.as_ref().ok_or_else(|| {
+            std::io::Error::other("expected assistant tool calls in rebuilt messages")
+        })?;
         assert_eq!(tcs.len(), 2);
         assert_eq!(tcs[0].name, "memory_search");
         assert_eq!(tcs[0].id, "call_0");
@@ -1949,6 +1952,7 @@ mod tests {
         // final assistant
         assert_eq!(result[4].role, crate::llm::Role::Assistant);
         assert_eq!(result[4].content, "I found some results.");
+        Ok(())
     }
 
     #[test]
@@ -2032,7 +2036,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_awaiting_approval_rejection_includes_tool_context() {
+    async fn test_awaiting_approval_rejection_includes_tool_context()
+    -> Result<(), Box<dyn std::error::Error>> {
         // Test that when a thread is in AwaitingApproval state and receives a new message,
         // process_user_input rejects it with a non-error status that includes tool context.
         use crate::agent::session::{PendingApproval, Session, Thread, ThreadState};
@@ -2099,8 +2104,11 @@ mod tests {
                     msg
                 );
             }
-            _ => panic!("Expected approval rejection message"),
+            _ => {
+                return Err(std::io::Error::other("expected approval rejection message").into());
+            }
         }
+        Ok(())
     }
 
     // Helper function to extract the approval message without needing a full Agent instance

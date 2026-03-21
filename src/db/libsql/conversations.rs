@@ -2,7 +2,7 @@
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use libsql::params;
+use libsql::{params, params_from_iter};
 use uuid::Uuid;
 
 use super::{LibSqlBackend, fmt_ts, get_i64, get_json, get_opt_text, get_text, get_ts, opt_text};
@@ -678,18 +678,25 @@ impl ConversationStore for LibSqlBackend {
 
         let conn = self.connect().await?;
         let now = fmt_ts(&Utc::now());
-        for notification_id in notification_ids {
-            conn.execute(
-                r#"
-                UPDATE conversation_notifications
-                SET consumed_at = ?2
-                WHERE id = ?1 AND consumed_at IS NULL
-                "#,
-                params![notification_id.to_string(), now.clone()],
-            )
+        let placeholders: Vec<String> = (1..=notification_ids.len())
+            .map(|idx| format!("?{}", idx))
+            .collect();
+        let sql = format!(
+            "UPDATE conversation_notifications
+             SET consumed_at = ?{}
+             WHERE id IN ({}) AND consumed_at IS NULL",
+            notification_ids.len() + 1,
+            placeholders.join(", ")
+        );
+        let mut values: Vec<libsql::Value> = notification_ids
+            .iter()
+            .map(|id| libsql::Value::Text(id.to_string()))
+            .collect();
+        values.push(libsql::Value::Text(now));
+        let params = params_from_iter(values);
+        conn.execute(sql.as_str(), params)
             .await
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
-        }
         Ok(())
     }
 
@@ -718,13 +725,14 @@ impl ConversationStore for LibSqlBackend {
 mod tests {
     use super::*;
     use crate::db::Database;
+    use std::error::Error;
 
     #[tokio::test]
-    async fn test_get_or_create_routine_conversation_is_idempotent() {
-        let dir = tempfile::tempdir().unwrap();
+    async fn test_get_or_create_routine_conversation_is_idempotent() -> Result<(), Box<dyn Error>> {
+        let dir = tempfile::tempdir()?;
         let db_path = dir.path().join("test_routine_conv.db");
-        let backend = LibSqlBackend::new_local(&db_path).await.unwrap();
-        backend.run_migrations().await.unwrap();
+        let backend = LibSqlBackend::new_local(&db_path).await?;
+        backend.run_migrations().await?;
 
         let routine_id = Uuid::new_v4();
         let user_id = "test_user";
@@ -732,22 +740,19 @@ mod tests {
         // First call — creates the conversation
         let id1 = backend
             .get_or_create_routine_conversation(routine_id, "my-routine", user_id)
-            .await
-            .unwrap();
+            .await?;
 
         // Second call — should return the SAME conversation
         let id2 = backend
             .get_or_create_routine_conversation(routine_id, "my-routine", user_id)
-            .await
-            .unwrap();
+            .await?;
 
         assert_eq!(id1, id2, "Expected same conversation ID on repeated calls");
 
         // Third call — still the same
         let id3 = backend
             .get_or_create_routine_conversation(routine_id, "my-routine", user_id)
-            .await
-            .unwrap();
+            .await?;
 
         assert_eq!(id1, id3);
 
@@ -755,21 +760,21 @@ mod tests {
         let other_routine_id = Uuid::new_v4();
         let id4 = backend
             .get_or_create_routine_conversation(other_routine_id, "other-routine", user_id)
-            .await
-            .unwrap();
+            .await?;
 
         assert_ne!(
             id1, id4,
             "Different routines should get different conversations"
         );
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_routine_conversation_persists_across_messages() {
-        let dir = tempfile::tempdir().unwrap();
+    async fn test_routine_conversation_persists_across_messages() -> Result<(), Box<dyn Error>> {
+        let dir = tempfile::tempdir()?;
         let db_path = dir.path().join("test_routine_persist.db");
-        let backend = LibSqlBackend::new_local(&db_path).await.unwrap();
-        backend.run_migrations().await.unwrap();
+        let backend = LibSqlBackend::new_local(&db_path).await?;
+        backend.run_migrations().await?;
 
         let routine_id = Uuid::new_v4();
         let user_id = "test_user";
@@ -777,32 +782,25 @@ mod tests {
         // First invocation: create conversation and add a message
         let id1 = backend
             .get_or_create_routine_conversation(routine_id, "my-routine", user_id)
-            .await
-            .unwrap();
+            .await?;
 
         backend
             .add_conversation_message(id1, "assistant", "[cron] Completed: all good")
-            .await
-            .unwrap();
+            .await?;
 
         // Second invocation: should find existing conversation
         let id2 = backend
             .get_or_create_routine_conversation(routine_id, "my-routine", user_id)
-            .await
-            .unwrap();
+            .await?;
 
         assert_eq!(id1, id2, "Second invocation should reuse same conversation");
 
         backend
             .add_conversation_message(id2, "assistant", "[cron] Completed: still good")
-            .await
-            .unwrap();
+            .await?;
 
         // Verify only one routine conversation exists (not two)
-        let convs = backend
-            .list_conversations_all_channels(user_id, 50)
-            .await
-            .unwrap();
+        let convs = backend.list_conversations_all_channels(user_id, 50).await?;
 
         let routine_convs: Vec<_> = convs.iter().filter(|c| c.channel == "routine").collect();
         assert_eq!(
@@ -811,39 +809,40 @@ mod tests {
             "Should have exactly 1 routine conversation, found {}",
             routine_convs.len()
         );
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_get_or_create_heartbeat_conversation_is_idempotent() {
-        let dir = tempfile::tempdir().unwrap();
+    async fn test_get_or_create_heartbeat_conversation_is_idempotent() -> Result<(), Box<dyn Error>>
+    {
+        let dir = tempfile::tempdir()?;
         let db_path = dir.path().join("test_heartbeat_conv.db");
-        let backend = LibSqlBackend::new_local(&db_path).await.unwrap();
-        backend.run_migrations().await.unwrap();
+        let backend = LibSqlBackend::new_local(&db_path).await?;
+        backend.run_migrations().await?;
 
         let user_id = "test_user";
 
         let id1 = backend
             .get_or_create_heartbeat_conversation(user_id)
-            .await
-            .unwrap();
+            .await?;
 
         let id2 = backend
             .get_or_create_heartbeat_conversation(user_id)
-            .await
-            .unwrap();
+            .await?;
 
         assert_eq!(
             id1, id2,
             "Expected same heartbeat conversation on repeated calls"
         );
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_conversation_notifications_scope_and_consumption() {
-        let dir = tempfile::tempdir().unwrap();
+    async fn test_conversation_notifications_scope_and_consumption() -> Result<(), Box<dyn Error>> {
+        let dir = tempfile::tempdir()?;
         let db_path = dir.path().join("test_notifications.db");
-        let backend = LibSqlBackend::new_local(&db_path).await.unwrap();
-        backend.run_migrations().await.unwrap();
+        let backend = LibSqlBackend::new_local(&db_path).await?;
+        backend.run_migrations().await?;
 
         let user_id = "test_user";
         let channel = "gateway";
@@ -860,8 +859,7 @@ mod tests {
                 &serde_json::json!({"routine_name": "Scoped"}),
                 None,
             )
-            .await
-            .unwrap();
+            .await?;
         let global_id = backend
             .add_conversation_notification(
                 user_id,
@@ -873,34 +871,30 @@ mod tests {
                 &serde_json::json!({"routine_name": "Global"}),
                 None,
             )
-            .await
-            .unwrap();
+            .await?;
 
         let scoped_notifications = backend
             .list_unread_conversation_notifications(user_id, channel, Some(scoped), 10)
-            .await
-            .unwrap();
+            .await?;
         assert_eq!(scoped_notifications.len(), 2);
         assert_eq!(scoped_notifications[0].id, scoped_id);
         assert_eq!(scoped_notifications[1].id, global_id);
 
         let global_notifications = backend
             .list_unread_conversation_notifications(user_id, channel, None, 10)
-            .await
-            .unwrap();
+            .await?;
         assert_eq!(global_notifications.len(), 1);
         assert_eq!(global_notifications[0].id, global_id);
 
         backend
             .mark_conversation_notifications_consumed(&[scoped_id])
-            .await
-            .unwrap();
+            .await?;
 
         let scoped_notifications = backend
             .list_unread_conversation_notifications(user_id, channel, Some(scoped), 10)
-            .await
-            .unwrap();
+            .await?;
         assert_eq!(scoped_notifications.len(), 1);
         assert_eq!(scoped_notifications[0].id, global_id);
+        Ok(())
     }
 }
