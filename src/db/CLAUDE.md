@@ -37,7 +37,7 @@ cargo check --all-features                            # both
 | `libsql_migrations.rs` | Consolidated libSQL schema (CREATE IF NOT EXISTS, no ALTER TABLE) |
 | `tls.rs` | TLS connector factory for PostgreSQL (`rustls` + system root certs) |
 
-PostgreSQL schema: `migrations/V1__initial.sql` through `V9__flexible_embedding_dimension.sql` (managed by `refinery`). V1 is the base schema; later migrations add tables, columns, and rename `claude_code_events` → `job_events`.
+PostgreSQL schema: `migrations/V1__initial.sql` through `V14__conversation_notifications.sql` (managed by `refinery`). V1 is the base schema; later migrations add tables, columns, and rename `claude_code_events` → `job_events`.
 
 ## Trait Structure
 
@@ -45,7 +45,7 @@ The `Database` supertrait is composed of seven sub-traits. Leaf consumers can de
 
 | Sub-trait | Methods | Covers |
 |-----------|---------|--------|
-| `ConversationStore` | 12 | Conversations, messages |
+| `ConversationStore` | 18 | Conversations, messages, routine notifications |
 | `JobStore` | 13 | Agent jobs, actions, LLM calls, estimation |
 | `SandboxStore` | 13 | Sandbox jobs, job events |
 | `RoutineStore` | 15 | Routines, routine runs |
@@ -99,6 +99,7 @@ The `Database` supertrait is composed of seven sub-traits. Leaf consumers can de
 **Core:**
 - `conversations` — multi-channel conversation tracking
 - `conversation_messages` — individual messages within a conversation
+- `conversation_notifications` — unread routine notification records injected into the next user turn
 - `agent_jobs` — job metadata and status
 - `job_actions` — event-sourced tool executions
 - `job_events` — sandbox job streaming events (renamed from `claude_code_events` in V7)

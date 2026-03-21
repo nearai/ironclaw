@@ -20,15 +20,96 @@ use crate::channels::web::util::truncate_preview;
 use crate::channels::{IncomingMessage, StatusUpdate};
 use crate::context::JobContext;
 use crate::error::Error;
+use crate::history::ConversationNotification;
 use crate::llm::{ChatMessage, ToolCall};
 use crate::tools::redact_params;
 
 const FORGED_THREAD_ID_ERROR: &str = "Invalid or unauthorized thread ID.";
+const ROUTINE_NOTIFICATION_CONTEXT_LIMIT: i64 = 5;
+const ROUTINE_NOTIFICATION_PREVIEW_CHARS: usize = 400;
 
 fn requires_preexisting_uuid_thread(channel: &str) -> bool {
     // Gateway-style channels send server-issued conversation UUIDs.
     // Unknown UUIDs should be rejected instead of silently creating a new thread.
     matches!(channel, "gateway" | "test")
+}
+
+fn routine_notification_title(notification: &ConversationNotification) -> String {
+    notification
+        .metadata
+        .get("routine_name")
+        .and_then(|value| value.as_str())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| notification.source_id.clone())
+}
+
+fn routine_notification_digest(notifications: &[ConversationNotification]) -> String {
+    let mut lines = Vec::with_capacity(notifications.len() + 2);
+    lines.push("Recent routine notifications for this conversation:".to_string());
+    for notification in notifications {
+        let title = routine_notification_title(notification);
+        let preview = truncate_preview(&notification.content, ROUTINE_NOTIFICATION_PREVIEW_CHARS);
+        lines.push(format!("- {title}: {preview}"));
+    }
+    lines.push("Use this context when answering the user's next message.".to_string());
+    lines.join("\n")
+}
+
+async fn load_routine_notification_context(
+    agent: &Agent,
+    message: &IncomingMessage,
+) -> (Vec<Uuid>, Option<ChatMessage>) {
+    let Some(store) = agent.store() else {
+        return (Vec::new(), None);
+    };
+
+    let scope = message.conversation_scope();
+    match store
+        .list_unread_conversation_notifications(
+            &message.user_id,
+            &message.channel,
+            scope,
+            ROUTINE_NOTIFICATION_CONTEXT_LIMIT,
+        )
+        .await
+    {
+        Ok(notifications) if !notifications.is_empty() => {
+            let notification_ids = notifications.iter().map(|n| n.id).collect();
+            let digest = routine_notification_digest(&notifications);
+            (notification_ids, Some(ChatMessage::system(digest)))
+        }
+        Ok(_) => (Vec::new(), None),
+        Err(e) => {
+            tracing::warn!(
+                user = %message.user_id,
+                channel = %message.channel,
+                error = %e,
+                "Failed to load routine notification context"
+            );
+            (Vec::new(), None)
+        }
+    }
+}
+
+async fn consume_routine_notification_context(agent: &Agent, notification_ids: &[Uuid]) {
+    if notification_ids.is_empty() {
+        return;
+    }
+
+    let Some(store) = agent.store() else {
+        return;
+    };
+
+    if let Err(e) = store
+        .mark_conversation_notifications_consumed(notification_ids)
+        .await
+    {
+        tracing::warn!(
+            notification_count = notification_ids.len(),
+            error = %e,
+            "Failed to mark routine notifications consumed"
+        );
+    }
 }
 
 impl Agent {
@@ -361,7 +442,7 @@ impl Agent {
         };
 
         // Start the turn and get messages
-        let turn_messages = {
+        let mut turn_messages = {
             let mut sess = session.lock().await;
             let thread = sess
                 .threads
@@ -371,6 +452,12 @@ impl Agent {
             turn.image_content_parts = image_parts;
             thread.messages()
         };
+
+        let (notification_ids, notification_context) =
+            load_routine_notification_context(self, message).await;
+        if let Some(notification_message) = notification_context {
+            turn_messages.insert(0, notification_message);
+        }
 
         // Persist user message to DB immediately so it survives crashes
         tracing::debug!(
@@ -415,6 +502,7 @@ impl Agent {
             .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
 
         if thread.state == ThreadState::Interrupted {
+            consume_routine_notification_context(self, &notification_ids).await;
             let _ = self
                 .channels
                 .send_status(
@@ -498,6 +586,7 @@ impl Agent {
                         .await;
                 }
 
+                consume_routine_notification_context(self, &notification_ids).await;
                 Ok(SubmissionResult::response(response))
             }
             Ok(AgenticLoopResult::NeedApproval { pending }) => {
@@ -522,6 +611,7 @@ impl Agent {
                         &message.metadata,
                     )
                     .await;
+                consume_routine_notification_context(self, &notification_ids).await;
                 Ok(SubmissionResult::NeedApproval {
                     request_id,
                     tool_name,
@@ -533,6 +623,7 @@ impl Agent {
             Err(e) => {
                 thread.fail_turn(e.to_string());
                 // User message already persisted at turn start; nothing else to save
+                consume_routine_notification_context(self, &notification_ids).await;
                 Ok(SubmissionResult::error(e.to_string()))
             }
         }

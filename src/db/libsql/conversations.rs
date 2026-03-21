@@ -8,7 +8,7 @@ use uuid::Uuid;
 use super::{LibSqlBackend, fmt_ts, get_i64, get_json, get_opt_text, get_text, get_ts, opt_text};
 use crate::db::ConversationStore;
 use crate::error::DatabaseError;
-use crate::history::{ConversationMessage, ConversationSummary};
+use crate::history::{ConversationMessage, ConversationNotification, ConversationSummary};
 
 #[async_trait]
 impl ConversationStore for LibSqlBackend {
@@ -58,6 +58,48 @@ impl ConversationStore for LibSqlBackend {
             .await
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
         self.touch_conversation(conversation_id).await?;
+        Ok(id)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn add_conversation_notification(
+        &self,
+        user_id: &str,
+        channel: &str,
+        conversation_scope_id: Option<&str>,
+        source_kind: &str,
+        source_id: &str,
+        content: &str,
+        metadata: &serde_json::Value,
+        expires_at: Option<DateTime<Utc>>,
+    ) -> Result<Uuid, DatabaseError> {
+        let conn = self.connect().await?;
+        let id = Uuid::new_v4();
+        let now = fmt_ts(&Utc::now());
+        conn.execute(
+            r#"
+            INSERT INTO conversation_notifications (
+                id, user_id, channel, conversation_scope_id,
+                source_kind, source_id, content, metadata,
+                created_at, expires_at
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            "#,
+            params![
+                id.to_string(),
+                user_id,
+                channel,
+                opt_text(conversation_scope_id),
+                source_kind,
+                source_id,
+                content,
+                metadata.to_string(),
+                now,
+                expires_at.as_ref().map(fmt_ts)
+            ],
+        )
+        .await
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
         Ok(id)
     }
 
@@ -546,6 +588,111 @@ impl ConversationStore for LibSqlBackend {
         Ok(messages)
     }
 
+    async fn list_unread_conversation_notifications(
+        &self,
+        user_id: &str,
+        channel: &str,
+        conversation_scope_id: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<ConversationNotification>, DatabaseError> {
+        let conn = self.connect().await?;
+        let now = fmt_ts(&Utc::now());
+        let mut rows = if let Some(scope) = conversation_scope_id {
+            conn.query(
+                r#"
+                SELECT id, user_id, channel, conversation_scope_id,
+                       source_kind, source_id, content, metadata,
+                       created_at, consumed_at, expires_at
+                FROM conversation_notifications
+                WHERE user_id = ?1
+                  AND channel = ?2
+                  AND consumed_at IS NULL
+                  AND (expires_at IS NULL OR expires_at > ?3)
+                  AND (conversation_scope_id IS NULL OR conversation_scope_id = ?4)
+                ORDER BY datetime(created_at) ASC, rowid ASC
+                LIMIT ?5
+                "#,
+                params![user_id, channel, now, scope, limit],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        } else {
+            conn.query(
+                r#"
+                SELECT id, user_id, channel, conversation_scope_id,
+                       source_kind, source_id, content, metadata,
+                       created_at, consumed_at, expires_at
+                FROM conversation_notifications
+                WHERE user_id = ?1
+                  AND channel = ?2
+                  AND conversation_scope_id IS NULL
+                  AND consumed_at IS NULL
+                  AND (expires_at IS NULL OR expires_at > ?3)
+                ORDER BY datetime(created_at) ASC, rowid ASC
+                LIMIT ?4
+                "#,
+                params![user_id, channel, now, limit],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        };
+
+        let mut notifications = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        {
+            notifications.push(ConversationNotification {
+                id: get_text(&row, 0).parse().unwrap_or_default(),
+                user_id: get_text(&row, 1),
+                channel: get_text(&row, 2),
+                conversation_scope_id: get_opt_text(&row, 3),
+                source_kind: get_text(&row, 4),
+                source_id: get_text(&row, 5),
+                content: get_text(&row, 6),
+                metadata: get_json(&row, 7),
+                created_at: get_ts(&row, 8),
+                consumed_at: get_opt_text(&row, 9).and_then(|ts| {
+                    chrono::DateTime::parse_from_rfc3339(&ts)
+                        .ok()
+                        .map(|dt| dt.with_timezone(&Utc))
+                }),
+                expires_at: get_opt_text(&row, 10).and_then(|ts| {
+                    chrono::DateTime::parse_from_rfc3339(&ts)
+                        .ok()
+                        .map(|dt| dt.with_timezone(&Utc))
+                }),
+            });
+        }
+        Ok(notifications)
+    }
+
+    async fn mark_conversation_notifications_consumed(
+        &self,
+        notification_ids: &[Uuid],
+    ) -> Result<(), DatabaseError> {
+        if notification_ids.is_empty() {
+            return Ok(());
+        }
+
+        let conn = self.connect().await?;
+        let now = fmt_ts(&Utc::now());
+        for notification_id in notification_ids {
+            conn.execute(
+                r#"
+                UPDATE conversation_notifications
+                SET consumed_at = ?2
+                WHERE id = ?1 AND consumed_at IS NULL
+                "#,
+                params![notification_id.to_string(), now.clone()],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        }
+        Ok(())
+    }
+
     async fn conversation_belongs_to_user(
         &self,
         conversation_id: Uuid,
@@ -689,5 +836,71 @@ mod tests {
             id1, id2,
             "Expected same heartbeat conversation on repeated calls"
         );
+    }
+
+    #[tokio::test]
+    async fn test_conversation_notifications_scope_and_consumption() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test_notifications.db");
+        let backend = LibSqlBackend::new_local(&db_path).await.unwrap();
+        backend.run_migrations().await.unwrap();
+
+        let user_id = "test_user";
+        let channel = "gateway";
+        let scoped = "thread-123";
+
+        let scoped_id = backend
+            .add_conversation_notification(
+                user_id,
+                channel,
+                Some(scoped),
+                "routine",
+                "routine-1",
+                "Scoped notification",
+                &serde_json::json!({"routine_name": "Scoped"}),
+                None,
+            )
+            .await
+            .unwrap();
+        let global_id = backend
+            .add_conversation_notification(
+                user_id,
+                channel,
+                None,
+                "routine",
+                "routine-2",
+                "Global notification",
+                &serde_json::json!({"routine_name": "Global"}),
+                None,
+            )
+            .await
+            .unwrap();
+
+        let scoped_notifications = backend
+            .list_unread_conversation_notifications(user_id, channel, Some(scoped), 10)
+            .await
+            .unwrap();
+        assert_eq!(scoped_notifications.len(), 2);
+        assert_eq!(scoped_notifications[0].id, scoped_id);
+        assert_eq!(scoped_notifications[1].id, global_id);
+
+        let global_notifications = backend
+            .list_unread_conversation_notifications(user_id, channel, None, 10)
+            .await
+            .unwrap();
+        assert_eq!(global_notifications.len(), 1);
+        assert_eq!(global_notifications[0].id, global_id);
+
+        backend
+            .mark_conversation_notifications_consumed(&[scoped_id])
+            .await
+            .unwrap();
+
+        let scoped_notifications = backend
+            .list_unread_conversation_notifications(user_id, channel, Some(scoped), 10)
+            .await
+            .unwrap();
+        assert_eq!(scoped_notifications.len(), 1);
+        assert_eq!(scoped_notifications[0].id, global_id);
     }
 }

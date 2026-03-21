@@ -136,6 +136,52 @@ fn should_fallback_routine_notification(error: &ChannelError) -> bool {
     !matches!(error, ChannelError::MissingRoutingTarget { .. })
 }
 
+async fn persist_routine_notification(
+    store: Option<Arc<dyn Database>>,
+    channel: &str,
+    user_id: &str,
+    response: &OutgoingResponse,
+) {
+    let Some(store) = store else {
+        return;
+    };
+
+    let source_id = response
+        .metadata
+        .get("routine_id")
+        .and_then(|value| value.as_str())
+        .or_else(|| {
+            response
+                .metadata
+                .get("routine_name")
+                .and_then(|value| value.as_str())
+        })
+        .unwrap_or("routine");
+    let expires_at = Some(chrono::Utc::now() + chrono::TimeDelta::seconds(7 * 24 * 60 * 60));
+    let metadata = response.metadata.clone();
+
+    if let Err(e) = store
+        .add_conversation_notification(
+            user_id,
+            channel,
+            None,
+            "routine",
+            source_id,
+            &response.content,
+            &metadata,
+            expires_at,
+        )
+        .await
+    {
+        tracing::warn!(
+            channel = %channel,
+            user = %user_id,
+            error = %e,
+            "Failed to persist routine notification context"
+        );
+    }
+}
+
 /// Core dependencies for the agent.
 ///
 /// Bundles the shared components to reduce argument count.
@@ -620,6 +666,7 @@ impl Agent {
 
                     // Spawn notification forwarder (mirrors heartbeat pattern)
                     let channels = self.channels.clone();
+                    let store = self.store().cloned();
                     let extension_manager = self.deps.extension_manager.clone();
                     tokio::spawn(async move {
                         while let Some(response) = notify_rx.recv().await {
@@ -674,7 +721,9 @@ impl Agent {
                             };
 
                             if !targeted_ok && let Some(user) = fallback_user {
-                                let results = channels.broadcast_all(&user, response).await;
+                                let fallback_response = response.clone();
+                                let results =
+                                    channels.broadcast_all(&user, fallback_response).await;
                                 for (ch, result) in results {
                                     if let Err(e) = result {
                                         tracing::warn!(
@@ -682,8 +731,24 @@ impl Agent {
                                             ch,
                                             e
                                         );
+                                    } else {
+                                        persist_routine_notification(
+                                            store.clone(),
+                                            &ch,
+                                            &user,
+                                            &response,
+                                        )
+                                        .await;
                                     }
                                 }
+                            } else if targeted_ok {
+                                persist_routine_notification(
+                                    store.clone(),
+                                    notify_channel.as_deref().unwrap_or(""),
+                                    &user,
+                                    &response,
+                                )
+                                .await;
                             }
                         }
                     });

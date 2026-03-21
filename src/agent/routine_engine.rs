@@ -627,6 +627,7 @@ impl RoutineEngine {
             &self.notify_tx,
             &routine.notify,
             &routine.user_id,
+            routine.id,
             &routine.name,
             status,
             Some(summary),
@@ -1103,6 +1104,7 @@ async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) 
         &ctx.notify_tx,
         &routine.notify,
         &routine.user_id,
+        routine.id,
         &routine.name,
         status,
         summary.as_deref(),
@@ -1706,10 +1708,12 @@ async fn execute_routine_tool(
 }
 
 /// Send a notification based on the routine's notify config and run status.
+#[allow(clippy::too_many_arguments)]
 async fn send_notification(
     tx: &mpsc::Sender<OutgoingResponse>,
     notify: &NotifyConfig,
     owner_id: &str,
+    routine_id: Uuid,
     routine_name: &str,
     status: RunStatus,
     summary: Option<&str>,
@@ -1744,11 +1748,13 @@ async fn send_notification(
         attachments: Vec::new(),
         metadata: serde_json::json!({
             "source": "routine",
+            "routine_id": routine_id,
             "routine_name": routine_name,
             "status": status.to_string(),
             "owner_id": owner_id,
             "notify_user": notify.user,
             "notify_channel": notify.channel,
+            "notify_thread_id": thread_id,
         }),
     };
 
