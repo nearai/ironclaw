@@ -761,9 +761,9 @@ impl TestRigBuilder {
             document_extraction: None,
             sandbox_readiness: ironclaw::agent::SandboxReadiness::Available, // tests don't use real Docker
             builder: None,
-llm_backend: "nearai".to_string(),
+            llm_backend: "nearai".to_string(),
             tenant_rates: std::sync::Arc::new(ironclaw::tenant::TenantRateRegistry::new(4, 3)),
-    channel_routing: None,
+            channel_routing: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         };
 
         // 7. Create TestChannel and ChannelManager.

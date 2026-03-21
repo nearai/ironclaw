@@ -179,13 +179,14 @@ pub struct AgentDeps {
     pub sandbox_readiness: crate::agent::routine_engine::SandboxReadiness,
     /// Software builder for self-repair tool rebuilding.
     pub builder: Option<Arc<dyn crate::tools::SoftwareBuilder>>,
-/// Resolved LLM backend identifier (e.g., "nearai", "openai", "groq").
+    /// Resolved LLM backend identifier (e.g., "nearai", "openai", "groq").
     /// Used by `/model` persistence to determine which env var to update.
     pub llm_backend: String,
     /// Per-tenant rate limiting registry (lazily creates rate state per user).
     pub tenant_rates: Arc<crate::tenant::TenantRateRegistry>,
-    /// Per-channel tool routing config (loaded from channel-routing.json).
-    pub channel_routing: Option<Arc<crate::agent::channel_routing::ChannelRoutingConfig>>,
+    /// Per-channel tool routing config. Wrapped in RwLock for hot-reload support.
+    pub channel_routing:
+        Arc<tokio::sync::RwLock<Option<crate::agent::channel_routing::ChannelRoutingConfig>>>,
 }
 
 /// The main agent that coordinates all components.
