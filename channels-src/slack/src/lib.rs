@@ -555,6 +555,7 @@ fn notify_auth_failure(error: &str) {
         ),
         thread_id: None,
         metadata_json: "{}".to_string(),
+        attachments: Vec::new(),
     });
 }
 
@@ -1199,6 +1200,7 @@ mod tests {
             config.allow_from,
             Some(vec!["U456".to_string(), "U789".to_string()])
         );
+    }
 
     #[test]
     fn test_extract_slack_attachments_with_files() {
