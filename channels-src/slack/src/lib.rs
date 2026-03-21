@@ -608,6 +608,14 @@ fn download_slack_file(url: &str) -> Result<Vec<u8>, String> {
     Ok(response.body)
 }
 
+/// Normalize Slack message text for agent delivery.
+///
+/// Attachment-only Slack messages may omit `text`, but we still want to emit the
+/// message so the attachment pipeline can process the files.
+fn normalize_message_text(text: Option<String>) -> String {
+    text.unwrap_or_default()
+}
+
 /// Download file bytes and store them via the host for processing.
 ///
 /// Downloads all file types (images, documents, etc.) so the host-side
@@ -690,12 +698,12 @@ fn handle_slack_event(event: SlackEvent, team_id: Option<String>, _event_id: Opt
     match event.event_type.as_str() {
         // Direct mention of the bot (always in a channel, not a DM)
         "app_mention" => {
-            if let (Some(user), Some(channel), Some(text), Some(ts)) = (
+            if let (Some(user), Some(channel), Some(ts)) = (
                 event.user,
                 event.channel.clone(),
-                event.text,
                 event.ts.clone(),
             ) {
+                let text = normalize_message_text(event.text);
                 // app_mention is always in a channel (not DM)
                 if !check_sender_permission(&user, &channel, false) {
                     return;
@@ -723,12 +731,12 @@ fn handle_slack_event(event: SlackEvent, team_id: Option<String>, _event_id: Opt
                 return;
             }
 
-            if let (Some(user), Some(channel), Some(text), Some(ts)) = (
+            if let (Some(user), Some(channel), Some(ts)) = (
                 event.user,
                 event.channel.clone(),
-                event.text,
                 event.ts.clone(),
             ) {
+                let text = normalize_message_text(event.text);
                 let is_dm = channel.starts_with('D');
                 let is_threaded_reply = event.thread_ts.is_some();
 
@@ -1309,5 +1317,43 @@ mod tests {
     fn test_max_download_size_constant() {
         // Verify the constant is 20 MB
         assert_eq!(MAX_DOWNLOAD_SIZE_BYTES, 20 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_normalize_message_text_preserves_text() {
+        assert_eq!(
+            normalize_message_text(Some("Check this".to_string())),
+            "Check this"
+        );
+    }
+
+    #[test]
+    fn test_normalize_message_text_allows_attachment_only_messages() {
+        assert_eq!(normalize_message_text(None), "");
+    }
+
+    #[test]
+    fn test_parse_slack_event_attachment_only_message() {
+        let json = r#"{
+            "type": "message",
+            "user": "U123",
+            "channel": "D456",
+            "ts": "1234567890.000001",
+            "files": [
+                {
+                    "id": "F001",
+                    "mimetype": "application/pdf",
+                    "name": "report.pdf",
+                    "size": 30000,
+                    "url_private": "https://files.slack.com/files-pri/T123-F001/report.pdf"
+                }
+            ]
+        }"#;
+
+        let event: SlackEvent = serde_json::from_str(json).unwrap();
+        assert_eq!(normalize_message_text(event.text), "");
+        let attachments = extract_slack_attachments(&event.files);
+        assert_eq!(attachments.len(), 1);
+        assert_eq!(attachments[0].filename.as_deref(), Some("report.pdf"));
     }
 }

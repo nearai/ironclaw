@@ -27,13 +27,14 @@
   "capabilities": {
     "http": {
       "allowlist": [
-        { "host": "slack.com", "path_prefix": "/api/" }
+        { "host": "slack.com", "path_prefix": "/api/" },
+        { "host": "files.slack.com" }
       ],
       "credentials": {
         "slack_bot": {
           "secret_name": "slack_bot_token",
           "location": { "type": "bearer" },
-          "host_patterns": ["slack.com"]
+          "host_patterns": ["slack.com", "files.slack.com"]
         }
       },
       "rate_limit": {

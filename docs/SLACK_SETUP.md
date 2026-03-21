@@ -28,6 +28,7 @@ The Slack channel lets you interact with IronClaw from Slack DMs, `@mentions`, a
 - **DM pairing**: approve unknown DM senders before they can message the agent
 - **Owner restriction**: lock the channel to a single Slack user ID
 - **Thread replies**: continue conversations in Slack threads
+- **Inbound attachments**: download Slack files and pass images/documents through IronClaw's attachment pipeline
 
 ## Prerequisites
 
@@ -115,11 +116,14 @@ Use the following bot token scopes for the current IronClaw Slack channel.
 | `channels:history` | You want threaded follow-up messages in public channels | Lets IronClaw receive `message.channels` events for public channel threads |
 | `groups:history` | You want threaded follow-up messages in private channels | Lets IronClaw receive `message.groups` events for private channel threads |
 | `mpim:history` | You use multi-person DMs | Lets IronClaw receive `message.mpim` events |
-| `files:read` | You want the agent to process files shared in Slack messages | Lets IronClaw download shared Slack files from `url_private` links |
+| `files:read` | You want the agent to process files shared in Slack messages | Lets IronClaw download shared Slack files from authenticated `url_private` links on `files.slack.com` and make them available to the attachment pipeline |
 
 ### Notes
 
-- `files:read` is optional, but recommended if people will share attachments with the bot
+- `files:read` is required for inbound attachment support
+- Without `files:read`, Slack text messages still work, but shared files cannot be downloaded or processed
+- Attachment-only Slack messages are supported; users do not need to add companion text for the file to reach the agent
+- Supported handling depends on IronClaw's configured middleware and the selected model. Common cases include text/Markdown, PDF, Office documents, JSON/CSV, and images
 - Slash commands are not required for the current IronClaw Slack channel
 - Slack interactivity is not required for the current IronClaw Slack channel
 
