@@ -149,17 +149,12 @@ fn filter_lines(
     ignore_case: bool,
     context: usize,
 ) -> anyhow::Result<Vec<String>> {
-    use regex::{Regex, RegexBuilder};
+    use regex::RegexBuilder;
 
-    let re = if ignore_case {
-        RegexBuilder::new(pattern)
-            .case_insensitive(true)
-            .build()
-            .map_err(|e| anyhow::anyhow!("Invalid regex pattern '{}': {}", pattern, e))?
-    } else {
-        Regex::new(pattern)
-            .map_err(|e| anyhow::anyhow!("Invalid regex pattern '{}': {}", pattern, e))?
-    };
+    let re = RegexBuilder::new(pattern)
+        .case_insensitive(ignore_case)
+        .build()
+        .map_err(|e| anyhow::anyhow!("Invalid regex pattern '{}': {}", pattern, e))?;
 
     if context == 0 {
         // Simple filtering: only matching lines
@@ -733,7 +728,6 @@ mod tests {
     fn test_filter_lines_invalid_regex() {
         let lines = vec!["test".to_string()];
         let result = filter_lines(lines, "[invalid", false, 0);
-        assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Invalid regex"));
     }
 }
