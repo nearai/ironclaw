@@ -937,6 +937,31 @@ impl ExtensionManager {
         &self.secrets
     }
 
+    /// Inject a pre-created MCP client (from startup loading) into the manager.
+    ///
+    /// Startup-loaded MCP clients register their tools in `ToolRegistry` but are
+    /// otherwise dropped. This method stores the client so that `list()` reports
+    /// accurate "connected" status and reconnection/session management works.
+    pub(crate) async fn inject_mcp_client(
+        &self,
+        name: String,
+        client: Arc<crate::tools::mcp::McpClient>,
+    ) {
+        if name.is_empty() {
+            tracing::warn!("inject_mcp_client called with empty name; ignoring");
+            return;
+        }
+        if let Err(e) = Self::validate_extension_name(&name) {
+            tracing::warn!(
+                error = %e,
+                name = %name,
+                "inject_mcp_client called with invalid name; ignoring"
+            );
+            return;
+        }
+        self.mcp_clients.write().await.insert(name, client);
+    }
+
     /// Register channel names that were loaded at startup.
     /// Called after WASM channels are loaded so `list()` reports accurate active status.
     pub async fn set_active_channels(&self, names: Vec<String>) {
