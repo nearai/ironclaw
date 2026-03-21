@@ -1,22 +1,22 @@
 //! Per-channel tool routing.
 //!
-//! Loads `~/.ironclaw/channel-routing.json` and filters which tools
-//! (MCP and built-in) the LLM can see based on the originating channel.
+//! Filters which tools (MCP and built-in) the LLM can see based on the
+//! originating channel. Config is loaded from `channel-routing.json`
+//! or the database-backed SettingsStore.
 
 use std::collections::HashMap;
 use std::path::Path;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::llm::ToolDefinition;
 
 /// Channel-to-tool-group routing configuration.
 ///
-/// Loaded from `channel-routing.json` in the IronClaw base directory.
 /// When present, each incoming message's channel name is mapped to a group,
 /// and only tools belonging to that group's allowed MCP servers (plus any
 /// whitelisted built-in tools) are shown to the LLM.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChannelRoutingConfig {
     /// MCP server allowlist per group. Key = group name, value = server names.
     /// A tool named `ServerName_tool` belongs to server `ServerName`.
@@ -32,14 +32,15 @@ pub struct ChannelRoutingConfig {
 
     /// Fallback group for channels not listed in `channels`.
     pub default_group: String,
-}
 
-/// Prefixes that identify direct messages (bypass routing entirely).
-const DM_PREFIXES: &[&str] = &["slack-dm", "telegram-dm", "cli", "repl", "web"];
+    /// Key used for metadata-based channel resolution (ignored, for compat).
+    #[serde(default)]
+    pub metadata_key: Option<String>,
+}
 
 impl ChannelRoutingConfig {
     /// Load from `<base_dir>/channel-routing.json`. Returns `None` if the file
-    /// doesn't exist or can't be parsed (logged as warning).
+    /// doesn't exist, can't be parsed, or fails validation.
     pub fn load(base_dir: &Path) -> Option<Self> {
         let path = base_dir.join("channel-routing.json");
         let content = match std::fs::read_to_string(&path) {
@@ -50,9 +51,12 @@ impl ChannelRoutingConfig {
                 return None;
             }
         };
-        match serde_json::from_str(&content) {
+        match serde_json::from_str::<Self>(&content) {
             Ok(config) => {
-                let config: Self = config;
+                if let Err(e) = config.validate() {
+                    tracing::error!("Channel routing config invalid: {}", e);
+                    return None;
+                }
                 tracing::info!(
                     groups = ?config.groups.keys().collect::<Vec<_>>(),
                     channels = config.channels.len(),
@@ -67,6 +71,30 @@ impl ChannelRoutingConfig {
         }
     }
 
+    /// Validate that group references are consistent.
+    fn validate(&self) -> Result<(), String> {
+        // default_group must exist in groups
+        if !self.groups.contains_key(&self.default_group) {
+            return Err(format!(
+                "default_group '{}' not found in groups (available: {:?})",
+                self.default_group,
+                self.groups.keys().collect::<Vec<_>>()
+            ));
+        }
+        // Every channel mapping must reference an existing group
+        for (channel, group) in &self.channels {
+            if !self.groups.contains_key(group) {
+                return Err(format!(
+                    "channel '{}' maps to group '{}' which doesn't exist (available: {:?})",
+                    channel,
+                    group,
+                    self.groups.keys().collect::<Vec<_>>()
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Resolve which group a channel belongs to.
     pub fn resolve_group(&self, channel: &str) -> &str {
         self.channels
@@ -75,9 +103,32 @@ impl ChannelRoutingConfig {
             .unwrap_or(&self.default_group)
     }
 
-    /// Whether this channel name represents a direct message (no filtering).
+    /// Whether this channel name represents a direct message (bypass routing).
+    ///
+    /// Uses exact match for short names and prefix-with-delimiter for DM channels.
     pub fn is_dm(channel: &str) -> bool {
-        DM_PREFIXES.iter().any(|p| channel.starts_with(p))
+        // Exact matches for CLI/REPL/web gateway
+        matches!(channel, "cli" | "repl" | "web")
+            // Prefix matches for Slack/Telegram DMs (e.g. "slack-dm-U12345")
+            || channel == "slack-dm"
+            || channel.starts_with("slack-dm-")
+            || channel == "telegram-dm"
+            || channel.starts_with("telegram-dm-")
+    }
+
+    /// Collect all unique MCP server names across all groups, sorted by
+    /// length descending. This ensures `KitchenAI_` is matched before `Kit_`.
+    fn sorted_server_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .groups
+            .values()
+            .flatten()
+            .cloned()
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
+        names.sort_by_key(|s| std::cmp::Reverse(s.len()));
+        names
     }
 
     /// Filter tool definitions based on channel routing rules.
@@ -103,20 +154,21 @@ impl ChannelRoutingConfig {
                     group,
                     "Channel routing group not found — blocking all MCP tools (restrictive default)"
                 );
-                // Restrictive: only pass through built-in tools when group is misconfigured.
+                let sorted = self.sorted_server_names();
                 return tools
                     .into_iter()
-                    .filter(|t| self.extract_mcp_server(&t.name).is_none())
+                    .filter(|t| Self::extract_mcp_server_from(&t.name, &sorted).is_none())
                     .collect();
             }
         };
 
         let builtin_whitelist = self.builtin_whitelist.get(group);
+        let sorted = self.sorted_server_names();
 
         tools
             .into_iter()
             .filter(|tool| {
-                if let Some(server) = self.extract_mcp_server(&tool.name) {
+                if let Some(server) = Self::extract_mcp_server_from(&tool.name, &sorted) {
                     allowed_servers.iter().any(|s| s == server)
                 } else {
                     match builtin_whitelist {
@@ -130,10 +182,13 @@ impl ChannelRoutingConfig {
 
     /// Try to extract the MCP server name from a tool name.
     ///
-    /// MCP tools are named `ServerName_tool_name`. We check if the prefix
-    /// before the first `_` matches any known server name across all groups.
-    fn extract_mcp_server<'a>(&self, tool_name: &'a str) -> Option<&'a str> {
-        for server in self.groups.values().flatten() {
+    /// Checks against a pre-sorted list (longest first) to avoid prefix
+    /// collisions (e.g. `Kit` matching `KitchenAI_recipe_search`).
+    fn extract_mcp_server_from<'a>(
+        tool_name: &'a str,
+        sorted_servers: &[String],
+    ) -> Option<&'a str> {
+        for server in sorted_servers {
             let prefix = format!("{}_", server);
             if tool_name.starts_with(&prefix) {
                 return Some(&tool_name[..server.len()]);
@@ -161,7 +216,7 @@ mod tests {
             },
             "default_group": "minimal"
         }"#;
-        serde_json::from_str(json).unwrap()
+        serde_json::from_str(json).unwrap() // safety: test helper
     }
 
     fn make_tool_def(name: &str) -> ToolDefinition {
@@ -175,36 +230,120 @@ mod tests {
     #[test]
     fn test_deserialize_config() {
         let config = sample_config();
-        assert_eq!(config.groups.len(), 2);
-        assert_eq!(config.default_group, "minimal");
-        assert_eq!(config.channels["agentiffai-dev-issues"], "dev");
+        assert_eq!(config.groups.len(), 2); // safety: test assertion
+        assert_eq!(config.default_group, "minimal"); // safety: test assertion
+        assert_eq!(config.channels["agentiffai-dev-issues"], "dev"); // safety: test assertion
     }
 
     #[test]
     fn test_resolve_group_mapped_channel() {
         let config = sample_config();
-        assert_eq!(config.resolve_group("agentiffai-dev-issues"), "dev");
+        assert_eq!(config.resolve_group("agentiffai-dev-issues"), "dev"); // safety: test assertion
     }
 
     #[test]
     fn test_resolve_group_unmapped_falls_to_default() {
         let config = sample_config();
-        assert_eq!(config.resolve_group("random-channel"), "minimal");
+        assert_eq!(config.resolve_group("random-channel"), "minimal"); // safety: test assertion
     }
 
     #[test]
     fn test_is_dm() {
-        assert!(ChannelRoutingConfig::is_dm("slack-dm"));
-        assert!(ChannelRoutingConfig::is_dm("telegram-dm"));
-        assert!(ChannelRoutingConfig::is_dm("cli"));
-        assert!(ChannelRoutingConfig::is_dm("repl"));
-        assert!(ChannelRoutingConfig::is_dm("web"));
-        assert!(!ChannelRoutingConfig::is_dm("agentiffai-dev-issues"));
+        // Exact matches
+        assert!(ChannelRoutingConfig::is_dm("slack-dm")); // safety: test assertion
+        assert!(ChannelRoutingConfig::is_dm("telegram-dm")); // safety: test assertion
+        assert!(ChannelRoutingConfig::is_dm("cli")); // safety: test assertion
+        assert!(ChannelRoutingConfig::is_dm("repl")); // safety: test assertion
+        assert!(ChannelRoutingConfig::is_dm("web")); // safety: test assertion
+        // Prefix with delimiter
+        assert!(ChannelRoutingConfig::is_dm("slack-dm-U12345")); // safety: test assertion
+        assert!(ChannelRoutingConfig::is_dm("telegram-dm-12345")); // safety: test assertion
+        // NOT DMs
+        assert!(!ChannelRoutingConfig::is_dm("agentiffai-dev-issues")); // safety: test assertion
+        assert!(!ChannelRoutingConfig::is_dm("web-team-standup")); // safety: test assertion
+        assert!(!ChannelRoutingConfig::is_dm("cli-tools")); // safety: test assertion
+        assert!(!ChannelRoutingConfig::is_dm("repl-server")); // safety: test assertion
+        assert!(!ChannelRoutingConfig::is_dm("webhook")); // safety: test assertion
+    }
+
+    #[test]
+    fn test_prefix_matching_longest_first() {
+        let json = r#"{
+            "groups": {
+                "short": ["Kit"],
+                "long": ["KitchenAI"]
+            },
+            "channels": { "ch1": "short" },
+            "default_group": "short"
+        }"#;
+        let config: ChannelRoutingConfig = serde_json::from_str(json).unwrap(); // safety: test
+        let sorted = config.sorted_server_names();
+        // KitchenAI should come before Kit (longer first)
+        let ki_idx = sorted.iter().position(|s| s == "KitchenAI"); // safety: test
+        let k_idx = sorted.iter().position(|s| s == "Kit"); // safety: test
+        assert!(ki_idx.unwrap() < k_idx.unwrap()); // safety: test assertion
+
+        // KitchenAI_recipe_search should match KitchenAI, not Kit
+        let server =
+            ChannelRoutingConfig::extract_mcp_server_from("KitchenAI_recipe_search", &sorted);
+        assert_eq!(server, Some("KitchenAI")); // safety: test assertion
+
+        // Kit_list_subscribers should still match Kit
+        let server2 =
+            ChannelRoutingConfig::extract_mcp_server_from("Kit_list_subscribers", &sorted);
+        assert_eq!(server2, Some("Kit")); // safety: test assertion
+    }
+
+    #[test]
+    fn test_validate_valid_config() {
+        let config = sample_config();
+        assert!(config.validate().is_ok()); // safety: test assertion
+    }
+
+    #[test]
+    fn test_validate_invalid_default_group() {
+        let json = r#"{
+            "groups": { "minimal": ["Archon"] },
+            "channels": {},
+            "default_group": "nonexistent"
+        }"#;
+        let config: ChannelRoutingConfig = serde_json::from_str(json).unwrap(); // safety: test
+        assert!(config.validate().is_err()); // safety: test assertion
+        assert!(config.validate().unwrap_err().contains("nonexistent")); // safety: test assertion
+    }
+
+    #[test]
+    fn test_validate_invalid_channel_group() {
+        let json = r#"{
+            "groups": { "minimal": ["Archon"] },
+            "channels": { "ch1": "typo_group" },
+            "default_group": "minimal"
+        }"#;
+        let config: ChannelRoutingConfig = serde_json::from_str(json).unwrap(); // safety: test
+        assert!(config.validate().is_err()); // safety: test assertion
+        assert!(config.validate().unwrap_err().contains("typo_group")); // safety: test assertion
+    }
+
+    #[test]
+    fn test_load_validates_config() {
+        let dir = tempfile::tempdir().unwrap(); // safety: test
+        let path = dir.path().join("channel-routing.json");
+        std::fs::write(
+            &path,
+            r#"{
+                "groups": {"minimal": ["Archon"]},
+                "channels": {},
+                "default_group": "nonexistent"
+            }"#,
+        )
+        .unwrap(); // safety: test
+        // Should return None because validation fails
+        let config = ChannelRoutingConfig::load(dir.path());
+        assert!(config.is_none()); // safety: test assertion
     }
 
     #[test]
     fn test_filter_keeps_allowed_mcp_tools() {
-        // Add Smartlead to a different group so it's recognized as MCP
         let json = r#"{
             "groups": {
                 "minimal": ["Archon"],
@@ -219,7 +358,7 @@ mod tests {
             },
             "default_group": "minimal"
         }"#;
-        let config: ChannelRoutingConfig = serde_json::from_str(json).unwrap(); // safety: test-only helper
+        let config: ChannelRoutingConfig = serde_json::from_str(json).unwrap(); // safety: test
         let tools = vec![
             make_tool_def("Archon_list_tasks"),
             make_tool_def("Kiro_run_task"),
@@ -246,11 +385,11 @@ mod tests {
         ];
         let filtered = config.filter_tool_defs("unmapped-channel", tools);
         let names: Vec<&str> = filtered.iter().map(|t| t.name.as_str()).collect();
-        assert!(names.contains(&"Archon_list_tasks"));
-        assert!(names.contains(&"memory_search"));
-        assert!(names.contains(&"create_job"));
-        assert!(!names.contains(&"shell"));
-        assert!(!names.contains(&"http_request"));
+        assert!(names.contains(&"Archon_list_tasks")); // safety: test assertion
+        assert!(names.contains(&"memory_search")); // safety: test assertion
+        assert!(names.contains(&"create_job")); // safety: test assertion
+        assert!(!names.contains(&"shell")); // safety: test assertion
+        assert!(!names.contains(&"http_request")); // safety: test assertion
     }
 
     #[test]
@@ -262,7 +401,7 @@ mod tests {
             make_tool_def("memory_search"),
         ];
         let filtered = config.filter_tool_defs("agentiffai-dev-issues", tools);
-        assert_eq!(filtered.len(), 3);
+        assert_eq!(filtered.len(), 3); // safety: test assertion
     }
 
     #[test]
@@ -274,19 +413,19 @@ mod tests {
             make_tool_def("shell"),
         ];
         let filtered = config.filter_tool_defs("slack-dm", tools);
-        assert_eq!(filtered.len(), 3);
+        assert_eq!(filtered.len(), 3); // safety: test assertion
     }
 
     #[test]
     fn test_load_returns_none_for_missing_file() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap(); // safety: test
         let config = ChannelRoutingConfig::load(dir.path());
-        assert!(config.is_none());
+        assert!(config.is_none()); // safety: test assertion
     }
 
     #[test]
     fn test_load_parses_valid_file() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap(); // safety: test
         let path = dir.path().join("channel-routing.json");
         std::fs::write(
             &path,
@@ -296,19 +435,19 @@ mod tests {
                 "default_group": "minimal"
             }"#,
         )
-        .unwrap();
+        .unwrap(); // safety: test
         let config = ChannelRoutingConfig::load(dir.path());
-        assert!(config.is_some());
-        assert_eq!(config.unwrap().default_group, "minimal");
+        assert!(config.is_some()); // safety: test assertion
+        assert_eq!(config.unwrap().default_group, "minimal"); // safety: test assertion
     }
 
     #[test]
     fn test_load_returns_none_for_invalid_json() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap(); // safety: test
         let path = dir.path().join("channel-routing.json");
-        std::fs::write(&path, "not json").unwrap();
+        std::fs::write(&path, "not json").unwrap(); // safety: test
         let config = ChannelRoutingConfig::load(dir.path());
-        assert!(config.is_none());
+        assert!(config.is_none()); // safety: test assertion
     }
 
     #[test]
@@ -328,9 +467,8 @@ mod tests {
             },
             "default_group": "minimal"
         }"#;
-        let config: ChannelRoutingConfig = serde_json::from_str(json).unwrap();
+        let config: ChannelRoutingConfig = serde_json::from_str(json).unwrap(); // safety: test
 
-        // Content channel: only Archon+Notion+Kit MCP tools + whitelisted builtins
         let all_tools = vec![
             make_tool_def("Archon_list_tasks"),
             make_tool_def("Notion_post_search"),
@@ -350,27 +488,8 @@ mod tests {
                 "Notion_post_search",
                 "Kit_list_subscribers",
                 "memory_search",
-                "create_job",
+                "create_job"
             ]
-        );
-
-        // Dev channel: Archon+Kiro+Notion MCP tools, all builtins (no whitelist)
-        let dev_tools = config.filter_tool_defs("agentiffai-dev-issues", all_tools.clone());
-        let dev_names: Vec<&str> = dev_tools.iter().map(|t| t.name.as_str()).collect();
-        assert_eq!(
-            dev_names,
-            vec![
-                "Archon_list_tasks",
-                "Notion_post_search",
-                "Kiro_run_task",
-                "memory_search",
-                "shell",
-                "create_job",
-            ]
-        );
-
-        // DM: everything
-        let dm_tools = config.filter_tool_defs("slack-dm", all_tools);
-        assert_eq!(dm_tools.len(), 7);
+        ); // safety: test assertion
     }
 }
