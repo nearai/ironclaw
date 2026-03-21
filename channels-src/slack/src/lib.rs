@@ -23,6 +23,7 @@ wit_bindgen::generate!({
 });
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 
 // Re-export generated types
 use exports::near::agent::channel::{
@@ -576,19 +577,22 @@ fn emit_message(
     });
 }
 
-fn parse_active_slack_threads(raw: Option<&str>) -> Vec<String> {
+fn parse_active_slack_threads(raw: Option<&str>) -> HashSet<String> {
     raw.and_then(|value| serde_json::from_str::<Vec<String>>(value).ok())
         .unwrap_or_default()
+        .into_iter()
+        .collect()
 }
 
-fn serialize_active_slack_threads(threads: &[String]) -> String {
-    serde_json::to_string(threads).unwrap_or_else(|_| "[]".to_string())
+fn serialize_active_slack_threads(threads: &HashSet<String>) -> String {
+    let mut sorted: Vec<_> = threads.iter().cloned().collect();
+    sorted.sort();
+    serde_json::to_string(&sorted).unwrap_or_else(|_| "[]".to_string())
 }
 
 fn active_slack_thread_is_known(raw: Option<&str>, thread_ts: &str) -> bool {
     parse_active_slack_threads(raw)
-        .iter()
-        .any(|known| known == thread_ts)
+        .contains(thread_ts)
 }
 
 fn is_active_slack_thread(thread_ts: &str) -> bool {
@@ -601,11 +605,11 @@ fn is_active_slack_thread(thread_ts: &str) -> bool {
 fn remember_active_slack_thread(thread_ts: &str) {
     let mut threads =
         parse_active_slack_threads(channel_host::workspace_read(ACTIVE_THREADS_PATH).as_deref());
-    if threads.iter().any(|known| known == thread_ts) {
+    if threads.contains(thread_ts) {
         return;
     }
 
-    threads.push(thread_ts.to_string());
+    threads.insert(thread_ts.to_string());
     let _ = channel_host::workspace_write(
         ACTIVE_THREADS_PATH,
         &serialize_active_slack_threads(&threads),
@@ -882,7 +886,8 @@ mod tests {
     fn test_active_slack_threads_round_trip() {
         let raw = r#"["123.45","678.90"]"#;
         let threads = parse_active_slack_threads(Some(raw));
-        assert_eq!(threads, vec!["123.45".to_string(), "678.90".to_string()]);
+        assert!(threads.contains("123.45"));
+        assert!(threads.contains("678.90"));
         assert!(active_slack_thread_is_known(Some(raw), "123.45"));
         assert!(!active_slack_thread_is_known(Some(raw), "999.99"));
         assert_eq!(serialize_active_slack_threads(&threads), raw);
