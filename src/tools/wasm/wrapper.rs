@@ -656,10 +656,61 @@ impl WasmToolSchemas {
     }
 
     fn new(discovery: serde_json::Value) -> Self {
+        let advertised = Self::compact_schema(&discovery);
         Self {
-            advertised: Self::permissive_schema(),
+            advertised,
             discovery,
         }
+    }
+
+    /// Derive a compact advertised schema from the full discovery schema.
+    ///
+    /// Keeps only properties that are `required` or carry an `enum` constraint,
+    /// which gives the LLM enough context to call the tool without sending the
+    /// entire schema every turn. The full schema remains available via
+    /// `tool_info(detail: "schema")`.
+    fn compact_schema(discovery: &serde_json::Value) -> serde_json::Value {
+        let required: Vec<String> = discovery
+            .get("required")
+            .and_then(|r| r.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let properties = match discovery.get("properties").and_then(|p| p.as_object()) {
+            Some(props) => props,
+            None => return Self::permissive_schema(),
+        };
+
+        let kept: serde_json::Map<String, serde_json::Value> = properties
+            .iter()
+            .filter(|(name, prop)| required.contains(name) || prop.get("enum").is_some())
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+
+        if kept.is_empty() {
+            return Self::permissive_schema();
+        }
+
+        let kept_required: Vec<serde_json::Value> = required
+            .iter()
+            .filter(|name| kept.contains_key(name.as_str()))
+            .map(|name| serde_json::Value::String(name.clone()))
+            .collect();
+
+        let mut result = serde_json::json!({
+            "type": "object",
+            "properties": kept,
+            "additionalProperties": true,
+        });
+        if !kept_required.is_empty() {
+            result["required"] = serde_json::Value::Array(kept_required);
+        }
+
+        result
     }
 
     fn with_override(&self, schema: serde_json::Value) -> Self {
@@ -1655,7 +1706,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_advertised_schema_stays_permissive_until_sidecar_override() {
+    async fn test_advertised_schema_auto_compacted_from_discovery() {
         let discovery_schema = serde_json::json!({
             "type": "object",
             "properties": {
@@ -1675,42 +1726,7 @@ mod tests {
         wrapper.schemas = super::WasmToolSchemas::new(discovery_schema.clone());
         wrapper.description = "Search documents".to_string();
 
-        // Advertised schema stays permissive; discovery holds the typed schema
-        assert_eq!(
-            wrapper.parameters_schema(),
-            serde_json::json!({
-                "type": "object",
-                "properties": {},
-                "additionalProperties": true
-            })
-        );
-        assert_eq!(wrapper.discovery_schema(), discovery_schema);
-
-        // Raw description is clean — no tool_info hint baked in
-        assert!(!wrapper.description().contains("tool_info"));
-
-        // But schema() composes the hint at display time when advertised is permissive
-        let schema = wrapper.schema();
-        assert!(
-            schema.description.contains("tool_info"),
-            "schema().description should contain tool_info hint: {}",
-            schema.description
-        );
-        assert!(
-            schema.description.contains("include_schema: true"),
-            "hint should mention include_schema: true: {}",
-            schema.description
-        );
-
-        // After sidecar override, both schemas match and hint disappears
-        let wrapper = wrapper.with_schema(serde_json::json!({
-            "type": "object",
-            "properties": {
-                "query": { "type": "string" }
-            },
-            "required": ["query"]
-        }));
-
+        // Advertised schema is auto-compacted: keeps required props, drops optional
         assert_eq!(
             wrapper.parameters_schema(),
             serde_json::json!({
@@ -1718,18 +1734,78 @@ mod tests {
                 "properties": {
                     "query": { "type": "string" }
                 },
-                "required": ["query"]
+                "required": ["query"],
+                "additionalProperties": true
             })
         );
-        assert_eq!(wrapper.discovery_schema(), wrapper.parameters_schema());
+        // Discovery retains the full schema
+        assert_eq!(wrapper.discovery_schema(), discovery_schema);
 
-        // With typed schema, schema() should NOT include tool_info hint
+        // Compacted schema has typed properties, so no tool_info hint needed
         let schema = wrapper.schema();
         assert!(
             !schema.description.contains("tool_info"),
-            "schema().description should not contain tool_info hint when typed: {}",
+            "schema().description should not contain tool_info hint when auto-compacted: {}",
             schema.description
         );
+    }
+
+    #[test]
+    fn test_compact_schema_keeps_required_and_enum_properties() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["list", "get", "create"],
+                    "description": "The operation"
+                },
+                "query": { "type": "string" },
+                "limit": { "type": "integer" },
+                "format": {
+                    "type": "string",
+                    "enum": ["json", "csv"]
+                }
+            },
+            "required": ["action"]
+        });
+
+        let compacted = super::WasmToolSchemas::compact_schema(&schema);
+        let props = compacted["properties"].as_object().unwrap();
+
+        // action: required + enum → kept
+        assert!(props.contains_key("action"));
+        // format: has enum → kept
+        assert!(props.contains_key("format"));
+        // query: not required, no enum → dropped
+        assert!(!props.contains_key("query"));
+        // limit: not required, no enum → dropped
+        assert!(!props.contains_key("limit"));
+        // additionalProperties lets the LLM still pass dropped props
+        assert_eq!(compacted["additionalProperties"], true);
+        assert_eq!(compacted["required"], serde_json::json!(["action"]));
+    }
+
+    #[test]
+    fn test_compact_schema_falls_back_to_permissive_when_empty() {
+        // No required, no enum → permissive fallback
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "query": { "type": "string" },
+                "limit": { "type": "integer" }
+            }
+        });
+
+        let compacted = super::WasmToolSchemas::compact_schema(&schema);
+        assert!(compacted["properties"].as_object().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_compact_schema_handles_no_properties() {
+        let schema = serde_json::json!({ "type": "object" });
+        let compacted = super::WasmToolSchemas::compact_schema(&schema);
+        assert!(compacted["properties"].as_object().unwrap().is_empty());
     }
 
     #[test]

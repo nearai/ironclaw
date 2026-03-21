@@ -2,17 +2,6 @@
   "version": "0.2.0",
   "wit_version": "0.3.0",
   "description": "Search, access, upload, share, and organize files and folders in Google Drive. Supports personal drives and shared (organizational) drives.",
-  "parameters": {
-    "type": "object",
-    "properties": {
-      "action": {
-        "type": "string",
-        "description": "The operation to perform",
-        "enum": ["list_files", "get_file", "download_file", "upload_file", "update_file", "create_folder", "delete_file", "trash_file", "share_file", "list_permissions", "remove_permission", "list_shared_drives"]
-      }
-    },
-    "required": ["action"]
-  },
   "http": {
     "allowlist": [
       {

@@ -2,17 +2,6 @@
   "version": "0.2.0",
   "wit_version": "0.3.0",
   "description": "Read and send messages from a Telegram user account. Supports contacts, chat history, message search, sending, forwarding, and deletion via encrypted MTProto.",
-  "parameters": {
-    "type": "object",
-    "properties": {
-      "action": {
-        "type": "string",
-        "description": "The operation to perform",
-        "enum": ["login", "submit_auth_code", "submit_2fa_password", "get_me", "get_contacts", "get_chats", "get_messages", "send_message", "forward_message", "delete_message", "search_messages", "get_updates"]
-      }
-    },
-    "required": ["action"]
-  },
   "http": {
     "allowlist": [
       {

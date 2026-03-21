@@ -2,17 +2,6 @@
   "version": "0.2.1",
   "wit_version": "0.3.0",
   "description": "Manage GitHub repositories, issues, pull requests, reviews, and workflows. Supports listing, creating, commenting, merging PRs, and triggering GitHub Actions.",
-  "parameters": {
-    "type": "object",
-    "properties": {
-      "action": {
-        "type": "string",
-        "description": "The operation to perform",
-        "enum": ["get_repo", "list_issues", "create_issue", "get_issue", "list_issue_comments", "create_issue_comment", "list_pull_requests", "create_pull_request", "get_pull_request", "get_pull_request_files", "create_pr_review", "list_pull_request_comments", "reply_pull_request_comment", "get_pull_request_reviews", "get_combined_status", "merge_pull_request", "list_repos", "get_file_content", "trigger_workflow", "get_workflow_runs"]
-      }
-    },
-    "required": ["action"]
-  },
   "capabilities": {
     "webhook": {
       "hmac_secret_name": "github_webhook_secret",

@@ -2,17 +2,6 @@
   "version": "0.2.0",
   "wit_version": "0.3.0",
   "description": "Create, read, write, and format Google Sheets spreadsheets. Supports cell operations using A1 notation, sheet (tab) management, and cell formatting.",
-  "parameters": {
-    "type": "object",
-    "properties": {
-      "action": {
-        "type": "string",
-        "description": "The operation to perform",
-        "enum": ["create_spreadsheet", "get_spreadsheet", "read_values", "batch_read_values", "write_values", "append_values", "clear_values", "add_sheet", "delete_sheet", "rename_sheet", "format_cells"]
-      }
-    },
-    "required": ["action"]
-  },
   "http": {
     "allowlist": [
       {

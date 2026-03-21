@@ -2,32 +2,6 @@
   "version": "0.1.0",
   "wit_version": "0.3.0",
   "description": "Fetch pre-extracted web content from Brave Search for grounding LLM answers. Returns actual page content (text chunks, tables, code) relevant to the query, ready for RAG or fact-checking.",
-  "parameters": {
-    "type": "object",
-    "properties": {
-      "query": {
-        "type": "string",
-        "description": "The search query to fetch context for"
-      },
-      "count": {
-        "type": "integer",
-        "description": "Number of URLs to include (default 5)",
-        "minimum": 1,
-        "maximum": 20,
-        "default": 5
-      },
-      "country": {
-        "type": "string",
-        "description": "2-letter uppercase country code to bias results (e.g. 'US', 'DE')"
-      },
-      "search_lang": {
-        "type": "string",
-        "description": "2-letter lowercase language code (e.g. 'en', 'fr')"
-      }
-    },
-    "required": ["query"],
-    "additionalProperties": false
-  },
   "capabilities": {
     "http": {
       "allowlist": [

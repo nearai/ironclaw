@@ -2,17 +2,6 @@
   "version": "0.2.0",
   "wit_version": "0.3.0",
   "description": "Create, read, edit, and format Google Slides presentations. Supports slide management, text operations, shapes, images, text formatting, and paragraph alignment.",
-  "parameters": {
-    "type": "object",
-    "properties": {
-      "action": {
-        "type": "string",
-        "description": "The operation to perform",
-        "enum": ["create_presentation", "get_presentation", "get_thumbnail", "create_slide", "delete_object", "insert_text", "delete_text", "replace_all_text", "create_shape", "insert_image", "format_text", "format_paragraph", "replace_shapes_with_image", "batch_update"]
-      }
-    },
-    "required": ["action"]
-  },
   "http": {
     "allowlist": [
       {
