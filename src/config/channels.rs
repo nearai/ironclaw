@@ -113,7 +113,7 @@ impl ChannelsConfig {
         let gateway = if gateway_enabled {
             let user_id = optional_env("GATEWAY_USER_ID")?
                 .or_else(|| cs.gateway_user_id.clone())
-                .unwrap_or_else(|| "default".to_string());
+                .unwrap_or_else(|| owner_id.to_string());
 
             Some(GatewayConfig {
                 host: optional_env("GATEWAY_HOST")?
