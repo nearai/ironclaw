@@ -936,7 +936,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_tool_definitions_use_tool_schema() {
+    async fn test_tool_definitions_use_tool_schema() -> Result<(), Box<dyn std::error::Error>> {
         struct DiscoveryTool;
 
         #[async_trait::async_trait]
@@ -988,16 +988,21 @@ mod tests {
         registry.register(Arc::new(DiscoveryTool)).await;
 
         let defs = registry.tool_definitions().await;
-        let Some(def) = defs.iter().find(|def| def.name == "discovery_tool") else {
-            assert!(false, "tool definition should be present");
-            return;
-        };
-        assert!(
-            def.description.contains("tool_info"),
-            "live tool definition should include schema hint: {}",
-            def.description
-        );
-        assert!(def.parameters.get("extra").is_none());
+        let def = defs
+            .iter()
+            .find(|def| def.name == "discovery_tool")
+            .ok_or_else(|| std::io::Error::other("tool definition should be present"))?;
+        if !def.description.contains("tool_info") {
+            return Err(std::io::Error::other(format!(
+                "live tool definition should include schema hint: {}",
+                def.description
+            ))
+            .into());
+        }
+        if def.parameters.get("extra").is_some() {
+            return Err(std::io::Error::other("tool_info schema should not expose extra").into());
+        }
+        Ok(())
     }
 
     #[tokio::test]
