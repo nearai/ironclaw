@@ -42,11 +42,38 @@ pub fn validate_strict_schema(
     }
 }
 
+/// Returns true if the schema uses `oneOf`, `anyOf`, or `allOf` combinators
+/// where at least one variant is an object type (has `type: "object"` or `properties`).
+fn has_object_combinator_variants(schema: &serde_json::Value) -> bool {
+    for key in ["oneOf", "anyOf", "allOf"] {
+        if let Some(variants) = schema.get(key).and_then(|v| v.as_array())
+            && variants.iter().any(|v| {
+                v.get("type").and_then(|t| t.as_str()) == Some("object")
+                    || v.get("properties").is_some()
+            })
+        {
+            return true;
+        }
+    }
+    false
+}
+
 /// Recursively validate an object-typed schema node.
 fn check_object_schema(schema: &serde_json::Value, path: &str) -> Vec<String> {
     let mut errors = Vec::new();
 
-    // Rule 1: must have "type": "object"
+    // Report non-array combinator values as errors.
+    for key in ["oneOf", "anyOf", "allOf"] {
+        if let Some(val) = schema.get(key)
+            && !val.is_array()
+        {
+            errors.push(format!("{path}: \"{key}\" must be an array"));
+        }
+    }
+
+    let has_combinators = has_object_combinator_variants(schema);
+
+    // Rule 1: must have "type": "object" (unless combinators define the structure)
     match schema.get("type").and_then(|t| t.as_str()) {
         Some("object") => {}
         Some(other) => {
@@ -54,16 +81,67 @@ fn check_object_schema(schema: &serde_json::Value, path: &str) -> Vec<String> {
             return errors;
         }
         None => {
-            errors.push(format!("{path}: missing \"type\": \"object\""));
-            return errors;
+            if !has_combinators {
+                errors.push(format!("{path}: missing \"type\": \"object\""));
+                return errors;
+            }
         }
     }
 
-    // Rule 2: must have "properties" as an object
+    // Validate combinator variants recursively
+    for key in ["allOf", "oneOf", "anyOf"] {
+        if let Some(variants) = schema.get(key).and_then(|v| v.as_array()) {
+            for (i, variant) in variants.iter().enumerate() {
+                if variant.get("type").and_then(|t| t.as_str()) == Some("object")
+                    || variant.get("properties").is_some()
+                {
+                    let variant_path = format!("{path}.{key}[{i}]");
+                    errors.extend(check_object_schema(variant, &variant_path));
+                }
+            }
+        }
+    }
+
+    // Rule 2: must have "properties" as an object (unless combinators define them)
     let properties = match schema.get("properties").and_then(|p| p.as_object()) {
         Some(p) => p,
         None => {
-            errors.push(format!("{path}: missing or non-object \"properties\""));
+            if !has_combinators {
+                errors.push(format!("{path}: missing or non-object \"properties\""));
+                return errors;
+            }
+            // Combinators define the structure — validate top-level `required` keys
+            // against merged properties from all combinator variants.
+            if let Some(required) = schema.get("required").and_then(|r| r.as_array()) {
+                let mut merged_keys = std::collections::HashSet::new();
+                if let Some(all_of) = schema.get("allOf").and_then(|a| a.as_array()) {
+                    for variant in all_of {
+                        if let Some(props) = variant.get("properties").and_then(|p| p.as_object()) {
+                            merged_keys.extend(props.keys().cloned());
+                        }
+                    }
+                }
+                for key in ["oneOf", "anyOf"] {
+                    if let Some(variants) = schema.get(key).and_then(|v| v.as_array()) {
+                        for variant in variants {
+                            if let Some(props) =
+                                variant.get("properties").and_then(|p| p.as_object())
+                            {
+                                merged_keys.extend(props.keys().cloned());
+                            }
+                        }
+                    }
+                }
+                for req in required {
+                    if let Some(key) = req.as_str()
+                        && !merged_keys.contains(key)
+                    {
+                        errors.push(format!(
+                            "{path}: required key \"{key}\" not found in any combinator variant properties"
+                        ));
+                    }
+                }
+            }
             return errors;
         }
     };
@@ -558,48 +636,7 @@ mod tests {
             // Routine tools
             (
                 "routine_create",
-                serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "name": { "type": "string", "description": "Routine name" },
-                        "description": { "type": "string", "description": "What it does" },
-                        "trigger_type": {
-                            "type": "string",
-                            "enum": ["cron", "event", "system_event", "manual"],
-                            "description": "When the routine fires"
-                        },
-                        "schedule": { "type": "string", "description": "Cron expression" },
-                        "event_pattern": { "type": "string", "description": "Regex pattern" },
-                        "event_channel": { "type": "string", "description": "Channel filter" },
-                        "event_source": { "type": "string", "description": "System event source" },
-                        "event_type": { "type": "string", "description": "System event type" },
-                        "event_filters": {
-                            "type": "object",
-                            "additionalProperties": { "type": "string" },
-                            "description": "Exact-match payload filters"
-                        },
-                        "prompt": { "type": "string", "description": "Instructions" },
-                        "context_paths": {
-                            "type": "array",
-                            "items": { "type": "string" },
-                            "description": "Workspace paths to load"
-                        },
-                        "action_type": {
-                            "type": "string",
-                            "enum": ["lightweight", "full_job"],
-                            "description": "Execution mode"
-                        },
-                        "cooldown_secs": { "type": "integer", "description": "Min seconds between fires" },
-                        "tool_permissions": {
-                            "type": "array",
-                            "items": { "type": "string" },
-                            "description": "Pre-authorized tools for full_job mode"
-                        },
-                        "notify_channel": { "type": "string", "description": "Channel for message tool" },
-                        "notify_user": { "type": "string", "description": "User/target to notify" }
-                    },
-                    "required": ["name", "trigger_type", "prompt"]
-                }),
+                crate::tools::builtin::routine::routine_create_parameters_schema(),
             ),
             (
                 "routine_list",
@@ -611,17 +648,7 @@ mod tests {
             ),
             (
                 "routine_update",
-                serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "name": { "type": "string", "description": "Name" },
-                        "enabled": { "type": "boolean", "description": "Toggle" },
-                        "prompt": { "type": "string", "description": "New prompt" },
-                        "schedule": { "type": "string", "description": "New cron schedule" },
-                        "description": { "type": "string", "description": "New description" }
-                    },
-                    "required": ["name"]
-                }),
+                crate::tools::builtin::routine::routine_update_parameters_schema(),
             ),
             (
                 "routine_delete",
@@ -656,15 +683,7 @@ mod tests {
             ),
             (
                 "event_emit",
-                serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "event_source": { "type": "string", "description": "Event source" },
-                        "event_type": { "type": "string", "description": "Event type" },
-                        "payload": { "type": "object", "description": "Event payload", "properties": {} }
-                    },
-                    "required": ["event_source", "event_type"]
-                }),
+                crate::tools::builtin::routine::event_emit_parameters_schema(),
             ),
             // Job tools with complex deps
             (

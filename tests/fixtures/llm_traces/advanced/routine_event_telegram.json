@@ -1,0 +1,47 @@
+{
+  "model_name": "advanced-routine-event-telegram",
+  "expects": {
+    "tools_used": ["routine_create"],
+    "all_tools_succeeded": true,
+    "min_responses": 1
+  },
+  "steps": [
+    {
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_routine_create_event_telegram",
+            "name": "routine_create",
+            "arguments": {
+              "name": "telegram-bug-watcher",
+              "description": "Watch Telegram bug reports and alert on them.",
+              "trigger_type": "event",
+              "event_channel": "telegram",
+              "event_pattern": "^bug\\b",
+              "prompt": "Summarize the bug report in one line."
+            }
+          }
+        ],
+        "input_tokens": 140,
+        "output_tokens": 40
+      }
+    },
+    {
+      "response": {
+        "type": "text",
+        "content": "Created the telegram-bug-watcher routine for Telegram bug messages.",
+        "input_tokens": 180,
+        "output_tokens": 20
+      }
+    },
+    {
+      "response": {
+        "type": "text",
+        "content": "Bug report detected: home button broken.",
+        "input_tokens": 120,
+        "output_tokens": 14
+      }
+    }
+  ]
+}

@@ -30,7 +30,9 @@ use crate::llm::{
 use crate::safety::SafetyLayer;
 use crate::tools::execute::process_tool_result;
 use crate::tools::rate_limiter::RateLimitResult;
-use crate::tools::{ApprovalContext, ToolRegistry, redact_params};
+use crate::tools::{
+    ApprovalContext, ToolRegistry, autonomous_unavailable_error, prepare_tool_params, redact_params,
+};
 
 /// Shared dependencies for worker execution.
 ///
@@ -196,6 +198,7 @@ impl Worker {
                         .get("session_id")
                         .and_then(|v| v.as_str())
                         .map(|s| s.to_string()),
+                    fallback_deliverable: data.get("fallback_deliverable").cloned(),
                 }),
                 _ => None,
             };
@@ -483,22 +486,22 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                     name: tool_name.to_string(),
                 })?;
 
-        // Check approval: use context-aware check if available, else block all non-Never tools
-        let requirement = tool.requires_approval(params);
-        let blocked =
-            ApprovalContext::is_blocked_or_default(&deps.approval_context, tool_name, requirement);
-        if blocked {
-            return Err(crate::error::ToolError::AuthRequired {
-                name: tool_name.to_string(),
-            }
-            .into());
-        }
+        let normalized_params = prepare_tool_params(tool.as_ref(), params);
 
-        // Fetch job context early so we have the real user_id for hooks and rate limiting
+        // Fetch job context early so we have the real user_id for approval, hooks,
+        // and rate limiting decisions.
         let mut job_ctx = deps.context_manager.get_context(job_id).await?;
         // Propagate http_interceptor for trace recording/replay
         if job_ctx.http_interceptor.is_none() {
             job_ctx.http_interceptor = deps.http_interceptor.clone();
+        }
+
+        // Check approval: use context-aware check if available, else block all non-Never tools
+        let requirement = tool.requires_approval(&normalized_params);
+        let blocked =
+            ApprovalContext::is_blocked_or_default(&deps.approval_context, tool_name, requirement);
+        if blocked {
+            return Err(autonomous_unavailable_error(tool_name, &job_ctx.user_id).into());
         }
 
         // Check per-tool rate limit before running hooks or executing (cheaper check first)
@@ -517,9 +520,9 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
         }
 
         // Run BeforeToolCall hook
-        let params = {
+        let effective_params = {
             use crate::hooks::{HookError, HookEvent, HookOutcome};
-            let hook_params = redact_params(params, tool.sensitive_params());
+            let hook_params = redact_params(&normalized_params, tool.sensitive_params());
             let event = HookEvent::ToolCall {
                 tool_name: tool_name.to_string(),
                 parameters: hook_params,
@@ -543,15 +546,21 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                 }
                 Ok(HookOutcome::Continue {
                     modified: Some(new_params),
-                }) => serde_json::from_str(&new_params).unwrap_or_else(|e| {
-                    tracing::warn!(
-                        tool = %tool_name,
-                        "Hook returned non-JSON modification for ToolCall, ignoring: {}",
-                        e
-                    );
-                    params.clone()
-                }),
-                _ => params.clone(),
+                }) => match serde_json::from_str(&new_params) {
+                    // Hook output is fresh JSON text and may reintroduce stringified scalars or
+                    // containers, so we normalize it again. The fallback path reuses the already
+                    // normalized input because no hook mutation was applied.
+                    Ok(parsed) => prepare_tool_params(tool.as_ref(), &parsed),
+                    Err(e) => {
+                        tracing::warn!(
+                            tool = %tool_name,
+                            "Hook returned non-JSON modification for ToolCall, ignoring: {}",
+                            e
+                        );
+                        normalized_params
+                    }
+                },
+                _ => normalized_params,
             }
         };
         if job_ctx.state == JobState::Cancelled {
@@ -563,7 +572,10 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
         }
 
         // Validate tool parameters
-        let validation = deps.safety.validator().validate_tool_params(&params);
+        let validation = deps
+            .safety
+            .validator()
+            .validate_tool_params(&effective_params);
         if !validation.is_valid {
             let details = validation
                 .errors
@@ -579,7 +591,7 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
         }
 
         // Redact sensitive parameter values before they touch any observability or audit path.
-        let safe_params = redact_params(&params, tool.sensitive_params());
+        let safe_params = redact_params(&effective_params, tool.sensitive_params());
         tracing::debug!(
             tool = %tool_name,
             params = %safe_params,
@@ -591,7 +603,7 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
         let tool_timeout = tool.execution_timeout();
         let start = std::time::Instant::now();
         let result = tokio::time::timeout(tool_timeout, async {
-            tool.execute(params.clone(), &job_ctx).await
+            tool.execute(effective_params.clone(), &job_ctx).await
         })
         .await;
         let elapsed = start.elapsed();
@@ -749,12 +761,12 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
         );
         reason_ctx.messages.push(message);
 
-        match &result {
+        match result {
             Ok(raw_output) => {
                 let sanitized = self
                     .deps
                     .safety
-                    .sanitize_tool_output(&selection.tool_name, raw_output);
+                    .sanitize_tool_output(&selection.tool_name, &raw_output);
                 self.log_event(
                     "tool_result",
                     serde_json::json!({
@@ -795,7 +807,14 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                     }),
                 );
 
-                Ok(())
+                if matches!(
+                    &e,
+                    Error::Tool(crate::error::ToolError::AutonomousUnavailable { .. })
+                ) {
+                    Err(e)
+                } else {
+                    Ok(())
+                }
             }
         }
     }
@@ -949,9 +968,14 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
     }
 
     async fn mark_failed(&self, reason: &str) -> Result<(), Error> {
+        // Build fallback deliverable from memory before transitioning.
+        let fallback = self.build_fallback(reason).await;
+
         self.context_manager()
             .update_context(self.job_id, |ctx| {
-                ctx.transition_to(JobState::Failed, Some(reason.to_string()))
+                ctx.transition_to(JobState::Failed, Some(reason.to_string()))?;
+                store_fallback_in_metadata(ctx, fallback.as_ref());
+                Ok(())
             })
             .await?
             .map_err(|s| crate::error::JobError::ContextError {
@@ -972,8 +996,15 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
     }
 
     async fn mark_stuck(&self, reason: &str) -> Result<(), Error> {
+        // Build fallback deliverable from memory before transitioning.
+        let fallback = self.build_fallback(reason).await;
+
         self.context_manager()
-            .update_context(self.job_id, |ctx| ctx.mark_stuck(reason))
+            .update_context(self.job_id, |ctx| {
+                ctx.mark_stuck(reason)?;
+                store_fallback_in_metadata(ctx, fallback.as_ref());
+                Ok(())
+            })
             .await?
             .map_err(|s| crate::error::JobError::ContextError {
                 id: self.job_id,
@@ -990,6 +1021,57 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
         );
         self.persist_status(JobState::Stuck, Some(reason.to_string()));
         Ok(())
+    }
+
+    /// Build a [`FallbackDeliverable`] from the current job context and memory.
+    async fn build_fallback(&self, reason: &str) -> Option<crate::context::FallbackDeliverable> {
+        let memory = match self.context_manager().get_memory(self.job_id).await {
+            Ok(memory) => memory,
+            Err(e) => {
+                tracing::warn!(
+                    job_id = %self.job_id,
+                    "Failed to load memory while building fallback deliverable: {e}"
+                );
+                return None;
+            }
+        };
+        let ctx = match self.context_manager().get_context(self.job_id).await {
+            Ok(ctx) => ctx,
+            Err(e) => {
+                tracing::warn!(
+                    job_id = %self.job_id,
+                    "Failed to load context while building fallback deliverable: {e}"
+                );
+                return None;
+            }
+        };
+        Some(crate::context::FallbackDeliverable::build(
+            &ctx, &memory, reason,
+        ))
+    }
+}
+
+/// Store a fallback deliverable in the job context's metadata.
+fn store_fallback_in_metadata(
+    ctx: &mut crate::context::JobContext,
+    fallback: Option<&crate::context::FallbackDeliverable>,
+) {
+    let Some(fb) = fallback else {
+        return;
+    };
+    match serde_json::to_value(fb) {
+        Ok(val) => {
+            if !ctx.metadata.is_object() {
+                ctx.metadata = serde_json::json!({});
+            }
+            ctx.metadata["fallback_deliverable"] = val;
+        }
+        Err(e) => {
+            tracing::warn!(
+                "Failed to serialize fallback deliverable for job {}: {e}",
+                ctx.job_id
+            );
+        }
     }
 }
 
@@ -1108,9 +1190,10 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
             return LoopSignal::InjectMessage(content);
         }
 
-        // Check for terminal or non-progressing state. The loop should stop when the
-        // job has been cancelled, failed, stuck, or already completed — not just the
-        // three states that `is_terminal()` covers (Accepted/Failed/Cancelled).
+        // Check for terminal or post-completion state. The loop should stop when the
+        // job has been cancelled, failed, or already completed — but NOT when Stuck,
+        // because Stuck is recoverable (Stuck -> InProgress via self-repair).
+        // Stopping on Stuck would prevent recovery from resuming the worker (issue #892).
         if let Ok(ctx) = self
             .worker
             .context_manager()
@@ -1120,7 +1203,6 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
                 ctx.state,
                 JobState::Cancelled
                     | JobState::Failed
-                    | JobState::Stuck
                     | JobState::Completed
                     | JobState::Submitted
                     | JobState::Accepted
@@ -1159,11 +1241,16 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
                 // Reset counter after a successful LLM call
                 self.consecutive_rate_limits
                     .store(0, std::sync::atomic::Ordering::Relaxed);
+                // Preserve the LLM's reasoning text so it appears in the
+                // assistant_with_tool_calls message pushed by execute_tool_calls.
+                let reasoning_text = s
+                    .iter()
+                    .find_map(|sel| (!sel.reasoning.is_empty()).then_some(sel.reasoning.clone()));
                 let tool_calls: Vec<ToolCall> = selections_to_tool_calls(&s);
                 return Ok(crate::llm::RespondOutput {
                     result: RespondResult::ToolCalls {
                         tool_calls,
-                        content: None,
+                        content: reasoning_text,
                     },
                     usage: crate::llm::TokenUsage::default(),
                 });
@@ -1424,7 +1511,7 @@ mod tests {
         }
 
         let cm = Arc::new(crate::context::ContextManager::new(5));
-        let job_id = cm.create_job("test", "test job").await.unwrap();
+        let job_id = cm.create_job("test", "test job").await.unwrap(); // safety: test
 
         let deps = WorkerDeps {
             context_manager: cm,
@@ -1456,8 +1543,9 @@ mod tests {
             tool_call_id: "call_abc123".to_string(),
         };
 
-        assert_eq!(selection.tool_call_id, "call_abc123");
+        assert_eq!(selection.tool_call_id, "call_abc123"); // safety: test
         assert_ne!(
+            /* safety: test */
             selection.tool_call_id, "tool_call_id",
             "tool_call_id must not be the hardcoded placeholder string"
         );
@@ -1493,11 +1581,12 @@ mod tests {
         let results = worker.execute_tools_parallel(&selections).await;
         let elapsed = start.elapsed();
 
-        assert_eq!(results.len(), 3);
+        assert_eq!(results.len(), 3); // safety: test
         for r in &results {
-            assert!(r.result.is_ok(), "Tool should succeed");
+            assert!(r.result.is_ok(), "Tool should succeed"); // safety: test
         }
         assert!(
+            /* safety: test */
             elapsed < Duration::from_millis(800),
             "Parallel execution took {:?}, expected < 800ms (sequential would be ~600ms)",
             elapsed
@@ -1549,9 +1638,9 @@ mod tests {
 
         let results = worker.execute_tools_parallel(&selections).await;
 
-        assert!(results[0].result.as_ref().unwrap().contains("done_tool_a"));
-        assert!(results[1].result.as_ref().unwrap().contains("done_tool_b"));
-        assert!(results[2].result.as_ref().unwrap().contains("done_tool_c"));
+        assert!(results[0].result.as_ref().unwrap().contains("done_tool_a")); // safety: test
+        assert!(results[1].result.as_ref().unwrap().contains("done_tool_b")); // safety: test
+        assert!(results[2].result.as_ref().unwrap().contains("done_tool_c")); // safety: test
     }
 
     #[tokio::test]
@@ -1567,15 +1656,16 @@ mod tests {
         }];
 
         let results = worker.execute_tools_parallel(&selections).await;
-        assert_eq!(results.len(), 1);
+        assert_eq!(results.len(), 1); // safety: test
         assert!(
+            /* safety: test */
             results[0].result.is_err(),
             "Missing tool should produce an error, not a panic"
         );
     }
 
     #[tokio::test]
-    async fn test_mark_completed_twice_returns_error() {
+    async fn test_mark_completed_twice_is_idempotent() {
         let worker = make_worker(vec![]).await;
 
         worker
@@ -1584,23 +1674,35 @@ mod tests {
                 ctx.transition_to(JobState::InProgress, None)
             })
             .await
-            .unwrap()
-            .unwrap();
+            .unwrap() // safety: test
+            .unwrap(); // safety: test
 
-        worker.mark_completed().await.unwrap();
+        worker.mark_completed().await.unwrap(); // safety: test
 
+        let ctx = worker
+            .context_manager()
+            .get_context(worker.job_id)
+            .await
+            .unwrap(); // safety: test
+        assert_eq!(ctx.state, JobState::Completed); // safety: test
+
+        // Second mark_completed should succeed (idempotent) rather than
+        // erroring, matching the fix for the execution_loop / worker wrapper
+        // race condition.
+        let result = worker.mark_completed().await;
+        assert!(
+            /* safety: test */
+            result.is_ok(),
+            "Completed -> Completed transition should be idempotent"
+        );
+
+        // State should still be Completed
         let ctx = worker
             .context_manager()
             .get_context(worker.job_id)
             .await
             .unwrap();
         assert_eq!(ctx.state, JobState::Completed);
-
-        let result = worker.mark_completed().await;
-        assert!(
-            result.is_err(),
-            "Completed → Completed transition should be rejected by state machine"
-        );
     }
 
     /// Build a Worker with the given approval context.
@@ -1614,7 +1716,7 @@ mod tests {
         }
 
         let cm = Arc::new(crate::context::ContextManager::new(5));
-        let job_id = cm.create_job("test", "test job").await.unwrap();
+        let job_id = cm.create_job("test", "test job").await.unwrap(); // safety: test
 
         let deps = WorkerDeps {
             context_manager: cm,
@@ -1707,25 +1809,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_approval_context_unblocks_unless_auto_approved() {
+    async fn test_approval_context_requires_explicit_allowed_tool_names() {
         let worker_blocked = make_worker_with_approval(vec![Arc::new(ApprovalTool)], None).await;
         let result = worker_blocked
             .execute_tool("needs_approval", &serde_json::json!({}))
             .await;
         assert!(
+            /* safety: test */
             result.is_err(),
             "Should be blocked without approval context"
         );
 
         let worker_allowed = make_worker_with_approval(
             vec![Arc::new(ApprovalTool)],
-            Some(crate::tools::ApprovalContext::autonomous()),
+            Some(crate::tools::ApprovalContext::autonomous_with_tools([
+                "needs_approval".to_string(),
+            ])),
         )
         .await;
         let result = worker_allowed
             .execute_tool("needs_approval", &serde_json::json!({}))
             .await;
-        assert!(result.is_ok(), "Should be allowed with autonomous context");
+        assert!(
+            result.is_ok(),
+            "Should be allowed when the tool is in the autonomous scope"
+        ); // safety: test
     }
 
     #[tokio::test]
@@ -1739,6 +1847,7 @@ mod tests {
             .execute_tool("always_approval", &serde_json::json!({}))
             .await;
         assert!(
+            /* safety: test */
             result.is_err(),
             "Always tool should be blocked without permission"
         );
@@ -1754,9 +1863,29 @@ mod tests {
             .execute_tool("always_approval", &serde_json::json!({}))
             .await;
         assert!(
+            /* safety: test */
             result.is_ok(),
             "Always tool should be allowed with permission"
         );
+    }
+
+    #[tokio::test]
+    async fn test_approval_context_returns_structured_autonomous_unavailable_error() {
+        let worker = make_worker_with_approval(
+            vec![Arc::new(AlwaysApprovalTool)],
+            Some(crate::tools::ApprovalContext::autonomous()),
+        )
+        .await;
+
+        let result = worker
+            .execute_tool("always_approval", &serde_json::json!({}))
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(Error::Tool(crate::error::ToolError::AutonomousUnavailable { name, .. }))
+                if name == "always_approval"
+        ));
     }
 
     #[tokio::test]
@@ -1770,8 +1899,8 @@ mod tests {
                 ctx.transition_to(JobState::InProgress, None)
             })
             .await
-            .unwrap()
-            .unwrap();
+            .unwrap() // safety: test
+            .unwrap(); // safety: test
 
         // Set a token budget
         worker
@@ -1780,16 +1909,17 @@ mod tests {
                 ctx.max_tokens = 100;
             })
             .await
-            .unwrap();
+            .unwrap(); // safety: test
 
         // Simulate adding tokens that exceed the budget
         let budget_result = worker
             .context_manager()
             .update_context(worker.job_id, |ctx| ctx.add_tokens(200))
             .await
-            .unwrap();
+            .unwrap(); // safety: test
 
         assert!(
+            /* safety: test */
             budget_result.is_err(),
             "Should return error when token budget exceeded"
         );
@@ -1798,13 +1928,13 @@ mod tests {
         worker
             .mark_failed(&budget_result.unwrap_err().to_string())
             .await
-            .unwrap();
+            .unwrap(); // safety: test
         let ctx = worker
             .context_manager()
             .get_context(worker.job_id)
             .await
-            .unwrap();
-        assert_eq!(ctx.state, JobState::Failed);
+            .unwrap(); // safety: test
+        assert_eq!(ctx.state, JobState::Failed); // safety: test
     }
 
     #[tokio::test]
@@ -1818,24 +1948,197 @@ mod tests {
                 ctx.transition_to(JobState::InProgress, None)
             })
             .await
-            .unwrap()
-            .unwrap();
+            .unwrap() // safety: test
+            .unwrap(); // safety: test
 
         // Simulate what the execution loop does when max_iterations is exceeded
         worker
             .mark_failed("Maximum iterations exceeded: job hit the iteration cap")
             .await
-            .unwrap();
+            .unwrap(); // safety: test
 
         let ctx = worker
             .context_manager()
             .get_context(worker.job_id)
             .await
-            .unwrap();
+            .unwrap(); // safety: test
         assert_eq!(
+            /* safety: test */
             ctx.state,
             JobState::Failed,
             "Iteration cap should transition to Failed, not Stuck"
         );
+    }
+
+    /// Regression test: selections_to_tool_calls must preserve tool_call_id
+    /// so that tool_result messages match the assistant_with_tool_calls message
+    /// and are not treated as orphaned by sanitize_tool_messages.
+    #[test]
+    fn test_selections_to_tool_calls_preserves_ids() {
+        let selections = vec![
+            ToolSelection {
+                tool_name: "search".into(),
+                parameters: serde_json::json!({"q": "test"}),
+                reasoning: "Need to search".into(),
+                alternatives: vec![],
+                tool_call_id: "call_abc".into(),
+            },
+            ToolSelection {
+                tool_name: "fetch".into(),
+                parameters: serde_json::json!({"url": "https://example.com"}),
+                reasoning: "Need to fetch".into(),
+                alternatives: vec![],
+                tool_call_id: "call_def".into(),
+            },
+        ];
+
+        let tool_calls = selections_to_tool_calls(&selections);
+
+        assert_eq!(tool_calls.len(), 2);
+        assert_eq!(tool_calls[0].id, "call_abc");
+        assert_eq!(tool_calls[0].name, "search");
+        assert_eq!(tool_calls[1].id, "call_def");
+        assert_eq!(tool_calls[1].name, "fetch");
+    }
+
+    /// Regression test: when select_tools returns selections with reasoning,
+    /// the reasoning text should be preserved as content in the RespondResult
+    /// so it appears in the assistant_with_tool_calls message. Without this,
+    /// the LLM's reasoning context is lost and subsequent turns lack context.
+    #[test]
+    fn test_reasoning_text_extraction_from_selections() {
+        // Simulate what call_llm does: extract first non-empty reasoning
+        let selections = [
+            ToolSelection {
+                tool_name: "search".into(),
+                parameters: serde_json::json!({}),
+                reasoning: "I need to search for relevant information".into(),
+                alternatives: vec![],
+                tool_call_id: "call_1".into(),
+            },
+            ToolSelection {
+                tool_name: "fetch".into(),
+                parameters: serde_json::json!({}),
+                reasoning: "I need to search for relevant information".into(),
+                alternatives: vec![],
+                tool_call_id: "call_2".into(),
+            },
+        ];
+
+        let reasoning_text = selections
+            .iter()
+            .find_map(|sel| (!sel.reasoning.is_empty()).then_some(sel.reasoning.clone()));
+
+        assert_eq!(
+            reasoning_text.as_deref(),
+            Some("I need to search for relevant information"),
+            "Reasoning text should be extracted from first non-empty selection"
+        );
+
+        // Empty reasoning should result in None
+        let empty_selections = [ToolSelection {
+            tool_name: "echo".into(),
+            parameters: serde_json::json!({}),
+            reasoning: String::new(),
+            alternatives: vec![],
+            tool_call_id: "call_3".into(),
+        }];
+
+        let empty_reasoning = empty_selections
+            .iter()
+            .find_map(|sel| (!sel.reasoning.is_empty()).then_some(sel.reasoning.clone()));
+
+        assert!(
+            empty_reasoning.is_none(),
+            "Empty reasoning should not be included as content"
+        );
+    }
+
+    /// When the first selection has empty reasoning but a subsequent one has
+    /// non-empty reasoning, find_map should skip the empty one and return the
+    /// first non-empty reasoning.
+    #[test]
+    fn test_reasoning_text_skips_empty_first_selection() {
+        let selections = [
+            ToolSelection {
+                tool_name: "echo".into(),
+                parameters: serde_json::json!({}),
+                reasoning: String::new(),
+                alternatives: vec![],
+                tool_call_id: "call_1".into(),
+            },
+            ToolSelection {
+                tool_name: "search".into(),
+                parameters: serde_json::json!({}),
+                reasoning: "Found the answer in the second selection".into(),
+                alternatives: vec![],
+                tool_call_id: "call_2".into(),
+            },
+            ToolSelection {
+                tool_name: "fetch".into(),
+                parameters: serde_json::json!({}),
+                reasoning: "Third selection reasoning".into(),
+                alternatives: vec![],
+                tool_call_id: "call_3".into(),
+            },
+        ];
+
+        let reasoning_text = selections
+            .iter()
+            .find_map(|sel| (!sel.reasoning.is_empty()).then_some(sel.reasoning.clone()));
+
+        assert_eq!(
+            reasoning_text.as_deref(),
+            Some("Found the answer in the second selection"),
+            "Should skip empty first reasoning and return the first non-empty one"
+        );
+    }
+
+    #[test]
+    fn test_store_fallback_in_metadata_roundtrip() {
+        use crate::context::FallbackDeliverable;
+
+        let mut ctx = JobContext::new("Test", "fallback roundtrip");
+        let memory = crate::context::Memory::new(ctx.job_id);
+        let fb = FallbackDeliverable::build(&ctx, &memory, "test failure");
+
+        // Store into metadata
+        store_fallback_in_metadata(&mut ctx, Some(&fb));
+
+        // Verify it's stored and can be deserialized back
+        let stored = ctx.metadata.get("fallback_deliverable");
+        assert!(stored.is_some(), "fallback missing from metadata"); // safety: test
+
+        let recovered: FallbackDeliverable =
+            serde_json::from_value(stored.unwrap().clone()).expect("deserialize fallback"); // safety: test
+        assert_eq!(recovered.failure_reason, "test failure"); // safety: test
+        assert!(!recovered.partial); // safety: test
+    }
+
+    #[test]
+    fn test_store_fallback_handles_non_object_metadata() {
+        use crate::context::FallbackDeliverable;
+
+        let mut ctx = JobContext::new("Test", "non-object metadata");
+        ctx.metadata = serde_json::json!("not an object");
+
+        let memory = crate::context::Memory::new(ctx.job_id);
+        let fb = FallbackDeliverable::build(&ctx, &memory, "failed");
+
+        store_fallback_in_metadata(&mut ctx, Some(&fb));
+
+        // Must normalize to object and store
+        assert!(ctx.metadata.is_object()); // safety: test
+        assert!(ctx.metadata.get("fallback_deliverable").is_some()); // safety: test
+    }
+
+    #[test]
+    fn test_store_fallback_none_is_noop() {
+        let mut ctx = JobContext::new("Test", "noop");
+        let original = ctx.metadata.clone();
+
+        store_fallback_in_metadata(&mut ctx, None);
+
+        assert_eq!(ctx.metadata, original); // safety: test
     }
 }

@@ -14,10 +14,14 @@ use crate::config::AgentConfig;
 use crate::context::{ContextManager, JobContext, JobState};
 use crate::db::Database;
 use crate::error::{Error, JobError};
+use crate::extensions::ExtensionManager;
 use crate::hooks::HookRegistry;
 use crate::llm::LlmProvider;
 use crate::safety::SafetyLayer;
-use crate::tools::{ApprovalContext, ToolRegistry};
+use crate::tools::{
+    ApprovalContext, ToolRegistry, autonomous_allowed_tool_names, autonomous_unavailable_error,
+    prepare_tool_params,
+};
 use crate::worker::job::{Worker, WorkerDeps};
 
 /// Message to send to a worker.
@@ -45,6 +49,14 @@ struct ScheduledSubtask {
     handle: JoinHandle<Result<TaskOutput, Error>>,
 }
 
+/// Shared scheduler-owned dependencies that are forwarded into autonomous runs.
+pub struct SchedulerDeps {
+    pub tools: Arc<ToolRegistry>,
+    pub extension_manager: Option<Arc<ExtensionManager>>,
+    pub store: Option<Arc<dyn Database>>,
+    pub hooks: Arc<HookRegistry>,
+}
+
 /// Schedules and manages parallel job execution.
 pub struct Scheduler {
     config: AgentConfig,
@@ -52,6 +64,7 @@ pub struct Scheduler {
     llm: Arc<dyn LlmProvider>,
     safety: Arc<SafetyLayer>,
     tools: Arc<ToolRegistry>,
+    extension_manager: Option<Arc<ExtensionManager>>,
     store: Option<Arc<dyn Database>>,
     hooks: Arc<HookRegistry>,
     /// SSE broadcast sender for live job event streaming.
@@ -71,18 +84,17 @@ impl Scheduler {
         context_manager: Arc<ContextManager>,
         llm: Arc<dyn LlmProvider>,
         safety: Arc<SafetyLayer>,
-        tools: Arc<ToolRegistry>,
-        store: Option<Arc<dyn Database>>,
-        hooks: Arc<HookRegistry>,
+        deps: SchedulerDeps,
     ) -> Self {
         Self {
             config,
             context_manager,
             llm,
             safety,
-            tools,
-            store,
-            hooks,
+            tools: deps.tools,
+            extension_manager: deps.extension_manager,
+            store: deps.store,
+            hooks: deps.hooks,
             sse_tx: None,
             http_interceptor: None,
             jobs: Arc::new(RwLock::new(HashMap::new())),
@@ -120,14 +132,21 @@ impl Scheduler {
         description: &str,
         metadata: Option<serde_json::Value>,
     ) -> Result<Uuid, JobError> {
-        self.dispatch_job_inner(user_id, title, description, metadata, None)
-            .await
+        let approval_context = self.autonomous_approval_context(user_id).await;
+        self.dispatch_job_inner(
+            user_id,
+            title,
+            description,
+            metadata,
+            Some(approval_context),
+        )
+        .await
     }
 
     /// Dispatch a job with an explicit approval context for autonomous execution.
     ///
     /// Same as `dispatch_job`, but the worker will use the given `ApprovalContext`
-    /// to determine which tools are pre-approved (instead of blocking all non-`Never` tools).
+    /// to determine the explicit autonomous allowlist for that job.
     pub async fn dispatch_job_with_context(
         &self,
         user_id: &str,
@@ -179,27 +198,33 @@ impl Scheduler {
             })
             .unwrap_or(self.config.max_tokens_per_job);
 
-        // Apply both metadata and token budget in one closure (Issue #813: atomic update)
-        if let Some(meta) = metadata {
+        // Apply both metadata and token budget in one closure (Issue #813: atomic update).
+        // Use update_context_and_get to ensure atomicity: no gap where concurrent workers
+        // can modify the context between update and DB persist (Issue #807).
+        let ctx = if let Some(meta) = metadata {
             self.context_manager
-                .update_context(job_id, |ctx| {
+                .update_context_and_get(job_id, |ctx| {
                     ctx.metadata = meta;
                     if max_tokens > 0 {
                         ctx.max_tokens = max_tokens;
                     }
                 })
-                .await?;
+                .await?
         } else if max_tokens > 0 {
             self.context_manager
-                .update_context(job_id, |ctx| {
+                .update_context_and_get(job_id, |ctx| {
                     ctx.max_tokens = max_tokens;
                 })
-                .await?;
-        }
+                .await?
+        } else {
+            // No metadata or token budget to set; get the initial context
+            self.context_manager.get_context(job_id).await?
+        };
 
-        // Persist to DB before scheduling so the worker's FK references are valid
+        // Persist to DB before scheduling so the worker's FK references are valid.
+        // The context was read under the same lock as the update (atomic), preventing
+        // concurrent worker interference (Issue #807: non-transactional context updates).
         if let Some(ref store) = self.store {
-            let ctx = self.context_manager.get_context(job_id).await?;
             store.save_job(&ctx).await.map_err(|e| JobError::Failed {
                 id: job_id,
                 reason: format!("failed to persist job: {e}"),
@@ -208,6 +233,13 @@ impl Scheduler {
 
         self.schedule_with_context(job_id, approval_context).await?;
         Ok(job_id)
+    }
+
+    async fn autonomous_approval_context(&self, user_id: &str) -> ApprovalContext {
+        ApprovalContext::autonomous_with_tools(
+            autonomous_allowed_tool_names(&self.tools, self.extension_manager.as_ref(), user_id)
+                .await,
+        )
     }
 
     /// Schedule a job for execution.
@@ -505,20 +537,23 @@ impl Scheduler {
             .into());
         }
 
+        let normalized_params = prepare_tool_params(tool.as_ref(), &params);
+
         // Scheduler-specific approval check
-        let requirement = tool.requires_approval(&params);
+        let requirement = tool.requires_approval(&normalized_params);
         let blocked =
             ApprovalContext::is_blocked_or_default(&approval_context, tool_name, requirement);
         if blocked {
-            return Err(crate::error::ToolError::AuthRequired {
-                name: tool_name.to_string(),
-            }
-            .into());
+            return Err(autonomous_unavailable_error(tool_name, &job_ctx.user_id).into());
         }
 
         // Delegate to shared tool execution pipeline
         let output_str = crate::tools::execute::execute_tool_with_safety(
-            &tools, &safety, tool_name, &params, &job_ctx,
+            &tools,
+            &safety,
+            tool_name,
+            &normalized_params,
+            &job_ctx,
         )
         .await?;
 
@@ -764,7 +799,18 @@ mod tests {
         let tools = Arc::new(ToolRegistry::new());
         let hooks = Arc::new(HookRegistry::default());
 
-        Scheduler::new(config, cm, llm, safety, tools, None, hooks)
+        Scheduler::new(
+            config,
+            cm,
+            llm,
+            safety,
+            SchedulerDeps {
+                tools,
+                extension_manager: None,
+                store: None,
+                hooks,
+            },
+        )
     }
 
     #[tokio::test]
@@ -830,6 +876,24 @@ mod tests {
             Some("custom_value"),
             "metadata should be set atomically with token budget"
         );
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_job_no_metadata_no_user_tokens_edge_case() {
+        // Edge case coverage: when metadata=None AND max_tokens=0 (config),
+        // the else branch calls get_context() directly (not update_context_and_get).
+        // This test verifies that path works correctly (Issue #807: full branch coverage).
+        let sched = make_test_scheduler(0); // 0 = unlimited, but user provides None
+        let job_id = sched
+            .dispatch_job("user1", "test", "desc", None) // None metadata
+            .await
+            .unwrap(); // safety: test code
+
+        let ctx = sched.context_manager.get_context(job_id).await.unwrap(); // safety: test code
+        // No metadata was set, should have default empty metadata
+        assert!(ctx.metadata.is_null() || ctx.metadata == serde_json::json!({})); // safety: test code
+        // No user tokens AND unlimited config means max_tokens stays at default
+        assert_eq!(ctx.max_tokens, 0, "unlimited config"); // safety: test code
     }
 
     #[test]
@@ -973,12 +1037,14 @@ mod tests {
     async fn test_execute_tool_task_autonomous_unblocks_soft() {
         let (tools, cm, safety, job_id) = setup_tools_and_job().await;
 
-        // Autonomous context auto-approves UnlessAutoApproved
+        // Autonomous execution only allows tools explicitly in scope.
         let result = Scheduler::execute_tool_task(
             tools.clone(),
             cm.clone(),
             safety.clone(),
-            Some(ApprovalContext::autonomous()),
+            Some(ApprovalContext::autonomous_with_tools([
+                "soft_gate".to_string()
+            ])),
             job_id,
             "soft_gate",
             serde_json::json!({}),
@@ -1010,8 +1076,11 @@ mod tests {
     async fn test_execute_tool_task_autonomous_with_permissions() {
         let (tools, cm, safety, job_id) = setup_tools_and_job().await;
 
-        // Autonomous context with explicit permission for hard_gate
-        let ctx = ApprovalContext::autonomous_with_tools(["hard_gate".to_string()]);
+        // Autonomous context with explicit permission for both tools.
+        let ctx = ApprovalContext::autonomous_with_tools([
+            "soft_gate".to_string(),
+            "hard_gate".to_string(),
+        ]);
 
         let result = Scheduler::execute_tool_task(
             tools.clone(),
@@ -1038,6 +1107,81 @@ mod tests {
         assert!(
             result.is_ok(),
             "hard_gate should pass with explicit permission"
+        );
+    }
+
+    struct NormalizedApprovalTool;
+
+    #[async_trait::async_trait]
+    impl Tool for NormalizedApprovalTool {
+        fn name(&self) -> &str {
+            "normalized_gate"
+        }
+        fn description(&self) -> &str {
+            "approval depends on normalized params"
+        }
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "safe": { "type": "boolean" }
+                }
+            })
+        }
+        async fn execute(
+            &self,
+            _params: serde_json::Value,
+            _ctx: &JobContext,
+        ) -> Result<ToolOutput, ToolError> {
+            Ok(ToolOutput::text(
+                "normalized_ok",
+                std::time::Instant::now().elapsed(),
+            ))
+        }
+        fn requires_approval(&self, params: &serde_json::Value) -> ApprovalRequirement {
+            if params.get("safe").and_then(|v| v.as_bool()) == Some(true) {
+                ApprovalRequirement::Never
+            } else {
+                ApprovalRequirement::Always
+            }
+        }
+        fn requires_sanitization(&self) -> bool {
+            false
+        }
+    }
+
+    #[tokio::test]
+    async fn test_execute_tool_task_normalizes_params_before_approval() {
+        let registry = ToolRegistry::new();
+        registry.register(Arc::new(NormalizedApprovalTool)).await;
+
+        let cm = Arc::new(ContextManager::new(5));
+        let job_id = cm.create_job("test", "normalized approval").await.unwrap(); // safety: test-only setup
+        cm.update_context(job_id, |ctx| ctx.transition_to(JobState::InProgress, None))
+            .await
+            .unwrap() // safety: test-only setup
+            .unwrap(); // safety: test-only setup
+
+        let safety = Arc::new(SafetyLayer::new(&SafetyConfig {
+            max_output_length: 100_000,
+            injection_check_enabled: false,
+        }));
+
+        let result = Scheduler::execute_tool_task(
+            Arc::new(registry),
+            cm,
+            safety,
+            None,
+            job_id,
+            "normalized_gate",
+            serde_json::json!({"safe": "true"}),
+        )
+        .await;
+
+        #[rustfmt::skip]
+        assert!( // safety: test-only assertion
+            result.is_ok(),
+            "stringified boolean should normalize before approval: {result:?}"
         );
     }
 }

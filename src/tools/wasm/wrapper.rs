@@ -17,6 +17,7 @@ use wasmtime::component::Linker;
 use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiView};
 
 use crate::context::JobContext;
+use crate::llm::recording::{HttpExchangeRequest, HttpExchangeResponse, HttpInterceptor};
 use crate::safety::LeakDetector;
 use crate::secrets::SecretsStore;
 use crate::tools::tool::{Tool, ToolError, ToolOutput};
@@ -99,6 +100,9 @@ struct StoreData {
     /// Dedicated tokio runtime for HTTP requests, lazily initialized.
     /// Reused across multiple `http_request` calls within one execution.
     http_runtime: Option<tokio::runtime::Runtime>,
+    /// Optional HTTP interceptor for testing — returns canned responses
+    /// instead of making real requests when set.
+    http_interceptor: Option<Arc<dyn HttpInterceptor>>,
 }
 
 impl StoreData {
@@ -119,6 +123,7 @@ impl StoreData {
             credentials,
             host_credentials,
             http_runtime: None,
+            http_interceptor: None,
         }
     }
 
@@ -343,7 +348,60 @@ impl near::agent::host::Host for StoreData {
                     .map_err(|e| format!("Failed to create HTTP runtime: {e}"))?,
             );
         }
-        let rt = self.http_runtime.as_ref().expect("just initialized");
+        let rt = self.http_runtime.as_ref().expect("just initialized"); // safety: is_none branch above guarantees Some
+
+        // If an HTTP interceptor is set (testing), short-circuit with a canned response.
+        if let Some(interceptor) = &self.http_interceptor {
+            let interceptor = Arc::clone(interceptor);
+            let intercept_url = url.clone();
+            let intercept_method = method.clone();
+            let mut intercept_headers: Vec<(String, String)> = headers
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            intercept_headers.sort_by(|a, b| a.0.cmp(&b.0));
+            let intercept_body = body
+                .as_ref()
+                .map(|b| String::from_utf8_lossy(b).to_string());
+            let intercepted = rt.block_on(async {
+                let req = HttpExchangeRequest {
+                    method: intercept_method,
+                    url: intercept_url,
+                    headers: intercept_headers,
+                    body: intercept_body,
+                };
+                interceptor.before_request(&req).await
+            });
+            if let Some(resp) = intercepted {
+                let resp_headers: HashMap<String, String> = resp
+                    .headers
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+                let resp_headers_json =
+                    serde_json::to_string(&resp_headers).unwrap_or_else(|_| "{}".to_string());
+                return Ok(near::agent::host::HttpResponse {
+                    status: resp.status,
+                    headers_json: resp_headers_json,
+                    body: resp.body.into_bytes(),
+                });
+            }
+        }
+
+        // Capture request metadata before headers/body are consumed by the reqwest
+        // builder. Used for after_response callback when a recording interceptor is set.
+        let interceptor_req = self.http_interceptor.as_ref().map(|_| HttpExchangeRequest {
+            method: method.clone(),
+            url: url.clone(),
+            headers: headers
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+            body: body
+                .as_ref()
+                .map(|b| String::from_utf8_lossy(b).to_string()),
+        });
+
         let result = rt.block_on(async {
             let client = reqwest::Client::builder()
                 .connect_timeout(Duration::from_secs(10))
@@ -434,6 +492,51 @@ impl near::agent::host::Host for StoreData {
             })
         });
 
+        // Notify the interceptor about the completed response (recording mode).
+        // RecordingHttpInterceptor returns None from before_request and captures
+        // exchanges via after_response, so this path is exercised during trace recording.
+        if let (Some(interceptor), Some(req), Ok(resp)) =
+            (&self.http_interceptor, &interceptor_req, &result)
+        {
+            let interceptor = Arc::clone(interceptor);
+
+            // Redact credentials from request before passing to the interceptor
+            // to prevent credential leakage into recorded traces.
+            let mut redacted_req = req.clone();
+            redacted_req.url = self.redact_credentials(&redacted_req.url);
+            redacted_req.headers = redacted_req
+                .headers
+                .into_iter()
+                .map(|(k, v)| (k, self.redact_credentials(&v)))
+                .collect();
+            redacted_req.body = redacted_req.body.map(|b| self.redact_credentials(&b));
+
+            let resp_headers: Vec<(String, String)> =
+                serde_json::from_str::<HashMap<String, String>>(&resp.headers_json)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .collect();
+            let resp_body = String::from_utf8_lossy(&resp.body).to_string();
+
+            // Redact credentials from response as well
+            let redacted_headers: Vec<(String, String)> = resp_headers
+                .into_iter()
+                .map(|(k, v)| (k, self.redact_credentials(&v)))
+                .collect();
+            let redacted_body = self.redact_credentials(&resp_body);
+
+            let exchange_resp = HttpExchangeResponse {
+                status: resp.status,
+                headers: redacted_headers,
+                body: redacted_body,
+            };
+            rt.block_on(async {
+                interceptor
+                    .after_response(&redacted_req, &exchange_resp)
+                    .await;
+            });
+        }
+
         // Redact credentials from error messages before returning to WASM
         result.map_err(|e| self.redact_credentials(&e))
     }
@@ -476,6 +579,9 @@ pub struct WasmToolWrapper {
     secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
     /// OAuth refresh configuration for auto-refreshing expired tokens.
     oauth_refresh: Option<OAuthRefreshConfig>,
+    /// Optional HTTP interceptor for testing — returns canned responses
+    /// instead of making real requests when set.
+    http_interceptor: Option<Arc<dyn HttpInterceptor>>,
 }
 
 #[derive(Debug, Clone)]
@@ -485,7 +591,7 @@ struct WasmToolSchemas {
     /// This stays permissive by default to avoid serializing full exported
     /// WASM schemas on every LLM call. Sidecars can override it explicitly.
     advertised: serde_json::Value,
-    /// Full schema available for discovery and coercion.
+    /// Full schema available for discovery and runtime parameter preparation.
     ///
     /// Seeded from the WASM `schema()` export at registration time, unless a
     /// sidecar explicitly overrides it.
@@ -502,10 +608,51 @@ impl WasmToolSchemas {
     }
 
     fn is_permissive_schema(schema: &serde_json::Value) -> bool {
-        schema
+        if schema
             .get("properties")
             .and_then(|p| p.as_object())
-            .is_none_or(|p| p.is_empty())
+            .is_some_and(|p| !p.is_empty())
+        {
+            return false;
+        }
+
+        // Schemas with combinator variants containing properties are not permissive
+        for key in ["oneOf", "anyOf", "allOf"] {
+            if let Some(variants) = schema.get(key).and_then(|v| v.as_array())
+                && variants.iter().any(|v| {
+                    v.get("properties")
+                        .and_then(|p| p.as_object())
+                        .is_some_and(|p| !p.is_empty())
+                })
+            {
+                return false;
+            }
+        }
+
+        true
+    }
+
+    fn typed_property_count(schema: &serde_json::Value) -> usize {
+        let mut all_props = serde_json::Map::new();
+
+        if let Some(props) = schema.get("properties").and_then(|p| p.as_object()) {
+            all_props.extend(props.iter().map(|(k, v)| (k.clone(), v.clone())));
+        }
+
+        for key in ["allOf", "oneOf", "anyOf"] {
+            if let Some(variants) = schema.get(key).and_then(|v| v.as_array()) {
+                for variant in variants {
+                    if let Some(props) = variant.get("properties").and_then(|p| p.as_object()) {
+                        all_props.extend(props.iter().map(|(k, v)| (k.clone(), v.clone())));
+                    }
+                }
+            }
+        }
+
+        all_props
+            .values()
+            .filter(|prop| schema_is_typed_property(prop))
+            .count()
     }
 
     fn new(discovery: serde_json::Value) -> Self {
@@ -533,27 +680,6 @@ impl WasmToolSchemas {
     fn discovery(&self) -> serde_json::Value {
         self.discovery.clone()
     }
-
-    /// Return the best schema available for type coercion.
-    ///
-    /// Prefers the discovery schema when it has typed properties. Falls back
-    /// to the `PreparedModule` schema extracted at load time rather than
-    /// re-calling the WASM `schema()` export mid-execution, which could
-    /// interact with mutable linear memory state.
-    fn effective_for_coercion(&self, prepared_schema: &serde_json::Value) -> serde_json::Value {
-        if !Self::is_permissive_schema(&self.discovery) {
-            return self.discovery.clone();
-        }
-
-        // Fall back to the load-time extracted schema from PreparedModule.
-        // This avoids calling schema() on the already-running WASM instance
-        // where mutable state could produce inconsistent results.
-        if !Self::is_permissive_schema(prepared_schema) {
-            return prepared_schema.clone();
-        }
-
-        self.discovery.clone()
-    }
 }
 
 impl WasmToolWrapper {
@@ -572,7 +698,18 @@ impl WasmToolWrapper {
             credentials: HashMap::new(),
             secrets_store: None,
             oauth_refresh: None,
+            http_interceptor: None,
         }
+    }
+
+    /// Set an HTTP interceptor for testing.
+    ///
+    /// When set, WASM tool HTTP requests are routed through the interceptor
+    /// instead of making real network calls. This allows tests to verify the
+    /// exact HTTP requests a WASM tool constructs.
+    pub fn with_http_interceptor(mut self, interceptor: Arc<dyn HttpInterceptor>) -> Self {
+        self.http_interceptor = Some(interceptor);
+        self
     }
 
     /// Override the tool description.
@@ -583,7 +720,21 @@ impl WasmToolWrapper {
 
     /// Override the parameter schema.
     pub fn with_schema(mut self, schema: serde_json::Value) -> Self {
-        self.schemas = self.schemas.with_override(schema);
+        let override_typed = WasmToolSchemas::typed_property_count(&schema);
+        let prepared_typed = WasmToolSchemas::typed_property_count(&self.prepared.schema);
+
+        if override_typed == 0 && prepared_typed > 0 {
+            tracing::warn!(
+                tool = %self.prepared.name,
+                "Ignoring untyped schema override for discovery/runtime preparation and preserving extracted WASM schema"
+            );
+            self.schemas = WasmToolSchemas {
+                advertised: schema,
+                discovery: self.prepared.schema.clone(),
+            };
+        } else {
+            self.schemas = self.schemas.with_override(schema);
+        }
         self
     }
 
@@ -645,12 +796,13 @@ impl WasmToolWrapper {
         let limits = &self.prepared.limits;
 
         // Create store with fresh state (NEAR pattern: fresh instance per call)
-        let store_data = StoreData::new(
+        let mut store_data = StoreData::new(
             limits.memory_bytes,
             self.capabilities.clone(),
             self.credentials.clone(),
             host_credentials,
         );
+        store_data.http_interceptor = self.http_interceptor.clone();
         let mut store = Store::new(engine, store_data);
 
         // Configure fuel if enabled
@@ -697,16 +849,6 @@ impl WasmToolWrapper {
         // Get typed interface — used for execute.
         let tool_iface = instance.near_agent_tool();
 
-        // Determine effective schema for type coercion.
-        // Prefer the discovery schema when typed; fall back to the load-time
-        // extracted schema from PreparedModule rather than re-calling the WASM
-        // export on the already-running instance.
-        let effective_schema = self.schemas.effective_for_coercion(&self.prepared.schema);
-
-        // Coerce string-encoded values to their schema-declared types.
-        // LLMs frequently pass numeric values as strings (e.g. "5" instead of 5).
-        let params = coerce_params_to_schema(params, &effective_schema);
-
         // Prepare the request
         let params_json = serde_json::to_string(&params)
             .map_err(|e| WasmError::InvalidResponseJson(e.to_string()))?;
@@ -734,10 +876,7 @@ impl WasmToolWrapper {
         // Check for tool-level error — point the LLM to tool_info for the
         // full schema instead of dumping ~3.5KB inline.
         if let Some(err) = response.error {
-            let hint = format!(
-                "Tip: call tool_info(name: \"{}\", include_schema: true) for the full parameter schema.",
-                self.prepared.name
-            );
+            let hint = build_tool_usage_hint(&self.prepared.name, &self.schemas.discovery());
             return Err(WasmError::ToolReturnedError { message: err, hint });
         }
 
@@ -848,13 +987,7 @@ impl Tool for WasmToolWrapper {
         // Pre-resolve host credentials from secrets store (async, before blocking task).
         // This decrypts the secrets once so the sync http_request() host function
         // can inject them without needing async access.
-        //
-        // BUG FIX: ExtensionManager stores OAuth tokens under user_id "default"
-        // (hardcoded at construction in app.rs), but this was previously looking
-        // them up under ctx.user_id — which could be a Telegram user ID, web
-        // gateway user, etc. — causing credential resolution to silently fail.
-        // Must match the storage key until per-user credential isolation is added.
-        let credential_user_id = "default";
+        let credential_user_id = &ctx.user_id;
         let host_credentials = resolve_host_credentials(
             &self.capabilities,
             self.secrets_store.as_deref(),
@@ -885,6 +1018,7 @@ impl Tool for WasmToolWrapper {
                 credentials,
                 secrets_store: None, // Not needed in blocking task
                 oauth_refresh: None, // Already used above for pre-refresh
+                http_interceptor: self.http_interceptor.clone(),
             };
 
             tokio::task::spawn_blocking(move || {
@@ -1104,7 +1238,18 @@ async fn resolve_host_credentials(
 ) -> Vec<ResolvedHostCredential> {
     let store = match store {
         Some(s) => s,
-        None => return Vec::new(),
+        None => {
+            // If tool requires credentials but has no secrets store, this is a configuration error
+            if let Some(http_cap) = &capabilities.http
+                && !http_cap.credentials.is_empty()
+            {
+                tracing::warn!(
+                    user_id = %user_id,
+                    "WASM tool requires credentials but secrets_store is not configured - authentication will fail"
+                );
+            }
+            return Vec::new();
+        }
     };
 
     // Check if the access token needs refreshing before resolving credentials.
@@ -1155,13 +1300,44 @@ async fn resolve_host_credentials(
             continue;
         }
 
+        // Try to get credential under the provided user_id first.
+        // If not found and user_id != "default", fallback to "default" (global credentials).
+        // This handles OAuth tokens stored globally under "default" but accessed from routine contexts.
         let secret = match store.get_decrypted(user_id, &mapping.secret_name).await {
-            Ok(s) => s,
+            Ok(s) => Some(s),
             Err(e) => {
-                tracing::debug!(
+                tracing::trace!(
+                    user_id = %user_id,
                     secret_name = %mapping.secret_name,
                     error = %e,
-                    "Could not resolve credential for WASM tool (auth may not be configured)"
+                    "No matching host credential resolved for WASM tool in the requested scope"
+                );
+
+                // If lookup fails and we're not already looking up "default", try "default" as fallback
+                if user_id != "default" {
+                    tracing::debug!(
+                        secret_name = %mapping.secret_name,
+                        user_id = %user_id,
+                        error = %e,
+                        "Credential not found for user, trying default global credentials"
+                    );
+                    store
+                        .get_decrypted("default", &mapping.secret_name)
+                        .await
+                        .ok()
+                } else {
+                    None
+                }
+            }
+        };
+
+        let secret = match secret {
+            Some(s) => s,
+            None => {
+                tracing::warn!(
+                    secret_name = %mapping.secret_name,
+                    user_id = %user_id,
+                    "Could not resolve credential for WASM tool (not found in user context or default)"
                 );
                 continue;
             }
@@ -1290,64 +1466,101 @@ fn is_private_ip(ip: std::net::IpAddr) -> bool {
     }
 }
 
-/// Coerce parameter values to match their JSON Schema-declared types.
-///
-/// LLMs frequently send numeric values as strings (e.g. `"5"` instead of `5`)
-/// or booleans as strings (`"true"` instead of `true`). This walks the params
-/// object and converts string values where the schema expects a different type.
-fn coerce_params_to_schema(
-    mut params: serde_json::Value,
-    schema: &serde_json::Value,
-) -> serde_json::Value {
-    let properties = schema.get("properties").and_then(|p| p.as_object());
-
-    let properties = match properties {
-        Some(p) => p,
-        None => return params,
+fn schema_contains_container_properties(schema: &serde_json::Value) -> bool {
+    let has_container = |props: &serde_json::Map<String, serde_json::Value>| {
+        props
+            .values()
+            .any(|prop| schema_declares_type(prop, "array") || schema_declares_type(prop, "object"))
     };
 
-    let obj = match params.as_object_mut() {
-        Some(o) => o,
-        None => return params,
-    };
+    if schema
+        .get("properties")
+        .and_then(|p| p.as_object())
+        .is_some_and(has_container)
+    {
+        return true;
+    }
 
-    for (key, prop_schema) in properties {
-        let declared_type = prop_schema.get("type").and_then(|t| t.as_str());
-        let declared_type = match declared_type {
-            Some(t) => t,
-            None => continue,
-        };
-
-        if let Some(current_value) = obj.get_mut(key)
-            && let Some(s) = current_value.as_str()
+    for key in ["allOf", "oneOf", "anyOf"] {
+        if let Some(variants) = schema.get(key).and_then(|v| v.as_array())
+            && variants.iter().any(|v| {
+                v.get("properties")
+                    .and_then(|p| p.as_object())
+                    .is_some_and(has_container)
+            })
         {
-            if declared_type == "string" {
-                continue;
-            }
-
-            let coerced = match declared_type {
-                "number" => s.parse::<f64>().ok().map(serde_json::Value::from),
-                "integer" => s.parse::<i64>().ok().map(serde_json::Value::from),
-                "boolean" => match s.to_lowercase().as_str() {
-                    "true" => Some(serde_json::json!(true)),
-                    "false" => Some(serde_json::json!(false)),
-                    _ => None,
-                },
-                _ => None,
-            };
-
-            if let Some(new_val) = coerced {
-                *current_value = new_val;
-            }
+            return true;
         }
     }
 
-    params
+    false
+}
+
+fn schema_declares_type(schema: &serde_json::Value, expected: &str) -> bool {
+    match schema.get("type") {
+        Some(serde_json::Value::String(t)) => t == expected,
+        Some(serde_json::Value::Array(types)) => types.iter().any(|t| t.as_str() == Some(expected)),
+        _ => match expected {
+            "object" => {
+                schema
+                    .get("properties")
+                    .and_then(|p| p.as_object())
+                    .is_some()
+                    || schema
+                        .get("additionalProperties")
+                        .is_some_and(serde_json::Value::is_object)
+            }
+            "array" => schema.get("items").is_some(),
+            _ => false,
+        },
+    }
+}
+
+fn schema_is_typed_property(schema: &serde_json::Value) -> bool {
+    matches!(
+        schema.get("type"),
+        Some(serde_json::Value::String(_)) | Some(serde_json::Value::Array(_))
+    ) || schema.get("$ref").is_some()
+        || schema.get("anyOf").is_some()
+        || schema.get("oneOf").is_some()
+        || schema.get("allOf").is_some()
+        || schema.get("items").is_some()
+        || schema
+            .get("properties")
+            .and_then(|p| p.as_object())
+            .is_some()
+        || schema
+            .get("additionalProperties")
+            .is_some_and(serde_json::Value::is_object)
+}
+
+fn build_tool_usage_hint(tool_name: &str, schema: &serde_json::Value) -> String {
+    let mut hint = format!(
+        "Tip: call tool_info(name: \"{}\", include_schema: true) for the full parameter schema.",
+        tool_name
+    );
+
+    if schema_contains_container_properties(schema) {
+        hint.push_str(
+            " For array/object fields, pass native JSON arrays/objects, not quoted JSON strings.",
+        );
+    }
+
+    hint
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
+
+    use async_trait::async_trait;
+    use uuid::Uuid;
+
+    use crate::context::JobContext;
+    use crate::secrets::{
+        CreateSecretParams, DecryptedSecret, InMemorySecretsStore, Secret, SecretError, SecretRef,
+        SecretsStore,
+    };
 
     use crate::testing::credentials::{
         TEST_BEARER_TOKEN_123, TEST_GOOGLE_OAUTH_FRESH, TEST_GOOGLE_OAUTH_LEGACY,
@@ -1357,6 +1570,78 @@ mod tests {
     use crate::tools::tool::Tool;
     use crate::tools::wasm::capabilities::Capabilities;
     use crate::tools::wasm::runtime::{WasmRuntimeConfig, WasmToolRuntime};
+
+    struct RecordingSecretsStore {
+        inner: InMemorySecretsStore,
+        get_decrypted_lookups: Mutex<Vec<(String, String)>>,
+    }
+
+    impl RecordingSecretsStore {
+        fn new() -> Self {
+            Self {
+                inner: test_secrets_store(),
+                get_decrypted_lookups: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn decrypted_lookups(&self) -> Vec<(String, String)> {
+            self.get_decrypted_lookups.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl SecretsStore for RecordingSecretsStore {
+        async fn create(
+            &self,
+            user_id: &str,
+            params: CreateSecretParams,
+        ) -> Result<Secret, SecretError> {
+            self.inner.create(user_id, params).await
+        }
+
+        async fn get(&self, user_id: &str, name: &str) -> Result<Secret, SecretError> {
+            self.inner.get(user_id, name).await
+        }
+
+        async fn get_decrypted(
+            &self,
+            user_id: &str,
+            name: &str,
+        ) -> Result<DecryptedSecret, SecretError> {
+            self.get_decrypted_lookups
+                .lock()
+                .unwrap()
+                .push((user_id.to_string(), name.to_string()));
+            self.inner.get_decrypted(user_id, name).await
+        }
+
+        async fn exists(&self, user_id: &str, name: &str) -> Result<bool, SecretError> {
+            self.inner.exists(user_id, name).await
+        }
+
+        async fn list(&self, user_id: &str) -> Result<Vec<SecretRef>, SecretError> {
+            self.inner.list(user_id).await
+        }
+
+        async fn delete(&self, user_id: &str, name: &str) -> Result<bool, SecretError> {
+            self.inner.delete(user_id, name).await
+        }
+
+        async fn record_usage(&self, secret_id: Uuid) -> Result<(), SecretError> {
+            self.inner.record_usage(secret_id).await
+        }
+
+        async fn is_accessible(
+            &self,
+            user_id: &str,
+            secret_name: &str,
+            allowed_secrets: &[String],
+        ) -> Result<bool, SecretError> {
+            self.inner
+                .is_accessible(user_id, secret_name, allowed_secrets)
+                .await
+        }
+    }
 
     #[test]
     fn test_wrapper_creation() {
@@ -1654,6 +1939,104 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_resolve_host_credentials_owner_scope_bearer() {
+        use std::collections::HashMap;
+
+        use crate::secrets::{
+            CreateSecretParams, CredentialLocation, CredentialMapping, SecretsStore,
+        };
+        use crate::tools::wasm::capabilities::HttpCapability;
+        use crate::tools::wasm::wrapper::resolve_host_credentials;
+
+        let store = test_secrets_store();
+        let ctx = JobContext::with_user("owner-scope", "owner-scope test", "owner-scope test");
+
+        store
+            .create(
+                &ctx.user_id,
+                CreateSecretParams::new("google_oauth_token", TEST_GOOGLE_OAUTH_TOKEN),
+            )
+            .await
+            .unwrap();
+
+        let mut credentials = HashMap::new();
+        credentials.insert(
+            "google_oauth_token".to_string(),
+            CredentialMapping {
+                secret_name: "google_oauth_token".to_string(),
+                location: CredentialLocation::AuthorizationBearer,
+                host_patterns: vec!["www.googleapis.com".to_string()],
+            },
+        );
+
+        let caps = Capabilities {
+            http: Some(HttpCapability {
+                credentials,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let result = resolve_host_credentials(&caps, Some(&store), &ctx.user_id, None).await;
+        assert_eq!(result.len(), 1);
+        assert_eq!(
+            result[0].headers.get("Authorization"),
+            Some(&format!("Bearer {TEST_GOOGLE_OAUTH_TOKEN}"))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_execute_resolves_host_credentials_from_owner_scope_context() {
+        use std::collections::HashMap;
+
+        use crate::secrets::{CredentialLocation, CredentialMapping};
+        use crate::tools::wasm::capabilities::HttpCapability;
+
+        let runtime = Arc::new(WasmToolRuntime::new(WasmRuntimeConfig::for_testing()).unwrap());
+        let prepared = runtime
+            .prepare("search", b"\0asm\x0d\0\x01\0", None)
+            .await
+            .unwrap();
+        let store = Arc::new(RecordingSecretsStore::new());
+        let ctx = JobContext::with_user("owner-scope", "owner-scope test", "owner-scope test");
+
+        store
+            .create(
+                &ctx.user_id,
+                CreateSecretParams::new("google_oauth_token", TEST_GOOGLE_OAUTH_TOKEN),
+            )
+            .await
+            .unwrap();
+
+        let mut credentials = HashMap::new();
+        credentials.insert(
+            "google_oauth_token".to_string(),
+            CredentialMapping {
+                secret_name: "google_oauth_token".to_string(),
+                location: CredentialLocation::AuthorizationBearer,
+                host_patterns: vec!["www.googleapis.com".to_string()],
+            },
+        );
+
+        let caps = Capabilities {
+            http: Some(HttpCapability {
+                credentials,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let wrapper = super::WasmToolWrapper::new(Arc::clone(&runtime), prepared, caps)
+            .with_secrets_store(store.clone());
+        let result = wrapper.execute(serde_json::json!({}), &ctx).await;
+        assert!(result.is_err());
+
+        let lookups = store.decrypted_lookups();
+        assert!(lookups.contains(&("owner-scope".to_string(), "google_oauth_token".to_string())));
+        assert!(!lookups.contains(&("default".to_string(), "google_oauth_token".to_string())));
+    }
+
+    #[tokio::test]
     async fn test_resolve_host_credentials_missing_secret() {
         use std::collections::HashMap;
 
@@ -1910,100 +2293,60 @@ mod tests {
         assert!(result.is_ok());
     }
 
-    #[test]
-    fn test_coerce_params_string_to_number() {
-        let schema = serde_json::json!({
+    #[tokio::test]
+    async fn test_untyped_override_preserves_extracted_discovery_schema() {
+        let typed_schema = serde_json::json!({
             "type": "object",
             "properties": {
-                "count": { "type": "number" },
-                "name": { "type": "string" }
+                "values": {
+                    "type": ["array", "null"],
+                    "items": { "type": "array" }
+                }
             }
         });
-        let params = serde_json::json!({"count": "5", "name": "test"});
-        let result = super::coerce_params_to_schema(params, &schema);
-        assert_eq!(result["count"], serde_json::json!(5.0));
-        assert_eq!(result["name"], serde_json::json!("test"));
+
+        let runtime = Arc::new(WasmToolRuntime::new(WasmRuntimeConfig::for_testing()).unwrap()); // safety: test-only setup
+        let mut prepared = runtime
+            .prepare("sheets", b"\0asm\x0d\0\x01\0", None)
+            .await
+            .unwrap(); // safety: test-only setup
+        Arc::get_mut(&mut prepared).unwrap().schema = typed_schema.clone(); // safety: test-only setup
+
+        let wrapper =
+            super::WasmToolWrapper::new(Arc::clone(&runtime), prepared, Capabilities::default())
+                .with_schema(serde_json::json!({
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": true
+                }));
+
+        #[rustfmt::skip]
+        assert_eq!( // safety: test-only assertion
+            wrapper.parameters_schema(),
+            serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": true
+            })
+        );
+        assert_eq!(wrapper.discovery_schema(), typed_schema); // safety: test-only assertion
     }
 
     #[test]
-    fn test_coerce_params_string_to_integer() {
+    fn test_build_tool_usage_hint_detects_nullable_container_properties() {
         let schema = serde_json::json!({
             "type": "object",
             "properties": {
-                "limit": { "type": "integer" }
+                "requests": {
+                    "type": ["array", "null"],
+                    "items": { "type": "object" }
+                }
             }
         });
-        let params = serde_json::json!({"limit": "10"});
-        let result = super::coerce_params_to_schema(params, &schema);
-        assert_eq!(result["limit"], serde_json::json!(10));
-    }
 
-    #[test]
-    fn test_coerce_params_string_to_boolean() {
-        let schema = serde_json::json!({
-            "type": "object",
-            "properties": {
-                "a": { "type": "boolean" },
-                "b": { "type": "boolean" },
-                "c": { "type": "boolean" },
-                "d": { "type": "boolean" }
-            }
-        });
-        let params = serde_json::json!({
-            "a": "true",
-            "b": "false",
-            "c": "True",
-            "d": "FALSE"
-        });
-        let result = super::coerce_params_to_schema(params, &schema);
-        assert_eq!(result["a"], serde_json::json!(true));
-        assert_eq!(result["b"], serde_json::json!(false));
-        assert_eq!(result["c"], serde_json::json!(true));
-        assert_eq!(result["d"], serde_json::json!(false));
-    }
+        let hint = super::build_tool_usage_hint("google_docs", &schema);
 
-    #[test]
-    fn test_coerce_params_already_correct_type() {
-        let schema = serde_json::json!({
-            "type": "object",
-            "properties": {
-                "count": { "type": "number" }
-            }
-        });
-        let params = serde_json::json!({"count": 5});
-        let result = super::coerce_params_to_schema(params, &schema);
-        assert_eq!(result["count"], serde_json::json!(5));
-    }
-
-    #[test]
-    fn test_coerce_params_invalid_string_not_coerced() {
-        let schema = serde_json::json!({
-            "type": "object",
-            "properties": {
-                "count": { "type": "number" }
-            }
-        });
-        let params = serde_json::json!({"count": "not-a-number"});
-        let result = super::coerce_params_to_schema(params, &schema);
-        // Should remain as string since it can't be parsed
-        assert_eq!(result["count"], serde_json::json!("not-a-number"));
-    }
-
-    /// Regression: permissive fallback schema (empty properties) must NOT coerce.
-    /// This documents the bug where WASM tools with no sidecar `parameters` field
-    /// got the permissive fallback, causing coercion to be a no-op and LLM-provided
-    /// string integers to reach the WASM tool un-coerced.
-    #[test]
-    fn test_coerce_noop_with_permissive_schema() {
-        let permissive = serde_json::json!({
-            "type": "object",
-            "properties": {},
-            "additionalProperties": true
-        });
-        let params = serde_json::json!({"query": "test", "count": "10"});
-        let result = super::coerce_params_to_schema(params, &permissive);
-        // With empty properties, no coercion happens — string stays string
-        assert_eq!(result["count"], serde_json::json!("10"));
+        assert!(hint.contains("native JSON arrays/objects")); // safety: test-only assertion
     }
 
     /// Regression test: leak scan must run on raw headers (before credential
@@ -2057,5 +2400,162 @@ mod tests {
             post_result.is_err(),
             "Leak scan on post-injection headers should block the Slack token"
         );
+    }
+
+    #[tokio::test]
+    async fn test_resolve_host_credentials_fallback_to_default_user() {
+        use crate::secrets::{CredentialLocation, CredentialMapping, SecretsStore};
+        use crate::tools::wasm::capabilities::HttpCapability;
+        use crate::tools::wasm::wrapper::resolve_host_credentials;
+
+        let store = test_secrets_store();
+
+        // Store a token under the "default" global user
+        store
+            .create(
+                "default",
+                crate::secrets::CreateSecretParams::new("google_oauth_token", "global_token_value"),
+            )
+            .await
+            .expect("Failed to store global token"); // safety: test code only
+
+        // Create capabilities requiring this credential
+        let mut creds = std::collections::HashMap::new();
+        creds.insert(
+            "google_oauth_token".to_string(),
+            CredentialMapping {
+                secret_name: "google_oauth_token".to_string(),
+                location: CredentialLocation::AuthorizationBearer,
+                host_patterns: vec!["sheets.googleapis.com".to_string()],
+            },
+        );
+        let caps = Capabilities {
+            http: Some(HttpCapability {
+                allowlist: vec![],
+                credentials: creds,
+                rate_limit: crate::tools::wasm::capabilities::RateLimitConfig::default(),
+                max_request_bytes: 1024 * 1024,
+                max_response_bytes: 10 * 1024 * 1024,
+                timeout: std::time::Duration::from_secs(30),
+            }),
+            ..Default::default()
+        };
+
+        // Resolve credentials for a different user (routine context)
+        // Should fallback to "default" and find the token
+        let result = resolve_host_credentials(&caps, Some(&store), "routine_user_123", None).await;
+
+        assert!(!result.is_empty(), "fallback to default"); // safety: test code only
+        assert_eq!(result[0].secret_value, "global_token_value"); // safety: test code only
+    }
+
+    fn test_capabilities_with_google_oauth() -> Capabilities {
+        use crate::secrets::{CredentialLocation, CredentialMapping};
+        use crate::tools::wasm::capabilities::HttpCapability;
+
+        let mut creds = std::collections::HashMap::new();
+        creds.insert(
+            "google_oauth_token".to_string(),
+            CredentialMapping {
+                secret_name: "google_oauth_token".to_string(),
+                location: CredentialLocation::AuthorizationBearer,
+                host_patterns: vec!["sheets.googleapis.com".to_string()],
+            },
+        );
+        Capabilities {
+            http: Some(HttpCapability {
+                allowlist: vec![],
+                credentials: creds,
+                rate_limit: crate::tools::wasm::capabilities::RateLimitConfig::default(),
+                max_request_bytes: 1024 * 1024,
+                max_response_bytes: 10 * 1024 * 1024,
+                timeout: std::time::Duration::from_secs(30),
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn test_resolve_host_credentials_prefers_user_specific_over_default() {
+        use crate::secrets::SecretsStore;
+        use crate::tools::wasm::wrapper::resolve_host_credentials;
+
+        let store = test_secrets_store();
+
+        // Store token under "default" (global)
+        store
+            .create(
+                "default",
+                crate::secrets::CreateSecretParams::new("google_oauth_token", "global_token"),
+            )
+            .await
+            .expect("Failed to store global token"); // safety: test code only
+
+        // Store token under user_123 (user-specific)
+        store
+            .create(
+                "user_123",
+                crate::secrets::CreateSecretParams::new(
+                    "google_oauth_token",
+                    "user_specific_token",
+                ),
+            )
+            .await
+            .expect("Failed to store user token"); // safety: test code only
+
+        // Create capabilities
+        let caps = test_capabilities_with_google_oauth();
+
+        // Resolve credentials for user_123
+        // Should prefer user_123's token over default
+        let result = resolve_host_credentials(&caps, Some(&store), "user_123", None).await;
+
+        assert!(!result.is_empty(), "has user credentials"); // safety: test code only
+        assert_eq!(result[0].secret_value, "user_specific_token", "user token"); // safety: test code only
+    }
+
+    #[tokio::test]
+    async fn test_resolve_host_credentials_no_fallback_when_already_default() {
+        use crate::secrets::SecretsStore;
+        use crate::tools::wasm::wrapper::resolve_host_credentials;
+
+        let store = test_secrets_store();
+
+        // Only store token under "default" (not a duplicate)
+        store
+            .create(
+                "default",
+                crate::secrets::CreateSecretParams::new("google_oauth_token", "default_token"),
+            )
+            .await
+            .expect("Failed to store default token"); // safety: test code only
+
+        // Create capabilities
+        let caps = test_capabilities_with_google_oauth();
+
+        // Resolve credentials for "default" user
+        // Should NOT attempt fallback (already looking up default)
+        let result = resolve_host_credentials(&caps, Some(&store), "default", None).await;
+
+        assert!(!result.is_empty(), "Should find default token"); // safety: test code only
+        assert_eq!(result[0].secret_value, "default_token"); // safety: test code only
+    }
+
+    #[tokio::test]
+    async fn test_resolve_host_credentials_missing_secret_warns() {
+        use crate::tools::wasm::wrapper::resolve_host_credentials;
+
+        let store = test_secrets_store();
+
+        // Don't store any token
+
+        // Create capabilities expecting a credential
+        let caps = test_capabilities_with_google_oauth();
+
+        // Resolve credentials when neither user nor default has the token
+        let result = resolve_host_credentials(&caps, Some(&store), "user_456", None).await;
+
+        // Should return empty since credential can't be found anywhere
+        assert!(result.is_empty(), "no credentials found"); // safety: test code only
     }
 }

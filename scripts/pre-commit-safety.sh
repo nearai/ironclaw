@@ -10,6 +10,7 @@
 #   3. Hardcoded /tmp paths in tests (flaky in parallel runs)
 #   4. Tool parameters logged without redaction (secret leaks)
 #   5. Multi-step DB operations without transaction wrapping
+#   6. .unwrap(), .expect(), assert!() in production code (panics)
 #
 # Suppress individual lines with an inline "// safety: <reason>" comment.
 
@@ -126,6 +127,32 @@ if [ -n "$DIFF_W_OUTPUT" ]; then
             }
         ' | grep -E '^\+.*\.(execute|query)\(' | head -4 | sed 's/^/    /'
     fi
+fi
+
+# 6. .unwrap(), .expect(), assert!() in production code
+#    Matches added lines containing panic-inducing calls.
+#    Excludes test files, test modules, and debug_assert (compiled out in release).
+#    Suppress with "// safety: <reason>".
+PROD_DIFF="$DIFF_OUTPUT"
+# Strip hunks from test-only files (tests/ directory, *_test.rs, test_*.rs)
+PROD_DIFF=$(echo "$PROD_DIFF" | grep -v '^+++ b/tests/' || true)
+# Strip hunks whose @@ context line indicates a test module.
+# git diff includes the enclosing function/module name after @@.
+# Only match `mod tests` (the conventional #[cfg(test)] module) — do NOT
+# match `fn test_*` because production code can have functions named test_*.
+PROD_DIFF=$(echo "$PROD_DIFF" | awk '
+    /^@@ / { in_test = ($0 ~ /mod tests/) }
+    !in_test { print }
+' || true)
+if echo "$PROD_DIFF" | grep -nE '^\+' \
+    | grep -E '\.(unwrap|expect)\(|[^_]assert(_eq|_ne)?!' \
+    | grep -vE 'debug_assert|// safety:|#\[cfg\(test\)\]|#\[test\]|mod tests' \
+    | head -5 | grep -q .; then
+    warn "PANIC" "Production code must not use .unwrap(), .expect(), or assert!(). Use proper error handling."
+    echo "$PROD_DIFF" | grep -nE '^\+' \
+        | grep -E '\.(unwrap|expect)\(|[^_]assert(_eq|_ne)?!' \
+        | grep -vE 'debug_assert|// safety:|#\[cfg\(test\)\]|#\[test\]|mod tests' \
+        | head -5 | sed 's/^/    /'
 fi
 
 if [ "$WARNINGS" -gt 0 ]; then

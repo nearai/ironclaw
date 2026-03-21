@@ -487,12 +487,32 @@ impl RoutineStore for PgBackend {
         self.store.count_running_routine_runs(routine_id).await
     }
 
+    async fn count_running_routine_runs_batch(
+        &self,
+        routine_ids: &[Uuid],
+    ) -> Result<std::collections::HashMap<Uuid, i64>, DatabaseError> {
+        self.store
+            .count_running_routine_runs_batch(routine_ids)
+            .await
+    }
+
     async fn link_routine_run_to_job(
         &self,
         run_id: Uuid,
         job_id: Uuid,
     ) -> Result<(), DatabaseError> {
         self.store.link_routine_run_to_job(run_id, job_id).await
+    }
+
+    async fn get_webhook_routine_by_path(
+        &self,
+        path: &str,
+    ) -> Result<Option<Routine>, DatabaseError> {
+        self.store.get_webhook_routine_by_path(path).await
+    }
+
+    async fn list_dispatched_routine_runs(&self) -> Result<Vec<RoutineRun>, DatabaseError> {
+        self.store.list_dispatched_routine_runs().await
     }
 }
 

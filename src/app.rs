@@ -25,7 +25,7 @@ use crate::tools::ToolRegistry;
 use crate::tools::mcp::{McpProcessManager, McpSessionManager};
 use crate::tools::wasm::SharedCredentialRegistry;
 use crate::tools::wasm::WasmToolRuntime;
-use crate::workspace::{EmbeddingProvider, Workspace};
+use crate::workspace::{EmbeddingCacheConfig, EmbeddingProvider, Workspace};
 
 /// Fully initialized application components, ready for channel wiring
 /// and agent construction.
@@ -56,6 +56,7 @@ pub struct AppComponents {
     pub session: Arc<SessionManager>,
     pub catalog_entries: Vec<crate::extensions::RegistryEntry>,
     pub dev_loaded_tool_names: Vec<String>,
+    pub builder: Option<Arc<dyn crate::tools::SoftwareBuilder>>,
 }
 
 /// Options that control optional init phases.
@@ -140,12 +141,14 @@ impl AppBuilder {
         self.handles = Some(handles);
 
         // Post-init: migrate disk config, reload config from DB, attach session, cleanup
-        if let Err(e) = crate::bootstrap::migrate_disk_to_db(db.as_ref(), "default").await {
+        if let Err(e) =
+            crate::bootstrap::migrate_disk_to_db(db.as_ref(), &self.config.owner_id).await
+        {
             tracing::warn!("Disk-to-DB settings migration failed: {}", e);
         }
 
         let toml_path = self.toml_path.as_deref();
-        match Config::from_db_with_toml(db.as_ref(), "default", toml_path).await {
+        match Config::from_db_with_toml(db.as_ref(), &self.config.owner_id, toml_path).await {
             Ok(db_config) => {
                 self.config = db_config;
                 tracing::debug!("Configuration reloaded from database");
@@ -158,7 +161,9 @@ impl AppBuilder {
             }
         }
 
-        self.session.attach_store(db.clone(), "default").await;
+        self.session
+            .attach_store(db.clone(), &self.config.owner_id)
+            .await;
 
         // Fire-and-forget housekeeping — no need to block startup.
         let db_cleanup = db.clone();
@@ -193,9 +198,10 @@ impl AppBuilder {
                 let store: Option<&(dyn crate::db::SettingsStore + Sync)> =
                     self.db.as_ref().map(|db| db.as_ref() as _);
                 let toml_path = self.toml_path.as_deref();
+                let owner_id = self.config.owner_id.clone();
                 if let Err(e) = self
                     .config
-                    .re_resolve_llm(store, "default", toml_path)
+                    .re_resolve_llm(store, &owner_id, toml_path)
                     .await
                 {
                     tracing::warn!(
@@ -224,15 +230,17 @@ impl AppBuilder {
 
         if let Some(ref secrets) = store {
             // Inject LLM API keys from encrypted storage
-            crate::config::inject_llm_keys_from_secrets(secrets.as_ref(), "default").await;
+            crate::config::inject_llm_keys_from_secrets(secrets.as_ref(), &self.config.owner_id)
+                .await;
 
             // Re-resolve only the LLM config with newly available keys.
             let store: Option<&(dyn crate::db::SettingsStore + Sync)> =
                 self.db.as_ref().map(|db| db.as_ref() as _);
             let toml_path = self.toml_path.as_deref();
+            let owner_id = self.config.owner_id.clone();
             if let Err(e) = self
                 .config
-                .re_resolve_llm(store, "default", toml_path)
+                .re_resolve_llm(store, &owner_id, toml_path)
                 .await
             {
                 tracing::warn!("Failed to re-resolve LLM config after secret injection: {e}");
@@ -273,6 +281,7 @@ impl AppBuilder {
             Arc<ToolRegistry>,
             Option<Arc<dyn EmbeddingProvider>>,
             Option<Arc<Workspace>>,
+            Option<Arc<dyn crate::tools::SoftwareBuilder>>,
         ),
         anyhow::Error,
     > {
@@ -303,12 +312,23 @@ impl AppBuilder {
             .create_provider(&self.config.llm.nearai.base_url, self.session.clone());
 
         // Register memory tools if database is available
+        let workspace_user_id = self
+            .config
+            .channels
+            .gateway
+            .as_ref()
+            .map(|gw| gw.user_id.as_str())
+            .unwrap_or("default");
         let workspace = if let Some(ref db) = self.db {
-            let mut ws = Workspace::new_with_db("default", db.clone())
+            let emb_cache_config = EmbeddingCacheConfig {
+                max_entries: self.config.embeddings.cache_size,
+            };
+            let mut ws = Workspace::new_with_db(workspace_user_id, db.clone())
                 .with_search_config(&self.config.search);
             if let Some(ref emb) = embeddings {
-                ws = ws.with_embeddings(emb.clone());
+                ws = ws.with_embeddings_cached(emb.clone(), emb_cache_config);
             }
+            ws = ws.with_memory_layers(self.config.workspace.memory_layers.clone());
             let ws = Arc::new(ws);
             tools.register_memory_tools(Arc::clone(&ws));
             Some(ws)
@@ -360,16 +380,19 @@ impl AppBuilder {
         }
 
         // Register builder tool if enabled
-        if self.config.builder.enabled
+        let builder = if self.config.builder.enabled
             && (self.config.agent.allow_local_tools || !self.config.sandbox.enabled)
         {
-            tools
+            let b = tools
                 .register_builder_tool(llm.clone(), Some(self.config.builder.to_builder_config()))
                 .await;
-            tracing::debug!("Builder mode enabled");
-        }
+            tracing::info!("Builder mode enabled");
+            Some(b)
+        } else {
+            None
+        };
 
-        Ok((safety, tools, embeddings, workspace))
+        Ok((safety, tools, embeddings, workspace, builder))
     }
 
     /// Phase 5: Load WASM tools, MCP servers, and create extension manager.
@@ -469,9 +492,10 @@ impl AppBuilder {
             let tools = Arc::clone(tools);
             let mcp_sm = Arc::clone(&mcp_session_manager);
             let pm = Arc::clone(&mcp_process_manager);
+            let owner_id = self.config.owner_id.clone();
             async move {
                 let servers_result = if let Some(ref d) = db {
-                    load_mcp_servers_from_db(d.as_ref(), "default").await
+                    load_mcp_servers_from_db(d.as_ref(), &owner_id).await
                 } else {
                     crate::tools::mcp::config::load_mcp_servers().await
                 };
@@ -491,6 +515,7 @@ impl AppBuilder {
                             let secrets = secrets_store.clone();
                             let tools = Arc::clone(&tools);
                             let pm = Arc::clone(&pm);
+                            let owner_id = owner_id.clone();
 
                             join_set.spawn(async move {
                                 let server_name = server.name.clone();
@@ -500,7 +525,7 @@ impl AppBuilder {
                                     &mcp_sm,
                                     &pm,
                                     secrets,
-                                    "default",
+                                    &owner_id,
                                 )
                                 .await
                                 {
@@ -511,7 +536,7 @@ impl AppBuilder {
                                             server_name,
                                             e
                                         );
-                                        return;
+                                        return None;
                                     }
                                 };
 
@@ -528,6 +553,10 @@ impl AppBuilder {
                                                     tool_count,
                                                     server_name
                                                 );
+                                                return Some((
+                                                    server_name,
+                                                    Arc::new(client),
+                                                ));
                                             }
                                             Err(e) => {
                                                 tracing::warn!(
@@ -558,14 +587,27 @@ impl AppBuilder {
                                         }
                                     }
                                 }
+                                None
                             });
                         }
 
+                        let mut startup_clients = Vec::new();
                         while let Some(result) = join_set.join_next().await {
-                            if let Err(e) = result {
-                                tracing::warn!("MCP server loading task panicked: {}", e);
+                            match result {
+                                Ok(Some(client_pair)) => {
+                                    startup_clients.push(client_pair);
+                                }
+                                Ok(None) => {}
+                                Err(e) => {
+                                    if e.is_panic() {
+                                        tracing::error!("MCP server loading task panicked: {}", e);
+                                    } else {
+                                        tracing::warn!("MCP server loading task failed: {}", e);
+                                    }
+                                }
                             }
                         }
+                        return startup_clients;
                     }
                     Err(e) => {
                         if matches!(
@@ -583,10 +625,12 @@ impl AppBuilder {
                         }
                     }
                 }
+                Vec::new()
             }
         };
 
-        let (dev_loaded_tool_names, _) = tokio::join!(wasm_tools_future, mcp_servers_future);
+        let (dev_loaded_tool_names, startup_mcp_clients) =
+            tokio::join!(wasm_tools_future, mcp_servers_future);
 
         // Load registry catalog entries for extension discovery
         let mut catalog_entries = match crate::registry::RegistryCatalog::load_or_embedded() {
@@ -594,7 +638,7 @@ impl AppBuilder {
                 let entries: Vec<_> = catalog
                     .all()
                     .iter()
-                    .map(|m| m.to_registry_entry())
+                    .filter_map(|m| m.to_registry_entry())
                     .collect();
                 tracing::debug!(
                     count = entries.len(),
@@ -642,12 +686,23 @@ impl AppBuilder {
                 self.config.wasm.tools_dir.clone(),
                 self.config.channels.wasm_channels_dir.clone(),
                 self.config.tunnel.public_url.clone(),
-                "default".to_string(),
+                self.config.owner_id.clone(),
                 self.db.clone(),
                 catalog_entries.clone(),
             ));
             tools.register_extension_tools(Arc::clone(&manager));
             tracing::debug!("Extension manager initialized with in-chat discovery tools");
+
+            if !startup_mcp_clients.is_empty() {
+                tracing::info!(
+                    count = startup_mcp_clients.len(),
+                    "Injecting startup MCP clients into extension manager"
+                );
+                for (name, client) in startup_mcp_clients {
+                    manager.inject_mcp_client(name, client).await;
+                }
+            }
+
             Some(manager)
         };
 
@@ -677,7 +732,11 @@ impl AppBuilder {
         // Post-init validation: if a non-nearai backend was selected but
         // credentials were never resolved (deferred resolution found no keys),
         // fail early with a clear error instead of a confusing runtime failure.
-        if self.config.llm.backend != "nearai" && self.config.llm.provider.is_none() {
+        if self.config.llm.backend != "nearai"
+            && self.config.llm.backend != "bedrock"
+            && self.config.llm.backend != "openai_codex"
+            && self.config.llm.provider.is_none()
+        {
             let backend = &self.config.llm.backend;
             anyhow::bail!(
                 "LLM_BACKEND={backend} is configured but no credentials were found. \
@@ -690,7 +749,7 @@ impl AppBuilder {
         } else {
             self.init_llm().await?
         };
-        let (safety, tools, embeddings, workspace) = self.init_tools(&llm).await?;
+        let (safety, tools, embeddings, workspace, builder) = self.init_tools(&llm).await?;
 
         // Create hook registry early so runtime extension activation can register hooks.
         let hooks = Arc::new(HookRegistry::new());
@@ -705,6 +764,17 @@ impl AppBuilder {
             catalog_entries,
             dev_loaded_tool_names,
         ) = self.init_extensions(&tools, &hooks).await?;
+
+        // Load bootstrap-completed flag from settings so that existing users
+        // who already completed onboarding don't re-get bootstrap injection.
+        if let Some(ref ws) = workspace {
+            let toml_path = crate::settings::Settings::default_toml_path();
+            if let Ok(Some(settings)) = crate::settings::Settings::load_toml(&toml_path)
+                && settings.profile_onboarding_completed
+            {
+                ws.mark_bootstrap_completed();
+            }
+        }
 
         // Seed workspace and backfill embeddings
         if let Some(ref ws) = workspace {
@@ -810,6 +880,7 @@ impl AppBuilder {
             session: self.session,
             catalog_entries,
             dev_loaded_tool_names,
+            builder,
         })
     }
 }

@@ -642,6 +642,7 @@ fn poll_channel_mentions(channel_id: &str, bot_id: &str) {
             },
             thread_id: None,
             metadata_json,
+            attachments: vec![],
         });
 
         remember_processed_id(&mut recent_ids, &msg.id);

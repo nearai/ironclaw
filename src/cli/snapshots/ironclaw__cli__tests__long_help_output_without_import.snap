@@ -24,8 +24,10 @@ Commands:
   skills      Manage skills
   hooks       Manage lifecycle hooks
   doctor      Run diagnostics
+  logs        View and manage gateway logs
   status      Show system status
   completion  Generate completions
+  login       Authenticate with a provider
   help        Print this message or the help of the given subcommand(s)
 
 Options:
