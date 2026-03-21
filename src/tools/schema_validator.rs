@@ -92,7 +92,9 @@ fn check_object_schema(schema: &serde_json::Value, path: &str) -> Vec<String> {
     for key in ["allOf", "oneOf", "anyOf"] {
         if let Some(variants) = schema.get(key).and_then(|v| v.as_array()) {
             for (i, variant) in variants.iter().enumerate() {
-                if variant.get("type").and_then(|t| t.as_str()) == Some("object") {
+                if variant.get("type").and_then(|t| t.as_str()) == Some("object")
+                    || variant.get("properties").is_some()
+                {
                     let variant_path = format!("{path}.{key}[{i}]");
                     errors.extend(check_object_schema(variant, &variant_path));
                 }

@@ -522,7 +522,9 @@ fn validate_tool_schema_inner(schema: &serde_json::Value, path: &str, depth: usi
     for key in ["allOf", "oneOf", "anyOf"] {
         if let Some(variants) = schema.get(key).and_then(|v| v.as_array()) {
             for (i, variant) in variants.iter().enumerate() {
-                if variant.get("type").and_then(|t| t.as_str()) == Some("object") {
+                if variant.get("type").and_then(|t| t.as_str()) == Some("object")
+                    || variant.get("properties").is_some()
+                {
                     let variant_path = format!("{path}.{key}[{i}]");
                     errors.extend(validate_tool_schema_inner(
                         variant,
