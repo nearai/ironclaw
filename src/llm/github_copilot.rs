@@ -107,10 +107,14 @@ impl GithubCopilotProvider {
         body: &impl Serialize,
     ) -> Result<R, LlmError> {
         let url = self.api_url();
+        // Map token exchange failures to RequestFailed (retryable) rather than
+        // AuthFailed (non-retryable), since transient network errors during
+        // exchange should be retried by RetryProvider.
         let token = self.token_manager.get_token().await.map_err(|e| {
             tracing::warn!(error = %e, "Copilot: token exchange failed");
-            LlmError::AuthFailed {
+            LlmError::RequestFailed {
                 provider: "github_copilot".to_string(),
+                reason: format!("Token exchange failed: {e}"),
             }
         })?;
 
@@ -136,12 +140,10 @@ impl GithubCopilotProvider {
         let status = response.status();
 
         if !status.is_success() {
-            let retry_after = response
-                .headers()
-                .get("retry-after")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.parse::<u64>().ok())
-                .map(std::time::Duration::from_secs);
+            // Use shared retry-after parser (supports HTTP-date, default 60s)
+            let retry_after = Some(crate::llm::retry::parse_retry_after(
+                response.headers().get(reqwest::header::RETRY_AFTER),
+            ));
 
             let response_text = response
                 .text()
@@ -155,12 +157,46 @@ impl GithubCopilotProvider {
             );
 
             if status.as_u16() == 401 {
-                // Invalidate the cached session token so the next attempt
-                // performs a fresh token exchange.
-                tracing::warn!(
-                    "Copilot: 401 Unauthorized — invalidating cached session token for retry"
-                );
+                // Invalidate the cached session token and retry once with a
+                // fresh exchange — stale tokens are the most common 401 cause.
+                tracing::warn!("Copilot: 401 Unauthorized — invalidating session token, retrying");
                 self.token_manager.invalidate().await;
+                let fresh = self.token_manager.get_token().await.map_err(|e| {
+                    tracing::warn!(error = %e, "Copilot: re-exchange after 401 failed");
+                    LlmError::AuthFailed {
+                        provider: "github_copilot".to_string(),
+                    }
+                })?;
+                let mut retry_req = self
+                    .client
+                    .post(&url)
+                    .bearer_auth(fresh.expose_secret())
+                    .header("Content-Type", "application/json");
+                for (key, value) in &self.extra_headers {
+                    retry_req = retry_req.header(key.as_str(), value.as_str());
+                }
+                let retry =
+                    retry_req
+                        .json(body)
+                        .send()
+                        .await
+                        .map_err(|e| LlmError::RequestFailed {
+                            provider: "github_copilot".to_string(),
+                            reason: format!("Retry after 401 failed: {e}"),
+                        })?;
+                if retry.status().is_success() {
+                    let text = retry.text().await.map_err(|e| LlmError::RequestFailed {
+                        provider: "github_copilot".to_string(),
+                        reason: format!("Failed to read retry response body: {e}"),
+                    })?;
+                    return serde_json::from_str(&text).map_err(|e| {
+                        let truncated = crate::agent::truncate_for_preview(&text, 512);
+                        LlmError::InvalidResponse {
+                            provider: "github_copilot".to_string(),
+                            reason: format!("JSON parse error: {e}. Raw: {truncated}"),
+                        }
+                    });
+                }
                 return Err(LlmError::AuthFailed {
                     provider: "github_copilot".to_string(),
                 });
