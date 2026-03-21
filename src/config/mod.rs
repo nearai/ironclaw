@@ -79,14 +79,17 @@ static INJECTED_VARS: LazyLock<Mutex<HashMap<String, String>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 static WARNED_EXPLICIT_DEFAULT_OWNER_ID: Once = Once::new();
 
-/// Default HTTP webhook host for the current platform.
-pub fn default_http_host() -> &'static str {
-    self::channels::default_http_host()
-}
-
 /// Default HTTP webhook bind address for the current platform.
 pub fn default_webhook_bind_addr(port: u16) -> SocketAddr {
-    self::channels::default_webhook_bind_addr(port)
+    #[cfg(windows)]
+    {
+        SocketAddr::from(([127, 0, 0, 1], port))
+    }
+
+    #[cfg(not(windows))]
+    {
+        SocketAddr::from(([0, 0, 0, 0], port))
+    }
 }
 
 /// Main configuration for the agent.
