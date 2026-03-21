@@ -796,7 +796,6 @@ impl RoutineEngine {
             tools: self.tools.clone(),
             safety: self.safety.clone(),
             sandbox_readiness: self.sandbox_readiness,
-            extension_manager: self.extension_manager.clone(),
         };
 
         tokio::spawn(async move {
