@@ -52,7 +52,7 @@ HEADED=1 pytest scenarios/
 | `test_html_injection.py` | XSS vectors injected directly via `page.evaluate("addMessage('assistant', ...)")` are sanitized by `renderMarkdown`; user messages are shown as escaped plain text |
 | `test_skills.py` | Skills tab UI visibility, ClawHub search (skipped if registry unreachable), install + remove lifecycle |
 | `test_sse_reconnect.py` | SSE reconnects after programmatic `eventSource.close()` + `connectSSE()`; history is reloaded after reconnect |
-| `test_tool_approval.py` | Approval card appears, buttons disable on approve/deny, parameters toggle; all triggered via `page.evaluate("showApproval(...)")` — no real tool call needed |
+| `test_tool_approval.py` | Approval card appears, buttons disable on approve/deny, parameters toggle via `page.evaluate("showApproval(...)")`; the waiting-approval regression uses a real HTTP tool call |
 
 ## `helpers.py`
 
@@ -164,7 +164,7 @@ async def test_my_ui_feature(page):
 - **`asyncio_default_fixture_loop_scope = "session"`** — all async fixtures share one event loop. Do not use `asyncio.run()` inside fixtures; use `await` directly.
 - **The `page` fixture navigates with `/?token=e2e-test-token` and waits for `#auth-screen` to be hidden.** Tests receive a page that is already past the auth screen and has SSE connected.
 - **`test_skills.py` makes real network calls to ClawHub.** Tests skip (not fail) if the registry is unreachable via `pytest.skip()`.
-- **`test_html_injection.py` and `test_tool_approval.py` inject state via `page.evaluate(...)`.** They test the browser-side rendering pipeline and do not depend on the LLM or backend tool execution.
+- **`test_html_injection.py` injects state via `page.evaluate(...)`, and most of `test_tool_approval.py` does too.** The waiting-approval regression in `test_tool_approval.py` intentionally uses a real tool approval flow so it can verify backend thread-state handling.
 - **Browser is Chromium only.** `conftest.py` uses `p.chromium.launch()`; there is no Firefox or WebKit variant.
 - **Default timeout is 120 seconds** (pyproject.toml). Individual `wait_for` calls inside tests use shorter timeouts (5–20s) for faster failure messages.
 - **The libsql database is a temp directory** created fresh per `pytest` invocation; tests do not share state across runs.

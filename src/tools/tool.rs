@@ -28,30 +28,29 @@ impl ApprovalRequirement {
     }
 }
 
-/// Approval context for autonomous tool execution (routines, background jobs).
+/// Precomputed autonomous tool scope for background jobs and routines.
 ///
-/// Interactive sessions don't use this type — they rely on session-level
-/// auto-approve lists managed by the UI. This enum models only the autonomous
-/// case where no interactive user is present.
+/// Interactive sessions don't use this type — they still rely on
+/// `requires_approval()` and session-level approval state.
 #[derive(Debug, Clone)]
 pub enum ApprovalContext {
-    /// Autonomous job with no interactive user. `UnlessAutoApproved` tools are
-    /// pre-approved. `Always` tools are blocked unless listed in `allowed_tools`.
+    /// Autonomous job with no interactive user. Only tools in `allowed_tools`
+    /// may run; interactive approval requirements are ignored.
     Autonomous {
-        /// Tool names that are pre-authorized even for `Always` approval.
+        /// Tool names that may run autonomously for this job/run.
         allowed_tools: std::collections::HashSet<String>,
     },
 }
 
 impl ApprovalContext {
-    /// Create an autonomous context with no extra tool permissions.
+    /// Create an autonomous context with no allowed tools.
     pub fn autonomous() -> Self {
         Self::Autonomous {
             allowed_tools: std::collections::HashSet::new(),
         }
     }
 
-    /// Create an autonomous context with specific tools pre-authorized.
+    /// Create an autonomous context with specific allowed tools.
     pub fn autonomous_with_tools(tools: impl IntoIterator<Item = String>) -> Self {
         Self::Autonomous {
             allowed_tools: tools.into_iter().collect(),
@@ -59,13 +58,9 @@ impl ApprovalContext {
     }
 
     /// Check whether a tool invocation is blocked in this context.
-    pub fn is_blocked(&self, tool_name: &str, requirement: ApprovalRequirement) -> bool {
+    pub fn is_blocked(&self, tool_name: &str, _requirement: ApprovalRequirement) -> bool {
         match self {
-            Self::Autonomous { allowed_tools } => match requirement {
-                ApprovalRequirement::Never => false,
-                ApprovalRequirement::UnlessAutoApproved => false,
-                ApprovalRequirement::Always => !allowed_tools.contains(tool_name),
-            },
+            Self::Autonomous { allowed_tools } => !allowed_tools.contains(tool_name),
         }
     }
 
@@ -231,6 +226,19 @@ impl ToolSchema {
     }
 }
 
+/// Curated discovery guidance surfaced by `tool_info(detail: "summary")`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ToolDiscoverySummary {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub always_required: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conditional_requirements: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub examples: Vec<serde_json::Value>,
+}
+
 /// Trait for tools that the agent can use.
 #[async_trait]
 pub trait Tool: Send + Sync {
@@ -347,12 +355,32 @@ pub trait Tool: Send + Sync {
         self.parameters_schema()
     }
 
+    /// Curated discovery guidance used by `tool_info(detail: "summary")`.
+    ///
+    /// Default: no custom summary; callers may derive a minimal fallback from
+    /// `discovery_schema()`.
+    fn discovery_summary(&self) -> Option<ToolDiscoverySummary> {
+        None
+    }
+
     /// Get the tool schema for LLM function calling.
     fn schema(&self) -> ToolSchema {
+        let parameters = self.parameters_schema();
+        let has_discovery_hint =
+            self.discovery_summary().is_some() || self.discovery_schema() != parameters;
+        let description = if has_discovery_hint {
+            format!(
+                "{} (call tool_info(name: \"{}\", detail: \"summary\") for rules/examples or detail: \"schema\" for the full discovery schema)",
+                self.description(),
+                self.name()
+            )
+        } else {
+            self.description().to_string()
+        };
         ToolSchema {
             name: self.name().to_string(),
-            description: self.description().to_string(),
-            parameters: self.parameters_schema(),
+            description,
+            parameters,
         }
     }
 }
@@ -434,6 +462,22 @@ pub fn redact_params(params: &serde_json::Value, sensitive: &[&str]) -> serde_js
 /// on maliciously crafted schemas.
 const MAX_SCHEMA_DEPTH: usize = 16;
 
+/// Returns true if the schema uses `oneOf`, `anyOf`, or `allOf` combinators
+/// where at least one variant is an object type (has `type: "object"` or `properties`).
+fn has_object_combinator_variants(schema: &serde_json::Value) -> bool {
+    for key in ["oneOf", "anyOf", "allOf"] {
+        if let Some(variants) = schema.get(key).and_then(|v| v.as_array())
+            && variants.iter().any(|v| {
+                v.get("type").and_then(|t| t.as_str()) == Some("object")
+                    || v.get("properties").is_some()
+            })
+        {
+            return true;
+        }
+    }
+    false
+}
+
 pub fn validate_tool_schema(schema: &serde_json::Value, path: &str) -> Vec<String> {
     validate_tool_schema_inner(schema, path, 0)
 }
@@ -448,7 +492,18 @@ fn validate_tool_schema_inner(schema: &serde_json::Value, path: &str, depth: usi
         return errors;
     }
 
-    // Rule 1: must have "type": "object" at this level
+    // Report non-array combinator values as errors.
+    for key in ["oneOf", "anyOf", "allOf"] {
+        if let Some(val) = schema.get(key)
+            && !val.is_array()
+        {
+            errors.push(format!("{path}: \"{key}\" must be an array"));
+        }
+    }
+
+    let has_combinators = has_object_combinator_variants(schema);
+
+    // Rule 1: must have "type": "object" at this level (unless combinators define the structure)
     match schema.get("type").and_then(|t| t.as_str()) {
         Some("object") => {}
         Some(other) => {
@@ -456,16 +511,71 @@ fn validate_tool_schema_inner(schema: &serde_json::Value, path: &str, depth: usi
             return errors; // Can't check further
         }
         None => {
-            errors.push(format!("{path}: missing \"type\": \"object\""));
-            return errors;
+            if !has_combinators {
+                errors.push(format!("{path}: missing \"type\": \"object\""));
+                return errors;
+            }
         }
     }
 
-    // Rule 2: must have "properties" as an object
+    // Validate combinator variants recursively
+    for key in ["allOf", "oneOf", "anyOf"] {
+        if let Some(variants) = schema.get(key).and_then(|v| v.as_array()) {
+            for (i, variant) in variants.iter().enumerate() {
+                if variant.get("type").and_then(|t| t.as_str()) == Some("object")
+                    || variant.get("properties").is_some()
+                {
+                    let variant_path = format!("{path}.{key}[{i}]");
+                    errors.extend(validate_tool_schema_inner(
+                        variant,
+                        &variant_path,
+                        depth + 1,
+                    ));
+                }
+            }
+        }
+    }
+
+    // Rule 2: must have "properties" as an object (unless combinators define them)
     let properties = match schema.get("properties").and_then(|p| p.as_object()) {
         Some(p) => p,
         None => {
-            errors.push(format!("{path}: missing or non-object \"properties\""));
+            if !has_combinators {
+                errors.push(format!("{path}: missing or non-object \"properties\""));
+                return errors;
+            }
+            // Combinators define the structure — validate top-level `required` keys
+            // against merged properties from all combinator variants.
+            if let Some(required) = schema.get("required").and_then(|r| r.as_array()) {
+                let mut merged_keys = std::collections::HashSet::new();
+                if let Some(all_of) = schema.get("allOf").and_then(|a| a.as_array()) {
+                    for variant in all_of {
+                        if let Some(props) = variant.get("properties").and_then(|p| p.as_object()) {
+                            merged_keys.extend(props.keys().cloned());
+                        }
+                    }
+                }
+                for key in ["oneOf", "anyOf"] {
+                    if let Some(variants) = schema.get(key).and_then(|v| v.as_array()) {
+                        for variant in variants {
+                            if let Some(props) =
+                                variant.get("properties").and_then(|p| p.as_object())
+                            {
+                                merged_keys.extend(props.keys().cloned());
+                            }
+                        }
+                    }
+                }
+                for req in required {
+                    if let Some(key) = req.as_str()
+                        && !merged_keys.contains(key)
+                    {
+                        errors.push(format!(
+                            "{path}: required key \"{key}\" not found in any combinator variant properties"
+                        ));
+                    }
+                }
+            }
             return errors;
         }
     };
@@ -856,26 +966,27 @@ mod tests {
     }
 
     #[test]
-    fn test_approval_context_autonomous_allows_unless_auto_approved() {
+    fn test_approval_context_autonomous_blocks_tools_not_in_scope() {
         let ctx = ApprovalContext::autonomous();
-        assert!(!ctx.is_blocked("shell", ApprovalRequirement::Never));
-        assert!(!ctx.is_blocked("shell", ApprovalRequirement::UnlessAutoApproved));
+        assert!(ctx.is_blocked("shell", ApprovalRequirement::Never));
+        assert!(ctx.is_blocked("shell", ApprovalRequirement::UnlessAutoApproved));
         assert!(ctx.is_blocked("shell", ApprovalRequirement::Always));
     }
 
     #[test]
-    fn test_approval_context_autonomous_with_tools_allows_always() {
+    fn test_approval_context_autonomous_with_tools_allows_registered_name() {
         let ctx =
             ApprovalContext::autonomous_with_tools(["shell".to_string(), "message".to_string()]);
+        assert!(!ctx.is_blocked("shell", ApprovalRequirement::Never));
         assert!(!ctx.is_blocked("shell", ApprovalRequirement::Always));
         assert!(!ctx.is_blocked("message", ApprovalRequirement::Always));
         assert!(ctx.is_blocked("http", ApprovalRequirement::Always));
     }
 
     #[test]
-    fn test_approval_context_never_is_not_blocked() {
+    fn test_approval_context_blocks_never_when_not_in_scope() {
         let ctx = ApprovalContext::autonomous();
-        assert!(!ctx.is_blocked("any_tool", ApprovalRequirement::Never));
+        assert!(ctx.is_blocked("any_tool", ApprovalRequirement::Never));
     }
 
     #[test]
@@ -913,7 +1024,7 @@ mod tests {
             "other",
             ApprovalRequirement::Always
         ));
-        assert!(!ApprovalContext::is_blocked_or_default(
+        assert!(ApprovalContext::is_blocked_or_default(
             &ctx,
             "any",
             ApprovalRequirement::UnlessAutoApproved

@@ -753,17 +753,12 @@ pub struct ToolFieldSetupSchema {
 }
 
 /// Input widget type for a setup field.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolSetupFieldInputType {
+    #[default]
     Text,
     Password,
-}
-
-impl Default for ToolSetupFieldInputType {
-    fn default() -> Self {
-        Self::Text
-    }
 }
 
 fn default_tool_setup_field_input_type() -> ToolSetupFieldInputType {

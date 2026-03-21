@@ -20,7 +20,7 @@ exclude = [
 
 [package]
 name = "ironclaw"
-version = "0.18.0"
+version = "0.19.0"
 edition = "2024"
 rust-version = "1.92"
 description = "Secure personal AI assistant that protects your data and expands its capabilities on the fly"
@@ -40,6 +40,7 @@ eula = false
 tokio = { version = "1", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 futures = "0.3"
+eventsource-stream = "0.2"
 
 # HTTP client
 reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls-native-roots", "stream"] }
@@ -221,10 +222,16 @@ postgres = [
     "rust_decimal/db-tokio-postgres",
 ]
 libsql = ["dep:libsql"]
+# Opt-in feature for especially heavy integration-test targets that run in a
+# dedicated CI job instead of the default Rust test matrix.
 integration = []
 html-to-markdown = ["dep:html-to-markdown-rs", "dep:readabilityrs"]
 bedrock = ["dep:aws-config", "dep:aws-sdk-bedrockruntime", "dep:aws-smithy-types"]
 import = ["dep:json5", "libsql"]
+
+[[test]]
+name = "e2e_thread_scheduling"
+required-features = ["libsql", "integration"]
 
 [[test]]
 name = "html_to_markdown"
