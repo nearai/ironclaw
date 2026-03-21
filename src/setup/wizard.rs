@@ -1358,7 +1358,36 @@ impl SetupWizard {
     }
 
     async fn setup_github_copilot(&mut self) -> Result<(), SetupError> {
-        self.setup_github_copilot_device_login().await
+        print_info("GitHub Copilot authentication:");
+        let options = &[
+            "GitHub device login (recommended)",
+            "Paste an existing token (from IDE or personal access token)",
+        ];
+        let choice = select_one("Auth method:", options).map_err(SetupError::Io)?;
+        match choice {
+            0 => self.setup_github_copilot_device_login().await,
+            _ => self.setup_github_copilot_paste_token().await,
+        }
+    }
+
+    async fn setup_github_copilot_paste_token(&mut self) -> Result<(), SetupError> {
+        self.set_llm_backend_preserving_model("github_copilot");
+
+        print_info(
+            "Paste your GitHub Copilot OAuth token (e.g. from ~/.config/github-copilot/apps.json).",
+        );
+        let token_secret = secret_input("GitHub Copilot token").map_err(SetupError::Io)?;
+        let token = token_secret.expose_secret().trim().to_string();
+        if token.is_empty() {
+            return Err(SetupError::Auth("No token provided".to_string()));
+        }
+
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
+            .build()
+            .map_err(|e| SetupError::Auth(format!("Failed to create HTTP client: {e}")))?;
+
+        self.save_github_copilot_token(&client, &token).await
     }
 
     async fn setup_github_copilot_device_login(&mut self) -> Result<(), SetupError> {

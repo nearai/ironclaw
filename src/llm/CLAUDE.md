@@ -63,18 +63,23 @@ Uses the native Converse API via `aws-sdk-bedrockruntime` (`bedrock.rs`). Requir
 
 ## GitHub Copilot Provider Notes
 
-`github_copilot` is a declarative registry provider backed by the existing
-OpenAI-compatible path. It defaults to `https://api.githubcopilot.com` and expects a
-GitHub Copilot OAuth token in `GITHUB_COPILOT_TOKEN` (for example the `oauth_token`
-stored by your IDE sign-in flow in `~/.config/github-copilot/apps.json`). The setup
-wizard also supports GitHub device login using the VS Code Copilot client ID and then
-stores the resulting token in the encrypted secrets store.
+`github_copilot` uses a dedicated `GithubCopilotProvider` (`github_copilot.rs`) with
+direct HTTP via `reqwest::Client`. It cannot use `RigAdapter` because the Copilot API
+requires a two-step authentication flow: a long-lived GitHub OAuth token is exchanged
+for a short-lived Copilot session token via `api.github.com/copilot_internal/v2/token`.
+The session token is cached and auto-refreshed before expiry by `CopilotTokenManager`
+in `github_copilot_auth.rs`.
 
-Manual model entry is used in the setup wizard (`can_list_models = false`) because
-GitHub Copilot model discovery can require extra integration headers on some clients.
-IronClaw injects the standard VS Code identity headers automatically:
-`User-Agent`, `Editor-Version`, `Editor-Plugin-Version`, and
-`Copilot-Integration-Id`. Advanced users can still override or append headers via
+The API endpoint is `https://api.githubcopilot.com/chat/completions` (OpenAI Chat
+Completions format). Token source: `GITHUB_COPILOT_TOKEN` env var, or the
+`oauth_token` from your IDE sign-in flow (`~/.config/github-copilot/apps.json`).
+The setup wizard supports GitHub device login or manual token paste.
+
+**Known risk:** The device login flow uses the VS Code Copilot OAuth client ID
+(`Iv1.b507a08c87ecfe98`) and injects VS Code identity headers (`User-Agent`,
+`Editor-Version`, `Editor-Plugin-Version`, `Copilot-Integration-Id`). GitHub could
+rotate this client ID at any time. If GitHub publishes an official third-party client
+ID, migrate to it immediately. Advanced users can override headers via
 `GITHUB_COPILOT_EXTRA_HEADERS`.
 
 ## NEAR AI Provider Gotchas

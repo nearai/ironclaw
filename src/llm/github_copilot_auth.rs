@@ -478,10 +478,7 @@ impl CopilotTokenManager {
             expires_at,
         });
 
-        tracing::debug!(
-            expires_at = expires_at,
-            "Copilot session token refreshed"
-        );
+        tracing::debug!(expires_at = expires_at, "Copilot session token refreshed");
 
         Ok(token)
     }
@@ -502,11 +499,7 @@ fn truncate_for_error(body: &str) -> String {
     if body.len() <= LIMIT {
         return body.to_string();
     }
-
-    let mut end = LIMIT;
-    while end > 0 && !body.is_char_boundary(end) {
-        end -= 1;
-    }
+    let end = crate::util::floor_char_boundary(body, LIMIT);
     format!("{}...", &body[..end])
 }
 

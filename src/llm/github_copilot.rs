@@ -503,10 +503,15 @@ fn convert_messages(messages: Vec<ChatMessage>) -> Vec<OpenAiMessage> {
                 } else {
                     let mut parts = vec![OpenAiContentPart::Text { text: msg.content }];
                     for part in msg.content_parts {
-                        if let ContentPart::ImageUrl { image_url } = part {
-                            parts.push(OpenAiContentPart::ImageUrl {
-                                image_url: OpenAiImageUrl { url: image_url.url },
-                            });
+                        match part {
+                            ContentPart::Text { text } => {
+                                parts.push(OpenAiContentPart::Text { text });
+                            }
+                            ContentPart::ImageUrl { image_url } => {
+                                parts.push(OpenAiContentPart::ImageUrl {
+                                    image_url: OpenAiImageUrl { url: image_url.url },
+                                });
+                            }
                         }
                     }
                     Some(OpenAiContent::Parts(parts))
