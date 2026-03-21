@@ -29,6 +29,22 @@ pub struct LlmCallRecord<'a> {
     pub purpose: Option<&'a str>,
 }
 
+/// A routine notification that can be injected into the user's next turn.
+#[derive(Debug, Clone)]
+pub struct ConversationNotification {
+    pub id: Uuid,
+    pub user_id: String,
+    pub channel: String,
+    pub conversation_scope_id: Option<String>,
+    pub source_kind: String,
+    pub source_id: String,
+    pub content: String,
+    pub metadata: serde_json::Value,
+    pub created_at: DateTime<Utc>,
+    pub consumed_at: Option<DateTime<Utc>>,
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
 /// Database store for the agent.
 #[cfg(feature = "postgres")]
 pub struct Store {
@@ -136,6 +152,49 @@ impl Store {
         // Update conversation activity
         self.touch_conversation(conversation_id).await?;
 
+        Ok(id)
+    }
+
+    /// Persist a routine notification for later injection into the user's next turn.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn add_conversation_notification(
+        &self,
+        user_id: &str,
+        channel: &str,
+        conversation_scope_id: Option<&str>,
+        source_kind: &str,
+        source_id: &str,
+        content: &str,
+        metadata: &serde_json::Value,
+        expires_at: Option<DateTime<Utc>>,
+    ) -> Result<Uuid, DatabaseError> {
+        let conn = self.conn().await?;
+        let id = Uuid::new_v4();
+        let created_at = Utc::now();
+
+        conn.execute(
+            r#"
+            INSERT INTO conversation_notifications (
+                id, user_id, channel, conversation_scope_id,
+                source_kind, source_id, content, metadata,
+                created_at, expires_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            "#,
+            &[
+                &id,
+                &user_id,
+                &channel,
+                &conversation_scope_id,
+                &source_kind,
+                &source_id,
+                &content,
+                metadata,
+                &created_at,
+                &expires_at,
+            ],
+        )
+        .await?;
         Ok(id)
     }
 
@@ -1910,6 +1969,96 @@ impl Store {
             })
             .collect())
     }
+
+    /// Load unread routine notifications for a channel and conversation scope.
+    pub async fn list_unread_conversation_notifications(
+        &self,
+        user_id: &str,
+        channel: &str,
+        conversation_scope_id: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<ConversationNotification>, DatabaseError> {
+        let conn = self.conn().await?;
+        let now = Utc::now();
+
+        let rows = if let Some(scope) = conversation_scope_id {
+            conn.query(
+                r#"
+                SELECT id, user_id, channel, conversation_scope_id,
+                       source_kind, source_id, content, metadata,
+                       created_at, consumed_at, expires_at
+                FROM conversation_notifications
+                WHERE user_id = $1
+                  AND channel = $2
+                  AND consumed_at IS NULL
+                  AND (expires_at IS NULL OR expires_at > $3)
+                  AND (conversation_scope_id IS NULL OR conversation_scope_id = $4)
+                ORDER BY created_at ASC, id ASC
+                LIMIT $5
+                "#,
+                &[&user_id, &channel, &now, &scope, &limit],
+            )
+            .await?
+        } else {
+            conn.query(
+                r#"
+                SELECT id, user_id, channel, conversation_scope_id,
+                       source_kind, source_id, content, metadata,
+                       created_at, consumed_at, expires_at
+                FROM conversation_notifications
+                WHERE user_id = $1
+                  AND channel = $2
+                  AND conversation_scope_id IS NULL
+                  AND consumed_at IS NULL
+                  AND (expires_at IS NULL OR expires_at > $3)
+                ORDER BY created_at ASC, id ASC
+                LIMIT $4
+                "#,
+                &[&user_id, &channel, &now, &limit],
+            )
+            .await?
+        };
+
+        Ok(rows
+            .iter()
+            .map(|r| ConversationNotification {
+                id: r.get("id"),
+                user_id: r.get("user_id"),
+                channel: r.get("channel"),
+                conversation_scope_id: r.get("conversation_scope_id"),
+                source_kind: r.get("source_kind"),
+                source_id: r.get("source_id"),
+                content: r.get("content"),
+                metadata: r.get("metadata"),
+                created_at: r.get("created_at"),
+                consumed_at: r.get("consumed_at"),
+                expires_at: r.get("expires_at"),
+            })
+            .collect())
+    }
+
+    /// Mark notifications as consumed.
+    pub async fn mark_conversation_notifications_consumed(
+        &self,
+        notification_ids: &[Uuid],
+    ) -> Result<(), DatabaseError> {
+        if notification_ids.is_empty() {
+            return Ok(());
+        }
+
+        let conn = self.conn().await?;
+        let consumed_at = Utc::now();
+        conn.execute(
+            r#"
+            UPDATE conversation_notifications
+            SET consumed_at = $2
+            WHERE id = ANY($1) AND consumed_at IS NULL
+            "#,
+            &[&notification_ids, &consumed_at],
+        )
+        .await?;
+        Ok(())
+    }
 }
 
 #[cfg(feature = "postgres")]
@@ -2223,30 +2372,28 @@ mod tests {
     #[cfg(feature = "postgres")]
     #[tokio::test]
     #[ignore]
-    async fn test_save_job_persists_user_id() {
+    async fn test_save_job_persists_user_id() -> Result<(), Box<dyn std::error::Error>> {
         use crate::config::Config;
         use crate::context::JobContext;
 
         let _ = dotenvy::dotenv();
-        let config = Config::from_env().await.expect("Failed to load config");
-        let store = Store::new(&config.database)
-            .await
-            .expect("Failed to connect to database");
-        store
-            .run_migrations()
-            .await
-            .expect("Failed to run migrations");
+        let config = Config::from_env().await?;
+        let store = Store::new(&config.database).await?;
+        store.run_migrations().await?;
 
         let ctx = JobContext::with_user("test-user-42", "PG user_id test", "regression test");
-        store.save_job(&ctx).await.unwrap();
+        store.save_job(&ctx).await?;
 
-        let loaded = store.get_job(ctx.job_id).await.unwrap().unwrap();
+        let loaded = store
+            .get_job(ctx.job_id)
+            .await?
+            .ok_or_else(|| std::io::Error::other("expected saved job to load"))?;
         assert_eq!(loaded.user_id, "test-user-42");
 
         // Clean up
-        let conn = store.conn().await.unwrap();
+        let conn = store.conn().await?;
         conn.execute("DELETE FROM agent_jobs WHERE id = $1", &[&ctx.job_id])
-            .await
-            .unwrap();
+            .await?;
+        Ok(())
     }
 }

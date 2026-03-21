@@ -35,8 +35,9 @@ use crate::context::{ActionRecord, JobContext, JobState};
 use crate::error::DatabaseError;
 use crate::error::WorkspaceError;
 use crate::history::{
-    AgentJobRecord, AgentJobSummary, ConversationMessage, ConversationSummary, JobEventRecord,
-    LlmCallRecord, SandboxJobRecord, SandboxJobSummary, SettingRow,
+    AgentJobRecord, AgentJobSummary, ConversationMessage, ConversationNotification,
+    ConversationSummary, JobEventRecord, LlmCallRecord, SandboxJobRecord, SandboxJobSummary,
+    SettingRow,
 };
 use crate::workspace::{MemoryChunk, MemoryDocument, WorkspaceEntry};
 use crate::workspace::{SearchConfig, SearchResult};
@@ -330,6 +331,18 @@ pub trait ConversationStore: Send + Sync {
         role: &str,
         content: &str,
     ) -> Result<Uuid, DatabaseError>;
+    #[allow(clippy::too_many_arguments)]
+    async fn add_conversation_notification(
+        &self,
+        user_id: &str,
+        channel: &str,
+        conversation_scope_id: Option<&str>,
+        source_kind: &str,
+        source_id: &str,
+        content: &str,
+        metadata: &serde_json::Value,
+        expires_at: Option<DateTime<Utc>>,
+    ) -> Result<Uuid, DatabaseError>;
     async fn ensure_conversation(
         &self,
         id: Uuid,
@@ -389,6 +402,17 @@ pub trait ConversationStore: Send + Sync {
         &self,
         conversation_id: Uuid,
     ) -> Result<Vec<ConversationMessage>, DatabaseError>;
+    async fn list_unread_conversation_notifications(
+        &self,
+        user_id: &str,
+        channel: &str,
+        conversation_scope_id: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<ConversationNotification>, DatabaseError>;
+    async fn mark_conversation_notifications_consumed(
+        &self,
+        notification_ids: &[Uuid],
+    ) -> Result<(), DatabaseError>;
     async fn conversation_belongs_to_user(
         &self,
         conversation_id: Uuid,
@@ -676,10 +700,10 @@ mod tests {
     /// chose postgres when both features were enabled (PR #209).
     #[cfg(feature = "libsql")]
     #[tokio::test]
-    async fn test_create_secrets_store_libsql_backend() {
+    async fn test_create_secrets_store_libsql_backend() -> Result<(), Box<dyn std::error::Error>> {
         use secrecy::SecretString;
 
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = tempfile::tempdir()?;
         let db_path = tmp.path().join("test.db");
 
         let config = crate::config::DatabaseConfig {
@@ -693,18 +717,13 @@ mod tests {
         };
 
         let master_key = SecretString::from("a]".repeat(16));
-        let crypto = Arc::new(crate::secrets::SecretsCrypto::new(master_key).unwrap());
+        let crypto = Arc::new(crate::secrets::SecretsCrypto::new(master_key)?);
 
-        let store = create_secrets_store(&config, crypto).await;
-        assert!(
-            store.is_ok(),
-            "create_secrets_store should succeed for libsql backend"
-        );
+        let store = create_secrets_store(&config, crypto).await?;
 
         // Verify basic operation works
-        let store = store.unwrap();
-        let exists = store.exists("test_user", "nonexistent_secret").await;
-        assert!(exists.is_ok());
-        assert!(!exists.unwrap());
+        let exists = store.exists("test_user", "nonexistent_secret").await?;
+        assert!(!exists);
+        Ok(())
     }
 }

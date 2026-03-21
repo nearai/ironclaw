@@ -42,6 +42,7 @@ Session (per user)
 
 - A session has one **active thread** at a time; threads can be switched.
 - Turns are append-only. Undo rolls back by restoring a prior checkpoint (message list, not a full thread snapshot).
+- Routine notifications are stored separately from turns and injected into the next user turn as a transient system message, so they can influence LLM context without becoming fake user/assistant turns.
 - `UndoManager` is per-thread, stored in `SessionManager`, not on `Session` itself. Max 20 checkpoints (oldest dropped when exceeded).
 - Group chat detection: if `metadata.chat_type` is `group`/`channel`/`supergroup`, `MEMORY.md` is excluded from the system prompt to prevent leaking personal context.
 - **Auth mode**: if a thread has `pending_auth` set (e.g. from `tool_auth` returning `awaiting_token`), the next user message is intercepted before any turn creation, logging, or safety validation and sent directly to the credential store. Any control submission (undo, interrupt, etc.) cancels auth mode.

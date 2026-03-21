@@ -65,6 +65,23 @@ CREATE TABLE IF NOT EXISTS conversation_messages (
 CREATE INDEX IF NOT EXISTS idx_conversation_messages_conversation
     ON conversation_messages(conversation_id);
 
+CREATE TABLE IF NOT EXISTS conversation_notifications (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    channel TEXT NOT NULL,
+    conversation_scope_id TEXT,
+    source_kind TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    content TEXT NOT NULL,
+    metadata TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    consumed_at TEXT,
+    expires_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_conversation_notifications_lookup
+    ON conversation_notifications(user_id, channel, conversation_scope_id, consumed_at, created_at);
+
 -- ==================== Agent Jobs ====================
 
 CREATE TABLE IF NOT EXISTS agent_jobs (
@@ -723,6 +740,28 @@ CREATE INDEX IF NOT EXISTS idx_routines_event_triggers
     WHERE enabled = 1 AND trigger_type IN ('event', 'system_event');
 
 PRAGMA foreign_keys=ON;
+"#,
+    ),
+    (
+        14,
+        "conversation_notifications",
+        r#"
+CREATE TABLE IF NOT EXISTS conversation_notifications (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    channel TEXT NOT NULL,
+    conversation_scope_id TEXT,
+    source_kind TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    content TEXT NOT NULL,
+    metadata TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    consumed_at TEXT,
+    expires_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_conversation_notifications_lookup
+    ON conversation_notifications(user_id, channel, conversation_scope_id, consumed_at, created_at);
 "#,
     ),
 ];

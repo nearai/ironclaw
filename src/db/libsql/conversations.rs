@@ -2,13 +2,13 @@
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use libsql::params;
+use libsql::{params, params_from_iter};
 use uuid::Uuid;
 
 use super::{LibSqlBackend, fmt_ts, get_i64, get_json, get_opt_text, get_text, get_ts, opt_text};
 use crate::db::ConversationStore;
 use crate::error::DatabaseError;
-use crate::history::{ConversationMessage, ConversationSummary};
+use crate::history::{ConversationMessage, ConversationNotification, ConversationSummary};
 
 #[async_trait]
 impl ConversationStore for LibSqlBackend {
@@ -58,6 +58,48 @@ impl ConversationStore for LibSqlBackend {
             .await
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
         self.touch_conversation(conversation_id).await?;
+        Ok(id)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn add_conversation_notification(
+        &self,
+        user_id: &str,
+        channel: &str,
+        conversation_scope_id: Option<&str>,
+        source_kind: &str,
+        source_id: &str,
+        content: &str,
+        metadata: &serde_json::Value,
+        expires_at: Option<DateTime<Utc>>,
+    ) -> Result<Uuid, DatabaseError> {
+        let conn = self.connect().await?;
+        let id = Uuid::new_v4();
+        let now = fmt_ts(&Utc::now());
+        conn.execute(
+            r#"
+            INSERT INTO conversation_notifications (
+                id, user_id, channel, conversation_scope_id,
+                source_kind, source_id, content, metadata,
+                created_at, expires_at
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            "#,
+            params![
+                id.to_string(),
+                user_id,
+                channel,
+                opt_text(conversation_scope_id),
+                source_kind,
+                source_id,
+                content,
+                metadata.to_string(),
+                now,
+                expires_at.as_ref().map(fmt_ts)
+            ],
+        )
+        .await
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
         Ok(id)
     }
 
@@ -546,6 +588,118 @@ impl ConversationStore for LibSqlBackend {
         Ok(messages)
     }
 
+    async fn list_unread_conversation_notifications(
+        &self,
+        user_id: &str,
+        channel: &str,
+        conversation_scope_id: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<ConversationNotification>, DatabaseError> {
+        let conn = self.connect().await?;
+        let now = fmt_ts(&Utc::now());
+        let mut rows = if let Some(scope) = conversation_scope_id {
+            conn.query(
+                r#"
+                SELECT id, user_id, channel, conversation_scope_id,
+                       source_kind, source_id, content, metadata,
+                       created_at, consumed_at, expires_at
+                FROM conversation_notifications
+                WHERE user_id = ?1
+                  AND channel = ?2
+                  AND consumed_at IS NULL
+                  AND (expires_at IS NULL OR expires_at > ?3)
+                  AND (conversation_scope_id IS NULL OR conversation_scope_id = ?4)
+                ORDER BY datetime(created_at) ASC, rowid ASC
+                LIMIT ?5
+                "#,
+                params![user_id, channel, now, scope, limit],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        } else {
+            conn.query(
+                r#"
+                SELECT id, user_id, channel, conversation_scope_id,
+                       source_kind, source_id, content, metadata,
+                       created_at, consumed_at, expires_at
+                FROM conversation_notifications
+                WHERE user_id = ?1
+                  AND channel = ?2
+                  AND conversation_scope_id IS NULL
+                  AND consumed_at IS NULL
+                  AND (expires_at IS NULL OR expires_at > ?3)
+                ORDER BY datetime(created_at) ASC, rowid ASC
+                LIMIT ?4
+                "#,
+                params![user_id, channel, now, limit],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        };
+
+        let mut notifications = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        {
+            notifications.push(ConversationNotification {
+                id: get_text(&row, 0).parse().unwrap_or_default(),
+                user_id: get_text(&row, 1),
+                channel: get_text(&row, 2),
+                conversation_scope_id: get_opt_text(&row, 3),
+                source_kind: get_text(&row, 4),
+                source_id: get_text(&row, 5),
+                content: get_text(&row, 6),
+                metadata: get_json(&row, 7),
+                created_at: get_ts(&row, 8),
+                consumed_at: get_opt_text(&row, 9).and_then(|ts| {
+                    chrono::DateTime::parse_from_rfc3339(&ts)
+                        .ok()
+                        .map(|dt| dt.with_timezone(&Utc))
+                }),
+                expires_at: get_opt_text(&row, 10).and_then(|ts| {
+                    chrono::DateTime::parse_from_rfc3339(&ts)
+                        .ok()
+                        .map(|dt| dt.with_timezone(&Utc))
+                }),
+            });
+        }
+        Ok(notifications)
+    }
+
+    async fn mark_conversation_notifications_consumed(
+        &self,
+        notification_ids: &[Uuid],
+    ) -> Result<(), DatabaseError> {
+        if notification_ids.is_empty() {
+            return Ok(());
+        }
+
+        let conn = self.connect().await?;
+        let now = fmt_ts(&Utc::now());
+        let placeholders: Vec<String> = (1..=notification_ids.len())
+            .map(|idx| format!("?{}", idx))
+            .collect();
+        let sql = format!(
+            "UPDATE conversation_notifications
+             SET consumed_at = ?{}
+             WHERE id IN ({}) AND consumed_at IS NULL",
+            notification_ids.len() + 1,
+            placeholders.join(", ")
+        );
+        let mut values: Vec<libsql::Value> = notification_ids
+            .iter()
+            .map(|id| libsql::Value::Text(id.to_string()))
+            .collect();
+        values.push(libsql::Value::Text(now));
+        let params = params_from_iter(values);
+        conn.execute(sql.as_str(), params)
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        Ok(())
+    }
+
     async fn conversation_belongs_to_user(
         &self,
         conversation_id: Uuid,
@@ -571,13 +725,14 @@ impl ConversationStore for LibSqlBackend {
 mod tests {
     use super::*;
     use crate::db::Database;
+    use std::error::Error;
 
     #[tokio::test]
-    async fn test_get_or_create_routine_conversation_is_idempotent() {
-        let dir = tempfile::tempdir().unwrap();
+    async fn test_get_or_create_routine_conversation_is_idempotent() -> Result<(), Box<dyn Error>> {
+        let dir = tempfile::tempdir()?;
         let db_path = dir.path().join("test_routine_conv.db");
-        let backend = LibSqlBackend::new_local(&db_path).await.unwrap();
-        backend.run_migrations().await.unwrap();
+        let backend = LibSqlBackend::new_local(&db_path).await?;
+        backend.run_migrations().await?;
 
         let routine_id = Uuid::new_v4();
         let user_id = "test_user";
@@ -585,22 +740,19 @@ mod tests {
         // First call — creates the conversation
         let id1 = backend
             .get_or_create_routine_conversation(routine_id, "my-routine", user_id)
-            .await
-            .unwrap();
+            .await?;
 
         // Second call — should return the SAME conversation
         let id2 = backend
             .get_or_create_routine_conversation(routine_id, "my-routine", user_id)
-            .await
-            .unwrap();
+            .await?;
 
         assert_eq!(id1, id2, "Expected same conversation ID on repeated calls");
 
         // Third call — still the same
         let id3 = backend
             .get_or_create_routine_conversation(routine_id, "my-routine", user_id)
-            .await
-            .unwrap();
+            .await?;
 
         assert_eq!(id1, id3);
 
@@ -608,21 +760,21 @@ mod tests {
         let other_routine_id = Uuid::new_v4();
         let id4 = backend
             .get_or_create_routine_conversation(other_routine_id, "other-routine", user_id)
-            .await
-            .unwrap();
+            .await?;
 
         assert_ne!(
             id1, id4,
             "Different routines should get different conversations"
         );
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_routine_conversation_persists_across_messages() {
-        let dir = tempfile::tempdir().unwrap();
+    async fn test_routine_conversation_persists_across_messages() -> Result<(), Box<dyn Error>> {
+        let dir = tempfile::tempdir()?;
         let db_path = dir.path().join("test_routine_persist.db");
-        let backend = LibSqlBackend::new_local(&db_path).await.unwrap();
-        backend.run_migrations().await.unwrap();
+        let backend = LibSqlBackend::new_local(&db_path).await?;
+        backend.run_migrations().await?;
 
         let routine_id = Uuid::new_v4();
         let user_id = "test_user";
@@ -630,32 +782,25 @@ mod tests {
         // First invocation: create conversation and add a message
         let id1 = backend
             .get_or_create_routine_conversation(routine_id, "my-routine", user_id)
-            .await
-            .unwrap();
+            .await?;
 
         backend
             .add_conversation_message(id1, "assistant", "[cron] Completed: all good")
-            .await
-            .unwrap();
+            .await?;
 
         // Second invocation: should find existing conversation
         let id2 = backend
             .get_or_create_routine_conversation(routine_id, "my-routine", user_id)
-            .await
-            .unwrap();
+            .await?;
 
         assert_eq!(id1, id2, "Second invocation should reuse same conversation");
 
         backend
             .add_conversation_message(id2, "assistant", "[cron] Completed: still good")
-            .await
-            .unwrap();
+            .await?;
 
         // Verify only one routine conversation exists (not two)
-        let convs = backend
-            .list_conversations_all_channels(user_id, 50)
-            .await
-            .unwrap();
+        let convs = backend.list_conversations_all_channels(user_id, 50).await?;
 
         let routine_convs: Vec<_> = convs.iter().filter(|c| c.channel == "routine").collect();
         assert_eq!(
@@ -664,30 +809,92 @@ mod tests {
             "Should have exactly 1 routine conversation, found {}",
             routine_convs.len()
         );
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_get_or_create_heartbeat_conversation_is_idempotent() {
-        let dir = tempfile::tempdir().unwrap();
+    async fn test_get_or_create_heartbeat_conversation_is_idempotent() -> Result<(), Box<dyn Error>>
+    {
+        let dir = tempfile::tempdir()?;
         let db_path = dir.path().join("test_heartbeat_conv.db");
-        let backend = LibSqlBackend::new_local(&db_path).await.unwrap();
-        backend.run_migrations().await.unwrap();
+        let backend = LibSqlBackend::new_local(&db_path).await?;
+        backend.run_migrations().await?;
 
         let user_id = "test_user";
 
         let id1 = backend
             .get_or_create_heartbeat_conversation(user_id)
-            .await
-            .unwrap();
+            .await?;
 
         let id2 = backend
             .get_or_create_heartbeat_conversation(user_id)
-            .await
-            .unwrap();
+            .await?;
 
         assert_eq!(
             id1, id2,
             "Expected same heartbeat conversation on repeated calls"
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_conversation_notifications_scope_and_consumption() -> Result<(), Box<dyn Error>> {
+        let dir = tempfile::tempdir()?;
+        let db_path = dir.path().join("test_notifications.db");
+        let backend = LibSqlBackend::new_local(&db_path).await?;
+        backend.run_migrations().await?;
+
+        let user_id = "test_user";
+        let channel = "gateway";
+        let scoped = "thread-123";
+
+        let scoped_id = backend
+            .add_conversation_notification(
+                user_id,
+                channel,
+                Some(scoped),
+                "routine",
+                "routine-1",
+                "Scoped notification",
+                &serde_json::json!({"routine_name": "Scoped"}),
+                None,
+            )
+            .await?;
+        let global_id = backend
+            .add_conversation_notification(
+                user_id,
+                channel,
+                None,
+                "routine",
+                "routine-2",
+                "Global notification",
+                &serde_json::json!({"routine_name": "Global"}),
+                None,
+            )
+            .await?;
+
+        let scoped_notifications = backend
+            .list_unread_conversation_notifications(user_id, channel, Some(scoped), 10)
+            .await?;
+        assert_eq!(scoped_notifications.len(), 2);
+        assert_eq!(scoped_notifications[0].id, scoped_id);
+        assert_eq!(scoped_notifications[1].id, global_id);
+
+        let global_notifications = backend
+            .list_unread_conversation_notifications(user_id, channel, None, 10)
+            .await?;
+        assert_eq!(global_notifications.len(), 1);
+        assert_eq!(global_notifications[0].id, global_id);
+
+        backend
+            .mark_conversation_notifications_consumed(&[scoped_id])
+            .await?;
+
+        let scoped_notifications = backend
+            .list_unread_conversation_notifications(user_id, channel, Some(scoped), 10)
+            .await?;
+        assert_eq!(scoped_notifications.len(), 1);
+        assert_eq!(scoped_notifications[0].id, global_id);
+        Ok(())
     }
 }

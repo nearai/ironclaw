@@ -21,8 +21,9 @@ use crate::db::{
 };
 use crate::error::{DatabaseError, WorkspaceError};
 use crate::history::{
-    AgentJobRecord, AgentJobSummary, ConversationMessage, ConversationSummary, JobEventRecord,
-    LlmCallRecord, SandboxJobRecord, SandboxJobSummary, SettingRow, Store,
+    AgentJobRecord, AgentJobSummary, ConversationMessage, ConversationNotification,
+    ConversationSummary, JobEventRecord, LlmCallRecord, SandboxJobRecord, SandboxJobSummary,
+    SettingRow, Store,
 };
 use crate::workspace::{
     MemoryChunk, MemoryDocument, Repository, SearchConfig, SearchResult, WorkspaceEntry,
@@ -90,6 +91,32 @@ impl ConversationStore for PgBackend {
     ) -> Result<Uuid, DatabaseError> {
         self.store
             .add_conversation_message(conversation_id, role, content)
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn add_conversation_notification(
+        &self,
+        user_id: &str,
+        channel: &str,
+        conversation_scope_id: Option<&str>,
+        source_kind: &str,
+        source_id: &str,
+        content: &str,
+        metadata: &serde_json::Value,
+        expires_at: Option<DateTime<Utc>>,
+    ) -> Result<Uuid, DatabaseError> {
+        self.store
+            .add_conversation_notification(
+                user_id,
+                channel,
+                conversation_scope_id,
+                source_kind,
+                source_id,
+                content,
+                metadata,
+                expires_at,
+            )
             .await
     }
 
@@ -201,6 +228,27 @@ impl ConversationStore for PgBackend {
         conversation_id: Uuid,
     ) -> Result<Vec<ConversationMessage>, DatabaseError> {
         self.store.list_conversation_messages(conversation_id).await
+    }
+
+    async fn list_unread_conversation_notifications(
+        &self,
+        user_id: &str,
+        channel: &str,
+        conversation_scope_id: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<ConversationNotification>, DatabaseError> {
+        self.store
+            .list_unread_conversation_notifications(user_id, channel, conversation_scope_id, limit)
+            .await
+    }
+
+    async fn mark_conversation_notifications_consumed(
+        &self,
+        notification_ids: &[Uuid],
+    ) -> Result<(), DatabaseError> {
+        self.store
+            .mark_conversation_notifications_consumed(notification_ids)
+            .await
     }
 
     async fn conversation_belongs_to_user(
