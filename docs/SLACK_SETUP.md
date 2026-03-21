@@ -353,18 +353,9 @@ What to expect:
 - `ironclaw pairing list slack` is usually irrelevant because non-owner users are rejected before DM pairing logic matters
 - `slack.capabilities.json` may still say `dm_policy: "pairing"`, but the owner restriction takes precedence
 
-### Scenario 3: Owner Only Plus Specific Allowed Users
+### Scenario 3: Allow Specific Users to DM, All Users to Message in Channels
 
-There are two distinct cases:
-
-1. Host-level owner binding is set
-2. `allow_from` contains additional Slack user IDs
-
-Example owner binding:
-
-```bash
-ironclaw config set channels.wasm_channel_owner_ids.slack 123456789
-```
+This scenario works when no owner binding is set and DM access is controlled with `dm_policy` plus `allow_from`.
 
 Example manifest config:
 
@@ -380,14 +371,14 @@ Example manifest config:
 
 Expected behavior:
 
-- DMs: only the owner can talk to IronClaw
-- Public Channels: only the owner can talk to IronClaw
-- Private Channels: only the owner can talk to IronClaw
+- DMs: only the listed users can message IronClaw
+- Public Channels: any user can still talk to IronClaw by default
+- Private Channels: any user can still talk to IronClaw by default
 
 Why:
 
-- once the owner binding is set, the owner check runs first and blocks everyone else
-- additional users in `allow_from` do not override the owner restriction
+- `dm_policy` only applies to DMs
+- channel messages bypass DM allowlist checks when no owner binding is set
 
 Commands to inspect this scenario:
 
@@ -395,35 +386,28 @@ Commands to inspect this scenario:
 ironclaw config get channels.wasm_channel_owner_ids.slack
 sed -n '1,220p' ~/.ironclaw/channels/slack.capabilities.json
 cat ~/.ironclaw/slack-allowFrom.json
+ironclaw pairing list slack
 ```
 
 What to expect:
 
-- the owner binding is set in `ironclaw config`
-- `allow_from` may contain extra users in the manifest or pairing store
-- despite that, only the owner can successfully message the channel
+- `ironclaw config get channels.wasm_channel_owner_ids.slack` returns `Setting not found`
+- `slack.capabilities.json` shows `dm_policy: "allowlist"` and the expected `allow_from` entries
+- `slack-allowFrom.json` may also contain approved DM users from pairing
+- `ironclaw pairing list slack` may be empty because this scenario does not require pending pairing requests
 
-### Can I Allow Specific Users Without Setting an Owner?
+### Currently Unsupported Scenarios
 
-Yes, for DMs only.
+The current Slack channel does not support these access-control patterns:
 
-Example manifest config:
-
-```json
-{
-  "config": {
-    "owner_id": null,
-    "dm_policy": "allowlist",
-    "allow_from": ["U11111111", "U22222222"]
-  }
-}
-```
-
-Behavior:
-
-- DMs: only the listed users can message IronClaw
-- Public Channels: any user can still talk to IronClaw by default
-- Private Channels: any user can still talk to IronClaw by default
+- Owner only plus specific additional allowed users
+  - if an owner binding is set, only the owner can talk to IronClaw anywhere
+- Allow specific users in public channels while blocking others
+- Allow specific users in private channels while blocking others
+- Different allowlists for different Slack channels
+- Channel-level pairing
+- Per-channel user access rules such as “user A can talk in channel X but not channel Y”
+- Allowlist-only channel messaging without using a global owner binding
 
 ### Is There Channel-Level Pairing or Per-Channel User Access?
 
