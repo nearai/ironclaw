@@ -239,6 +239,9 @@ impl Agent {
                         });
                     }
                     // State changed (turn completed) — fall through to process normally.
+                    // NOTE: `sess` (the Mutex guard) is dropped at the end of
+                    // this `Processing` match arm, releasing the session lock
+                    // before the rest of process_user_input runs. No deadlock.
                 } else {
                     return Ok(SubmissionResult::error("Thread no longer exists."));
                 }

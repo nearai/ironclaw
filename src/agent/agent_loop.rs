@@ -1173,7 +1173,7 @@ impl Agent {
                 // - `Error`: soft error — draining more messages after an error
                 //    would produce confusing interleaved output
                 // - `Err(_)`: hard error
-                while let Ok(SubmissionResult::Response { .. }) = &result {
+                while let Ok(SubmissionResult::Response { content: outgoing }) = &result {
                     let merged = {
                         let mut sess = session.lock().await;
                         sess.threads
@@ -1203,15 +1203,9 @@ impl Agent {
                     //   identity will attribute every response to the first
                     //   message. This is acceptable for the current
                     //   single-user-per-thread model.
-                    // We're inside `while let Ok(Response { .. })` so result
-                    // is always a Response here.
-                    let outgoing = match &result {
-                        Ok(SubmissionResult::Response { content }) => content.clone(),
-                        _ => unreachable!("while-let guard ensures Response"),
-                    };
                     if let Err(e) = self
                         .channels
-                        .respond(message, OutgoingResponse::text(outgoing))
+                        .respond(message, OutgoingResponse::text(outgoing.clone()))
                         .await
                     {
                         tracing::warn!(

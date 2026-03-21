@@ -312,6 +312,11 @@ impl Thread {
     /// Re-queue previously drained content at the front of the queue.
     /// Used to preserve user input when the drain loop fails to process
     /// merged messages (soft error, hard error, interrupt).
+    ///
+    /// This intentionally bypasses [`MAX_PENDING_MESSAGES`] — the content
+    /// was already counted against the cap before draining. The overshoot
+    /// is bounded to 1 entry (the re-queued merged string) plus any new
+    /// messages that arrived during the failed attempt.
     pub fn requeue_drained(&mut self, content: String) {
         self.pending_messages.push_front(content);
     }
