@@ -750,7 +750,7 @@ async def test_auth_card_with_oauth(page):
     assert await oauth_link.evaluate("(node) => node.tagName") == "A"
     assert await oauth_link.get_attribute("target") == "_blank"
     rel = await oauth_link.get_attribute("rel")
-    assert rel and "noopener" in rel
+    assert rel and "noopener" in rel and "noreferrer" in rel
     assert "slack" in await oauth_link.text_content()
 
 
