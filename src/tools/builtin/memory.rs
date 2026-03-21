@@ -194,6 +194,15 @@ impl Tool for MemoryWriteTool {
                     "type": "boolean",
                     "description": "If true, append to existing content. If false, replace entirely.",
                     "default": true
+                },
+                "layer": {
+                    "type": "string",
+                    "description": "Memory layer to write to (e.g. 'private', 'household', 'finance'). When omitted, writes to the workspace's default scope."
+                },
+                "force": {
+                    "type": "boolean",
+                    "description": "Skip privacy classification and write directly to the specified layer without redirect. Use when you're certain the content belongs in the target layer.",
+                    "default": false
                 }
             },
             "required": ["content"]
@@ -256,67 +265,86 @@ impl Tool for MemoryWriteTool {
             .and_then(|v| v.as_bool())
             .unwrap_or(true);
 
-        // Prompt injection scanning for system-prompt files is handled by
-        // Workspace::write() / Workspace::append() — no need to duplicate here.
+        let layer = params.get("layer").and_then(|v| v.as_str());
+        let force = params
+            .get("force")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
 
-        let path = match target {
-            "memory" => {
-                if append {
-                    self.workspace
-                        .append_memory(content)
-                        .await
-                        .map_err(map_write_err)?;
-                } else {
-                    self.workspace
-                        .write(paths::MEMORY, content)
-                        .await
-                        .map_err(map_write_err)?;
-                }
-                paths::MEMORY.to_string()
-            }
+        // Resolve the target to a workspace path
+        let resolved_path = match target {
+            "memory" => paths::MEMORY.to_string(),
             "daily_log" => {
                 let tz = crate::timezone::parse_timezone(&ctx.user_timezone)
                     .unwrap_or(chrono_tz::Tz::UTC);
+                let now = chrono::Utc::now().with_timezone(&tz);
+                format!("daily/{}.md", now.format("%Y-%m-%d"))
+            }
+            "heartbeat" => paths::HEARTBEAT.to_string(),
+            path => path.to_string(),
+        };
+
+        // When a layer is specified, route through layer-aware methods for ALL targets.
+        // Otherwise, use default workspace methods (which include injection scanning).
+        let layer_result = if let Some(layer_name) = layer {
+            let result = if append {
                 self.workspace
-                    .append_daily_log_tz(content, tz)
+                    .append_to_layer(layer_name, &resolved_path, content, force)
                     .await
                     .map_err(map_write_err)?
-            }
-            "heartbeat" => {
-                if append {
+            } else {
+                self.workspace
+                    .write_to_layer(layer_name, &resolved_path, content, force)
+                    .await
+                    .map_err(map_write_err)?
+            };
+            Some((result.actual_layer, result.redirected))
+        } else {
+            // No layer specified — use default workspace methods.
+            // Prompt injection scanning for system-prompt files is handled by
+            // Workspace::write() / Workspace::append().
+            match target {
+                "memory" => {
+                    if append {
+                        self.workspace
+                            .append_memory(content)
+                            .await
+                            .map_err(map_write_err)?;
+                    } else {
+                        self.workspace
+                            .write(paths::MEMORY, content)
+                            .await
+                            .map_err(map_write_err)?;
+                    }
+                }
+                "daily_log" => {
+                    let tz = crate::timezone::parse_timezone(&ctx.user_timezone)
+                        .unwrap_or(chrono_tz::Tz::UTC);
                     self.workspace
-                        .append(paths::HEARTBEAT, content)
-                        .await
-                        .map_err(map_write_err)?;
-                } else {
-                    self.workspace
-                        .write(paths::HEARTBEAT, content)
+                        .append_daily_log_tz(content, tz)
                         .await
                         .map_err(map_write_err)?;
                 }
-                paths::HEARTBEAT.to_string()
-            }
-            path => {
-                if append {
-                    self.workspace
-                        .append(path, content)
-                        .await
-                        .map_err(map_write_err)?;
-                } else {
-                    self.workspace
-                        .write(path, content)
-                        .await
-                        .map_err(map_write_err)?;
+                _ => {
+                    if append {
+                        self.workspace
+                            .append(&resolved_path, content)
+                            .await
+                            .map_err(map_write_err)?;
+                    } else {
+                        self.workspace
+                            .write(&resolved_path, content)
+                            .await
+                            .map_err(map_write_err)?;
+                    }
                 }
-                path.to_string()
             }
+            None
         };
 
         // Sync derived identity documents when the profile is written.
-        // Normalize the path to match Workspace::normalize_path(): trim, strip
-        // leading/trailing slashes, collapse all consecutive slashes.
         let normalized_path = {
-            let trimmed = path.trim().trim_matches('/');
+            let trimmed = resolved_path.trim().trim_matches('/');
             let mut result = String::new();
             let mut last_was_slash = false;
             for c in trimmed.chars() {
@@ -339,9 +367,6 @@ impl Tool for MemoryWriteTool {
                     tracing::info!("profile write: synced USER.md + assistant-directives.md");
                     synced_docs.extend_from_slice(&[paths::USER, paths::ASSISTANT_DIRECTIVES]);
 
-                    // Persist the onboarding-completed flag and set the
-                    // in-memory safety net so BOOTSTRAP.md injection stops
-                    // even if the LLM forgets to delete it.
                     self.workspace.mark_bootstrap_completed();
                     let toml_path = crate::settings::Settings::default_toml_path();
                     if let Ok(Some(mut settings)) = crate::settings::Settings::load_toml(&toml_path)
@@ -364,10 +389,14 @@ impl Tool for MemoryWriteTool {
 
         let mut output = serde_json::json!({
             "status": "written",
-            "path": path,
+            "path": resolved_path,
             "append": append,
             "content_length": content.len(),
         });
+        if let Some((actual_layer, redirected)) = layer_result {
+            output["layer"] = serde_json::Value::String(actual_layer);
+            output["redirected"] = serde_json::Value::Bool(redirected);
+        }
         if !synced_docs.is_empty() {
             output["synced"] = serde_json::json!(synced_docs);
         }
