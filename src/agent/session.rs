@@ -632,7 +632,7 @@ impl Turn {
         }
     }
 
-    /// Record a tool result by tool_call_id, with positional fallback.
+    /// Record a tool result by tool_call_id, with fallback to first pending call.
     pub fn record_tool_result_for(&mut self, tool_call_id: &str, result: serde_json::Value) {
         if let Some(call) = self
             .tool_calls
@@ -640,12 +640,16 @@ impl Turn {
             .find(|c| c.tool_call_id.as_deref() == Some(tool_call_id))
         {
             call.result = Some(result);
-        } else if let Some(call) = self.tool_calls.last_mut() {
+        } else if let Some(call) = self
+            .tool_calls
+            .iter_mut()
+            .find(|c| c.result.is_none() && c.error.is_none())
+        {
             call.result = Some(result);
         }
     }
 
-    /// Record a tool error by tool_call_id, with positional fallback.
+    /// Record a tool error by tool_call_id, with fallback to first pending call.
     pub fn record_tool_error_for(&mut self, tool_call_id: &str, error: impl Into<String>) {
         if let Some(call) = self
             .tool_calls
@@ -653,7 +657,11 @@ impl Turn {
             .find(|c| c.tool_call_id.as_deref() == Some(tool_call_id))
         {
             call.error = Some(error.into());
-        } else if let Some(call) = self.tool_calls.last_mut() {
+        } else if let Some(call) = self
+            .tool_calls
+            .iter_mut()
+            .find(|c| c.result.is_none() && c.error.is_none())
+        {
             call.error = Some(error.into());
         }
     }

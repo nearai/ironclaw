@@ -1173,7 +1173,7 @@ impl Agent {
                         SubmissionResult::Error { message } => {
                             Ok(Some(format!("Error: {}", message)))
                         }
-                        _ => Ok(None),
+                        _ => Ok(Some(String::new())),
                     };
                 }
                 // Authorization checks (including restart channel check) are enforced in handle_system_command

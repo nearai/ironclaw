@@ -917,7 +917,11 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                         id: selection.tool_call_id.clone(),
                         name: selection.tool_name.clone(),
                         arguments: selection.parameters.clone(),
-                        reasoning: None,
+                        reasoning: if action.reasoning.is_empty() {
+                            None
+                        } else {
+                            Some(action.reasoning.clone())
+                        },
                     }],
                 ));
 

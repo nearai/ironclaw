@@ -518,7 +518,13 @@ impl Reasoning {
 
         let response = self.llm.complete_with_tools(request).await?;
 
-        let shared_reasoning = response.content.unwrap_or_default();
+        let shared_reasoning = response
+            .content
+            .map(|c| {
+                let pre_truncated = truncate_at_tool_tags(&c);
+                clean_response(&pre_truncated)
+            })
+            .unwrap_or_default();
 
         let selections: Vec<ToolSelection> = response
             .tool_calls

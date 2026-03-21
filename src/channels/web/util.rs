@@ -26,6 +26,21 @@ pub fn truncate_preview(s: &str, max_bytes: usize) -> String {
     result
 }
 
+/// Parse tool call summary JSON objects into `ToolCallInfo` structs.
+fn parse_tool_call_infos(calls: &[serde_json::Value]) -> Vec<ToolCallInfo> {
+    calls
+        .iter()
+        .map(|c| ToolCallInfo {
+            name: c["name"].as_str().unwrap_or("unknown").to_string(),
+            has_result: c.get("result_preview").is_some(),
+            has_error: c.get("error").is_some(),
+            result_preview: c["result_preview"].as_str().map(String::from),
+            error: c["error"].as_str().map(String::from),
+            rationale: c["rationale"].as_str().map(String::from),
+        })
+        .collect()
+}
+
 /// Build TurnInfo pairs from flat DB messages (user/tool_calls/assistant triples).
 ///
 /// Handles three message patterns:
@@ -57,19 +72,28 @@ pub fn build_turns_from_db_messages(
                 && next.role == "tool_calls"
             {
                 let tc_msg = iter.next().expect("peeked");
-                match serde_json::from_str::<Vec<serde_json::Value>>(&tc_msg.content) {
-                    Ok(calls) => {
-                        turn.tool_calls = calls
-                            .iter()
-                            .map(|c| ToolCallInfo {
-                                name: c["name"].as_str().unwrap_or("unknown").to_string(),
-                                has_result: c.get("result_preview").is_some(),
-                                has_error: c.get("error").is_some(),
-                                result_preview: c["result_preview"].as_str().map(String::from),
-                                error: c["error"].as_str().map(String::from),
-                                rationale: c["rationale"].as_str().map(String::from),
-                            })
-                            .collect();
+                // Parse tool_calls JSON — supports two formats:
+                // safety: no byte-index slicing; comment describes JSON shape
+                match serde_json::from_str::<serde_json::Value>(&tc_msg.content) {
+                    Ok(serde_json::Value::Array(calls)) => {
+                        // Old format: plain array
+                        turn.tool_calls = parse_tool_call_infos(&calls);
+                    }
+                    Ok(serde_json::Value::Object(obj)) => {
+                        // New wrapped format with narrative
+                        turn.narrative = obj
+                            .get("narrative")
+                            .and_then(|v| v.as_str())
+                            .map(String::from);
+                        if let Some(serde_json::Value::Array(calls)) = obj.get("calls") {
+                            turn.tool_calls = parse_tool_call_infos(calls);
+                        }
+                    }
+                    Ok(_) => {
+                        tracing::warn!(
+                            message_id = %tc_msg.id,
+                            "Unexpected tool_calls JSON shape in DB, skipping"
+                        );
                     }
                     Err(e) => {
                         tracing::warn!(
