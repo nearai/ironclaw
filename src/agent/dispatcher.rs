@@ -35,12 +35,13 @@ pub(super) enum AgenticLoopResult {
 
 impl Agent {
     /// Apply per-channel tool filtering if routing config is loaded.
-    fn apply_channel_routing(
+    async fn apply_channel_routing(
         &self,
         channel: &str,
         tools: Vec<crate::llm::ToolDefinition>,
     ) -> Vec<crate::llm::ToolDefinition> {
-        if let Some(ref routing) = self.deps.channel_routing {
+        let guard = self.deps.channel_routing.read().await;
+        if let Some(ref routing) = *guard {
             let before = tools.len();
             let filtered = routing.filter_tool_defs(channel, tools);
             if filtered.len() < before {
@@ -173,7 +174,9 @@ impl Agent {
         // Build system prompts once for this turn. Two variants: with tools
         // (normal iterations) and without (force_text final iteration).
         let initial_tool_defs = self.tools().tool_definitions().await;
-        let initial_tool_defs = self.apply_channel_routing(&message.channel, initial_tool_defs);
+        let initial_tool_defs = self
+            .apply_channel_routing(&message.channel, initial_tool_defs)
+            .await;
         let initial_tool_defs = if !active_skills.is_empty() {
             crate::skills::attenuate_tools(&initial_tool_defs, &active_skills).tools
         } else {
@@ -306,7 +309,8 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
         let tool_defs = self.agent.tools().tool_definitions().await;
         let tool_defs = self
             .agent
-            .apply_channel_routing(&self.message.channel, tool_defs);
+            .apply_channel_routing(&self.message.channel, tool_defs)
+            .await;
 
         // Apply trust-based tool attenuation if skills are active.
         let tool_defs = if !self.active_skills.is_empty() {
@@ -1224,7 +1228,7 @@ mod tests {
             document_extraction: None,
             sandbox_readiness: crate::agent::routine_engine::SandboxReadiness::DisabledByConfig,
             builder: None,
-            channel_routing: None,
+            channel_routing: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         };
 
         Agent::new(
@@ -2097,7 +2101,7 @@ mod tests {
             document_extraction: None,
             sandbox_readiness: crate::agent::routine_engine::SandboxReadiness::DisabledByConfig,
             builder: None,
-            channel_routing: None,
+            channel_routing: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         };
 
         Agent::new(
@@ -2218,7 +2222,7 @@ mod tests {
                 document_extraction: None,
                 sandbox_readiness: crate::agent::routine_engine::SandboxReadiness::DisabledByConfig,
                 builder: None,
-                channel_routing: None,
+                channel_routing: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
             };
 
             Agent::new(

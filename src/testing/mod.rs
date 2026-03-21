@@ -494,7 +494,7 @@ impl TestHarnessBuilder {
             document_extraction: None,
             sandbox_readiness: crate::agent::routine_engine::SandboxReadiness::DisabledByConfig,
             builder: None,
-            channel_routing: None,
+            channel_routing: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         };
 
         TestHarness {

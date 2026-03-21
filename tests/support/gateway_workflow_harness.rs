@@ -260,7 +260,7 @@ impl GatewayWorkflowHarness {
                 document_extraction: None,
                 sandbox_readiness: ironclaw::agent::SandboxReadiness::DisabledByConfig,
                 builder: None,
-                channel_routing: None,
+                channel_routing: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
             },
             channels,
             None,

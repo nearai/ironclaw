@@ -9,6 +9,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+use crate::db::SettingsStore;
 use crate::llm::ToolDefinition;
 
 /// Channel-to-tool-group routing configuration.
@@ -69,6 +70,59 @@ impl ChannelRoutingConfig {
                 None
             }
         }
+    }
+
+    /// Load from database-backed SettingsStore. Falls back to file if not in DB.
+    ///
+    /// This provides hot-reload support — the settings system handles cache
+    /// invalidation and the web UI can modify the config without restarts.
+    pub async fn load_from_store(
+        store: &(dyn SettingsStore + Send + Sync),
+        user_id: &str,
+        file_fallback: &Path,
+    ) -> Option<Self> {
+        match store.get_setting(user_id, "channel_routing").await {
+            Ok(Some(value)) => match serde_json::from_value::<Self>(value) {
+                Ok(config) => {
+                    if let Err(e) = config.validate() {
+                        tracing::error!("Channel routing config from DB invalid: {}", e);
+                        return None;
+                    }
+                    tracing::info!(
+                        groups = ?config.groups.keys().collect::<Vec<_>>(),
+                        channels = config.channels.len(),
+                        "Loaded channel routing config from database"
+                    );
+                    return Some(config);
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to parse channel routing from DB: {}", e);
+                }
+            },
+            Ok(None) => {
+                tracing::debug!("No channel routing config in database, trying file fallback");
+            }
+            Err(e) => {
+                tracing::warn!("Failed to read channel routing from DB: {}", e);
+            }
+        }
+        // Fall back to file-based config
+        Self::load(file_fallback)
+    }
+
+    /// Save current config to the database SettingsStore.
+    pub async fn save_to_store(
+        &self,
+        store: &(dyn SettingsStore + Send + Sync),
+        user_id: &str,
+    ) -> Result<(), crate::error::DatabaseError> {
+        let value = serde_json::to_value(self).map_err(|e| {
+            crate::error::DatabaseError::Serialization(format!(
+                "Failed to serialize channel routing: {}",
+                e
+            ))
+        })?;
+        store.set_setting(user_id, "channel_routing", &value).await
     }
 
     /// Validate that group references are consistent.
