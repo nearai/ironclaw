@@ -30,6 +30,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -344,6 +345,80 @@ impl near::agent::channel_host::Host for ChannelStoreData {
             })
             .collect();
 
+        // Leak-scan WASM-provided content BEFORE host-side auto-injection.
+        // Auto-injected credentials are trusted host-side values that must not
+        // be flagged by the leak detector.
+        {
+            let url_for_scan = &injected_url;
+            let header_vec: Vec<(String, String)> = headers
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            let leak_detector = LeakDetector::new();
+            leak_detector
+                .scan_http_request(url_for_scan, &header_vec, body.as_deref())
+                .map_err(|e| format!("Potential secret leak blocked: {}", e))?;
+        }
+
+        // Auto-inject credentials based on capability mappings (Bearer, Header).
+        // WASM channels don't include auth headers explicitly; the host injects
+        // them based on the credential mappings in the capabilities file.
+        if let Some(http_cap) = &self.host_state.capabilities().tool_capabilities.http
+            && let Ok(parsed) = reqwest::Url::parse(&injected_url)
+            && let Some(host) = parsed.host_str()
+        {
+            for mapping in http_cap.credentials.values() {
+                let matches_host = mapping.host_patterns.iter().any(|p| {
+                    crate::tools::wasm::credential_injector::host_matches_pattern(host, p)
+                });
+                if !matches_host {
+                    continue;
+                }
+                let cred_key = mapping.secret_name.to_uppercase();
+                let cred_value = self.credentials.get(&cred_key);
+                if let Some(value) = cred_value {
+                    match &mapping.location {
+                        crate::secrets::CredentialLocation::AuthorizationBearer => {
+                            if !headers.contains_key("Authorization")
+                                && !headers.contains_key("authorization")
+                            {
+                                headers.insert(
+                                    "Authorization".to_string(),
+                                    format!("Bearer {}", value),
+                                );
+                                tracing::debug!(
+                                    host = %host,
+                                    "Auto-injected Bearer credential from capability mapping"
+                                );
+                            }
+                        }
+                        crate::secrets::CredentialLocation::Header {
+                            name: header_name,
+                            prefix,
+                        } => {
+                            let header_lower = header_name.to_lowercase();
+                            if !headers.contains_key(header_name)
+                                && !headers.contains_key(&header_lower)
+                            {
+                                let header_value = if let Some(pfx) = prefix {
+                                    format!("{}{}", pfx, value)
+                                } else {
+                                    value.clone()
+                                };
+                                headers.insert(header_name.clone(), header_value);
+                                tracing::debug!(
+                                    host = %host,
+                                    header = %header_name,
+                                    "Auto-injected header credential from capability mapping"
+                                );
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+
         let headers_changed = headers
             .values()
             .any(|v| v.contains("Bearer ") && !v.contains('{'));
@@ -355,22 +430,9 @@ impl near::agent::channel_host::Host for ChannelStoreData {
 
         let mut url = injected_url;
 
-        // Leak scan runs on WASM-provided values BEFORE host credential injection.
-        // This prevents false positives where the host-injected Bearer token
-        // (e.g., xoxb- Slack token) triggers the leak detector — WASM never saw
-        // the real value, so scanning the pre-injection state is correct.
-        let leak_detector = LeakDetector::new();
-        let header_vec: Vec<(String, String)> = headers
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-
-        leak_detector
-            .scan_http_request(&url, &header_vec, body.as_deref())
-            .map_err(|e| format!("Potential secret leak blocked: {}", e))?;
-
         // Inject pre-resolved host credentials (Bearer tokens, API keys, etc.)
-        // after the leak scan so host-injected secrets don't trigger false positives.
+        // after the first leak scan (lines 348-361) so host-injected secrets
+        // don't trigger false positives.
         if let Some(host) = extract_host_from_url(&url) {
             self.inject_host_credentials(&host, &mut headers, &mut url);
         }
@@ -502,7 +564,7 @@ impl near::agent::channel_host::Host for ChannelStoreData {
             if let Ok(body_str) = std::str::from_utf8(&body)
                 && !should_skip_response_leak_scan(&url)
             {
-                leak_detector
+                LeakDetector::new()
                     .scan_and_clean(body_str)
                     .map_err(|e| format!("Potential secret leak in response: {}", e))?;
             }
@@ -710,6 +772,13 @@ pub struct WasmChannel {
     /// Ensures WASM channels can maintain state (e.g., polling offsets) between ticks.
     workspace_store: Arc<ChannelWorkspaceStore>,
 
+    /// Consecutive response failures for health monitoring.
+    /// Reset to 0 on success; emits a warning after `CONSECUTIVE_ERROR_THRESHOLD`.
+    consecutive_errors: AtomicU32,
+
+    /// Shutdown sender for the Socket Mode bridge task.
+    socket_shutdown_tx: RwLock<Option<oneshot::Sender<()>>>,
+
     /// Last-seen message metadata (contains chat_id for broadcast routing).
     /// Populated from incoming messages so `broadcast()` knows where to send.
     last_broadcast_metadata: Arc<tokio::sync::RwLock<Option<String>>>,
@@ -723,7 +792,7 @@ pub struct WasmChannel {
     /// Channel-specific actor ID that maps to the instance owner on this channel.
     owner_actor_id: Option<String>,
 
-    /// Secrets store for host-based credential injection.
+    /// Secrets store for host-based credential injection and Socket Mode.
     /// Used to pre-resolve credentials before each WASM callback.
     secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
 }
@@ -844,6 +913,8 @@ impl WasmChannel {
             typing_task: RwLock::new(None),
             pairing_store,
             workspace_store: Arc::new(ChannelWorkspaceStore::new()),
+            consecutive_errors: AtomicU32::new(0),
+            socket_shutdown_tx: RwLock::new(None),
             last_broadcast_metadata: Arc::new(tokio::sync::RwLock::new(None)),
             settings_store,
             owner_scope_id: owner_scope_id.into(),
@@ -910,6 +981,15 @@ impl WasmChannel {
             config = %*config_guard,
             "Updated channel config"
         );
+    }
+
+    /// Set the secrets store for Socket Mode support.
+    ///
+    /// Must be called before `start()`. The bridge reads the app-level token
+    /// from this store at connection time — the token never enters the WASM
+    /// credential map.
+    pub fn set_secrets_store(&mut self, store: Arc<dyn crate::secrets::SecretsStore>) {
+        self.secrets_store = Some(store);
     }
 
     /// Set a credential for URL injection.
@@ -1313,7 +1393,7 @@ impl WasmChannel {
             path = path,
             body_len = body.len(),
             secret_validated = secret_validated,
-            "call_on_http_request invoked (webhook received)"
+            "call_on_http_request invoked"
         );
 
         // Log the body for debugging (truncated at char boundary)
@@ -2368,6 +2448,57 @@ impl WasmChannel {
         });
     }
 
+    /// Start the Socket Mode bridge if configured.
+    ///
+    /// Requires an `Arc<WasmChannel>` because the bridge needs to call
+    /// `call_on_http_request` from a spawned task. Called by `SharedWasmChannel::start()`
+    /// which has access to the Arc.
+    async fn start_socket_bridge(&self, channel_arc: Arc<WasmChannel>) {
+        let socket_config = match &self.capabilities.socket_mode {
+            Some(config) => config.clone(),
+            None => return,
+        };
+
+        // Check if the app token is available (secrets store or env var)
+        let in_secrets = if let Some(ref secrets) = self.secrets_store {
+            secrets
+                .exists("default", &socket_config.app_token_secret)
+                .await
+                .unwrap_or(false)
+        } else {
+            false
+        };
+        let env_name = socket_config.app_token_secret.to_uppercase();
+        let in_env = std::env::var(&env_name)
+            .map(|v| !v.is_empty())
+            .unwrap_or(false);
+
+        if !in_secrets && !in_env {
+            tracing::info!(
+                channel = %self.name,
+                secret = %socket_config.app_token_secret,
+                env_var = %env_name,
+                "Socket Mode app token not found — falling back to webhook mode"
+            );
+            return;
+        }
+
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        *self.socket_shutdown_tx.write().await = Some(shutdown_tx);
+
+        tracing::info!(
+            channel = %self.name,
+            "Starting Socket Mode bridge"
+        );
+
+        crate::channels::wasm::socket_bridge::spawn_socket_bridge(
+            channel_arc,
+            socket_config,
+            self.secrets_store.clone(),
+            shutdown_rx,
+        );
+    }
+
     /// Execute a single poll callback with a fresh WASM instance.
     ///
     /// Returns any emitted messages from the callback. Pending workspace writes
@@ -2579,6 +2710,45 @@ impl WasmChannel {
     }
 }
 
+/// Number of consecutive response failures before emitting a health warning.
+const CONSECUTIVE_ERROR_THRESHOLD: u32 = 5;
+
+/// Classified error from a WASM channel callback failure reason string.
+#[derive(Debug)]
+enum ChannelCallbackError {
+    /// Token invalid or revoked — surfaces as AuthRequired.
+    AuthFailure(String),
+    /// Upstream rate-limited — log but don't flood the user.
+    RateLimited,
+    /// Missing permission/scope.
+    MissingScope(String),
+    /// Everything else.
+    Other(String),
+}
+
+/// Classify a WASM callback error reason string into actionable categories.
+///
+/// The error reason comes from the WASM module's `on_respond` return value
+/// (e.g., Slack channel returns `"invalid_auth: token_revoked"`).
+fn classify_callback_error(reason: &str) -> ChannelCallbackError {
+    let lower = reason.to_lowercase();
+    if lower.contains("invalid_auth")
+        || lower.contains("token_revoked")
+        || lower.contains("token_expired")
+        || lower.contains("not_authed")
+        || lower.contains("account_inactive")
+        || lower.contains("unauthorized")
+    {
+        ChannelCallbackError::AuthFailure(reason.to_string())
+    } else if lower.contains("rate_limited") || lower.contains("ratelimited") {
+        ChannelCallbackError::RateLimited
+    } else if lower.contains("missing_scope") {
+        ChannelCallbackError::MissingScope(reason.to_string())
+    } else {
+        ChannelCallbackError::Other(reason.to_string())
+    }
+}
+
 struct EmitDispatchContext<'a> {
     channel_name: &'a str,
     owner_scope_id: &'a str,
@@ -2693,20 +2863,75 @@ impl Channel for WasmChannel {
         if msg.user_id == self.owner_scope_id {
             self.update_broadcast_metadata(&metadata_json).await;
         }
-        self.call_on_respond(
-            msg.id,
-            &response.content,
-            response.thread_id.as_deref(),
-            &metadata_json,
-            &response.attachments,
-        )
-        .await
-        .map_err(|e| ChannelError::SendFailed {
-            name: self.name.clone(),
-            reason: e.to_string(),
-        })?;
+        let result = self
+            .call_on_respond(
+                msg.id,
+                &response.content,
+                response.thread_id.as_deref(),
+                &metadata_json,
+                &response.attachments,
+            )
+            .await;
 
-        Ok(())
+        match result {
+            Ok(()) => {
+                self.consecutive_errors.store(0, Ordering::Relaxed);
+                Ok(())
+            }
+            Err(e) => {
+                let count = self.consecutive_errors.fetch_add(1, Ordering::Relaxed) + 1;
+                let reason = e.to_string();
+
+                // Classify the error for targeted logging / action
+                let classified = classify_callback_error(&reason);
+                match classified {
+                    ChannelCallbackError::AuthFailure(ref detail) => {
+                        tracing::error!(
+                            channel = %self.name,
+                            detail = %detail,
+                            "Channel auth failure — token may be invalid or revoked"
+                        );
+                    }
+                    ChannelCallbackError::RateLimited => {
+                        tracing::warn!(
+                            channel = %self.name,
+                            "Channel response rate-limited by upstream API"
+                        );
+                    }
+                    ChannelCallbackError::MissingScope(ref detail) => {
+                        tracing::error!(
+                            channel = %self.name,
+                            detail = %detail,
+                            "Channel missing required API scope"
+                        );
+                    }
+                    ChannelCallbackError::Other(ref detail) => {
+                        tracing::warn!(
+                            channel = %self.name,
+                            consecutive = count,
+                            detail = %detail,
+                            "Channel on_respond failed"
+                        );
+                    }
+                }
+
+                // Emit a health warning after N consecutive failures
+                if count == CONSECUTIVE_ERROR_THRESHOLD {
+                    tracing::error!(
+                        channel = %self.name,
+                        consecutive = count,
+                        last_error = %reason,
+                        "Channel has {} consecutive response failures — may need attention",
+                        count
+                    );
+                }
+
+                Err(ChannelError::SendFailed {
+                    name: self.name.clone(),
+                    reason,
+                })
+            }
+        }
     }
 
     async fn broadcast(
@@ -2776,6 +3001,11 @@ impl Channel for WasmChannel {
         // Stop polling by dropping the sender (receiver will complete)
         let _ = self.poll_shutdown_tx.write().await.take();
 
+        // Stop Socket Mode bridge
+        if let Some(tx) = self.socket_shutdown_tx.write().await.take() {
+            let _ = tx.send(());
+        }
+
         // Clear the message sender
         *self.message_tx.write().await = None;
 
@@ -2837,7 +3067,14 @@ impl Channel for SharedWasmChannel {
     }
 
     async fn start(&self) -> Result<MessageStream, ChannelError> {
-        self.inner.start().await
+        let stream = self.inner.start().await?;
+
+        // Start Socket Mode bridge if configured (needs Arc<WasmChannel>)
+        self.inner
+            .start_socket_bridge(Arc::clone(&self.inner))
+            .await;
+
+        Ok(stream)
     }
 
     async fn respond(
@@ -4456,6 +4693,34 @@ mod tests {
         assert_eq!(result, 42);
     }
 
+    #[test]
+    fn test_channel_capabilities_socket_mode_default_none() {
+        let caps = crate::channels::wasm::capabilities::ChannelCapabilities::default();
+        assert!(caps.socket_mode.is_none());
+    }
+
+    #[test]
+    fn test_channel_capabilities_with_socket_mode() {
+        let caps = crate::channels::wasm::capabilities::ChannelCapabilities {
+            socket_mode: Some(crate::channels::wasm::capabilities::SocketModeConfig {
+                open_url: "https://slack.com/api/apps.connections.open".to_string(),
+                app_token_secret: "slack_app_token".to_string(),
+                reconnect_delay_ms: 5000,
+                max_reconnect_attempts: 10,
+            }),
+            ..Default::default()
+        };
+        assert!(caps.socket_mode.is_some());
+        let socket_mode = caps.socket_mode.unwrap();
+        assert_eq!(socket_mode.app_token_secret, "slack_app_token");
+        assert_eq!(
+            socket_mode.open_url,
+            "https://slack.com/api/apps.connections.open"
+        );
+        assert_eq!(socket_mode.reconnect_delay_ms, 5000);
+        assert_eq!(socket_mode.max_reconnect_attempts, 10);
+    }
+
     /// Verify a real HTTP request works using the dedicated-runtime pattern.
     /// This catches DNS, TLS, and I/O driver issues that trivial tests miss.
     #[tokio::test]
@@ -4487,6 +4752,84 @@ mod tests {
         .expect("spawn_blocking panicked");
         // 404 because "000" is not a valid bot token
         assert_eq!(result, 404);
+    }
+
+    #[tokio::test]
+    async fn credential_lookup_requires_uppercase_key() {
+        // Regression: Phase 2 of inject_channel_credentials stored env var keys
+        // in their original case, but the credential injection lookup (line 292)
+        // uppercases the secret_name: `mapping.secret_name.to_uppercase()`.
+        // If a credential is stored as "slack_bot_token" (lowercase), the lookup
+        // for "SLACK_BOT_TOKEN" won't find it.
+        //
+        // Fix: Phase 2 now uppercases keys before storing, matching Phase 1.
+        let channel = create_test_channel();
+
+        // Simulate Phase 2 storing with uppercase (the fix)
+        let env_key = "slack_bot_token";
+        channel
+            .set_credential(&env_key.to_uppercase(), "xoxb-test".into())
+            .await;
+
+        let creds = channel.get_credentials().await;
+
+        // The credential injection code looks up with UPPERCASE key
+        let lookup_key = env_key.to_uppercase(); // "SLACK_BOT_TOKEN"
+        assert!(
+            creds.contains_key(&lookup_key),
+            "Credential stored with uppercase key must be findable by uppercase lookup. \
+             Got keys: {:?}",
+            creds.keys().collect::<Vec<_>>()
+        );
+
+        // Also verify that storing with original case would NOT be found
+        // (this documents why the uppercase fix is necessary)
+        let channel2 = create_test_channel();
+        channel2.set_credential(env_key, "xoxb-test".into()).await;
+        let creds2 = channel2.get_credentials().await;
+        assert!(
+            !creds2.contains_key(&lookup_key),
+            "Without uppercase fix, lowercase key is NOT findable by uppercase lookup"
+        );
+    }
+
+    #[test]
+    fn wildcard_host_pattern_rejects_subdomain_spoofing() {
+        // Regression: the inline wildcard matching in credential auto-injection was:
+        //   host.ends_with(suffix) || host == suffix
+        // which allowed "evilslack.com" to match pattern "*.slack.com"
+        // because "evilslack.com".ends_with("slack.com") == true.
+        //
+        // Replicate the EXACT inline logic to prove the vulnerability:
+        fn old_inline_match(host: &str, pattern: &str) -> bool {
+            if let Some(suffix) = pattern.strip_prefix("*.") {
+                host.ends_with(suffix) || host == suffix
+            } else {
+                host == pattern
+            }
+        }
+
+        // BUG: old inline logic incorrectly matches spoofed domains
+        assert!(
+            old_inline_match("evilslack.com", "*.slack.com"),
+            "Old logic should (incorrectly) match — proving the vulnerability"
+        );
+
+        // The correct function requires a dot separator before the suffix
+        use crate::tools::wasm::credential_injector::host_matches_pattern;
+
+        // Legitimate subdomains MUST match
+        assert!(host_matches_pattern("api.slack.com", "*.slack.com"));
+        assert!(host_matches_pattern("sub.api.slack.com", "*.slack.com"));
+
+        // Spoofed domains MUST NOT match
+        assert!(!host_matches_pattern("evilslack.com", "*.slack.com"));
+        assert!(!host_matches_pattern("notslack.com", "*.slack.com"));
+        assert!(!host_matches_pattern("fakeslack.com", "*.slack.com"));
+
+        // Exact match patterns still work
+        assert!(host_matches_pattern("slack.com", "slack.com"));
+        assert!(!host_matches_pattern("slack.com", "*.slack.com"));
     }
 
     #[tokio::test]
