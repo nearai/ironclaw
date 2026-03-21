@@ -287,9 +287,9 @@ impl GatewayWorkflowHarness {
                 sandbox_readiness:
                     ironclaw::agent::routine_engine::SandboxReadiness::DisabledByConfig,
                 builder: None,
-llm_backend: "nearai".to_string(),
+                llm_backend: "nearai".to_string(),
                 tenant_rates: std::sync::Arc::new(ironclaw::tenant::TenantRateRegistry::new(4, 3)),
-    channel_routing: None,
+                channel_routing: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
             },
             channels,
             None,
