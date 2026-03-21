@@ -1080,7 +1080,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn concurrent_register_and_read_no_panic() {
+    async fn concurrent_register_and_read_no_panic() -> Result<(), Box<dyn std::error::Error>> {
         use std::sync::Arc as StdArc;
 
         let registry = StdArc::new(ToolRegistry::new());
@@ -1113,12 +1113,14 @@ mod tests {
         }
 
         for handle in handles {
-            assert!(handle.await.is_ok(), "task should not panic");
+            handle.await??;
         }
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_tool_definitions_sorted_alphabetically() {
+    async fn test_tool_definitions_sorted_alphabetically() -> Result<(), Box<dyn std::error::Error>>
+    {
         // Create tools with names that would NOT be alphabetical if inserted in this order.
         struct ToolZ;
         struct ToolA;
@@ -1153,72 +1155,94 @@ mod tests {
         impl_tool!(ToolM, "middle");
 
         let registry = ToolRegistry::new();
-        // Register in non-alphabetical order
         registry.register(Arc::new(ToolZ)).await;
         registry.register(Arc::new(ToolA)).await;
         registry.register(Arc::new(ToolM)).await;
 
         let defs = registry.tool_definitions().await;
         let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
-        assert_eq!(names, vec!["alpha", "middle", "zebra"]);
+        if names != vec!["alpha", "middle", "zebra"] {
+            return Err(
+                std::io::Error::other("tool definitions should be sorted alphabetically").into(),
+            );
+        }
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_retain_only_filters_tools() {
+    async fn test_retain_only_filters_tools() -> Result<(), Box<dyn std::error::Error>> {
         let registry = ToolRegistry::new();
         registry.register_builtin_tools();
         let all = registry.list().await;
-        assert!(all.len() > 2, "expected multiple built-in tools");
+        if all.len() <= 2 {
+            return Err(std::io::Error::other("expected multiple built-in tools").into());
+        }
         registry.retain_only(&["echo", "time"]).await;
         let remaining = registry.list().await;
-        assert_eq!(remaining.len(), 2);
-        assert!(remaining.contains(&"echo".to_string()));
-        assert!(remaining.contains(&"time".to_string()));
+        if remaining.len() != 2 {
+            return Err(std::io::Error::other("expected two remaining tools").into());
+        }
+        if !remaining.contains(&"echo".to_string()) || !remaining.contains(&"time".to_string()) {
+            return Err(std::io::Error::other("expected echo and time to remain").into());
+        }
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_retain_only_empty_is_noop() {
+    async fn test_retain_only_empty_is_noop() -> Result<(), Box<dyn std::error::Error>> {
         let registry = ToolRegistry::new();
         registry.register_builtin_tools();
         let before = registry.list().await.len();
         registry.retain_only(&[]).await;
         let after = registry.list().await.len();
-        assert_eq!(before, after);
+        if before != after {
+            return Err(std::io::Error::other("retain_only([]) should be a no-op").into());
+        }
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_http_allowlisted_domain_bypasses_approval() {
+    async fn test_http_allowlisted_domain_bypasses_approval()
+    -> Result<(), Box<dyn std::error::Error>> {
         let registry = ToolRegistry::new().with_http_allowed_domains(vec![
             "api.example.com".to_string(),
             "*.vercel.app".to_string(),
         ]);
         registry.register_builtin_tools();
 
-        let Some(http_tool) = registry.get("http").await else {
-            assert!(false, "http tool should be present");
-            return;
-        };
+        let http_tool = registry
+            .get("http")
+            .await
+            .ok_or_else(|| std::io::Error::other("http tool should be present"))?;
 
-        assert_eq!(
-            http_tool.requires_approval(&serde_json::json!({
-                "method": "POST",
-                "url": "https://api.example.com/v1/messages"
-            })),
-            ApprovalRequirement::Never
-        );
-        assert_eq!(
-            http_tool.requires_approval(&serde_json::json!({
-                "method": "GET",
-                "url": "https://preview.vercel.app/api"
-            })),
-            ApprovalRequirement::Never
-        );
-        assert_eq!(
-            http_tool.requires_approval(&serde_json::json!({
-                "method": "POST",
-                "url": "https://evil.example.net"
-            })),
-            ApprovalRequirement::UnlessAutoApproved
-        );
+        if http_tool.requires_approval(&serde_json::json!({
+            "method": "POST",
+            "url": "https://api.example.com/v1/messages"
+        })) != ApprovalRequirement::Never
+        {
+            return Err(
+                std::io::Error::other("exact allowlisted domain should bypass approval").into(),
+            );
+        }
+        if http_tool.requires_approval(&serde_json::json!({
+            "method": "GET",
+            "url": "https://preview.vercel.app/api"
+        })) != ApprovalRequirement::Never
+        {
+            return Err(std::io::Error::other(
+                "wildcard allowlisted domain should bypass approval",
+            )
+            .into());
+        }
+        if http_tool.requires_approval(&serde_json::json!({
+            "method": "POST",
+            "url": "https://evil.example.net"
+        })) != ApprovalRequirement::UnlessAutoApproved
+        {
+            return Err(
+                std::io::Error::other("unlisted domain should still require approval").into(),
+            );
+        }
+        Ok(())
     }
 }
