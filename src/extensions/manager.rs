@@ -9039,35 +9039,35 @@ mod tests {
         let tools_dir = dir.path().join("tools");
         std::fs::create_dir_all(&tools_dir).map_err(|err| format!("tools dir: {err}"))?;
 
-        for (name, scope) in [("google-docs", "https://www.googleapis.com/auth/documents")] {
-            std::fs::write(tools_dir.join(format!("{name}.wasm")), b"\0asm")
-                .map_err(|err| format!("write {name}.wasm: {err}"))?;
+        let name = "google-docs";
+        let scope = "https://www.googleapis.com/auth/documents";
+        std::fs::write(tools_dir.join(format!("{name}.wasm")), b"\0asm")
+            .map_err(|err| format!("write {name}.wasm: {err}"))?;
 
-            let caps = serde_json::json!({
-                "auth": {
-                    "secret_name": "google_oauth_token",
-                    "display_name": "Google",
-                    "oauth": {
-                        "authorization_url": "https://accounts.google.com/o/oauth2/v2/auth",
-                        "token_url": "https://oauth2.googleapis.com/token",
-                        "client_id_env": "GOOGLE_OAUTH_CLIENT_ID",
-                        "client_secret_env": "GOOGLE_OAUTH_CLIENT_SECRET",
-                        "scopes": [scope],
-                        "use_pkce": false,
-                        "extra_params": {
-                            "access_type": "offline",
-                            "prompt": "consent"
-                        }
-                    },
-                    "env_var": "GOOGLE_OAUTH_TOKEN"
-                }
-            });
-            std::fs::write(
-                tools_dir.join(format!("{name}.capabilities.json")),
-                serde_json::to_vec(&caps).map_err(|err| format!("serialize {name}: {err}"))?,
-            )
-            .map_err(|err| format!("write {name}.capabilities.json: {err}"))?;
-        }
+        let caps = serde_json::json!({
+            "auth": {
+                "secret_name": "google_oauth_token",
+                "display_name": "Google",
+                "oauth": {
+                    "authorization_url": "https://accounts.google.com/o/oauth2/v2/auth",
+                    "token_url": "https://oauth2.googleapis.com/token",
+                    "client_id_env": "GOOGLE_OAUTH_CLIENT_ID",
+                    "client_secret_env": "GOOGLE_OAUTH_CLIENT_SECRET",
+                    "scopes": [scope],
+                    "use_pkce": false,
+                    "extra_params": {
+                        "access_type": "offline",
+                        "prompt": "consent"
+                    }
+                },
+                "env_var": "GOOGLE_OAUTH_TOKEN"
+            }
+        });
+        std::fs::write(
+            tools_dir.join(format!("{name}.capabilities.json")),
+            serde_json::to_vec(&caps).map_err(|err| format!("serialize {name}: {err}"))?,
+        )
+        .map_err(|err| format!("write {name}.capabilities.json: {err}"))?;
 
         let mgr = make_test_manager(None, tools_dir.clone());
         mgr.secrets
