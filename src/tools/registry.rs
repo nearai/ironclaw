@@ -325,11 +325,7 @@ impl ToolRegistry {
     /// capabilities needed for the software builder. Call this after
     /// `register_builtin_tools()` to enable code generation features.
     pub fn register_dev_tools(&self) {
-        let mut shell = ShellTool::new();
-        if let Some(store) = &self.secrets_store {
-            shell = shell.with_secrets_store(Arc::clone(store));
-        }
-        self.register_sync(Arc::new(shell));
+        self.register_sync(Arc::new(ShellTool::new()));
         self.register_sync(Arc::new(ReadFileTool::new()));
         self.register_sync(Arc::new(WriteFileTool::new()));
         self.register_sync(Arc::new(ListDirTool::new()));

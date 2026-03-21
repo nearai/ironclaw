@@ -63,6 +63,8 @@ pub mod keychain;
 mod store;
 mod types;
 
+use std::sync::{Arc, OnceLock, RwLock};
+
 pub use crypto::SecretsCrypto;
 #[cfg(feature = "libsql")]
 pub use store::LibSqlSecretsStore;
@@ -75,6 +77,32 @@ pub use types::{
 };
 
 pub use store::in_memory::InMemorySecretsStore;
+
+static GLOBAL_SECRETS_STORE: OnceLock<RwLock<Option<Arc<dyn SecretsStore + Send + Sync>>>> =
+    OnceLock::new();
+
+/// Set the process-wide secrets store used by shell credential injection.
+///
+/// This is intentionally optional so the rest of the application can run
+/// without secrets support in environments that do not configure a store.
+pub fn set_global_store(store: Option<Arc<dyn SecretsStore + Send + Sync>>) {
+    if let Ok(mut guard) = GLOBAL_SECRETS_STORE
+        .get_or_init(|| RwLock::new(None))
+        .write()
+    {
+        *guard = store;
+    }
+}
+
+/// Get the process-wide secrets store used by shell credential injection.
+pub fn global_store() -> Option<Arc<dyn SecretsStore + Send + Sync>> {
+    GLOBAL_SECRETS_STORE.get().and_then(|store| {
+        store
+            .read()
+            .ok()
+            .and_then(|guard| guard.as_ref().map(Arc::clone))
+    })
+}
 
 /// Create a secrets store from a master key and database handles.
 ///
@@ -106,6 +134,8 @@ pub fn create_secrets_store(
             )) as std::sync::Arc<dyn SecretsStore + Send + Sync>
         })
     });
+
+    set_global_store(store.as_ref().map(Arc::clone));
 
     store
 }
@@ -148,20 +178,4 @@ pub fn crypto_from_hex(hex: &str) -> Result<std::sync::Arc<SecretsCrypto>, Secre
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_crypto_from_hex_valid() {
-        // 32 bytes = 64 hex chars
-        let hex = "0123456789abcdef".repeat(4); // 64 hex chars
-        let result = crypto_from_hex(&hex);
-        assert!(result.is_ok()); // safety: test assertion
-    }
-
-    #[test]
-    fn test_crypto_from_hex_invalid() {
-        let result = crypto_from_hex("too_short");
-        assert!(result.is_err()); // safety: test assertion
-    }
-}
+mod tests;
