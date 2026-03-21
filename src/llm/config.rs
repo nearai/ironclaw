@@ -9,6 +9,7 @@ use std::path::PathBuf;
 
 use secrecy::SecretString;
 
+use crate::bootstrap::ironclaw_base_dir;
 use crate::llm::registry::ProviderProtocol;
 use crate::llm::session::SessionConfig;
 
@@ -102,6 +103,36 @@ pub struct RegistryProviderConfig {
     pub unsupported_params: Vec<String>,
 }
 
+/// Configuration for OpenAI Codex (ChatGPT subscription OAuth).
+#[derive(Debug, Clone)]
+pub struct OpenAiCodexConfig {
+    /// Model to use (default: "gpt-5.3-codex").
+    pub model: String,
+    /// OAuth authorization server (default: "https://auth.openai.com").
+    pub auth_endpoint: String,
+    /// Responses API base URL (default: "https://chatgpt.com/backend-api/codex").
+    pub api_base_url: String,
+    /// OAuth client ID (default: OpenAI's public Codex client).
+    pub client_id: String,
+    /// Path to session file (default: ~/.ironclaw/openai_codex_session.json).
+    pub session_path: PathBuf,
+    /// Seconds before expiry to proactively refresh (default: 300).
+    pub token_refresh_margin_secs: u64,
+}
+
+impl Default for OpenAiCodexConfig {
+    fn default() -> Self {
+        Self {
+            model: "gpt-5.3-codex".to_string(),
+            auth_endpoint: "https://auth.openai.com".to_string(),
+            api_base_url: "https://chatgpt.com/backend-api/codex".to_string(),
+            client_id: "app_EMoamEEZ73f0CkXaXp7hrann".to_string(),
+            session_path: ironclaw_base_dir().join("openai_codex_session.json"),
+            token_refresh_margin_secs: 300,
+        }
+    }
+}
+
 /// Configuration for AWS Bedrock (native Converse API).
 #[derive(Debug, Clone)]
 pub struct BedrockConfig {
@@ -134,10 +165,36 @@ pub struct LlmConfig {
     pub provider: Option<RegistryProviderConfig>,
     /// AWS Bedrock config (populated when backend=bedrock, requires --features bedrock).
     pub bedrock: Option<BedrockConfig>,
+    /// OpenAI Codex config (populated when backend=openai_codex).
+    pub openai_codex: Option<OpenAiCodexConfig>,
     /// HTTP request timeout in seconds for LLM API calls.
     /// Default: 120. Increase for local LLMs (Ollama, vLLM, LM Studio) that
     /// need more time for prompt evaluation on consumer hardware.
     pub request_timeout_secs: u64,
+    /// Generic cheap/fast model for lightweight tasks (heartbeat, routing, evaluation).
+    /// Works with any backend. Set via `LLM_CHEAP_MODEL` env var.
+    /// When set, takes priority over the NearAI-specific `NEARAI_CHEAP_MODEL`.
+    pub cheap_model: Option<String>,
+    /// Enable cascade mode for smart routing (retry with primary if cheap model
+    /// response seems uncertain). Default: true. Set via `SMART_ROUTING_CASCADE`.
+    pub smart_routing_cascade: bool,
+}
+
+impl LlmConfig {
+    /// Resolve the effective cheap model name.
+    ///
+    /// Resolution order:
+    /// 1. `LLM_CHEAP_MODEL` (generic, works with any backend)
+    /// 2. `NEARAI_CHEAP_MODEL` (NearAI-only, backward compatibility)
+    pub fn cheap_model_name(&self) -> Option<&str> {
+        self.cheap_model.as_deref().or_else(|| {
+            if self.backend == "nearai" {
+                self.nearai.cheap_model.as_deref()
+            } else {
+                None
+            }
+        })
+    }
 }
 
 /// NEAR AI configuration.
@@ -180,8 +237,7 @@ impl NearAiConfig {
     /// appropriate base URL (cloud-api when API key is present,
     /// private.near.ai for session-token auth).
     pub(crate) fn for_model_discovery() -> Self {
-        let api_key = std::env::var("NEARAI_API_KEY")
-            .ok()
+        let api_key = crate::config::helpers::env_or_override("NEARAI_API_KEY")
             .filter(|k| !k.is_empty())
             .map(SecretString::from);
 
@@ -190,8 +246,8 @@ impl NearAiConfig {
         } else {
             "https://private.near.ai"
         };
-        let base_url =
-            std::env::var("NEARAI_BASE_URL").unwrap_or_else(|_| default_base.to_string());
+        let base_url = crate::config::helpers::env_or_override("NEARAI_BASE_URL")
+            .unwrap_or_else(|| default_base.to_string());
 
         Self {
             model: String::new(),

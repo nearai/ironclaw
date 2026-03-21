@@ -244,6 +244,18 @@ mod tests {
     }
 
     #[test]
+    fn test_wrap_for_llm_escapes_attr_chars() {
+        let config = SafetyConfig {
+            max_output_length: 100_000,
+            injection_check_enabled: true,
+        };
+        let safety = SafetyLayer::new(&config);
+
+        let wrapped = safety.wrap_for_llm("bad&\"<>name", "ok", false);
+        assert!(wrapped.contains("name=\"bad&amp;&quot;&lt;&gt;name\"")); // safety: test assertion in #[cfg(test)] module
+    }
+
+    #[test]
     fn test_sanitize_action_forces_sanitization_when_injection_check_disabled() {
         let config = SafetyConfig {
             max_output_length: 100_000,

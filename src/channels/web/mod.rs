@@ -98,10 +98,12 @@ impl GatewayChannel {
             skill_catalog: None,
             chat_rate_limiter: server::RateLimiter::new(30, 60),
             oauth_rate_limiter: server::RateLimiter::new(10, 60),
+            webhook_rate_limiter: server::RateLimiter::new(10, 60),
             registry_entries: Vec::new(),
             cost_guard: None,
             routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
             startup_time: std::time::Instant::now(),
+            active_config: server::ActiveConfigSnapshot::default(),
         });
 
         Self {
@@ -135,10 +137,12 @@ impl GatewayChannel {
             skill_catalog: self.state.skill_catalog.clone(),
             chat_rate_limiter: server::RateLimiter::new(30, 60),
             oauth_rate_limiter: server::RateLimiter::new(10, 60),
+            webhook_rate_limiter: server::RateLimiter::new(10, 60),
             registry_entries: self.state.registry_entries.clone(),
             cost_guard: self.state.cost_guard.clone(),
             routine_engine: Arc::clone(&self.state.routine_engine),
             startup_time: self.state.startup_time,
+            active_config: self.state.active_config.clone(),
         };
         mutate(&mut new_state);
         self.state = Arc::new(new_state);
@@ -247,6 +251,12 @@ impl GatewayChannel {
     /// Inject a shared routine engine slot used by other HTTP ingress paths.
     pub fn with_routine_engine_slot(mut self, slot: server::RoutineEngineSlot) -> Self {
         self.rebuild_state(|s| s.routine_engine = slot);
+        self
+    }
+
+    /// Inject the active (resolved) configuration snapshot for the status endpoint.
+    pub fn with_active_config(mut self, config: server::ActiveConfigSnapshot) -> Self {
+        self.rebuild_state(|s| s.active_config = config);
         self
     }
 
@@ -366,6 +376,7 @@ impl Channel for GatewayChannel {
                 tool_name,
                 description,
                 parameters,
+                allow_always,
             } => SseEvent::ApprovalNeeded {
                 request_id,
                 tool_name,
@@ -373,6 +384,7 @@ impl Channel for GatewayChannel {
                 parameters: serde_json::to_string_pretty(&parameters)
                     .unwrap_or_else(|_| parameters.to_string()),
                 thread_id,
+                allow_always,
             },
             StatusUpdate::AuthRequired {
                 extension_name,

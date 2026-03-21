@@ -4,11 +4,18 @@ import pytest
 from helpers import SEL
 
 
+async def go_to_skills(page):
+    """Navigate to Settings > Skills subtab."""
+    await page.locator(SEL["tab_button"].format(tab="settings")).click()
+    await page.locator(SEL["settings_subtab"].format(subtab="skills")).click()
+    await page.locator(SEL["settings_subpanel"].format(subtab="skills")).wait_for(
+        state="visible", timeout=5000
+    )
+
+
 async def test_skills_tab_visible(page):
-    """Skills tab shows the search interface."""
-    await page.locator(SEL["tab_button"].format(tab="skills")).click()
-    panel = page.locator(SEL["tab_panel"].format(tab="skills"))
-    await panel.wait_for(state="visible", timeout=5000)
+    """Skills subtab shows the search interface."""
+    await go_to_skills(page)
 
     search_input = page.locator(SEL["skill_search_input"])
     assert await search_input.is_visible(), "Skills search input not visible"
@@ -16,7 +23,7 @@ async def test_skills_tab_visible(page):
 
 async def test_skills_search(page):
     """Search ClawHub for skills and verify results appear."""
-    await page.locator(SEL["tab_button"].format(tab="skills")).click()
+    await go_to_skills(page)
 
     search_input = page.locator(SEL["skill_search_input"])
     await search_input.fill("markdown")
@@ -35,7 +42,7 @@ async def test_skills_search(page):
 
 async def test_skills_install_and_remove(page):
     """Install a skill from search results, then remove it."""
-    await page.locator(SEL["tab_button"].format(tab="skills")).click()
+    await go_to_skills(page)
 
     # Search
     search_input = page.locator(SEL["skill_search_input"])
@@ -68,10 +75,14 @@ async def test_skills_install_and_remove(page):
     installed_count = await installed.count()
     assert installed_count >= 1, "Skill should appear in installed list after install"
 
-    # Remove the skill (confirm is already overridden)
+    # Remove the skill via confirm modal
     remove_btn = installed.first.locator("button", has_text="Remove")
     if await remove_btn.count() > 0:
         await remove_btn.click()
+        # Confirm in the modal
+        confirm_btn = page.locator(SEL["confirm_modal_btn"])
+        await confirm_btn.wait_for(state="visible", timeout=5000)
+        await confirm_btn.click()
         # Wait for the card to disappear or list to shrink
         await page.wait_for_timeout(3000)
         new_count = await page.locator(SEL["skill_installed"]).count()

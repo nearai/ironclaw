@@ -3,7 +3,7 @@
 //! The wizard guides users through:
 //! 1. Database connection
 //! 2. Security (secrets master key)
-//! 3. Inference provider (NEAR AI, Anthropic, OpenAI, Ollama, OpenAI-compatible)
+//! 3. Inference provider (NEAR AI, Anthropic, OpenAI, OpenAI Codex, Ollama, OpenAI-compatible)
 //! 4. Model selection
 //! 5. Embeddings
 //! 6. Channel configuration
@@ -14,6 +14,8 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+#[cfg(feature = "postgres")]
+use deadpool_postgres::Config as PoolConfig;
 use secrecy::{ExposeSecret, SecretString};
 
 use crate::bootstrap::ironclaw_base_dir;
@@ -25,8 +27,10 @@ use crate::llm::models::{
     build_nearai_model_fetch_config, fetch_anthropic_models, fetch_ollama_models,
     fetch_openai_compatible_models, fetch_openai_models,
 };
+#[cfg(test)]
+use crate::llm::models::{is_openai_chat_model, sort_openai_models};
 use crate::llm::{SessionConfig, SessionManager};
-use crate::secrets::SecretsCrypto;
+use crate::secrets::{SecretsCrypto, SecretsStore};
 use crate::settings::{KeySource, Settings};
 use crate::setup::channels::{
     SecretsContext, setup_http, setup_signal, setup_tunnel, setup_wasm_channel,
@@ -86,11 +90,14 @@ pub struct SetupConfig {
 pub struct SetupWizard {
     config: SetupConfig,
     settings: Settings,
+    owner_id: String,
     session_manager: Option<Arc<SessionManager>>,
-    /// Backend-agnostic database trait object (created during setup).
-    db: Option<Arc<dyn crate::db::Database>>,
-    /// Backend-specific handles for secrets store and other satellite consumers.
-    db_handles: Option<crate::db::DatabaseHandles>,
+    /// Database pool (created during setup, postgres only).
+    #[cfg(feature = "postgres")]
+    db_pool: Option<deadpool_postgres::Pool>,
+    /// libSQL backend (created during setup, libsql only).
+    #[cfg(feature = "libsql")]
+    db_backend: Option<crate::db::libsql::LibSqlBackend>,
     /// Secrets crypto (created during setup).
     secrets_crypto: Option<Arc<SecretsCrypto>>,
     /// Cached API key from provider setup (used by model fetcher without env mutation).
@@ -98,30 +105,71 @@ pub struct SetupWizard {
 }
 
 impl SetupWizard {
-    /// Create a new setup wizard.
-    pub fn new() -> Self {
+    fn owner_id(&self) -> &str {
+        &self.owner_id
+    }
+
+    fn fallback_with_default_owner(
+        config: SetupConfig,
+        settings: Settings,
+        error: &crate::error::ConfigError,
+    ) -> Self {
+        tracing::warn!("Falling back to default owner scope for setup wizard: {error}");
         Self {
-            config: SetupConfig::default(),
-            settings: Settings::default(),
+            config,
+            settings,
+            owner_id: "default".to_string(),
             session_manager: None,
-            db: None,
-            db_handles: None,
+            #[cfg(feature = "postgres")]
+            db_pool: None,
+            #[cfg(feature = "libsql")]
+            db_backend: None,
             secrets_crypto: None,
             llm_api_key: None,
         }
     }
 
-    /// Create a wizard with custom configuration.
-    pub fn with_config(config: SetupConfig) -> Self {
-        Self {
+    fn from_bootstrap_settings(
+        config: SetupConfig,
+        settings: Settings,
+    ) -> Result<Self, crate::error::ConfigError> {
+        let owner_id = crate::config::resolve_owner_id(&settings)?;
+        Ok(Self {
             config,
-            settings: Settings::default(),
+            settings,
+            owner_id,
             session_manager: None,
-            db: None,
-            db_handles: None,
+            #[cfg(feature = "postgres")]
+            db_pool: None,
+            #[cfg(feature = "libsql")]
+            db_backend: None,
             secrets_crypto: None,
             llm_api_key: None,
-        }
+        })
+    }
+
+    /// Create a new setup wizard.
+    pub fn new() -> Self {
+        let settings = crate::config::load_bootstrap_settings(None).unwrap_or_default();
+        Self::from_bootstrap_settings(SetupConfig::default(), settings.clone()).unwrap_or_else(
+            |e| Self::fallback_with_default_owner(SetupConfig::default(), settings, &e),
+        )
+    }
+
+    /// Create a wizard with custom configuration.
+    pub fn with_config(config: SetupConfig) -> Self {
+        let settings = crate::config::load_bootstrap_settings(None).unwrap_or_default();
+        Self::from_bootstrap_settings(config.clone(), settings.clone())
+            .unwrap_or_else(|e| Self::fallback_with_default_owner(config, settings, &e))
+    }
+
+    /// Create a wizard with custom configuration and bootstrap TOML overlay.
+    pub fn try_with_config_and_toml(
+        config: SetupConfig,
+        toml_path: Option<&std::path::Path>,
+    ) -> Result<Self, crate::error::ConfigError> {
+        let settings = crate::config::load_bootstrap_settings(toml_path)?;
+        Self::from_bootstrap_settings(config, settings)
     }
 
     /// Set the session manager (for reusing existing auth).
@@ -169,13 +217,52 @@ impl SetupWizard {
             self.auto_setup_security().await?;
             self.persist_after_step().await;
 
-            print_step(1, 2, "Inference Provider");
-            self.step_inference_provider().await?;
-            self.persist_after_step().await;
+            // Pre-populate backend from env so step_inference_provider
+            // can offer "Keep current provider?" instead of asking from scratch.
+            if self.settings.llm_backend.is_none() {
+                use crate::config::helpers::env_or_override;
+                if let Some(b) = env_or_override("LLM_BACKEND")
+                    && !b.trim().is_empty()
+                {
+                    self.settings.llm_backend = Some(b.trim().to_string());
+                } else if env_or_override("NEARAI_API_KEY").is_some() {
+                    self.settings.llm_backend = Some("nearai".to_string());
+                } else if env_or_override("ANTHROPIC_API_KEY").is_some()
+                    || env_or_override("ANTHROPIC_OAUTH_TOKEN").is_some()
+                {
+                    self.settings.llm_backend = Some("anthropic".to_string());
+                } else if env_or_override("OPENAI_API_KEY").is_some() {
+                    self.settings.llm_backend = Some("openai".to_string());
+                }
+            }
 
-            print_step(2, 2, "Model Selection");
-            self.step_model_selection().await?;
-            self.persist_after_step().await;
+            if let Some(api_key) = crate::config::helpers::env_or_override("NEARAI_API_KEY")
+                && self.settings.llm_backend.as_deref() == Some("nearai")
+            {
+                // NEARAI_API_KEY is set and backend auto-detected — skip interactive prompts
+                print_info("NEARAI_API_KEY found — using NEAR AI provider");
+                if let Ok(ctx) = self.init_secrets_context().await {
+                    let key = SecretString::from(api_key.clone());
+                    if let Err(e) = ctx.save_secret("llm_nearai_api_key", &key).await {
+                        tracing::warn!("Failed to persist NEARAI_API_KEY to secrets: {}", e);
+                    }
+                }
+                self.llm_api_key = Some(SecretString::from(api_key));
+                if self.settings.selected_model.is_none() {
+                    let default = crate::llm::DEFAULT_MODEL;
+                    self.settings.selected_model = Some(default.to_string());
+                    print_info(&format!("Using default model: {default}"));
+                }
+                self.persist_after_step().await;
+            } else {
+                print_step(1, 2, "Inference Provider");
+                self.step_inference_provider().await?;
+                self.persist_after_step().await;
+
+                print_step(2, 2, "Model Selection");
+                self.step_model_selection().await?;
+                self.persist_after_step().await;
+            }
         } else {
             let total_steps = 9;
 
@@ -237,6 +324,10 @@ impl SetupWizard {
             print_step(9, total_steps, "Background Tasks");
             self.step_heartbeat()?;
             self.persist_after_step().await;
+
+            // Personal onboarding now happens conversationally during the
+            // user's first interaction with the assistant (see bootstrap
+            // block in workspace/mod.rs system_prompt_for_context).
         }
 
         // Save settings and print summary
@@ -252,79 +343,115 @@ impl SetupWizard {
     /// database connection and the wizard's `self.settings` reflects the
     /// previously saved configuration.
     async fn reconnect_existing_db(&mut self) -> Result<(), SetupError> {
-        use crate::config::DatabaseConfig;
+        // Determine backend from env (set by bootstrap .env loaded in main).
+        let backend = std::env::var("DATABASE_BACKEND").unwrap_or_else(|_| "postgres".to_string());
 
-        let db_config = DatabaseConfig::resolve().map_err(|e| {
-            SetupError::Database(format!(
-                "Cannot resolve database config. Run full setup first (ironclaw onboard): {}",
-                e
-            ))
+        // Try libsql first if that's the configured backend.
+        #[cfg(feature = "libsql")]
+        if backend == "libsql" || backend == "turso" || backend == "sqlite" {
+            return self.reconnect_libsql().await;
+        }
+
+        // Try postgres (either explicitly configured or as default).
+        #[cfg(feature = "postgres")]
+        {
+            let _ = &backend;
+            return self.reconnect_postgres().await;
+        }
+
+        #[allow(unreachable_code)]
+        Err(SetupError::Database(
+            "No database configured. Run full setup first (ironclaw onboard).".to_string(),
+        ))
+    }
+
+    /// Reconnect to an existing PostgreSQL database and load settings.
+    #[cfg(feature = "postgres")]
+    async fn reconnect_postgres(&mut self) -> Result<(), SetupError> {
+        let url = std::env::var("DATABASE_URL").map_err(|_| {
+            SetupError::Database(
+                "DATABASE_URL not set. Run full setup first (ironclaw onboard).".to_string(),
+            )
         })?;
 
-        let backend_name = db_config.backend.to_string();
-        let (db, handles) = crate::db::connect_with_handles(&db_config)
-            .await
-            .map_err(|e| SetupError::Database(format!("Failed to connect: {}", e)))?;
+        self.test_database_connection_postgres(&url).await?;
+        self.settings.database_backend = Some("postgres".to_string());
+        self.settings.database_url = Some(url.clone());
 
-        // Load existing settings from DB
-        if let Ok(map) = db.get_all_settings("default").await {
-            self.settings = Settings::from_db_map(&map);
-        }
-
-        // Restore connection fields that may not be persisted in the settings map
-        self.settings.database_backend = Some(backend_name);
-        if let Ok(url) = std::env::var("DATABASE_URL") {
-            self.settings.database_url = Some(url);
-        }
-        if let Ok(path) = std::env::var("LIBSQL_PATH") {
-            self.settings.libsql_path = Some(path);
-        } else if db_config.libsql_path.is_some() {
-            self.settings.libsql_path = db_config
-                .libsql_path
-                .as_ref()
-                .map(|p| p.to_string_lossy().to_string());
-        }
-        if let Ok(url) = std::env::var("LIBSQL_URL") {
-            self.settings.libsql_url = Some(url);
+        // Load existing settings from DB, then restore connection fields that
+        // may not be persisted in the settings map.
+        if let Some(ref pool) = self.db_pool {
+            let store = crate::history::Store::from_pool(pool.clone());
+            if let Ok(map) = store.get_all_settings(self.owner_id()).await {
+                self.settings = Settings::from_db_map(&map);
+                self.settings.database_backend = Some("postgres".to_string());
+                self.settings.database_url = Some(url);
+            }
         }
 
-        self.db = Some(db);
-        self.db_handles = Some(handles);
+        Ok(())
+    }
+
+    /// Reconnect to an existing libSQL database and load settings.
+    #[cfg(feature = "libsql")]
+    async fn reconnect_libsql(&mut self) -> Result<(), SetupError> {
+        let path = std::env::var("LIBSQL_PATH").unwrap_or_else(|_| {
+            crate::config::default_libsql_path()
+                .to_string_lossy()
+                .to_string()
+        });
+        let turso_url = std::env::var("LIBSQL_URL").ok();
+        let turso_token = std::env::var("LIBSQL_AUTH_TOKEN").ok();
+
+        self.test_database_connection_libsql(&path, turso_url.as_deref(), turso_token.as_deref())
+            .await?;
+
+        self.settings.database_backend = Some("libsql".to_string());
+        self.settings.libsql_path = Some(path.clone());
+        if let Some(ref url) = turso_url {
+            self.settings.libsql_url = Some(url.clone());
+        }
+
+        // Load existing settings from DB, then restore connection fields that
+        // may not be persisted in the settings map.
+        if let Some(ref db) = self.db_backend {
+            use crate::db::SettingsStore as _;
+            if let Ok(map) = db.get_all_settings(self.owner_id()).await {
+                self.settings = Settings::from_db_map(&map);
+                self.settings.database_backend = Some("libsql".to_string());
+                self.settings.libsql_path = Some(path);
+                if let Some(url) = turso_url {
+                    self.settings.libsql_url = Some(url);
+                }
+            }
+        }
 
         Ok(())
     }
 
     /// Step 1: Database connection.
-    ///
-    /// Determines the backend at runtime (env var, interactive selection, or
-    /// compile-time default) and runs the appropriate configuration flow.
     async fn step_database(&mut self) -> Result<(), SetupError> {
-        use crate::config::{DatabaseBackend, DatabaseConfig};
+        // When both features are compiled, let the user choose.
+        // If DATABASE_BACKEND is already set in the environment, respect it.
+        #[cfg(all(feature = "postgres", feature = "libsql"))]
+        {
+            // Check if a backend is already pinned via env var
+            let env_backend = std::env::var("DATABASE_BACKEND").ok();
 
-        const POSTGRES_AVAILABLE: bool = cfg!(feature = "postgres");
-        const LIBSQL_AVAILABLE: bool = cfg!(feature = "libsql");
-
-        // Determine backend from env var, interactive selection, or default.
-        let env_backend = std::env::var("DATABASE_BACKEND").ok();
-
-        let backend = if let Some(ref raw) = env_backend {
-            match raw.parse::<DatabaseBackend>() {
-                Ok(b) => b,
-                Err(_) => {
-                    let fallback = if POSTGRES_AVAILABLE {
-                        DatabaseBackend::Postgres
-                    } else {
-                        DatabaseBackend::LibSql
-                    };
-                    print_info(&format!(
-                        "Unknown DATABASE_BACKEND '{}', defaulting to {}",
-                        raw, fallback
-                    ));
-                    fallback
+            if let Some(ref backend) = env_backend {
+                if backend == "libsql" || backend == "turso" || backend == "sqlite" {
+                    return self.step_database_libsql().await;
                 }
+                if backend != "postgres" && backend != "postgresql" {
+                    print_info(&format!(
+                        "Unknown DATABASE_BACKEND '{}', defaulting to PostgreSQL",
+                        backend
+                    ));
+                }
+                return self.step_database_postgres().await;
             }
-        } else if POSTGRES_AVAILABLE && LIBSQL_AVAILABLE {
-            // Both features compiled — offer interactive selection.
+
+            // Interactive selection
             let pre_selected = self.settings.database_backend.as_deref().map(|b| match b {
                 "libsql" | "turso" | "sqlite" => 1,
                 _ => 0,
@@ -350,82 +477,88 @@ impl SetupWizard {
                 self.settings.libsql_url = None;
             }
 
-            if choice == 1 {
-                DatabaseBackend::LibSql
-            } else {
-                DatabaseBackend::Postgres
+            match choice {
+                1 => return self.step_database_libsql().await,
+                _ => return self.step_database_postgres().await,
             }
-        } else if LIBSQL_AVAILABLE {
-            DatabaseBackend::LibSql
-        } else {
-            // Only postgres (or neither, but that won't compile anyway).
-            DatabaseBackend::Postgres
-        };
+        }
 
-        // --- Postgres flow ---
-        if backend == DatabaseBackend::Postgres {
-            self.settings.database_backend = Some("postgres".to_string());
+        #[cfg(all(feature = "postgres", not(feature = "libsql")))]
+        {
+            return self.step_database_postgres().await;
+        }
 
-            let existing_url = std::env::var("DATABASE_URL")
-                .ok()
-                .or_else(|| self.settings.database_url.clone());
+        #[cfg(all(feature = "libsql", not(feature = "postgres")))]
+        {
+            return self.step_database_libsql().await;
+        }
+    }
 
-            if let Some(ref url) = existing_url {
-                let display_url = mask_password_in_url(url);
-                print_info(&format!("Existing database URL: {}", display_url));
+    /// Step 1 (postgres): Database connection via PostgreSQL URL.
+    #[cfg(feature = "postgres")]
+    async fn step_database_postgres(&mut self) -> Result<(), SetupError> {
+        self.settings.database_backend = Some("postgres".to_string());
 
-                if confirm("Use this database?", true).map_err(SetupError::Io)? {
-                    let config = DatabaseConfig::from_postgres_url(url, 5);
-                    if let Err(e) = self.test_database_connection(&config).await {
-                        print_error(&format!("Connection failed: {}", e));
-                        print_info("Let's configure a new database URL.");
-                    } else {
-                        print_success("Database connection successful");
-                        self.settings.database_url = Some(url.clone());
-                        return Ok(());
-                    }
-                }
-            }
+        let existing_url = std::env::var("DATABASE_URL")
+            .ok()
+            .or_else(|| self.settings.database_url.clone());
 
-            println!();
-            print_info("Enter your PostgreSQL connection URL.");
-            print_info("Format: postgres://user:password@host:port/database");
-            println!();
+        if let Some(ref url) = existing_url {
+            let display_url = mask_password_in_url(url);
+            print_info(&format!("Existing database URL: {}", display_url));
 
-            loop {
-                let url = input("Database URL").map_err(SetupError::Io)?;
-
-                if url.is_empty() {
-                    print_error("Database URL is required.");
-                    continue;
-                }
-
-                print_info("Testing connection...");
-                let config = DatabaseConfig::from_postgres_url(&url, 5);
-                match self.test_database_connection(&config).await {
-                    Ok(()) => {
-                        print_success("Database connection successful");
-
-                        if confirm("Run database migrations?", true).map_err(SetupError::Io)? {
-                            self.run_migrations().await?;
-                        }
-
-                        self.settings.database_url = Some(url);
-                        return Ok(());
-                    }
-                    Err(e) => {
-                        print_error(&format!("Connection failed: {}", e));
-                        if !confirm("Try again?", true).map_err(SetupError::Io)? {
-                            return Err(SetupError::Database(
-                                "Database connection failed".to_string(),
-                            ));
-                        }
-                    }
+            if confirm("Use this database?", true).map_err(SetupError::Io)? {
+                if let Err(e) = self.test_database_connection_postgres(url).await {
+                    print_error(&format!("Connection failed: {}", e));
+                    print_info("Let's configure a new database URL.");
+                } else {
+                    print_success("Database connection successful");
+                    self.settings.database_url = Some(url.clone());
+                    return Ok(());
                 }
             }
         }
 
-        // --- libSQL flow ---
+        println!();
+        print_info("Enter your PostgreSQL connection URL.");
+        print_info("Format: postgres://user:password@host:port/database");
+        println!();
+
+        loop {
+            let url = input("Database URL").map_err(SetupError::Io)?;
+
+            if url.is_empty() {
+                print_error("Database URL is required.");
+                continue;
+            }
+
+            print_info("Testing connection...");
+            match self.test_database_connection_postgres(&url).await {
+                Ok(()) => {
+                    print_success("Database connection successful");
+
+                    if confirm("Run database migrations?", true).map_err(SetupError::Io)? {
+                        self.run_migrations_postgres().await?;
+                    }
+
+                    self.settings.database_url = Some(url);
+                    return Ok(());
+                }
+                Err(e) => {
+                    print_error(&format!("Connection failed: {}", e));
+                    if !confirm("Try again?", true).map_err(SetupError::Io)? {
+                        return Err(SetupError::Database(
+                            "Database connection failed".to_string(),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    /// Step 1 (libsql): Database connection via local file or Turso remote replica.
+    #[cfg(feature = "libsql")]
+    async fn step_database_libsql(&mut self) -> Result<(), SetupError> {
         self.settings.database_backend = Some("libsql".to_string());
 
         let default_path = crate::config::default_libsql_path();
@@ -444,12 +577,14 @@ impl SetupWizard {
                     .or_else(|| self.settings.libsql_url.clone());
                 let turso_token = std::env::var("LIBSQL_AUTH_TOKEN").ok();
 
-                let config = DatabaseConfig::from_libsql_path(
-                    path,
-                    turso_url.as_deref(),
-                    turso_token.as_deref(),
-                );
-                match self.test_database_connection(&config).await {
+                match self
+                    .test_database_connection_libsql(
+                        path,
+                        turso_url.as_deref(),
+                        turso_token.as_deref(),
+                    )
+                    .await
+                {
                     Ok(()) => {
                         print_success("Database connection successful");
                         self.settings.libsql_path = Some(path.clone());
@@ -508,17 +643,15 @@ impl SetupWizard {
         };
 
         print_info("Testing connection...");
-        let config = DatabaseConfig::from_libsql_path(
-            &db_path,
-            turso_url.as_deref(),
-            turso_token.as_deref(),
-        );
-        match self.test_database_connection(&config).await {
+        match self
+            .test_database_connection_libsql(&db_path, turso_url.as_deref(), turso_token.as_deref())
+            .await
+        {
             Ok(()) => {
                 print_success("Database connection successful");
 
                 // Always run migrations for libsql (they're idempotent)
-                self.run_migrations().await?;
+                self.run_migrations_libsql().await?;
 
                 self.settings.libsql_path = Some(db_path);
                 if let Some(url) = turso_url {
@@ -530,39 +663,155 @@ impl SetupWizard {
         }
     }
 
-    /// Test database connection using the db module factory.
+    /// Test PostgreSQL connection and store the pool.
     ///
-    /// Connects without running migrations and validates PostgreSQL
-    /// prerequisites (version, pgvector) when using the postgres backend.
-    async fn test_database_connection(
-        &mut self,
-        config: &crate::config::DatabaseConfig,
-    ) -> Result<(), SetupError> {
-        let (db, handles) = crate::db::connect_without_migrations(config)
-            .await
-            .map_err(|e| SetupError::Database(e.to_string()))?;
+    /// After connecting, validates:
+    /// 1. PostgreSQL version >= 15 (required for pgvector compatibility)
+    /// 2. pgvector extension is available (required for embeddings/vector search)
+    #[cfg(feature = "postgres")]
+    async fn test_database_connection_postgres(&mut self, url: &str) -> Result<(), SetupError> {
+        let mut cfg = PoolConfig::new();
+        cfg.url = Some(url.to_string());
+        cfg.pool = Some(deadpool_postgres::PoolConfig {
+            max_size: 5,
+            ..Default::default()
+        });
 
-        self.db = Some(db);
-        self.db_handles = Some(handles);
+        let pool = crate::db::tls::create_pool(&cfg, crate::config::SslMode::from_env())
+            .map_err(|e| SetupError::Database(format!("Failed to create pool: {}", e)))?;
+
+        let client = pool
+            .get()
+            .await
+            .map_err(|e| SetupError::Database(format!("Failed to connect: {}", e)))?;
+
+        // Check PostgreSQL server version (need 15+ for pgvector)
+        let version_row = client
+            .query_one("SHOW server_version", &[])
+            .await
+            .map_err(|e| SetupError::Database(format!("Failed to query server version: {}", e)))?;
+        let version_str: &str = version_row.get(0);
+        let major_version = version_str
+            .split('.')
+            .next()
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(0);
+
+        const MIN_PG_MAJOR_VERSION: u32 = 15;
+
+        if major_version < MIN_PG_MAJOR_VERSION {
+            return Err(SetupError::Database(format!(
+                "PostgreSQL {} detected. IronClaw requires PostgreSQL {} or later for pgvector support.\n\
+                 Upgrade: https://www.postgresql.org/download/",
+                version_str, MIN_PG_MAJOR_VERSION
+            )));
+        }
+
+        // Check if pgvector extension is available
+        let pgvector_row = client
+            .query_opt(
+                "SELECT 1 FROM pg_available_extensions WHERE name = 'vector'",
+                &[],
+            )
+            .await
+            .map_err(|e| {
+                SetupError::Database(format!("Failed to check pgvector availability: {}", e))
+            })?;
+
+        if pgvector_row.is_none() {
+            return Err(SetupError::Database(format!(
+                "pgvector extension not found on your PostgreSQL server.\n\n\
+                 Install it:\n  \
+                 macOS:   brew install pgvector\n  \
+                 Ubuntu:  apt install postgresql-{0}-pgvector\n  \
+                 Docker:  use the pgvector/pgvector:pg{0} image\n  \
+                 Source:  https://github.com/pgvector/pgvector#installation\n\n\
+                 Then restart PostgreSQL and re-run: ironclaw onboard",
+                major_version
+            )));
+        }
+
+        self.db_pool = Some(pool);
         Ok(())
     }
 
-    /// Run database migrations on the current connection.
-    async fn run_migrations(&self) -> Result<(), SetupError> {
-        if let Some(ref db) = self.db {
+    /// Test libSQL connection and store the backend.
+    #[cfg(feature = "libsql")]
+    async fn test_database_connection_libsql(
+        &mut self,
+        path: &str,
+        turso_url: Option<&str>,
+        turso_token: Option<&str>,
+    ) -> Result<(), SetupError> {
+        use crate::db::libsql::LibSqlBackend;
+        use std::path::Path;
+
+        let db_path = Path::new(path);
+
+        let backend = if let (Some(url), Some(token)) = (turso_url, turso_token) {
+            LibSqlBackend::new_remote_replica(db_path, url, token)
+                .await
+                .map_err(|e| SetupError::Database(format!("Failed to connect: {}", e)))?
+        } else {
+            LibSqlBackend::new_local(db_path)
+                .await
+                .map_err(|e| SetupError::Database(format!("Failed to open database: {}", e)))?
+        };
+
+        self.db_backend = Some(backend);
+        Ok(())
+    }
+
+    /// Run PostgreSQL migrations.
+    #[cfg(feature = "postgres")]
+    async fn run_migrations_postgres(&self) -> Result<(), SetupError> {
+        if let Some(ref pool) = self.db_pool {
+            use refinery::embed_migrations;
+            embed_migrations!("migrations");
+
             if !self.config.quick {
                 print_info("Running migrations...");
             }
-            tracing::debug!("Running database migrations...");
+            tracing::debug!("Running PostgreSQL migrations...");
 
-            db.run_migrations()
+            let mut client = pool
+                .get()
+                .await
+                .map_err(|e| SetupError::Database(format!("Pool error: {}", e)))?;
+
+            migrations::runner()
+                .run_async(&mut **client)
                 .await
                 .map_err(|e| SetupError::Database(format!("Migration failed: {}", e)))?;
 
             if !self.config.quick {
                 print_success("Migrations applied");
             }
-            tracing::debug!("Database migrations applied");
+            tracing::debug!("PostgreSQL migrations applied");
+        }
+        Ok(())
+    }
+
+    /// Run libSQL migrations.
+    #[cfg(feature = "libsql")]
+    async fn run_migrations_libsql(&self) -> Result<(), SetupError> {
+        if let Some(ref backend) = self.db_backend {
+            use crate::db::Database;
+
+            if !self.config.quick {
+                print_info("Running migrations...");
+            }
+            tracing::debug!("Running libSQL migrations...");
+
+            backend
+                .run_migrations()
+                .await
+                .map_err(|e| SetupError::Database(format!("Migration failed: {}", e)))?;
+
+            if !self.config.quick {
+                print_success("Migrations applied");
+            }
+            tracing::debug!("libSQL migrations applied");
         }
         Ok(())
     }
@@ -579,19 +828,20 @@ impl SetupWizard {
             return Ok(());
         }
 
-        // Try to retrieve existing key from keychain via resolve_master_key
-        // (checks env var first, then keychain). We skip the env var case
-        // above, so this will only find a keychain key here.
+        // Try to retrieve existing key from keychain. We use get_master_key()
+        // instead of has_master_key() so we can cache the key bytes and build
+        // SecretsCrypto eagerly, avoiding redundant keychain accesses later
+        // (each access triggers macOS system dialogs).
         print_info("Checking OS keychain for existing master key...");
         if let Ok(keychain_key_bytes) = crate::secrets::keychain::get_master_key().await {
             let key_hex: String = keychain_key_bytes
                 .iter()
                 .map(|b| format!("{:02x}", b))
                 .collect();
-            self.secrets_crypto = Some(
-                crate::secrets::crypto_from_hex(&key_hex)
+            self.secrets_crypto = Some(Arc::new(
+                SecretsCrypto::new(SecretString::from(key_hex))
                     .map_err(|e| SetupError::Config(e.to_string()))?,
-            );
+            ));
 
             print_info("Existing master key found in OS keychain.");
             if confirm("Use existing keychain key?", true).map_err(SetupError::Io)? {
@@ -630,11 +880,12 @@ impl SetupWizard {
                         SetupError::Config(format!("Failed to store in keychain: {}", e))
                     })?;
 
+                // Also create crypto instance
                 let key_hex: String = key.iter().map(|b| format!("{:02x}", b)).collect();
-                self.secrets_crypto = Some(
-                    crate::secrets::crypto_from_hex(&key_hex)
+                self.secrets_crypto = Some(Arc::new(
+                    SecretsCrypto::new(SecretString::from(key_hex))
                         .map_err(|e| SetupError::Config(e.to_string()))?,
-                );
+                ));
 
                 self.settings.secrets_master_key_source = KeySource::Keychain;
                 print_success("Master key generated and stored in OS keychain");
@@ -645,10 +896,10 @@ impl SetupWizard {
 
                 // Initialize crypto so subsequent wizard steps (channel setup,
                 // API key storage) can encrypt secrets immediately.
-                self.secrets_crypto = Some(
-                    crate::secrets::crypto_from_hex(&key_hex)
+                self.secrets_crypto = Some(Arc::new(
+                    SecretsCrypto::new(SecretString::from(key_hex.clone()))
                         .map_err(|e| SetupError::Config(e.to_string()))?,
-                );
+                ));
 
                 // Make visible to optional_env() for any subsequent config resolution.
                 crate::config::inject_single_var("SECRETS_MASTER_KEY", &key_hex);
@@ -681,22 +932,16 @@ impl SetupWizard {
     /// standard path. Falls back to the interactive `step_database()` only when
     /// just the postgres feature is compiled (can't auto-default postgres).
     async fn auto_setup_database(&mut self) -> Result<(), SetupError> {
-        use crate::config::{DatabaseBackend, DatabaseConfig};
-
-        const POSTGRES_AVAILABLE: bool = cfg!(feature = "postgres");
-        const LIBSQL_AVAILABLE: bool = cfg!(feature = "libsql");
-
+        // If DATABASE_URL or LIBSQL_PATH already set, respect existing config
+        #[cfg(feature = "postgres")]
         let env_backend = std::env::var("DATABASE_BACKEND").ok();
 
-        // If DATABASE_BACKEND=postgres and DATABASE_URL exists: connect+migrate
+        #[cfg(feature = "postgres")]
         if let Some(ref backend) = env_backend
-            && let Ok(DatabaseBackend::Postgres) = backend.parse::<DatabaseBackend>()
+            && (backend == "postgres" || backend == "postgresql")
         {
             if let Ok(url) = std::env::var("DATABASE_URL") {
                 print_info("Using existing PostgreSQL configuration");
-                let config = DatabaseConfig::from_postgres_url(&url, 5);
-                self.test_database_connection(&config).await?;
-                self.run_migrations().await?;
                 self.settings.database_backend = Some("postgres".to_string());
                 self.settings.database_url = Some(url);
                 return Ok(());
@@ -705,23 +950,17 @@ impl SetupWizard {
             return self.step_database().await;
         }
 
-        // If DATABASE_URL exists (no explicit backend): connect+migrate as postgres,
-        // but only when the postgres feature is actually compiled in.
-        if POSTGRES_AVAILABLE
-            && env_backend.is_none()
-            && let Ok(url) = std::env::var("DATABASE_URL")
-        {
+        #[cfg(feature = "postgres")]
+        if let Ok(url) = std::env::var("DATABASE_URL") {
             print_info("Using existing PostgreSQL configuration");
-            let config = DatabaseConfig::from_postgres_url(&url, 5);
-            self.test_database_connection(&config).await?;
-            self.run_migrations().await?;
             self.settings.database_backend = Some("postgres".to_string());
             self.settings.database_url = Some(url);
             return Ok(());
         }
 
-        // Auto-default to libsql if available
-        if LIBSQL_AVAILABLE {
+        // Auto-default to libsql if the feature is compiled
+        #[cfg(feature = "libsql")]
+        {
             self.settings.database_backend = Some("libsql".to_string());
 
             let existing_path = std::env::var("LIBSQL_PATH")
@@ -737,13 +976,14 @@ impl SetupWizard {
             let turso_url = std::env::var("LIBSQL_URL").ok();
             let turso_token = std::env::var("LIBSQL_AUTH_TOKEN").ok();
 
-            let config = DatabaseConfig::from_libsql_path(
+            self.test_database_connection_libsql(
                 &db_path,
                 turso_url.as_deref(),
                 turso_token.as_deref(),
-            );
-            self.test_database_connection(&config).await?;
-            self.run_migrations().await?;
+            )
+            .await?;
+
+            self.run_migrations_libsql().await?;
 
             self.settings.libsql_path = Some(db_path.clone());
             if let Some(url) = turso_url {
@@ -755,7 +995,10 @@ impl SetupWizard {
         }
 
         // Only postgres feature compiled — can't auto-default, use interactive
-        self.step_database().await
+        #[allow(unreachable_code)]
+        {
+            self.step_database().await
+        }
     }
 
     /// Auto-setup security with zero prompts (quick mode).
@@ -764,23 +1007,26 @@ impl SetupWizard {
     /// key if available, otherwise generates and stores one automatically
     /// (keychain on macOS, env var fallback).
     async fn auto_setup_security(&mut self) -> Result<(), SetupError> {
-        // Try resolving an existing key from env var or keychain
-        if let Some(key_hex) = crate::secrets::resolve_master_key().await {
-            self.secrets_crypto = Some(
-                crate::secrets::crypto_from_hex(&key_hex)
+        // Check env var first
+        if std::env::var("SECRETS_MASTER_KEY").is_ok() {
+            self.settings.secrets_master_key_source = KeySource::Env;
+            print_success("Security configured (env var)");
+            return Ok(());
+        }
+
+        // Try existing keychain key (no prompts — get_master_key may show
+        // OS dialogs on macOS, but that's unavoidable for keychain access)
+        if let Ok(keychain_key_bytes) = crate::secrets::keychain::get_master_key().await {
+            let key_hex: String = keychain_key_bytes
+                .iter()
+                .map(|b| format!("{:02x}", b))
+                .collect();
+            self.secrets_crypto = Some(Arc::new(
+                SecretsCrypto::new(SecretString::from(key_hex))
                     .map_err(|e| SetupError::Config(e.to_string()))?,
-            );
-            // Determine source: env var or keychain (filter empty to match resolve_master_key)
-            let (source, label) = if std::env::var("SECRETS_MASTER_KEY")
-                .ok()
-                .is_some_and(|v| !v.is_empty())
-            {
-                (KeySource::Env, "env var")
-            } else {
-                (KeySource::Keychain, "keychain")
-            };
-            self.settings.secrets_master_key_source = source;
-            print_success(&format!("Security configured ({})", label));
+            ));
+            self.settings.secrets_master_key_source = KeySource::Keychain;
+            print_success("Security configured (keychain)");
             return Ok(());
         }
 
@@ -792,10 +1038,10 @@ impl SetupWizard {
             .is_ok()
         {
             let key_hex: String = key.iter().map(|b| format!("{:02x}", b)).collect();
-            self.secrets_crypto = Some(
-                crate::secrets::crypto_from_hex(&key_hex)
+            self.secrets_crypto = Some(Arc::new(
+                SecretsCrypto::new(SecretString::from(key_hex))
                     .map_err(|e| SetupError::Config(e.to_string()))?,
-            );
+            ));
             self.settings.secrets_master_key_source = KeySource::Keychain;
             print_success("Master key stored in OS keychain");
             return Ok(());
@@ -803,10 +1049,10 @@ impl SetupWizard {
 
         // Keychain unavailable — fall back to env var mode
         let key_hex = crate::secrets::keychain::generate_master_key_hex();
-        self.secrets_crypto = Some(
-            crate::secrets::crypto_from_hex(&key_hex)
+        self.secrets_crypto = Some(Arc::new(
+            SecretsCrypto::new(SecretString::from(key_hex.clone()))
                 .map_err(|e| SetupError::Config(e.to_string()))?,
-        );
+        ));
         crate::config::inject_single_var("SECRETS_MASTER_KEY", &key_hex);
         self.settings.secrets_master_key_hex = Some(key_hex);
         self.settings.secrets_master_key_source = KeySource::Env;
@@ -837,14 +1083,20 @@ impl SetupWizard {
             print_info(&format!("Current provider: {}", display));
             println!();
 
-            let is_known =
-                current == "nearai" || current == "bedrock" || registry.is_known(&current);
+            let is_known = current == "nearai"
+                || current == "bedrock"
+                || current == "openai_codex"
+                || registry.is_known(&current);
 
             if is_known && confirm("Keep current provider?", true).map_err(SetupError::Io)? {
                 if current == "bedrock" {
                     // Keeping the existing Bedrock config — no need to re-run
                     // the full setup flow (region, auth, cross-region).
                     print_info("Keeping existing AWS Bedrock configuration.");
+                    return Ok(());
+                }
+                if current == "openai_codex" {
+                    print_info("Keeping existing OpenAI Codex configuration.");
                     return Ok(());
                 }
                 return self.run_provider_setup(&current, &registry).await;
@@ -861,13 +1113,16 @@ impl SetupWizard {
         print_info("Select your inference provider:");
         println!();
 
-        // Build menu: NearAI first, then all registry providers with setup hints, then Bedrock
+        // Build menu: NearAI first, then OpenAI Codex, then registry providers, then Bedrock
         let selectable = registry.selectable();
         let mut options: Vec<String> = Vec::with_capacity(2 + selectable.len());
         let mut provider_ids: Vec<String> = Vec::with_capacity(2 + selectable.len());
 
         options.push("NEAR AI          - multi-model access via NEAR account".to_string());
         provider_ids.push("nearai".to_string());
+
+        options.push("OpenAI Codex     - ChatGPT subscription (Plus/Pro/Max)".to_string());
+        provider_ids.push("openai_codex".to_string());
 
         for def in &selectable {
             let label = format!(
@@ -910,6 +1165,10 @@ impl SetupWizard {
     ) -> Result<(), SetupError> {
         if provider_id == "nearai" {
             return self.setup_nearai().await;
+        }
+
+        if provider_id == "openai_codex" {
+            return self.setup_openai_codex().await;
         }
 
         let def = registry
@@ -991,6 +1250,27 @@ impl SetupWizard {
     /// NEAR AI provider setup (extracted from the old step_authentication).
     async fn setup_nearai(&mut self) -> Result<(), SetupError> {
         self.set_llm_backend_preserving_model("nearai");
+
+        // Check if NEARAI_API_KEY is already provided via environment or runtime overlay
+        if let Some(existing) = crate::config::helpers::env_or_override("NEARAI_API_KEY")
+            && !existing.is_empty()
+        {
+            print_info(&format!(
+                "NEARAI_API_KEY found: {}",
+                mask_api_key(&existing)
+            ));
+            if confirm("Use this key?", true).map_err(SetupError::Io)? {
+                if let Ok(ctx) = self.init_secrets_context().await {
+                    let key = SecretString::from(existing.clone());
+                    if let Err(e) = ctx.save_secret("llm_nearai_api_key", &key).await {
+                        tracing::warn!("Failed to persist NEARAI_API_KEY to secrets: {}", e);
+                    }
+                }
+                self.llm_api_key = Some(SecretString::from(existing));
+                print_success("NEAR AI configured (from env)");
+                return Ok(());
+            }
+        }
 
         // Check if we already have a session
         if let Some(ref session) = self.session_manager
@@ -1223,6 +1503,29 @@ impl SetupWizard {
         Ok(())
     }
 
+    /// OpenAI Codex (ChatGPT subscription) setup: device code OAuth flow.
+    async fn setup_openai_codex(&mut self) -> Result<(), SetupError> {
+        self.settings.llm_backend = Some("openai_codex".to_string());
+        if self.settings.selected_model.is_some() {
+            self.settings.selected_model = None;
+        }
+
+        use crate::config::OpenAiCodexConfig;
+        use crate::llm::OpenAiCodexSessionManager;
+
+        let config = OpenAiCodexConfig::default();
+
+        let mgr = OpenAiCodexSessionManager::new(config).map_err(|e| {
+            SetupError::Config(format!("OpenAI Codex session manager init failed: {}", e))
+        })?;
+        mgr.device_code_login().await.map_err(|e| {
+            SetupError::Config(format!("OpenAI Codex authentication failed: {}", e))
+        })?;
+
+        print_success("OpenAI Codex configured (ChatGPT subscription)");
+        Ok(())
+    }
+
     /// Generic Ollama-style setup: just needs a base URL, no API key.
     fn setup_ollama_generic(
         &mut self,
@@ -1420,25 +1723,8 @@ impl SetupWizard {
         if backend == "nearai" {
             // NEAR AI: use existing provider list_models()
             let fetched = self.fetch_nearai_models().await;
-            let default_models: Vec<(String, String)> = vec![
-                (
-                    "zai-org/GLM-latest".into(),
-                    "GLM Latest (default, fast)".into(),
-                ),
-                (
-                    "anthropic::claude-sonnet-4-20250514".into(),
-                    "Claude Sonnet 4 (best quality)".into(),
-                ),
-                (
-                    "openai::gpt-5.3-codex".into(),
-                    "GPT-5.3 Codex (flagship)".into(),
-                ),
-                ("openai::gpt-5.2".into(), "GPT-5.2".into()),
-                ("openai::gpt-4o".into(), "GPT-4o".into()),
-            ];
-
             let models = if fetched.is_empty() {
-                default_models
+                crate::llm::default_models()
             } else {
                 fetched.iter().map(|m| (m.clone(), m.clone())).collect()
             };
@@ -1677,32 +1963,135 @@ impl SetupWizard {
 
     /// Initialize secrets context for channel setup.
     async fn init_secrets_context(&mut self) -> Result<SecretsContext, SetupError> {
-        // Get crypto (should be set from step 2, or resolve from keychain/env)
+        // Get crypto (should be set from step 2, or load from keychain/env)
         let crypto = if let Some(ref c) = self.secrets_crypto {
             Arc::clone(c)
         } else {
-            let key_hex = crate::secrets::resolve_master_key().await.ok_or_else(|| {
-                SetupError::Config(
+            // Try to load master key from keychain or env
+            let key = if let Ok(env_key) = std::env::var("SECRETS_MASTER_KEY") {
+                env_key
+            } else if let Ok(keychain_key) = crate::secrets::keychain::get_master_key().await {
+                keychain_key.iter().map(|b| format!("{:02x}", b)).collect()
+            } else {
+                return Err(SetupError::Config(
                     "Secrets not configured. Run full setup or set SECRETS_MASTER_KEY.".to_string(),
-                )
-            })?;
+                ));
+            };
 
-            let crypto = crate::secrets::crypto_from_hex(&key_hex)
-                .map_err(|e| SetupError::Config(e.to_string()))?;
+            let crypto = Arc::new(
+                SecretsCrypto::new(SecretString::from(key))
+                    .map_err(|e| SetupError::Config(e.to_string()))?,
+            );
             self.secrets_crypto = Some(Arc::clone(&crypto));
             crypto
         };
 
-        // Create secrets store from existing database handles
-        if let Some(ref handles) = self.db_handles
-            && let Some(store) = crate::secrets::create_secrets_store(Arc::clone(&crypto), handles)
-        {
-            return Ok(SecretsContext::from_store(store, "default"));
+        // Create backend-appropriate secrets store.
+        // Use runtime dispatch based on the user's selected backend.
+        // Default to whichever backend is compiled in. When only libsql is
+        // available, we must not default to "postgres" or we'd skip store creation.
+        let default_backend = {
+            #[cfg(feature = "postgres")]
+            {
+                "postgres"
+            }
+            #[cfg(not(feature = "postgres"))]
+            {
+                "libsql"
+            }
+        };
+        let selected_backend = self
+            .settings
+            .database_backend
+            .as_deref()
+            .unwrap_or(default_backend);
+
+        match selected_backend {
+            #[cfg(feature = "libsql")]
+            "libsql" | "turso" | "sqlite" => {
+                if let Some(store) = self.create_libsql_secrets_store(&crypto)? {
+                    return Ok(SecretsContext::from_store(store, self.owner_id()));
+                }
+                // Fallback to postgres if libsql store creation returned None
+                #[cfg(feature = "postgres")]
+                if let Some(store) = self.create_postgres_secrets_store(&crypto).await? {
+                    return Ok(SecretsContext::from_store(store, self.owner_id()));
+                }
+            }
+            #[cfg(feature = "postgres")]
+            _ => {
+                if let Some(store) = self.create_postgres_secrets_store(&crypto).await? {
+                    return Ok(SecretsContext::from_store(store, self.owner_id()));
+                }
+                // Fallback to libsql if postgres store creation returned None
+                #[cfg(feature = "libsql")]
+                if let Some(store) = self.create_libsql_secrets_store(&crypto)? {
+                    return Ok(SecretsContext::from_store(store, self.owner_id()));
+                }
+            }
+            #[cfg(not(feature = "postgres"))]
+            _ => {}
         }
 
         Err(SetupError::Config(
             "No database backend available for secrets storage".to_string(),
         ))
+    }
+
+    /// Create a PostgreSQL secrets store from the current pool.
+    #[cfg(feature = "postgres")]
+    async fn create_postgres_secrets_store(
+        &mut self,
+        crypto: &Arc<SecretsCrypto>,
+    ) -> Result<Option<Arc<dyn SecretsStore>>, SetupError> {
+        let pool = if let Some(ref p) = self.db_pool {
+            p.clone()
+        } else {
+            // Fall back to creating one from settings/env
+            let url = self
+                .settings
+                .database_url
+                .clone()
+                .or_else(|| std::env::var("DATABASE_URL").ok());
+
+            if let Some(url) = url {
+                self.test_database_connection_postgres(&url).await?;
+                self.run_migrations_postgres().await?;
+                match self.db_pool.clone() {
+                    Some(pool) => pool,
+                    None => {
+                        return Err(SetupError::Database(
+                            "Database pool not initialized after connection test".to_string(),
+                        ));
+                    }
+                }
+            } else {
+                return Ok(None);
+            }
+        };
+
+        let store: Arc<dyn SecretsStore> = Arc::new(crate::secrets::PostgresSecretsStore::new(
+            pool,
+            Arc::clone(crypto),
+        ));
+        Ok(Some(store))
+    }
+
+    /// Create a libSQL secrets store from the current backend.
+    #[cfg(feature = "libsql")]
+    fn create_libsql_secrets_store(
+        &self,
+        crypto: &Arc<SecretsCrypto>,
+    ) -> Result<Option<Arc<dyn SecretsStore>>, SetupError> {
+        if let Some(ref backend) = self.db_backend {
+            let store: Arc<dyn SecretsStore> = Arc::new(crate::secrets::LibSqlSecretsStore::new(
+                backend.shared_db(),
+                Arc::clone(crypto),
+            ));
+            Ok(Some(store))
+        } else {
+            Ok(None)
+        }
     }
 
     /// Step 6: Channel configuration.
@@ -2222,29 +2611,60 @@ impl SetupWizard {
     /// connection is available yet (e.g., before Step 1 completes).
     async fn persist_settings(&self) -> Result<bool, SetupError> {
         let db_map = self.settings.to_db_map();
+        let saved = false;
 
-        if let Some(ref db) = self.db {
-            db.set_all_settings("default", &db_map).await.map_err(|e| {
-                SetupError::Database(format!("Failed to save settings to database: {}", e))
-            })?;
-            Ok(true)
+        #[cfg(feature = "postgres")]
+        let saved = if !saved {
+            if let Some(ref pool) = self.db_pool {
+                let store = crate::history::Store::from_pool(pool.clone());
+                store
+                    .set_all_settings(self.owner_id(), &db_map)
+                    .await
+                    .map_err(|e| {
+                        SetupError::Database(format!("Failed to save settings to database: {}", e))
+                    })?;
+                true
+            } else {
+                false
+            }
         } else {
-            Ok(false)
-        }
+            saved
+        };
+
+        #[cfg(feature = "libsql")]
+        let saved = if !saved {
+            if let Some(ref backend) = self.db_backend {
+                use crate::db::SettingsStore as _;
+                backend
+                    .set_all_settings(self.owner_id(), &db_map)
+                    .await
+                    .map_err(|e| {
+                        SetupError::Database(format!("Failed to save settings to database: {}", e))
+                    })?;
+                true
+            } else {
+                false
+            }
+        } else {
+            saved
+        };
+
+        Ok(saved)
     }
 
     /// Write bootstrap environment variables to `~/.ironclaw/.env`.
     ///
-    /// These are the chicken-and-egg settings needed before the database is
-    /// connected (DATABASE_BACKEND, DATABASE_URL, LLM_BACKEND, etc.).
+    /// Only true chicken-and-egg settings are written here — things needed
+    /// before the database is connected: `DATABASE_BACKEND`, `DATABASE_URL`,
+    /// `LIBSQL_PATH`, `SECRETS_MASTER_KEY`, `ONBOARD_COMPLETED`, and
+    /// channel config vars (Signal, Claude Code sandbox).
     ///
-    /// **Credentials are NOT written here.** API keys and OAuth tokens live
-    /// only in the encrypted secrets DB. `LlmConfig::resolve()` defers
-    /// gracefully when credentials are missing during early startup, and the
-    /// re-resolution in `AppBuilder::build_all()` fills them in after
-    /// `inject_llm_keys_from_secrets()` loads from encrypted storage.
+    /// **LLM settings and credentials are NOT written here.** `LLM_BACKEND`,
+    /// base URLs, and model names are persisted to the DB via
+    /// `persist_settings()` and loaded by `Config::from_db_with_toml()`.
+    /// API keys live only in the encrypted secrets DB and are injected via
+    /// `inject_llm_keys_from_secrets()` after DB init.
     fn write_bootstrap_env(&self) -> Result<(), SetupError> {
-        let registry = crate::llm::ProviderRegistry::load();
         let mut env_vars: Vec<(String, String)> = Vec::new();
 
         if let Some(ref backend) = self.settings.database_backend {
@@ -2258,66 +2678,6 @@ impl SetupWizard {
         }
         if let Some(ref url) = self.settings.libsql_url {
             env_vars.push(("LIBSQL_URL".to_string(), url.clone()));
-        }
-
-        // LLM bootstrap vars: same chicken-and-egg problem as DATABASE_BACKEND.
-        // Config::from_env() needs the backend before the DB is connected.
-        if let Some(ref backend) = self.settings.llm_backend {
-            env_vars.push(("LLM_BACKEND".to_string(), backend.clone()));
-        }
-        if let Some(ref url) = self.settings.openai_compatible_base_url {
-            env_vars.push(("LLM_BASE_URL".to_string(), url.clone()));
-        }
-        if let Some(ref url) = self.settings.ollama_base_url {
-            env_vars.push(("OLLAMA_BASE_URL".to_string(), url.clone()));
-        }
-        if let Some(ref region) = self.settings.bedrock_region {
-            env_vars.push(("BEDROCK_REGION".to_string(), region.clone()));
-        }
-        if self.settings.llm_backend.as_deref() == Some("bedrock") {
-            if let Some(ref model) = self.settings.selected_model {
-                env_vars.push(("BEDROCK_MODEL".to_string(), model.clone()));
-            }
-            if let Some(ref cross) = self.settings.bedrock_cross_region {
-                env_vars.push(("BEDROCK_CROSS_REGION".to_string(), cross.clone()));
-            }
-            if let Some(ref profile) = self.settings.bedrock_profile {
-                env_vars.push(("AWS_PROFILE".to_string(), profile.clone()));
-            }
-        }
-
-        // Model name: same chicken-and-egg — Config::from_env() resolves the
-        // model before the DB is connected, so we must persist it to .env.
-        // Write the backend-specific env var so the correct resolution path
-        // picks it up (looked up from the provider registry).
-        // Bedrock model is already written above as BEDROCK_MODEL, skip here.
-        if self.settings.llm_backend.as_deref() != Some("bedrock")
-            && let Some(ref model) = self.settings.selected_model
-        {
-            let backend_str = self.settings.llm_backend.as_deref().unwrap_or("nearai");
-            let model_env = registry.model_env_var(backend_str);
-            env_vars.push((model_env.to_string(), model.clone()));
-        }
-
-        // Also write provider-specific base URL env var if the provider
-        // defines one (e.g., GROQ doesn't need LLM_BASE_URL since its
-        // default is compiled in, but it doesn't hurt to be explicit).
-        if let Some(ref backend) = self.settings.llm_backend
-            && let Some(def) = registry.find(backend)
-            && let Some(ref base_url_env) = def.base_url_env
-            && let Some(ref base_url) = def.default_base_url
-            && base_url_env != "LLM_BASE_URL"
-            && base_url_env != "OLLAMA_BASE_URL"
-        {
-            env_vars.push((base_url_env.clone(), base_url.clone()));
-        }
-
-        // Preserve NEARAI_API_KEY if present (set by API key auth flow
-        // via the thread-safe runtime env overlay).
-        if let Some(api_key) = crate::config::helpers::env_or_override("NEARAI_API_KEY")
-            && !api_key.is_empty()
-        {
-            env_vars.push(("NEARAI_API_KEY".to_string(), api_key));
         }
 
         // Secrets master key (env var mode): write to .env so it's available
@@ -2406,12 +2766,28 @@ impl SetupWizard {
             Err(_) => return,
         };
 
-        if let Some(ref db) = self.db {
-            if let Err(e) = db
-                .set_setting("default", "nearai.session_token", &value)
+        #[cfg(feature = "postgres")]
+        if let Some(ref pool) = self.db_pool {
+            let store = crate::history::Store::from_pool(pool.clone());
+            if let Err(e) = store
+                .set_setting(self.owner_id(), "nearai.session_token", &value)
                 .await
             {
-                tracing::debug!("Could not persist session token to database: {}", e);
+                tracing::debug!("Could not persist session token to postgres: {}", e);
+            } else {
+                tracing::debug!("Session token persisted to database");
+                return;
+            }
+        }
+
+        #[cfg(feature = "libsql")]
+        if let Some(ref backend) = self.db_backend {
+            use crate::db::SettingsStore as _;
+            if let Err(e) = backend
+                .set_setting(self.owner_id(), "nearai.session_token", &value)
+                .await
+            {
+                tracing::debug!("Could not persist session token to libsql: {}", e);
             } else {
                 tracing::debug!("Session token persisted to database");
             }
@@ -2448,19 +2824,58 @@ impl SetupWizard {
     /// prefers the `other` argument's non-default values. Without this,
     /// stale DB values would overwrite fresh user choices.
     async fn try_load_existing_settings(&mut self) {
-        if let Some(ref db) = self.db {
-            match db.get_all_settings("default").await {
-                Ok(db_map) if !db_map.is_empty() => {
-                    let existing = Settings::from_db_map(&db_map);
-                    self.settings.merge_from(&existing);
-                    tracing::info!("Loaded {} existing settings from database", db_map.len());
+        let loaded = false;
+
+        #[cfg(feature = "postgres")]
+        let loaded = if !loaded {
+            if let Some(ref pool) = self.db_pool {
+                let store = crate::history::Store::from_pool(pool.clone());
+                match store.get_all_settings(self.owner_id()).await {
+                    Ok(db_map) if !db_map.is_empty() => {
+                        let existing = Settings::from_db_map(&db_map);
+                        self.settings.merge_from(&existing);
+                        tracing::info!("Loaded {} existing settings from database", db_map.len());
+                        true
+                    }
+                    Ok(_) => false,
+                    Err(e) => {
+                        tracing::debug!("Could not load existing settings: {}", e);
+                        false
+                    }
                 }
-                Ok(_) => {}
-                Err(e) => {
-                    tracing::debug!("Could not load existing settings: {}", e);
-                }
+            } else {
+                false
             }
-        }
+        } else {
+            loaded
+        };
+
+        #[cfg(feature = "libsql")]
+        let loaded = if !loaded {
+            if let Some(ref backend) = self.db_backend {
+                use crate::db::SettingsStore as _;
+                match backend.get_all_settings(self.owner_id()).await {
+                    Ok(db_map) if !db_map.is_empty() => {
+                        let existing = Settings::from_db_map(&db_map);
+                        self.settings.merge_from(&existing);
+                        tracing::info!("Loaded {} existing settings from database", db_map.len());
+                        true
+                    }
+                    Ok(_) => false,
+                    Err(e) => {
+                        tracing::debug!("Could not load existing settings: {}", e);
+                        false
+                    }
+                }
+            } else {
+                false
+            }
+        } else {
+            loaded
+        };
+
+        // Suppress unused variable warning when only one backend is compiled.
+        let _ = loaded;
     }
 
     /// Save settings to the database and `~/.ironclaw/.env`, then print summary.
@@ -2525,6 +2940,7 @@ impl SetupWizard {
                 "ollama" => "Ollama",
                 "openai_compatible" => "OpenAI-compatible",
                 "bedrock" => "AWS Bedrock",
+                "openai_codex" => "OpenAI Codex",
                 other => other,
             };
             println!("  Provider: {}", display);
@@ -2610,6 +3026,7 @@ impl Default for SetupWizard {
 }
 
 /// Mask password in a database URL for display.
+#[cfg(feature = "postgres")]
 fn mask_password_in_url(url: &str) -> String {
     // URL format: scheme://user:password@host/database
     // Find "://" to locate start of credentials
@@ -2911,12 +3328,13 @@ async fn install_selected_bundled_channels(
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
+    #[cfg(unix)]
+    use std::ffi::OsString;
 
     use tempfile::tempdir;
 
     use super::*;
     use crate::config::helpers::ENV_MUTEX;
-    use crate::llm::models::{is_openai_chat_model, sort_openai_models};
 
     #[test]
     fn test_wizard_creation() {
@@ -2938,6 +3356,53 @@ mod tests {
     }
 
     #[test]
+    fn test_wizard_owner_id_uses_resolved_env_scope() {
+        let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _owner = EnvGuard::set("IRONCLAW_OWNER_ID", " wizard-owner ");
+
+        let wizard = SetupWizard::new();
+        assert_eq!(wizard.owner_id(), "wizard-owner"); // safety: test-only assertion
+    }
+
+    #[test]
+    fn test_wizard_owner_id_uses_toml_scope() {
+        let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _owner = EnvGuard::clear("IRONCLAW_OWNER_ID");
+        let dir = tempdir().unwrap(); // safety: test-only tempdir setup
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "owner_id = \"toml-owner\"\n").unwrap(); // safety: test-only fixture write
+
+        let wizard = SetupWizard::try_with_config_and_toml(Default::default(), Some(&path))
+            .expect("wizard should load owner_id from TOML"); // safety: test-only assertion
+        assert_eq!(wizard.owner_id(), "toml-owner"); // safety: test-only assertion
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_try_with_config_and_toml_propagates_invalid_owner_env() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let original = std::env::var_os("IRONCLAW_OWNER_ID");
+        unsafe {
+            std::env::set_var("IRONCLAW_OWNER_ID", OsString::from_vec(vec![0x66, 0x80]));
+        }
+
+        let result = SetupWizard::try_with_config_and_toml(Default::default(), None);
+
+        unsafe {
+            if let Some(value) = original {
+                std::env::set_var("IRONCLAW_OWNER_ID", value);
+            } else {
+                std::env::remove_var("IRONCLAW_OWNER_ID");
+            }
+        }
+
+        assert!(result.is_err()); // safety: test-only assertion
+    }
+
+    #[test]
+    #[cfg(feature = "postgres")]
     fn test_mask_password_in_url() {
         assert_eq!(
             mask_password_in_url("postgres://user:secret@localhost/db"),
@@ -2981,12 +3446,12 @@ mod tests {
             return;
         }
 
-        let dir = tempdir().unwrap();
+        let dir = tempdir().unwrap(); // safety: test-only tempdir setup
         let installed = HashSet::<String>::new();
 
         install_missing_bundled_channels(dir.path(), &installed)
             .await
-            .unwrap();
+            .unwrap(); // safety: test-only assertion
 
         assert!(dir.path().join("telegram.wasm").exists());
         assert!(dir.path().join("telegram.capabilities.json").exists());
@@ -3088,7 +3553,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_discover_wasm_channels_empty_dir() {
-        let dir = tempdir().unwrap();
+        let dir = tempdir().unwrap(); // safety: test-only tempdir setup
         let channels = discover_wasm_channels(dir.path()).await;
         assert!(channels.is_empty());
     }
@@ -3397,6 +3862,65 @@ mod tests {
         assert!(
             config.nearai.api_key.is_none(),
             "config should have no api_key when env var is empty"
+        );
+    }
+
+    /// Regression: API key set via inject_single_var (the path used by
+    /// setup_api_key_provider during onboarding) must be picked up by
+    /// for_model_discovery() so model listing uses cloud-api auth
+    /// instead of falling back to session-token auth.
+    #[test]
+    fn test_model_discovery_picks_up_injected_var() {
+        use secrecy::ExposeSecret;
+
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let _guard = EnvGuard::clear("NEARAI_API_KEY");
+        let _guard2 = EnvGuard::clear("NEARAI_BASE_URL");
+
+        crate::config::inject_single_var("NEARAI_API_KEY", "injected-wizard-key");
+        let config = build_nearai_model_fetch_config();
+
+        // Clean up: empty values are treated as unset by env_or_override()
+        // at every layer (real env, runtime overrides, INJECTED_VARS).
+        crate::config::inject_single_var("NEARAI_API_KEY", "");
+
+        assert!(
+            config.nearai.api_key.is_some(),
+            "for_model_discovery must read NEARAI_API_KEY from inject_single_var overlay"
+        );
+        assert_eq!(
+            config.nearai.api_key.as_ref().unwrap().expose_secret(),
+            "injected-wizard-key"
+        );
+        assert_eq!(
+            config.nearai.base_url, "https://cloud-api.near.ai",
+            "API key from overlay must select cloud-api base URL"
+        );
+    }
+
+    /// Regression: API key set via set_runtime_env (interactive api_key_login
+    /// path) must be picked up by build_nearai_model_fetch_config so that
+    /// model listing doesn't fall back to session-token auth and re-trigger
+    /// the NEAR AI authentication menu.
+    #[test]
+    fn test_build_nearai_model_fetch_config_picks_up_runtime_env() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        // Ensure the real env var is unset so the only source is the overlay.
+        let _guard = EnvGuard::clear("NEARAI_API_KEY");
+
+        crate::config::helpers::set_runtime_env("NEARAI_API_KEY", "test-key-from-overlay");
+        let config = build_nearai_model_fetch_config();
+
+        // Clean up runtime overlay
+        crate::config::helpers::set_runtime_env("NEARAI_API_KEY", "");
+
+        assert!(
+            config.nearai.api_key.is_some(),
+            "config must pick up NEARAI_API_KEY from runtime overlay"
+        );
+        assert_eq!(
+            config.nearai.base_url, "https://cloud-api.near.ai",
+            "API key auth must use cloud-api base URL"
         );
     }
 }

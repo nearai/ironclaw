@@ -122,6 +122,9 @@ pub enum ChannelError {
     #[error("Failed to send response on channel {name}: {reason}")]
     SendFailed { name: String, reason: String },
 
+    #[error("Channel {name} is missing a routing target: {reason}")]
+    MissingRoutingTarget { name: String, reason: String },
+
     #[error("Invalid message format: {0}")]
     InvalidMessage(String),
 
@@ -164,6 +167,9 @@ pub enum ToolError {
 
     #[error("Tool {name} requires authentication")]
     AuthRequired { name: String },
+
+    #[error("Tool {name} is not available for autonomous execution: {reason}")]
+    AutonomousUnavailable { name: String, reason: String },
 
     #[error("Tool {name} is rate limited, retry after {retry_after:?}")]
     RateLimited {
@@ -309,6 +315,9 @@ pub enum WorkspaceError {
 
     #[error("Cannot write sensitive content: no private layer available for redirect")]
     PrivacyRedirectFailed,
+
+    #[error("Write rejected for '{path}': prompt injection detected ({reason})")]
+    InjectionRejected { path: String, reason: String },
 }
 
 /// Orchestrator errors (internal API, container management).
@@ -378,6 +387,9 @@ pub enum RoutineError {
 
     #[error("Not authorized to trigger routine {id}")]
     NotAuthorized { id: Uuid },
+
+    #[error("Routine {name} is in cooldown period")]
+    Cooldown { name: String },
 
     #[error("Routine {name} at max concurrent runs")]
     MaxConcurrent { name: String },

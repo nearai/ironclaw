@@ -20,9 +20,9 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 |---------|----------|----------|-------|
 | Hub-and-spoke architecture | ✅ | ✅ | Web gateway as central hub |
 | WebSocket control plane | ✅ | ✅ | Gateway with WebSocket + SSE |
-| Single-user system | ✅ | ✅ | |
+| Single-user system | ✅ | ✅ | Explicit instance owner scope for persistent routines, secrets, jobs, settings, extensions, and workspace memory |
 | Multi-agent routing | ✅ | ❌ | Workspace isolation per-agent |
-| Session-based messaging | ✅ | ✅ | Per-sender sessions |
+| Session-based messaging | ✅ | ✅ | Owner scope is separate from sender identity and conversation scope |
 | Loopback-first networking | ✅ | ✅ | HTTP binds to 0.0.0.0 but can be configured |
 
 ### Owner: _Unassigned_
@@ -66,9 +66,9 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | CLI/TUI | ✅ | ✅ | - | Ratatui-based TUI |
 | HTTP webhook | ✅ | ✅ | - | axum with secret validation |
 | REPL (simple) | ✅ | ✅ | - | For testing |
-| WASM channels | ❌ | ✅ | - | IronClaw innovation |
+| WASM channels | ❌ | ✅ | - | IronClaw innovation; host resolves owner scope vs sender identity |
 | WhatsApp | ✅ | ❌ | P1 | Baileys (Web), same-phone mode with echo detection |
-| Telegram | ✅ | ✅ | - | WASM channel(MTProto), DM pairing, caption, /start, bot_username, DM topics |
+| Telegram | ✅ | ✅ | - | WASM channel(MTProto), DM pairing, caption, /start, bot_username, DM topics, setup-time owner auto-verification, owner-scoped persistence |
 | Discord | ✅ | ❌ | P2 | discord.js, thread parent binding inheritance |
 | Signal | ✅ | ✅ | P2 | signal-cli daemonPC, SSE listener HTTP/JSON-R, user/group allowlists, DM pairing |
 | Slack | ✅ | ✅ | - | WASM tool |
@@ -465,7 +465,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Device pairing | ✅ | ❌ | |
 | Tailscale identity | ✅ | ❌ | |
 | Trusted-proxy auth | ✅ | ❌ | Header-based reverse proxy auth |
-| OAuth flows | ✅ | 🚧 | NEAR AI OAuth |
+| OAuth flows | ✅ | 🚧 | NEAR AI OAuth plus hosted extension/MCP OAuth broker; external auth-proxy rollout still pending |
 | DM pairing verification | ✅ | ✅ | ironclaw pairing approve, host APIs |
 | Allowlist/blocklist | ✅ | 🚧 | allow_from + pairing store |
 | Per-group tool policies | ✅ | ❌ | |

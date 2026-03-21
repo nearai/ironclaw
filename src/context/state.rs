@@ -81,6 +81,15 @@ impl JobState {
     pub fn is_active(&self) -> bool {
         !self.is_terminal()
     }
+
+    /// Check if this job consumes a parallel execution slot.
+    ///
+    /// Only jobs in Pending, InProgress, or Stuck states consume execution resources
+    /// and should count toward the parallel job limit. Completed and Submitted jobs
+    /// are in the state machine but are no longer actively executing.
+    pub fn is_parallel_blocking(&self) -> bool {
+        matches!(self, Self::Pending | Self::InProgress | Self::Stuck)
+    }
 }
 
 impl std::fmt::Display for JobState {
@@ -121,6 +130,9 @@ pub struct JobContext {
     pub state: JobState,
     /// User ID that owns this job (for workspace scoping).
     pub user_id: String,
+    /// Channel-specific requester/actor ID, when different from the owner scope.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requester_id: Option<String>,
     /// Conversation ID if linked to a conversation.
     pub conversation_id: Option<Uuid>,
     /// Job title.
@@ -202,6 +214,7 @@ impl JobContext {
             job_id: Uuid::new_v4(),
             state: JobState::Pending,
             user_id: user_id.into(),
+            requester_id: None,
             conversation_id: None,
             title: title.into(),
             description: description.into(),
@@ -230,6 +243,12 @@ impl JobContext {
     /// Set the user timezone on this context.
     pub fn with_timezone(mut self, tz: impl Into<String>) -> Self {
         self.user_timezone = tz.into();
+        self
+    }
+
+    /// Set the channel-specific requester/actor ID.
+    pub fn with_requester_id(mut self, requester_id: impl Into<String>) -> Self {
+        self.requester_id = Some(requester_id.into());
         self
     }
 
