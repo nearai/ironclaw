@@ -528,16 +528,16 @@ mod tests {
         let app = Router::new().route("/", post(accepted));
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
-            .expect("bind test accepted server");
+            .expect("Failed to bind to an ephemeral port");
         let addr = listener
             .local_addr()
-            .expect("resolve accepted server address");
+            .expect("Failed to get listener's local address");
         let url = format!("http://127.0.0.1:{}", addr.port());
 
         let handle = tokio::spawn(async move {
             axum::serve(listener, app)
                 .await
-                .expect("serve accepted test server");
+                .expect("Test server failed to run");
         });
 
         (url, handle)
