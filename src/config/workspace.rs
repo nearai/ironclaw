@@ -35,10 +35,7 @@ impl WorkspaceConfig {
             if layer.name.len() > 64 {
                 return Err(ConfigError::InvalidValue {
                     key: "MEMORY_LAYERS".to_string(),
-                    message: format!(
-                        "layer name '{}' exceeds 64 characters",
-                        layer.name
-                    ),
+                    message: format!("layer name '{}' exceeds 64 characters", layer.name),
                 });
             }
             if !layer
@@ -118,7 +115,10 @@ mod tests {
             let result = WorkspaceConfig::resolve("alice");
             assert!(result.is_err(), "invalid JSON should fail");
             let err = result.unwrap_err().to_string();
-            assert!(err.contains("valid JSON"), "error should mention JSON: {err}");
+            assert!(
+                err.contains("valid JSON"),
+                "error should mention JSON: {err}"
+            );
         });
     }
 

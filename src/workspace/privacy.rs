@@ -33,7 +33,6 @@ pub struct PatternPrivacyClassifier {
     patterns: Vec<Regex>,
 }
 
-
 impl PatternPrivacyClassifier {
     pub fn new() -> Result<Self, regex::Error> {
         let pattern_strs = [
@@ -136,7 +135,11 @@ mod tests {
 
     #[test]
     fn detects_api_key() {
-        assert!(classifier().classify("set the api_key to sk-1234").is_sensitive);
+        assert!(
+            classifier()
+                .classify("set the api_key to sk-1234")
+                .is_sensitive
+        );
     }
 
     // Household content — must NOT trigger (previous false positives)
@@ -149,22 +152,38 @@ mod tests {
 
     #[test]
     fn allows_doctor_mention() {
-        assert!(!classifier().classify("the doctor's office called about Saturday").is_sensitive);
+        assert!(
+            !classifier()
+                .classify("the doctor's office called about Saturday")
+                .is_sensitive
+        );
     }
 
     #[test]
     fn allows_email_address() {
-        assert!(!classifier().classify("email joe@plumber.com about the leak").is_sensitive);
+        assert!(
+            !classifier()
+                .classify("email joe@plumber.com about the leak")
+                .is_sensitive
+        );
     }
 
     #[test]
     fn allows_phone_number() {
-        assert!(!classifier().classify("call the restaurant at 555-123-4567").is_sensitive);
+        assert!(
+            !classifier()
+                .classify("call the restaurant at 555-123-4567")
+                .is_sensitive
+        );
     }
 
     #[test]
     fn allows_medical_terms_in_context() {
-        assert!(!classifier().classify("Started new medication for anxiety").is_sensitive);
+        assert!(
+            !classifier()
+                .classify("Started new medication for anxiety")
+                .is_sensitive
+        );
     }
 
     #[test]
@@ -193,12 +212,20 @@ mod tests {
     // Format variants
     #[test]
     fn detects_credit_card_no_separators() {
-        assert!(classifier().classify("card 4111111111111111 on file").is_sensitive);
+        assert!(
+            classifier()
+                .classify("card 4111111111111111 on file")
+                .is_sensitive
+        );
     }
 
     #[test]
     fn detects_credit_card_with_dashes() {
-        assert!(classifier().classify("Card: 4111-1111-1111-1111").is_sensitive);
+        assert!(
+            classifier()
+                .classify("Card: 4111-1111-1111-1111")
+                .is_sensitive
+        );
     }
 
     #[test]
@@ -208,12 +235,20 @@ mod tests {
 
     #[test]
     fn detects_auth_token_keyword() {
-        assert!(classifier().classify("set auth_token to abc123").is_sensitive);
+        assert!(
+            classifier()
+                .classify("set auth_token to abc123")
+                .is_sensitive
+        );
     }
 
     #[test]
     fn detects_secret_key_keyword() {
-        assert!(classifier().classify("the secret_key is sk-prod-xyz").is_sensitive);
+        assert!(
+            classifier()
+                .classify("the secret_key is sk-prod-xyz")
+                .is_sensitive
+        );
     }
 
     #[test]
@@ -232,6 +267,10 @@ mod tests {
 
     #[test]
     fn partial_ssn_not_sensitive() {
-        assert!(!classifier().classify("code 123-45 in the system").is_sensitive);
+        assert!(
+            !classifier()
+                .classify("code 123-45 in the system")
+                .is_sensitive
+        );
     }
 }
