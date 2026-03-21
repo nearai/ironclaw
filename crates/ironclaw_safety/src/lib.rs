@@ -352,6 +352,13 @@ mod tests {
         let wrapped = safety.wrap_for_llm("t", json);
         let unwrapped = SafetyLayer::unwrap_tool_output(&wrapped).expect("should unwrap");
         assert_eq!(unwrapped, json);
+
+        // Verify XML metacharacters in JSON survive the round trip unchanged
+        let json2 = r#"{"query": "a < b & c > d"}"#;
+        let wrapped2 = safety.wrap_for_llm("t", json2);
+        assert!(wrapped2.contains(r#""query": "a < b & c > d""#));
+        let unwrapped2 = SafetyLayer::unwrap_tool_output(&wrapped2).expect("should unwrap");
+        assert_eq!(unwrapped2, json2);
     }
 
     #[test]
@@ -393,7 +400,7 @@ mod tests {
         };
         let safety = SafetyLayer::new(&config);
 
-        let wrapped = safety.wrap_for_llm("bad&\"<>name", "ok", false);
+        let wrapped = safety.wrap_for_llm("bad&\"<>name", "ok");
         assert!(wrapped.contains("name=\"bad&amp;&quot;&lt;&gt;name\"")); // safety: test assertion in #[cfg(test)] module
     }
 
