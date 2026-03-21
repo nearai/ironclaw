@@ -150,6 +150,26 @@ impl Repository {
         Ok(())
     }
 
+    /// Update a document's metadata.
+    pub async fn update_document_metadata(
+        &self,
+        id: Uuid,
+        metadata: &serde_json::Value,
+    ) -> Result<(), WorkspaceError> {
+        let conn = self.conn().await?;
+
+        conn.execute(
+            "UPDATE memory_documents SET metadata = $2, updated_at = NOW() WHERE id = $1",
+            &[&id, metadata],
+        )
+        .await
+        .map_err(|e| WorkspaceError::SearchFailed {
+            reason: format!("Metadata update failed: {}", e),
+        })?;
+
+        Ok(())
+    }
+
     /// Delete a document by its path.
     pub async fn delete_document_by_path(
         &self,
@@ -262,6 +282,37 @@ impl Repository {
             .await
             .map_err(|e| WorkspaceError::SearchFailed {
                 reason: format!("Query failed: {}", e),
+            })?;
+
+        Ok(rows.iter().map(|r| self.row_to_document(r)).collect())
+    }
+
+    /// List documents matching a metadata key/value pair.
+    pub async fn list_documents_by_metadata(
+        &self,
+        user_id: &str,
+        agent_id: Option<Uuid>,
+        key: &str,
+        value: &str,
+    ) -> Result<Vec<MemoryDocument>, WorkspaceError> {
+        let conn = self.conn().await?;
+
+        let rows = conn
+            .query(
+                r#"
+                SELECT id, user_id, agent_id, path, content,
+                       created_at, updated_at, metadata
+                FROM memory_documents
+                WHERE user_id = $1
+                  AND agent_id IS NOT DISTINCT FROM $2
+                  AND metadata ->> $3 = $4
+                ORDER BY updated_at DESC
+                "#,
+                &[&user_id, &agent_id, &key, &value],
+            )
+            .await
+            .map_err(|e| WorkspaceError::SearchFailed {
+                reason: format!("Metadata query failed: {}", e),
             })?;
 
         Ok(rows.iter().map(|r| self.row_to_document(r)).collect())

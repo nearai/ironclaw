@@ -203,6 +203,18 @@ impl WorkspaceStorage {
         }
     }
 
+    async fn update_document_metadata(
+        &self,
+        id: Uuid,
+        metadata: &serde_json::Value,
+    ) -> Result<(), WorkspaceError> {
+        match self {
+            #[cfg(feature = "postgres")]
+            Self::Repo(repo) => repo.update_document_metadata(id, metadata).await,
+            Self::Db(db) => db.update_document_metadata(id, metadata).await,
+        }
+    }
+
     async fn delete_document_by_path(
         &self,
         user_id: &str,
@@ -238,6 +250,26 @@ impl WorkspaceStorage {
             #[cfg(feature = "postgres")]
             Self::Repo(repo) => repo.list_all_paths(user_id, agent_id).await,
             Self::Db(db) => db.list_all_paths(user_id, agent_id).await,
+        }
+    }
+
+    async fn list_documents_by_metadata(
+        &self,
+        user_id: &str,
+        agent_id: Option<Uuid>,
+        key: &str,
+        value: &str,
+    ) -> Result<Vec<MemoryDocument>, WorkspaceError> {
+        match self {
+            #[cfg(feature = "postgres")]
+            Self::Repo(repo) => {
+                repo.list_documents_by_metadata(user_id, agent_id, key, value)
+                    .await
+            }
+            Self::Db(db) => {
+                db.list_documents_by_metadata(user_id, agent_id, key, value)
+                    .await
+            }
         }
     }
 
@@ -550,6 +582,31 @@ impl Workspace {
         self.storage.get_document_by_id(doc.id).await
     }
 
+    /// Write or update a file and attach metadata in one step.
+    pub async fn write_with_metadata(
+        &self,
+        path: &str,
+        content: &str,
+        metadata: serde_json::Value,
+    ) -> Result<MemoryDocument, WorkspaceError> {
+        let doc = self.write(path, content).await?;
+        self.storage
+            .update_document_metadata(doc.id, &metadata)
+            .await?;
+        self.storage.get_document_by_id(doc.id).await
+    }
+
+    /// Update metadata for an existing document.
+    pub async fn update_metadata(
+        &self,
+        document_id: Uuid,
+        metadata: &serde_json::Value,
+    ) -> Result<(), WorkspaceError> {
+        self.storage
+            .update_document_metadata(document_id, metadata)
+            .await
+    }
+
     /// Append content to a file.
     ///
     /// Creates the file if it doesn't exist.
@@ -752,6 +809,17 @@ impl Workspace {
     pub async fn list_all(&self) -> Result<Vec<String>, WorkspaceError> {
         self.storage
             .list_all_paths(&self.user_id, self.agent_id)
+            .await
+    }
+
+    /// List documents matching a metadata key/value pair.
+    pub async fn list_by_metadata(
+        &self,
+        key: &str,
+        value: &str,
+    ) -> Result<Vec<MemoryDocument>, WorkspaceError> {
+        self.storage
+            .list_documents_by_metadata(&self.user_id, self.agent_id, key, value)
             .await
     }
 
@@ -1530,6 +1598,8 @@ fn normalize_directory(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "libsql")]
+    use crate::db::Database;
 
     #[test]
     fn test_normalize_path() {
@@ -1694,6 +1764,62 @@ mod tests {
         // Injection content targeting a non-system-prompt file should not
         // be checked (the guard is in write/append, not reject_if_injected).
         assert!(!is_system_prompt_file("notes/foo.md"));
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_workspace_metadata_round_trip_and_filtering() {
+        use crate::db::libsql::LibSqlBackend;
+        use std::sync::Arc;
+
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let db_path = tempdir.path().join("workspace_metadata.db");
+        let backend = LibSqlBackend::new_local(&db_path)
+            .await
+            .expect("new local db");
+        backend.run_migrations().await.expect("run migrations");
+        let db: Arc<dyn Database> = Arc::new(backend);
+        let workspace = Workspace::new_with_db("user1", db);
+
+        let doc = workspace
+            .write_with_metadata(
+                "skills/deploy/SKILL.md",
+                "---\nname: deploy\n---\n\nDeploy prompt.",
+                serde_json::json!({
+                    "context_type": "skill",
+                    "trust_level": "trusted",
+                }),
+            )
+            .await
+            .expect("write with metadata");
+
+        assert_eq!(doc.path, "skills/deploy/SKILL.md");
+        assert_eq!(doc.metadata["context_type"], "skill");
+        assert_eq!(doc.metadata["trust_level"], "trusted");
+
+        let filtered = workspace
+            .list_by_metadata("context_type", "skill")
+            .await
+            .expect("list by metadata");
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].path, "skills/deploy/SKILL.md");
+
+        workspace
+            .update_metadata(
+                doc.id,
+                &serde_json::json!({
+                    "context_type": "skill",
+                    "trust_level": "installed",
+                }),
+            )
+            .await
+            .expect("update metadata");
+
+        let updated = workspace
+            .read("skills/deploy/SKILL.md")
+            .await
+            .expect("read doc");
+        assert_eq!(updated.metadata["trust_level"], "installed");
     }
 }
 
