@@ -84,6 +84,8 @@ pub struct SetupConfig {
     pub provider_only: bool,
     /// Quick setup: auto-defaults everything except LLM provider and model.
     pub quick: bool,
+    /// Run only specific setup steps (e.g. "provider", "channels", "model", "database", "security").
+    pub steps: Vec<String>,
 }
 
 /// Interactive setup wizard for IronClaw.
@@ -188,6 +190,55 @@ impl SetupWizard {
         print_banner();
         print_header("IronClaw Setup Wizard");
 
+        if !self.config.steps.is_empty() {
+            // Selective step mode: reconnect to existing DB and load settings,
+            // then run only the requested steps.
+            self.reconnect_existing_db().await?;
+
+            let valid_steps = ["provider", "channels", "model", "database", "security"];
+            for s in &self.config.steps {
+                if !valid_steps.contains(&s.as_str()) {
+                    return Err(SetupError::Config(format!(
+                        "Unknown step '{}'. Valid steps: {}",
+                        s,
+                        valid_steps.join(", ")
+                    )));
+                }
+            }
+
+            let total = self.config.steps.len();
+            for (i, step_name) in self.config.steps.clone().iter().enumerate() {
+                let step_num = i + 1;
+                match step_name.as_str() {
+                    "database" => {
+                        print_step(step_num, total, "Database Connection");
+                        self.step_database().await?;
+                    }
+                    "security" => {
+                        print_step(step_num, total, "Security");
+                        self.step_security().await?;
+                    }
+                    "provider" => {
+                        print_step(step_num, total, "Inference Provider");
+                        self.step_inference_provider().await?;
+                    }
+                    "model" => {
+                        print_step(step_num, total, "Model Selection");
+                        self.step_model_selection().await?;
+                    }
+                    "channels" => {
+                        print_step(step_num, total, "Channel Configuration");
+                        self.step_channels().await?;
+                    }
+                    _ => {} // already validated above
+                }
+                self.persist_after_step().await;
+            }
+
+            self.save_and_summarize().await?;
+            return Ok(());
+        }
+
         if self.config.channels_only {
             // Channels-only mode: reconnect to existing DB and load settings
             // before running the channel step, so secrets and save work.
@@ -220,23 +271,23 @@ impl SetupWizard {
             // Pre-populate backend from env so step_inference_provider
             // can offer "Keep current provider?" instead of asking from scratch.
             if self.settings.llm_backend.is_none() {
-                use crate::config::helpers::env_or_override;
-                if let Some(b) = env_or_override("LLM_BACKEND")
-                    && !b.trim().is_empty()
-                {
-                    self.settings.llm_backend = Some(b.trim().to_string());
-                } else if env_or_override("NEARAI_API_KEY").is_some() {
+                if let Ok(b) = std::env::var("LLM_BACKEND") {
+                    self.settings.llm_backend = Some(b);
+                } else if std::env::var("NEARAI_API_KEY").is_ok() {
                     self.settings.llm_backend = Some("nearai".to_string());
-                } else if env_or_override("ANTHROPIC_API_KEY").is_some()
-                    || env_or_override("ANTHROPIC_OAUTH_TOKEN").is_some()
+                } else if std::env::var("ANTHROPIC_API_KEY").is_ok()
+                    || std::env::var("ANTHROPIC_OAUTH_TOKEN").is_ok()
                 {
                     self.settings.llm_backend = Some("anthropic".to_string());
-                } else if env_or_override("OPENAI_API_KEY").is_some() {
+                } else if std::env::var("OPENAI_API_KEY").is_ok() {
                     self.settings.llm_backend = Some("openai".to_string());
+                } else if std::env::var("OPENROUTER_API_KEY").is_ok() {
+                    self.settings.llm_backend = Some("openrouter".to_string());
                 }
             }
 
-            if let Some(api_key) = crate::config::helpers::env_or_override("NEARAI_API_KEY")
+            if let Ok(api_key) = std::env::var("NEARAI_API_KEY")
+                && !api_key.is_empty()
                 && self.settings.llm_backend.as_deref() == Some("nearai")
             {
                 // NEARAI_API_KEY is set and backend auto-detected — skip interactive prompts
@@ -250,6 +301,79 @@ impl SetupWizard {
                 self.llm_api_key = Some(SecretString::from(api_key));
                 if self.settings.selected_model.is_none() {
                     let default = crate::llm::DEFAULT_MODEL;
+                    self.settings.selected_model = Some(default.to_string());
+                    print_info(&format!("Using default model: {default}"));
+                }
+                self.persist_after_step().await;
+            } else if self.settings.llm_backend.as_deref() == Some("anthropic")
+                && let Some(api_key) = Self::detect_anthropic_key()
+            {
+                // Anthropic key detected — skip interactive prompts
+                print_info("Anthropic credentials found — using Anthropic provider");
+                let secret_name = if api_key.starts_with("sk-ant-oat") {
+                    "llm_anthropic_oauth_token"
+                } else {
+                    "llm_anthropic_api_key"
+                };
+                if let Ok(ctx) = self.init_secrets_context().await {
+                    let key = SecretString::from(api_key.clone());
+                    if let Err(e) = ctx.save_secret(secret_name, &key).await {
+                        tracing::warn!("Failed to persist Anthropic key to secrets: {}", e);
+                    }
+                }
+                self.llm_api_key = Some(SecretString::from(api_key));
+                let registry = crate::llm::ProviderRegistry::load();
+                if self.settings.selected_model.is_none() {
+                    let default = registry
+                        .find("anthropic")
+                        .map(|d| d.default_model.as_str())
+                        .unwrap_or("claude-sonnet-4-20250514");
+                    self.settings.selected_model = Some(default.to_string());
+                    print_info(&format!("Using default model: {default}"));
+                }
+                self.persist_after_step().await;
+            } else if let Ok(api_key) = std::env::var("OPENAI_API_KEY")
+                && !api_key.is_empty()
+                && self.settings.llm_backend.as_deref() == Some("openai")
+            {
+                // OpenAI key detected — skip interactive prompts
+                print_info("OPENAI_API_KEY found — using OpenAI provider");
+                if let Ok(ctx) = self.init_secrets_context().await {
+                    let key = SecretString::from(api_key.clone());
+                    if let Err(e) = ctx.save_secret("llm_openai_api_key", &key).await {
+                        tracing::warn!("Failed to persist OPENAI_API_KEY to secrets: {}", e);
+                    }
+                }
+                self.llm_api_key = Some(SecretString::from(api_key));
+                let registry = crate::llm::ProviderRegistry::load();
+                if self.settings.selected_model.is_none() {
+                    let default = registry
+                        .find("openai")
+                        .map(|d| d.default_model.as_str())
+                        .unwrap_or("gpt-5-mini");
+                    self.settings.selected_model = Some(default.to_string());
+                    print_info(&format!("Using default model: {default}"));
+                }
+                self.persist_after_step().await;
+            } else if let Ok(api_key) = std::env::var("OPENROUTER_API_KEY")
+                && !api_key.is_empty()
+                && self.settings.llm_backend.as_deref() == Some("openrouter")
+            {
+                // OpenRouter key detected — skip interactive prompts
+                print_info("OPENROUTER_API_KEY found — using OpenRouter provider");
+                if let Ok(ctx) = self.init_secrets_context().await {
+                    let key = SecretString::from(api_key.clone());
+                    if let Err(e) = ctx.save_secret("llm_openrouter_api_key", &key).await {
+                        tracing::warn!("Failed to persist OPENROUTER_API_KEY to secrets: {}", e);
+                    }
+                }
+                self.llm_api_key = Some(SecretString::from(api_key));
+                let registry = crate::llm::ProviderRegistry::load();
+                if self.settings.selected_model.is_none() {
+                    let default = registry
+                        .find("openrouter")
+                        .map(|d| d.default_model.as_str())
+                        .unwrap_or("openai/gpt-4o");
                     self.settings.selected_model = Some(default.to_string());
                     print_info(&format!("Using default model: {default}"));
                 }
@@ -1132,33 +1256,98 @@ impl SetupWizard {
 
         // Build menu: NearAI first, then Gemini OAuth, then OpenAI Codex, then registry providers, then Bedrock
         let selectable = registry.selectable();
-        let mut options: Vec<String> = Vec::with_capacity(3 + selectable.len());
-        let mut provider_ids: Vec<String> = Vec::with_capacity(3 + selectable.len());
 
-        options.push("NEAR AI          - multi-model access via NEAR account".to_string());
-        provider_ids.push("nearai".to_string());
-        options.push("Gemini CLI        - Official Gemini API via Gemini CLI OAuth".to_string());
-        provider_ids.push("gemini_oauth".to_string());
+        // Detect which providers have API keys already set in the environment.
+        let detected_env: HashMap<&str, bool> = [
+            ("nearai", std::env::var("NEARAI_API_KEY").is_ok()),
+            (
+                "anthropic",
+                std::env::var("ANTHROPIC_API_KEY").is_ok()
+                    || std::env::var("ANTHROPIC_OAUTH_TOKEN").is_ok(),
+            ),
+            ("openai", std::env::var("OPENAI_API_KEY").is_ok()),
+            ("openrouter", std::env::var("OPENROUTER_API_KEY").is_ok()),
+        ]
+        .into_iter()
+        .collect();
 
-        options.push("OpenAI Codex     - ChatGPT subscription (Plus/Pro/Max)".to_string());
-        provider_ids.push("openai_codex".to_string());
+        // Helper: build a label for a provider entry, prepending a checkmark if detected.
+        let make_label = |id: &str, name: &str, desc: &str| -> String {
+            if detected_env.get(id).copied().unwrap_or(false) {
+                format!("\u{2713} {:<15}- {}", name, desc)
+            } else {
+                format!("  {:<15}- {}", name, desc)
+            }
+        };
+
+        // Collect all entries as (provider_id, label, is_detected).
+        struct ProviderEntry {
+            id: String,
+            label: String,
+            detected: bool,
+        }
+
+        let mut entries: Vec<ProviderEntry> = Vec::with_capacity(2 + selectable.len());
+
+        entries.push(ProviderEntry {
+            id: "nearai".to_string(),
+            label: make_label("nearai", "NEAR AI", "multi-model access via NEAR account"),
+            detected: detected_env.get("nearai").copied().unwrap_or(false),
+        });
+
+        entries.push(ProviderEntry {
+            id: "gemini_oauth".to_string(),
+            label: make_label(
+                "gemini_oauth",
+                "Gemini CLI",
+                "Official Gemini API via Gemini CLI OAuth",
+            ),
+            detected: false,
+        });
+
+        entries.push(ProviderEntry {
+            id: "openai_codex".to_string(),
+            label: make_label(
+                "openai_codex",
+                "OpenAI Codex",
+                "ChatGPT subscription (Plus/Pro/Max)",
+            ),
+            detected: false,
+        });
 
         for def in &selectable {
-            let label = format!(
-                "{:<17}- {}",
-                def.setup
-                    .as_ref()
-                    .map(|s| s.display_name())
-                    .unwrap_or(&def.id),
-                def.description
-            );
-            options.push(label);
-            provider_ids.push(def.id.clone());
+            let display_name = def
+                .setup
+                .as_ref()
+                .map(|s| s.display_name())
+                .unwrap_or(&def.id);
+            entries.push(ProviderEntry {
+                id: def.id.clone(),
+                label: make_label(&def.id, display_name, &def.description),
+                detected: detected_env.get(def.id.as_str()).copied().unwrap_or(false),
+            });
         }
 
         // Bedrock is a special case (native AWS SDK, not registry-based)
-        options.push("AWS Bedrock      - Claude & other models via AWS (IAM, SSO)".to_string());
-        provider_ids.push("bedrock".to_string());
+        entries.push(ProviderEntry {
+            id: "bedrock".to_string(),
+            label: make_label(
+                "bedrock",
+                "AWS Bedrock",
+                "Claude & other models via AWS (IAM, SSO)",
+            ),
+            detected: false,
+        });
+
+        // Sort: detected providers first, preserving relative order within each group.
+        entries.sort_by_key(|e| !e.detected);
+
+        let mut options: Vec<String> = Vec::with_capacity(entries.len());
+        let mut provider_ids: Vec<String> = Vec::with_capacity(entries.len());
+        for entry in &entries {
+            options.push(entry.label.clone());
+            provider_ids.push(entry.id.clone());
+        }
 
         let option_refs: Vec<&str> = options.iter().map(|s| s.as_str()).collect();
         let choice = select_one("Provider:", &option_refs).map_err(SetupError::Io)?;
@@ -1260,6 +1449,24 @@ impl SetupWizard {
         }
 
         Ok(())
+    }
+
+    /// Detect an Anthropic credential from the environment.
+    ///
+    /// Checks `ANTHROPIC_API_KEY` first, then `ANTHROPIC_OAUTH_TOKEN`.
+    /// Returns the key/token string if found, or `None`.
+    fn detect_anthropic_key() -> Option<String> {
+        if let Ok(key) = std::env::var("ANTHROPIC_API_KEY")
+            && !key.is_empty()
+        {
+            return Some(key);
+        }
+        if let Ok(token) = std::env::var("ANTHROPIC_OAUTH_TOKEN")
+            && !token.is_empty()
+        {
+            return Some(token);
+        }
+        None
     }
 
     /// Update the selected LLM backend while preserving the current model when
@@ -3079,8 +3286,11 @@ impl SetupWizard {
         let _ = loaded;
     }
 
-    /// Save settings to the database and `~/.ironclaw/.env`, then print summary.
+    /// Save settings to the database and `~/.ironclaw/.env`, then print
+    /// a warm completion card with the 3 key facts.
     async fn save_and_summarize(&mut self) -> Result<(), SetupError> {
+        use crate::cli::fmt;
+
         self.settings.onboard_completed = true;
 
         // Final persist (idempotent — earlier incremental saves already wrote
@@ -3096,117 +3306,108 @@ impl SetupWizard {
         // Write bootstrap env (also idempotent)
         self.write_bootstrap_env()?;
 
+        // ── Completion card ───────────────────────────────────
+        let sep = fmt::separator(38);
+
         println!();
-        print_success("Configuration saved to database");
+        println!("  {}", sep);
         println!();
 
-        // Print summary
-        println!("Configuration Summary:");
-        println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+        // Title line: checkmark + "ironclaw is ready"
+        println!(
+            "  {}\u{2713}{} {}ironclaw is ready{}",
+            fmt::success(),
+            fmt::reset(),
+            fmt::bold_accent(),
+            fmt::reset(),
+        );
+        println!();
 
-        let backend = self
-            .settings
-            .database_backend
-            .as_deref()
-            .unwrap_or("postgres");
-        match backend {
-            "libsql" => {
-                if let Some(ref path) = self.settings.libsql_path {
-                    println!("  Database: libSQL ({})", path);
-                } else {
-                    println!("  Database: libSQL (default path)");
-                }
-                if self.settings.libsql_url.is_some() {
-                    println!("  Turso sync: enabled");
-                }
-            }
-            _ => {
-                if self.settings.database_url.is_some() {
-                    println!("  Database: PostgreSQL (configured)");
-                }
-            }
-        }
-
-        match self.settings.secrets_master_key_source {
-            KeySource::Keychain => println!("  Security: OS keychain"),
-            KeySource::Env => println!("  Security: environment variable"),
-            KeySource::None => println!("  Security: disabled"),
-        }
-
-        if let Some(ref provider) = self.settings.llm_backend {
-            let display = match provider.as_str() {
-                "nearai" => "NEAR AI",
-                "anthropic" => "Anthropic",
-                "openai" => "OpenAI",
-                "ollama" => "Ollama",
-                "openai_compatible" => "OpenAI-compatible",
-                "bedrock" => "AWS Bedrock",
-                "openai_codex" => "OpenAI Codex",
-                other => other,
-            };
-            println!("  Provider: {}", display);
-        }
-
-        if let Some(ref model) = self.settings.selected_model {
+        // Fact 1: Provider + model
+        let provider_display = match self.settings.llm_backend.as_deref() {
+            Some("nearai") => "NEAR AI".to_string(),
+            Some("anthropic") => "Anthropic".to_string(),
+            Some("openai") => "OpenAI".to_string(),
+            Some("ollama") => "Ollama".to_string(),
+            Some("openai_compatible") => "OpenAI-compatible".to_string(),
+            Some("bedrock") => "AWS Bedrock".to_string(),
+            Some("openai_codex") => "OpenAI Codex".to_string(),
+            Some("gemini_oauth") => "Gemini CLI".to_string(),
+            Some(other) => other.to_string(),
+            None => "unknown".to_string(),
+        };
+        let model_suffix = if let Some(ref model) = self.settings.selected_model {
             // Truncate long model names (char-based to avoid UTF-8 panic)
-            let display = if model.chars().count() > 40 {
-                let truncated: String = model.chars().take(37).collect();
+            let display = if model.chars().count() > 30 {
+                let truncated: String = model.chars().take(27).collect();
                 format!("{}...", truncated)
             } else {
                 model.clone()
             };
-            println!("  Model: {}", display);
-        }
-
-        if self.settings.embeddings.enabled {
-            println!(
-                "  Embeddings: {} ({})",
-                self.settings.embeddings.provider, self.settings.embeddings.model
-            );
+            format!(" ({})", display)
         } else {
-            println!("  Embeddings: disabled");
-        }
+            String::new()
+        };
+        let provider_value = format!("{}{}", provider_display, model_suffix);
+        println!(
+            "    {}provider{}    {}{}{}",
+            fmt::dim(),
+            fmt::reset(),
+            fmt::accent(),
+            provider_value,
+            fmt::reset(),
+        );
 
-        if let Some(ref tunnel_url) = self.settings.tunnel.public_url {
-            println!("  Tunnel: {} (static)", tunnel_url);
-        } else if let Some(ref provider) = self.settings.tunnel.provider {
-            println!("  Tunnel: {} (managed, starts at boot)", provider);
-        }
+        // Fact 2: Database
+        let db_display = match self.settings.database_backend.as_deref() {
+            Some("libsql") => "libSQL".to_string(),
+            Some("postgres") | Some("postgresql") => "PostgreSQL".to_string(),
+            Some(other) => other.to_string(),
+            None => "unknown".to_string(),
+        };
+        println!(
+            "    {}database{}    {}{}{}",
+            fmt::dim(),
+            fmt::reset(),
+            fmt::accent(),
+            db_display,
+            fmt::reset(),
+        );
 
-        let has_tunnel =
-            self.settings.tunnel.public_url.is_some() || self.settings.tunnel.provider.is_some();
-
-        println!("  Channels:");
-        println!("    - CLI/TUI: enabled");
-
-        if self.settings.channels.http_enabled {
-            let port = self.settings.channels.http_port.unwrap_or(8080);
-            println!("    - HTTP: enabled (port {})", port);
-        }
-
-        for channel_name in &self.settings.channels.wasm_channels {
-            let mode = if has_tunnel { "webhook" } else { "polling" };
-            println!(
-                "    - {}: enabled ({})",
-                capitalize_first(channel_name),
-                mode
-            );
-        }
-
-        if self.settings.heartbeat.enabled {
-            println!(
-                "  Heartbeat: every {} minutes",
-                self.settings.heartbeat.interval_secs / 60
-            );
-        }
+        // Fact 3: Security
+        let security_display = match self.settings.secrets_master_key_source {
+            KeySource::Keychain => "OS keychain",
+            KeySource::Env => "environment variable",
+            KeySource::None => "disabled",
+        };
+        println!(
+            "    {}security{}    {}{}{}",
+            fmt::dim(),
+            fmt::reset(),
+            fmt::accent(),
+            security_display,
+            fmt::reset(),
+        );
 
         println!();
-        println!("To start the agent, run:");
-        println!("  ironclaw");
+        println!("  {}", sep);
         println!();
-        println!("To change settings later:");
-        println!("  ironclaw config set <setting> <value>");
-        println!("  ironclaw onboard");
+
+        // Action hints
+        println!(
+            "  {}Start chatting:{}   {}ironclaw{}",
+            fmt::dim(),
+            fmt::reset(),
+            fmt::bold_accent(),
+            fmt::reset(),
+        );
+        println!(
+            "  {}Full setup:{}       {}ironclaw onboard{}",
+            fmt::dim(),
+            fmt::reset(),
+            fmt::bold_accent(),
+            fmt::reset(),
+        );
         println!();
 
         if self.config.quick {
@@ -3551,6 +3752,7 @@ mod tests {
             channels_only: false,
             provider_only: false,
             quick: false,
+            steps: vec![],
         };
         let wizard = SetupWizard::with_config(config);
         assert!(wizard.config.skip_auth);

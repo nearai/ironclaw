@@ -415,6 +415,16 @@ impl Channel for GatewayChannel {
                 suggestions,
                 thread_id,
             },
+            StatusUpdate::TurnCost {
+                input_tokens,
+                output_tokens,
+                cost_usd,
+            } => SseEvent::TurnCost {
+                input_tokens,
+                output_tokens,
+                cost_usd,
+                thread_id,
+            },
         };
 
         self.state.sse.broadcast(event);

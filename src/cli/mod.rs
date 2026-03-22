@@ -18,6 +18,7 @@ mod channels;
 mod completion;
 mod config;
 mod doctor;
+pub mod fmt;
 mod hooks;
 #[cfg(feature = "import")]
 pub mod import;
@@ -111,16 +112,20 @@ pub enum Command {
         skip_auth: bool,
 
         /// Reconfigure channels only
-        #[arg(long, conflicts_with_all = ["provider_only", "quick"])]
+        #[arg(long, conflicts_with_all = ["provider_only", "quick", "step"], help = "Deprecated: use --step channels")]
         channels_only: bool,
 
         /// Reconfigure LLM provider and model only
-        #[arg(long, conflicts_with_all = ["channels_only", "quick"])]
+        #[arg(long, conflicts_with_all = ["channels_only", "quick", "step"], help = "Deprecated: use --step provider")]
         provider_only: bool,
 
         /// Quick setup: auto-defaults everything except LLM provider and model
-        #[arg(long, conflicts_with_all = ["channels_only", "provider_only"])]
+        #[arg(long, conflicts_with_all = ["channels_only", "provider_only", "step"])]
         quick: bool,
+
+        /// Run only specific setup steps (comma-separated: provider, channels, model, database, security)
+        #[arg(long, value_delimiter = ',', conflicts_with_all = ["channels_only", "provider_only", "quick"])]
+        step: Vec<String>,
     },
 
     /// Manage configuration settings

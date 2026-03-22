@@ -800,12 +800,16 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                     });
                 }
 
+                let error_preview = {
+                    let msg = format!("Error: {}", e);
+                    truncate_for_preview(&msg, 500).into_owned()
+                };
                 self.log_event(
                     "tool_result",
                     serde_json::json!({
                         "tool_name": selection.tool_name,
                         "success": false,
-                        "output": truncate_for_preview(&format!("Error: {}", e), 500),
+                        "output": error_preview,
                     }),
                 );
 
