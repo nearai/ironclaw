@@ -18,6 +18,7 @@ pub mod config;
 pub mod costs;
 pub mod error;
 pub mod failover;
+pub mod gemini_oauth;
 mod github_copilot;
 pub(crate) mod github_copilot_auth;
 mod nearai_chat;
@@ -50,6 +51,7 @@ pub use config::{
 };
 pub use error::LlmError;
 pub use failover::{CooldownConfig, FailoverProvider};
+pub use gemini_oauth::GeminiOauthProvider;
 pub use nearai_chat::{DEFAULT_MODEL, ModelInfo, NearAiChatProvider, default_models};
 pub use openai_codex_provider::OpenAiCodexProvider;
 pub use openai_codex_session::{OpenAiCodexSession, OpenAiCodexSessionManager};
@@ -91,6 +93,10 @@ pub async fn create_llm_provider(
 
     if config.backend == "nearai" || config.backend == "near_ai" || config.backend == "near" {
         return create_llm_provider_with_config(&config.nearai, session, timeout);
+    }
+
+    if config.backend == "gemini_oauth" || config.backend == "gemini-oauth" {
+        return create_gemini_oauth_provider(config);
     }
 
     // Bedrock uses a native AWS SDK, not the rig-core registry
@@ -490,6 +496,19 @@ fn create_cheap_provider_for_backend(
         });
     }
 
+    if config.backend == "gemini_oauth" {
+        let Some(ref gemini_config) = config.gemini_oauth else {
+            return Err(LlmError::RequestFailed {
+                provider: "gemini_oauth".to_string(),
+                reason: "Gemini OAuth config not available for cheap model".to_string(),
+            });
+        };
+        let mut cheap_gemini_config = gemini_config.clone();
+        cheap_gemini_config.model = cheap_model.to_string();
+        let provider = GeminiOauthProvider::new(cheap_gemini_config)?;
+        return Ok(Some(Arc::new(provider)));
+    }
+
     // Registry-based provider: clone config and swap model
     let reg_config = config.provider.as_ref().ok_or_else(|| LlmError::RequestFailed {
         provider: config.backend.clone(),
@@ -674,6 +693,17 @@ pub async fn build_provider_chain(
     Ok((llm, cheap_llm, recording_handle))
 }
 
+pub fn create_gemini_oauth_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, LlmError> {
+    let gemini_config = config
+        .gemini_oauth
+        .clone()
+        .ok_or_else(|| LlmError::AuthFailed {
+            provider: "gemini_oauth".to_string(),
+        })?;
+    let provider = gemini_oauth::GeminiOauthProvider::new(gemini_config)?;
+    Ok(Arc::new(provider))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -705,6 +735,7 @@ mod tests {
             nearai: test_nearai_config(),
             provider: None,
             bedrock: None,
+            gemini_oauth: None,
             request_timeout_secs: 120,
             cheap_model: None,
             smart_routing_cascade: true,
@@ -783,6 +814,30 @@ mod tests {
         assert!(
             result.is_err(),
             "Bedrock should return an error for cheap model"
+        );
+    }
+
+    #[test]
+    fn test_create_cheap_llm_provider_gemini_oauth_creates_provider() {
+        let mut config = test_llm_config();
+        config.backend = "gemini_oauth".to_string();
+        config.cheap_model = Some("gemini-2.5-flash-lite".to_string());
+        config.gemini_oauth = Some(crate::config::GeminiOauthConfig {
+            model: "gemini-2.5-pro".to_string(),
+            credentials_path: std::path::PathBuf::from("/tmp/nonexistent-creds.json"),
+        });
+
+        let session = Arc::new(SessionManager::new(SessionConfig::default()));
+        let result = create_cheap_llm_provider(&config, session);
+
+        // Should succeed and return a provider (credentials validation is deferred
+        // until the first LLM call, not at construction time).
+        let provider = result.expect("gemini_oauth cheap provider should succeed");
+        assert!(provider.is_some(), "Should return Some(provider)");
+        assert_eq!(
+            provider.unwrap().model_name(),
+            "gemini-2.5-flash-lite",
+            "Cheap provider should use the overridden model name"
         );
     }
 

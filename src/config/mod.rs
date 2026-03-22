@@ -56,8 +56,8 @@ pub use self::tunnel::TunnelConfig;
 pub use self::wasm::WasmConfig;
 pub use self::workspace::WorkspaceConfig;
 pub use crate::llm::config::{
-    BedrockConfig, CacheRetention, LlmConfig, NearAiConfig, OAUTH_PLACEHOLDER, OpenAiCodexConfig,
-    RegistryProviderConfig,
+    BedrockConfig, CacheRetention, GeminiOauthConfig, LlmConfig, NearAiConfig, OAUTH_PLACEHOLDER,
+    OpenAiCodexConfig, RegistryProviderConfig,
 };
 pub use crate::llm::session::SessionConfig;
 
