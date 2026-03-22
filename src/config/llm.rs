@@ -9,6 +9,7 @@ use crate::llm::config::*;
 use crate::llm::registry::{ProviderProtocol, ProviderRegistry};
 use crate::llm::session::SessionConfig;
 use crate::settings::Settings;
+
 impl LlmConfig {
     /// Create a test-friendly config without reading env vars.
     #[cfg(feature = "libsql")]
@@ -37,6 +38,7 @@ impl LlmConfig {
             },
             provider: None,
             bedrock: None,
+            gemini_oauth: None,
             openai_codex: None,
             request_timeout_secs: 120,
             cheap_model: None,
@@ -73,11 +75,16 @@ impl LlmConfig {
             backend_lower == "nearai" || backend_lower == "near_ai" || backend_lower == "near";
         let is_bedrock =
             backend_lower == "bedrock" || backend_lower == "aws_bedrock" || backend_lower == "aws";
+        let is_gemini_oauth = backend_lower == "gemini_oauth" || backend_lower == "gemini-oauth";
         let is_openai_codex = backend_lower == "openai_codex"
             || backend_lower == "openai-codex"
             || backend_lower == "codex";
 
-        if !is_nearai && !is_bedrock && !is_openai_codex && registry.find(&backend_lower).is_none()
+        if !is_nearai
+            && !is_bedrock
+            && !is_gemini_oauth
+            && !is_openai_codex
+            && registry.find(&backend_lower).is_none()
         {
             tracing::warn!(
                 "Unknown LLM backend '{}'. Will attempt as openai_compatible fallback.",
@@ -131,8 +138,8 @@ impl LlmConfig {
             smart_routing_cascade: parse_optional_env("SMART_ROUTING_CASCADE", true)?,
         };
 
-        // Resolve registry provider config (for non-NearAI, non-Bedrock, non-Codex backends)
-        let provider = if is_nearai || is_bedrock || is_openai_codex {
+        // Resolve registry provider config (for non-NearAI, non-Bedrock, non-Gemini, non-Codex backends)
+        let provider = if is_nearai || is_bedrock || is_gemini_oauth || is_openai_codex {
             None
         } else {
             Some(Self::resolve_registry_provider(
@@ -213,6 +220,19 @@ impl LlmConfig {
 
         let request_timeout_secs = parse_optional_env("LLM_REQUEST_TIMEOUT_SECS", 120)?;
 
+        let gemini_oauth = if backend_lower == "gemini_oauth" || backend_lower == "gemini-oauth" {
+            let model = Self::resolve_model("GEMINI_MODEL", settings, "gemini-2.5-flash")?;
+            let credentials_path = optional_env("GEMINI_CREDENTIALS_PATH")?
+                .map(PathBuf::from)
+                .unwrap_or_else(GeminiOauthConfig::default_credentials_path);
+            Some(GeminiOauthConfig {
+                model,
+                credentials_path,
+            })
+        } else {
+            None
+        };
+
         // Generic cheap model (works with any backend).
         // Falls back to NearAI-specific cheap_model in provider chain logic.
         let cheap_model = optional_env("LLM_CHEAP_MODEL")?;
@@ -226,6 +246,8 @@ impl LlmConfig {
                 "nearai".to_string()
             } else if is_bedrock {
                 "bedrock".to_string()
+            } else if is_gemini_oauth {
+                "gemini_oauth".to_string()
             } else if is_openai_codex {
                 "openai_codex".to_string()
             } else if let Some(ref p) = provider {
@@ -237,6 +259,7 @@ impl LlmConfig {
             nearai,
             provider,
             bedrock,
+            gemini_oauth,
             openai_codex,
             request_timeout_secs,
             cheap_model,

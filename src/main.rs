@@ -133,6 +133,11 @@ async fn async_main() -> anyhow::Result<()> {
             return ironclaw::cli::run_skills_command(skills_cmd.clone(), cli.config.as_deref())
                 .await;
         }
+        Some(Command::Hooks(hooks_cmd)) => {
+            init_cli_tracing();
+            return ironclaw::cli::run_hooks_command(hooks_cmd.clone(), cli.config.as_deref())
+                .await;
+        }
         Some(Command::Logs(logs_cmd)) => {
             init_cli_tracing();
             return ironclaw::cli::run_logs_command(logs_cmd.clone(), cli.config.as_deref()).await;

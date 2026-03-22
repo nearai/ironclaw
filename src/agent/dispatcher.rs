@@ -845,11 +845,9 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                         Ok(output) => {
                             let sanitized =
                                 self.agent.safety().sanitize_tool_output(&tc.name, &output);
-                            self.agent.safety().wrap_for_llm(
-                                &tc.name,
-                                &sanitized.content,
-                                sanitized.was_modified,
-                            )
+                            self.agent
+                                .safety()
+                                .wrap_for_llm(&tc.name, &sanitized.content)
                         }
                         Err(e) => format!("Tool '{}' failed: {}", tc.name, e),
                     };
@@ -1270,9 +1268,10 @@ mod tests {
 
     #[test]
     fn test_shell_destructive_command_requires_explicit_approval() {
-        // requires_explicit_approval() detects destructive commands that
-        // should return ApprovalRequirement::Always from ShellTool.
-        use crate::tools::builtin::shell::requires_explicit_approval;
+        // classify_command_risk() classifies destructive commands as High, which
+        // maps to ApprovalRequirement::Always in ShellTool::requires_approval().
+        use crate::tools::RiskLevel;
+        use crate::tools::builtin::shell::classify_command_risk;
 
         let destructive_cmds = [
             "rm -rf /tmp/test",
@@ -1280,20 +1279,14 @@ mod tests {
             "git reset --hard HEAD~5",
         ];
         for cmd in &destructive_cmds {
-            assert!(
-                requires_explicit_approval(cmd),
-                "'{}' should require explicit approval",
-                cmd
-            );
+            let r = classify_command_risk(cmd);
+            assert_eq!(r, RiskLevel::High, "'{}'", cmd); // safety: test code
         }
 
         let safe_cmds = ["git status", "cargo build", "ls -la"];
         for cmd in &safe_cmds {
-            assert!(
-                !requires_explicit_approval(cmd),
-                "'{}' should not require explicit approval",
-                cmd
-            );
+            let r = classify_command_risk(cmd);
+            assert_ne!(r, RiskLevel::High, "'{}'", cmd); // safety: test code
         }
     }
 

@@ -175,7 +175,7 @@ mod tests {
 
     #[test]
     fn test_truncate_preview_closes_tool_output_tag() {
-        let s = "<tool_output name=\"search\" sanitized=\"true\">\nSome very long content here\n</tool_output>";
+        let s = "<tool_output name=\"search\">\nSome very long content here\n</tool_output>";
         // Truncate so it cuts before the closing tag
         let result = truncate_preview(s, 60);
         assert!(result.ends_with("</tool_output>"));
@@ -184,7 +184,7 @@ mod tests {
 
     #[test]
     fn test_truncate_preview_no_extra_close_when_intact() {
-        let s = "<tool_output name=\"echo\" sanitized=\"false\">\nshort\n</tool_output>";
+        let s = "<tool_output name=\"echo\">\nshort\n</tool_output>";
         // The string is short enough not to be truncated
         let result = truncate_preview(s, 500);
         assert_eq!(result, s);
