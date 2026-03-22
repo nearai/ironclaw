@@ -556,6 +556,33 @@ impl Agent {
                         .await;
                 }
 
+                // Emit per-turn cost summary
+                {
+                    let usage = self.cost_guard().model_usage().await;
+                    let (total_in, total_out, total_cost) =
+                        usage
+                            .values()
+                            .fold((0u64, 0u64, rust_decimal::Decimal::ZERO), |acc, m| {
+                                (
+                                    acc.0 + m.input_tokens,
+                                    acc.1 + m.output_tokens,
+                                    acc.2 + m.cost,
+                                )
+                            });
+                    let _ = self
+                        .channels
+                        .send_status(
+                            &message.channel,
+                            StatusUpdate::TurnCost {
+                                input_tokens: total_in,
+                                output_tokens: total_out,
+                                cost_usd: format!("${:.4}", total_cost),
+                            },
+                            &message.metadata,
+                        )
+                        .await;
+                }
+
                 Ok(SubmissionResult::response(response))
             }
             Ok(AgenticLoopResult::NeedApproval { pending }) => {
