@@ -783,6 +783,7 @@ mod tests {
         assert!(cfg.response_cache_enabled);
         assert_eq!(cfg.response_cache_ttl_secs, 2222);
         assert_eq!(cfg.response_cache_max_entries, 333);
+        clear_shared_decorator_env();
     }
 
     #[test]
