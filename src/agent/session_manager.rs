@@ -221,6 +221,25 @@ impl SessionManager {
         }
     }
 
+    /// Check whether a thread is already registered for the given user/channel.
+    ///
+    /// This is a cheap read-only lookup used by approval routing to avoid
+    /// taking the session write lock on the common path where the approval
+    /// thread is already mapped.
+    pub async fn is_thread_registered(
+        &self,
+        user_id: &str,
+        channel: &str,
+        external_thread_id: &str,
+    ) -> bool {
+        let thread_map = self.thread_map.read().await;
+        thread_map.iter().any(|(key, _)| {
+            key.user_id == user_id
+                && key.channel == channel
+                && key.external_thread_id.as_deref() == Some(external_thread_id)
+        })
+    }
+
     /// Get undo manager for a thread.
     pub async fn get_undo_manager(&self, thread_id: Uuid) -> Arc<Mutex<UndoManager>> {
         // Fast path
@@ -669,6 +688,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_is_thread_registered() {
+        use crate::agent::session::{Session, Thread};
+
+        let manager = SessionManager::new();
+        let tid = Uuid::new_v4();
+        let session = Arc::new(Mutex::new(Session::new("user-reg")));
+
+        {
+            let mut sess = session.lock().await;
+            let thread = Thread::with_id(tid, sess.id);
+            sess.threads.insert(tid, thread);
+        }
+
+        assert!(
+            !manager
+                .is_thread_registered("user-reg", "gateway", &tid.to_string())
+                .await
+        );
+
+        manager
+            .register_thread("user-reg", "gateway", tid, Arc::clone(&session))
+            .await;
+
+        assert!(
+            manager
+                .is_thread_registered("user-reg", "gateway", &tid.to_string())
+                .await
+        );
+    }
+
+    #[tokio::test]
     async fn test_multiple_threads_per_user() {
         let manager = SessionManager::new();
 
@@ -802,7 +852,7 @@ mod tests {
     // === QA Plan P3 - 4.2: Concurrent session stress tests ===
 
     #[tokio::test]
-    async fn concurrent_get_or_create_same_user_returns_same_session() {
+    async fn concurrent_get_or_create_same_user_returns_same_session() -> anyhow::Result<()> {
         let manager = Arc::new(SessionManager::new());
 
         let handles: Vec<_> = (0..30)
@@ -814,17 +864,19 @@ mod tests {
 
         let mut sessions = Vec::new();
         for handle in handles {
-            sessions.push(handle.await.expect("task should not panic"));
+            sessions.push(handle.await?);
         }
 
         // All 30 must return the *same* Arc (double-checked locking guarantee).
         for s in &sessions {
             assert!(Arc::ptr_eq(&sessions[0], s));
         }
+
+        Ok(())
     }
 
     #[tokio::test]
-    async fn concurrent_resolve_thread_distinct_users_no_cross_talk() {
+    async fn concurrent_resolve_thread_distinct_users_no_cross_talk() -> anyhow::Result<()> {
         let manager = Arc::new(SessionManager::new());
 
         let handles: Vec<_> = (0..20)
@@ -840,7 +892,7 @@ mod tests {
 
         let mut results = Vec::new();
         for handle in handles {
-            results.push(handle.await.expect("task should not panic"));
+            results.push(handle.await?);
         }
 
         // All thread IDs must be unique.
@@ -853,10 +905,12 @@ mod tests {
             assert!(sess.threads.contains_key(tid));
             assert_eq!(sess.threads.len(), 1);
         }
+
+        Ok(())
     }
 
     #[tokio::test]
-    async fn concurrent_resolve_thread_same_user_different_channels() {
+    async fn concurrent_resolve_thread_same_user_different_channels() -> anyhow::Result<()> {
         let manager = Arc::new(SessionManager::new());
         let channels = ["gateway", "telegram", "slack", "cli", "repl"];
 
@@ -874,7 +928,7 @@ mod tests {
 
         let mut results = Vec::new();
         for handle in handles {
-            results.push(handle.await.expect("task should not panic"));
+            results.push(handle.await?);
         }
 
         // All 5 threads must be unique (different channels = different keys).
@@ -884,10 +938,12 @@ mod tests {
         // All threads should live in the same session.
         let sess = results[0].1.lock().await;
         assert_eq!(sess.threads.len(), 5);
+
+        Ok(())
     }
 
     #[tokio::test]
-    async fn concurrent_get_undo_manager_same_thread_returns_same_arc() {
+    async fn concurrent_get_undo_manager_same_thread_returns_same_arc() -> anyhow::Result<()> {
         let manager = Arc::new(SessionManager::new());
         let (_, tid) = manager.resolve_thread("undo-user", "gateway", None).await;
 
@@ -900,13 +956,15 @@ mod tests {
 
         let mut managers = Vec::new();
         for handle in handles {
-            managers.push(handle.await.expect("task should not panic"));
+            managers.push(handle.await?);
         }
 
         // All 20 must point to the same UndoManager.
         for m in &managers {
             assert!(Arc::ptr_eq(&managers[0], m));
         }
+
+        Ok(())
     }
 
     #[tokio::test]
