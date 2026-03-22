@@ -972,7 +972,7 @@ impl GeminiOauthProvider {
             None => return,
         };
 
-        // For each model turn in the active loop, ensure the first functionCall has a thoughtSignature.
+        // For each model turn in the active loop, ensure functionCall parts have a thoughtSignature.
         for item in contents.iter_mut().skip(start) {
             let is_model = item.get("role").and_then(|r| r.as_str()) == Some("model");
             if !is_model {
@@ -992,7 +992,6 @@ impl GeminiOauthProvider {
                             );
                         }
                         modified = true;
-                        break; // Only the first functionCall
                     }
                 }
                 if modified {
@@ -2581,5 +2580,37 @@ mod tests {
         assert_eq!(curated.len(), 2, "Invalid model turn should be dropped");
         assert_eq!(curated[0]["parts"][0]["text"], "hello");
         assert_eq!(curated[1]["parts"][0]["text"], "again");
+    }
+
+    #[test]
+    fn test_ensure_thought_signatures_adds_signatures_to_all_function_calls() {
+        let mut contents = vec![
+            serde_json::json!({
+                "role": "user",
+                "parts": [{ "text": "call tools" }]
+            }),
+            serde_json::json!({
+                "role": "model",
+                "parts": [
+                    { "functionCall": { "name": "memory_write", "args": { "key": "a" } } },
+                    { "functionCall": { "name": "memory_write", "args": { "key": "b" } } }
+                ]
+            }),
+        ];
+
+        GeminiOauthProvider::ensure_thought_signatures(&mut contents);
+
+        let parts = contents[1]
+            .get("parts")
+            .and_then(|p| p.as_array())
+            .expect("model turn should have parts");
+
+        let signed_calls = parts
+            .iter()
+            .filter(|part| part.get("functionCall").is_some())
+            .filter(|part| part.get("thoughtSignature").is_some())
+            .count();
+
+        assert_eq!(signed_calls, 2); // safety: test-only assertion
     }
 }
