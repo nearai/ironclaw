@@ -3855,6 +3855,17 @@ function renderRoutineDetail(routine) {
   }
 
   // Action config
+  if (routine.full_job_permissions) {
+    html += '<div class="job-description"><h3>Full Job Permissions</h3>'
+      + '<div class="job-meta-grid">'
+      + metaItem('Mode', routine.full_job_permissions.permission_mode)
+      + metaItem('Owner Default', routine.full_job_permissions.default_permission_mode)
+      + metaItem('Inherited Tools', (routine.full_job_permissions.owner_allowed_tools || []).join(', ') || '-')
+      + metaItem('Stored Tools', (routine.full_job_permissions.stored_tool_permissions || []).join(', ') || '-')
+      + metaItem('Effective Tools', (routine.full_job_permissions.effective_tool_permissions || []).join(', ') || '-')
+      + '</div></div>';
+  }
+
   html += '<div class="job-description"><h3>Action</h3>'
     + '<pre class="action-json">' + escapeHtml(JSON.stringify(routine.action, null, 2)) + '</pre></div>';
 
@@ -4689,6 +4700,10 @@ var AGENT_SETTINGS = [
     settings: [
       { key: 'routines.max_concurrent', label: 'cfg.routines_max_concurrent.label', description: 'cfg.routines_max_concurrent.desc', type: 'number', min: 0 },
       { key: 'routines.default_cooldown_secs', label: 'cfg.routines_cooldown.label', description: 'cfg.routines_cooldown.desc', type: 'number', min: 0 },
+      { key: 'routines.full_job_default_permission_mode', label: 'cfg.routines_full_job_default_mode.label', description: 'cfg.routines_full_job_default_mode.desc',
+        type: 'select', options: ['inherit_owner', 'explicit', 'copy_owner'] },
+      { key: 'routines.full_job_owner_allowed_tools', label: 'cfg.routines_full_job_owner_tools.label', description: 'cfg.routines_full_job_owner_tools.desc',
+        type: 'list', placeholder: 'shell, http' },
     ]
   },
   {
@@ -4873,7 +4888,14 @@ function renderStructuredSettingsRow(def, value, activeValue) {
   inputWrap.style.gap = '8px';
 
   var ariaLabel = I18n.t(def.label) + (def.description ? '. ' + I18n.t(def.description) : '');
-  var placeholderText = activeValue ? I18n.t('settings.envValue', { value: activeValue }) : (def.placeholder || I18n.t('settings.envDefault'));
+  function formatSettingValue(raw) {
+    if (Array.isArray(raw)) return raw.join(', ');
+    if (raw === null || raw === undefined) return '';
+    return String(raw);
+  }
+
+  var activeValueText = formatSettingValue(activeValue);
+  var placeholderText = activeValueText ? I18n.t('settings.envValue', { value: activeValueText }) : (def.placeholder || I18n.t('settings.envDefault'));
 
   if (def.type === 'boolean') {
     var boolSel = document.createElement('select');
@@ -4945,6 +4967,26 @@ function renderStructuredSettingsRow(def, value, activeValue) {
       };
     })(def.key, numInp));
     inputWrap.appendChild(numInp);
+  } else if (def.type === 'list') {
+    var listInp = document.createElement('input');
+    listInp.type = 'text';
+    listInp.className = 'settings-input';
+    listInp.setAttribute('aria-label', ariaLabel);
+    var listValue = '';
+    if (Array.isArray(value)) listValue = value.join(', ');
+    else if (typeof value === 'string') listValue = value;
+    listInp.value = listValue;
+    if (!listValue) listInp.placeholder = placeholderText;
+    listInp.addEventListener('change', (function(k, el) {
+      return function() {
+        if (el.value.trim() === '') return saveSetting(k, null);
+        var items = el.value.split(/[\n,]/).map(function(item) {
+          return item.trim();
+        }).filter(Boolean);
+        saveSetting(k, items);
+      };
+    })(def.key, listInp));
+    inputWrap.appendChild(listInp);
   } else {
     var textInp = document.createElement('input');
     textInp.type = 'text';

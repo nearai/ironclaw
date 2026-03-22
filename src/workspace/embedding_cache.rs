@@ -183,8 +183,8 @@ impl EmbeddingProvider for CachedEmbeddingProvider {
         {
             let mut guard = self.cache.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(entry) = guard.get_mut(&key) {
-                // Key already present (thundering herd) — just update, no eviction needed.
-                entry.embedding = embedding.clone();
+                // Thundering herd — another caller already cached it.
+                // Just touch timestamp; skip the clone.
                 entry.last_accessed = Instant::now();
             } else {
                 Self::evict_lru(&mut guard, self.config.max_entries);
@@ -260,15 +260,10 @@ impl EmbeddingProvider for CachedEmbeddingProvider {
             "embedding batch: partial cache"
         );
 
-        // Assemble results first (all misses, regardless of cache capacity).
-        for (orig_idx, emb) in miss_indices.iter().copied().zip(&new_embeddings) {
-            results[orig_idx] = Some(emb.clone());
-        }
-
-        // Cache the new embeddings, respecting max_entries.
+        // Cache FIRST (clone only the cacheable subset), then move originals
+        // into results. This avoids cloning capacity-skipped embeddings entirely.
         {
             let mut guard = self.cache.lock().unwrap_or_else(|e| e.into_inner());
-            // When misses exceed capacity, clear and only cache the tail.
             let cacheable = miss_indices.len().min(self.config.max_entries);
             let skip = miss_indices.len() - cacheable;
             let need_to_evict = (guard.len() + cacheable).saturating_sub(self.config.max_entries);
@@ -285,6 +280,11 @@ impl EmbeddingProvider for CachedEmbeddingProvider {
                     },
                 );
             }
+        }
+
+        // Move originals into results (zero-copy for all, including cached ones).
+        for (orig_idx, emb) in miss_indices.iter().copied().zip(new_embeddings) {
+            results[orig_idx] = Some(emb);
         }
 
         results
