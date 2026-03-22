@@ -192,6 +192,27 @@ impl ExecutionLoop {
             // 6. Handle response
             match llm_output.response {
                 LlmResponse::Text(text) => {
+                    // Check for FINAL() in text (regex fallback — models
+                    // sometimes write FINAL() outside code blocks)
+                    if let Some(answer) = extract_final_from_text(&text) {
+                        self.thread
+                            .add_message(ThreadMessage::assistant(text));
+                        step.status = StepStatus::Completed;
+                        step.completed_at = Some(chrono::Utc::now());
+                        self.thread.add_event(EventKind::StepCompleted {
+                            step_id: step.id,
+                            tokens: step.tokens_used,
+                        });
+                        self.thread.step_count += 1;
+                        self.thread.transition_to(
+                            ThreadState::Completed,
+                            Some("FINAL() in text".into()),
+                        )?;
+                        return Ok(ThreadOutcome::Completed {
+                            response: Some(answer),
+                        });
+                    }
+
                     // Check for tool intent nudge
                     if nudge_enabled
                         && nudge_count < max_nudges
@@ -462,6 +483,70 @@ enum SignalAction {
     Continue,
     Stop,
     Inject(ThreadMessage),
+}
+
+/// Extract a FINAL() answer from the LLM's text response.
+///
+/// Matches `FINAL(...)` anywhere in the text, handling:
+/// - Single-line: `FINAL("the answer")`
+/// - Multi-line: `FINAL("""\n...\n""")`
+/// - With or without quotes
+///
+/// This is the regex fallback from the official RLM implementation
+/// (`find_final_answer` in parsing.py) for when the model writes
+/// FINAL() outside a code block.
+fn extract_final_from_text(text: &str) -> Option<String> {
+    // Find FINAL( — could be at start of line or after whitespace
+    let marker = "FINAL(";
+    let start = text.find(marker)?;
+    let content_start = start + marker.len();
+
+    // Extract everything after FINAL( up to the matching closing paren
+    // Handle nested parens and triple-quoted strings
+    let remaining = &text[content_start..];
+
+    // Try triple-quoted string first: FINAL("""...""")
+    if remaining.starts_with("\"\"\"") {
+        let inner_start = 3;
+        if let Some(end) = remaining[inner_start..].find("\"\"\"") {
+            let answer = remaining[inner_start..inner_start + end].trim();
+            if !answer.is_empty() {
+                return Some(answer.to_string());
+            }
+        }
+    }
+
+    // Try single/double quoted: FINAL("...") or FINAL('...')
+    if remaining.starts_with('"') || remaining.starts_with('\'') {
+        let quote = remaining.as_bytes()[0] as char;
+        if let Some(end) = remaining[1..].find(quote) {
+            let answer = &remaining[1..1 + end];
+            if !answer.is_empty() {
+                return Some(answer.to_string());
+            }
+        }
+    }
+
+    // Unquoted: FINAL(some content here) — find matching close paren
+    let mut depth = 1;
+    for (i, ch) in remaining.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    let answer = remaining[..i].trim();
+                    if !answer.is_empty() {
+                        return Some(answer.to_string());
+                    }
+                    return None;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    None
 }
 
 #[cfg(test)]
@@ -1043,5 +1128,93 @@ mod tests {
             }
             other => panic!("expected Completed, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn codeact_final_in_text_response() {
+        // LLM outputs FINAL() as plain text (not in a code block)
+        // This is the Hyperliquid case — model writes explanation + FINAL()
+        let (mut exec, _tx) = make_loop(
+            vec![text_response(
+                "Based on my analysis, the answer is clear.\n\nFINAL(\"Revenue grows with volume\")",
+            )],
+            vec![],
+            ThreadConfig::default(),
+        )
+        .await;
+
+        let outcome = exec.run().await.unwrap();
+        assert!(
+            matches!(outcome, ThreadOutcome::Completed { response: Some(ref r) } if r == "Revenue grows with volume"),
+            "got: {outcome:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn codeact_final_triple_quoted_in_text() {
+        // FINAL with triple-quoted multi-line string in plain text
+        let (mut exec, _tx) = make_loop(
+            vec![text_response(
+                "Here's the summary:\n\nFINAL(\"\"\"\nLine 1\nLine 2\nLine 3\n\"\"\")",
+            )],
+            vec![],
+            ThreadConfig::default(),
+        )
+        .await;
+
+        let outcome = exec.run().await.unwrap();
+        match outcome {
+            ThreadOutcome::Completed { response: Some(r) } => {
+                assert!(r.contains("Line 1"), "got: {r}");
+                assert!(r.contains("Line 3"), "got: {r}");
+            }
+            other => panic!("expected Completed, got {other:?}"),
+        }
+    }
+
+    // ── extract_final_from_text unit tests ──────────────────
+
+    #[test]
+    fn final_double_quoted() {
+        let text = "some text\nFINAL(\"the answer\")";
+        assert_eq!(extract_final_from_text(text).unwrap(), "the answer");
+    }
+
+    #[test]
+    fn final_single_quoted() {
+        let text = "FINAL('hello world')";
+        assert_eq!(extract_final_from_text(text).unwrap(), "hello world");
+    }
+
+    #[test]
+    fn final_triple_quoted() {
+        let text = "FINAL(\"\"\"\nmulti\nline\n\"\"\")";
+        assert_eq!(extract_final_from_text(text).unwrap(), "multi\nline");
+    }
+
+    #[test]
+    fn final_unquoted() {
+        let text = "FINAL(42)";
+        assert_eq!(extract_final_from_text(text).unwrap(), "42");
+    }
+
+    #[test]
+    fn final_with_nested_parens() {
+        let text = "FINAL(f'result is {len(items)}')";
+        assert_eq!(
+            extract_final_from_text(text).unwrap(),
+            "f'result is {len(items)}'"
+        );
+    }
+
+    #[test]
+    fn no_final_returns_none() {
+        assert!(extract_final_from_text("just regular text").is_none());
+    }
+
+    #[test]
+    fn final_after_long_text() {
+        let text = "A very long explanation...\n\n🔚 Final Thought\n\nFINAL(\"the conclusion\")";
+        assert_eq!(extract_final_from_text(text).unwrap(), "the conclusion");
     }
 }
