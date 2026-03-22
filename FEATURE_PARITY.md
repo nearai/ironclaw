@@ -484,13 +484,13 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Docker sandbox | ✅ | ✅ | Orchestrator/worker containers |
 | Podman support | ✅ | ❌ | Alternative to Docker |
 | WASM sandbox | ❌ | ✅ | IronClaw innovation |
-| Sandbox env sanitization | ✅ | 🚧 | Shell tool scrubs env vars (secret detection); docker container env sanitization partial |
+| Sandbox env sanitization | ✅ | 🚧 | Shell tool scrubs env vars (secret detection) and supports opt-in credential grants; docker container env sanitization partial |
 | Tool policies | ✅ | ✅ | |
 | Elevated mode | ✅ | ❌ | |
 | Safe bins allowlist | ✅ | ❌ | Hardened path trust |
 | LD*/DYLD* validation | ✅ | ❌ | |
 | Path traversal prevention | ✅ | ✅ | Including config includes (OC-06) + workspace-only tool mounts |
-| Credential theft via env injection | ✅ | 🚧 | Shell env scrubbing + command injection detection; no full OC-09 defense |
+| Credential theft via env injection | ✅ | 🚧 | Shell env scrubbing + command injection detection + opt-in credential grants; no full OC-09 defense |
 | Session file permissions (0o600) | ✅ | ✅ | Session token file set to 0o600 in llm/session.rs |
 | Skill download path restriction | ✅ | ❌ | Validated download roots prevent arbitrary write targets |
 | Webhook signature verification | ✅ | ✅ | |
