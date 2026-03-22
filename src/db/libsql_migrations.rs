@@ -208,6 +208,8 @@ CREATE TABLE IF NOT EXISTS memory_documents (
     agent_id TEXT,
     path TEXT NOT NULL,
     content TEXT NOT NULL,
+    summary_l0 TEXT,
+    summary_l1 TEXT,
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     metadata TEXT NOT NULL DEFAULT '{}',

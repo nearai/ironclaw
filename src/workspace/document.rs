@@ -217,6 +217,10 @@ pub struct MemoryDocument {
     pub path: String,
     /// Full document content.
     pub content: String,
+    /// Short one-line summary for directory listings and L0 search.
+    pub summary_l0: Option<String>,
+    /// Structured overview for default search results.
+    pub summary_l1: Option<String>,
     /// Creation timestamp.
     pub created_at: DateTime<Utc>,
     /// Last update timestamp.
@@ -239,6 +243,8 @@ impl MemoryDocument {
             agent_id,
             path: path.into(),
             content: String::new(),
+            summary_l0: None,
+            summary_l1: None,
             created_at: now,
             updated_at: now,
             metadata: serde_json::Value::Object(serde_json::Map::new()),
@@ -281,7 +287,7 @@ pub struct WorkspaceEntry {
     pub is_directory: bool,
     /// Last update timestamp (latest among children for directories).
     pub updated_at: Option<DateTime<Utc>>,
-    /// Preview of content (first ~200 chars, None for directories).
+    /// Preview of content or L0 summary (None for directories).
     pub content_preview: Option<String>,
 }
 
@@ -375,6 +381,8 @@ mod tests {
         assert_eq!(doc.user_id, "user1");
         assert_eq!(doc.path, "context/vision.md");
         assert!(doc.content.is_empty());
+        assert!(doc.summary_l0.is_none());
+        assert!(doc.summary_l1.is_none());
     }
 
     #[test]

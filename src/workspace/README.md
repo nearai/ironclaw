@@ -8,6 +8,7 @@ Inspired by [OpenClaw](https://github.com/openclaw/openclaw), the workspace prov
 2. **Flexible structure** - Create any directory/file hierarchy you need
 3. **Self-documenting** - Use README.md files to describe directory structure
 4. **Hybrid search** - Combines FTS (keyword) + vector (semantic) via Reciprocal Rank Fusion
+5. **Tiered summaries** - Search can return L0 abstracts, L1 overviews, or L2 raw chunks
 
 ## Filesystem Structure
 
@@ -61,7 +62,7 @@ workspace.append_daily_log("Session note").await?;
 // List directory contents
 let entries = workspace.list("projects/").await?;
 
-// Search (hybrid FTS + vector)
+// Search (hybrid FTS + vector, L1 summaries by default)
 let results = workspace.search("dark mode preference", 5).await?;
 
 // Get system prompt from identity files

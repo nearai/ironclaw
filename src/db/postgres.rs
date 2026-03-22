@@ -744,6 +744,17 @@ impl WorkspaceStore for PgBackend {
         self.repo.update_document(id, content).await
     }
 
+    async fn update_document_summaries(
+        &self,
+        id: Uuid,
+        summary_l0: Option<&str>,
+        summary_l1: Option<&str>,
+    ) -> Result<(), WorkspaceError> {
+        self.repo
+            .update_document_summaries(id, summary_l0, summary_l1)
+            .await
+    }
+
     async fn delete_document_by_path(
         &self,
         user_id: &str,

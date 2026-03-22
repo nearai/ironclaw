@@ -410,9 +410,11 @@ pub(crate) fn row_to_memory_document(row: &libsql::Row) -> MemoryDocument {
         agent_id: get_opt_text(row, 2).and_then(|s| s.parse().ok()),
         path: get_text(row, 3),
         content: get_text(row, 4),
-        created_at: get_ts(row, 5),
-        updated_at: get_ts(row, 6),
-        metadata: get_json(row, 7),
+        summary_l0: get_opt_text(row, 5),
+        summary_l1: get_opt_text(row, 6),
+        created_at: get_ts(row, 7),
+        updated_at: get_ts(row, 8),
+        metadata: get_json(row, 9),
     }
 }
 

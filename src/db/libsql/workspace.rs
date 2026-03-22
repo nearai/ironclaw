@@ -259,7 +259,7 @@ impl WorkspaceStore for LibSqlBackend {
             .query(
                 r#"
                 SELECT id, user_id, agent_id, path, content,
-                       created_at, updated_at, metadata
+                       summary_l0, summary_l1, created_at, updated_at, metadata
                 FROM memory_documents
                 WHERE user_id = ?1 AND agent_id IS ?2 AND path = ?3
                 "#,
@@ -295,7 +295,7 @@ impl WorkspaceStore for LibSqlBackend {
             .query(
                 r#"
                 SELECT id, user_id, agent_id, path, content,
-                       created_at, updated_at, metadata
+                       summary_l0, summary_l1, created_at, updated_at, metadata
                 FROM memory_documents WHERE id = ?1
                 "#,
                 params![id.to_string()],
@@ -366,12 +366,35 @@ impl WorkspaceStore for LibSqlBackend {
             })?;
         let now = fmt_ts(&Utc::now());
         conn.execute(
-            "UPDATE memory_documents SET content = ?2, updated_at = ?3 WHERE id = ?1",
+            "UPDATE memory_documents SET content = ?2, summary_l0 = NULL, summary_l1 = NULL, updated_at = ?3 WHERE id = ?1",
             params![id.to_string(), content, now],
         )
         .await
         .map_err(|e| WorkspaceError::SearchFailed {
             reason: format!("Update failed: {}", e),
+        })?;
+        Ok(())
+    }
+
+    async fn update_document_summaries(
+        &self,
+        id: Uuid,
+        summary_l0: Option<&str>,
+        summary_l1: Option<&str>,
+    ) -> Result<(), WorkspaceError> {
+        let conn = self
+            .connect()
+            .await
+            .map_err(|e| WorkspaceError::SearchFailed {
+                reason: e.to_string(),
+            })?;
+        conn.execute(
+            "UPDATE memory_documents SET summary_l0 = ?2, summary_l1 = ?3 WHERE id = ?1",
+            params![id.to_string(), summary_l0, summary_l1],
+        )
+        .await
+        .map_err(|e| WorkspaceError::SearchFailed {
+            reason: format!("Summary update failed: {}", e),
         })?;
         Ok(())
     }
@@ -431,7 +454,8 @@ impl WorkspaceStore for LibSqlBackend {
         let mut rows = conn
             .query(
                 r#"
-                SELECT path, updated_at, substr(content, 1, 200) as content_preview
+                SELECT path, updated_at,
+                       COALESCE(summary_l0, substr(content, 1, 200)) as content_preview
                 FROM memory_documents
                 WHERE user_id = ?1 AND agent_id IS ?2
                   AND (?3 = '%' OR path LIKE ?3)
@@ -559,7 +583,7 @@ impl WorkspaceStore for LibSqlBackend {
             .query(
                 r#"
                 SELECT id, user_id, agent_id, path, content,
-                       created_at, updated_at, metadata
+                       summary_l0, summary_l1, created_at, updated_at, metadata
                 FROM memory_documents
                 WHERE user_id = ?1 AND agent_id IS ?2
                 ORDER BY updated_at DESC
@@ -739,7 +763,7 @@ impl WorkspaceStore for LibSqlBackend {
             let mut rows = conn
                 .query(
                     r#"
-                    SELECT c.id, c.document_id, d.path, c.content
+                    SELECT c.id, c.document_id, d.path, c.content, d.summary_l0, d.summary_l1
                     FROM memory_chunks_fts fts
                     JOIN memory_chunks c ON c._rowid = fts.rowid
                     JOIN memory_documents d ON d.id = c.document_id
@@ -768,6 +792,8 @@ impl WorkspaceStore for LibSqlBackend {
                     document_id: get_text(&row, 1).parse().unwrap_or_default(),
                     document_path: get_text(&row, 2),
                     content: get_text(&row, 3),
+                    summary_l0: get_opt_text(&row, 4),
+                    summary_l1: get_opt_text(&row, 5),
                     rank: results.len() as u32 + 1,
                 });
             }
@@ -791,7 +817,7 @@ impl WorkspaceStore for LibSqlBackend {
             match conn
                 .query(
                     r#"
-                    SELECT c.id, c.document_id, d.path, c.content
+                    SELECT c.id, c.document_id, d.path, c.content, d.summary_l0, d.summary_l1
                     FROM vector_top_k('idx_memory_chunks_embedding', vector(?1), ?2) AS top_k
                     JOIN memory_chunks c ON c._rowid = top_k.id
                     JOIN memory_documents d ON d.id = c.document_id
@@ -815,6 +841,8 @@ impl WorkspaceStore for LibSqlBackend {
                             document_id: get_text(&row, 1).parse().unwrap_or_default(),
                             document_path: get_text(&row, 2),
                             content: get_text(&row, 3),
+                            summary_l0: get_opt_text(&row, 4),
+                            summary_l1: get_opt_text(&row, 5),
                             rank: results.len() as u32 + 1,
                         });
                     }
