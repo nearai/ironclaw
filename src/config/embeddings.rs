@@ -84,12 +84,13 @@ impl EmbeddingsConfig {
             "EMBEDDING_PROVIDER",
         )?;
 
-        let model = if provider == "bedrock" {
-            optional_env("EMBEDDING_MODEL")?
-                .unwrap_or_else(|| "amazon.titan-embed-text-v2:0".to_string())
-        } else {
-            optional_env("EMBEDDING_MODEL")?.unwrap_or_else(|| settings.embeddings.model.clone())
-        };
+        let model = optional_env("EMBEDDING_MODEL")?.unwrap_or_else(|| {
+            if provider == "bedrock" {
+                "amazon.titan-embed-text-v2:0".to_string()
+            } else {
+                settings.embeddings.model.clone()
+            }
+        });
 
         // ollama_base_url lives on the top-level Settings, not the embeddings
         // sub-struct. Use a manual DB > env > default chain.

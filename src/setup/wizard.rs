@@ -2350,25 +2350,22 @@ impl SetupWizard {
             return Ok(());
         }
 
-        let mut options = Vec::new();
+        let mut provider_options = Vec::new();
         if has_nearai {
-            options.push("NEAR AI (uses same auth, no extra cost)");
+            provider_options.push(("nearai", "NEAR AI (uses same auth, no extra cost)"));
         }
         if has_bedrock {
-            options.push("AWS Bedrock (uses AWS auth and region)");
+            provider_options.push(("bedrock", "AWS Bedrock (uses AWS auth and region)"));
         }
-        options.push("OpenAI (requires API key)");
+        provider_options.push(("openai", "OpenAI (requires API key)"));
 
-        let choice = select_one("Select embeddings provider:", &options).map_err(SetupError::Io)?;
-
-        // Map choice back to provider name
-        let provider = if has_nearai && choice == 0 {
-            "nearai"
-        } else if has_bedrock && ((has_nearai && choice == 1) || (!has_nearai && choice == 0)) {
-            "bedrock"
-        } else {
-            "openai"
-        };
+        let display_options: Vec<&str> = provider_options
+            .iter()
+            .map(|(_, display)| *display)
+            .collect();
+        let choice =
+            select_one("Select embeddings provider:", &display_options).map_err(SetupError::Io)?;
+        let provider = provider_options[choice].0;
 
         match provider {
             "nearai" => {
