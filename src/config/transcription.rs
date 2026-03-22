@@ -89,7 +89,7 @@ impl TranscriptionConfig {
     }
 
     /// Create the transcription provider if enabled and configured.
-    pub fn create_provider(&self) -> Option<Box<dyn crate::transcription::TranscriptionProvider>> {
+    pub fn create_provider(&self) -> Option<Box<dyn crate::llm::transcription::TranscriptionProvider>> {
         if !self.enabled {
             return None;
         }
@@ -103,7 +103,7 @@ impl TranscriptionConfig {
                     "Audio transcription enabled via Chat Completions API"
                 );
 
-                let mut provider = crate::transcription::ChatCompletionsTranscriptionProvider::new(
+                let mut provider = crate::llm::transcription::ChatCompletionsTranscriptionProvider::new(
                     api_key.clone(),
                 )
                 .with_model(&self.model);
@@ -121,7 +121,7 @@ impl TranscriptionConfig {
                 );
 
                 let mut provider =
-                    crate::transcription::OpenAiWhisperProvider::new(api_key.clone())
+                    crate::llm::transcription::OpenAiWhisperProvider::new(api_key.clone())
                         .with_model(&self.model);
 
                 if let Some(ref base_url) = self.base_url {
