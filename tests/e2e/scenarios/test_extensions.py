@@ -741,13 +741,17 @@ async def test_auth_card_token_only(page):
 
 
 async def test_auth_card_with_oauth(page):
-    """Auth card with auth_url shows the OAuth button."""
+    """Auth card with auth_url shows a new-tab OAuth link."""
     await _show_auth_card(page, extension_name="slack", auth_url="https://slack.com/oauth/authorize")
 
     card = page.locator(SEL["auth_card"])
-    oauth_btn = card.locator(SEL["auth_oauth_btn"])
-    assert await oauth_btn.count() == 1
-    assert "slack" in await oauth_btn.text_content()
+    oauth_link = card.locator(SEL["auth_oauth_btn"])
+    assert await oauth_link.count() == 1
+    assert await oauth_link.evaluate("(node) => node.tagName") == "A"
+    assert await oauth_link.get_attribute("target") == "_blank"
+    rel = await oauth_link.get_attribute("rel")
+    assert rel and "noopener" in rel and "noreferrer" in rel
+    assert "slack" in await oauth_link.text_content()
 
 
 async def test_auth_card_with_setup_url(page):
