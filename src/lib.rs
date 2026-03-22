@@ -62,6 +62,7 @@ pub mod orchestrator;
 pub mod pairing;
 pub mod profile;
 pub mod registry;
+pub mod release;
 pub mod safety;
 pub mod sandbox;
 pub mod secrets;

@@ -1,5 +1,6 @@
 ---
 source: src/cli/mod.rs
+assertion_line: 394
 expression: help
 ---
 Secure personal AI assistant that protects your data and expands its capabilities
@@ -21,6 +22,7 @@ Commands:
   skills      Manage skills
   hooks       Manage lifecycle hooks
   doctor      Run diagnostics
+  update      Check for a newer IronClaw release
   logs        View and manage gateway logs
   status      Show system status
   completion  Generate completions

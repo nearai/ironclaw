@@ -103,6 +103,20 @@ pub struct PendingApprovalInfo {
     pub parameters: String,
 }
 
+#[derive(Debug, Serialize)]
+pub struct GatewayUpdateResponse {
+    pub current_version: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_version: Option<String>,
+    pub update_available: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub release_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub release_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 // --- Approval ---
 
 #[derive(Debug, Deserialize)]
