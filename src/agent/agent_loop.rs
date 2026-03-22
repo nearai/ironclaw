@@ -1153,8 +1153,92 @@ impl Agent {
         // Process based on submission type
         let result = match submission {
             Submission::UserInput { content } => {
-                self.process_user_input(message, session, thread_id, &content)
-                    .await
+                let mut result = self
+                    .process_user_input(message, session.clone(), thread_id, &content)
+                    .await;
+
+                // Drain any messages queued during processing.
+                // Messages are merged (newline-separated) so the LLM receives
+                // full context from rapid consecutive inputs instead of
+                // processing each as a separate turn with partial context (#259).
+                //
+                // Only `Response` continues the drain — the user got a normal
+                // reply and there may be more queued messages to process.
+                //
+                // Everything else stops the loop:
+                // - `NeedApproval`: thread is blocked on user approval
+                // - `Interrupted`: turn was cancelled
+                // - `Ok`: control-command acknowledgment (including the "queued"
+                //    ack returned when a message arrives during Processing)
+                // - `Error`: soft error — draining more messages after an error
+                //    would produce confusing interleaved output
+                // - `Err(_)`: hard error
+                while let Ok(SubmissionResult::Response { content: outgoing }) = &result {
+                    let merged = {
+                        let mut sess = session.lock().await;
+                        sess.threads
+                            .get_mut(&thread_id)
+                            .and_then(|t| t.drain_pending_messages())
+                    };
+                    let Some(next_content) = merged else {
+                        break;
+                    };
+
+                    tracing::debug!(
+                        thread_id = %thread_id,
+                        merged_len = next_content.len(),
+                        "Drain loop: processing merged queued messages"
+                    );
+
+                    // Send the completed turn's response before starting the next.
+                    //
+                    // Known limitations:
+                    // - One-shot channels (HttpChannel) consume the response
+                    //   sender on the first respond() call keyed by msg.id.
+                    //   Subsequent calls (including the outer handler's final
+                    //   respond) are silently dropped. For one-shot channels
+                    //   only this intermediate response is delivered.
+                    // - All drain-loop responses are routed via the original
+                    //   `message`, so channels that key routing on message
+                    //   identity will attribute every response to the first
+                    //   message. This is acceptable for the current
+                    //   single-user-per-thread model.
+                    if let Err(e) = self
+                        .channels
+                        .respond(message, OutgoingResponse::text(outgoing.clone()))
+                        .await
+                    {
+                        tracing::warn!(
+                            thread_id = %thread_id,
+                            "Failed to send intermediate drain-loop response: {e}"
+                        );
+                    }
+
+                    // Process merged queued messages as a single turn.
+                    // Use a message clone with cleared attachments so
+                    // augment_with_attachments doesn't re-apply the original
+                    // message's attachments to unrelated queued text.
+                    let mut queued_msg = message.clone();
+                    queued_msg.attachments.clear();
+                    result = self
+                        .process_user_input(&queued_msg, session.clone(), thread_id, &next_content)
+                        .await;
+
+                    // If processing failed, re-queue the drained content so it
+                    // isn't lost. It will be picked up on the next successful turn.
+                    if !matches!(&result, Ok(SubmissionResult::Response { .. })) {
+                        let mut sess = session.lock().await;
+                        if let Some(thread) = sess.threads.get_mut(&thread_id) {
+                            thread.requeue_drained(next_content);
+                            tracing::debug!(
+                                thread_id = %thread_id,
+                                "Re-queued drained content after non-Response result"
+                            );
+                        }
+                    }
+                }
+
+                result
             }
             Submission::SystemCommand { command, args } => {
                 tracing::debug!(
