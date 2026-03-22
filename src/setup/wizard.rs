@@ -2376,9 +2376,7 @@ impl SetupWizard {
             "openai" => {
                 if !has_openai_key {
                     print_info("OPENAI_API_KEY not set in environment.");
-                    print_info(
-                        "Add it to your .env file or environment to enable embeddings.",
-                    );
+                    print_info("Add it to your .env file or environment to enable embeddings.");
                 }
                 self.settings.embeddings.enabled = true;
                 self.settings.embeddings.provider = "openai".to_string();
@@ -2388,9 +2386,7 @@ impl SetupWizard {
             "gemini" => {
                 if !has_gemini_key {
                     print_info("GEMINI_API_KEY not set in environment.");
-                    print_info(
-                        "Add it to your .env file or environment to enable embeddings.",
-                    );
+                    print_info("Add it to your .env file or environment to enable embeddings.");
                 }
                 self.settings.embeddings.enabled = true;
                 self.settings.embeddings.provider = "gemini".to_string();
