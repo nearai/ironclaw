@@ -571,25 +571,16 @@ mod tests {
 
     #[test]
     fn test_truncate_short_string_unchanged() {
-        assert_eq!(truncate_for_preview("hello", 10), "hello");
-    }
-
-    #[test]
-    fn test_truncate_short_string_borrowed() {
         let result = truncate_for_preview("hello", 10);
-        assert!(matches!(result, Cow::Borrowed("hello"))); // safety: test-only assertion
+        assert_eq!(result, "hello");
+        assert!(matches!(result, Cow::Borrowed(_)));
     }
 
     #[test]
     fn test_truncate_long_string_adds_ellipsis() {
         let result = truncate_for_preview("hello world", 5);
         assert_eq!(result, "hello...");
-    }
-
-    #[test]
-    fn test_truncate_long_string_owned() {
-        let result = truncate_for_preview("hello world", 5);
-        assert!(matches!(result, Cow::Owned(_))); // safety: test-only assertion
+        assert!(matches!(result, Cow::Owned(_)));
     }
 
     #[test]
