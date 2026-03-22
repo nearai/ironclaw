@@ -396,6 +396,10 @@ mod tests {
         // The mutex is now poisoned. lock_env() should recover, not cascade.
         assert!(ENV_MUTEX.lock().is_err(), "mutex should be poisoned");
         let _guard = lock_env(); // must not panic
+        drop(_guard);
+
+        // Clean up so this test doesn't leave ENV_MUTEX permanently poisoned.
+        ENV_MUTEX.clear_poison();
     }
 
     // --- validate_base_url tests (regression for #1103) ---
