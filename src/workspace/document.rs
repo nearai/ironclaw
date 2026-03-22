@@ -31,6 +31,10 @@ pub mod paths {
     pub const TOOLS: &str = "TOOLS.md";
     /// First-run ritual file; self-deletes after onboarding completes.
     pub const BOOTSTRAP: &str = "BOOTSTRAP.md";
+    /// User psychographic profile (JSON).
+    pub const PROFILE: &str = "context/profile.json";
+    /// Assistant behavioral directives (derived from profile).
+    pub const ASSISTANT_DIRECTIVES: &str = "context/assistant-directives.md";
 }
 
 /// A memory document stored in the database.

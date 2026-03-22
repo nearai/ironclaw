@@ -239,6 +239,17 @@ pub enum Command {
     )]
     Import(ImportCommand),
 
+    /// Authenticate with a provider (re-login)
+    #[command(
+        about = "Authenticate with a provider",
+        long_about = "Re-authenticate with an LLM provider.\nExample: ironclaw login --openai-codex"
+    )]
+    Login {
+        /// Authenticate with OpenAI Codex (ChatGPT subscription)
+        #[arg(long)]
+        openai_codex: bool,
+    },
+
     /// Run as a sandboxed worker inside a Docker container (internal use).
     /// This is invoked automatically by the orchestrator, not by users directly.
     #[command(hide = true)]
@@ -336,7 +347,10 @@ pub async fn run_memory_command(mem_cmd: &MemoryCommand) -> anyhow::Result<()> {
         .await
         .map_err(|e| anyhow::anyhow!("{}", e))?;
 
-    run_memory_command_with_db(mem_cmd.clone(), db, embeddings).await
+    let cache_config = crate::workspace::EmbeddingCacheConfig {
+        max_entries: config.embeddings.cache_size,
+    };
+    run_memory_command_with_db(mem_cmd.clone(), db, embeddings, cache_config).await
 }
 
 #[cfg(test)]

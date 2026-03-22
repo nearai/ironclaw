@@ -83,10 +83,12 @@ impl TestGatewayBuilder {
             scheduler: None,
             chat_rate_limiter: RateLimiter::new(30, 60),
             oauth_rate_limiter: RateLimiter::new(10, 60),
+            webhook_rate_limiter: RateLimiter::new(10, 60),
             registry_entries: Vec::new(),
             cost_guard: None,
             routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
             startup_time: std::time::Instant::now(),
+            active_config: crate::channels::web::server::ActiveConfigSnapshot::default(),
         })
     }
 
