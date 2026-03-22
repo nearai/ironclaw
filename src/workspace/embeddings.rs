@@ -226,12 +226,9 @@ impl EmbeddingProvider for OpenAiEmbeddings {
         }
 
         if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            let retry_after = response
-                .headers()
-                .get("retry-after")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|s| s.parse::<u64>().ok())
-                .map(std::time::Duration::from_secs);
+            let retry_after = Some(crate::llm::retry::parse_retry_after(
+                response.headers().get("retry-after"),
+            ));
             return Err(EmbeddingError::RateLimited { retry_after });
         }
 
@@ -367,12 +364,9 @@ impl EmbeddingProvider for NearAiEmbeddings {
         }
 
         if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            let retry_after = response
-                .headers()
-                .get("retry-after")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|s| s.parse::<u64>().ok())
-                .map(std::time::Duration::from_secs);
+            let retry_after = Some(crate::llm::retry::parse_retry_after(
+                response.headers().get("retry-after"),
+            ));
             return Err(EmbeddingError::RateLimited { retry_after });
         }
 

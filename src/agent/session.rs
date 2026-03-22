@@ -10,7 +10,7 @@
 //! - Compaction: Summarize old turns to save context
 //! - Resume: Continue from a saved checkpoint
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use chrono::{DateTime, TimeDelta, Utc};
 use serde::{Deserialize, Serialize};
@@ -188,6 +188,15 @@ pub struct PendingApproval {
     /// through the approval flow even if the approval message lacks timezone.
     #[serde(default)]
     pub user_timezone: Option<String>,
+    /// Whether the "always" auto-approve option should be offered to the user.
+    /// `false` when the tool returned `ApprovalRequirement::Always` (e.g.
+    /// destructive shell commands), meaning every invocation must be confirmed.
+    #[serde(default = "default_true")]
+    pub allow_always: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// A conversation thread within a session.
@@ -213,7 +222,16 @@ pub struct Thread {
     /// Pending auth token request (thread is in auth mode).
     #[serde(default)]
     pub pending_auth: Option<PendingAuth>,
+    /// Messages queued while the thread was processing a turn.
+    #[serde(default, skip_serializing_if = "VecDeque::is_empty")]
+    pub pending_messages: VecDeque<String>,
 }
+
+/// Maximum number of messages that can be queued while a thread is processing.
+/// 10 merged messages can produce a large combined input for the LLM, but this
+/// is acceptable for the personal assistant use case where a single user sends
+/// rapid follow-ups. The drain loop processes them as one newline-delimited turn.
+pub const MAX_PENDING_MESSAGES: usize = 10;
 
 impl Thread {
     /// Create a new thread.
@@ -229,6 +247,7 @@ impl Thread {
             metadata: serde_json::Value::Null,
             pending_approval: None,
             pending_auth: None,
+            pending_messages: VecDeque::new(),
         }
     }
 
@@ -245,6 +264,7 @@ impl Thread {
             metadata: serde_json::Value::Null,
             pending_approval: None,
             pending_auth: None,
+            pending_messages: VecDeque::new(),
         }
     }
 
@@ -261,6 +281,47 @@ impl Thread {
     /// Get the last turn mutably.
     pub fn last_turn_mut(&mut self) -> Option<&mut Turn> {
         self.turns.last_mut()
+    }
+
+    /// Queue a message for processing after the current turn completes.
+    /// Returns `false` if the queue is at capacity ([`MAX_PENDING_MESSAGES`]).
+    pub fn queue_message(&mut self, content: String) -> bool {
+        if self.pending_messages.len() >= MAX_PENDING_MESSAGES {
+            return false;
+        }
+        self.pending_messages.push_back(content);
+        self.updated_at = Utc::now();
+        true
+    }
+
+    /// Take the next pending message from the queue.
+    pub fn take_pending_message(&mut self) -> Option<String> {
+        self.pending_messages.pop_front()
+    }
+
+    /// Drain all pending messages from the queue.
+    /// Multiple messages are joined with newlines so the LLM receives
+    /// full context from rapid consecutive inputs (#259).
+    pub fn drain_pending_messages(&mut self) -> Option<String> {
+        if self.pending_messages.is_empty() {
+            return None;
+        }
+        let parts: Vec<String> = self.pending_messages.drain(..).collect();
+        self.updated_at = Utc::now();
+        Some(parts.join("\n"))
+    }
+
+    /// Re-queue previously drained content at the front of the queue.
+    /// Used to preserve user input when the drain loop fails to process
+    /// merged messages (soft error, hard error, interrupt).
+    ///
+    /// This intentionally bypasses [`MAX_PENDING_MESSAGES`] — the content
+    /// was already counted against the cap before draining. The overshoot
+    /// is bounded to 1 entry (the re-queued merged string) plus any new
+    /// messages that arrived during the failed attempt.
+    pub fn requeue_drained(&mut self, content: String) {
+        self.pending_messages.push_front(content);
+        self.updated_at = Utc::now();
     }
 
     /// Start a new turn with user input.
@@ -326,11 +387,12 @@ impl Thread {
         self.pending_auth.take()
     }
 
-    /// Interrupt the current turn.
+    /// Interrupt the current turn and discard any queued messages.
     pub fn interrupt(&mut self) {
         if let Some(turn) = self.turns.last_mut() {
             turn.interrupt();
         }
+        self.pending_messages.clear();
         self.state = ThreadState::Interrupted;
         self.updated_at = Utc::now();
     }
@@ -1120,6 +1182,7 @@ mod tests {
             context_messages: vec![ChatMessage::user("do it")],
             deferred_tool_calls: vec![],
             user_timezone: None,
+            allow_always: false,
         };
 
         thread.await_approval(approval);
@@ -1146,6 +1209,7 @@ mod tests {
             context_messages: vec![],
             deferred_tool_calls: vec![],
             user_timezone: None,
+            allow_always: true,
         };
 
         thread.await_approval(approval);
@@ -1394,5 +1458,166 @@ mod tests {
             tool_result_content.len()
         );
         assert!(tool_result_content.ends_with("..."));
+    }
+
+    #[test]
+    fn test_thread_message_queue() {
+        let mut thread = Thread::new(Uuid::new_v4());
+
+        // Queue is initially empty
+        assert!(thread.pending_messages.is_empty());
+        assert!(thread.take_pending_message().is_none());
+
+        // Queue messages and verify FIFO ordering
+        assert!(thread.queue_message("first".to_string()));
+        assert!(thread.queue_message("second".to_string()));
+        assert!(thread.queue_message("third".to_string()));
+        assert_eq!(thread.pending_messages.len(), 3);
+
+        assert_eq!(thread.take_pending_message(), Some("first".to_string()));
+        assert_eq!(thread.take_pending_message(), Some("second".to_string()));
+        assert_eq!(thread.take_pending_message(), Some("third".to_string()));
+        assert!(thread.take_pending_message().is_none());
+
+        // Fill to capacity — all 10 should succeed
+        for i in 0..MAX_PENDING_MESSAGES {
+            assert!(thread.queue_message(format!("msg-{}", i)));
+        }
+        assert_eq!(thread.pending_messages.len(), MAX_PENDING_MESSAGES);
+
+        // 11th message rejected by queue_message itself
+        assert!(!thread.queue_message("overflow".to_string()));
+        assert_eq!(thread.pending_messages.len(), MAX_PENDING_MESSAGES);
+
+        // Drain and verify order
+        for i in 0..MAX_PENDING_MESSAGES {
+            assert_eq!(thread.take_pending_message(), Some(format!("msg-{}", i)));
+        }
+        assert!(thread.take_pending_message().is_none());
+    }
+
+    #[test]
+    fn test_thread_message_queue_serialization() {
+        let mut thread = Thread::new(Uuid::new_v4());
+
+        // Empty queue should not appear in serialization (skip_serializing_if)
+        let json = serde_json::to_string(&thread).unwrap();
+        assert!(!json.contains("pending_messages"));
+
+        // Non-empty queue should serialize and deserialize
+        thread.queue_message("queued msg".to_string());
+        let json = serde_json::to_string(&thread).unwrap();
+        assert!(json.contains("pending_messages"));
+        assert!(json.contains("queued msg"));
+
+        let restored: Thread = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.pending_messages.len(), 1);
+        assert_eq!(restored.pending_messages[0], "queued msg");
+    }
+
+    #[test]
+    fn test_thread_message_queue_default_on_old_data() {
+        // Deserialization of old data without pending_messages should default to empty
+        let thread = Thread::new(Uuid::new_v4());
+        let json = serde_json::to_string(&thread).unwrap();
+
+        // The field is absent (skip_serializing_if), simulating old data
+        assert!(!json.contains("pending_messages"));
+        let restored: Thread = serde_json::from_str(&json).unwrap();
+        assert!(restored.pending_messages.is_empty());
+    }
+
+    #[test]
+    fn test_interrupt_clears_pending_messages() {
+        let mut thread = Thread::new(Uuid::new_v4());
+
+        // Start a turn so there's something to interrupt
+        thread.start_turn("initial input");
+
+        // Queue several messages while "processing"
+        thread.queue_message("queued-1".to_string());
+        thread.queue_message("queued-2".to_string());
+        thread.queue_message("queued-3".to_string());
+        assert_eq!(thread.pending_messages.len(), 3);
+
+        // Interrupt should clear the queue
+        thread.interrupt();
+        assert!(thread.pending_messages.is_empty());
+        assert_eq!(thread.state, ThreadState::Interrupted);
+    }
+
+    #[test]
+    fn test_thread_state_idle_after_full_drain() {
+        let mut thread = Thread::new(Uuid::new_v4());
+
+        // Simulate a full drain cycle: start turn, queue messages, complete turn,
+        // then drain all queued messages as a single merged turn (#259).
+        thread.start_turn("turn 1");
+        assert_eq!(thread.state, ThreadState::Processing);
+
+        thread.queue_message("queued-a".to_string());
+        thread.queue_message("queued-b".to_string());
+
+        // Complete the turn (simulates process_user_input finishing)
+        thread.complete_turn("response 1");
+        assert_eq!(thread.state, ThreadState::Idle);
+
+        // Drain: merge all queued messages and process as a single turn
+        let merged = thread.drain_pending_messages().unwrap();
+        assert_eq!(merged, "queued-a\nqueued-b");
+        thread.start_turn(&merged);
+        thread.complete_turn("response for merged");
+
+        // Queue is fully drained, thread is idle
+        assert!(thread.drain_pending_messages().is_none());
+        assert!(thread.pending_messages.is_empty());
+        assert_eq!(thread.state, ThreadState::Idle);
+    }
+
+    #[test]
+    fn test_drain_pending_messages_merges_with_newlines() {
+        let mut thread = Thread::new(Uuid::new_v4());
+
+        // Empty queue returns None
+        assert!(thread.drain_pending_messages().is_none());
+
+        // Single message returned as-is (no trailing newline)
+        thread.queue_message("only one".to_string());
+        assert_eq!(
+            thread.drain_pending_messages(),
+            Some("only one".to_string()),
+        );
+        assert!(thread.pending_messages.is_empty());
+
+        // Multiple messages joined with newlines
+        thread.queue_message("hey".to_string());
+        thread.queue_message("can you check the server".to_string());
+        thread.queue_message("it started 10 min ago".to_string());
+        assert_eq!(
+            thread.drain_pending_messages(),
+            Some("hey\ncan you check the server\nit started 10 min ago".to_string()),
+        );
+        assert!(thread.pending_messages.is_empty());
+
+        // Queue is empty after drain
+        assert!(thread.drain_pending_messages().is_none());
+    }
+
+    #[test]
+    fn test_requeue_drained_preserves_content_at_front() {
+        let mut thread = Thread::new(Uuid::new_v4());
+
+        // Re-queue into empty queue
+        thread.requeue_drained("failed batch".to_string());
+        assert_eq!(thread.pending_messages.len(), 1);
+        assert_eq!(thread.pending_messages[0], "failed batch");
+
+        // New messages go behind the re-queued content
+        thread.queue_message("new msg".to_string());
+        assert_eq!(thread.pending_messages.len(), 2);
+
+        // Drain should return re-queued content first (front of queue)
+        let merged = thread.drain_pending_messages().unwrap();
+        assert_eq!(merged, "failed batch\nnew msg");
     }
 }

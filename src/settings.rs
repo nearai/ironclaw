@@ -16,6 +16,14 @@ pub struct Settings {
     #[serde(default, alias = "setup_completed")]
     pub onboard_completed: bool,
 
+    /// Stable owner scope for this IronClaw instance.
+    ///
+    /// This is bootstrap configuration loaded from env / disk / TOML. We do
+    /// not persist it in the per-user DB settings table because the DB lookup
+    /// itself already requires the owner scope to be known.
+    #[serde(default)]
+    pub owner_id: Option<String>,
+
     // === Step 1: Database ===
     /// Database backend: "postgres" or "libsql".
     #[serde(default)]
@@ -47,7 +55,7 @@ pub struct Settings {
     pub secrets_master_key_hex: Option<String>,
 
     // === Step 3: Inference Provider ===
-    /// LLM backend: "nearai", "anthropic", "openai", "ollama", "openai_compatible", "tinfoil", "bedrock".
+    /// LLM backend: "nearai", "anthropic", "openai", "github_copilot", "ollama", "openai_compatible", "tinfoil", "bedrock".
     #[serde(default)]
     pub llm_backend: Option<String>,
 
@@ -94,6 +102,17 @@ pub struct Settings {
     /// Heartbeat configuration.
     #[serde(default)]
     pub heartbeat: HeartbeatSettings,
+
+    // === Conversational Profile Onboarding ===
+    /// Whether the conversational profile onboarding has been completed.
+    ///
+    /// Set during the user's first interaction with the running assistant
+    /// (not during the setup wizard), after the agent builds a psychographic
+    /// profile via `memory_write`. Used by the agent loop (via workspace
+    /// system-prompt wiring) to suppress BOOTSTRAP.md injection once
+    /// onboarding is complete.
+    #[serde(default, alias = "personal_onboarding_completed")]
+    pub profile_onboarding_completed: bool,
 
     // === Advanced Settings (not asked during setup, editable via CLI) ===
     /// Agent behavior configuration.
@@ -733,6 +752,10 @@ impl Settings {
         let mut settings = Self::default();
 
         for (key, value) in map {
+            if key == "owner_id" {
+                continue;
+            }
+
             // Convert the JSONB value to a string for the existing set() method
             let value_str = match value {
                 serde_json::Value::String(s) => s.clone(),
@@ -772,6 +795,7 @@ impl Settings {
 
         let mut map = std::collections::HashMap::new();
         collect_settings_json(&json, String::new(), &mut map);
+        map.remove("owner_id");
         map
     }
 

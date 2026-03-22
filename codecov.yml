@@ -2,9 +2,13 @@ coverage:
   status:
     project:
       default:
-        target: auto
-        threshold: 1%
+        target: 80%
+        threshold: 2%
     patch:
       default:
-        target: 80%
-        threshold: 5%
+        target: 90%
+
+comment:
+  layout: "reach,diff,flags"
+  behavior: default
+  require_changes: true

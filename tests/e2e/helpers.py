@@ -1,6 +1,8 @@
 """Shared helpers for E2E tests."""
 
 import asyncio
+import hashlib
+import hmac
 import re
 import time
 
@@ -43,12 +45,13 @@ SEL = {
     "approval_always_btn": ".approval-actions button.always",
     "approval_deny_btn": ".approval-actions button.deny",
     "approval_resolved": ".approval-resolved",
-    # Extensions tab – sections
+    # Settings subtabs
+    "settings_subtab":          '.settings-subtab[data-settings-subtab="{subtab}"]',
+    "settings_subpanel":        "#settings-{subtab}",
+    # Extensions section
     "extensions_list":          "#extensions-list",
     "available_wasm_list":      "#available-wasm-list",
     "mcp_servers_list":         "#mcp-servers-list",
-    "tools_tbody":              "#tools-tbody",
-    "tools_empty":              "#tools-empty",
     # Extensions tab – cards
     "ext_card_installed":       "#extensions-list .ext-card",
     "ext_card_available":       "#available-wasm-list .ext-card.ext-available",
@@ -90,17 +93,32 @@ SEL = {
     "ext_stepper":              ".ext-stepper",
     "stepper_step":             ".stepper-step",
     "stepper_circle":           ".stepper-circle",
+    # Confirm modal (custom, replaces window.confirm)
+    "confirm_modal":            "#confirm-modal",
+    "confirm_modal_btn":        "#confirm-modal-btn",
+    "confirm_modal_cancel":     "#confirm-modal-cancel-btn",
+    # Channels subtab – cards
+    "channels_ext_card":        "#settings-channels-content .ext-card",
     # Toast notifications
     "toast":                    ".toast",
     "toast_success":            ".toast.toast-success",
     "toast_error":              ".toast.toast-error",
     "toast_info":               ".toast.toast-info",
+    # Jobs / routines
+    "jobs_tbody":               "#jobs-tbody",
+    "job_row":                  "#jobs-tbody .job-row",
+    "jobs_empty":               "#jobs-empty",
+    "routines_tbody":           "#routines-tbody",
+    "routine_row":              "#routines-tbody .routine-row",
+    "routines_empty":           "#routines-empty",
 }
 
-TABS = ["chat", "memory", "jobs", "routines", "extensions", "skills"]
+TABS = ["chat", "memory", "jobs", "routines", "settings"]
 
 # Auth token used across all tests
 AUTH_TOKEN = "e2e-test-token"
+OWNER_SCOPE_ID = "e2e-owner-scope"
+HTTP_WEBHOOK_SECRET = "e2e-http-webhook-secret"
 
 
 async def wait_for_ready(url: str, *, timeout: float = 60, interval: float = 0.5):
@@ -162,3 +180,16 @@ async def api_post(base_url: str, path: str, **kwargs) -> httpx.Response:
             timeout=kwargs.pop("timeout", 10),
             **kwargs,
         )
+
+
+def signed_http_webhook_headers(body: bytes) -> dict[str, str]:
+    """Return headers for the owner-scoped HTTP webhook channel."""
+    digest = hmac.new(
+        HTTP_WEBHOOK_SECRET.encode("utf-8"),
+        body,
+        hashlib.sha256,
+    ).hexdigest()
+    return {
+        "Content-Type": "application/json",
+        "X-Hub-Signature-256": f"sha256={digest}",
+    }
