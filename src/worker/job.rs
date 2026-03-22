@@ -1432,17 +1432,92 @@ impl From<TaskOutput> for Result<String, Error> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+    use futures::StreamExt;
+    use tokio::sync::{Mutex, mpsc};
+
+    use crate::channels::{
+        Channel, ChannelManager, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate,
+    };
     use crate::llm::ToolSelection;
 
     use super::*;
     use crate::config::SafetyConfig;
     use crate::context::JobContext;
+    use crate::error::ChannelError;
     use crate::llm::{
         CompletionRequest, CompletionResponse, LlmProvider, ToolCompletionRequest,
         ToolCompletionResponse,
     };
     use crate::safety::SafetyLayer;
+    use crate::tools::builtin::MessageTool;
     use crate::tools::{Tool, ToolError as ToolExecError, ToolOutput};
+
+    type BroadcastCapture = Arc<Mutex<Vec<(String, OutgoingResponse)>>>;
+
+    struct RecordingBroadcastChannel {
+        name: &'static str,
+        captures: BroadcastCapture,
+    }
+
+    impl RecordingBroadcastChannel {
+        fn new(name: &'static str) -> (Self, BroadcastCapture) {
+            let captures = Arc::new(Mutex::new(Vec::new()));
+            (
+                Self {
+                    name,
+                    captures: Arc::clone(&captures),
+                },
+                captures,
+            )
+        }
+    }
+
+    #[async_trait]
+    impl Channel for RecordingBroadcastChannel {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        async fn start(&self) -> Result<MessageStream, ChannelError> {
+            let (_tx, rx) = mpsc::channel::<IncomingMessage>(1);
+            Ok(tokio_stream::wrappers::ReceiverStream::new(rx).boxed())
+        }
+
+        async fn respond(
+            &self,
+            _msg: &IncomingMessage,
+            _response: OutgoingResponse,
+        ) -> Result<(), ChannelError> {
+            Ok(())
+        }
+
+        async fn send_status(
+            &self,
+            _status: StatusUpdate,
+            _metadata: &serde_json::Value,
+        ) -> Result<(), ChannelError> {
+            Ok(())
+        }
+
+        async fn broadcast(
+            &self,
+            user_id: &str,
+            response: OutgoingResponse,
+        ) -> Result<(), ChannelError> {
+            self.captures
+                .lock()
+                .await
+                .push((user_id.to_string(), response));
+            Ok(())
+        }
+
+        async fn health_check(&self) -> Result<(), ChannelError> {
+            Ok(())
+        }
+    }
 
     /// A test tool that sleeps for a configurable duration before returning.
     struct SlowTool {
@@ -1531,6 +1606,20 @@ mod tests {
         };
 
         Worker::new(job_id, deps)
+    }
+
+    async fn make_worker_with_message_tool()
+    -> (Worker, Arc<MessageTool>, BroadcastCapture, BroadcastCapture) {
+        let channel_manager = ChannelManager::new();
+        let (gateway, gateway_captures) = RecordingBroadcastChannel::new("gateway");
+        let (telegram, telegram_captures) = RecordingBroadcastChannel::new("telegram");
+        channel_manager.add(Box::new(gateway)).await;
+        channel_manager.add(Box::new(telegram)).await;
+
+        let message_tool = Arc::new(MessageTool::new(Arc::new(channel_manager)));
+        let worker = make_worker(vec![message_tool.clone()]).await;
+
+        (worker, message_tool, gateway_captures, telegram_captures)
     }
 
     #[test]
@@ -2140,5 +2229,48 @@ mod tests {
         store_fallback_in_metadata(&mut ctx, None);
 
         assert_eq!(ctx.metadata, original); // safety: test
+    }
+
+    #[tokio::test]
+    async fn autonomous_message_tool_ignores_stale_gateway_context_when_routine_metadata_targets_telegram()
+     {
+        let (worker, message_tool, gateway_captures, telegram_captures) =
+            make_worker_with_message_tool().await;
+
+        message_tool
+            .set_context(Some("gateway".to_string()), Some("telegram".to_string()))
+            .await;
+
+        worker
+            .context_manager()
+            .update_context(worker.job_id, |ctx| {
+                ctx.user_id = "telegram".to_string();
+                ctx.metadata = serde_json::json!({
+                    "notify_channel": "telegram",
+                    "owner_id": "owner-scope",
+                });
+                Ok::<(), String>(())
+            })
+            .await
+            .unwrap() // safety: test
+            .unwrap(); // safety: test
+
+        let result = worker
+            .execute_tool(
+                "message",
+                &serde_json::json!({"content": "hello from routine"}),
+            )
+            .await
+            .unwrap(); // safety: test
+        assert!(
+            result.contains("telegram:owner-scope"),
+            "expected telegram owner-scope routing, got: {result}"
+        );
+
+        assert!(gateway_captures.lock().await.is_empty());
+        let telegram = telegram_captures.lock().await.clone();
+        assert_eq!(telegram.len(), 1);
+        assert_eq!(telegram[0].0, "owner-scope");
+        assert_eq!(telegram[0].1.content, "hello from routine");
     }
 }

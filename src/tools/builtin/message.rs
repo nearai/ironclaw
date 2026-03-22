@@ -80,6 +80,10 @@ fn metadata_notify_user(metadata: &serde_json::Value) -> Option<String> {
     metadata_string(metadata, "notify_user").filter(|value| value != "default")
 }
 
+fn metadata_owner_id(metadata: &serde_json::Value) -> Option<String> {
+    metadata_string(metadata, "owner_id")
+}
+
 fn channel_matches_source(resolved_channel: Option<&str>, source_channel: Option<&str>) -> bool {
     match (resolved_channel, source_channel) {
         (None, _) => true,
@@ -91,11 +95,11 @@ fn channel_matches_source(resolved_channel: Option<&str>, source_channel: Option
 async fn resolve_channel_fallback_target(
     extension_manager: Option<&Arc<ExtensionManager>>,
     channel: Option<&str>,
+    owner_scope_target: Option<&str>,
     ctx_user_id: &str,
 ) -> Option<String> {
-    let channel_name = channel?;
-
-    if let Some(extension_manager) = extension_manager
+    if let Some(channel_name) = channel
+        && let Some(extension_manager) = extension_manager
         && let Some(target) = extension_manager
             .notification_target_for_channel(channel_name)
             .await
@@ -103,13 +107,16 @@ async fn resolve_channel_fallback_target(
         return Some(target);
     }
 
-    Some(ctx_user_id.to_string())
+    owner_scope_target
+        .map(ToOwned::to_owned)
+        .or_else(|| Some(ctx_user_id.to_string()))
 }
 
 struct MessageTargetResolution<'a> {
     extension_manager: Option<&'a Arc<ExtensionManager>>,
     explicit_target: Option<String>,
     metadata_target: Option<String>,
+    owner_scope_target: Option<String>,
     default_target: Option<String>,
     channel: Option<&'a str>,
     metadata_channel: Option<&'a str>,
@@ -133,6 +140,7 @@ async fn resolve_message_target(inputs: MessageTargetResolution<'_>) -> Option<S
         return resolve_channel_fallback_target(
             inputs.extension_manager,
             inputs.channel,
+            inputs.owner_scope_target.as_deref(),
             inputs.ctx_user_id,
         )
         .await;
@@ -148,6 +156,7 @@ async fn resolve_message_target(inputs: MessageTargetResolution<'_>) -> Option<S
         return resolve_channel_fallback_target(
             inputs.extension_manager,
             inputs.channel,
+            None,
             inputs.ctx_user_id,
         )
         .await;
@@ -224,8 +233,9 @@ impl Tool for MessageTool {
             .unwrap_or_else(|e| e.into_inner())
             .clone();
         let metadata_target = metadata_notify_user(&ctx.metadata);
+        let metadata_owner_id = metadata_owner_id(&ctx.metadata);
         let has_execution_routing_metadata =
-            metadata_channel.is_some() || metadata_target.is_some();
+            metadata_channel.is_some() || metadata_target.is_some() || metadata_owner_id.is_some();
 
         // Job metadata is authoritative for autonomous executions. The shared
         // conversation defaults are only a legacy fallback when no execution-local
@@ -250,6 +260,7 @@ impl Tool for MessageTool {
             extension_manager: self.extension_manager.as_ref(),
             explicit_target,
             metadata_target,
+            owner_scope_target: metadata_owner_id,
             default_target,
             channel: channel.as_deref(),
             metadata_channel: metadata_channel.as_deref(),
@@ -870,28 +881,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn message_tool_falls_back_to_ctx_user_when_channel_known() {
-        // Regression for owner-scoped notifications: a channel can be known
-        // even when the concrete delivery target is omitted, so the message
-        // tool should pass ctx.user_id through to the channel layer.
-        let tool = MessageTool::new(Arc::new(ChannelManager::new()));
+    async fn message_tool_falls_back_to_owner_scope_when_channel_known() {
+        let (tool, gateway_captures, telegram_captures) =
+            message_tool_with_recording_channels().await;
 
         let mut ctx =
-            crate::context::JobContext::with_user("owner-scope", "routine-job", "price alert");
+            crate::context::JobContext::with_user("telegram", "routine-job", "price alert");
         ctx.metadata = serde_json::json!({
             "notify_channel": "telegram",
+            "owner_id": "owner-scope",
         });
 
         let result = tool
             .execute(serde_json::json!({"content": "NEAR price is $5"}), &ctx)
-            .await;
+            .await
+            .expect("message tool should use owner scope before ctx.user_id");
 
-        assert!(result.is_err()); // safety: test-only assertion
-        let err = result.unwrap_err().to_string();
-        let mentions_missing_target = err.contains("No target specified");
-        assert!(!mentions_missing_target); // safety: test-only assertion
-        let mentions_missing_channel = err.contains("No channel specified");
-        assert!(!mentions_missing_channel); // safety: test-only assertion
+        assert_eq!(
+            result.result.as_str(),
+            Some("Sent message to telegram:owner-scope")
+        );
+        assert!(gateway_captures.lock().await.is_empty());
+        let telegram = telegram_captures.lock().await.clone();
+        assert_eq!(telegram.len(), 1);
+        assert_eq!(telegram[0].0, "owner-scope");
+        assert_eq!(telegram[0].1.content, "NEAR price is $5");
     }
 
     #[tokio::test]
