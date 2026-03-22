@@ -41,6 +41,12 @@ impl LlmConfig {
             gemini_oauth: None,
             openai_codex: None,
             request_timeout_secs: 120,
+            max_retries: 0,
+            circuit_breaker_threshold: None,
+            circuit_breaker_recovery_secs: 30,
+            response_cache_enabled: false,
+            response_cache_ttl_secs: 3600,
+            response_cache_max_entries: 100,
             cheap_model: None,
             smart_routing_cascade: false,
         }
@@ -55,6 +61,70 @@ impl LlmConfig {
         Ok(optional_env(env_var)?
             .or_else(|| settings.selected_model.clone())
             .unwrap_or_else(|| default.to_string()))
+    }
+
+    fn parse_bool_value(key: &str, value: &str) -> Result<bool, ConfigError> {
+        match value.to_lowercase().as_str() {
+            "true" | "1" => Ok(true),
+            "false" | "0" => Ok(false),
+            _ => Err(ConfigError::InvalidValue {
+                key: key.to_string(),
+                message: format!("must be 'true' or 'false', got '{value}'"),
+            }),
+        }
+    }
+
+    fn parse_env_value<T>(key: &str, value: String) -> Result<T, ConfigError>
+    where
+        T: std::str::FromStr,
+        T::Err: std::fmt::Display,
+    {
+        value.parse().map_err(|e| ConfigError::InvalidValue {
+            key: key.to_string(),
+            message: format!("{e}"),
+        })
+    }
+
+    fn resolve_legacy_env<T>(primary: &str, legacy: &str, default: T) -> Result<T, ConfigError>
+    where
+        T: std::str::FromStr,
+        T::Err: std::fmt::Display,
+    {
+        if let Some(value) = optional_env(primary)? {
+            return Self::parse_env_value(primary, value);
+        }
+        if let Some(value) = optional_env(legacy)? {
+            return Self::parse_env_value(legacy, value);
+        }
+        Ok(default)
+    }
+
+    fn resolve_legacy_option_env<T>(primary: &str, legacy: &str) -> Result<Option<T>, ConfigError>
+    where
+        T: std::str::FromStr,
+        T::Err: std::fmt::Display,
+    {
+        if let Some(value) = optional_env(primary)? {
+            return Self::parse_env_value(primary, value).map(Some);
+        }
+        if let Some(value) = optional_env(legacy)? {
+            return Self::parse_env_value(legacy, value).map(Some);
+        }
+        Ok(None)
+    }
+
+    fn resolve_legacy_bool_env(
+        primary: &str,
+        legacy: &str,
+        default: bool,
+    ) -> Result<bool, ConfigError> {
+        if let Some(value) = optional_env(primary)? {
+            return Self::parse_bool_value(primary, &value);
+        }
+        if let Some(value) = optional_env(legacy)? {
+            return Self::parse_bool_value(legacy, &value);
+        }
+        Ok(default)
     }
 
     pub(crate) fn resolve(settings: &Settings) -> Result<Self, ConfigError> {
@@ -103,6 +173,34 @@ impl LlmConfig {
                 .unwrap_or_else(default_session_path),
         };
 
+        // Shared chain-wide decorator settings. Generic LLM_* env vars take
+        // priority, with legacy NearAI/bare names retained for compatibility.
+        let max_retries = Self::resolve_legacy_env("LLM_MAX_RETRIES", "NEARAI_MAX_RETRIES", 3)?;
+        let circuit_breaker_threshold = Self::resolve_legacy_option_env(
+            "LLM_CIRCUIT_BREAKER_THRESHOLD",
+            "CIRCUIT_BREAKER_THRESHOLD",
+        )?;
+        let circuit_breaker_recovery_secs = Self::resolve_legacy_env(
+            "LLM_CIRCUIT_BREAKER_RECOVERY_SECS",
+            "CIRCUIT_BREAKER_RECOVERY_SECS",
+            30,
+        )?;
+        let response_cache_enabled = Self::resolve_legacy_bool_env(
+            "LLM_RESPONSE_CACHE_ENABLED",
+            "RESPONSE_CACHE_ENABLED",
+            false,
+        )?;
+        let response_cache_ttl_secs = Self::resolve_legacy_env(
+            "LLM_RESPONSE_CACHE_TTL_SECS",
+            "RESPONSE_CACHE_TTL_SECS",
+            3600,
+        )?;
+        let response_cache_max_entries = Self::resolve_legacy_env(
+            "LLM_RESPONSE_CACHE_MAX_ENTRIES",
+            "RESPONSE_CACHE_MAX_ENTRIES",
+            1000,
+        )?;
+
         // Always resolve NEAR AI config (used for embeddings even when not the primary backend)
         let nearai_api_key = optional_env("NEARAI_API_KEY")?.map(SecretString::from);
         let nearai = NearAiConfig {
@@ -121,18 +219,12 @@ impl LlmConfig {
             },
             api_key: nearai_api_key,
             fallback_model: optional_env("NEARAI_FALLBACK_MODEL")?,
-            max_retries: parse_optional_env("NEARAI_MAX_RETRIES", 3)?,
-            circuit_breaker_threshold: optional_env("CIRCUIT_BREAKER_THRESHOLD")?
-                .map(|s| s.parse())
-                .transpose()
-                .map_err(|e| ConfigError::InvalidValue {
-                    key: "CIRCUIT_BREAKER_THRESHOLD".to_string(),
-                    message: format!("must be a positive integer: {e}"),
-                })?,
-            circuit_breaker_recovery_secs: parse_optional_env("CIRCUIT_BREAKER_RECOVERY_SECS", 30)?,
-            response_cache_enabled: parse_optional_env("RESPONSE_CACHE_ENABLED", false)?,
-            response_cache_ttl_secs: parse_optional_env("RESPONSE_CACHE_TTL_SECS", 3600)?,
-            response_cache_max_entries: parse_optional_env("RESPONSE_CACHE_MAX_ENTRIES", 1000)?,
+            max_retries,
+            circuit_breaker_threshold,
+            circuit_breaker_recovery_secs,
+            response_cache_enabled,
+            response_cache_ttl_secs,
+            response_cache_max_entries,
             failover_cooldown_secs: parse_optional_env("LLM_FAILOVER_COOLDOWN_SECS", 300)?,
             failover_cooldown_threshold: parse_optional_env("LLM_FAILOVER_THRESHOLD", 3)?,
             smart_routing_cascade: parse_optional_env("SMART_ROUTING_CASCADE", true)?,
@@ -262,6 +354,12 @@ impl LlmConfig {
             gemini_oauth,
             openai_codex,
             request_timeout_secs,
+            max_retries,
+            circuit_breaker_threshold,
+            circuit_breaker_recovery_secs,
+            response_cache_enabled,
+            response_cache_ttl_secs,
+            response_cache_max_entries,
             cheap_model,
             smart_routing_cascade,
         })
@@ -546,6 +644,24 @@ mod tests {
         }
     }
 
+    fn clear_shared_decorator_env() {
+        // SAFETY: Only called under ENV_MUTEX in tests.
+        unsafe {
+            std::env::remove_var("LLM_MAX_RETRIES");
+            std::env::remove_var("NEARAI_MAX_RETRIES");
+            std::env::remove_var("LLM_CIRCUIT_BREAKER_THRESHOLD");
+            std::env::remove_var("CIRCUIT_BREAKER_THRESHOLD");
+            std::env::remove_var("LLM_CIRCUIT_BREAKER_RECOVERY_SECS");
+            std::env::remove_var("CIRCUIT_BREAKER_RECOVERY_SECS");
+            std::env::remove_var("LLM_RESPONSE_CACHE_ENABLED");
+            std::env::remove_var("RESPONSE_CACHE_ENABLED");
+            std::env::remove_var("LLM_RESPONSE_CACHE_TTL_SECS");
+            std::env::remove_var("RESPONSE_CACHE_TTL_SECS");
+            std::env::remove_var("LLM_RESPONSE_CACHE_MAX_ENTRIES");
+            std::env::remove_var("RESPONSE_CACHE_MAX_ENTRIES");
+        }
+    }
+
     #[test]
     fn openai_compatible_uses_selected_model_when_llm_model_unset() {
         let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
@@ -589,6 +705,85 @@ mod tests {
         unsafe {
             std::env::remove_var("LLM_MODEL");
         }
+    }
+
+    #[test]
+    fn openai_compatible_shared_decorator_env_prefers_llm_vars_over_legacy_names() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        clear_openai_compatible_env();
+        clear_shared_decorator_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::set_var("LLM_MAX_RETRIES", "7");
+            std::env::set_var("NEARAI_MAX_RETRIES", "2");
+            std::env::set_var("LLM_CIRCUIT_BREAKER_THRESHOLD", "9");
+            std::env::set_var("CIRCUIT_BREAKER_THRESHOLD", "4");
+            std::env::set_var("LLM_CIRCUIT_BREAKER_RECOVERY_SECS", "44");
+            std::env::set_var("CIRCUIT_BREAKER_RECOVERY_SECS", "33");
+            std::env::set_var("LLM_RESPONSE_CACHE_ENABLED", "true");
+            std::env::set_var("RESPONSE_CACHE_ENABLED", "false");
+            std::env::set_var("LLM_RESPONSE_CACHE_TTL_SECS", "1234");
+            std::env::set_var("RESPONSE_CACHE_TTL_SECS", "5678");
+            std::env::set_var("LLM_RESPONSE_CACHE_MAX_ENTRIES", "777");
+            std::env::set_var("RESPONSE_CACHE_MAX_ENTRIES", "888");
+        }
+
+        let settings = Settings {
+            llm_backend: Some("openai_compatible".to_string()),
+            openai_compatible_base_url: Some("https://openrouter.ai/api/v1".to_string()),
+            selected_model: Some("openai/gpt-5.1-codex".to_string()),
+            ..Default::default()
+        };
+
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
+
+        assert_eq!(cfg.max_retries, 7);
+        assert_eq!(cfg.nearai.max_retries, 7);
+        assert_eq!(cfg.circuit_breaker_threshold, Some(9));
+        assert_eq!(cfg.nearai.circuit_breaker_threshold, Some(9));
+        assert_eq!(cfg.circuit_breaker_recovery_secs, 44);
+        assert_eq!(cfg.nearai.circuit_breaker_recovery_secs, 44);
+        assert!(cfg.response_cache_enabled);
+        assert!(cfg.nearai.response_cache_enabled);
+        assert_eq!(cfg.response_cache_ttl_secs, 1234);
+        assert_eq!(cfg.nearai.response_cache_ttl_secs, 1234);
+        assert_eq!(cfg.response_cache_max_entries, 777);
+        assert_eq!(cfg.nearai.response_cache_max_entries, 777);
+
+        clear_shared_decorator_env();
+    }
+
+    #[test]
+    fn openai_compatible_shared_decorator_env_falls_back_to_legacy_names() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        clear_openai_compatible_env();
+        clear_shared_decorator_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::set_var("NEARAI_MAX_RETRIES", "4");
+            std::env::set_var("CIRCUIT_BREAKER_THRESHOLD", "6");
+            std::env::set_var("CIRCUIT_BREAKER_RECOVERY_SECS", "41");
+            std::env::set_var("RESPONSE_CACHE_ENABLED", "true");
+            std::env::set_var("RESPONSE_CACHE_TTL_SECS", "2222");
+            std::env::set_var("RESPONSE_CACHE_MAX_ENTRIES", "333");
+        }
+
+        let settings = Settings {
+            llm_backend: Some("openai_compatible".to_string()),
+            openai_compatible_base_url: Some("https://openrouter.ai/api/v1".to_string()),
+            selected_model: Some("openai/gpt-5.1-codex".to_string()),
+            ..Default::default()
+        };
+
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
+
+        assert_eq!(cfg.max_retries, 4);
+        assert_eq!(cfg.circuit_breaker_threshold, Some(6));
+        assert_eq!(cfg.circuit_breaker_recovery_secs, 41);
+        assert!(cfg.response_cache_enabled);
+        assert_eq!(cfg.response_cache_ttl_secs, 2222);
+        assert_eq!(cfg.response_cache_max_entries, 333);
+        clear_shared_decorator_env();
     }
 
     #[test]
