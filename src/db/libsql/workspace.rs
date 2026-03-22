@@ -376,6 +376,30 @@ impl WorkspaceStore for LibSqlBackend {
         Ok(())
     }
 
+    async fn update_document_metadata(
+        &self,
+        id: Uuid,
+        metadata: &serde_json::Value,
+    ) -> Result<(), WorkspaceError> {
+        let conn = self
+            .connect()
+            .await
+            .map_err(|e| WorkspaceError::SearchFailed {
+                reason: e.to_string(),
+            })?;
+        let now = fmt_ts(&Utc::now());
+        let metadata = metadata.to_string();
+        conn.execute(
+            "UPDATE memory_documents SET metadata = ?2, updated_at = ?3 WHERE id = ?1",
+            params![id.to_string(), metadata, now],
+        )
+        .await
+        .map_err(|e| WorkspaceError::SearchFailed {
+            reason: format!("Metadata update failed: {}", e),
+        })?;
+        Ok(())
+    }
+
     async fn delete_document_by_path(
         &self,
         user_id: &str,
@@ -569,6 +593,50 @@ impl WorkspaceStore for LibSqlBackend {
             .await
             .map_err(|e| WorkspaceError::SearchFailed {
                 reason: format!("Query failed: {}", e),
+            })?;
+
+        let mut docs = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| WorkspaceError::SearchFailed {
+                reason: format!("Query failed: {}", e),
+            })?
+        {
+            docs.push(row_to_memory_document(&row));
+        }
+        Ok(docs)
+    }
+
+    async fn list_documents_by_metadata(
+        &self,
+        user_id: &str,
+        agent_id: Option<Uuid>,
+        key: &str,
+        value: &str,
+    ) -> Result<Vec<MemoryDocument>, WorkspaceError> {
+        let conn = self
+            .connect()
+            .await
+            .map_err(|e| WorkspaceError::SearchFailed {
+                reason: e.to_string(),
+            })?;
+        let agent_id_str = agent_id.map(|id| id.to_string());
+        let mut rows = conn
+            .query(
+                r#"
+                SELECT id, user_id, agent_id, path, content,
+                       created_at, updated_at, metadata
+                FROM memory_documents
+                WHERE user_id = ?1 AND agent_id IS ?2
+                  AND json_extract(metadata, '$.' || ?3) = ?4
+                ORDER BY updated_at DESC
+                "#,
+                params![user_id, agent_id_str.as_deref(), key, value],
+            )
+            .await
+            .map_err(|e| WorkspaceError::SearchFailed {
+                reason: format!("Metadata query failed: {}", e),
             })?;
 
         let mut docs = Vec::new();

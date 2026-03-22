@@ -595,6 +595,11 @@ pub trait WorkspaceStore: Send + Sync {
         path: &str,
     ) -> Result<MemoryDocument, WorkspaceError>;
     async fn update_document(&self, id: Uuid, content: &str) -> Result<(), WorkspaceError>;
+    async fn update_document_metadata(
+        &self,
+        id: Uuid,
+        metadata: &serde_json::Value,
+    ) -> Result<(), WorkspaceError>;
     async fn delete_document_by_path(
         &self,
         user_id: &str,
@@ -616,6 +621,13 @@ pub trait WorkspaceStore: Send + Sync {
         &self,
         user_id: &str,
         agent_id: Option<Uuid>,
+    ) -> Result<Vec<MemoryDocument>, WorkspaceError>;
+    async fn list_documents_by_metadata(
+        &self,
+        user_id: &str,
+        agent_id: Option<Uuid>,
+        key: &str,
+        value: &str,
     ) -> Result<Vec<MemoryDocument>, WorkspaceError>;
     async fn delete_chunks(&self, document_id: Uuid) -> Result<(), WorkspaceError>;
     async fn insert_chunk(
