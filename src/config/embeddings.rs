@@ -28,8 +28,8 @@ pub struct EmbeddingsConfig {
     pub ollama_base_url: String,
     /// Embedding vector dimension. Inferred from the model name when not set explicitly.
     pub dimension: usize,
-    /// Custom base URL for remote embedding providers.
-    /// When set, overrides the default provider API base URL.
+    /// Custom base URL for remote embedding providers from `EMBEDDING_BASE_URL`.
+    /// Legacy field name retained for compatibility; prefer [`Self::embedding_base_url`].
     pub openai_base_url: Option<String>,
     /// Maximum entries in the embedding LRU cache (default 10,000).
     ///
@@ -94,11 +94,11 @@ impl EmbeddingsConfig {
 
         let enabled = parse_bool_env("EMBEDDING_ENABLED", settings.embeddings.enabled)?;
 
-        let openai_base_url = optional_env("EMBEDDING_BASE_URL")?;
+        let embedding_base_url = optional_env("EMBEDDING_BASE_URL")?;
 
         // Validate base URLs to prevent SSRF attacks (#1103).
         validate_base_url(&ollama_base_url, "OLLAMA_BASE_URL")?;
-        if let Some(ref url) = openai_base_url {
+        if let Some(ref url) = embedding_base_url {
             validate_base_url(url, "EMBEDDING_BASE_URL")?;
         }
 
@@ -119,7 +119,7 @@ impl EmbeddingsConfig {
             model,
             ollama_base_url,
             dimension,
-            openai_base_url,
+            openai_base_url: embedding_base_url,
             cache_size,
         })
     }
@@ -132,6 +132,11 @@ impl EmbeddingsConfig {
     /// Get the Gemini API key if configured.
     pub fn gemini_api_key(&self) -> Option<&str> {
         self.gemini_api_key.as_ref().map(|s| s.expose_secret())
+    }
+
+    /// Get the custom base URL for remote embedding providers.
+    pub fn embedding_base_url(&self) -> Option<&str> {
+        self.openai_base_url.as_deref()
     }
 
     /// Create the appropriate embedding provider based on configuration.
@@ -180,7 +185,7 @@ impl EmbeddingsConfig {
                         &self.model,
                         self.dimension,
                     );
-                    if let Some(ref base_url) = self.openai_base_url {
+                    if let Some(base_url) = self.embedding_base_url() {
                         tracing::debug!(
                             "Embeddings enabled via Gemini (model: {}, base_url: {}, dim: {})",
                             self.model,
@@ -208,7 +213,7 @@ impl EmbeddingsConfig {
                         &self.model,
                         self.dimension,
                     );
-                    if let Some(ref base_url) = self.openai_base_url {
+                    if let Some(base_url) = self.embedding_base_url() {
                         tracing::debug!(
                             "Embeddings enabled via OpenAI (model: {}, base_url: {}, dim: {})",
                             self.model,
@@ -360,9 +365,17 @@ mod tests {
         let settings = Settings::default();
         let config = EmbeddingsConfig::resolve(&settings).expect("resolve should succeed");
         assert!(
-            config.openai_base_url.is_none(),
-            "openai_base_url should be None when EMBEDDING_BASE_URL is not set"
+            config.embedding_base_url().is_none(),
+            "embedding_base_url should be None when EMBEDDING_BASE_URL is not set"
         );
+    }
+
+    #[test]
+    fn embedding_base_url_accessor_uses_legacy_field() {
+        let mut config = EmbeddingsConfig::default();
+        config.openai_base_url = Some("https://8.8.8.8".to_string());
+
+        assert_eq!(config.embedding_base_url(), Some("https://8.8.8.8"));
     }
 
     #[test]

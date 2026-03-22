@@ -113,6 +113,12 @@ struct EmbeddingsProviderAvailability {
     nearai: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct EmbeddingsProviderOption {
+    id: &'static str,
+    label: &'static str,
+}
+
 impl SetupWizard {
     fn owner_id(&self) -> &str {
         &self.owner_id
@@ -2343,28 +2349,19 @@ impl SetupWizard {
             return Ok(());
         }
 
-        let mut options = Vec::new();
-        if has_nearai {
-            options.push("NEAR AI (uses same auth, no extra cost)");
-        }
-        options.push("OpenAI (requires API key)");
-        options.push("Gemini (requires API key)");
-
-        let choice = select_one("Select embeddings provider:", &options).map_err(SetupError::Io)?;
-
-        // Map choice back to provider name
-        let provider = if has_nearai {
-            match choice {
-                0 => "nearai",
-                1 => "openai",
-                _ => "gemini",
-            }
-        } else {
-            match choice {
-                0 => "openai",
-                _ => "gemini",
-            }
-        };
+        let provider_options = Self::embeddings_provider_options(has_nearai);
+        let option_refs: Vec<&str> = provider_options.iter().map(|option| option.label).collect();
+        let choice =
+            select_one("Select embeddings provider:", &option_refs).map_err(SetupError::Io)?;
+        let provider = provider_options
+            .get(choice)
+            .map(|option| option.id)
+            .ok_or_else(|| {
+                SetupError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("invalid embeddings provider choice index: {choice}"),
+                ))
+            })?;
 
         match provider {
             "nearai" => {
@@ -3242,6 +3239,28 @@ impl SetupWizard {
                 .is_some_and(|key| !key.is_empty()),
             nearai: self.has_nearai_embeddings_session(),
         }
+    }
+
+    fn embeddings_provider_options(has_nearai: bool) -> Vec<EmbeddingsProviderOption> {
+        let mut options = Vec::with_capacity(if has_nearai { 3 } else { 2 });
+
+        if has_nearai {
+            options.push(EmbeddingsProviderOption {
+                id: "nearai",
+                label: "NEAR AI (uses same auth, no extra cost)",
+            });
+        }
+
+        options.push(EmbeddingsProviderOption {
+            id: "openai",
+            label: "OpenAI (requires API key)",
+        });
+        options.push(EmbeddingsProviderOption {
+            id: "gemini",
+            label: "Gemini (requires API key)",
+        });
+
+        options
     }
 
     fn has_nearai_embeddings_session(&self) -> bool {
@@ -4180,6 +4199,76 @@ mod tests {
                 gemini: true,
                 nearai: false,
             }
+        );
+    }
+
+    #[test]
+    fn test_embeddings_provider_availability_uses_cached_openai_key_for_openai_backend() {
+        let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempdir().unwrap();
+        let session_path = dir.path().join("missing-session.json");
+        let _session_path = EnvGuard::set(
+            "NEARAI_SESSION_PATH",
+            session_path.to_str().expect("utf-8 session path"),
+        );
+        let _openai = EnvGuard::clear("OPENAI_API_KEY");
+        let _gemini = EnvGuard::clear("GEMINI_API_KEY");
+
+        let mut wizard = SetupWizard::new();
+        wizard.settings.llm_backend = Some("openai".to_string());
+        wizard.llm_api_key = Some(SecretString::from("test-openai-key".to_string()));
+
+        let availability = wizard.embeddings_provider_availability();
+
+        assert_eq!(
+            availability,
+            EmbeddingsProviderAvailability {
+                openai: true,
+                gemini: false,
+                nearai: false,
+            }
+        );
+    }
+
+    #[test]
+    fn test_embeddings_provider_options_include_nearai_when_available() {
+        let options = SetupWizard::embeddings_provider_options(true);
+
+        assert_eq!(
+            options,
+            vec![
+                EmbeddingsProviderOption {
+                    id: "nearai",
+                    label: "NEAR AI (uses same auth, no extra cost)",
+                },
+                EmbeddingsProviderOption {
+                    id: "openai",
+                    label: "OpenAI (requires API key)",
+                },
+                EmbeddingsProviderOption {
+                    id: "gemini",
+                    label: "Gemini (requires API key)",
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn test_embeddings_provider_options_omit_nearai_without_session() {
+        let options = SetupWizard::embeddings_provider_options(false);
+
+        assert_eq!(
+            options,
+            vec![
+                EmbeddingsProviderOption {
+                    id: "openai",
+                    label: "OpenAI (requires API key)",
+                },
+                EmbeddingsProviderOption {
+                    id: "gemini",
+                    label: "Gemini (requires API key)",
+                },
+            ]
         );
     }
 
