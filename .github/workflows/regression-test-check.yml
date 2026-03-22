@@ -121,6 +121,7 @@ jobs:
           fi
 
           # Whole-function context: detect edits inside existing test functions.
+          # Uses -W (whole function) which works when git recognises function boundaries.
           if git diff "${BASE_REF}...${HEAD_REF}" -W -- '*.rs' | awk '
             /^@@/           { if (has_test && has_add) { found=1; exit } has_test=0; has_add=0 }
             /^ .*#\[test\]/ || /^ .*#\[tokio::test\]/ || /^ .*#\[cfg\(test\)\]/ || /^ .*mod tests/ { has_test=1 }
@@ -130,6 +131,31 @@ jobs:
           '; then
             echo "Test changes found in existing test functions."
             exit 0
+          fi
+
+          # Line-level check: detect changes inside #[cfg(test)] regions.
+          # git -W relies on function boundary detection which misses Rust mod blocks,
+          # so this fallback checks whether changed line numbers fall within test modules.
+          CHANGED_RS=$(echo "$CHANGED_FILES" | grep '\.rs$' || true)
+          if [ -n "$CHANGED_RS" ]; then
+            while IFS= read -r rs_file; do
+              [ -f "$rs_file" ] || continue
+
+              # Find the line number where #[cfg(test)] appears (start of test module).
+              TEST_MOD_START=$(grep -n '#\[cfg(test)\]' "$rs_file" | head -1 | cut -d: -f1 || true)
+              [ -n "$TEST_MOD_START" ] || continue
+
+              # Get changed line numbers in this file from the diff hunk headers.
+              # Each @@ line looks like: @@ -old,count +new,count @@
+              while IFS= read -r hunk_line; do
+                line_no=$(echo "$hunk_line" | sed -E 's/^@@ -[0-9,]+ \+([0-9]+).*/\1/')
+                [ -n "$line_no" ] || continue
+                if [ "$line_no" -ge "$TEST_MOD_START" ]; then
+                  echo "Test changes found: $rs_file has changes at line $line_no inside #[cfg(test)] region (starts at line $TEST_MOD_START)."
+                  exit 0
+                fi
+              done < <(git diff "${BASE_REF}...${HEAD_REF}" -U0 -- "$rs_file" | grep -E '^@@')
+            done <<< "$CHANGED_RS"
           fi
 
           if grep -qE '^tests/' <<< "$CHANGED_FILES"; then
