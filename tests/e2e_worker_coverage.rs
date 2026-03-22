@@ -235,7 +235,7 @@ mod tests {
 
         rig.verify_trace_expects(&trace, &responses);
 
-        // Both calls should have failed due to rate limiting.
+        // All calls should have failed due to rate limiting.
         let completed = rig.tool_calls_completed();
         let rl_calls: Vec<_> = completed
             .iter()
@@ -248,6 +248,16 @@ mod tests {
         assert!(
             rl_calls.iter().all(|(_, ok)| !ok),
             "All stub_rate_limit calls should fail: {rl_calls:?}"
+        );
+
+        // Verify we accumulated enough consecutive rate-limited failures
+        // to exercise the cascade path rather than stopping after just 2 calls.
+        // With 11 tool_calls in the fixture and max_tool_iterations=10 (default),
+        // the worker completes ~9 calls before hitting the iteration limit.
+        assert!(
+            rl_calls.len() >= 8,
+            "Expected >= 8 rate-limited tool calls to hit threshold, got {}",
+            rl_calls.len()
         );
 
         rig.shutdown();
