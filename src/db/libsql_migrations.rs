@@ -728,10 +728,19 @@ PRAGMA foreign_keys=ON;
     (
         14,
         "conversation_message_sequence",
-        // Add stable sequence numbers to preserve message order independently
-        // from timestamps, then backfill existing rows in chronological order.
+        // Rebuild conversation_messages with a NOT NULL sequence_num column so
+        // both fresh and migrated databases enforce stable ordering in schema.
         r#"
-ALTER TABLE conversation_messages ADD COLUMN sequence_num INTEGER;
+ALTER TABLE conversation_messages RENAME TO conversation_messages_old;
+
+CREATE TABLE conversation_messages (
+    id TEXT PRIMARY KEY,
+    conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    role TEXT NOT NULL,
+    content TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    sequence_num INTEGER NOT NULL
+);
 
 WITH ranked AS (
     SELECT
@@ -740,15 +749,23 @@ WITH ranked AS (
             PARTITION BY conversation_id
             ORDER BY created_at ASC, id ASC
         ) - 1 AS sequence_num
-    FROM conversation_messages
+    FROM conversation_messages_old
 )
-UPDATE conversation_messages
-SET sequence_num = (
-    SELECT ranked.sequence_num
-    FROM ranked
-    WHERE ranked.id = conversation_messages.id
-)
-WHERE sequence_num IS NULL;
+INSERT INTO conversation_messages (id, conversation_id, role, content, created_at, sequence_num)
+SELECT
+    old.id,
+    old.conversation_id,
+    old.role,
+    old.content,
+    old.created_at,
+    ranked.sequence_num
+FROM conversation_messages_old AS old
+JOIN ranked ON ranked.id = old.id;
+
+DROP TABLE conversation_messages_old;
+
+CREATE INDEX IF NOT EXISTS idx_conversation_messages_conversation
+    ON conversation_messages(conversation_id);
 
 CREATE UNIQUE INDEX IF NOT EXISTS uq_conversation_messages_sequence
     ON conversation_messages(conversation_id, sequence_num);
@@ -924,6 +941,23 @@ mod tests {
                 ("second".to_string(), 1),
                 ("third".to_string(), 2),
             ]
+        );
+
+        let mut schema_rows = conn
+            .query("PRAGMA table_info(conversation_messages)", ())
+            .await
+            .unwrap();
+        let mut sequence_num_not_null = false;
+        while let Some(row) = schema_rows.next().await.unwrap() {
+            let name = row.get::<String>(1).unwrap_or_default();
+            if name == "sequence_num" {
+                sequence_num_not_null = row.get::<i64>(3).unwrap_or_default() == 1;
+                break;
+            }
+        }
+        assert!(
+            sequence_num_not_null,
+            "sequence_num should be enforced as NOT NULL after V14"
         );
 
         let mut migration_rows = conn

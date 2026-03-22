@@ -10,6 +10,12 @@ use crate::db::{ConversationPageCursor, ConversationStore};
 use crate::error::DatabaseError;
 use crate::history::{ConversationMessage, ConversationSummary};
 
+async fn rollback_with_warning(conn: &libsql::Connection, context: &'static str) {
+    if let Err(err) = conn.execute("ROLLBACK", params![]).await {
+        tracing::warn!(context, error = %err, "libSQL rollback failed");
+    }
+}
+
 #[async_trait]
 impl ConversationStore for LibSqlBackend {
     async fn create_conversation(
@@ -140,7 +146,7 @@ impl ConversationStore for LibSqlBackend {
                     .map_err(|e| DatabaseError::Query(e.to_string()))?;
             }
             Err(_) => {
-                let _ = conn.execute("ROLLBACK", params![]).await;
+                rollback_with_warning(&conn, "add_conversation_message_with_metadata").await;
             }
         }
 
@@ -370,7 +376,7 @@ impl ConversationStore for LibSqlBackend {
                     .map_err(|e| DatabaseError::Query(e.to_string()))?;
             }
             Err(_) => {
-                let _ = conn.execute("ROLLBACK", params![]).await;
+                rollback_with_warning(&conn, "get_or_create_routine_conversation").await;
             }
         }
         result
@@ -432,7 +438,7 @@ impl ConversationStore for LibSqlBackend {
                     .map_err(|e| DatabaseError::Query(e.to_string()))?;
             }
             Err(_) => {
-                let _ = conn.execute("ROLLBACK", params![]).await;
+                rollback_with_warning(&conn, "get_or_create_heartbeat_conversation").await;
             }
         }
         result
