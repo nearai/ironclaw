@@ -250,46 +250,50 @@ impl Agent {
         }
 
         // Safety validation for user input.
-        // Skip empty-content check when the message has attachments (e.g., image-only messages).
-        // The attachment pipeline (augment_with_attachments) will provide content downstream.
+        // Skip all safety checks when the message has attachments but no text
+        // content (e.g., image-only messages). An empty string carries no
+        // injection payload, and the attachment pipeline
+        // (augment_with_attachments) will provide content downstream.
+        // Non-empty messages always go through the full safety pipeline.
         let has_attachments = !message.attachments.is_empty();
-        let validation = if content.is_empty() && has_attachments {
-            // Image/file-only message — bypass empty-input validation
-            ironclaw_safety::ValidationResult::ok()
-        } else {
-            self.safety().validate_input(content)
-        };
-        if !validation.is_valid {
-            let details = validation
-                .errors
+        // Intentionally `is_empty()`, not `trim().is_empty()` — whitespace-only
+        // content should still go through safety validation.
+        let skip_safety = content.is_empty() && has_attachments;
+
+        if !skip_safety {
+            let validation = self.safety().validate_input(content);
+            if !validation.is_valid {
+                let details = validation
+                    .errors
+                    .iter()
+                    .map(|e| format!("{}: {}", e.field, e.message))
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                return Ok(SubmissionResult::error(format!(
+                    "Input rejected by safety validation: {}",
+                    details
+                )));
+            }
+
+            let violations = self.safety().check_policy(content);
+            if violations
                 .iter()
-                .map(|e| format!("{}: {}", e.field, e.message))
-                .collect::<Vec<_>>()
-                .join("; ");
-            return Ok(SubmissionResult::error(format!(
-                "Input rejected by safety validation: {}",
-                details
-            )));
-        }
+                .any(|rule| rule.action == crate::safety::PolicyAction::Block)
+            {
+                return Ok(SubmissionResult::error("Input rejected by safety policy."));
+            }
 
-        let violations = self.safety().check_policy(content);
-        if violations
-            .iter()
-            .any(|rule| rule.action == crate::safety::PolicyAction::Block)
-        {
-            return Ok(SubmissionResult::error("Input rejected by safety policy."));
-        }
-
-        // Scan inbound messages for secrets (API keys, tokens).
-        // Catching them here prevents the LLM from echoing them back, which
-        // would trigger the outbound leak detector and create error loops.
-        if let Some(warning) = self.safety().scan_inbound_for_secrets(content) {
-            tracing::warn!(
-                user = %message.user_id,
-                channel = %message.channel,
-                "Inbound message blocked: contains leaked secret"
-            );
-            return Ok(SubmissionResult::error(warning));
+            // Scan inbound messages for secrets (API keys, tokens).
+            // Catching them here prevents the LLM from echoing them back, which
+            // would trigger the outbound leak detector and create error loops.
+            if let Some(warning) = self.safety().scan_inbound_for_secrets(content) {
+                tracing::warn!(
+                    user = %message.user_id,
+                    channel = %message.channel,
+                    "Inbound message blocked: contains leaked secret"
+                );
+                return Ok(SubmissionResult::error(warning));
+            }
         }
 
         // Handle explicit commands (starting with /) directly
@@ -360,13 +364,56 @@ impl Agent {
             );
         }
 
-        // Augment content with attachment context (transcripts, metadata, images)
+        // Augment content with attachment context (transcripts, metadata, images).
         let augmented =
             crate::agent::attachments::augment_with_attachments(content, &message.attachments);
         let (effective_content, image_parts) = match &augmented {
             Some(result) => (result.text.as_str(), result.image_parts.clone()),
             None => (content, Vec::new()),
         };
+
+        // Safety-validate the augmented content when attachments introduced new
+        // text (e.g., image transcripts, PDF extracted text, audio transcripts).
+        // This closes the gap where attacker-controlled content embedded in
+        // attachments could bypass the pre-augmentation safety checks above.
+        if augmented.is_some() && !effective_content.is_empty() {
+            let validation = self.safety().validate_input(effective_content);
+            if !validation.is_valid {
+                let details = validation
+                    .errors
+                    .iter()
+                    .map(|e| format!("{}: {}", e.field, e.message))
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                return Ok(SubmissionResult::error(format!(
+                    "Attachment content rejected by safety validation: {}",
+                    details
+                )));
+            }
+
+            let violations = self.safety().check_policy(effective_content);
+            if violations
+                .iter()
+                .any(|rule| rule.action == crate::safety::PolicyAction::Block)
+            {
+                return Ok(SubmissionResult::error(
+                    "Attachment content rejected by safety policy.",
+                ));
+            }
+
+            if let Some(_warning) = self.safety().scan_inbound_for_secrets(effective_content) {
+                tracing::warn!(
+                    user = %message.user_id,
+                    channel = %message.channel,
+                    "Augmented content blocked: contains leaked secret"
+                );
+                return Ok(SubmissionResult::error(
+                    "Attachment content appears to contain a secret (API key, token, or credential). \
+                     For security, it was not sent to the AI. Please remove the secret from the \
+                     attachment and try again.",
+                ));
+            }
+        }
 
         // Start the turn and get messages
         let turn_messages = {
@@ -2044,6 +2091,241 @@ mod tests {
             Ok(Some(msg))
         } else {
             Ok(None)
+        }
+    }
+
+    /// Build a minimal `Agent` for thread_ops unit tests (no DB, no workspace).
+    fn make_thread_ops_test_agent() -> crate::agent::Agent {
+        use std::time::Duration;
+
+        use async_trait::async_trait;
+        use rust_decimal::Decimal;
+
+        use crate::agent::agent_loop::AgentDeps;
+        use crate::agent::cost_guard::{CostGuard, CostGuardConfig};
+        use crate::channels::ChannelManager;
+        use crate::config::{AgentConfig, SafetyConfig, SkillsConfig};
+        use crate::context::ContextManager;
+        use crate::hooks::HookRegistry;
+        use crate::llm::{
+            CompletionRequest, CompletionResponse, FinishReason, LlmProvider,
+            ToolCompletionRequest, ToolCompletionResponse,
+        };
+        use crate::safety::SafetyLayer;
+        use crate::tools::ToolRegistry;
+
+        struct StaticLlm;
+
+        #[async_trait]
+        impl LlmProvider for StaticLlm {
+            fn model_name(&self) -> &str {
+                "test"
+            }
+            fn cost_per_token(&self) -> (Decimal, Decimal) {
+                (Decimal::ZERO, Decimal::ZERO)
+            }
+            async fn complete(
+                &self,
+                _req: CompletionRequest,
+            ) -> Result<CompletionResponse, crate::error::LlmError> {
+                Ok(CompletionResponse {
+                    content: "ok".to_string(),
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    finish_reason: FinishReason::Stop,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                })
+            }
+            async fn complete_with_tools(
+                &self,
+                _req: ToolCompletionRequest,
+            ) -> Result<ToolCompletionResponse, crate::error::LlmError> {
+                Ok(ToolCompletionResponse {
+                    content: Some("ok".to_string()),
+                    tool_calls: Vec::new(),
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    finish_reason: FinishReason::Stop,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                })
+            }
+        }
+
+        let deps = AgentDeps {
+            store: None,
+            llm: Arc::new(StaticLlm),
+            cheap_llm: None,
+            safety: Arc::new(SafetyLayer::new(&SafetyConfig {
+                max_output_length: 100_000,
+                injection_check_enabled: true,
+            })),
+            tools: Arc::new(ToolRegistry::new()),
+            workspace: None,
+            extension_manager: None,
+            skill_registry: None,
+            skill_catalog: None,
+            skills_config: SkillsConfig::default(),
+            hooks: Arc::new(HookRegistry::new()),
+            cost_guard: Arc::new(CostGuard::new(CostGuardConfig::default())),
+            sse_tx: None,
+            http_interceptor: None,
+            transcription: None,
+            document_extraction: None,
+            owner_id: "test-owner".to_string(),
+            builder: None,
+        };
+
+        crate::agent::Agent::new(
+            AgentConfig {
+                name: "test-agent".to_string(),
+                max_parallel_jobs: 1,
+                job_timeout: Duration::from_secs(60),
+                stuck_threshold: Duration::from_secs(60),
+                repair_check_interval: Duration::from_secs(30),
+                max_repair_attempts: 1,
+                use_planning: false,
+                session_idle_timeout: Duration::from_secs(300),
+                allow_local_tools: false,
+                max_cost_per_day_cents: None,
+                max_actions_per_hour: None,
+                max_tool_iterations: 50,
+                auto_approve_tools: false,
+                default_timezone: "UTC".to_string(),
+                max_tokens_per_job: 0,
+            },
+            deps,
+            Arc::new(ChannelManager::new()),
+            None,
+            None,
+            None,
+            Some(Arc::new(ContextManager::new(1))),
+            None,
+        )
+    }
+
+    /// Regression: empty content + attachments must NOT be rejected by safety
+    /// validation. Before this fix, `validate_input("")` returned an error
+    /// and blocked image-only messages.
+    #[tokio::test]
+    async fn test_process_user_input_allows_attachment_only_messages() {
+        use crate::channels::{AttachmentKind, IncomingAttachment};
+
+        let agent = make_thread_ops_test_agent();
+
+        let mut session = Session::new("test-user");
+        let thread = session.create_thread();
+        let thread_id = thread.id;
+
+        let session = Arc::new(Mutex::new(session));
+
+        let mut message = IncomingMessage::new("test", "test-user", "");
+        message.attachments.push(IncomingAttachment {
+            id: "photo-1".to_string(),
+            kind: AttachmentKind::Image,
+            mime_type: "image/jpeg".to_string(),
+            filename: Some("photo.jpg".to_string()),
+            size_bytes: Some(1024),
+            source_url: None,
+            storage_key: None,
+            extracted_text: None,
+            data: vec![],
+            duration_secs: None,
+        });
+
+        let result = agent
+            .process_user_input(&message, session, thread_id, "")
+            .await;
+
+        // The call may fail downstream (no DB, no real LLM), but it must NOT
+        // fail on safety validation. Any error containing "safety" would mean
+        // the bypass didn't work.
+        match &result {
+            Ok(crate::agent::submission::SubmissionResult::Error { message }) => {
+                assert!(
+                    !message.to_lowercase().contains("safety"),
+                    "Attachment-only message was blocked by safety: {message}"
+                );
+            }
+            _ => {
+                // Either succeeded or failed for a non-safety reason — both OK.
+            }
+        }
+    }
+
+    /// Control test: empty content WITHOUT attachments must still be rejected.
+    #[tokio::test]
+    async fn test_process_user_input_rejects_empty_without_attachments() {
+        let agent = make_thread_ops_test_agent();
+
+        let mut session = Session::new("test-user");
+        let thread = session.create_thread();
+        let thread_id = thread.id;
+
+        let session = Arc::new(Mutex::new(session));
+        let message = IncomingMessage::new("test", "test-user", "");
+
+        let result = agent
+            .process_user_input(&message, session, thread_id, "")
+            .await;
+
+        match result {
+            Ok(crate::agent::submission::SubmissionResult::Error { message }) => {
+                assert!(
+                    message.contains("safety validation"),
+                    "Expected safety validation error, got: {message}"
+                );
+            }
+            other => {
+                panic!("Expected SubmissionResult::Error for empty input, got: {other:?}");
+            }
+        }
+    }
+
+    /// Non-empty content + attachments must still go through full safety
+    /// validation (the bypass only fires for empty content).
+    #[tokio::test]
+    async fn test_process_user_input_validates_nonempty_with_attachments() {
+        use crate::channels::{AttachmentKind, IncomingAttachment};
+
+        let agent = make_thread_ops_test_agent();
+
+        let mut session = Session::new("test-user");
+        let thread = session.create_thread();
+        let thread_id = thread.id;
+
+        let session = Arc::new(Mutex::new(session));
+
+        let mut message = IncomingMessage::new("test", "test-user", "describe this image");
+        message.attachments.push(IncomingAttachment {
+            id: "photo-2".to_string(),
+            kind: AttachmentKind::Image,
+            mime_type: "image/png".to_string(),
+            filename: Some("screenshot.png".to_string()),
+            size_bytes: Some(2048),
+            source_url: None,
+            storage_key: None,
+            extracted_text: None,
+            data: vec![],
+            duration_secs: None,
+        });
+
+        let result = agent
+            .process_user_input(&message, session, thread_id, "describe this image")
+            .await;
+
+        // Non-empty content with a valid message should NOT be rejected by safety.
+        match &result {
+            Ok(crate::agent::submission::SubmissionResult::Error { message }) => {
+                assert!(
+                    !message.to_lowercase().contains("safety"),
+                    "Non-empty content with attachment was blocked by safety: {message}"
+                );
+            }
+            _ => {
+                // Passed safety — expected.
+            }
         }
     }
 }
