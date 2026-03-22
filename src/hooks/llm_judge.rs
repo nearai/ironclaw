@@ -13,16 +13,27 @@ use async_trait::async_trait;
 
 use ironclaw_safety::{AmbiguousPolicy, JudgeVerdict, LlmJudge, ToolCallRequest};
 
+use crate::db::Database;
 use crate::hooks::{Hook, HookContext, HookError, HookEvent, HookOutcome, HookPoint};
 
 /// Hook that runs the LLM judge before every tool call.
 pub struct LlmJudgeHook {
     judge: Arc<LlmJudge>,
+    verdict_store: Option<Arc<dyn Database>>,
 }
 
 impl LlmJudgeHook {
     pub fn new(judge: Arc<LlmJudge>) -> Self {
-        Self { judge }
+        Self {
+            judge,
+            verdict_store: None,
+        }
+    }
+
+    /// Attach a database for audit persistence of judge verdicts.
+    pub fn with_verdict_store(mut self, store: Arc<dyn Database>) -> Self {
+        self.verdict_store = Some(store);
+        self
     }
 }
 
@@ -71,6 +82,23 @@ impl Hook for LlmJudgeHook {
             latency_ms = record.latency_ms,
             "LLM judge result"
         );
+
+        // Persist audit record — fire-and-forget; a failed write must not
+        // change the verdict or block the agent.
+        if let Some(ref store) = self.verdict_store
+            && let Err(e) = store
+                .record_judge_verdict(
+                    &record.tool_name,
+                    &record.verdict,
+                    record.attack_type.as_deref(),
+                    record.confidence,
+                    &record.reasoning,
+                    record.latency_ms,
+                )
+                .await
+        {
+            tracing::warn!(error = %e, "LLM judge: failed to persist verdict audit record");
+        }
 
         match verdict {
             JudgeVerdict::Allow => Ok(HookOutcome::ok()),

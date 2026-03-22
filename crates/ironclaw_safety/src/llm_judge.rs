@@ -64,21 +64,34 @@ impl AmbiguousPolicy {
 
 /// Configuration for the LLM judge, read from environment variables.
 ///
-/// Base URL and API key are intentionally absent — the judge reuses the
-/// already-configured `LlmProvider`, so no separate endpoint is needed.
-/// This reduces the number of judge-specific env vars from 7 to 4.
+/// When `base_url` and `api_key` are both set the judge uses a dedicated
+/// LLM endpoint (e.g. a cheaper/faster model on a separate provider).
+/// When unset, the adapter falls back to the main `LlmProvider`, inheriting
+/// its connection pool, retry logic, and credentials automatically.
 #[derive(Debug, Clone)]
 pub struct LlmJudgeConfig {
     /// Whether the judge is enabled. Default: false.
     pub enabled: bool,
-    /// Optional model override (e.g. `"claude-haiku-4-5-20251001"`).
-    /// `None` means use the provider's configured model.
+    /// Optional model name override. Works with both the dedicated endpoint
+    /// (when `base_url`/`api_key` are set) and the inherited provider.
+    /// Example: `"claude-haiku-4-5-20251001"`. `None` uses the provider default.
     pub model: Option<String>,
+    /// Dedicated judge endpoint base URL (e.g. `"https://api.openai.com/v1"`).
+    /// Set together with `api_key` to use a separate provider for judge calls.
+    /// `None` means inherit from the main `LlmProvider`.
+    pub base_url: Option<String>,
+    /// API key for the dedicated judge endpoint.
+    /// Required when `base_url` is set; ignored otherwise.
+    pub api_key: Option<String>,
     /// Confidence threshold below which a verdict is treated as Ambiguous.
     /// Default: 0.70.
     pub confidence_threshold: f64,
     /// What to do with Ambiguous verdicts. Default: Block.
     pub ambiguous_policy: AmbiguousPolicy,
+    /// Maximum time to wait for the judge LLM response, in milliseconds.
+    /// Default: 5000 (5 s). Timeout is enforced by the adapter in the main
+    /// crate (which has tokio), not here — keeping this crate lean.
+    pub timeout_ms: u64,
 }
 
 impl LlmJudgeConfig {
@@ -94,6 +107,8 @@ impl LlmJudgeConfig {
             .unwrap_or(false);
 
         let model = std::env::var("SAFETY_LLM_JUDGE_MODEL").ok();
+        let base_url = std::env::var("SAFETY_LLM_JUDGE_BASE_URL").ok();
+        let api_key = std::env::var("SAFETY_LLM_JUDGE_API_KEY").ok();
 
         let confidence_threshold = std::env::var("SAFETY_LLM_JUDGE_CONFIDENCE_THRESHOLD")
             .ok()
@@ -104,11 +119,19 @@ impl LlmJudgeConfig {
             .map(|s| AmbiguousPolicy::parse_policy(&s))
             .unwrap_or(AmbiguousPolicy::Block);
 
+        let timeout_ms = std::env::var("SAFETY_LLM_JUDGE_TIMEOUT_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(5_000u64);
+
         Self {
             enabled,
             model,
+            base_url,
+            api_key,
             confidence_threshold,
             ambiguous_policy,
+            timeout_ms,
         }
     }
 }
@@ -174,8 +197,21 @@ impl LlmJudge {
     /// Returns `(JudgeVerdict, JudgeRecord)`. On network or parse errors the
     /// verdict is `Allow` (fail-open) with a warning log — judge outages must
     /// not brick the assistant.
+    ///
+    /// An empty `original_user_intent` is treated as `Ambiguous` rather than
+    /// being forwarded to the judge. An empty intent would make any tool call
+    /// appear consistent with the user's request, defeating the purpose of
+    /// this layer. Callers should pass `None` intent to the hook (which skips
+    /// evaluation entirely) only for pre-approved tool calls.
     pub async fn evaluate(&self, req: &ToolCallRequest) -> (JudgeVerdict, JudgeRecord) {
         let start = Instant::now();
+
+        // Reject empty intent — it would make every tool call look safe.
+        if req.original_user_intent.trim().is_empty() {
+            let latency_ms = start.elapsed().as_millis() as u64;
+            warn!(tool = %req.tool_name, "LLM judge: empty user intent, treating as Ambiguous");
+            return fail_ambiguous(&req.tool_name, latency_ms, "Empty user intent");
+        }
 
         let args_str = serde_json::to_string_pretty(&req.tool_args)
             .unwrap_or_else(|_| req.tool_args.to_string());
@@ -250,7 +286,14 @@ impl LlmJudge {
         // Normalize to lowercase so "Allow", "allow", and "ALLOW" all match.
         // LLMs are not reliable about casing despite prompt instructions.
         let verdict_str = raw.verdict.trim().to_ascii_lowercase();
-        let reasoning = raw.reasoning.clone();
+        // Guard against serde_json default(""): a 0.0 confidence + empty
+        // reasoning means the judge omitted both fields. Treat as Ambiguous so
+        // the policy decides rather than letting a malformed response through.
+        let reasoning = if raw.reasoning.is_empty() {
+            "Judge returned no reasoning".to_string()
+        } else {
+            raw.reasoning.clone()
+        };
 
         let verdict = if confidence < self.config.confidence_threshold {
             let reason = format!(
@@ -382,9 +425,129 @@ mod tests {
         LlmJudgeConfig {
             enabled,
             model: Some("test-model".to_string()),
+            base_url: None,
+            api_key: None,
             confidence_threshold: 0.70,
             ambiguous_policy: AmbiguousPolicy::Block,
+            timeout_ms: 5_000,
         }
+    }
+
+    // ===================== Mock JudgeLlm for integration tests =====================
+
+    struct MockJudgeLlm {
+        response: Result<String, String>,
+    }
+
+    impl MockJudgeLlm {
+        fn ok(json: &str) -> Self {
+            Self {
+                response: Ok(json.to_string()),
+            }
+        }
+        fn err(msg: &str) -> Self {
+            Self {
+                response: Err(msg.to_string()),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl JudgeLlm for MockJudgeLlm {
+        async fn complete_text(
+            &self,
+            _system: &str,
+            _user: &str,
+            _model_override: Option<&str>,
+            _max_tokens: u32,
+        ) -> Result<String, String> {
+            self.response.clone()
+        }
+    }
+
+    fn make_req(intent: &str) -> ToolCallRequest {
+        ToolCallRequest {
+            tool_name: "shell".to_string(),
+            tool_args: serde_json::json!({"cmd": "ls"}),
+            original_user_intent: intent.to_string(),
+        }
+    }
+
+    // ===================== Integration: full evaluate() paths =====================
+
+    #[tokio::test]
+    async fn integration_allow_path() {
+        let llm = Arc::new(MockJudgeLlm::ok(
+            r#"{"verdict":"Allow","attack_type":null,"confidence":0.95,"reasoning":"Consistent"}"#,
+        ));
+        let judge = LlmJudge::new(llm, make_config(true));
+        let (verdict, record) = judge.evaluate(&make_req("list my files")).await;
+        assert_eq!(verdict, JudgeVerdict::Allow);
+        assert_eq!(record.confidence, 0.95);
+        assert!(record.reasoning.contains("Consistent"));
+    }
+
+    #[tokio::test]
+    async fn integration_deny_path() {
+        let llm = Arc::new(MockJudgeLlm::ok(
+            r#"{"verdict":"Deny","attack_type":"data_exfiltration","confidence":0.98,"reasoning":"Exfiltrates SSH keys"}"#,
+        ));
+        let judge = LlmJudge::new(llm, make_config(true));
+        let (verdict, record) = judge.evaluate(&make_req("list my files")).await;
+        assert!(matches!(verdict, JudgeVerdict::Deny(_)));
+        assert_eq!(record.attack_type.as_deref(), Some("data_exfiltration"));
+    }
+
+    #[tokio::test]
+    async fn integration_ambiguous_path() {
+        let llm = Arc::new(MockJudgeLlm::ok(
+            r#"{"verdict":"Ambiguous","attack_type":null,"confidence":0.80,"reasoning":"Unclear"}"#,
+        ));
+        let judge = LlmJudge::new(llm, make_config(true));
+        let (verdict, _) = judge.evaluate(&make_req("list my files")).await;
+        assert!(matches!(verdict, JudgeVerdict::Ambiguous(_)));
+    }
+
+    #[tokio::test]
+    async fn integration_network_error_fails_open() {
+        let llm = Arc::new(MockJudgeLlm::err("connection refused"));
+        let judge = LlmJudge::new(llm, make_config(true));
+        let (verdict, record) = judge.evaluate(&make_req("list my files")).await;
+        // Network failure must fail-open (Allow), not fail-closed.
+        assert_eq!(verdict, JudgeVerdict::Allow);
+        assert_eq!(record.confidence, 0.0);
+        assert!(record.reasoning.contains("unavailable"));
+    }
+
+    #[tokio::test]
+    async fn integration_empty_intent_is_ambiguous() {
+        let llm = Arc::new(MockJudgeLlm::ok(
+            r#"{"verdict":"Allow","attack_type":null,"confidence":0.99,"reasoning":"ok"}"#,
+        ));
+        let judge = LlmJudge::new(llm, make_config(true));
+        // Empty intent must be rejected before reaching the judge.
+        let (verdict, record) = judge.evaluate(&make_req("")).await;
+        assert!(
+            matches!(verdict, JudgeVerdict::Ambiguous(_)),
+            "empty intent must be Ambiguous, got {:?}",
+            verdict
+        );
+        assert!(record.reasoning.contains("Empty user intent"));
+    }
+
+    #[tokio::test]
+    async fn integration_empty_reasoning_normalized() {
+        // serde default("") fills reasoning; the judge should normalize it.
+        let llm = Arc::new(MockJudgeLlm::ok(
+            r#"{"verdict":"Allow","attack_type":null,"confidence":0.95}"#,
+        ));
+        let judge = LlmJudge::new(llm, make_config(true));
+        let (verdict, record) = judge.evaluate(&make_req("list my files")).await;
+        assert_eq!(verdict, JudgeVerdict::Allow);
+        assert!(
+            !record.reasoning.is_empty(),
+            "reasoning must never be empty after normalization"
+        );
     }
 
     fn parse_verdict_json(json: &str, threshold: f64) -> JudgeVerdict {

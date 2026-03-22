@@ -1030,7 +1030,14 @@ pub(super) async fn execute_chat_tool_standalone(
     params: &serde_json::Value,
     job_ctx: &crate::context::JobContext,
 ) -> Result<String, Error> {
-    crate::tools::execute::execute_tool_with_safety(tools, safety, tool_name, params.clone(), job_ctx).await
+    crate::tools::execute::execute_tool_with_safety(
+        tools,
+        safety,
+        tool_name,
+        params.clone(),
+        job_ctx,
+    )
+    .await
 }
 
 /// Parsed auth result fields for emitting StatusUpdate::AuthRequired.

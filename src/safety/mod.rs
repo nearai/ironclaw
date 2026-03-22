@@ -25,7 +25,7 @@ mod tests {
     #[test]
     fn test_wrap_for_llm() {
         let safety = make_safety();
-        let wrapped = safety.wrap_for_llm("test_tool", "Hello <world>", true);
+        let wrapped = safety.wrap_for_llm("test_tool", "Hello <world>");
         assert!(wrapped.contains("name=\"test_tool\""));
         assert!(wrapped.contains("sanitized=\"true\""));
         assert!(wrapped.contains("Hello <world>"));

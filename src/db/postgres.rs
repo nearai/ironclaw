@@ -16,8 +16,8 @@ use crate::agent::routine::{Routine, RoutineRun, RunStatus};
 use crate::config::DatabaseConfig;
 use crate::context::{ActionRecord, JobContext, JobState};
 use crate::db::{
-    ApiTokenRecord, ConversationStore, Database, JobStore, RoutineStore, SandboxStore,
-    SettingsStore, ToolFailureStore, UserRecord, UserStore, WorkspaceStore,
+    ApiTokenRecord, ConversationStore, Database, JobStore, JudgeVerdictStore, RoutineStore,
+    SandboxStore, SettingsStore, ToolFailureStore, UserRecord, UserStore, WorkspaceStore,
 };
 use crate::error::{DatabaseError, WorkspaceError};
 use crate::history::{
@@ -563,6 +563,32 @@ impl ToolFailureStore for PgBackend {
 
     async fn increment_repair_attempts(&self, tool_name: &str) -> Result<(), DatabaseError> {
         self.store.increment_repair_attempts(tool_name).await
+    }
+}
+
+// ==================== JudgeVerdictStore ====================
+
+#[async_trait]
+impl JudgeVerdictStore for PgBackend {
+    async fn record_judge_verdict(
+        &self,
+        tool_name: &str,
+        verdict: &str,
+        attack_type: Option<&str>,
+        confidence: f64,
+        reasoning: &str,
+        latency_ms: u64,
+    ) -> Result<(), DatabaseError> {
+        self.store
+            .record_judge_verdict(
+                tool_name,
+                verdict,
+                attack_type,
+                confidence,
+                reasoning,
+                latency_ms,
+            )
+            .await
     }
 }
 

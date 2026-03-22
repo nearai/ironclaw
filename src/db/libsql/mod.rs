@@ -8,6 +8,7 @@
 
 mod conversations;
 mod jobs;
+mod judge_verdicts;
 mod routines;
 mod sandbox;
 mod settings;
