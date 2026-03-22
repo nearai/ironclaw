@@ -68,7 +68,7 @@ impl WebhookServer {
                 reason: format!("Failed to bind to {}: {}", self.config.addr, e),
             })?;
 
-        tracing::info!("Webhook server listening on {}", self.config.addr);
+        tracing::debug!("Webhook server listening on {}", self.config.addr);
 
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         self.shutdown_tx = Some(shutdown_tx);
@@ -129,7 +129,7 @@ impl WebhookServer {
         });
         self.handle = Some(handle);
 
-        tracing::info!("Webhook server listening on {}", new_addr);
+        tracing::debug!("Webhook server listening on {}", new_addr);
 
         (old_shutdown_tx, old_handle)
     }

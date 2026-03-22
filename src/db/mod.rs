@@ -97,7 +97,7 @@ pub async fn connect_with_handles(
                     .map_err(|e| DatabaseError::Pool(e.to_string()))?
             };
             backend.run_migrations().await?;
-            tracing::info!("libSQL database connected and migrations applied");
+            tracing::debug!("libSQL database connected and migrations applied");
 
             handles.libsql_db = Some(backend.shared_db());
 

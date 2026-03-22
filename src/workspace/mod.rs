@@ -679,6 +679,10 @@ impl Workspace {
     /// concurrent appends to the same path may lose writes.
     pub async fn append(&self, path: &str, content: &str) -> Result<(), WorkspaceError> {
         let path = normalize_path(path);
+        // Scan system-prompt-injected files for prompt injection.
+        if is_system_prompt_file(&path) && !content.is_empty() {
+            reject_if_injected(&path, content)?;
+        }
         let doc = self
             .storage
             .get_or_create_document_by_path(&self.user_id, self.agent_id, &path)

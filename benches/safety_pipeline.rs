@@ -40,7 +40,7 @@ fn bench_safety_layer_pipeline(c: &mut Criterion) {
 
     // Benchmark wrap_for_llm (structural boundary wrapping)
     group.bench_function("wrap_for_llm", |b| {
-        b.iter(|| layer.wrap_for_llm(black_box("shell"), black_box(clean_tool_output), false))
+        b.iter(|| layer.wrap_for_llm(black_box("shell"), black_box(clean_tool_output)))
     });
 
     // Benchmark inbound secret scanning

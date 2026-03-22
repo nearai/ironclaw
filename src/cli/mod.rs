@@ -18,6 +18,8 @@ mod channels;
 mod completion;
 mod config;
 mod doctor;
+pub mod fmt;
+mod hooks;
 #[cfg(feature = "import")]
 pub mod import;
 mod logs;
@@ -36,6 +38,7 @@ pub use channels::{ChannelsCommand, run_channels_command};
 pub use completion::Completion;
 pub use config::{ConfigCommand, run_config_command};
 pub use doctor::run_doctor_command;
+pub use hooks::{HooksCommand, run_hooks_command};
 #[cfg(feature = "import")]
 pub use import::{ImportCommand, run_import_command};
 pub use logs::{LogsCommand, run_logs_command};
@@ -109,16 +112,20 @@ pub enum Command {
         skip_auth: bool,
 
         /// Reconfigure channels only
-        #[arg(long, conflicts_with_all = ["provider_only", "quick"])]
+        #[arg(long, conflicts_with_all = ["provider_only", "quick", "step"], help = "Deprecated: use --step channels")]
         channels_only: bool,
 
         /// Reconfigure LLM provider and model only
-        #[arg(long, conflicts_with_all = ["channels_only", "quick"])]
+        #[arg(long, conflicts_with_all = ["channels_only", "quick", "step"], help = "Deprecated: use --step provider")]
         provider_only: bool,
 
         /// Quick setup: auto-defaults everything except LLM provider and model
-        #[arg(long, conflicts_with_all = ["channels_only", "provider_only"])]
+        #[arg(long, conflicts_with_all = ["channels_only", "provider_only", "step"])]
         quick: bool,
+
+        /// Run only specific setup steps (comma-separated: provider, channels, model, database, security)
+        #[arg(long, value_delimiter = ',', conflicts_with_all = ["channels_only", "provider_only", "quick"])]
+        step: Vec<String>,
     },
 
     /// Manage configuration settings
@@ -201,6 +208,14 @@ pub enum Command {
         long_about = "List, search, and inspect SKILL.md-based skills.\nExamples:\n  ironclaw skills list\n  ironclaw skills search 'writing'\n  ironclaw skills info my-skill"
     )]
     Skills(SkillsCommand),
+
+    /// Manage lifecycle hooks
+    #[command(
+        subcommand,
+        about = "Manage lifecycle hooks",
+        long_about = "List and inspect lifecycle hooks (bundled, plugin, workspace).\nExamples:\n  ironclaw hooks list\n  ironclaw hooks list --verbose\n  ironclaw hooks list --json"
+    )]
+    Hooks(HooksCommand),
 
     /// Probe external dependencies and validate configuration
     #[command(

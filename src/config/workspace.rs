@@ -115,13 +115,10 @@ impl WorkspaceConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    // Serialize env-var-dependent tests to avoid races.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    use crate::config::helpers::lock_env;
 
     fn with_env(key: &str, val: Option<&str>, f: impl FnOnce()) {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = lock_env();
         let prev = std::env::var(key).ok();
         match val {
             Some(v) => unsafe { std::env::set_var(key, v) },

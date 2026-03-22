@@ -579,23 +579,27 @@ pub fn encode_hosted_oauth_state(flow_id: &str, instance_name: Option<&str>) -> 
 /// Decode hosted OAuth state in either the new versioned format or the
 /// legacy `instance:nonce`/`nonce` forms.
 pub fn decode_hosted_oauth_state(state: &str) -> Result<DecodedHostedOAuthState, String> {
-    if let Some(rest) = state.strip_prefix(&format!("{HOSTED_STATE_PREFIX}."))
-        && let Some((payload_b64, checksum)) = rest.rsplit_once('.')
-        && let Ok(payload_json) = URL_SAFE_NO_PAD.decode(payload_b64)
-    {
+    if let Some(rest) = state.strip_prefix(&format!("{HOSTED_STATE_PREFIX}.")) {
+        let (payload_b64, checksum) = rest
+            .rsplit_once('.')
+            .ok_or("Hosted OAuth versioned state missing checksum separator")?;
+        let payload_json = URL_SAFE_NO_PAD
+            .decode(payload_b64)
+            .map_err(|e| format!("Hosted OAuth versioned state base64 decode failed: {e}"))?;
         let expected_checksum = hosted_state_checksum(&payload_json);
         if checksum != expected_checksum {
             return Err("Hosted OAuth state checksum mismatch".to_string());
         }
-        if let Ok(payload) = serde_json::from_slice::<HostedOAuthStatePayload>(&payload_json)
-            && !payload.flow_id.trim().is_empty()
-        {
-            return Ok(DecodedHostedOAuthState {
-                flow_id: payload.flow_id,
-                instance_name: payload.instance_name.filter(|v| !v.is_empty()),
-                is_legacy: false,
-            });
+        let payload: HostedOAuthStatePayload = serde_json::from_slice(&payload_json)
+            .map_err(|e| format!("Hosted OAuth versioned state JSON parse failed: {e}"))?;
+        if payload.flow_id.trim().is_empty() {
+            return Err("Hosted OAuth versioned state has empty flow_id".to_string());
         }
+        return Ok(DecodedHostedOAuthState {
+            flow_id: payload.flow_id,
+            instance_name: payload.instance_name.filter(|v| !v.is_empty()),
+            is_legacy: false,
+        });
     }
 
     if let Some((instance_name, flow_id)) = state.split_once(':') {
@@ -754,7 +758,7 @@ mod tests {
     use crate::cli::oauth_defaults::{
         builtin_credentials, callback_host, callback_url, is_loopback_host, landing_html,
     };
-    use crate::config::helpers::ENV_MUTEX;
+    use crate::config::helpers::lock_env;
 
     #[test]
     fn test_is_loopback_host() {
@@ -771,7 +775,7 @@ mod tests {
 
     #[test]
     fn test_callback_host_default() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = lock_env();
         let original = std::env::var("OAUTH_CALLBACK_HOST").ok();
         // SAFETY: Under ENV_MUTEX, no concurrent env access.
         unsafe {
@@ -788,7 +792,7 @@ mod tests {
 
     #[test]
     fn test_callback_host_env_override() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = lock_env();
         let original_host = std::env::var("OAUTH_CALLBACK_HOST").ok();
         let original_url = std::env::var("IRONCLAW_OAUTH_CALLBACK_URL").ok();
         // SAFETY: Under ENV_MUTEX, no concurrent env access.
@@ -815,7 +819,7 @@ mod tests {
 
     #[test]
     fn test_callback_url_default() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = lock_env();
         // Clear both env vars to test default behavior
         let original_url = std::env::var("IRONCLAW_OAUTH_CALLBACK_URL").ok();
         let original_host = std::env::var("OAUTH_CALLBACK_HOST").ok();
@@ -839,7 +843,7 @@ mod tests {
 
     #[test]
     fn test_callback_url_env_override() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = lock_env();
         let original = std::env::var("IRONCLAW_OAUTH_CALLBACK_URL").ok();
         // SAFETY: Under ENV_MUTEX, no concurrent env access.
         unsafe {
@@ -1004,7 +1008,7 @@ mod tests {
 
     #[test]
     fn test_use_gateway_callback_false_by_default() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = lock_env();
         let original = std::env::var("IRONCLAW_OAUTH_CALLBACK_URL").ok();
         // SAFETY: Under ENV_MUTEX, no concurrent env access.
         unsafe {
@@ -1020,7 +1024,7 @@ mod tests {
 
     #[test]
     fn test_use_gateway_callback_true_for_hosted() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = lock_env();
         let original = std::env::var("IRONCLAW_OAUTH_CALLBACK_URL").ok();
         // SAFETY: Under ENV_MUTEX, no concurrent env access.
         unsafe {
@@ -1041,7 +1045,7 @@ mod tests {
 
     #[test]
     fn test_use_gateway_callback_false_for_localhost() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = lock_env();
         let original = std::env::var("IRONCLAW_OAUTH_CALLBACK_URL").ok();
         // SAFETY: Under ENV_MUTEX, no concurrent env access.
         unsafe {
@@ -1059,7 +1063,7 @@ mod tests {
 
     #[test]
     fn test_use_gateway_callback_false_for_empty() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = lock_env();
         let original = std::env::var("IRONCLAW_OAUTH_CALLBACK_URL").ok();
         // SAFETY: Under ENV_MUTEX, no concurrent env access.
         unsafe {
@@ -1079,7 +1083,7 @@ mod tests {
     fn test_build_platform_state_with_instance() {
         use crate::cli::oauth_defaults::{build_platform_state, decode_hosted_oauth_state};
 
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = lock_env();
         let original = std::env::var("IRONCLAW_INSTANCE_NAME").ok();
         // SAFETY: Under ENV_MUTEX, no concurrent env access.
         unsafe {
@@ -1103,7 +1107,7 @@ mod tests {
     fn test_build_platform_state_without_instance() {
         use crate::cli::oauth_defaults::{build_platform_state, decode_hosted_oauth_state};
 
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = lock_env();
         let original = std::env::var("IRONCLAW_INSTANCE_NAME").ok();
         let original_oc = std::env::var("OPENCLAW_INSTANCE_NAME").ok();
         // SAFETY: Under ENV_MUTEX, no concurrent env access.
@@ -1130,7 +1134,7 @@ mod tests {
     fn test_build_platform_state_with_openclaw_instance() {
         use crate::cli::oauth_defaults::{build_platform_state, decode_hosted_oauth_state};
 
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = lock_env();
         let original_ic = std::env::var("IRONCLAW_INSTANCE_NAME").ok();
         let original_oc = std::env::var("OPENCLAW_INSTANCE_NAME").ok();
         // SAFETY: Under ENV_MUTEX, no concurrent env access.
@@ -1187,14 +1191,14 @@ mod tests {
     }
 
     #[test]
-    fn test_decode_hosted_oauth_state_falls_back_for_non_envelope_ic2_prefix() {
+    fn test_decode_hosted_oauth_state_rejects_non_envelope_ic2_prefix() {
         use crate::cli::oauth_defaults::decode_hosted_oauth_state;
 
-        let decoded =
-            decode_hosted_oauth_state("ic2.provider-owned-state").expect("prefixed fallback");
-        assert_eq!(decoded.flow_id, "ic2.provider-owned-state");
-        assert_eq!(decoded.instance_name, None);
-        assert!(decoded.is_legacy);
+        // "ic2." prefix must parse as a valid versioned envelope — never fall
+        // through to legacy handling, which would use the full malformed
+        // envelope as the flow_id and break OAuth callback lookup (#1441).
+        decode_hosted_oauth_state("ic2.provider-owned-state")
+            .expect_err("ic2-prefixed non-envelope state should fail");
     }
 
     #[test]
@@ -1243,5 +1247,66 @@ mod tests {
         assert!(result.url.contains("state="));
         assert!(result.url.contains("code_challenge="));
         assert!(result.code_verifier.is_some());
+    }
+
+    /// Malformed `ic2.*` states must return Err, never fall through to legacy
+    /// handling where the full envelope would be used as the flow_id (#1441).
+    #[test]
+    fn test_decode_versioned_state_rejects_malformed_envelopes() {
+        use crate::cli::oauth_defaults::decode_hosted_oauth_state;
+
+        // Missing checksum separator (no second dot after prefix)
+        let err =
+            decode_hosted_oauth_state("ic2.nodots").expect_err("missing separator should fail");
+        assert!(
+            err.contains("checksum separator"),
+            "unexpected error: {err}"
+        );
+
+        // Bad base64 payload
+        let err = decode_hosted_oauth_state("ic2.!!!badbase64!!!.fakechecksum")
+            .expect_err("bad base64 should fail");
+        assert!(err.contains("base64"), "unexpected error: {err}");
+
+        // Valid base64 but not JSON: use correct checksum so we exercise JSON parsing
+        use base64::Engine;
+        use sha2::Digest;
+        let not_json_bytes = b"not json";
+        let not_json_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(not_json_bytes);
+        let digest = sha2::Sha256::digest(not_json_bytes);
+        let checksum = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(&digest[..super::HOSTED_STATE_CHECKSUM_BYTES]);
+        let err = decode_hosted_oauth_state(&format!("ic2.{not_json_b64}.{checksum}"))
+            .expect_err("non-JSON payload should fail with JSON parse error");
+        assert!(
+            err.contains("JSON"),
+            "unexpected error (expected JSON parse failure): {err}"
+        );
+    }
+
+    /// Round-trip: encode_hosted_oauth_state(nonce) → decode → flow_id == nonce.
+    /// Ensures the registration key and lookup key are always identical (#1441).
+    #[test]
+    fn test_oauth_flow_key_round_trip_consistency() {
+        use crate::cli::oauth_defaults::{decode_hosted_oauth_state, encode_hosted_oauth_state};
+
+        let nonce = "test-nonce-abc123";
+        let encoded = encode_hosted_oauth_state(nonce, Some("my-instance"));
+        let decoded = decode_hosted_oauth_state(&encoded).expect("round-trip decode");
+
+        assert_eq!(
+            decoded.flow_id, nonce,
+            "flow_id must match the original nonce"
+        );
+        assert_eq!(decoded.instance_name.as_deref(), Some("my-instance"));
+        assert!(!decoded.is_legacy);
+
+        // Also test without instance name
+        let encoded_no_instance = encode_hosted_oauth_state(nonce, None);
+        let decoded_no_instance =
+            decode_hosted_oauth_state(&encoded_no_instance).expect("round-trip without instance");
+        assert_eq!(decoded_no_instance.flow_id, nonce);
+        assert_eq!(decoded_no_instance.instance_name, None);
+        assert!(!decoded_no_instance.is_legacy);
     }
 }

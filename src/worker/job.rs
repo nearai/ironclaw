@@ -592,10 +592,12 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
 
         // Redact sensitive parameter values before they touch any observability or audit path.
         let safe_params = redact_params(&effective_params, tool.sensitive_params());
+        let risk = tool.risk_level_for(&effective_params);
         tracing::debug!(
             tool = %tool_name,
             params = %safe_params,
             job = %job_id,
+            risk = %risk,
             "Tool call started"
         );
 
@@ -798,12 +800,16 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                     });
                 }
 
+                let error_preview = {
+                    let msg = format!("Error: {}", e);
+                    truncate_for_preview(&msg, 500).into_owned()
+                };
                 self.log_event(
                     "tool_result",
                     serde_json::json!({
                         "tool_name": selection.tool_name,
                         "success": false,
-                        "output": truncate_for_preview(&format!("Error: {}", e), 500),
+                        "output": error_preview,
                     }),
                 );
 
