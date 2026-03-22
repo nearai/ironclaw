@@ -85,14 +85,22 @@ impl EncryptedProfileEngine {
     /// Build HKDF info bytes for domain separation: per-user derived keys.
     /// Uses length-prefixed encoding to prevent ambiguity if user_id or
     /// agent_id contain delimiters.
-    fn hkdf_info(user_id: &str, agent_id: &str) -> Vec<u8> {
+    fn hkdf_info(user_id: &str, agent_id: &str) -> Result<Vec<u8>, UserProfileError> {
+        let user_len =
+            u32::try_from(user_id.len()).map_err(|_| UserProfileError::EncryptionError {
+                reason: "user_id length exceeds u32 range".into(),
+            })?;
+        let agent_len =
+            u32::try_from(agent_id.len()).map_err(|_| UserProfileError::EncryptionError {
+                reason: "agent_id length exceeds u32 range".into(),
+            })?;
         let mut info = Vec::with_capacity(32 + user_id.len() + agent_id.len());
         info.extend_from_slice(b"ironclaw-profile-v1\x00");
-        info.extend_from_slice(&(user_id.len() as u32).to_le_bytes());
+        info.extend_from_slice(&user_len.to_le_bytes());
         info.extend_from_slice(user_id.as_bytes());
-        info.extend_from_slice(&(agent_id.len() as u32).to_le_bytes());
+        info.extend_from_slice(&agent_len.to_le_bytes());
         info.extend_from_slice(agent_id.as_bytes());
-        info
+        Ok(info)
     }
 
     fn encrypt_value(
@@ -101,7 +109,7 @@ impl EncryptedProfileEngine {
         user_id: &str,
         agent_id: &str,
     ) -> Result<(Vec<u8>, Vec<u8>), UserProfileError> {
-        let info = Self::hkdf_info(user_id, agent_id);
+        let info = Self::hkdf_info(user_id, agent_id)?;
         self.crypto
             .encrypt_with_info(plaintext.as_bytes(), &info)
             .map_err(|e| UserProfileError::EncryptionError {
@@ -116,7 +124,7 @@ impl EncryptedProfileEngine {
         user_id: &str,
         agent_id: &str,
     ) -> Result<String, UserProfileError> {
-        let info = Self::hkdf_info(user_id, agent_id);
+        let info = Self::hkdf_info(user_id, agent_id)?;
         let decrypted = self
             .crypto
             .decrypt_with_info(encrypted, salt, &info)
