@@ -60,7 +60,8 @@ pub use embeddings::{
 #[cfg(feature = "postgres")]
 pub use repository::Repository;
 pub use search::{
-    FusionStrategy, RankedResult, SearchConfig, SearchResult, fuse_results, reciprocal_rank_fusion,
+    FusionStrategy, RankedResult, SearchConfig, SearchDetailLevel, SearchResult, fuse_results,
+    reciprocal_rank_fusion,
 };
 
 /// Result of a layer-aware write operation.
@@ -82,6 +83,7 @@ use deadpool_postgres::Pool;
 use uuid::Uuid;
 
 use crate::error::WorkspaceError;
+use crate::llm::{ChatMessage, CompletionRequest, LlmProvider};
 use crate::safety::{Sanitizer, Severity};
 
 /// Files injected into the system prompt. Writes to these are scanned for
@@ -146,6 +148,7 @@ fn reject_if_injected(path: &str, content: &str) -> Result<(), WorkspaceError> {
 ///
 /// Allows Workspace to work with either a PostgreSQL `Repository` (the original
 /// path) or any `Database` trait implementation (e.g. libSQL backend).
+#[derive(Clone)]
 enum WorkspaceStorage {
     /// PostgreSQL-backed repository (uses connection pool directly).
     #[cfg(feature = "postgres")]
@@ -200,6 +203,25 @@ impl WorkspaceStorage {
             #[cfg(feature = "postgres")]
             Self::Repo(repo) => repo.update_document(id, content).await,
             Self::Db(db) => db.update_document(id, content).await,
+        }
+    }
+
+    async fn update_document_summaries(
+        &self,
+        id: Uuid,
+        summary_l0: Option<&str>,
+        summary_l1: Option<&str>,
+    ) -> Result<(), WorkspaceError> {
+        match self {
+            #[cfg(feature = "postgres")]
+            Self::Repo(repo) => {
+                repo.update_document_summaries(id, summary_l0, summary_l1)
+                    .await
+            }
+            Self::Db(db) => {
+                db.update_document_summaries(id, summary_l0, summary_l1)
+                    .await
+            }
         }
     }
 
@@ -320,6 +342,18 @@ impl WorkspaceStorage {
             }
         }
     }
+
+    async fn list_documents(
+        &self,
+        user_id: &str,
+        agent_id: Option<Uuid>,
+    ) -> Result<Vec<MemoryDocument>, WorkspaceError> {
+        match self {
+            #[cfg(feature = "postgres")]
+            Self::Repo(repo) => repo.list_documents(user_id, agent_id).await,
+            Self::Db(db) => db.list_documents(user_id, agent_id).await,
+        }
+    }
 }
 
 /// Default template seeded into HEARTBEAT.md on first access.
@@ -349,6 +383,8 @@ pub struct Workspace {
     storage: WorkspaceStorage,
     /// Embedding provider for semantic search.
     embeddings: Option<Arc<dyn EmbeddingProvider>>,
+    /// Optional LLM provider for summary generation/backfill.
+    summary_llm: Option<Arc<dyn LlmProvider>>,
     /// Set by `seed_if_empty()` when BOOTSTRAP.md is freshly seeded.
     /// The agent loop checks and clears this to send a proactive greeting.
     bootstrap_pending: std::sync::atomic::AtomicBool,
@@ -375,6 +411,7 @@ impl Workspace {
             agent_id: None,
             storage: WorkspaceStorage::Repo(Repository::new(pool)),
             embeddings: None,
+            summary_llm: None,
             bootstrap_pending: std::sync::atomic::AtomicBool::new(false),
             bootstrap_completed: std::sync::atomic::AtomicBool::new(false),
             search_defaults: SearchConfig::default(),
@@ -394,6 +431,7 @@ impl Workspace {
             agent_id: None,
             storage: WorkspaceStorage::Db(db),
             embeddings: None,
+            summary_llm: None,
             bootstrap_pending: std::sync::atomic::AtomicBool::new(false),
             bootstrap_completed: std::sync::atomic::AtomicBool::new(false),
             search_defaults: SearchConfig::default(),
@@ -457,6 +495,12 @@ impl Workspace {
     /// Set the embedding provider **without** caching (for tests).
     pub fn with_embeddings_uncached(mut self, provider: Arc<dyn EmbeddingProvider>) -> Self {
         self.embeddings = Some(provider);
+        self
+    }
+
+    /// Set the optional LLM provider used for summary generation.
+    pub fn with_llm(mut self, provider: Arc<dyn LlmProvider>) -> Self {
+        self.summary_llm = Some(provider);
         self
     }
 
@@ -545,6 +589,7 @@ impl Workspace {
             .await?;
         self.storage.update_document(doc.id, content).await?;
         self.reindex_document(doc.id).await?;
+        self.schedule_summary_refresh(doc.id, path.clone(), content.to_string());
 
         // Return updated doc
         self.storage.get_document_by_id(doc.id).await
@@ -581,6 +626,7 @@ impl Workspace {
 
         self.storage.update_document(doc.id, &new_content).await?;
         self.reindex_document(doc.id).await?;
+        self.schedule_summary_refresh(doc.id, path.clone(), new_content);
         Ok(())
     }
 
@@ -667,6 +713,7 @@ impl Workspace {
             .await?;
         self.storage.update_document(doc.id, content).await?;
         self.reindex_document(doc.id).await?;
+        self.schedule_summary_refresh(doc.id, path.clone(), content.to_string());
         let document = self.storage.get_document_by_id(doc.id).await?;
         Ok(WriteResult {
             document,
@@ -697,6 +744,7 @@ impl Workspace {
         };
         self.storage.update_document(doc.id, &new_content).await?;
         self.reindex_document(doc.id).await?;
+        self.schedule_summary_refresh(doc.id, path.clone(), new_content);
         let document = self.storage.get_document_by_id(doc.id).await?;
         Ok(WriteResult {
             document,
@@ -821,6 +869,7 @@ impl Workspace {
         };
         self.storage.update_document(doc.id, &new_content).await?;
         self.reindex_document(doc.id).await?;
+        self.schedule_summary_refresh(doc.id, paths::MEMORY.to_string(), new_content);
         Ok(())
     }
 
@@ -1230,8 +1279,14 @@ impl Workspace {
         query: &str,
         limit: usize,
     ) -> Result<Vec<SearchResult>, WorkspaceError> {
-        self.search_with_config(query, self.search_defaults.clone().with_limit(limit))
-            .await
+        self.search_with_config(
+            query,
+            self.search_defaults
+                .clone()
+                .with_limit(limit)
+                .with_detail(SearchDetailLevel::L1),
+        )
+        .await
     }
 
     /// Search with custom configuration.
@@ -1299,6 +1354,31 @@ impl Workspace {
         }
 
         Ok(())
+    }
+
+    /// Schedule a background refresh of summary tiers for a document.
+    fn schedule_summary_refresh(&self, document_id: Uuid, path: String, content: String) {
+        let Some(llm) = self.summary_llm.as_ref() else {
+            return;
+        };
+        if content.split_whitespace().count() < SUMMARY_MIN_WORDS {
+            return;
+        }
+
+        let storage = self.storage.clone();
+        let llm = Arc::clone(llm);
+
+        tokio::spawn(async move {
+            if let Err(e) =
+                refresh_document_summaries(storage, llm, document_id, path, content).await
+            {
+                tracing::warn!(
+                    document_id = %document_id,
+                    "Failed to refresh workspace summaries: {}",
+                    e
+                );
+            }
+        });
     }
 
     // ==================== Seeding ====================
@@ -1503,6 +1583,145 @@ impl Workspace {
 
         Ok(count)
     }
+
+    /// Backfill missing summary tiers for existing documents.
+    pub async fn backfill_summaries(&self) -> Result<usize, WorkspaceError> {
+        let Some(ref llm) = self.summary_llm else {
+            return Ok(0);
+        };
+
+        let docs = self
+            .storage
+            .list_documents(&self.user_id, self.agent_id)
+            .await?;
+
+        let mut count = 0;
+        for doc in docs {
+            if doc.word_count() < SUMMARY_MIN_WORDS {
+                continue;
+            }
+            if doc.summary_l0.is_some() && doc.summary_l1.is_some() {
+                continue;
+            }
+
+            match refresh_document_summaries(
+                self.storage.clone(),
+                Arc::clone(llm),
+                doc.id,
+                doc.path.clone(),
+                doc.content.clone(),
+            )
+            .await
+            {
+                Ok(()) => {
+                    count += 1;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        document_id = %doc.id,
+                        path = %doc.path,
+                        "Failed to backfill workspace summaries: {}",
+                        e
+                    );
+                }
+            }
+        }
+
+        Ok(count)
+    }
+}
+
+const SUMMARY_MIN_WORDS: usize = 200;
+
+const SUMMARY_PROMPT: &str = r#"You are summarizing a document from a personal knowledge base.
+
+Produce two summaries in JSON only. Be specific and concise.
+
+- l0: exactly one sentence, at most 30 words
+- l1: structured overview, at most 500 words, with the most important facts, decisions, entities, dates, and action items
+
+Return exactly:
+{"l0":"...","l1":"..."}"#;
+
+fn extract_json_object(text: &str) -> Option<&str> {
+    let start = text.find('{')?;
+    let end = text.rfind('}')?;
+    if end < start {
+        return None;
+    }
+    Some(text[start..=end].trim())
+}
+
+async fn generate_document_summaries(
+    llm: &Arc<dyn LlmProvider>,
+    path: &str,
+    content: &str,
+) -> Result<(String, String), WorkspaceError> {
+    let prompt = format!(
+        "{SUMMARY_PROMPT}\n\nDOCUMENT PATH: {path}\nDOCUMENT CONTENT:\n---\n{content}\n---\n"
+    );
+    let request = CompletionRequest::new(vec![
+        ChatMessage::system("You produce compact JSON summaries for workspace documents."),
+        ChatMessage::user(prompt),
+    ])
+    .with_temperature(0.2)
+    .with_max_tokens(1024);
+
+    let response = llm
+        .complete(request)
+        .await
+        .map_err(|e| WorkspaceError::SearchFailed {
+            reason: format!("Summary generation failed: {e}"),
+        })?;
+
+    let json_text =
+        extract_json_object(&response.content).ok_or_else(|| WorkspaceError::SearchFailed {
+            reason: "Summary generation returned no JSON object".to_string(),
+        })?;
+
+    let parsed: serde_json::Value =
+        serde_json::from_str(json_text).map_err(|e| WorkspaceError::SearchFailed {
+            reason: format!("Summary generation returned invalid JSON: {e}"),
+        })?;
+
+    let l0 =
+        parsed
+            .get("l0")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| WorkspaceError::SearchFailed {
+                reason: "Summary generation missing l0".to_string(),
+            })?;
+    let l1 =
+        parsed
+            .get("l1")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| WorkspaceError::SearchFailed {
+                reason: "Summary generation missing l1".to_string(),
+            })?;
+
+    Ok((l0.trim().to_string(), l1.trim().to_string()))
+}
+
+async fn refresh_document_summaries(
+    storage: WorkspaceStorage,
+    llm: Arc<dyn LlmProvider>,
+    document_id: Uuid,
+    path: String,
+    content: String,
+) -> Result<(), WorkspaceError> {
+    if content.split_whitespace().count() < SUMMARY_MIN_WORDS {
+        return Ok(());
+    }
+
+    let (summary_l0, summary_l1) = generate_document_summaries(&llm, &path, &content).await?;
+
+    reject_if_injected(&format!("{path}#summary_l0"), &summary_l0)?;
+    reject_if_injected(&format!("{path}#summary_l1"), &summary_l1)?;
+
+    storage
+        .update_document_summaries(document_id, Some(&summary_l0), Some(&summary_l1))
+        .await?;
+    Ok(())
 }
 
 /// Normalize a file path (remove leading/trailing slashes, collapse //).
@@ -1533,7 +1752,10 @@ fn normalize_directory(path: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
+    use crate::testing::StubLlm;
 
     #[test]
     fn test_normalize_path() {
@@ -1550,6 +1772,20 @@ mod tests {
         assert_eq!(normalize_directory("foo/bar"), "foo/bar");
         assert_eq!(normalize_directory("/"), "");
         assert_eq!(normalize_directory(""), "");
+    }
+
+    #[tokio::test]
+    async fn test_generate_document_summaries_parses_json_response() {
+        let llm: Arc<dyn LlmProvider> = Arc::new(StubLlm::new(
+            "ignored preface {\"l0\":\"one line\",\"l1\":\"structured overview\"} trailing noise",
+        ));
+
+        let (l0, l1) = generate_document_summaries(&llm, "docs/test.md", "alpha beta gamma")
+            .await
+            .expect("summary generation");
+
+        assert_eq!(l0, "one line");
+        assert_eq!(l1, "structured overview");
     }
 
     // ── Fix 1: merge_profile_section tests ─────────────────────────

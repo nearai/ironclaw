@@ -275,6 +275,7 @@ impl AppBuilder {
     pub async fn init_tools(
         &self,
         llm: &Arc<dyn LlmProvider>,
+        cheap_llm: Option<&Arc<dyn LlmProvider>>,
     ) -> Result<
         (
             Arc<SafetyLayer>,
@@ -328,6 +329,7 @@ impl AppBuilder {
             if let Some(ref emb) = embeddings {
                 ws = ws.with_embeddings_cached(emb.clone(), emb_cache_config);
             }
+            ws = ws.with_llm(cheap_llm.cloned().unwrap_or_else(|| Arc::clone(llm)));
             ws = ws.with_memory_layers(self.config.workspace.memory_layers.clone());
             let ws = Arc::new(ws);
             tools.register_memory_tools(Arc::clone(&ws));
@@ -749,7 +751,8 @@ impl AppBuilder {
         } else {
             self.init_llm().await?
         };
-        let (safety, tools, embeddings, workspace, builder) = self.init_tools(&llm).await?;
+        let (safety, tools, embeddings, workspace, builder) =
+            self.init_tools(&llm, cheap_llm.as_ref()).await?;
 
         // Create hook registry early so runtime extension activation can register hooks.
         let hooks = Arc::new(HookRegistry::new());
@@ -824,6 +827,19 @@ impl AppBuilder {
                     }
                 });
             }
+
+            let ws_bg = Arc::clone(ws);
+            tokio::spawn(async move {
+                match ws_bg.backfill_summaries().await {
+                    Ok(count) if count > 0 => {
+                        tracing::debug!("Backfilled tiered summaries for {} documents", count);
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::warn!("Failed to backfill tiered summaries: {}", e);
+                    }
+                }
+            });
         }
 
         // Skills system

@@ -595,6 +595,12 @@ pub trait WorkspaceStore: Send + Sync {
         path: &str,
     ) -> Result<MemoryDocument, WorkspaceError>;
     async fn update_document(&self, id: Uuid, content: &str) -> Result<(), WorkspaceError>;
+    async fn update_document_summaries(
+        &self,
+        id: Uuid,
+        summary_l0: Option<&str>,
+        summary_l1: Option<&str>,
+    ) -> Result<(), WorkspaceError>;
     async fn delete_document_by_path(
         &self,
         user_id: &str,

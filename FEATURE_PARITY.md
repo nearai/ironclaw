@@ -345,6 +345,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Vector memory | ✅ | ✅ | pgvector |
 | Session-based memory | ✅ | ✅ | |
 | Hybrid search (BM25 + vector) | ✅ | ✅ | RRF algorithm |
+| Tiered context summaries (L0/L1) | ✅ | 🚧 | Workspace docs now store/generate summaries and search defaults to L1 |
 | Temporal decay (hybrid search) | ✅ | ❌ | Opt-in time-based scoring factor |
 | MMR re-ranking | ✅ | ❌ | Maximal marginal relevance for result diversity |
 | LLM-based query expansion | ✅ | ❌ | Expand FTS queries via LLM |
