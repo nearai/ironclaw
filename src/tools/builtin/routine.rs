@@ -851,8 +851,8 @@ fn parse_routine_execution(
     let mode = parse_execution_mode(string_field(params, "execution", "mode", &["action_type"]))?;
     let context_paths =
         string_array_field(params, "execution", "context_paths", &["context_paths"]);
-    let use_tools = bool_field(params, "execution", "use_tools", &["use_tools"])
-        .unwrap_or(default_use_tools);
+    let use_tools =
+        bool_field(params, "execution", "use_tools", &["use_tools"]).unwrap_or(default_use_tools);
     let max_tool_rounds = u64_field(params, "execution", "max_tool_rounds", &["max_tool_rounds"])
         .unwrap_or(3)
         .clamp(1, crate::agent::routine::MAX_TOOL_ROUNDS_LIMIT as u64)
