@@ -3,11 +3,11 @@
   "wit_version": "0.3.0",
   "type": "channel",
   "name": "feishu",
-  "description": "Feishu/Lark Bot channel for receiving and responding to Feishu messages",
+  "description": "Feishu/Lark Bot channel for receiving and responding to Feishu messages via Event Subscription webhooks",
   "auth": {
     "secret_name": "feishu_app_id",
     "display_name": "Feishu / Lark",
-    "instructions": "Create a bot at https://open.feishu.cn/app (Feishu) or https://open.larksuite.com/app (Lark). You need the App ID and App Secret.",
+    "instructions": "Create a bot at https://open.feishu.cn/app (Feishu) or https://open.larksuite.com/app (Lark). IronClaw currently supports Event Subscription webhook delivery, not Feishu long-connection websocket mode. You need the App ID and App Secret.",
     "setup_url": "https://open.feishu.cn/app",
     "token_hint": "App ID looks like cli_XXXX, App Secret is a long alphanumeric string",
     "env_var": "FEISHU_APP_ID"
@@ -16,7 +16,7 @@
     "required_secrets": [
       {
         "name": "feishu_app_id",
-        "prompt": "Enter your Feishu/Lark App ID (from https://open.feishu.cn/app)",
+        "prompt": "Enter your Feishu/Lark App ID (from https://open.feishu.cn/app). Use webhook-based Event Subscription, not long-connection websocket mode.",
         "optional": false
       },
       {
@@ -26,7 +26,7 @@
       },
       {
         "name": "feishu_verification_token",
-        "prompt": "Enter your Feishu/Lark Verification Token (from Event Subscription settings)",
+        "prompt": "Enter your Feishu/Lark Verification Token (from Event Subscription webhook settings)",
         "optional": true
       }
     ],
