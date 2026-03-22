@@ -305,7 +305,7 @@ mod tests {
             &registry,
             &safety,
             "",
-            &serde_json::json!({}),
+            serde_json::json!({}),
             &test_job_ctx(),
         )
         .await;
