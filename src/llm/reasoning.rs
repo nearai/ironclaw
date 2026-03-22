@@ -382,6 +382,21 @@ impl Reasoning {
         self
     }
 
+    /// Append additional context to the workspace system prompt without replacing it.
+    /// Used for injecting user profile data after the main prompt is set.
+    pub fn append_system_context(mut self, context: &str) -> Self {
+        match self.workspace_system_prompt {
+            Some(ref mut existing) => {
+                existing.push_str("\n\n");
+                existing.push_str(context);
+            }
+            None => {
+                self.workspace_system_prompt = Some(context.to_string());
+            }
+        }
+        self
+    }
+
     /// Set skill context to inject into the system prompt.
     ///
     /// The context block contains sanitized prompt content from active skills,

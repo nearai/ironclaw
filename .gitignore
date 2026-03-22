@@ -33,9 +33,13 @@ trace_*.json
 # Local Claude Code settings (machine-specific, should not be committed)
 .claude/settings.local.json
 .worktrees/
+.DS_Store
 
 # Python cache
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
+
+# Local architecture docs (not for upstream)
+docs/architecture/adaptive-learning/

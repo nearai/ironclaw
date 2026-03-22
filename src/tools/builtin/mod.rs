@@ -6,12 +6,15 @@ mod file;
 mod http;
 mod job;
 mod json;
+pub mod learning_tools;
 mod memory;
 mod message;
 pub mod path_utils;
+pub mod profile_tools;
 mod restart;
 pub mod routine;
 pub mod secrets_tools;
+mod session_search;
 pub(crate) mod shell;
 pub mod skill_tools;
 mod time;
@@ -29,14 +32,17 @@ pub use job::{
     PromptQueue, SchedulerSlot,
 };
 pub use json::JsonTool;
+pub use learning_tools::{SkillApproveTool, SkillListPendingTool};
 pub use memory::{MemoryReadTool, MemorySearchTool, MemoryTreeTool, MemoryWriteTool};
 pub use message::MessageTool;
+pub use profile_tools::{ProfileClearTool, ProfileEditTool, ProfileViewTool};
 pub use restart::RestartTool;
 pub use routine::{
     EventEmitTool, RoutineCreateTool, RoutineDeleteTool, RoutineFireTool, RoutineHistoryTool,
     RoutineListTool, RoutineUpdateTool,
 };
 pub use secrets_tools::{SecretDeleteTool, SecretListTool};
+pub use session_search::SessionSearchTool;
 pub use shell::ShellTool;
 pub use skill_tools::{SkillInstallTool, SkillListTool, SkillRemoveTool, SkillSearchTool};
 pub use time::TimeTool;

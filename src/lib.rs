@@ -56,6 +56,7 @@ pub mod history;
 pub mod hooks;
 #[cfg(feature = "import")]
 pub mod import;
+pub mod learning;
 pub mod llm;
 pub mod observability;
 pub mod orchestrator;
@@ -73,6 +74,7 @@ pub mod tools;
 pub mod tracing_fmt;
 pub mod transcription;
 pub mod tunnel;
+pub mod user_profile;
 pub mod util;
 pub mod webhooks;
 pub mod worker;
