@@ -14,6 +14,16 @@ use crate::config::INJECTED_VARS;
 #[cfg(test)]
 pub(crate) static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Acquire the env-var mutex, recovering from poison.
+///
+/// A poisoned mutex means a previous test panicked while holding the lock.
+/// The env state might be slightly stale, but cascading every subsequent
+/// test into a `PoisonError` panic is far worse. Recover and carry on.
+#[cfg(test)]
+pub(crate) fn lock_env() -> std::sync::MutexGuard<'static, ()> {
+    ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// Thread-safe mutable overlay for env vars set at runtime.
 ///
 /// Unlike `INJECTED_VARS` (which is set once at startup from the secrets
@@ -353,7 +363,7 @@ mod tests {
 
     #[test]
     fn real_env_var_takes_priority_over_runtime_override() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let _guard = lock_env();
         let key = "IRONCLAW_TEST_ENV_PRIORITY_42";
 
         // Set runtime override
