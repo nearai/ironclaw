@@ -67,28 +67,7 @@ fn execute_inner(params_str: &str, context: Option<&str>) -> Result<String, Stri
         return Err("'action' must not be empty".into());
     }
 
-    // Pre-flight: verify API key is available.
-    if !near::agent::host::secret_exists("composio_api_key") {
-        return Err(
-            "Composio API key not found in secret store. Set it with: \
-             ironclaw secret set composio_api_key <key>. \
-             Get a key at: https://app.composio.dev/"
-                .into(),
-        );
-    }
-
-    // Extract an entity identifier from context if provided; prefer `entity_id`,
-    // then `user_id` (from JobContext), then `requester_id`, otherwise "default".
-    let entity_id = context
-        .and_then(|ctx| serde_json::from_str::<serde_json::Value>(ctx).ok())
-        .and_then(|v| {
-            v.get("entity_id")
-                .or_else(|| v.get("user_id"))
-                .or_else(|| v.get("requester_id"))
-                .and_then(|e| e.as_str())
-                .map(String::from)
-        })
-        .unwrap_or_else(|| "default".to_string());
+    let entity_id = extract_entity_id(context);
 
     match params.action.as_str() {
         "list" => list_tools(params.app.as_deref()),
@@ -131,8 +110,8 @@ fn api_get(path: &str, query: &[(&str, &str)]) -> Result<serde_json::Value, Stri
         "User-Agent": "IronClaw-Composio-Tool/0.1"
     });
 
-    let response = http_with_retry("GET", &url, &headers.to_string(), None)?;
-    parse_json_response(&response.body, response.status)
+    let response = get_with_retry(&url, &headers.to_string())?;
+    parse_json_body(&response.body)
 }
 
 fn api_post(path: &str, body: &serde_json::Value) -> Result<serde_json::Value, String> {
@@ -146,25 +125,53 @@ fn api_post(path: &str, body: &serde_json::Value) -> Result<serde_json::Value, S
 
     let body_bytes = serde_json::to_vec(body).map_err(|e| format!("JSON serialize error: {e}"))?;
 
-    let response = http_with_retry("POST", &url, &headers.to_string(), Some(&body_bytes))?;
-    parse_json_response(&response.body, response.status)
+    // POST is not idempotent — no retry to avoid duplicate side effects.
+    let resp = near::agent::host::http_request("POST", &url, &headers.to_string(), Some(&body_bytes), None)
+        .map_err(|e| format!("HTTP request failed: {e}"))?;
+
+    if resp.status >= 200 && resp.status < 300 {
+        return parse_json_body(&resp.body);
+    }
+
+    // Surface helpful message on auth failure
+    if resp.status == 401 || resp.status == 403 {
+        return Err(
+            "Composio API authentication failed. Ensure your API key is set: \
+             ironclaw secret set composio_api_key <key>. \
+             Get a key at: https://app.composio.dev/"
+                .into(),
+        );
+    }
+
+    let truncated_bytes = if resp.body.len() > 512 { &resp.body[..512] } else { &resp.body };
+    let truncated = String::from_utf8_lossy(truncated_bytes);
+    Err(format!("Composio API error (HTTP {}): {truncated}", resp.status))
 }
 
-fn http_with_retry(
-    method: &str,
+/// GET with retry on transient errors (429, 5xx). Safe to retry since GET is idempotent.
+fn get_with_retry(
     url: &str,
     headers: &str,
-    body: Option<&[u8]>,
 ) -> Result<near::agent::host::HttpResponse, String> {
     let mut attempt = 0;
     loop {
         attempt += 1;
 
-        let resp = near::agent::host::http_request(method, url, headers, body, None)
+        let resp = near::agent::host::http_request("GET", url, headers, None, None)
             .map_err(|e| format!("HTTP request failed: {e}"))?;
 
         if resp.status >= 200 && resp.status < 300 {
             return Ok(resp);
+        }
+
+        // Surface helpful message on auth failure
+        if resp.status == 401 || resp.status == 403 {
+            return Err(
+                "Composio API authentication failed. Ensure your API key is set: \
+                 ironclaw secret set composio_api_key <key>. \
+                 Get a key at: https://app.composio.dev/"
+                    .into(),
+            );
         }
 
         if attempt < MAX_RETRIES && (resp.status == 429 || resp.status >= 500) {
@@ -190,18 +197,9 @@ fn http_with_retry(
     }
 }
 
-fn parse_json_response(body: &[u8], status: u16) -> Result<serde_json::Value, String> {
-    if !(200..300).contains(&status) {
-        // Truncate at byte level before UTF-8 conversion to avoid
-        // panicking on multibyte character boundaries.
-        let truncated_bytes = if body.len() > 512 { &body[..512] } else { body };
-        let truncated = String::from_utf8_lossy(truncated_bytes);
-        return Err(format!("Composio API {status}: {truncated}"));
-    }
-
-    let text = String::from_utf8(body.to_vec())
-        .map_err(|e| format!("non-UTF8 response: {e}"))?;
-    serde_json::from_str(&text).map_err(|e| format!("invalid JSON: {e}"))
+/// Parse a JSON response body directly from bytes (avoids extra allocation).
+fn parse_json_body(body: &[u8]) -> Result<serde_json::Value, String> {
+    serde_json::from_slice(body).map_err(|e| format!("invalid JSON: {e}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -385,6 +383,23 @@ const SCHEMA: &str = r#"{
     "additionalProperties": false
 }"#;
 
+/// Extract an entity identifier from context JSON.
+///
+/// Checks `entity_id`, then `user_id` (from JobContext), then `requester_id`,
+/// falling back to "default" if none are present.
+fn extract_entity_id(context: Option<&str>) -> String {
+    context
+        .and_then(|ctx| serde_json::from_str::<serde_json::Value>(ctx).ok())
+        .and_then(|v| {
+            v.get("entity_id")
+                .or_else(|| v.get("user_id"))
+                .or_else(|| v.get("requester_id"))
+                .and_then(|e| e.as_str())
+                .map(String::from)
+        })
+        .unwrap_or_else(|| "default".to_string())
+}
+
 export!(ComposioTool);
 
 #[cfg(test)]
@@ -421,5 +436,38 @@ mod tests {
     fn test_build_url_encodes_special_chars() {
         let url = build_url("/tools", &[("q", "my app+1")]);
         assert!(url.contains("q=my%20app%2B1"));
+    }
+
+    #[test]
+    fn test_extract_entity_id_from_entity_id() {
+        let ctx = r#"{"entity_id": "tenant-42", "user_id": "user-1"}"#;
+        assert_eq!(extract_entity_id(Some(ctx)), "tenant-42");
+    }
+
+    #[test]
+    fn test_extract_entity_id_falls_back_to_user_id() {
+        let ctx = r#"{"user_id": "user-1", "requester_id": "req-1"}"#;
+        assert_eq!(extract_entity_id(Some(ctx)), "user-1");
+    }
+
+    #[test]
+    fn test_extract_entity_id_falls_back_to_requester_id() {
+        let ctx = r#"{"requester_id": "req-1"}"#;
+        assert_eq!(extract_entity_id(Some(ctx)), "req-1");
+    }
+
+    #[test]
+    fn test_extract_entity_id_defaults_when_none() {
+        assert_eq!(extract_entity_id(None), "default");
+    }
+
+    #[test]
+    fn test_extract_entity_id_defaults_on_empty_context() {
+        assert_eq!(extract_entity_id(Some("{}")), "default");
+    }
+
+    #[test]
+    fn test_extract_entity_id_defaults_on_malformed_json() {
+        assert_eq!(extract_entity_id(Some("not json")), "default");
     }
 }
