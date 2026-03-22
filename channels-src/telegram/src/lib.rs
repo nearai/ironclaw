@@ -940,52 +940,75 @@ fn send_message(
 
     let headers = serde_json::json!({ "Content-Type": "application/json" });
 
-    let result = channel_host::http_request(
-        "POST",
-        "https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-        &headers.to_string(),
-        Some(&payload_bytes),
-        None,
-    );
+    const MAX_RETRIES: u32 = 3;
+    let mut last_err = String::new();
 
-    match result {
-        Ok(http_response) => {
-            if http_response.status == 400 {
-                let body_str = String::from_utf8_lossy(&http_response.body);
-                if body_str.contains("can't parse entities") {
-                    return Err(SendError::ParseEntities(body_str.to_string()));
+    for attempt in 0..MAX_RETRIES {
+        let result = channel_host::http_request(
+            "POST",
+            "https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            &headers.to_string(),
+            Some(&payload_bytes),
+            None,
+        );
+
+        match result {
+            Ok(http_response) => {
+                if http_response.status == 400 {
+                    let body_str = String::from_utf8_lossy(&http_response.body);
+                    if body_str.contains("can't parse entities") {
+                        return Err(SendError::ParseEntities(body_str.to_string()));
+                    }
+                    return Err(SendError::Other(format!(
+                        "Telegram API returned 400: {}",
+                        body_str
+                    )));
                 }
-                return Err(SendError::Other(format!(
-                    "Telegram API returned 400: {}",
-                    body_str
-                )));
+
+                if http_response.status != 200 {
+                    let body_str = String::from_utf8_lossy(&http_response.body);
+                    return Err(SendError::Other(format!(
+                        "Telegram API returned status {}: {}",
+                        http_response.status, body_str
+                    )));
+                }
+
+                let api_response: TelegramApiResponse<SentMessage> =
+                    serde_json::from_slice(&http_response.body)
+                        .map_err(|e| SendError::Other(format!("Failed to parse response: {}", e)))?;
+
+                if !api_response.ok {
+                    return Err(SendError::Other(format!(
+                        "Telegram API error: {}",
+                        api_response
+                            .description
+                            .unwrap_or_else(|| "unknown".to_string())
+                    )));
+                }
+
+                return Ok(api_response.result.map(|r| r.message_id).unwrap_or(0));
             }
-
-            if http_response.status != 200 {
-                let body_str = String::from_utf8_lossy(&http_response.body);
-                return Err(SendError::Other(format!(
-                    "Telegram API returned status {}: {}",
-                    http_response.status, body_str
-                )));
+            Err(e) => {
+                last_err = format!("HTTP request failed: {}", e);
+                if attempt < MAX_RETRIES - 1 {
+                    channel_host::log(
+                        channel_host::LogLevel::Warn,
+                        &format!(
+                            "sendMessage attempt {}/{} failed ({}), retrying...",
+                            attempt + 1,
+                            MAX_RETRIES,
+                            last_err
+                        ),
+                    );
+                }
             }
-
-            let api_response: TelegramApiResponse<SentMessage> =
-                serde_json::from_slice(&http_response.body)
-                    .map_err(|e| SendError::Other(format!("Failed to parse response: {}", e)))?;
-
-            if !api_response.ok {
-                return Err(SendError::Other(format!(
-                    "Telegram API error: {}",
-                    api_response
-                        .description
-                        .unwrap_or_else(|| "unknown".to_string())
-                )));
-            }
-
-            Ok(api_response.result.map(|r| r.message_id).unwrap_or(0))
         }
-        Err(e) => Err(SendError::Other(format!("HTTP request failed: {}", e))),
     }
+
+    Err(SendError::Other(format!(
+        "{} (after {} retries)",
+        last_err, MAX_RETRIES
+    )))
 }
 
 // ============================================================================
