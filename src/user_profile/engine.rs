@@ -82,9 +82,17 @@ impl EncryptedProfileEngine {
         self
     }
 
-    /// Build HKDF info string for domain separation: per-user derived keys.
+    /// Build HKDF info bytes for domain separation: per-user derived keys.
+    /// Uses length-prefixed encoding to prevent ambiguity if user_id or
+    /// agent_id contain delimiters.
     fn hkdf_info(user_id: &str, agent_id: &str) -> Vec<u8> {
-        format!("ironclaw-profile-v1:{user_id}:{agent_id}").into_bytes()
+        let mut info = Vec::with_capacity(32 + user_id.len() + agent_id.len());
+        info.extend_from_slice(b"ironclaw-profile-v1\x00");
+        info.extend_from_slice(&(user_id.len() as u32).to_le_bytes());
+        info.extend_from_slice(user_id.as_bytes());
+        info.extend_from_slice(&(agent_id.len() as u32).to_le_bytes());
+        info.extend_from_slice(agent_id.as_bytes());
+        info
     }
 
     fn encrypt_value(
