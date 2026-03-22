@@ -1078,21 +1078,38 @@ impl SetupWizard {
                     .map(|s| s.display_name().to_string())
                     .unwrap_or_else(|| def.id.clone())
             } else {
-                current.clone()
+                match current.as_str() {
+                    "nearai" => "NEAR AI".to_string(),
+                    "gemini_oauth" | "gemini-oauth" => "Gemini API (OAuth)".to_string(),
+                    _ => {
+                        if let Some(def) = registry.find(&current) {
+                            def.setup
+                                .as_ref()
+                                .map(|s| s.display_name().to_string())
+                                .unwrap_or_else(|| def.id.clone())
+                        } else {
+                            current.clone()
+                        }
+                    }
+                }
             };
             print_info(&format!("Current provider: {}", display));
             println!();
 
             let is_known = current == "nearai"
                 || current == "bedrock"
+                || current == "gemini_oauth"
+                || current == "gemini-oauth"
                 || current == "openai_codex"
                 || registry.is_known(&current);
 
             if is_known && confirm("Keep current provider?", true).map_err(SetupError::Io)? {
                 if current == "bedrock" {
-                    // Keeping the existing Bedrock config — no need to re-run
-                    // the full setup flow (region, auth, cross-region).
                     print_info("Keeping existing AWS Bedrock configuration.");
+                    return Ok(());
+                }
+                if current == "gemini_oauth" || current == "gemini-oauth" {
+                    print_info("Keeping existing Gemini CLI OAuth configuration.");
                     return Ok(());
                 }
                 if current == "openai_codex" {
@@ -1113,13 +1130,15 @@ impl SetupWizard {
         print_info("Select your inference provider:");
         println!();
 
-        // Build menu: NearAI first, then OpenAI Codex, then registry providers, then Bedrock
+        // Build menu: NearAI first, then Gemini OAuth, then OpenAI Codex, then registry providers, then Bedrock
         let selectable = registry.selectable();
-        let mut options: Vec<String> = Vec::with_capacity(2 + selectable.len());
-        let mut provider_ids: Vec<String> = Vec::with_capacity(2 + selectable.len());
+        let mut options: Vec<String> = Vec::with_capacity(3 + selectable.len());
+        let mut provider_ids: Vec<String> = Vec::with_capacity(3 + selectable.len());
 
         options.push("NEAR AI          - multi-model access via NEAR account".to_string());
         provider_ids.push("nearai".to_string());
+        options.push("Gemini CLI        - Official Gemini API via Gemini CLI OAuth".to_string());
+        provider_ids.push("gemini_oauth".to_string());
 
         options.push("OpenAI Codex     - ChatGPT subscription (Plus/Pro/Max)".to_string());
         provider_ids.push("openai_codex".to_string());
@@ -1147,6 +1166,8 @@ impl SetupWizard {
 
         if selected_id == "bedrock" {
             self.setup_bedrock().await?;
+        } else if selected_id == "gemini_oauth" {
+            self.setup_gemini_oauth().await?;
         } else {
             self.run_provider_setup(selected_id, &registry).await?;
         }
@@ -1795,6 +1816,40 @@ impl SetupWizard {
         Ok(())
     }
 
+    async fn setup_gemini_oauth(&mut self) -> Result<(), SetupError> {
+        self.settings.llm_backend = Some("gemini_oauth".to_string());
+        print_info("Starting Gemini CLI OAuth authentication...");
+        println!();
+
+        let creds_path = crate::config::GeminiOauthConfig::default_credentials_path();
+        let cred_manager =
+            crate::llm::gemini_oauth::CredentialManager::new(&creds_path).map_err(|e| {
+                SetupError::Config(format!(
+                    "Failed to initialize Gemini credential manager: {}",
+                    e
+                ))
+            })?;
+
+        match cred_manager.get_valid_credential().await {
+            Ok(cred) => {
+                print_success("Gemini CLI authentication successful!");
+                if let Some(ref pid) = cred.project_id {
+                    print_info(&format!("Cloud Code project: {}", pid));
+                }
+            }
+            Err(e) => {
+                return Err(SetupError::Config(format!(
+                    "Gemini CLI authentication failed: {}. Please try again.",
+                    e
+                )));
+            }
+        }
+
+        println!();
+        print_success("Gemini API configured via Gemini CLI");
+        Ok(())
+    }
+
     /// Step 4: Model selection.
     ///
     /// Branches on the selected LLM backend and fetches models from the
@@ -1818,109 +1873,157 @@ impl SetupWizard {
         let backend = self.settings.llm_backend.as_deref().unwrap_or("nearai");
         let registry = crate::llm::ProviderRegistry::load();
 
-        if backend == "nearai" {
-            // NEAR AI: use existing provider list_models()
-            let fetched = self.fetch_nearai_models().await;
-            let models = if fetched.is_empty() {
-                crate::llm::default_models()
-            } else {
-                fetched.iter().map(|m| (m.clone(), m.clone())).collect()
-            };
-            self.select_from_model_list(&models)?;
-        } else if let Some(def) = registry.find(backend) {
-            let can_list = def
-                .setup
-                .as_ref()
-                .map(|s| s.can_list_models())
-                .unwrap_or(false);
-
-            if can_list {
-                // Try to fetch models from the provider's /v1/models endpoint
-                let cached_key = self
-                    .llm_api_key
-                    .as_ref()
-                    .map(|k| k.expose_secret().to_string());
-
-                let models = match backend {
-                    "anthropic" => fetch_anthropic_models(cached_key.as_deref()).await,
-                    "openai" => fetch_openai_models(cached_key.as_deref()).await,
-                    "ollama" => {
-                        let base_url = self
-                            .settings
-                            .ollama_base_url
-                            .as_deref()
-                            .or(def.default_base_url.as_deref())
-                            .unwrap_or("http://localhost:11434");
-                        let models = fetch_ollama_models(base_url).await;
-                        if models.is_empty() {
-                            print_info("No models found. Pull one first: ollama pull llama3");
-                        }
-                        models
-                    }
-                    _ => {
-                        // Generic OpenAI-compatible model listing
-                        let base_url = def.default_base_url.as_deref().unwrap_or("");
-                        fetch_openai_compatible_models(base_url, cached_key.as_deref()).await
-                    }
-                };
-
-                // Apply models_filter from setup hint (e.g., Groq "chat" filters non-chat models)
-                let models =
-                    if let Some(filter) = def.setup.as_ref().and_then(|s| s.models_filter()) {
-                        let filter_lower = filter.to_lowercase();
-                        models
-                            .into_iter()
-                            .filter(|(id, _)| id.to_lowercase().contains(&filter_lower))
-                            .collect()
-                    } else {
-                        models
-                    };
-
-                if models.is_empty() {
-                    // Fall back to manual entry
-                    let default = &def.default_model;
-                    let model_id = input(&format!("Model name (default: {default})"))
-                        .map_err(SetupError::Io)?;
-                    let model_id = if model_id.is_empty() {
-                        default.clone()
-                    } else {
-                        model_id
-                    };
-                    self.settings.selected_model = Some(model_id.clone());
-                    print_success(&format!("Selected {}", model_id));
+        match backend {
+            "nearai" => {
+                // NEAR AI: use existing provider list_models()
+                let fetched = self.fetch_nearai_models().await;
+                let models = if fetched.is_empty() {
+                    crate::llm::default_models()
                 } else {
-                    self.select_from_model_list(&models)?;
-                }
-            } else {
-                // Manual model entry
-                let default = &def.default_model;
+                    fetched.iter().map(|m| (m.clone(), m.clone())).collect()
+                };
+                self.select_from_model_list(&models)?;
+            }
+            "gemini_oauth" | "gemini-oauth" => {
+                let default_models: Vec<(String, String)> = vec![
+                    (
+                        "gemini-3.1-pro-preview".into(),
+                        "Gemini 3.1 Pro (Latest, strongest reasoning)".into(),
+                    ),
+                    (
+                        "gemini-3.1-pro-preview-customtools".into(),
+                        "Gemini 3.1 Pro Custom Tools (Enhanced tool use)".into(),
+                    ),
+                    (
+                        "gemini-3-pro-preview".into(),
+                        "Gemini 3 Pro (Preview)".into(),
+                    ),
+                    (
+                        "gemini-3-flash-preview".into(),
+                        "Gemini 3 Flash (Fast preview with thinking)".into(),
+                    ),
+                    (
+                        "gemini-3.1-flash-lite-preview".into(),
+                        "Gemini 3.1 Flash Lite (Preview, lightweight)".into(),
+                    ),
+                    (
+                        "gemini-2.5-pro".into(),
+                        "Gemini 2.5 Pro (Stable, strong reasoning)".into(),
+                    ),
+                    (
+                        "gemini-2.5-flash".into(),
+                        "Gemini 2.5 Flash (Fast, good quality)".into(),
+                    ),
+                    (
+                        "gemini-2.5-flash-lite".into(),
+                        "Gemini 2.5 Flash Lite (Fastest, lightweight)".into(),
+                    ),
+                ];
+                self.select_from_model_list(&default_models)?;
+            }
+            "bedrock" => {
                 let model_id =
-                    input(&format!("Model name (default: {default})")).map_err(SetupError::Io)?;
-                let model_id = if model_id.is_empty() {
-                    default.clone()
-                } else {
-                    model_id
-                };
+                    input("Bedrock model ID (e.g., anthropic.claude-v3-sonnet-20240229-v1:0)")
+                        .map_err(SetupError::Io)?;
+                if model_id.is_empty() {
+                    return Err(SetupError::Config("Model ID is required".to_string()));
+                }
                 self.settings.selected_model = Some(model_id.clone());
                 print_success(&format!("Selected {}", model_id));
             }
-        } else if backend == "bedrock" {
-            let model_id = input("Bedrock model ID (e.g., anthropic.claude-opus-4-6-v1)")
-                .map_err(SetupError::Io)?;
-            if model_id.is_empty() {
-                return Err(SetupError::Config("Model ID is required".to_string()));
+            _ => {
+                if let Some(def) = registry.find(backend) {
+                    let can_list = def
+                        .setup
+                        .as_ref()
+                        .map(|s| s.can_list_models())
+                        .unwrap_or(false);
+
+                    if can_list {
+                        // Try to fetch models from the provider's /v1/models endpoint
+                        let cached_key = self
+                            .llm_api_key
+                            .as_ref()
+                            .map(|k| k.expose_secret().to_string());
+
+                        let models = match backend {
+                            "anthropic" => fetch_anthropic_models(cached_key.as_deref()).await,
+                            "openai" => fetch_openai_models(cached_key.as_deref()).await,
+                            "ollama" => {
+                                let base_url = self
+                                    .settings
+                                    .ollama_base_url
+                                    .as_deref()
+                                    .or(def.default_base_url.as_deref())
+                                    .unwrap_or("http://localhost:11434");
+                                let models = fetch_ollama_models(base_url).await;
+                                if models.is_empty() {
+                                    print_info(
+                                        "No models found. Pull one first: ollama pull llama3",
+                                    );
+                                }
+                                models
+                            }
+                            _ => {
+                                // Generic OpenAI-compatible model listing
+                                let base_url = def.default_base_url.as_deref().unwrap_or("");
+                                fetch_openai_compatible_models(base_url, cached_key.as_deref())
+                                    .await
+                            }
+                        };
+
+                        // Apply models_filter from setup hint
+                        let models = if let Some(filter) =
+                            def.setup.as_ref().and_then(|s| s.models_filter())
+                        {
+                            let filter_lower = filter.to_lowercase();
+                            models
+                                .into_iter()
+                                .filter(|(id, _)| id.to_lowercase().contains(&filter_lower))
+                                .collect()
+                        } else {
+                            models
+                        };
+
+                        if models.is_empty() {
+                            // Fall back to manual entry
+                            let default = &def.default_model;
+                            let model_id = input(&format!("Model name (default: {default})"))
+                                .map_err(SetupError::Io)?;
+                            let model_id = if model_id.is_empty() {
+                                default.clone()
+                            } else {
+                                model_id
+                            };
+                            self.settings.selected_model = Some(model_id.clone());
+                            print_success(&format!("Selected {}", model_id));
+                        } else {
+                            self.select_from_model_list(&models)?;
+                        }
+                    } else {
+                        // Manual model entry
+                        let default = &def.default_model;
+                        let model_id = input(&format!("Model name (default: {default})"))
+                            .map_err(SetupError::Io)?;
+                        let model_id = if model_id.is_empty() {
+                            default.clone()
+                        } else {
+                            model_id
+                        };
+                        self.settings.selected_model = Some(model_id.clone());
+                        print_success(&format!("Selected {}", model_id));
+                    }
+                } else {
+                    // Unknown provider, manual entry
+                    let model_id = input("Model name (e.g., meta-llama/Llama-3-8b-chat-hf)")
+                        .map_err(SetupError::Io)?;
+                    if model_id.is_empty() {
+                        return Err(SetupError::Config("Model name is required".to_string()));
+                    }
+                    self.settings.selected_model = Some(model_id.clone());
+                    print_success(&format!("Selected {}", model_id));
+                }
             }
-            self.settings.selected_model = Some(model_id.clone());
-            print_success(&format!("Selected {}", model_id));
-        } else {
-            // Unknown provider, manual entry
-            let model_id = input("Model name (e.g., meta-llama/Llama-3-8b-chat-hf)")
-                .map_err(SetupError::Io)?;
-            if model_id.is_empty() {
-                return Err(SetupError::Config("Model name is required".to_string()));
-            }
-            self.settings.selected_model = Some(model_id.clone());
-            print_success(&format!("Selected {}", model_id));
         }
 
         Ok(())
