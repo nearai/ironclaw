@@ -290,6 +290,7 @@ impl Thread {
             return false;
         }
         self.pending_messages.push_back(content);
+        self.updated_at = Utc::now();
         true
     }
 
@@ -306,6 +307,7 @@ impl Thread {
             return None;
         }
         let parts: Vec<String> = self.pending_messages.drain(..).collect();
+        self.updated_at = Utc::now();
         Some(parts.join("\n"))
     }
 
@@ -319,6 +321,7 @@ impl Thread {
     /// messages that arrived during the failed attempt.
     pub fn requeue_drained(&mut self, content: String) {
         self.pending_messages.push_front(content);
+        self.updated_at = Utc::now();
     }
 
     /// Start a new turn with user input.

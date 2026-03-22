@@ -224,6 +224,38 @@ impl Agent {
                                  Please resend after the current turn completes.",
                             ));
                         }
+
+                        // Run the same safety checks that the normal path applies
+                        // (validation, policy, secret scan) so that blocked content
+                        // is never stored in pending_messages or serialized.
+                        let validation = self.safety().validate_input(content);
+                        if !validation.is_valid {
+                            let details = validation
+                                .errors
+                                .iter()
+                                .map(|e| format!("{}: {}", e.field, e.message))
+                                .collect::<Vec<_>>()
+                                .join("; ");
+                            return Ok(SubmissionResult::error(format!(
+                                "Input rejected by safety validation: {details}",
+                            )));
+                        }
+                        let violations = self.safety().check_policy(content);
+                        if violations
+                            .iter()
+                            .any(|rule| rule.action == crate::safety::PolicyAction::Block)
+                        {
+                            return Ok(SubmissionResult::error("Input rejected by safety policy."));
+                        }
+                        if let Some(warning) = self.safety().scan_inbound_for_secrets(content) {
+                            tracing::warn!(
+                                user = %message.user_id,
+                                channel = %message.channel,
+                                "Queued message blocked: contains leaked secret"
+                            );
+                            return Ok(SubmissionResult::error(warning));
+                        }
+
                         if !thread.queue_message(content.to_string()) {
                             return Ok(SubmissionResult::error(format!(
                                 "Message queue full ({MAX_PENDING_MESSAGES}). Wait for the current turn to complete.",
