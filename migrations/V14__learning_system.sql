@@ -13,7 +13,11 @@ CREATE TABLE session_summaries (
     tool_names TEXT[] NOT NULL DEFAULT '{}',
     message_count INTEGER NOT NULL DEFAULT 0,
     search_vector tsvector GENERATED ALWAYS AS (to_tsvector('english', summary)) STORED,
-    embedding vector,  -- unbounded dimension (matches V9 workspace pattern)
+    embedding vector,  -- unbounded dimension: intentionally unconstrained to support any
+                       -- embedding model (768-dim nomic-embed-text through 3072-dim
+                       -- text-embedding-3-large). Matches V9 workspace migration which
+                       -- dropped HNSW index for the same reason. Sequential cosine
+                       -- distance search is fast enough for personal assistant workloads.
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );

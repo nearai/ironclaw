@@ -819,6 +819,7 @@ async fn async_main() -> anyhow::Result<()> {
         learning_tx,
         profile_engine,
         user_profile_config: config.user_profile.clone(),
+        distill_semaphore: Arc::new(tokio::sync::Semaphore::new(1)),
     };
 
     let mut agent = Agent::new(

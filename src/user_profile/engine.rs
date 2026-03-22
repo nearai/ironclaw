@@ -82,20 +82,39 @@ impl EncryptedProfileEngine {
         self
     }
 
-    fn encrypt_value(&self, plaintext: &str) -> Result<(Vec<u8>, Vec<u8>), UserProfileError> {
+    /// Build HKDF info string for domain separation: per-user derived keys.
+    fn hkdf_info(user_id: &str, agent_id: &str) -> Vec<u8> {
+        format!("ironclaw-profile-v1:{user_id}:{agent_id}").into_bytes()
+    }
+
+    fn encrypt_value(
+        &self,
+        plaintext: &str,
+        user_id: &str,
+        agent_id: &str,
+    ) -> Result<(Vec<u8>, Vec<u8>), UserProfileError> {
+        let info = Self::hkdf_info(user_id, agent_id);
         self.crypto
-            .encrypt(plaintext.as_bytes())
+            .encrypt_with_info(plaintext.as_bytes(), &info)
             .map_err(|e| UserProfileError::EncryptionError {
                 reason: e.to_string(),
             })
     }
 
-    fn decrypt_value(&self, encrypted: &[u8], salt: &[u8]) -> Result<String, UserProfileError> {
-        let decrypted = self.crypto.decrypt(encrypted, salt).map_err(|e| {
-            UserProfileError::DecryptionError {
+    fn decrypt_value(
+        &self,
+        encrypted: &[u8],
+        salt: &[u8],
+        user_id: &str,
+        agent_id: &str,
+    ) -> Result<String, UserProfileError> {
+        let info = Self::hkdf_info(user_id, agent_id);
+        let decrypted = self
+            .crypto
+            .decrypt_with_info(encrypted, salt, &info)
+            .map_err(|e| UserProfileError::DecryptionError {
                 reason: e.to_string(),
-            }
-        })?;
+            })?;
         Ok(decrypted.expose().to_string())
     }
 
@@ -118,7 +137,8 @@ impl UserProfileEngine for EncryptedProfileEngine {
 
         let mut facts = Vec::with_capacity(rows.len());
         for row in rows {
-            let value = self.decrypt_value(&row.fact_value_encrypted, &row.key_salt)?;
+            let value =
+                self.decrypt_value(&row.fact_value_encrypted, &row.key_salt, user_id, agent_id)?;
             let category = FactCategory::from_str_opt(&row.category).unwrap_or_else(|| {
                 tracing::warn!(
                     "Unknown profile category '{}', defaulting to Context",
@@ -190,7 +210,7 @@ impl UserProfileEngine for EncryptedProfileEngine {
             });
         }
 
-        let (encrypted, salt) = self.encrypt_value(&fact.value)?;
+        let (encrypted, salt) = self.encrypt_value(&fact.value, user_id, agent_id)?;
 
         self.db
             .upsert_profile_fact(

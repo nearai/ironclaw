@@ -261,6 +261,7 @@ impl GatewayWorkflowHarness {
                 learning_tx: None,
                 profile_engine: None,
                 user_profile_config: ironclaw::config::UserProfileConfig::default(),
+                distill_semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(1)),
             },
             channels,
             None,

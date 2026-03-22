@@ -154,6 +154,8 @@ pub struct AgentDeps {
     pub profile_engine: Option<Arc<dyn crate::user_profile::engine::UserProfileEngine>>,
     /// User profile config (max_prompt_chars, enabled flag).
     pub user_profile_config: crate::config::UserProfileConfig,
+    /// Bounds concurrent profile distillation tasks to 1.
+    pub distill_semaphore: Arc<tokio::sync::Semaphore>,
 }
 
 /// The main agent that coordinates all components.

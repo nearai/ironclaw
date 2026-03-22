@@ -270,7 +270,9 @@ impl Agent {
                         .collect(),
                     user_requested_synthesis: false,
                 };
-                let _ = tx.try_send(event); // non-blocking, drop if full
+                if let Err(e) = tx.try_send(event) {
+                    tracing::warn!("Learning event dropped (channel full, capacity 32): {e}");
+                }
             }
 
             // Auto-distill user profile facts every N turns (non-blocking)
@@ -286,43 +288,55 @@ impl Agent {
                 && self.deps.user_profile_config.enabled
                 && let Some(ref engine) = self.deps.profile_engine
             {
-                let llm = self.llm().clone();
-                let engine = Arc::clone(engine);
-                let user_id = message.user_id.clone();
-                let user_msgs: Vec<String> = reason_ctx
-                    .messages
-                    .iter()
-                    .filter(|m| m.role == crate::llm::Role::User)
-                    .map(|m| m.content.clone())
-                    .collect();
-                tokio::spawn(async move {
-                    let distiller = crate::user_profile::distiller::ProfileDistiller::new(llm);
-                    let existing = match engine.load_profile(&user_id, "default").await {
-                        Ok(profile) => profile,
-                        Err(e) => {
-                            tracing::warn!("Profile distill: failed to load profile: {e}");
-                            return;
-                        }
-                    };
-                    match distiller.extract_facts(&user_msgs, &existing.facts).await {
-                        Ok(facts) => {
-                            for fact in &facts {
-                                if let Err(e) = engine.store_fact(&user_id, "default", fact).await {
-                                    tracing::debug!("Profile distill: failed to store fact: {e}");
+                let sem = Arc::clone(&self.deps.distill_semaphore);
+                if let Ok(permit) = sem.try_acquire_owned() {
+                    let llm = self.llm().clone();
+                    let engine = Arc::clone(engine);
+                    let user_id = message.user_id.clone();
+                    let user_msgs: Vec<String> = reason_ctx
+                        .messages
+                        .iter()
+                        .filter(|m| m.role == crate::llm::Role::User)
+                        .map(|m| m.content.clone())
+                        .collect();
+                    tokio::spawn(async move {
+                        let _permit = permit; // held for the lifetime of the task
+                        let distiller = crate::user_profile::distiller::ProfileDistiller::new(llm);
+                        let existing = match engine.load_profile(&user_id, "default").await {
+                            Ok(profile) => profile,
+                            Err(e) => {
+                                tracing::warn!("Profile distill: failed to load profile: {e}");
+                                return;
+                            }
+                        };
+                        match distiller.extract_facts(&user_msgs, &existing.facts).await {
+                            Ok(facts) => {
+                                for fact in &facts {
+                                    if let Err(e) =
+                                        engine.store_fact(&user_id, "default", fact).await
+                                    {
+                                        tracing::debug!(
+                                            "Profile distill: failed to store fact: {e}"
+                                        );
+                                    }
+                                }
+                                if !facts.is_empty() {
+                                    tracing::debug!(
+                                        "Profile distill: extracted {} fact(s)",
+                                        facts.len()
+                                    );
                                 }
                             }
-                            if !facts.is_empty() {
-                                tracing::debug!(
-                                    "Profile distill: extracted {} fact(s)",
-                                    facts.len()
-                                );
+                            Err(e) => {
+                                tracing::debug!("Profile distill: extraction failed: {e}");
                             }
                         }
-                        Err(e) => {
-                            tracing::debug!("Profile distill: extraction failed: {e}");
-                        }
-                    }
-                });
+                    });
+                } else {
+                    tracing::debug!(
+                        "Profile distill: previous distillation still running, skipping"
+                    );
+                }
             }
         }
 
@@ -1322,6 +1336,7 @@ mod tests {
             learning_tx: None,
             profile_engine: None,
             user_profile_config: crate::config::UserProfileConfig::default(),
+            distill_semaphore: Arc::new(tokio::sync::Semaphore::new(1)),
         };
 
         Agent::new(
@@ -2166,6 +2181,7 @@ mod tests {
             learning_tx: None,
             profile_engine: None,
             user_profile_config: crate::config::UserProfileConfig::default(),
+            distill_semaphore: Arc::new(tokio::sync::Semaphore::new(1)),
         };
 
         Agent::new(
@@ -2288,6 +2304,7 @@ mod tests {
                 learning_tx: None,
                 profile_engine: None,
                 user_profile_config: crate::config::UserProfileConfig::default(),
+                distill_semaphore: Arc::new(tokio::sync::Semaphore::new(1)),
             };
 
             Agent::new(
