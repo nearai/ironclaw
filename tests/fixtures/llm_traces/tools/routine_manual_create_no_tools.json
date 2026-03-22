@@ -17,7 +17,9 @@
               "name": "manual-triage-no-tools",
               "trigger_type": "manual",
               "prompt": "Summarize the latest bug reports when this routine is fired.",
-              "use_tools": false
+              "execution": {
+                "use_tools": false
+              }
             }
           }
         ],
