@@ -32,6 +32,7 @@ use std::sync::Arc;
 async fn shell_tool() -> Arc<dyn Tool> {
     let registry = ToolRegistry::new();
     registry.register_builtin_tools();
+    registry.register_dev_tools();
     registry
         .all()
         .await
@@ -99,6 +100,9 @@ async fn medium_risk_commands() {
     let tool = shell_tool().await;
     let cmds = [
         "cargo build",
+        "cargo test",
+        "npm test",
+        "yarn test",
         "git commit -m 'foo'",
         "mkdir /tmp/dir",
         "npm install lodash",

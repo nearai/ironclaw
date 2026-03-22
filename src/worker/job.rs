@@ -596,7 +596,7 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
             tool = %tool_name,
             params = %safe_params,
             job = %job_id,
-            risk = ?risk,
+            risk = %risk,
             "Tool call started"
         );
 

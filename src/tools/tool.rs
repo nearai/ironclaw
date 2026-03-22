@@ -1,5 +1,6 @@
 //! Tool trait and types.
 
+use std::fmt;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -132,6 +133,16 @@ pub enum RiskLevel {
     /// Destructive, irreversible, or security-sensitive
     /// (e.g. `rm -rf`, `git push --force`, `kill -9`).
     High,
+}
+
+impl fmt::Display for RiskLevel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Low => f.write_str("low"),
+            Self::Medium => f.write_str("medium"),
+            Self::High => f.write_str("high"),
+        }
+    }
 }
 
 /// Where a tool should execute: orchestrator process or inside a container.
