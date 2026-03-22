@@ -51,6 +51,7 @@ impl exports::near::agent::tool::Guest for ComposioTool {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Params {
     action: String,
     app: Option<String>,
@@ -65,6 +66,18 @@ fn execute_inner(params_str: &str, context: Option<&str>) -> Result<String, Stri
 
     if params.action.is_empty() {
         return Err("'action' must not be empty".into());
+    }
+
+    // Best-effort pre-flight: check if the secret is configured in capabilities.
+    // This won't catch every case (the host may only check the allowlist), but
+    // avoids wasting a rate-limited API call when clearly misconfigured.
+    if !near::agent::host::secret_exists("composio_api_key") {
+        return Err(
+            "Composio API key not configured. Set it with: \
+             ironclaw secret set composio_api_key <key>. \
+             Get a key at: https://app.composio.dev/"
+                .into(),
+        );
     }
 
     let entity_id = extract_entity_id(context);

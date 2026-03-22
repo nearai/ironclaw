@@ -33,7 +33,6 @@
         "tools/gmail",
         "tools/google-calendar",
         "tools/google-drive",
-        "tools/composio",
         "tools/slack-tool",
         "channels/telegram",
         "channels/slack"
