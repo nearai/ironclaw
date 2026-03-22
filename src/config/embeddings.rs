@@ -77,12 +77,13 @@ impl EmbeddingsConfig {
         let provider = optional_env("EMBEDDING_PROVIDER")?
             .unwrap_or_else(|| settings.embeddings.provider.clone());
 
-        let model = if provider == "bedrock" {
-            optional_env("EMBEDDING_MODEL")?
-                .unwrap_or_else(|| "amazon.titan-embed-text-v2:0".to_string())
-        } else {
-            optional_env("EMBEDDING_MODEL")?.unwrap_or_else(|| settings.embeddings.model.clone())
-        };
+        let model = optional_env("EMBEDDING_MODEL")?.unwrap_or_else(|| {
+            if provider == "bedrock" {
+                "amazon.titan-embed-text-v2:0".to_string()
+            } else {
+                settings.embeddings.model.clone()
+            }
+        });
 
         let ollama_base_url = optional_env("OLLAMA_BASE_URL")?
             .or_else(|| settings.ollama_base_url.clone())

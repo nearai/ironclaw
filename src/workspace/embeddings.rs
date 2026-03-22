@@ -433,6 +433,39 @@ struct BedrockTitanEmbeddingResponse {
 }
 
 #[cfg(feature = "bedrock")]
+fn map_bedrock_invoke_model_error<R: std::fmt::Debug>(
+    error: &aws_sdk_bedrockruntime::error::SdkError<
+        aws_sdk_bedrockruntime::operation::invoke_model::InvokeModelError,
+        R,
+    >,
+) -> EmbeddingError {
+    use aws_sdk_bedrockruntime::error::SdkError;
+    use aws_sdk_bedrockruntime::operation::invoke_model::InvokeModelError;
+
+    match error {
+        SdkError::ServiceError(service_err) => match service_err.err() {
+            InvokeModelError::ThrottlingException(_) => {
+                EmbeddingError::RateLimited { retry_after: None }
+            }
+            InvokeModelError::AccessDeniedException(_) => EmbeddingError::AuthFailed,
+            InvokeModelError::ValidationException(e) => EmbeddingError::InvalidResponse(format!(
+                "Bedrock validation error: {}",
+                e.message().unwrap_or("unknown")
+            )),
+            InvokeModelError::ModelNotReadyException(e) => EmbeddingError::HttpError(format!(
+                "Bedrock model not ready: {}",
+                e.message().unwrap_or("unknown")
+            )),
+            other => EmbeddingError::HttpError(format!("Bedrock service error: {other:?}")),
+        },
+        SdkError::TimeoutError(_) => {
+            EmbeddingError::HttpError("Bedrock request timed out".to_string())
+        }
+        other => EmbeddingError::HttpError(format!("Bedrock request failed: {other:?}")),
+    }
+}
+
+#[cfg(feature = "bedrock")]
 #[async_trait]
 impl EmbeddingProvider for BedrockEmbeddings {
     fn dimension(&self) -> usize {
@@ -474,7 +507,7 @@ impl EmbeddingProvider for BedrockEmbeddings {
             .body(aws_smithy_types::Blob::new(body))
             .send()
             .await
-            .map_err(|e| EmbeddingError::HttpError(e.to_string()))?;
+            .map_err(|e| map_bedrock_invoke_model_error(&e))?;
 
         let result: BedrockTitanEmbeddingResponse = serde_json::from_slice(response.body.as_ref())
             .map_err(|e| {
