@@ -1557,20 +1557,12 @@ async fn execute_lightweight_with_tools(
                 let result_content = match result {
                     Ok(output) => {
                         let sanitized = ctx.safety.sanitize_tool_output(&tc.name, &output);
-                        ctx.safety.wrap_for_llm(
-                            &tc.name,
-                            &sanitized.content,
-                            sanitized.was_modified,
-                        )
+                        ctx.safety.wrap_for_llm(&tc.name, &sanitized.content)
                     }
                     Err(e) => {
                         let error_msg = format!("Tool '{}' failed: {}", tc.name, e);
                         let sanitized = ctx.safety.sanitize_tool_output(&tc.name, &error_msg);
-                        ctx.safety.wrap_for_llm(
-                            &tc.name,
-                            &sanitized.content,
-                            sanitized.was_modified,
-                        )
+                        ctx.safety.wrap_for_llm(&tc.name, &sanitized.content)
                     }
                 };
 

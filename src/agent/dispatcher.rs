@@ -845,11 +845,9 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                         Ok(output) => {
                             let sanitized =
                                 self.agent.safety().sanitize_tool_output(&tc.name, &output);
-                            self.agent.safety().wrap_for_llm(
-                                &tc.name,
-                                &sanitized.content,
-                                sanitized.was_modified,
-                            )
+                            self.agent
+                                .safety()
+                                .wrap_for_llm(&tc.name, &sanitized.content)
                         }
                         Err(e) => format!("Tool '{}' failed: {}", tc.name, e),
                     };
