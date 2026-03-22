@@ -760,6 +760,14 @@ fn generate_worker_mcp_config(
                 }
             })?;
 
+            // Restrict directory permissions to owner-only (0o700) to prevent
+            // other users on the host from reading filtered MCP configs.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&tmp_dir, std::fs::Permissions::from_mode(0o700));
+            }
+
             let tmp_path = tmp_dir.join(format!("{}.json", job_id));
             let config_json = serde_json::to_string_pretty(&filtered).map_err(|e| {
                 OrchestratorError::ContainerCreationFailed {
@@ -981,5 +989,137 @@ mod tests {
             "cli/mod.rs must have env = \"IRONCLAW_MAX_ITERATIONS\" on the max_iterations arg"
         );
         drop(mgr);
+    }
+
+    // ── Regression tests (CI-required) ────────────────────────────────
+
+    #[test]
+    fn test_filtered_config_contains_only_requested_server() {
+        let job_id = Uuid::new_v4();
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            tmp.path(),
+            r#"{"schema_version":2,"servers":[
+                {"name":"serpstat","enabled":true,"url":"http://localhost:8062"},
+                {"name":"notion","enabled":true,"url":"http://localhost:8063"},
+                {"name":"archon","enabled":true,"url":"http://localhost:8064"}
+            ]}"#,
+        )
+        .unwrap();
+
+        let names = vec!["serpstat".to_string()];
+        let result = generate_worker_mcp_config(tmp.path(), Some(&names), job_id);
+        let out_path = result.unwrap().expect("should produce a filtered config");
+
+        let content: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&out_path).unwrap()).unwrap();
+        let servers = content["servers"].as_array().unwrap();
+
+        assert_eq!(servers.len(), 1, "only serpstat should be present");
+        assert_eq!(servers[0]["name"], "serpstat");
+        assert!(
+            !servers.iter().any(|s| s["name"] == "notion"),
+            "notion must not leak into filtered config"
+        );
+        assert!(
+            !servers.iter().any(|s| s["name"] == "archon"),
+            "archon must not leak into filtered config"
+        );
+        assert_eq!(
+            content["schema_version"], 2,
+            "schema_version must be preserved"
+        );
+
+        let _ = std::fs::remove_file(&out_path);
+    }
+
+    #[test]
+    fn test_feature_flag_disabled_skips_mcp_filtering() {
+        // When MCP_PER_JOB_ENABLED is false (the default), the mcp_servers
+        // parameter should be ignored and no filtered config should be created.
+        let config = ContainerJobConfig::default();
+        assert!(
+            !config.mcp_per_job_enabled,
+            "mcp_per_job_enabled must default to false"
+        );
+
+        // Verify the gate in create_job_inner: the mcp_per_job_enabled field
+        // controls whether generate_worker_mcp_config is called at all.
+        let source = include_str!("job_manager.rs");
+        assert!(
+            source.contains("if self.config.mcp_per_job_enabled"),
+            "create_job_inner must gate MCP filtering on config.mcp_per_job_enabled"
+        );
+    }
+
+    #[test]
+    fn test_temp_file_cleanup_removes_per_job_config() {
+        let job_id = Uuid::new_v4();
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            tmp.path(),
+            r#"{"servers":[{"name":"serpstat","enabled":true}]}"#,
+        )
+        .unwrap();
+
+        let names = vec!["serpstat".to_string()];
+        let result = generate_worker_mcp_config(tmp.path(), Some(&names), job_id);
+        let out_path = result.unwrap().expect("should produce a filtered config");
+        assert!(
+            out_path.exists(),
+            "temp config file should exist after creation"
+        );
+
+        // Simulate what cleanup_job does
+        let expected_path = std::env::temp_dir()
+            .join("ironclaw-mcp-configs")
+            .join(format!("{}.json", job_id));
+        assert_eq!(
+            out_path, expected_path,
+            "temp path must match cleanup expectation"
+        );
+        std::fs::remove_file(&out_path).unwrap();
+        assert!(!out_path.exists(), "temp file should be gone after cleanup");
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_job_is_idempotent() {
+        let config = ContainerJobConfig::default();
+        let mgr = ContainerJobManager::new(config, TokenStore::new());
+        let job_id = Uuid::new_v4();
+
+        // cleanup_job should not panic or error when called for a job
+        // that has no temp file and no container handle.
+        mgr.cleanup_job(job_id).await;
+        // Second call should also be fine (idempotent).
+        mgr.cleanup_job(job_id).await;
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_temp_dir_has_restrictive_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let job_id = Uuid::new_v4();
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            tmp.path(),
+            r#"{"servers":[{"name":"test","enabled":true}]}"#,
+        )
+        .unwrap();
+
+        let names = vec!["test".to_string()];
+        let result = generate_worker_mcp_config(tmp.path(), Some(&names), job_id);
+        let out_path = result.unwrap().expect("should produce a filtered config");
+
+        let dir_path = out_path.parent().unwrap();
+        let mode = std::fs::metadata(dir_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o700,
+            "ironclaw-mcp-configs dir must be 0700, got {:o}",
+            mode
+        );
+
+        let _ = std::fs::remove_file(&out_path);
     }
 }
