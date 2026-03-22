@@ -10,6 +10,7 @@ use crate::db::Database;
 use crate::extensions::ExtensionManager;
 use crate::llm::{LlmProvider, ToolDefinition};
 use crate::orchestrator::job_manager::ContainerJobManager;
+use crate::sandbox::proxy::DomainAllowlist;
 use crate::secrets::SecretsStore;
 use crate::skills::catalog::SkillCatalog;
 use crate::skills::registry::SkillRegistry;
@@ -80,6 +81,104 @@ const PROTECTED_TOOL_NAMES: &[&str] = &[
     "tool_info",
 ];
 
+struct HttpToolWithApprovalBypass {
+    inner: HttpTool,
+    allowlist: DomainAllowlist,
+}
+
+impl HttpToolWithApprovalBypass {
+    fn new(inner: HttpTool, allowed_domains: &[String]) -> Self {
+        Self {
+            inner,
+            allowlist: DomainAllowlist::new(allowed_domains),
+        }
+    }
+
+    fn host_from_params(params: &serde_json::Value) -> Option<String> {
+        params
+            .get("url")
+            .and_then(|u| u.as_str())
+            .and_then(|u| reqwest::Url::parse(u).ok())
+            .and_then(|u| u.host_str().map(|h| h.to_string()))
+    }
+
+    fn request_is_whitelisted(&self, params: &serde_json::Value) -> bool {
+        Self::host_from_params(params)
+            .is_some_and(|host| self.allowlist.is_allowed(&host).is_allowed())
+    }
+}
+
+#[async_trait::async_trait]
+impl Tool for HttpToolWithApprovalBypass {
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    fn description(&self) -> &str {
+        self.inner.description()
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        self.inner.parameters_schema()
+    }
+
+    async fn execute(
+        &self,
+        params: serde_json::Value,
+        ctx: &crate::context::JobContext,
+    ) -> Result<crate::tools::tool::ToolOutput, crate::tools::tool::ToolError> {
+        self.inner.execute(params, ctx).await
+    }
+
+    fn estimated_cost(&self, params: &serde_json::Value) -> Option<rust_decimal::Decimal> {
+        self.inner.estimated_cost(params)
+    }
+
+    fn estimated_duration(&self, params: &serde_json::Value) -> Option<std::time::Duration> {
+        self.inner.estimated_duration(params)
+    }
+
+    fn requires_sanitization(&self) -> bool {
+        self.inner.requires_sanitization()
+    }
+
+    fn requires_approval(&self, params: &serde_json::Value) -> ApprovalRequirement {
+        if self.request_is_whitelisted(params) {
+            return ApprovalRequirement::Never;
+        }
+
+        self.inner.requires_approval(params)
+    }
+
+    fn execution_timeout(&self) -> std::time::Duration {
+        self.inner.execution_timeout()
+    }
+
+    fn domain(&self) -> ToolDomain {
+        self.inner.domain()
+    }
+
+    fn sensitive_params(&self) -> &[&str] {
+        self.inner.sensitive_params()
+    }
+
+    fn rate_limit_config(&self) -> Option<crate::tools::tool::ToolRateLimitConfig> {
+        self.inner.rate_limit_config()
+    }
+
+    fn webhook_capability(&self) -> Option<crate::tools::wasm::WebhookCapability> {
+        self.inner.webhook_capability()
+    }
+
+    fn discovery_schema(&self) -> serde_json::Value {
+        self.inner.discovery_schema()
+    }
+
+    fn discovery_summary(&self) -> Option<crate::tools::tool::ToolDiscoverySummary> {
+        self.inner.discovery_summary()
+    }
+}
+
 /// Registry of available tools.
 pub struct ToolRegistry {
     tools: RwLock<HashMap<String, Arc<dyn Tool>>>,
@@ -91,6 +190,8 @@ pub struct ToolRegistry {
     secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
     /// Shared rate limiter for built-in tool invocations.
     rate_limiter: RateLimiter,
+    /// HTTP domains that bypass approval prompts for the built-in HTTP tool.
+    http_allowed_domains: Vec<String>,
     /// Reference to the message tool for setting context per-turn.
     message_tool: RwLock<Option<Arc<crate::tools::builtin::MessageTool>>>,
 }
@@ -113,6 +214,7 @@ impl ToolRegistry {
             credential_registry: None,
             secrets_store: None,
             rate_limiter: RateLimiter::new(),
+            http_allowed_domains: Vec::new(),
             message_tool: RwLock::new(None),
         }
     }
@@ -125,6 +227,12 @@ impl ToolRegistry {
     ) -> Self {
         self.credential_registry = Some(credential_registry);
         self.secrets_store = Some(secrets_store);
+        self
+    }
+
+    /// Configure domains that bypass approval for the built-in HTTP tool.
+    pub fn with_http_allowed_domains(mut self, domains: Vec<String>) -> Self {
+        self.http_allowed_domains = domains;
         self
     }
 
@@ -246,7 +354,10 @@ impl ToolRegistry {
         if let (Some(cr), Some(ss)) = (&self.credential_registry, &self.secrets_store) {
             http = http.with_credentials(Arc::clone(cr), Arc::clone(ss));
         }
-        self.register_sync(Arc::new(http));
+        self.register_sync(Arc::new(HttpToolWithApprovalBypass::new(
+            http,
+            &self.http_allowed_domains,
+        )));
 
         tracing::debug!("Registered {} built-in tools", self.count());
     }
@@ -825,7 +936,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_tool_definitions_use_tool_schema() {
+    async fn test_tool_definitions_use_tool_schema() -> Result<(), Box<dyn std::error::Error>> {
         struct DiscoveryTool;
 
         #[async_trait::async_trait]
@@ -880,28 +991,34 @@ mod tests {
         let def = defs
             .iter()
             .find(|def| def.name == "discovery_tool")
-            .expect("tool definition should be present");
-        assert!(
-            def.description.contains("tool_info"),
-            "live tool definition should include schema hint: {}",
-            def.description
-        );
-        assert!(def.parameters.get("extra").is_none());
+            .ok_or_else(|| std::io::Error::other("tool definition should be present"))?;
+        if !def.description.contains("tool_info") {
+            return Err(std::io::Error::other(format!(
+                "live tool definition should include schema hint: {}",
+                def.description
+            ))
+            .into());
+        }
+        if def.parameters.get("extra").is_some() {
+            return Err(std::io::Error::other("tool_info schema should not expose extra").into());
+        }
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_builtin_tool_cannot_be_shadowed() {
+    async fn test_builtin_tool_cannot_be_shadowed() -> Result<(), Box<dyn std::error::Error>> {
         let registry = ToolRegistry::new();
         // Register echo as built-in (uses register_sync and echo is protected).
         registry.register_sync(Arc::new(EchoTool));
-        assert!(registry.has("echo").await);
+        if !registry.has("echo").await {
+            return Err(std::io::Error::other("echo should be present").into());
+        }
 
-        let original_desc = registry
+        let original_tool = registry
             .get("echo")
             .await
-            .unwrap()
-            .description()
-            .to_string();
+            .ok_or_else(|| std::io::Error::other("echo should be present"))?;
+        let original_desc = original_tool.description().to_string();
 
         // Create a fake tool that tries to shadow "echo"
         struct FakeEcho;
@@ -929,18 +1046,23 @@ mod tests {
         registry.register(Arc::new(FakeEcho)).await;
 
         // The original should still be there
-        let desc = registry
+        let current_tool = registry
             .get("echo")
             .await
-            .unwrap()
-            .description()
-            .to_string();
-        assert_eq!(desc, original_desc);
-        assert_ne!(desc, "EVIL SHADOW");
+            .ok_or_else(|| std::io::Error::other("echo should be present"))?;
+        let desc = current_tool.description().to_string();
+        if desc != original_desc {
+            return Err(std::io::Error::other("echo description changed unexpectedly").into());
+        }
+        if desc == "EVIL SHADOW" {
+            return Err(std::io::Error::other("shadow tool replaced built-in echo").into());
+        }
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_builtin_tool_names_include_non_protected_sync_tools() {
+    async fn test_builtin_tool_names_include_non_protected_sync_tools()
+    -> Result<(), Box<dyn std::error::Error>> {
         struct NonProtectedBuiltin;
 
         #[async_trait::async_trait]
@@ -967,11 +1089,14 @@ mod tests {
         registry.register_sync(Arc::new(NonProtectedBuiltin));
 
         let builtins = registry.builtin_tool_names().await;
-        assert!(builtins.contains("owner_gate"));
+        if !builtins.contains("owner_gate") {
+            return Err(std::io::Error::other("owner_gate should be tracked as builtin").into());
+        }
+        Ok(())
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn concurrent_register_and_read_no_panic() {
+    async fn concurrent_register_and_read_no_panic() -> Result<(), Box<dyn std::error::Error>> {
         use std::sync::Arc as StdArc;
 
         let registry = StdArc::new(ToolRegistry::new());
@@ -985,12 +1110,17 @@ mod tests {
             let reg = StdArc::clone(&registry);
             handles.push(tokio::spawn(async move {
                 let tools = reg.all().await;
-                assert!(!tools.is_empty());
+                if tools.is_empty() {
+                    return Err(std::io::Error::other("tools should not be empty"));
+                }
                 let names = reg.list().await;
-                assert!(!names.is_empty());
+                if names.is_empty() {
+                    return Err(std::io::Error::other("names should not be empty"));
+                }
                 let _ = reg.get("echo").await;
                 let _ = reg.has("echo").await;
                 let _ = reg.tool_definitions().await;
+                Ok::<(), std::io::Error>(())
             }));
         }
 
@@ -1000,16 +1130,19 @@ mod tests {
             handles.push(tokio::spawn(async move {
                 // This will be rejected (echo is protected) but should not panic
                 reg.register(Arc::new(EchoTool)).await;
+                Ok::<(), std::io::Error>(())
             }));
         }
 
         for handle in handles {
-            handle.await.expect("task should not panic");
+            handle.await??;
         }
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_tool_definitions_sorted_alphabetically() {
+    async fn test_tool_definitions_sorted_alphabetically() -> Result<(), Box<dyn std::error::Error>>
+    {
         // Create tools with names that would NOT be alphabetical if inserted in this order.
         struct ToolZ;
         struct ToolA;
@@ -1044,36 +1177,94 @@ mod tests {
         impl_tool!(ToolM, "middle");
 
         let registry = ToolRegistry::new();
-        // Register in non-alphabetical order
         registry.register(Arc::new(ToolZ)).await;
         registry.register(Arc::new(ToolA)).await;
         registry.register(Arc::new(ToolM)).await;
 
         let defs = registry.tool_definitions().await;
         let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
-        assert_eq!(names, vec!["alpha", "middle", "zebra"]);
+        if names != vec!["alpha", "middle", "zebra"] {
+            return Err(
+                std::io::Error::other("tool definitions should be sorted alphabetically").into(),
+            );
+        }
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_retain_only_filters_tools() {
+    async fn test_retain_only_filters_tools() -> Result<(), Box<dyn std::error::Error>> {
         let registry = ToolRegistry::new();
         registry.register_builtin_tools();
         let all = registry.list().await;
-        assert!(all.len() > 2, "expected multiple built-in tools");
+        if all.len() <= 2 {
+            return Err(std::io::Error::other("expected multiple built-in tools").into());
+        }
         registry.retain_only(&["echo", "time"]).await;
         let remaining = registry.list().await;
-        assert_eq!(remaining.len(), 2);
-        assert!(remaining.contains(&"echo".to_string()));
-        assert!(remaining.contains(&"time".to_string()));
+        if remaining.len() != 2 {
+            return Err(std::io::Error::other("expected two remaining tools").into());
+        }
+        if !remaining.contains(&"echo".to_string()) || !remaining.contains(&"time".to_string()) {
+            return Err(std::io::Error::other("expected echo and time to remain").into());
+        }
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_retain_only_empty_is_noop() {
+    async fn test_retain_only_empty_is_noop() -> Result<(), Box<dyn std::error::Error>> {
         let registry = ToolRegistry::new();
         registry.register_builtin_tools();
         let before = registry.list().await.len();
         registry.retain_only(&[]).await;
         let after = registry.list().await.len();
-        assert_eq!(before, after);
+        if before != after {
+            return Err(std::io::Error::other("retain_only([]) should be a no-op").into());
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_http_allowlisted_domain_bypasses_approval()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let registry = ToolRegistry::new().with_http_allowed_domains(vec![
+            "api.example.com".to_string(),
+            "*.vercel.app".to_string(),
+        ]);
+        registry.register_builtin_tools();
+
+        let http_tool = registry
+            .get("http")
+            .await
+            .ok_or_else(|| std::io::Error::other("http tool should be present"))?;
+
+        if http_tool.requires_approval(&serde_json::json!({
+            "method": "POST",
+            "url": "https://api.example.com/v1/messages"
+        })) != ApprovalRequirement::Never
+        {
+            return Err(
+                std::io::Error::other("exact allowlisted domain should bypass approval").into(),
+            );
+        }
+        if http_tool.requires_approval(&serde_json::json!({
+            "method": "GET",
+            "url": "https://preview.vercel.app/api"
+        })) != ApprovalRequirement::Never
+        {
+            return Err(std::io::Error::other(
+                "wildcard allowlisted domain should bypass approval",
+            )
+            .into());
+        }
+        if http_tool.requires_approval(&serde_json::json!({
+            "method": "POST",
+            "url": "https://evil.example.net"
+        })) != ApprovalRequirement::UnlessAutoApproved
+        {
+            return Err(
+                std::io::Error::other("unlisted domain should still require approval").into(),
+            );
+        }
+        Ok(())
     }
 }
