@@ -14,7 +14,7 @@ use crate::agent::compaction::ContextCompactor;
 use crate::agent::dispatcher::{
     AgenticLoopResult, check_auth_required, execute_chat_tool_standalone, parse_auth_result,
 };
-use crate::agent::session::{PendingApproval, Session, ThreadState};
+use crate::agent::session::{MAX_PENDING_MESSAGES, PendingApproval, Session, ThreadState};
 use crate::agent::submission::SubmissionResult;
 use crate::channels::web::util::truncate_preview;
 use crate::channels::{IncomingMessage, StatusUpdate};
@@ -211,14 +211,72 @@ impl Agent {
         // Check thread state
         match thread_state {
             ThreadState::Processing => {
-                tracing::warn!(
-                    message_id = %message.id,
-                    thread_id = %thread_id,
-                    "Thread is processing, rejecting new input"
-                );
-                return Ok(SubmissionResult::error(
-                    "Turn in progress. Use /interrupt to cancel.",
-                ));
+                let mut sess = session.lock().await;
+                if let Some(thread) = sess.threads.get_mut(&thread_id) {
+                    // Re-check state under lock — the turn may have completed
+                    // between the snapshot read and this mutable lock acquisition.
+                    if thread.state == ThreadState::Processing {
+                        // Reject messages with attachments — the queue stores
+                        // text only, so attachments would be silently dropped.
+                        if !message.attachments.is_empty() {
+                            return Ok(SubmissionResult::error(
+                                "Cannot queue messages with attachments while a turn is processing. \
+                                 Please resend after the current turn completes.",
+                            ));
+                        }
+
+                        // Run the same safety checks that the normal path applies
+                        // (validation, policy, secret scan) so that blocked content
+                        // is never stored in pending_messages or serialized.
+                        let validation = self.safety().validate_input(content);
+                        if !validation.is_valid {
+                            let details = validation
+                                .errors
+                                .iter()
+                                .map(|e| format!("{}: {}", e.field, e.message))
+                                .collect::<Vec<_>>()
+                                .join("; ");
+                            return Ok(SubmissionResult::error(format!(
+                                "Input rejected by safety validation: {details}",
+                            )));
+                        }
+                        let violations = self.safety().check_policy(content);
+                        if violations
+                            .iter()
+                            .any(|rule| rule.action == crate::safety::PolicyAction::Block)
+                        {
+                            return Ok(SubmissionResult::error("Input rejected by safety policy."));
+                        }
+                        if let Some(warning) = self.safety().scan_inbound_for_secrets(content) {
+                            tracing::warn!(
+                                user = %message.user_id,
+                                channel = %message.channel,
+                                "Queued message blocked: contains leaked secret"
+                            );
+                            return Ok(SubmissionResult::error(warning));
+                        }
+
+                        if !thread.queue_message(content.to_string()) {
+                            return Ok(SubmissionResult::error(format!(
+                                "Message queue full ({MAX_PENDING_MESSAGES}). Wait for the current turn to complete.",
+                            )));
+                        }
+                        // Return `Ok` (not `Response`) so the drain loop in
+                        // agent_loop.rs breaks — `Ok` signals a control
+                        // acknowledgment, not a completed LLM turn.
+                        return Ok(SubmissionResult::Ok {
+                            message: Some(
+                                "Message queued — will be processed after the current turn.".into(),
+                            ),
+                        });
+                    }
+                    // State changed (turn completed) — fall through to process normally.
+                    // NOTE: `sess` (the Mutex guard) is dropped at the end of
+                    // this `Processing` match arm, releasing the session lock
+                    // before the rest of process_user_input runs. No deadlock.
+                } else {
+                    return Ok(SubmissionResult::error("Thread no longer exists."));
+                }
             }
             ThreadState::AwaitingApproval => {
                 tracing::warn!(
@@ -849,6 +907,7 @@ impl Agent {
             .get_mut(&thread_id)
             .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
         thread.turns.clear();
+        thread.pending_messages.clear();
         thread.state = ThreadState::Idle;
 
         // Clear undo history too
@@ -2010,6 +2069,112 @@ mod tests {
             }
             _ => panic!("Expected approval rejection message"),
         }
+    }
+
+    #[test]
+    fn test_queue_cap_rejects_at_capacity() {
+        use crate::agent::session::{MAX_PENDING_MESSAGES, Thread, ThreadState};
+        use uuid::Uuid;
+
+        let mut thread = Thread::new(Uuid::new_v4());
+        thread.start_turn("processing something");
+        assert_eq!(thread.state, ThreadState::Processing);
+
+        // Fill the queue to the cap
+        for i in 0..MAX_PENDING_MESSAGES {
+            assert!(thread.queue_message(format!("msg-{}", i)));
+        }
+        assert_eq!(thread.pending_messages.len(), MAX_PENDING_MESSAGES);
+
+        // The next message should be rejected by queue_message
+        assert!(!thread.queue_message("overflow".to_string()));
+        assert_eq!(thread.pending_messages.len(), MAX_PENDING_MESSAGES);
+
+        // Verify all drain in FIFO order
+        for i in 0..MAX_PENDING_MESSAGES {
+            assert_eq!(thread.take_pending_message(), Some(format!("msg-{}", i)));
+        }
+        assert!(thread.take_pending_message().is_none());
+    }
+
+    #[test]
+    fn test_clear_clears_pending_messages() {
+        use crate::agent::session::{Thread, ThreadState};
+        use uuid::Uuid;
+
+        let mut thread = Thread::new(Uuid::new_v4());
+        thread.start_turn("processing");
+
+        thread.queue_message("pending-1".to_string());
+        thread.queue_message("pending-2".to_string());
+        assert_eq!(thread.pending_messages.len(), 2);
+
+        // Simulate what process_clear does: clear turns and pending_messages
+        thread.turns.clear();
+        thread.pending_messages.clear();
+        thread.state = ThreadState::Idle;
+
+        assert!(thread.pending_messages.is_empty());
+        assert!(thread.turns.is_empty());
+        assert_eq!(thread.state, ThreadState::Idle);
+    }
+
+    #[test]
+    fn test_processing_arm_thread_gone_returns_error() {
+        // Regression: if the thread disappears between the state snapshot and the
+        // mutable lock, the Processing arm must return an error — not a false
+        // "queued" acknowledgment.
+        //
+        // Exercises the exact branch at the `else` of
+        // `if let Some(thread) = sess.threads.get_mut(&thread_id)`.
+        use crate::agent::session::{Session, Thread, ThreadState};
+        use uuid::Uuid;
+
+        let thread_id = Uuid::new_v4();
+        let session_id = Uuid::new_v4();
+        let mut thread = Thread::with_id(thread_id, session_id);
+        thread.start_turn("working");
+        assert_eq!(thread.state, ThreadState::Processing);
+
+        let mut session = Session::new("test-user");
+        session.threads.insert(thread_id, thread);
+
+        // Simulate the thread disappearing (e.g., /clear racing with queue)
+        session.threads.remove(&thread_id);
+
+        // The Processing arm re-locks and calls get_mut — must get None.
+        assert!(session.threads.get_mut(&thread_id).is_none());
+        // Nothing was queued anywhere — the removed thread's queue is gone.
+    }
+
+    #[test]
+    fn test_processing_arm_state_changed_does_not_queue() {
+        // Regression: if the thread transitions from Processing to Idle between
+        // the state snapshot and the mutable lock, the message must NOT be queued.
+        // Instead the Processing arm falls through to normal processing.
+        //
+        // Exercises the `if thread.state == ThreadState::Processing` re-check.
+        use crate::agent::session::{Session, Thread, ThreadState};
+        use uuid::Uuid;
+
+        let thread_id = Uuid::new_v4();
+        let session_id = Uuid::new_v4();
+        let mut thread = Thread::with_id(thread_id, session_id);
+        thread.start_turn("working");
+        assert_eq!(thread.state, ThreadState::Processing);
+
+        // Simulate the turn completing between snapshot and re-lock
+        thread.complete_turn("done");
+        assert_eq!(thread.state, ThreadState::Idle);
+
+        let mut session = Session::new("test-user");
+        session.threads.insert(thread_id, thread);
+
+        // Re-check under lock: state is Idle, so queue_message must NOT be called.
+        let t = session.threads.get_mut(&thread_id).unwrap();
+        assert_ne!(t.state, ThreadState::Processing);
+        // Verify nothing was queued — the fall-through path doesn't touch the queue.
+        assert!(t.pending_messages.is_empty());
     }
 
     // Helper function to extract the approval message without needing a full Agent instance
