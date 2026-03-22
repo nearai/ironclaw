@@ -4,6 +4,10 @@ IronClaw defaults to NEAR AI for model access, but supports any OpenAI-compatibl
 endpoint as well as Anthropic, Ollama, and Google Gemini directly. This guide covers
 the most common configurations.
 
+Shared retry / circuit-breaker / response-cache settings are configured on the
+top-level `LlmConfig` with `LLM_*` environment variables. Legacy `NEARAI_*` and
+bare historical names remain accepted for backward compatibility.
+
 ## Provider Overview
 
 | Provider | Backend value | Requires API key | Notes |
@@ -37,6 +41,24 @@ for OAuth authentication. Credentials are saved to `~/.ironclaw/session.json`.
 NEARAI_MODEL=claude-3-5-sonnet-20241022
 NEARAI_BASE_URL=https://private.near.ai
 ```
+
+### Shared LLM decorator settings
+
+These apply to all backends, not just NEAR AI:
+
+```env
+LLM_MAX_RETRIES=3
+LLM_CIRCUIT_BREAKER_THRESHOLD=5
+LLM_CIRCUIT_BREAKER_RECOVERY_SECS=30
+LLM_RESPONSE_CACHE_ENABLED=false
+LLM_RESPONSE_CACHE_TTL_SECS=3600
+LLM_RESPONSE_CACHE_MAX_ENTRIES=1000
+```
+
+Legacy `NEARAI_MAX_RETRIES`, `CIRCUIT_BREAKER_THRESHOLD`,
+`CIRCUIT_BREAKER_RECOVERY_SECS`, `RESPONSE_CACHE_ENABLED`,
+`RESPONSE_CACHE_TTL_SECS`, and `RESPONSE_CACHE_MAX_ENTRIES` are still read as
+fallbacks for compatibility.
 
 ---
 
