@@ -382,6 +382,22 @@ mod tests {
         assert_eq!(env_or_override(key), Some("override_value".to_string()));
     }
 
+    // --- lock_env poison recovery (regression for env mutex cascade) ---
+
+    #[test]
+    fn lock_env_recovers_from_poisoned_mutex() {
+        // Simulate a poisoned mutex: spawn a thread that panics while holding the lock.
+        let _ = std::thread::spawn(|| {
+            let _guard = ENV_MUTEX.lock().unwrap();
+            panic!("intentional poison");
+        })
+        .join();
+
+        // The mutex is now poisoned. lock_env() should recover, not cascade.
+        assert!(ENV_MUTEX.lock().is_err(), "mutex should be poisoned");
+        let _guard = lock_env(); // must not panic
+    }
+
     // --- validate_base_url tests (regression for #1103) ---
 
     #[test]
