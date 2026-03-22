@@ -154,6 +154,7 @@ impl WasmToolLoader {
                 (caps, oauth, desc)
             } else {
                 tracing::warn!(
+                    tool = name,
                     path = %cap_path.display(),
                     "Capabilities file not found, using default (no permissions)"
                 );
