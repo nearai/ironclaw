@@ -437,4 +437,51 @@ mod tests {
         let decrypted = crypto.decrypt(&encrypted, &salt).unwrap();
         assert_eq!(decrypted.expose(), "password: p@$$w0rd! 你好 🔑");
     }
+
+    #[test]
+    fn test_encrypt_with_info_roundtrip() {
+        let crypto = test_crypto();
+        let plaintext = b"user profile fact";
+        let info = b"ironclaw-profile-v1:user123:default";
+
+        let (encrypted, salt) = crypto.encrypt_with_info(plaintext, info).unwrap();
+        let decrypted = crypto.decrypt_with_info(&encrypted, &salt, info).unwrap();
+        assert_eq!(decrypted.expose(), "user profile fact");
+    }
+
+    #[test]
+    fn test_encrypt_with_info_domain_isolation() {
+        let crypto = test_crypto();
+        let plaintext = b"shared value";
+        let info_a = b"ironclaw-profile-v1:alice:default";
+        let info_b = b"ironclaw-profile-v1:bob:default";
+
+        let (encrypted, salt) = crypto.encrypt_with_info(plaintext, info_a).unwrap();
+
+        // Decrypting with different info must fail (domain isolation)
+        assert!(crypto.decrypt_with_info(&encrypted, &salt, info_b).is_err());
+
+        // Decrypting with original info succeeds
+        let decrypted = crypto.decrypt_with_info(&encrypted, &salt, info_a).unwrap();
+        assert_eq!(decrypted.expose(), "shared value");
+    }
+
+    #[test]
+    fn test_encrypt_with_info_vs_plain_encrypt_isolated() {
+        let crypto = test_crypto();
+        let plaintext = b"same data";
+
+        let (enc_plain, salt_plain) = crypto.encrypt(plaintext).unwrap();
+        let (enc_info, salt_info) = crypto
+            .encrypt_with_info(plaintext, b"custom-domain")
+            .unwrap();
+
+        // Cross-decryption must fail: plain encrypt uses fixed info, with_info uses custom
+        assert!(
+            crypto
+                .decrypt_with_info(&enc_plain, &salt_plain, b"custom-domain")
+                .is_err()
+        );
+        assert!(crypto.decrypt(&enc_info, &salt_info).is_err());
+    }
 }
