@@ -110,6 +110,36 @@ pub fn create_secrets_store(
     store
 }
 
+/// Resolve a decrypted secret for a user, falling back to the `default`
+/// scope when the primary lookup fails.
+///
+/// This keeps hosted deployments usable when secrets are configured once via
+/// the default CLI scope but runtime execution happens under a different
+/// owner/user ID.
+pub async fn get_decrypted_with_default(
+    store: &(dyn SecretsStore + Send + Sync),
+    user_id: &str,
+    name: &str,
+) -> Result<DecryptedSecret, SecretError> {
+    match store.get_decrypted(user_id, name).await {
+        Ok(secret) => Ok(secret),
+        Err(primary_err) if user_id != "default" => {
+            match store.get_decrypted("default", name).await {
+                Ok(secret) => {
+                    tracing::debug!(
+                        user_id = %user_id,
+                        secret_name = %name,
+                        "Resolved secret from default scope fallback"
+                    );
+                    Ok(secret)
+                }
+                Err(_) => Err(primary_err),
+            }
+        }
+        Err(err) => Err(err),
+    }
+}
+
 /// Try to resolve an existing master key from env var or OS keychain.
 ///
 /// Resolution order:
@@ -150,6 +180,7 @@ pub fn crypto_from_hex(hex: &str) -> Result<std::sync::Arc<SecretsCrypto>, Secre
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::credentials::test_secrets_store;
 
     #[test]
     fn test_crypto_from_hex_valid() {
@@ -163,5 +194,48 @@ mod tests {
     fn test_crypto_from_hex_invalid() {
         let result = crypto_from_hex("too_short");
         assert!(result.is_err()); // safety: test assertion
+    }
+
+    #[tokio::test]
+    async fn test_get_decrypted_with_default_falls_back_to_default_scope() {
+        let store = test_secrets_store();
+        store
+            .create(
+                "default",
+                CreateSecretParams::new("matrix_access_token", "fallback-token"),
+            )
+            .await
+            .expect("seed default secret");
+
+        let secret = get_decrypted_with_default(&store, "agent3", "matrix_access_token")
+            .await
+            .expect("resolve via default scope");
+
+        assert_eq!(secret.expose(), "fallback-token"); // safety: test-only assertion
+    }
+
+    #[tokio::test]
+    async fn test_get_decrypted_with_default_uses_primary_scope_first() {
+        let store = test_secrets_store();
+        store
+            .create(
+                "agent3",
+                CreateSecretParams::new("matrix_access_token", "primary-token"),
+            )
+            .await
+            .expect("seed primary secret");
+        store
+            .create(
+                "default",
+                CreateSecretParams::new("matrix_access_token", "fallback-token"),
+            )
+            .await
+            .expect("seed default secret");
+
+        let secret = get_decrypted_with_default(&store, "agent3", "matrix_access_token")
+            .await
+            .expect("resolve via primary scope");
+
+        assert_eq!(secret.expose(), "primary-token"); // safety: test-only assertion
     }
 }

@@ -52,7 +52,7 @@ use crate::channels::{Channel, IncomingMessage, MessageStream, OutgoingResponse,
 use crate::error::ChannelError;
 use crate::pairing::PairingStore;
 use crate::safety::LeakDetector;
-use crate::secrets::SecretsStore;
+use crate::secrets::{SecretsStore, get_decrypted_with_default};
 use crate::tools::wasm::LogLevel;
 use crate::tools::wasm::WasmResourceLimiter;
 use crate::tools::wasm::credential_injector::{
@@ -3196,20 +3196,18 @@ async fn resolve_channel_host_credentials(
             continue;
         }
 
-        let secret = match store
-            .get_decrypted(owner_scope_id, &mapping.secret_name)
-            .await
-        {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::debug!(
-                    secret_name = %mapping.secret_name,
-                    error = %e,
-                    "Could not resolve credential for WASM channel (auth may not be configured)"
-                );
-                continue;
-            }
-        };
+        let secret =
+            match get_decrypted_with_default(store, owner_scope_id, &mapping.secret_name).await {
+                Ok(secret) => secret,
+                Err(e) => {
+                    tracing::debug!(
+                        secret_name = %mapping.secret_name,
+                        error = %e,
+                        "Could not resolve credential for WASM channel (auth may not be configured)"
+                    );
+                    continue;
+                }
+            };
 
         let mut injected = InjectedCredentials::empty();
         inject_credential(&mut injected, &mapping.location, &secret);
@@ -4667,6 +4665,38 @@ mod tests {
         assert_eq!(msg.sender_id, "guest-42"); // safety: test-only assertion
         assert_eq!(msg.conversation_scope(), Some("999")); // safety: test-only assertion
         assert!(last_broadcast_metadata.read().await.is_none()); // safety: test-only assertion
+    }
+
+    #[tokio::test]
+    async fn test_resolve_channel_host_credentials_falls_back_to_default_scope() {
+        use super::resolve_channel_host_credentials;
+        use crate::secrets::{CreateSecretParams, CredentialMapping, SecretsStore};
+        use crate::tools::wasm::{Capabilities, HttpCapability};
+
+        let store = crate::testing::credentials::test_secrets_store();
+        store
+            .create(
+                "default",
+                CreateSecretParams::new("matrix_access_token", "fallback-token"),
+            )
+            .await
+            .expect("seed default secret");
+
+        let mut http = HttpCapability::default();
+        http.credentials.insert(
+            "matrix_access_token".to_string(),
+            CredentialMapping::bearer("matrix_access_token", "matrix.org"),
+        );
+        let capabilities = ChannelCapabilities::for_channel("matrix")
+            .with_tool_capabilities(Capabilities::default().with_http(http));
+
+        let result = resolve_channel_host_credentials(&capabilities, Some(&store), "agent3").await;
+
+        assert_eq!(result.len(), 1); // safety: test-only assertion
+        assert_eq!(
+            result[0].headers.get("Authorization"),
+            Some(&"Bearer fallback-token".to_string())
+        ); // safety: test-only assertion
     }
 
     #[tokio::test]

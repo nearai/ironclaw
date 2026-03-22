@@ -15,7 +15,7 @@ use crate::config::Config;
 use crate::db::Database;
 use crate::extensions::ExtensionManager;
 use crate::pairing::PairingStore;
-use crate::secrets::SecretsStore;
+use crate::secrets::{SecretsStore, get_decrypted_with_default};
 
 /// Result of WASM channel setup.
 pub struct WasmChannelSetup {
@@ -129,8 +129,7 @@ async fn register_channel(
     let hmac_secret_name = loaded.hmac_secret_name();
 
     let webhook_secret = if let Some(secrets) = secrets_store {
-        secrets
-            .get_decrypted(&config.owner_id, &secret_name)
+        get_decrypted_with_default(secrets.as_ref(), &config.owner_id, &secret_name)
             .await
             .ok()
             .map(|s| s.expose().to_string())
@@ -222,7 +221,8 @@ async fn register_channel(
     // Register Ed25519 signature key if declared in capabilities.
     if let Some(ref sig_key_name) = sig_key_secret_name
         && let Some(secrets) = secrets_store
-        && let Ok(key_secret) = secrets.get_decrypted(&config.owner_id, sig_key_name).await
+        && let Ok(key_secret) =
+            get_decrypted_with_default(secrets.as_ref(), &config.owner_id, sig_key_name).await
     {
         match wasm_router
             .register_signature_key(&channel_name, key_secret.expose())
@@ -240,9 +240,8 @@ async fn register_channel(
     // Register HMAC signing secret if declared in capabilities.
     if let Some(ref hmac_secret_name) = hmac_secret_name
         && let Some(secrets) = secrets_store
-        && let Ok(secret) = secrets
-            .get_decrypted(&config.owner_id, hmac_secret_name)
-            .await
+        && let Ok(secret) =
+            get_decrypted_with_default(secrets.as_ref(), &config.owner_id, hmac_secret_name).await
     {
         wasm_router
             .register_hmac_secret(&channel_name, secret.expose())
@@ -305,8 +304,8 @@ pub async fn inject_channel_credentials(
     let mut injected_placeholders = HashSet::new();
 
     // 1. Try injecting from persistent secrets store if available
-    if let Some(secrets) = secrets {
-        let all_secrets = secrets
+    if let Some(secrets_store) = secrets {
+        let all_secrets = secrets_store
             .list(owner_id)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to list secrets: {}", e))?;
@@ -318,7 +317,13 @@ pub async fn inject_channel_credentials(
                 continue;
             }
 
-            let decrypted = match secrets.get_decrypted(owner_id, &secret_meta.name).await {
+            let decrypted = match get_decrypted_with_default(
+                secrets_store,
+                owner_id,
+                &secret_meta.name,
+            )
+            .await
+            {
                 Ok(d) => d,
                 Err(e) => {
                     tracing::warn!(
