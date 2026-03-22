@@ -773,7 +773,7 @@ impl TestRigBuilder {
         // 7. Create TestChannel and ChannelManager.
         // When testing bootstrap, the channel must be named "gateway" because
         // the bootstrap greeting targets only the gateway channel.
-        let test_channel = if keep_bootstrap {
+        let test_channel = if self.keep_bootstrap {
             Arc::new(TestChannel::new().with_name("gateway"))
         } else {
             Arc::new(TestChannel::new())

@@ -35,6 +35,7 @@ mod rig_adapter;
 pub mod session;
 pub mod smart_routing;
 mod token_refreshing;
+pub mod transcription;
 
 #[cfg(test)]
 mod codex_test_helpers;

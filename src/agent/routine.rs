@@ -529,8 +529,8 @@ pub fn normalize_cron_expression(schedule: &str) -> String {
     let trimmed = schedule.trim();
     let fields: Vec<&str> = trimmed.split_whitespace().collect();
     match fields.len() {
-        5 => format!("0 {} *", trimmed),
-        6 => format!("{} *", trimmed),
+        5 => format!("0 {} *", fields.join(" ")),
+        6 => format!("{} *", fields.join(" ")),
         _ => trimmed.to_string(),
     }
 }

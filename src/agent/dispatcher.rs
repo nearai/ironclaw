@@ -317,7 +317,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
             .channels
             .send_status(
                 &self.message.channel,
-                StatusUpdate::Thinking("Calling LLM...".into()),
+                StatusUpdate::Thinking(format!("Thinking (step {iteration})...")),
                 &self.message.metadata,
             )
             .await;
@@ -435,7 +435,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
             .channels
             .send_status(
                 &self.message.channel,
-                StatusUpdate::Thinking(format!("Executing {} tool(s)...", tool_calls.len())),
+                StatusUpdate::Thinking(contextual_tool_message(&tool_calls)),
                 &self.message.metadata,
             )
             .await;
@@ -967,6 +967,30 @@ pub(super) fn check_auth_required(
         .unwrap_or("Please provide your API token/key.")
         .to_string();
     Some((name, instructions))
+}
+
+/// Build a contextual thinking message based on tool names.
+///
+/// Instead of a generic "Executing 2 tool(s)..." this returns messages like
+/// "Running command..." or "Fetching page..." for single-tool calls, falling
+/// back to "Executing N tool(s)..." for multi-tool calls.
+fn contextual_tool_message(tool_calls: &[crate::llm::ToolCall]) -> String {
+    if tool_calls.len() == 1 {
+        match tool_calls[0].name.as_str() {
+            "shell" => "Running command...".into(),
+            "web_fetch" => "Fetching page...".into(),
+            "memory_search" => "Searching memory...".into(),
+            "memory_write" => "Writing to memory...".into(),
+            "memory_read" => "Reading memory...".into(),
+            "http_request" => "Making HTTP request...".into(),
+            "file_read" => "Reading file...".into(),
+            "file_write" => "Writing file...".into(),
+            "json_transform" => "Transforming data...".into(),
+            name => format!("Running {name}..."),
+        }
+    } else {
+        format!("Executing {} tool(s)...", tool_calls.len())
+    }
 }
 
 /// Compact messages for retry after a context-length-exceeded error.
