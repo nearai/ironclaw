@@ -750,21 +750,7 @@ mod tests {
         assert_eq!(cfg.response_cache_max_entries, 777);
         assert_eq!(cfg.nearai.response_cache_max_entries, 777);
 
-        // SAFETY: Under ENV_MUTEX.
-        unsafe {
-            std::env::remove_var("LLM_MAX_RETRIES");
-            std::env::remove_var("NEARAI_MAX_RETRIES");
-            std::env::remove_var("LLM_CIRCUIT_BREAKER_THRESHOLD");
-            std::env::remove_var("CIRCUIT_BREAKER_THRESHOLD");
-            std::env::remove_var("LLM_CIRCUIT_BREAKER_RECOVERY_SECS");
-            std::env::remove_var("CIRCUIT_BREAKER_RECOVERY_SECS");
-            std::env::remove_var("LLM_RESPONSE_CACHE_ENABLED");
-            std::env::remove_var("RESPONSE_CACHE_ENABLED");
-            std::env::remove_var("LLM_RESPONSE_CACHE_TTL_SECS");
-            std::env::remove_var("RESPONSE_CACHE_TTL_SECS");
-            std::env::remove_var("LLM_RESPONSE_CACHE_MAX_ENTRIES");
-            std::env::remove_var("RESPONSE_CACHE_MAX_ENTRIES");
-        }
+        clear_shared_decorator_env();
     }
 
     #[test]
