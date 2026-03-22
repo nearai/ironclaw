@@ -386,6 +386,105 @@ impl EmbeddingProvider for NearAiEmbeddings {
     }
 }
 
+/// AWS Bedrock embedding provider using Titan Text Embeddings V2.
+#[cfg(feature = "bedrock")]
+pub struct BedrockEmbeddings {
+    client: aws_sdk_bedrockruntime::Client,
+    model: String,
+    dimension: usize,
+}
+
+#[cfg(feature = "bedrock")]
+impl BedrockEmbeddings {
+    /// Create a new Bedrock embedding provider.
+    pub async fn new(
+        config: &crate::llm::BedrockConfig,
+        model: impl Into<String>,
+        dimension: usize,
+    ) -> Result<Self, EmbeddingError> {
+        let mut builder = aws_config::defaults(aws_config::BehaviorVersion::latest())
+            .region(aws_config::Region::new(config.region.clone()));
+        if let Some(ref profile) = config.profile {
+            builder = builder.profile_name(profile);
+        }
+
+        let sdk_config = builder.load().await;
+        Ok(Self {
+            client: aws_sdk_bedrockruntime::Client::new(&sdk_config),
+            model: model.into(),
+            dimension,
+        })
+    }
+}
+
+#[cfg(feature = "bedrock")]
+#[derive(Debug, Serialize)]
+struct BedrockTitanEmbeddingRequest<'a> {
+    #[serde(rename = "inputText")]
+    input_text: &'a str,
+    dimensions: usize,
+    normalize: bool,
+}
+
+#[cfg(feature = "bedrock")]
+#[derive(Debug, Deserialize)]
+struct BedrockTitanEmbeddingResponse {
+    embedding: Vec<f32>,
+}
+
+#[cfg(feature = "bedrock")]
+#[async_trait]
+impl EmbeddingProvider for BedrockEmbeddings {
+    fn dimension(&self) -> usize {
+        self.dimension
+    }
+
+    fn model_name(&self) -> &str {
+        &self.model
+    }
+
+    fn max_input_length(&self) -> usize {
+        32_000
+    }
+
+    async fn embed(&self, text: &str) -> Result<Vec<f32>, EmbeddingError> {
+        if text.len() > self.max_input_length() {
+            return Err(EmbeddingError::TextTooLong {
+                length: text.len(),
+                max: self.max_input_length(),
+            });
+        }
+
+        let request = BedrockTitanEmbeddingRequest {
+            input_text: text,
+            dimensions: self.dimension,
+            normalize: true,
+        };
+
+        let body = serde_json::to_vec(&request).map_err(|e| {
+            EmbeddingError::InvalidResponse(format!("Failed to serialize request: {}", e))
+        })?;
+
+        let response = self
+            .client
+            .invoke_model()
+            .model_id(&self.model)
+            .content_type("application/json")
+            .accept("application/json")
+            .body(aws_smithy_types::Blob::new(body))
+            .send()
+            .await
+            .map_err(|e| EmbeddingError::HttpError(e.to_string()))?;
+
+        let result: BedrockTitanEmbeddingResponse = serde_json::from_slice(response.body.as_ref())
+            .map_err(|e| {
+                EmbeddingError::InvalidResponse(format!("Failed to parse response: {}", e))
+            })?;
+
+        Ok(result.embedding)
+    }
+}
+
 /// Ollama embedding provider using a local Ollama instance.
 ///
 /// Ollama serves embedding models (e.g. `nomic-embed-text`, `mxbai-embed-large`)

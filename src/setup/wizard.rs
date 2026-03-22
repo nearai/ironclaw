@@ -2323,6 +2323,7 @@ impl SetupWizard {
         let has_openai_key = std::env::var("OPENAI_API_KEY").is_ok()
             || (backend == "openai" && self.llm_api_key.is_some());
         let has_nearai = backend == "nearai" || self.session_manager.is_some();
+        let has_bedrock = backend == "bedrock";
 
         // If the LLM backend is OpenAI and we already have a key, default to OpenAI embeddings
         if backend == "openai" && has_openai_key {
@@ -2333,8 +2334,16 @@ impl SetupWizard {
             return Ok(());
         }
 
-        // If no NEAR AI session and no OpenAI key, only OpenAI is viable
-        if !has_nearai && !has_openai_key {
+        if backend == "bedrock" {
+            self.settings.embeddings.enabled = true;
+            self.settings.embeddings.provider = "bedrock".to_string();
+            self.settings.embeddings.model = "amazon.titan-embed-text-v2:0".to_string();
+            print_success("Embeddings enabled via AWS Bedrock");
+            return Ok(());
+        }
+
+        // If no NEAR AI session, Bedrock config, or OpenAI key, embeddings aren't available.
+        if !has_nearai && !has_bedrock && !has_openai_key {
             print_info("No NEAR AI session or OpenAI key found for embeddings.");
             print_info("Set OPENAI_API_KEY in your environment to enable embeddings.");
             self.settings.embeddings.enabled = false;
@@ -2345,6 +2354,9 @@ impl SetupWizard {
         if has_nearai {
             options.push("NEAR AI (uses same auth, no extra cost)");
         }
+        if has_bedrock {
+            options.push("AWS Bedrock (uses AWS auth and region)");
+        }
         options.push("OpenAI (requires API key)");
 
         let choice = select_one("Select embeddings provider:", &options).map_err(SetupError::Io)?;
@@ -2352,6 +2364,8 @@ impl SetupWizard {
         // Map choice back to provider name
         let provider = if has_nearai && choice == 0 {
             "nearai"
+        } else if has_bedrock && ((has_nearai && choice == 1) || (!has_nearai && choice == 0)) {
+            "bedrock"
         } else {
             "openai"
         };
@@ -2362,6 +2376,12 @@ impl SetupWizard {
                 self.settings.embeddings.provider = "nearai".to_string();
                 self.settings.embeddings.model = "text-embedding-3-small".to_string();
                 print_success("Embeddings enabled via NEAR AI");
+            }
+            "bedrock" => {
+                self.settings.embeddings.enabled = true;
+                self.settings.embeddings.provider = "bedrock".to_string();
+                self.settings.embeddings.model = "amazon.titan-embed-text-v2:0".to_string();
+                print_success("Embeddings enabled via AWS Bedrock");
             }
             _ => {
                 if !has_openai_key {
