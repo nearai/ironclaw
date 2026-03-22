@@ -423,7 +423,16 @@ async fn show_tool_info(name_or_path: String, dir: Option<PathBuf>) -> anyhow::R
         println!("\nCapabilities ({}):", caps_path.display());
         let content = fs::read_to_string(&caps_path).await?;
         match CapabilitiesFile::from_json(&content) {
-            Ok(caps) => print_capabilities_detail(&caps),
+            Ok(caps) => {
+                let secrets_store = init_secrets_store().await.ok();
+                print_capabilities_detail(
+                    &caps,
+                    secrets_store
+                        .as_ref()
+                        .map(|s| s.as_ref() as &(dyn SecretsStore + Send + Sync)),
+                )
+                .await;
+            }
             Err(e) => println!("  Error parsing: {}", e),
         }
     } else {
@@ -476,8 +485,66 @@ fn print_capabilities_summary(caps: &CapabilitiesFile) {
     }
 }
 
+/// Per-secret info collected from all auth-related capability sections.
+struct AuthSecretInfo {
+    secret_name: String,
+    /// Human-readable label (from auth.display_name or setup prompt).
+    description: Option<String>,
+    /// Injection location (from http.credentials).
+    location: Option<String>,
+}
+
 /// Print detailed capabilities.
-fn print_capabilities_detail(caps: &CapabilitiesFile) {
+async fn print_capabilities_detail(
+    caps: &CapabilitiesFile,
+    secrets_store: Option<&(dyn SecretsStore + Send + Sync)>,
+) {
+    // Collect auth secrets from all sections, deduplicating by secret_name.
+    let mut auth_secrets: Vec<AuthSecretInfo> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    // auth.display_name is the best label — seed first.
+    if let Some(ref auth) = caps.auth {
+        seen.insert(auth.secret_name.clone());
+        auth_secrets.push(AuthSecretInfo {
+            secret_name: auth.secret_name.clone(),
+            description: auth.display_name.clone(),
+            location: None,
+        });
+    }
+
+    // setup.required_secrets.prompt is second-best label.
+    if let Some(ref setup) = caps.setup {
+        for secret in &setup.required_secrets {
+            if seen.insert(secret.name.clone()) {
+                auth_secrets.push(AuthSecretInfo {
+                    secret_name: secret.name.clone(),
+                    description: Some(secret.prompt.clone()),
+                    location: None,
+                });
+            }
+        }
+    }
+
+    // Merge injection location from http.credentials.
+    if let Some(ref http) = caps.http {
+        for cred in http.credentials.values() {
+            let loc = format!("{:?}", cred.location);
+            if let Some(existing) = auth_secrets
+                .iter_mut()
+                .find(|s| s.secret_name == cred.secret_name)
+            {
+                existing.location = Some(loc);
+            } else if seen.insert(cred.secret_name.clone()) {
+                auth_secrets.push(AuthSecretInfo {
+                    secret_name: cred.secret_name.clone(),
+                    description: None,
+                    location: Some(loc),
+                });
+            }
+        }
+    }
+
     if let Some(ref http) = caps.http {
         println!("  HTTP:");
         for endpoint in &http.allowlist {
@@ -490,13 +557,6 @@ fn print_capabilities_detail(caps: &CapabilitiesFile) {
             println!("    {} {} {}", methods, endpoint.host, path);
         }
 
-        if !http.credentials.is_empty() {
-            println!("  Credentials:");
-            for (key, cred) in &http.credentials {
-                println!("    {}: {} -> {:?}", key, cred.secret_name, cred.location);
-            }
-        }
-
         if let Some(ref rate) = http.rate_limit {
             println!(
                 "  Rate limit: {}/min, {}/hour",
@@ -505,12 +565,20 @@ fn print_capabilities_detail(caps: &CapabilitiesFile) {
         }
     }
 
+    // Only show secrets that aren't already covered by the auth section (e.g. wildcards).
     if let Some(ref secrets) = caps.secrets
         && !secrets.allowed_names.is_empty()
     {
-        println!("  Secrets (existence check only):");
-        for name in &secrets.allowed_names {
-            println!("    {}", name);
+        let extra: Vec<_> = secrets
+            .allowed_names
+            .iter()
+            .filter(|name| !seen.contains(name.as_str()))
+            .collect();
+        if !extra.is_empty() {
+            println!("  Secrets (existence check only):");
+            for name in extra {
+                println!("    {}", name);
+            }
         }
     }
 
@@ -529,6 +597,32 @@ fn print_capabilities_detail(caps: &CapabilitiesFile) {
         println!("  Workspace read prefixes:");
         for prefix in &ws.allowed_prefixes {
             println!("    {}", prefix);
+        }
+    }
+
+    // Consolidated auth status.
+    if !auth_secrets.is_empty() {
+        if let Some(store) = secrets_store {
+            println!("  Auth:");
+            for info in &auth_secrets {
+                let found = store
+                    .exists("default", &info.secret_name)
+                    .await
+                    .unwrap_or(false);
+                let (icon, label) = if found {
+                    ("\u{2713}", "configured")
+                } else {
+                    ("\u{2717}", "missing")
+                };
+                let mut parts = info.secret_name.clone();
+                if let Some(ref desc) = info.description {
+                    parts = format!("{} ({})", parts, desc);
+                }
+                if let Some(ref loc) = info.location {
+                    parts = format!("{} -> {}", parts, loc);
+                }
+                println!("    {}  {} {}", parts, icon, label);
+            }
         }
     }
 }
