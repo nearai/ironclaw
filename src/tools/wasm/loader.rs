@@ -206,7 +206,7 @@ impl WasmToolLoader {
             })
             .await?;
 
-        tracing::info!(
+        tracing::debug!(
             name = name,
             wasm_path = %wasm_path.display(),
             "Loaded WASM tool from file"
@@ -306,7 +306,7 @@ impl WasmToolLoader {
         }
 
         if !results.loaded.is_empty() {
-            tracing::info!(
+            tracing::debug!(
                 count = results.loaded.len(),
                 tools = ?results.loaded,
                 "Loaded WASM tools from directory"

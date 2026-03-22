@@ -111,6 +111,10 @@ impl ChannelsConfig {
 
         let gateway_enabled = parse_bool_env("GATEWAY_ENABLED", cs.gateway_enabled)?;
         let gateway = if gateway_enabled {
+            let user_id = optional_env("GATEWAY_USER_ID")?
+                .or_else(|| cs.gateway_user_id.clone())
+                .unwrap_or_else(|| "default".to_string());
+
             Some(GatewayConfig {
                 host: optional_env("GATEWAY_HOST")?
                     .or_else(|| cs.gateway_host.clone())
@@ -121,7 +125,7 @@ impl ChannelsConfig {
                 )?,
                 auth_token: optional_env("GATEWAY_AUTH_TOKEN")?
                     .or_else(|| cs.gateway_auth_token.clone()),
-                user_id: owner_id.to_string(),
+                user_id,
             })
         } else {
             None

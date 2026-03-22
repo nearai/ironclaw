@@ -9,6 +9,7 @@ use crate::llm::config::*;
 use crate::llm::registry::{ProviderProtocol, ProviderRegistry};
 use crate::llm::session::SessionConfig;
 use crate::settings::Settings;
+
 impl LlmConfig {
     /// Create a test-friendly config without reading env vars.
     #[cfg(feature = "libsql")]
@@ -37,6 +38,7 @@ impl LlmConfig {
             },
             provider: None,
             bedrock: None,
+            gemini_oauth: None,
             openai_codex: None,
             request_timeout_secs: 120,
             cheap_model: None,
@@ -73,11 +75,16 @@ impl LlmConfig {
             backend_lower == "nearai" || backend_lower == "near_ai" || backend_lower == "near";
         let is_bedrock =
             backend_lower == "bedrock" || backend_lower == "aws_bedrock" || backend_lower == "aws";
+        let is_gemini_oauth = backend_lower == "gemini_oauth" || backend_lower == "gemini-oauth";
         let is_openai_codex = backend_lower == "openai_codex"
             || backend_lower == "openai-codex"
             || backend_lower == "codex";
 
-        if !is_nearai && !is_bedrock && !is_openai_codex && registry.find(&backend_lower).is_none()
+        if !is_nearai
+            && !is_bedrock
+            && !is_gemini_oauth
+            && !is_openai_codex
+            && registry.find(&backend_lower).is_none()
         {
             tracing::warn!(
                 "Unknown LLM backend '{}'. Will attempt as openai_compatible fallback.",
@@ -131,8 +138,8 @@ impl LlmConfig {
             smart_routing_cascade: parse_optional_env("SMART_ROUTING_CASCADE", true)?,
         };
 
-        // Resolve registry provider config (for non-NearAI, non-Bedrock, non-Codex backends)
-        let provider = if is_nearai || is_bedrock || is_openai_codex {
+        // Resolve registry provider config (for non-NearAI, non-Bedrock, non-Gemini, non-Codex backends)
+        let provider = if is_nearai || is_bedrock || is_gemini_oauth || is_openai_codex {
             None
         } else {
             Some(Self::resolve_registry_provider(
@@ -213,6 +220,19 @@ impl LlmConfig {
 
         let request_timeout_secs = parse_optional_env("LLM_REQUEST_TIMEOUT_SECS", 120)?;
 
+        let gemini_oauth = if backend_lower == "gemini_oauth" || backend_lower == "gemini-oauth" {
+            let model = Self::resolve_model("GEMINI_MODEL", settings, "gemini-2.5-flash")?;
+            let credentials_path = optional_env("GEMINI_CREDENTIALS_PATH")?
+                .map(PathBuf::from)
+                .unwrap_or_else(GeminiOauthConfig::default_credentials_path);
+            Some(GeminiOauthConfig {
+                model,
+                credentials_path,
+            })
+        } else {
+            None
+        };
+
         // Generic cheap model (works with any backend).
         // Falls back to NearAI-specific cheap_model in provider chain logic.
         let cheap_model = optional_env("LLM_CHEAP_MODEL")?;
@@ -226,6 +246,8 @@ impl LlmConfig {
                 "nearai".to_string()
             } else if is_bedrock {
                 "bedrock".to_string()
+            } else if is_gemini_oauth {
+                "gemini_oauth".to_string()
             } else if is_openai_codex {
                 "openai_codex".to_string()
             } else if let Some(ref p) = provider {
@@ -237,6 +259,7 @@ impl LlmConfig {
             nearai,
             provider,
             bedrock,
+            gemini_oauth,
             openai_codex,
             request_timeout_secs,
             cheap_model,
@@ -389,6 +412,14 @@ impl LlmConfig {
         } else {
             Vec::new()
         };
+        let extra_headers = if canonical_id == "github_copilot" {
+            merge_extra_headers(
+                crate::llm::github_copilot_auth::default_headers(),
+                extra_headers,
+            )
+        } else {
+            extra_headers
+        };
 
         // Resolve OAuth token (Anthropic-specific: `claude login` flow).
         // Only check for OAuth token when the provider is actually Anthropic.
@@ -471,6 +502,26 @@ fn parse_extra_headers(val: &str) -> Result<Vec<(String, String)>, ConfigError> 
         headers.push((key.to_string(), value.trim().to_string()));
     }
     Ok(headers)
+}
+
+fn merge_extra_headers(
+    defaults: Vec<(String, String)>,
+    overrides: Vec<(String, String)>,
+) -> Vec<(String, String)> {
+    let mut merged = Vec::new();
+    let mut positions = std::collections::HashMap::<String, usize>::new();
+
+    for (key, value) in defaults.into_iter().chain(overrides) {
+        let normalized = key.to_ascii_lowercase();
+        if let Some(existing_index) = positions.get(&normalized).copied() {
+            merged[existing_index] = (key, value);
+        } else {
+            positions.insert(normalized, merged.len());
+            merged.push((key, value));
+        }
+    }
+
+    merged
 }
 
 /// Get the default session file path (~/.ironclaw/session.json).
@@ -600,6 +651,29 @@ mod tests {
             vec![
                 ("HTTP-Referer".to_string(), "https://myapp.com".to_string()),
                 ("X-Title".to_string(), "MyApp".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn merge_extra_headers_prefers_overrides_case_insensitively() {
+        let merged = merge_extra_headers(
+            vec![
+                ("User-Agent".to_string(), "default-agent".to_string()),
+                ("X-Test".to_string(), "default".to_string()),
+            ],
+            vec![
+                ("user-agent".to_string(), "override-agent".to_string()),
+                ("X-Extra".to_string(), "present".to_string()),
+            ],
+        );
+
+        assert_eq!(
+            merged,
+            vec![
+                ("user-agent".to_string(), "override-agent".to_string()),
+                ("X-Test".to_string(), "default".to_string()),
+                ("X-Extra".to_string(), "present".to_string()),
             ]
         );
     }
@@ -757,6 +831,54 @@ mod tests {
     }
 
     #[test]
+    fn registry_provider_resolves_github_copilot_alias() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::set_var("LLM_BACKEND", "github-copilot");
+            std::env::set_var("GITHUB_COPILOT_TOKEN", "gho_test_token");
+            std::env::set_var(
+                "GITHUB_COPILOT_EXTRA_HEADERS",
+                "Copilot-Integration-Id:custom-chat,X-Test:enabled",
+            );
+        }
+
+        let settings = Settings::default();
+
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
+        assert_eq!(cfg.backend, "github_copilot");
+        let provider = cfg.provider.expect("provider config should be present");
+        assert_eq!(provider.provider_id, "github_copilot");
+        assert_eq!(provider.base_url, "https://api.githubcopilot.com");
+        assert_eq!(provider.model, "gpt-4o");
+        assert!(
+            provider
+                .extra_headers
+                .iter()
+                .any(|(key, value)| { key == "Copilot-Integration-Id" && value == "custom-chat" })
+        );
+        assert!(
+            provider
+                .extra_headers
+                .iter()
+                .any(|(key, value)| key == "User-Agent" && value == "GitHubCopilotChat/0.26.7")
+        );
+        assert!(
+            provider
+                .extra_headers
+                .iter()
+                .any(|(key, value)| key == "X-Test" && value == "enabled")
+        );
+
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("LLM_BACKEND");
+            std::env::remove_var("GITHUB_COPILOT_TOKEN");
+            std::env::remove_var("GITHUB_COPILOT_EXTRA_HEADERS");
+        }
+    }
+
+    #[test]
     fn nearai_backend_has_no_registry_provider() {
         let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
         // SAFETY: Under ENV_MUTEX.
@@ -855,19 +977,19 @@ mod tests {
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::set_var("LLM_BACKEND", "openai_compatible");
-            std::env::set_var("LLM_BASE_URL", "http://env-url/v1");
+            std::env::set_var("LLM_BASE_URL", "http://localhost:8000/v1");
         }
 
         let settings = Settings {
             llm_backend: Some("openai_compatible".to_string()),
-            openai_compatible_base_url: Some("http://settings-url/v1".to_string()),
+            openai_compatible_base_url: Some("http://localhost:9000/v1".to_string()),
             ..Default::default()
         };
 
         let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
         let provider = cfg.provider.expect("should have provider config");
         assert_eq!(
-            provider.base_url, "http://env-url/v1",
+            provider.base_url, "http://localhost:8000/v1",
             "env var should take priority over settings"
         );
 
@@ -879,7 +1001,7 @@ mod tests {
         let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
         let provider = cfg.provider.expect("should have provider config");
         assert_eq!(
-            provider.base_url, "http://settings-url/v1",
+            provider.base_url, "http://localhost:9000/v1",
             "settings should take priority over registry default"
         );
 

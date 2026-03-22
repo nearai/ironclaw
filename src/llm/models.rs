@@ -332,8 +332,8 @@ pub(crate) async fn fetch_openai_compatible_models(
 /// Uses [`NearAiConfig::for_model_discovery()`] to construct a minimal NEAR AI
 /// config, then wraps it in an `LlmConfig` with session config for auth.
 pub(crate) fn build_nearai_model_fetch_config() -> crate::config::LlmConfig {
-    let auth_base_url =
-        std::env::var("NEARAI_AUTH_URL").unwrap_or_else(|_| "https://private.near.ai".to_string());
+    let auth_base_url = crate::config::helpers::env_or_override("NEARAI_AUTH_URL")
+        .unwrap_or_else(|| "https://private.near.ai".to_string());
 
     crate::config::LlmConfig {
         backend: "nearai".to_string(),
@@ -344,6 +344,7 @@ pub(crate) fn build_nearai_model_fetch_config() -> crate::config::LlmConfig {
         nearai: crate::config::NearAiConfig::for_model_discovery(),
         provider: None,
         bedrock: None,
+        gemini_oauth: None,
         request_timeout_secs: 120,
         cheap_model: None,
         smart_routing_cascade: false,

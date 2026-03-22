@@ -133,7 +133,7 @@ pub fn process_tool_result(
     let content = match result {
         Ok(output) => {
             let sanitized = safety.sanitize_tool_output(tool_name, output);
-            safety.wrap_for_llm(tool_name, &sanitized.content, sanitized.was_modified)
+            safety.wrap_for_llm(tool_name, &sanitized.content)
         }
         Err(e) => format!("Error: {}", e),
     };

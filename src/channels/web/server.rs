@@ -190,6 +190,8 @@ pub struct GatewayState {
     pub chat_rate_limiter: RateLimiter,
     /// Rate limiter for OAuth callback endpoints (10 requests per 60 seconds).
     pub oauth_rate_limiter: RateLimiter,
+    /// Rate limiter for webhook trigger endpoints (10 requests per 60 seconds).
+    pub webhook_rate_limiter: RateLimiter,
     /// Registry catalog entries for the available extensions API.
     /// Populated at startup from `registry/` manifests, independent of extension manager.
     pub registry_entries: Vec<crate::extensions::RegistryEntry>,
@@ -233,7 +235,11 @@ pub async fn start_server(
             "/oauth/slack/callback",
             get(slack_relay_oauth_callback_handler),
         )
-        .route("/relay/events", post(relay_events_handler));
+        .route("/relay/events", post(relay_events_handler))
+        .route(
+            "/api/webhooks/{path}",
+            post(crate::channels::web::handlers::webhooks::webhook_trigger_handler),
+        );
 
     // Protected routes (require auth)
     let auth_state = AuthState { token: auth_token };
@@ -1816,14 +1822,53 @@ async fn memory_write_handler(
         "Workspace not available".to_string(),
     ))?;
 
-    workspace
-        .write(&req.path, &req.content)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    // Route through layer-aware methods when a layer is specified
+    if let Some(ref layer_name) = req.layer {
+        let result = if req.append {
+            workspace
+                .append_to_layer(layer_name, &req.path, &req.content, req.force)
+                .await
+        } else {
+            workspace
+                .write_to_layer(layer_name, &req.path, &req.content, req.force)
+                .await
+        }
+        .map_err(|e| {
+            use crate::error::WorkspaceError;
+            let status = match &e {
+                WorkspaceError::LayerNotFound { .. } => StatusCode::BAD_REQUEST,
+                WorkspaceError::LayerReadOnly { .. } => StatusCode::FORBIDDEN,
+                WorkspaceError::PrivacyRedirectFailed => StatusCode::UNPROCESSABLE_ENTITY,
+                _ => StatusCode::INTERNAL_SERVER_ERROR,
+            };
+            (status, e.to_string())
+        })?;
+        return Ok(Json(MemoryWriteResponse {
+            path: req.path,
+            status: "written",
+            redirected: Some(result.redirected),
+            actual_layer: Some(result.actual_layer),
+        }));
+    }
+
+    // Non-layer path: honor the append field
+    if req.append {
+        workspace
+            .append(&req.path, &req.content)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    } else {
+        workspace
+            .write(&req.path, &req.content)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    }
 
     Ok(Json(MemoryWriteResponse {
         path: req.path,
         status: "written",
+        redirected: None,
+        actual_layer: None,
     }))
 }
 
@@ -2298,7 +2343,7 @@ async fn extensions_setup_handler(
         "Extension manager not available (secrets store required)".to_string(),
     ))?;
 
-    let secrets = ext_mgr
+    let setup = ext_mgr
         .get_setup_schema(&name)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -2314,7 +2359,8 @@ async fn extensions_setup_handler(
     Ok(Json(ExtensionSetupResponse {
         name,
         kind,
-        secrets,
+        secrets: setup.secrets,
+        fields: setup.fields,
     }))
 }
 
@@ -2332,7 +2378,7 @@ async fn extensions_setup_submit_handler(
     // through to the LLM instead of being intercepted as a token.
     clear_auth_mode(&state).await;
 
-    match ext_mgr.configure(&name, &req.secrets).await {
+    match ext_mgr.configure(&name, &req.secrets, &req.fields).await {
         Ok(result) => {
             let mut resp = if result.verification.is_some() || result.activated {
                 ActionResponse::ok(result.message)
@@ -2340,6 +2386,9 @@ async fn extensions_setup_submit_handler(
                 ActionResponse::fail(result.message)
             };
             resp.activated = Some(result.activated);
+            if result.restart_required || !result.activated {
+                resp.needs_restart = Some(true);
+            }
             resp.auth_url = result.auth_url.clone();
             resp.verification = result.verification.clone();
             resp.instructions = result.verification.as_ref().map(|v| v.instructions.clone());
@@ -2834,6 +2883,7 @@ mod tests {
             scheduler: None,
             chat_rate_limiter: RateLimiter::new(30, 60),
             oauth_rate_limiter: RateLimiter::new(10, 60),
+            webhook_rate_limiter: RateLimiter::new(10, 60),
             registry_entries: vec![],
             cost_guard: None,
             routine_engine: Arc::new(tokio::sync::RwLock::new(None)),

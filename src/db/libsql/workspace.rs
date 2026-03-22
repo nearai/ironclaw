@@ -36,7 +36,7 @@ pub(crate) fn resolve_embedding_dimension() -> Option<usize> {
         .unwrap_or(false);
 
     if !enabled {
-        tracing::info!("Vector index setup skipped (EMBEDDING_ENABLED not set in env)");
+        tracing::debug!("Vector index setup skipped (EMBEDDING_ENABLED not set in env)");
         return None;
     }
 

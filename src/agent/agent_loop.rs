@@ -10,6 +10,7 @@
 use std::sync::Arc;
 
 use futures::StreamExt;
+use uuid::Uuid;
 
 use crate::agent::context_monitor::ContextMonitor;
 use crate::agent::heartbeat::spawn_heartbeat;
@@ -17,7 +18,7 @@ use crate::agent::routine_engine::{RoutineEngine, spawn_cron_ticker};
 use crate::agent::self_repair::{DefaultSelfRepair, RepairResult, SelfRepair};
 use crate::agent::session_manager::SessionManager;
 use crate::agent::submission::{Submission, SubmissionParser, SubmissionResult};
-use crate::agent::{HeartbeatConfig as AgentHeartbeatConfig, Router, Scheduler};
+use crate::agent::{HeartbeatConfig as AgentHeartbeatConfig, Router, Scheduler, SchedulerDeps};
 use crate::channels::{ChannelManager, IncomingMessage, OutgoingResponse};
 use crate::config::{AgentConfig, HeartbeatConfig, RoutineConfig, SkillsConfig};
 use crate::context::ContextManager;
@@ -161,7 +162,7 @@ pub struct AgentDeps {
     /// HTTP interceptor for trace recording/replay.
     pub http_interceptor: Option<Arc<dyn crate::llm::recording::HttpInterceptor>>,
     /// Audio transcription middleware for voice messages.
-    pub transcription: Option<Arc<crate::transcription::TranscriptionMiddleware>>,
+    pub transcription: Option<Arc<crate::llm::transcription::TranscriptionMiddleware>>,
     /// Document text extraction middleware for PDF, DOCX, PPTX, etc.
     pub document_extraction: Option<Arc<crate::document_extraction::DocumentExtractionMiddleware>>,
     /// Sandbox readiness state for full-job routine dispatch.
@@ -227,9 +228,12 @@ impl Agent {
             context_manager.clone(),
             deps.llm.clone(),
             deps.safety.clone(),
-            deps.tools.clone(),
-            deps.store.clone(),
-            deps.hooks.clone(),
+            SchedulerDeps {
+                tools: deps.tools.clone(),
+                extension_manager: deps.extension_manager.clone(),
+                store: deps.store.clone(),
+                hooks: deps.hooks.clone(),
+            },
         );
         if let Some(ref tx) = deps.sse_tx {
             scheduler.set_sse_sender(tx.clone());
@@ -600,6 +604,7 @@ impl Agent {
                         Arc::clone(workspace),
                         notify_tx,
                         Some(self.scheduler.clone()),
+                        self.deps.extension_manager.clone(),
                         self.tools().clone(),
                         self.safety().clone(),
                         self.deps.sandbox_readiness,
@@ -1010,15 +1015,59 @@ impl Agent {
             }
         }
 
-        // Resolve session and thread
-        let (session, thread_id) = self
-            .session_manager
-            .resolve_thread(
-                &message.user_id,
-                &message.channel,
-                message.conversation_scope(),
-            )
-            .await;
+        // Resolve session and thread. Approval submissions are allowed to
+        // target an already-loaded owned thread by UUID across channels so the
+        // web approval UI can approve work that originated from HTTP/other
+        // owner-scoped channels.
+        let approval_thread_uuid = if matches!(
+            submission,
+            Submission::ExecApproval { .. } | Submission::ApprovalResponse { .. }
+        ) {
+            message
+                .conversation_scope()
+                .and_then(|thread_id| Uuid::parse_str(thread_id).ok())
+        } else {
+            None
+        };
+
+        let (session, thread_id) = if let Some(target_thread_id) = approval_thread_uuid {
+            let session = self
+                .session_manager
+                .get_or_create_session(&message.user_id)
+                .await;
+            let mut sess = session.lock().await;
+            if sess.threads.contains_key(&target_thread_id) {
+                sess.active_thread = Some(target_thread_id);
+                sess.last_active_at = chrono::Utc::now();
+                drop(sess);
+                self.session_manager
+                    .register_thread(
+                        &message.user_id,
+                        &message.channel,
+                        target_thread_id,
+                        Arc::clone(&session),
+                    )
+                    .await;
+                (session, target_thread_id)
+            } else {
+                drop(sess);
+                self.session_manager
+                    .resolve_thread(
+                        &message.user_id,
+                        &message.channel,
+                        message.conversation_scope(),
+                    )
+                    .await
+            }
+        } else {
+            self.session_manager
+                .resolve_thread(
+                    &message.user_id,
+                    &message.channel,
+                    message.conversation_scope(),
+                )
+                .await
+        };
         tracing::debug!(
             message_id = %message.id,
             thread_id = %thread_id,
@@ -1104,8 +1153,92 @@ impl Agent {
         // Process based on submission type
         let result = match submission {
             Submission::UserInput { content } => {
-                self.process_user_input(message, session, thread_id, &content)
-                    .await
+                let mut result = self
+                    .process_user_input(message, session.clone(), thread_id, &content)
+                    .await;
+
+                // Drain any messages queued during processing.
+                // Messages are merged (newline-separated) so the LLM receives
+                // full context from rapid consecutive inputs instead of
+                // processing each as a separate turn with partial context (#259).
+                //
+                // Only `Response` continues the drain — the user got a normal
+                // reply and there may be more queued messages to process.
+                //
+                // Everything else stops the loop:
+                // - `NeedApproval`: thread is blocked on user approval
+                // - `Interrupted`: turn was cancelled
+                // - `Ok`: control-command acknowledgment (including the "queued"
+                //    ack returned when a message arrives during Processing)
+                // - `Error`: soft error — draining more messages after an error
+                //    would produce confusing interleaved output
+                // - `Err(_)`: hard error
+                while let Ok(SubmissionResult::Response { content: outgoing }) = &result {
+                    let merged = {
+                        let mut sess = session.lock().await;
+                        sess.threads
+                            .get_mut(&thread_id)
+                            .and_then(|t| t.drain_pending_messages())
+                    };
+                    let Some(next_content) = merged else {
+                        break;
+                    };
+
+                    tracing::debug!(
+                        thread_id = %thread_id,
+                        merged_len = next_content.len(),
+                        "Drain loop: processing merged queued messages"
+                    );
+
+                    // Send the completed turn's response before starting the next.
+                    //
+                    // Known limitations:
+                    // - One-shot channels (HttpChannel) consume the response
+                    //   sender on the first respond() call keyed by msg.id.
+                    //   Subsequent calls (including the outer handler's final
+                    //   respond) are silently dropped. For one-shot channels
+                    //   only this intermediate response is delivered.
+                    // - All drain-loop responses are routed via the original
+                    //   `message`, so channels that key routing on message
+                    //   identity will attribute every response to the first
+                    //   message. This is acceptable for the current
+                    //   single-user-per-thread model.
+                    if let Err(e) = self
+                        .channels
+                        .respond(message, OutgoingResponse::text(outgoing.clone()))
+                        .await
+                    {
+                        tracing::warn!(
+                            thread_id = %thread_id,
+                            "Failed to send intermediate drain-loop response: {e}"
+                        );
+                    }
+
+                    // Process merged queued messages as a single turn.
+                    // Use a message clone with cleared attachments so
+                    // augment_with_attachments doesn't re-apply the original
+                    // message's attachments to unrelated queued text.
+                    let mut queued_msg = message.clone();
+                    queued_msg.attachments.clear();
+                    result = self
+                        .process_user_input(&queued_msg, session.clone(), thread_id, &next_content)
+                        .await;
+
+                    // If processing failed, re-queue the drained content so it
+                    // isn't lost. It will be picked up on the next successful turn.
+                    if !matches!(&result, Ok(SubmissionResult::Response { .. })) {
+                        let mut sess = session.lock().await;
+                        if let Some(thread) = sess.threads.get_mut(&thread_id) {
+                            thread.requeue_drained(next_content);
+                            tracing::debug!(
+                                thread_id = %thread_id,
+                                "Re-queued drained content after non-Response result"
+                            );
+                        }
+                    }
+                }
+
+                result
             }
             Submission::SystemCommand { command, args } => {
                 tracing::debug!(

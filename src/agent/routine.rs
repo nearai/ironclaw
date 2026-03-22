@@ -17,7 +17,7 @@
 //!                                     └──────────────┘
 //! ```
 
-use std::collections::{HashSet, hash_map::DefaultHasher};
+use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::str::FromStr;
 use std::time::Duration;
@@ -27,171 +27,6 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::error::RoutineError;
-
-pub const FULL_JOB_OWNER_ALLOWED_TOOLS_SETTING_KEY: &str = "routines.full_job_owner_allowed_tools";
-pub const FULL_JOB_DEFAULT_PERMISSION_MODE_SETTING_KEY: &str =
-    "routines.full_job_default_permission_mode";
-
-/// Persisted per-routine permission mode for autonomous `full_job` routines.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum FullJobPermissionMode {
-    /// Only use the routine's stored `tool_permissions`.
-    #[default]
-    Explicit,
-    /// Union the owner-scoped allowlist with the routine's `tool_permissions`.
-    InheritOwner,
-}
-
-impl FullJobPermissionMode {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Explicit => "explicit",
-            Self::InheritOwner => "inherit_owner",
-        }
-    }
-}
-
-impl FromStr for FullJobPermissionMode {
-    type Err = ();
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "explicit" => Ok(Self::Explicit),
-            "inherit_owner" => Ok(Self::InheritOwner),
-            _ => Err(()),
-        }
-    }
-}
-
-/// Owner-scoped default behavior for newly-created `full_job` routines.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum FullJobPermissionDefaultMode {
-    Explicit,
-    #[default]
-    InheritOwner,
-    CopyOwner,
-}
-
-impl FullJobPermissionDefaultMode {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Explicit => "explicit",
-            Self::InheritOwner => "inherit_owner",
-            Self::CopyOwner => "copy_owner",
-        }
-    }
-}
-
-impl FromStr for FullJobPermissionDefaultMode {
-    type Err = ();
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "explicit" => Ok(Self::Explicit),
-            "inherit_owner" => Ok(Self::InheritOwner),
-            "copy_owner" => Ok(Self::CopyOwner),
-            _ => Err(()),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct FullJobPermissionSettings {
-    pub owner_allowed_tools: Vec<String>,
-    pub default_mode: FullJobPermissionDefaultMode,
-}
-
-pub fn normalize_tool_names<I>(tools: I) -> Vec<String>
-where
-    I: IntoIterator<Item = String>,
-{
-    let mut seen = HashSet::new();
-    let mut normalized = Vec::new();
-    for tool in tools {
-        let trimmed = tool.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let normalized_name = trimmed.to_string();
-        if seen.insert(normalized_name.clone()) {
-            normalized.push(normalized_name);
-        }
-    }
-    normalized
-}
-
-pub fn parse_full_job_permission_mode(value: &serde_json::Value) -> FullJobPermissionMode {
-    value
-        .get("permission_mode")
-        .and_then(|v| v.as_str())
-        .and_then(|mode| FullJobPermissionMode::from_str(mode).ok())
-        .unwrap_or_default()
-}
-
-fn parse_owner_allowed_tools_setting(value: Option<serde_json::Value>) -> Vec<String> {
-    match value {
-        Some(serde_json::Value::Array(values)) => normalize_tool_names(
-            values
-                .into_iter()
-                .filter_map(|value| value.as_str().map(ToOwned::to_owned)),
-        ),
-        Some(serde_json::Value::String(csv)) => normalize_tool_names(
-            csv.split([',', '\n'])
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(ToOwned::to_owned),
-        ),
-        _ => Vec::new(),
-    }
-}
-
-fn parse_default_permission_mode_setting(
-    value: Option<serde_json::Value>,
-) -> FullJobPermissionDefaultMode {
-    value
-        .and_then(|v| v.as_str().map(ToOwned::to_owned))
-        .and_then(|mode| FullJobPermissionDefaultMode::from_str(&mode).ok())
-        .unwrap_or_default()
-}
-
-pub async fn load_full_job_permission_settings(
-    store: &(dyn crate::db::SettingsStore + Sync),
-    user_id: &str,
-) -> Result<FullJobPermissionSettings, crate::error::DatabaseError> {
-    let owner_allowed_tools = parse_owner_allowed_tools_setting(
-        store
-            .get_setting(user_id, FULL_JOB_OWNER_ALLOWED_TOOLS_SETTING_KEY)
-            .await?,
-    );
-    let default_mode = parse_default_permission_mode_setting(
-        store
-            .get_setting(user_id, FULL_JOB_DEFAULT_PERMISSION_MODE_SETTING_KEY)
-            .await?,
-    );
-    Ok(FullJobPermissionSettings {
-        owner_allowed_tools,
-        default_mode,
-    })
-}
-
-pub fn effective_full_job_tool_permissions(
-    permission_mode: FullJobPermissionMode,
-    routine_tool_permissions: &[String],
-    owner_allowed_tools: &[String],
-) -> Vec<String> {
-    match permission_mode {
-        FullJobPermissionMode::Explicit => {
-            normalize_tool_names(routine_tool_permissions.iter().cloned())
-        }
-        FullJobPermissionMode::InheritOwner => normalize_tool_names(
-            owner_allowed_tools
-                .iter()
-                .cloned()
-                .chain(routine_tool_permissions.iter().cloned()),
-        ),
-    }
-}
 
 /// A routine is a named, persistent, user-owned task with a trigger and an action.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -244,6 +79,13 @@ pub enum Trigger {
         #[serde(default)]
         filters: std::collections::HashMap<String, String>,
     },
+    /// Fire on incoming webhook POST to /api/webhooks/{path}.
+    Webhook {
+        /// Optional webhook path suffix (defaults to routine id).
+        path: Option<String>,
+        /// Optional shared secret for HMAC validation.
+        secret: Option<String>,
+    },
     /// Only fires via tool call or CLI.
     Manual,
 }
@@ -255,6 +97,7 @@ impl Trigger {
             Trigger::Cron { .. } => "cron",
             Trigger::Event { .. } => "event",
             Trigger::SystemEvent { .. } => "system_event",
+            Trigger::Webhook { .. } => "webhook",
             Trigger::Manual => "manual",
         }
     }
@@ -336,6 +179,17 @@ impl Trigger {
                     filters,
                 })
             }
+            "webhook" => {
+                let path = config
+                    .get("path")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                let secret = config
+                    .get("secret")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                Ok(Trigger::Webhook { path, secret })
+            }
             "manual" => Ok(Trigger::Manual),
             other => Err(RoutineError::UnknownTriggerType {
                 trigger_type: other.to_string(),
@@ -362,6 +216,10 @@ impl Trigger {
                 "source": source,
                 "event_type": event_type,
                 "filters": filters,
+            }),
+            Trigger::Webhook { path, secret } => serde_json::json!({
+                "path": path,
+                "secret": secret,
             }),
             Trigger::Manual => serde_json::json!({}),
         }
@@ -400,15 +258,6 @@ pub enum RoutineAction {
         /// Max reasoning iterations (default: 10).
         #[serde(default = "default_max_iterations")]
         max_iterations: u32,
-        /// Tool names pre-authorized for `Always`-approval tools (e.g. destructive
-        /// shell commands, cross-channel messaging). `UnlessAutoApproved` tools are
-        /// automatically permitted in routine jobs without listing them here.
-        #[serde(default)]
-        tool_permissions: Vec<String>,
-        /// Whether this routine should inherit the owner's durable full-job
-        /// permission allowlist or use only its explicit `tool_permissions`.
-        #[serde(default)]
-        permission_mode: FullJobPermissionMode,
     },
 }
 
@@ -431,18 +280,6 @@ pub(crate) const MAX_TOOL_ROUNDS_LIMIT: u32 = 20;
 /// Accepts u64 to avoid truncation before clamping.
 fn clamp_max_tool_rounds(value: u64) -> u32 {
     value.clamp(1, MAX_TOOL_ROUNDS_LIMIT as u64) as u32
-}
-
-/// Parse a `tool_permissions` JSON array into a `Vec<String>`.
-pub fn parse_tool_permissions(value: &serde_json::Value) -> Vec<String> {
-    normalize_tool_names(
-        value
-            .get("tool_permissions")
-            .and_then(|v| v.as_array())
-            .into_iter()
-            .flatten()
-            .filter_map(|v| v.as_str().map(String::from)),
-    )
 }
 
 impl RoutineAction {
@@ -519,14 +356,10 @@ impl RoutineAction {
                     .and_then(|v| v.as_u64())
                     .unwrap_or(default_max_iterations() as u64)
                     as u32;
-                let tool_permissions = parse_tool_permissions(&config);
-                let permission_mode = parse_full_job_permission_mode(&config);
                 Ok(RoutineAction::FullJob {
                     title,
                     description,
                     max_iterations,
-                    tool_permissions,
-                    permission_mode,
                 })
             }
             other => Err(RoutineError::UnknownActionType {
@@ -555,14 +388,10 @@ impl RoutineAction {
                 title,
                 description,
                 max_iterations,
-                tool_permissions,
-                permission_mode,
             } => serde_json::json!({
                 "title": title,
                 "description": description,
                 "max_iterations": max_iterations,
-                "tool_permissions": tool_permissions,
-                "permission_mode": permission_mode,
             }),
         }
     }
@@ -700,8 +529,8 @@ pub fn normalize_cron_expression(schedule: &str) -> String {
     let trimmed = schedule.trim();
     let fields: Vec<&str> = trimmed.split_whitespace().collect();
     match fields.len() {
-        5 => format!("0 {} *", trimmed),
-        6 => format!("{} *", trimmed),
+        5 => format!("0 {} *", fields.join(" ")),
+        6 => format!("{} *", fields.join(" ")),
         _ => trimmed.to_string(),
     }
 }
@@ -896,9 +725,8 @@ pub fn describe_cron(schedule: &str, timezone: Option<&str>) -> String {
 #[cfg(test)]
 mod tests {
     use crate::agent::routine::{
-        FullJobPermissionMode, MAX_TOOL_ROUNDS_LIMIT, RoutineAction, RoutineGuardrails, RunStatus,
-        Trigger, content_hash, describe_cron, effective_full_job_tool_permissions, next_cron_fire,
-        normalize_cron_expression,
+        MAX_TOOL_ROUNDS_LIMIT, RoutineAction, RoutineGuardrails, RunStatus, Trigger, content_hash,
+        describe_cron, next_cron_fire, normalize_cron_expression,
     };
 
     #[test]
@@ -965,66 +793,48 @@ mod tests {
             title: "Deploy review".to_string(),
             description: "Review and deploy pending changes".to_string(),
             max_iterations: 5,
-            tool_permissions: vec!["shell".to_string()],
-            permission_mode: FullJobPermissionMode::InheritOwner,
         };
         let json = action.to_config_json();
         let parsed = RoutineAction::from_db("full_job", json).expect("parse full_job");
         assert!(
-            matches!(parsed, RoutineAction::FullJob { title, max_iterations, tool_permissions, permission_mode, .. }
+            matches!(parsed, RoutineAction::FullJob { title, max_iterations, .. }
             if title == "Deploy review"
-                && max_iterations == 5
-                && tool_permissions == vec!["shell".to_string()]
-                && permission_mode == FullJobPermissionMode::InheritOwner)
+                && max_iterations == 5)
         );
     }
 
     #[test]
-    fn test_action_full_job_missing_permission_mode_defaults_to_explicit() {
+    fn test_action_full_job_ignores_legacy_permission_fields() {
         let parsed = RoutineAction::from_db(
             "full_job",
             serde_json::json!({
                 "title": "Deploy review",
                 "description": "Review and deploy pending changes",
                 "max_iterations": 5,
-                "tool_permissions": ["shell"]
+                "tool_permissions": ["shell"],
+                "permission_mode": "inherit_owner"
             }),
         )
         .expect("parse full_job");
         assert!(matches!(
             parsed,
             RoutineAction::FullJob {
-                permission_mode: FullJobPermissionMode::Explicit,
+                ref title,
+                ref description,
+                max_iterations,
                 ..
-            }
+            } if title == "Deploy review"
+                && description == "Review and deploy pending changes"
+                && max_iterations == 5
         ));
-    }
-
-    #[test]
-    fn test_effective_full_job_tool_permissions_inherit_owner_unions_lists() {
-        let resolved = effective_full_job_tool_permissions(
-            FullJobPermissionMode::InheritOwner,
-            &["shell".to_string(), "message".to_string()],
-            &["message".to_string(), "http".to_string()],
-        );
         assert_eq!(
-            resolved,
-            vec![
-                "message".to_string(),
-                "http".to_string(),
-                "shell".to_string()
-            ]
+            parsed.to_config_json(),
+            serde_json::json!({
+                "title": "Deploy review",
+                "description": "Review and deploy pending changes",
+                "max_iterations": 5,
+            })
         );
-    }
-
-    #[test]
-    fn test_effective_full_job_tool_permissions_explicit_ignores_owner_defaults() {
-        let resolved = effective_full_job_tool_permissions(
-            FullJobPermissionMode::Explicit,
-            &["shell".to_string()],
-            &["message".to_string(), "http".to_string()],
-        );
-        assert_eq!(resolved, vec!["shell".to_string()]);
     }
 
     #[test]
@@ -1174,6 +984,14 @@ mod tests {
             }
             .type_tag(),
             "system_event"
+        );
+        assert_eq!(
+            Trigger::Webhook {
+                path: None,
+                secret: None,
+            }
+            .type_tag(),
+            "webhook"
         );
         assert_eq!(Trigger::Manual.type_tag(), "manual");
     }
