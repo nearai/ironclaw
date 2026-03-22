@@ -390,6 +390,15 @@ impl EmbeddingProvider for GeminiEmbeddings {
             return Ok(Vec::new());
         }
 
+        for text in texts {
+            if text.len() > self.max_input_length() {
+                return Err(EmbeddingError::TextTooLong {
+                    length: text.len(),
+                    max: self.max_input_length(),
+                });
+            }
+        }
+
         let model = self.model_resource_name();
         let request = GeminiBatchEmbedRequest {
             requests: texts
@@ -441,6 +450,14 @@ impl EmbeddingProvider for GeminiEmbeddings {
         let result: GeminiBatchEmbedResponse = response.json().await.map_err(|e| {
             EmbeddingError::InvalidResponse(format!("Failed to parse Gemini response: {}", e))
         })?;
+
+        if result.embeddings.len() != texts.len() {
+            return Err(EmbeddingError::InvalidResponse(format!(
+                "Gemini returned {} embeddings for {} inputs",
+                result.embeddings.len(),
+                texts.len()
+            )));
+        }
 
         for (i, emb) in result.embeddings.iter().enumerate() {
             if emb.values.len() != self.dimension {
@@ -905,6 +922,17 @@ mod tests {
         )
     }
 
+    async fn gemini_batch_mismatch_handler() -> (StatusCode, Json<Value>) {
+        (
+            StatusCode::OK,
+            Json(json!({
+                "embeddings": [
+                    { "values": [0.1, 0.2, 0.3] }
+                ]
+            })),
+        )
+    }
+
     #[tokio::test]
     async fn test_gemini_embed_batch_parses_response() {
         let state = Arc::new(GeminiTestState {
@@ -960,5 +988,55 @@ mod tests {
 
         let _ = shutdown_tx.send(());
         let _ = handle.await;
+    }
+
+    #[tokio::test]
+    async fn test_gemini_embed_batch_rejects_mismatched_response_count() {
+        let app = Router::new().route(
+            "/v1beta/models/gemini-embedding-001:batchEmbedContents",
+            post(gemini_batch_mismatch_handler),
+        );
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let addr = listener.local_addr().expect("read local addr");
+
+        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+        let handle = tokio::spawn(async move {
+            let _ = axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = shutdown_rx.await;
+                })
+                .await;
+        });
+
+        let provider = GeminiEmbeddings::with_model("gemini-test-key", "gemini-embedding-001", 3)
+            .with_base_url(&format!("http://{}", addr));
+        let texts = vec!["hello".to_string(), "world".to_string()];
+        let error = provider.embed_batch(&texts).await.unwrap_err();
+
+        assert!(matches!(
+            error,
+            EmbeddingError::InvalidResponse(message)
+                if message.contains("Gemini returned 1 embeddings for 2 inputs")
+        ));
+
+        let _ = shutdown_tx.send(());
+        let _ = handle.await;
+    }
+
+    #[tokio::test]
+    async fn test_gemini_embed_batch_rejects_text_that_is_too_long() {
+        let provider = GeminiEmbeddings::new("test-key");
+        let texts = vec!["x".repeat(provider.max_input_length() + 1)];
+
+        let error = provider.embed_batch(&texts).await.unwrap_err();
+
+        assert!(matches!(
+            error,
+            EmbeddingError::TextTooLong { length, max }
+                if length == provider.max_input_length() + 1 && max == provider.max_input_length()
+        ));
     }
 }

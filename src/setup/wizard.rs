@@ -106,6 +106,13 @@ pub struct SetupWizard {
     llm_api_key: Option<SecretString>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct EmbeddingsProviderAvailability {
+    openai: bool,
+    gemini: bool,
+    nearai: bool,
+}
+
 impl SetupWizard {
     fn owner_id(&self) -> &str {
         &self.owner_id
@@ -2311,10 +2318,10 @@ impl SetupWizard {
         }
 
         let backend = self.settings.llm_backend.as_deref().unwrap_or("nearai");
-        let has_openai_key = std::env::var("OPENAI_API_KEY").is_ok()
-            || (backend == "openai" && self.llm_api_key.is_some());
-        let has_gemini_key = std::env::var("GEMINI_API_KEY").is_ok();
-        let has_nearai = backend == "nearai" || self.session_manager.is_some();
+        let availability = self.embeddings_provider_availability();
+        let has_openai_key = availability.openai;
+        let has_gemini_key = availability.gemini;
+        let has_nearai = availability.nearai;
 
         // If the LLM backend is OpenAI and we already have a key, default to OpenAI embeddings
         // unless Gemini is also configured and the user should choose explicitly.
@@ -3229,6 +3236,34 @@ impl SetupWizard {
         }
     }
 
+    fn embeddings_provider_availability(&self) -> EmbeddingsProviderAvailability {
+        let backend = self.settings.llm_backend.as_deref().unwrap_or("nearai");
+
+        EmbeddingsProviderAvailability {
+            openai: std::env::var("OPENAI_API_KEY").is_ok()
+                || (backend == "openai" && self.llm_api_key.is_some()),
+            gemini: crate::config::helpers::env_or_override("GEMINI_API_KEY")
+                .is_some_and(|key| !key.is_empty()),
+            nearai: self.has_nearai_embeddings_session(),
+        }
+    }
+
+    fn has_nearai_embeddings_session(&self) -> bool {
+        if self.session_manager.is_some() {
+            return true;
+        }
+
+        let session_path = crate::config::helpers::env_or_override("NEARAI_SESSION_PATH")
+            .filter(|path| !path.is_empty())
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(crate::config::llm::default_session_path);
+
+        session_path.exists()
+            && std::fs::read_to_string(&session_path)
+                .map(|contents| !contents.trim().is_empty())
+                .unwrap_or(false)
+    }
+
     /// Persist settings to DB and bootstrap .env after each step.
     ///
     /// Silently ignores errors (e.g., DB not connected yet before step 1
@@ -4096,6 +4131,60 @@ mod tests {
 
         assert_eq!(wizard.settings.llm_backend.as_deref(), Some("anthropic"));
         assert_eq!(wizard.settings.selected_model, None);
+    }
+
+    #[test]
+    fn test_embeddings_provider_availability_does_not_treat_nearai_backend_as_session() {
+        let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempdir().unwrap();
+        let session_path = dir.path().join("missing-session.json");
+        let _session_path = EnvGuard::set(
+            "NEARAI_SESSION_PATH",
+            session_path.to_str().expect("utf-8 session path"),
+        );
+        let _openai = EnvGuard::clear("OPENAI_API_KEY");
+        let _gemini = EnvGuard::clear("GEMINI_API_KEY");
+
+        let mut wizard = SetupWizard::new();
+        wizard.settings.llm_backend = Some("nearai".to_string());
+
+        let availability = wizard.embeddings_provider_availability();
+
+        assert_eq!(
+            availability,
+            EmbeddingsProviderAvailability {
+                openai: false,
+                gemini: false,
+                nearai: false,
+            }
+        );
+    }
+
+    #[test]
+    fn test_embeddings_provider_availability_detects_gemini_key_without_nearai_session() {
+        let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempdir().unwrap();
+        let session_path = dir.path().join("missing-session.json");
+        let _session_path = EnvGuard::set(
+            "NEARAI_SESSION_PATH",
+            session_path.to_str().expect("utf-8 session path"),
+        );
+        let _openai = EnvGuard::clear("OPENAI_API_KEY");
+        let _gemini = EnvGuard::set("GEMINI_API_KEY", "test-gemini-key");
+
+        let mut wizard = SetupWizard::new();
+        wizard.settings.llm_backend = Some("nearai".to_string());
+
+        let availability = wizard.embeddings_provider_availability();
+
+        assert_eq!(
+            availability,
+            EmbeddingsProviderAvailability {
+                openai: false,
+                gemini: true,
+                nearai: false,
+            }
+        );
     }
 
     /// Regression test for #600: re-running provider setup for the same backend
