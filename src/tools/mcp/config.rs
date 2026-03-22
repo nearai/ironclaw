@@ -10,7 +10,42 @@ use serde::{Deserialize, Serialize};
 use tokio::fs;
 
 use crate::bootstrap::ironclaw_base_dir;
-use crate::tools::tool::ToolError;
+use crate::tools::tool::{ApprovalRequirement, ToolError};
+
+/// Override approval behavior for all tools from an MCP server.
+///
+/// When set on a server config, this overrides the per-tool `destructive_hint`
+/// annotation. This is useful when an upstream MCP server doesn't set
+/// annotations but you want to require approval for all its tools.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalMode {
+    /// Use the tool's own MCP annotations to determine approval (default).
+    #[default]
+    Auto,
+    /// Require approval for every tool call from this server.
+    Always,
+    /// Skip approval for all tools from this server.
+    Never,
+}
+
+impl ApprovalMode {
+    /// Map this mode to an `ApprovalRequirement`, falling back to the
+    /// tool-level annotation when the mode is `Auto`.
+    pub fn to_requirement(self, tool_destructive_hint: bool) -> ApprovalRequirement {
+        match self {
+            Self::Always => ApprovalRequirement::Always,
+            Self::Never => ApprovalRequirement::Never,
+            Self::Auto => {
+                if tool_destructive_hint {
+                    ApprovalRequirement::UnlessAutoApproved
+                } else {
+                    ApprovalRequirement::Never
+                }
+            }
+        }
+    }
+}
 
 /// Transport configuration for an MCP server.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -58,6 +93,14 @@ pub struct McpServerConfig {
     /// Optional description for the server.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+
+    /// Override approval behavior for all tools from this server.
+    ///
+    /// - `auto` (default): use each tool's `destructive_hint` annotation.
+    /// - `always`: require human approval for every tool call.
+    /// - `never`: skip approval (use only for known read-only servers).
+    #[serde(default)]
+    pub approval_mode: ApprovalMode,
 }
 
 fn default_true() -> bool {
@@ -75,6 +118,7 @@ impl McpServerConfig {
             oauth: None,
             enabled: true,
             description: None,
+            approval_mode: ApprovalMode::Auto,
         }
     }
 
@@ -97,6 +141,7 @@ impl McpServerConfig {
             oauth: None,
             enabled: true,
             description: None,
+            approval_mode: ApprovalMode::Auto,
         }
     }
 
@@ -112,6 +157,7 @@ impl McpServerConfig {
             oauth: None,
             enabled: true,
             description: None,
+            approval_mode: ApprovalMode::Auto,
         }
     }
 
@@ -796,6 +842,35 @@ mod tests {
     }
 
     #[test]
+    fn test_approval_mode_to_requirement() {
+        // "always" requires explicit approval — cannot be auto-approved
+        assert_eq!(
+            ApprovalMode::Always.to_requirement(false),
+            ApprovalRequirement::Always
+        );
+        assert_eq!(
+            ApprovalMode::Always.to_requirement(true),
+            ApprovalRequirement::Always
+        );
+        assert_eq!(
+            ApprovalMode::Never.to_requirement(false),
+            ApprovalRequirement::Never
+        );
+        assert_eq!(
+            ApprovalMode::Never.to_requirement(true),
+            ApprovalRequirement::Never
+        );
+        assert_eq!(
+            ApprovalMode::Auto.to_requirement(false),
+            ApprovalRequirement::Never
+        );
+        assert_eq!(
+            ApprovalMode::Auto.to_requirement(true),
+            ApprovalRequirement::UnlessAutoApproved
+        );
+    }
+
+    #[test]
     fn test_stdio_config_creation() {
         let env = HashMap::from([("PATH".to_string(), "/usr/bin".to_string())]);
         let config = McpServerConfig::new_stdio(
@@ -1060,7 +1135,6 @@ mod tests {
 
     #[test]
     fn test_backward_compat_no_transport_field() {
-        // Existing configs without transport field should still deserialize
         let json = r#"{
             "name": "notion",
             "url": "https://mcp.notion.com",
@@ -1079,7 +1153,6 @@ mod tests {
 
     #[test]
     fn test_config_roundtrip_with_transport() {
-        // Test full roundtrip with stdio transport
         let config = McpServerConfig::new_stdio(
             "test-server",
             "node",
@@ -1104,7 +1177,6 @@ mod tests {
             other => panic!("Expected Stdio transport, got {:?}", other),
         }
 
-        // Test full roundtrip with unix transport
         let config = McpServerConfig::new_unix("unix-server", "/var/run/mcp.sock");
         let json = serde_json::to_string_pretty(&config).unwrap();
         let parsed: McpServerConfig = serde_json::from_str(&json).unwrap();
@@ -1117,7 +1189,6 @@ mod tests {
             other => panic!("Expected Unix transport, got {:?}", other),
         }
 
-        // Test roundtrip with HTTP + headers
         let headers = HashMap::from([("X-Custom".to_string(), "value".to_string())]);
         let config =
             McpServerConfig::new("http-server", "https://mcp.example.com").with_headers(headers);
@@ -1129,11 +1200,8 @@ mod tests {
         assert_eq!(parsed.headers.get("X-Custom").unwrap(), "value");
     }
 
-    // --- Issue 3 regression: is_localhost_url rejects attacker subdomains ---
-
     #[test]
     fn test_is_localhost_url_rejects_attacker_subdomain() {
-        // Before the fix, url.contains("localhost") matched this.
         assert!(
             !is_localhost_url("http://evil.localhost.attacker.com:8080/mcp"),
             "attacker subdomain containing 'localhost' must not be treated as local"
@@ -1156,5 +1224,42 @@ mod tests {
     fn test_is_localhost_url_rejects_remote() {
         assert!(!is_localhost_url("https://mcp.example.com"));
         assert!(!is_localhost_url("http://192.168.1.1:8080"));
+    }
+
+    #[test]
+    fn test_approval_mode_defaults_to_auto() {
+        let config = McpServerConfig::new("test", "http://localhost:8080");
+        assert_eq!(config.approval_mode, ApprovalMode::Auto);
+    }
+
+    #[test]
+    fn test_approval_mode_json_round_trip() {
+        let json = r#"{
+            "name": "k8s-rw",
+            "url": "http://localhost:8080/mcp",
+            "enabled": true,
+            "approval_mode": "always"
+        }"#;
+        let config: McpServerConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.approval_mode, ApprovalMode::Always);
+
+        let json = r#"{
+            "name": "k8s-ro",
+            "url": "http://localhost:8080/mcp",
+            "enabled": true
+        }"#;
+        let config: McpServerConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.approval_mode, ApprovalMode::Auto);
+
+        let json = r#"{
+            "name": "test",
+            "url": "http://localhost:8080/mcp",
+            "enabled": true,
+            "approval_mode": "never"
+        }"#;
+        let config: McpServerConfig = serde_json::from_str(json).unwrap();
+        let serialized = serde_json::to_string(&config).unwrap();
+        let deserialized: McpServerConfig = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(deserialized.approval_mode, ApprovalMode::Never);
     }
 }
