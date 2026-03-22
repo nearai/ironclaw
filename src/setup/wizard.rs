@@ -3233,7 +3233,7 @@ impl SetupWizard {
         let backend = self.settings.llm_backend.as_deref().unwrap_or("nearai");
 
         EmbeddingsProviderAvailability {
-            openai: std::env::var("OPENAI_API_KEY").is_ok()
+            openai: crate::config::helpers::env_or_override("OPENAI_API_KEY").is_some()
                 || (backend == "openai" && self.llm_api_key.is_some()),
             gemini: crate::config::helpers::env_or_override("GEMINI_API_KEY")
                 .is_some_and(|key| !key.is_empty()),
@@ -4219,6 +4219,33 @@ mod tests {
         wizard.llm_api_key = Some(SecretString::from("test-openai-key".to_string()));
 
         let availability = wizard.embeddings_provider_availability();
+
+        assert_eq!(
+            availability,
+            EmbeddingsProviderAvailability {
+                openai: true,
+                gemini: false,
+                nearai: false,
+            }
+        );
+    }
+
+    #[test]
+    fn test_embeddings_provider_availability_detects_openai_runtime_override() {
+        let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempdir().unwrap();
+        let session_path = dir.path().join("missing-session.json");
+        let _session_path = EnvGuard::set(
+            "NEARAI_SESSION_PATH",
+            session_path.to_str().expect("utf-8 session path"),
+        );
+        let _openai = EnvGuard::clear("OPENAI_API_KEY");
+        let _gemini = EnvGuard::clear("GEMINI_API_KEY");
+        crate::config::helpers::set_runtime_env("OPENAI_API_KEY", "runtime-openai-key");
+
+        let availability = SetupWizard::new().embeddings_provider_availability();
+
+        crate::config::helpers::set_runtime_env("OPENAI_API_KEY", "");
 
         assert_eq!(
             availability,

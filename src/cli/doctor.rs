@@ -398,8 +398,8 @@ fn check_embeddings(settings: &Settings) -> CheckResult {
                 return CheckResult::Skip("disabled (set EMBEDDING_ENABLED=true)".into());
             }
             let has_creds = match config.provider.as_str() {
-                "openai" => config.openai_api_key().is_some(),
-                "gemini" => config.gemini_api_key().is_some(),
+                "openai" => embedding_api_key_present(config.openai_api_key()),
+                "gemini" => embedding_api_key_present(config.gemini_api_key()),
                 "nearai" => {
                     // NearAiEmbeddings uses SessionManager::get_token() which
                     // only returns session tokens, NOT NEARAI_API_KEY
@@ -411,7 +411,7 @@ fn check_embeddings(settings: &Settings) -> CheckResult {
                             .unwrap_or(false)
                 }
                 "ollama" => true, // local, no creds needed
-                _ => config.openai_api_key().is_some(),
+                _ => embedding_api_key_present(config.openai_api_key()),
             };
             if has_creds {
                 CheckResult::Pass(format!(
@@ -432,6 +432,10 @@ fn check_embeddings(settings: &Settings) -> CheckResult {
         }
         Err(e) => CheckResult::Fail(format!("config error: {e}")),
     }
+}
+
+fn embedding_api_key_present(api_key: Option<&str>) -> bool {
+    api_key.is_some_and(|key| !key.is_empty())
 }
 
 // ── Routines config ─────────────────────────────────────────
@@ -891,6 +895,13 @@ mod tests {
             std::env::remove_var("EMBEDDING_ENABLED");
             std::env::remove_var("EMBEDDING_PROVIDER");
         }
+    }
+
+    #[test]
+    fn embedding_api_key_present_rejects_empty_values() {
+        assert!(!embedding_api_key_present(None));
+        assert!(!embedding_api_key_present(Some("")));
+        assert!(embedding_api_key_present(Some("non-empty")));
     }
 
     #[test]
