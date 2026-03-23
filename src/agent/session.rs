@@ -381,6 +381,7 @@ impl Thread {
                         id: format!("turn{}_{}", turn.turn_number, i),
                         name: tc.name.clone(),
                         arguments: tc.parameters.clone(),
+                        extra: Default::default(),
                     })
                     .collect();
 
@@ -1242,6 +1243,7 @@ mod tests {
             id: "call_0".to_string(),
             name: "search".to_string(),
             arguments: serde_json::json!({"q": "test"}),
+            extra: Default::default(),
         };
         let messages = vec![
             ChatMessage::user("Find test"),
@@ -1272,6 +1274,7 @@ mod tests {
             id: "call_0".to_string(),
             name: "http".to_string(),
             arguments: serde_json::json!({}),
+            extra: Default::default(),
         };
         let messages = vec![
             ChatMessage::user("Fetch URL"),
@@ -1337,11 +1340,13 @@ mod tests {
             id: "call_a".to_string(),
             name: "search".to_string(),
             arguments: serde_json::json!({"q": "data"}),
+            extra: Default::default(),
         };
         let tc2 = ToolCall {
             id: "call_b".to_string(),
             name: "write".to_string(),
             arguments: serde_json::json!({"path": "out.txt"}),
+            extra: Default::default(),
         };
         let messages = vec![
             ChatMessage::user("Find and save"),
