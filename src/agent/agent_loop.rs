@@ -1136,9 +1136,7 @@ impl Agent {
             && let Submission::UserInput { ref content } = submission
             && let Some(engine) = self.routine_engine().await
         {
-            let fired = engine
-                .check_event_triggers(&message)
-                .await;
+            let fired = engine.check_event_triggers(&message).await;
             if fired > 0 {
                 tracing::debug!(
                     channel = %message.channel,
