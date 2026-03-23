@@ -176,6 +176,8 @@ impl AliyunProvider {
         temperature: Option<f32>,
     ) -> Result<serde_json::Value, LlmError> {
         let url = self.build_url();
+        let mut messages = messages;
+        crate::llm::provider::sanitize_tool_messages(&mut messages);
         let auth = self.build_auth_header()?;
 
         let model_name = model.as_deref().unwrap_or(&self.config.model);
