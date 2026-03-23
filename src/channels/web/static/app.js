@@ -3955,7 +3955,6 @@ function renderRoutineDetail(routine) {
       const runStatusClass = run.status === 'ok' ? 'completed'
         : run.status === 'failed' ? 'failed'
         : run.status === 'attention' ? 'stuck'
-        : run.status === 'running' ? 'in_progress'
         : 'in_progress';
       html += '<tr>'
         + '<td>' + escapeHtml(run.trigger_type) + '</td>'

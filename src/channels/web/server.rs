@@ -2429,7 +2429,7 @@ async fn routines_runs_handler(
             trigger_type: run.trigger_type.clone(),
             started_at: run.started_at.to_rfc3339(),
             completed_at: run.completed_at.map(|dt| dt.to_rfc3339()),
-            status: format!("{:?}", run.status),
+            status: run.status.to_string(),
             result_summary: run.result_summary.clone(),
             tokens_used: run.tokens_used,
             job_id: run.job_id,
