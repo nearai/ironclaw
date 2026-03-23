@@ -14,6 +14,16 @@ use crate::config::INJECTED_VARS;
 #[cfg(test)]
 pub(crate) static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Acquire the env-var mutex, recovering from poison.
+///
+/// A poisoned mutex means a previous test panicked while holding the lock.
+/// The env state might be slightly stale, but cascading every subsequent
+/// test into a `PoisonError` panic is far worse. Recover and carry on.
+#[cfg(test)]
+pub(crate) fn lock_env() -> std::sync::MutexGuard<'static, ()> {
+    ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// Thread-safe mutable overlay for env vars set at runtime.
 ///
 /// Unlike `INJECTED_VARS` (which is set once at startup from the secrets
@@ -353,7 +363,7 @@ mod tests {
 
     #[test]
     fn real_env_var_takes_priority_over_runtime_override() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let _guard = lock_env();
         let key = "IRONCLAW_TEST_ENV_PRIORITY_42";
 
         // Set runtime override
@@ -370,6 +380,26 @@ mod tests {
 
         // Now the runtime override is visible again
         assert_eq!(env_or_override(key), Some("override_value".to_string()));
+    }
+
+    // --- lock_env poison recovery (regression for env mutex cascade) ---
+
+    #[test]
+    fn lock_env_recovers_from_poisoned_mutex() {
+        // Simulate a poisoned mutex: spawn a thread that panics while holding the lock.
+        let _ = std::thread::spawn(|| {
+            let _guard = ENV_MUTEX.lock().unwrap();
+            panic!("intentional poison");
+        })
+        .join();
+
+        // The mutex is now poisoned. lock_env() should recover, not cascade.
+        assert!(ENV_MUTEX.lock().is_err(), "mutex should be poisoned");
+        let _guard = lock_env(); // must not panic
+        drop(_guard);
+
+        // Clean up so this test doesn't leave ENV_MUTEX permanently poisoned.
+        ENV_MUTEX.clear_poison();
     }
 
     // --- validate_base_url tests (regression for #1103) ---

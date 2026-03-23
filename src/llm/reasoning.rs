@@ -23,6 +23,13 @@ You said you would perform an action, but you did not include any tool calls.\n\
 Do NOT describe what you intend to do — actually call the tool now.\n\
 Use the tool_calls mechanism to invoke the appropriate tool.";
 
+/// Seed value used as the second argument to `generate_tool_call_id` when
+/// recovering tool calls from malformed LLM text responses. This must differ
+/// from the `0` seed used in `rig_adapter::normalized_tool_call_id` to avoid
+/// ID collisions between provider-generated and text-recovered tool calls at
+/// the same positional index.
+const RECOVERED_TOOL_CALL_SEED: usize = 99;
+
 /// Detect when an LLM response expresses intent to call a tool without
 /// actually issuing tool calls. Returns `true` if the text contains phrases
 /// like "Let me search …" or "I'll fetch …" outside of fenced/indented code blocks.
@@ -1362,7 +1369,10 @@ fn recover_tool_calls_from_content(
                     .cloned()
                     .unwrap_or(serde_json::Value::Object(Default::default()));
                 calls.push(ToolCall {
-                    id: format!("recovered_{}", calls.len()),
+                    id: super::provider::generate_tool_call_id(
+                        calls.len(),
+                        RECOVERED_TOOL_CALL_SEED,
+                    ),
                     name: name.to_string(),
                     arguments,
                 });
@@ -1373,7 +1383,10 @@ fn recover_tool_calls_from_content(
             let name = inner.trim();
             if tool_names.contains(name) {
                 calls.push(ToolCall {
-                    id: format!("recovered_{}", calls.len()),
+                    id: super::provider::generate_tool_call_id(
+                        calls.len(),
+                        RECOVERED_TOOL_CALL_SEED,
+                    ),
                     name: name.to_string(),
                     arguments: serde_json::Value::Object(Default::default()),
                 });
@@ -1407,7 +1420,10 @@ fn recover_tool_calls_from_content(
                     let arguments = serde_json::from_str::<serde_json::Value>(args_str)
                         .unwrap_or(serde_json::Value::Object(Default::default()));
                     calls.push(ToolCall {
-                        id: format!("recovered_{}", calls.len()),
+                        id: super::provider::generate_tool_call_id(
+                            calls.len(),
+                            RECOVERED_TOOL_CALL_SEED,
+                        ),
                         name: name.to_string(),
                         arguments,
                     });
@@ -1418,7 +1434,7 @@ fn recover_tool_calls_from_content(
 
             // No arguments or malformed — call with empty args
             calls.push(ToolCall {
-                id: format!("recovered_{}", calls.len()),
+                id: super::provider::generate_tool_call_id(calls.len(), RECOVERED_TOOL_CALL_SEED),
                 name: name.to_string(),
                 arguments: serde_json::Value::Object(Default::default()),
             });

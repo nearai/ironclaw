@@ -95,12 +95,12 @@ impl WasmConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::helpers::ENV_MUTEX;
+    use crate::config::helpers::lock_env;
     use crate::settings::Settings;
 
     #[test]
     fn resolve_falls_back_to_settings() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = lock_env();
         let mut settings = Settings::default();
         settings.wasm.default_memory_limit = 42;
         settings.wasm.cache_compiled = false;
@@ -112,7 +112,7 @@ mod tests {
 
     #[test]
     fn env_overrides_settings() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = lock_env();
         let mut settings = Settings::default();
         settings.wasm.default_fuel_limit = 42;
 
