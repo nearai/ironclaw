@@ -14,7 +14,7 @@ use clap::Args;
 #[derive(Args, Debug, Clone)]
 #[command(
     about = "View and manage gateway logs",
-    long_about = "Tail gateway logs, stream live output, or adjust log level.\nExamples:\n  ironclaw logs                          # Show last 200 lines\n  ironclaw logs --follow                 # Stream live logs via SSE\n  ironclaw logs --limit 50 --json        # Last 50 lines as JSON\n  ironclaw logs --level                  # Show current log level\n  ironclaw logs --level debug            # Set log level to debug"
+    long_about = "Tail gateway logs, stream live output, or adjust log level.\nExamples:\n  ironclaw logs                          # Show last 200 lines\n  ironclaw logs --follow                 # Stream live logs via SSE\n  ironclaw logs --limit 50 --json        # Last 50 lines as JSON\n  ironclaw logs --level                  # Show current log level\n  ironclaw logs --level debug            # Set log level to debug\n  ironclaw logs --grep ERROR             # Filter lines matching 'ERROR'\n  ironclaw logs -g 'timeout|refused' --context 3  # Regex with context"
 )]
 pub struct LogsCommand {
     /// Stream live logs from the running gateway via SSE.
@@ -54,6 +54,18 @@ pub struct LogsCommand {
     /// With a value (trace|debug|info|warn|error), sets the level.
     #[arg(long, num_args = 0..=1, default_missing_value = "")]
     pub level: Option<String>,
+
+    /// Filter output by regex pattern (conflicts with --follow)
+    #[arg(long, short = 'g', conflicts_with = "follow")]
+    pub grep: Option<String>,
+
+    /// Ignore case when filtering (requires --grep)
+    #[arg(long, requires = "grep")]
+    pub ignore_case: bool,
+
+    /// Show N lines of context around matches (requires --grep)
+    #[arg(long, requires = "grep", default_value = "0")]
+    pub context: usize,
 }
 
 /// Resolved gateway connection parameters.
@@ -100,10 +112,19 @@ fn cmd_show(cmd: &LogsCommand) -> anyhow::Result<()> {
         );
     }
 
-    let lines = tail_file(&log_path, cmd.limit)?;
+    let mut lines = tail_file(&log_path, cmd.limit)?;
+
+    // Apply grep filtering if requested
+    if let Some(ref pattern) = cmd.grep {
+        lines = filter_lines(lines, pattern, cmd.ignore_case, cmd.context)?;
+    }
 
     if lines.is_empty() {
-        println!("(log file is empty)");
+        if cmd.grep.is_some() {
+            println!("(no matching log entries)");
+        } else {
+            println!("(log file is empty)");
+        }
         return Ok(());
     }
 
@@ -119,6 +140,47 @@ fn cmd_show(cmd: &LogsCommand) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// Filter lines by regex pattern, optionally with context.
+fn filter_lines(
+    lines: Vec<String>,
+    pattern: &str,
+    ignore_case: bool,
+    context: usize,
+) -> anyhow::Result<Vec<String>> {
+    use regex::RegexBuilder;
+
+    let re = RegexBuilder::new(pattern)
+        .case_insensitive(ignore_case)
+        .build()
+        .map_err(|e| anyhow::anyhow!("Invalid regex pattern '{}': {}", pattern, e))?;
+
+    if context == 0 {
+        // Simple filtering: only matching lines
+        Ok(lines.into_iter().filter(|line| re.is_match(line)).collect())
+    } else {
+        // With context: add N lines before/after each match
+        let mut result_indices = std::collections::BTreeSet::new();
+
+        // Find matching indices and add context
+        for (i, line) in lines.iter().enumerate() {
+            if re.is_match(line) {
+                // Add context range
+                let start = i.saturating_sub(context);
+                let end = (i + context + 1).min(lines.len());
+                for j in start..end {
+                    result_indices.insert(j);
+                }
+            }
+        }
+
+        // Collect lines in order
+        Ok(result_indices
+            .into_iter()
+            .map(|i| lines[i].clone())
+            .collect())
+    }
 }
 
 /// Read the last `n` lines from a file by scanning backwards from EOF.
@@ -526,6 +588,9 @@ mod tests {
             token: None,
             timeout: 5000,
             level: None,
+            grep: None,
+            ignore_case: false,
+            context: 0,
         };
         // Should not panic
         print_log_entry(&entry, &cmd);
@@ -583,5 +648,86 @@ mod tests {
 
         let result = tail_file(&path, 2).unwrap();
         assert_eq!(result, vec!["line2", "line3"]);
+    }
+
+    // ── New tests for --grep functionality ─────────────────────────────
+
+    #[test]
+    fn test_filter_lines_exact_match() -> anyhow::Result<()> {
+        let lines = vec![
+            "INFO: started".to_string(),
+            "ERROR: failed".to_string(),
+            "DEBUG: test".to_string(),
+        ];
+
+        let filtered = filter_lines(lines, "ERROR", false, 0)?;
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0], "ERROR: failed");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_filter_lines_ignore_case() -> anyhow::Result<()> {
+        let lines = vec![
+            "ERROR: fail".to_string(),
+            "error: also fail".to_string(),
+            "INFO: ok".to_string(),
+        ];
+
+        let filtered = filter_lines(lines, "error", true, 0)?;
+        assert_eq!(filtered.len(), 2);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_filter_lines_regex() -> anyhow::Result<()> {
+        let lines = vec![
+            "timeout after 5s".to_string(),
+            "connection refused".to_string(),
+            "ok".to_string(),
+        ];
+
+        let filtered = filter_lines(lines, "timeout|refused", false, 0)?;
+        assert_eq!(filtered.len(), 2);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_filter_lines_with_context() -> anyhow::Result<()> {
+        let lines = vec![
+            "line 1".to_string(),
+            "ERROR: panic".to_string(), // match
+            "line 3".to_string(),
+            "line 4".to_string(),
+            "ERROR: crash".to_string(), // match
+            "line 6".to_string(),
+        ];
+
+        let filtered = filter_lines(lines, "ERROR", false, 1)?;
+        // Should include: line 1, ERROR: panic, line 3, line 4, ERROR: crash, line 6
+        // (with deduplication for overlapping context)
+        assert_eq!(filtered.len(), 6);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_filter_lines_no_matches() -> anyhow::Result<()> {
+        let lines = vec!["INFO: ok".to_string(), "DEBUG: test".to_string()];
+
+        let filtered = filter_lines(lines, "ERROR", false, 0)?;
+        assert!(filtered.is_empty());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_filter_lines_invalid_regex() {
+        let lines = vec!["test".to_string()];
+        let result = filter_lines(lines, "[invalid", false, 0);
+        assert!(result.unwrap_err().to_string().contains("Invalid regex"));
     }
 }
