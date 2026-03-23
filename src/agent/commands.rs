@@ -841,12 +841,57 @@ impl Agent {
                 .await
             {
                 tracing::warn!("Failed to persist model to DB: {}", e);
+            } else {
+                tracing::debug!("Persisted selected_model to DB: {}", model);
             }
+        } else {
+            tracing::warn!("No database store available — model choice will not persist to DB");
         }
 
-        // 2. Update TOML config file if it exists (sync I/O in spawn_blocking).
+        // 2. Update TOML config file and .env (sync I/O in spawn_blocking).
         let model_owned = model.to_string();
         if let Err(e) = tokio::task::spawn_blocking(move || {
+            // 2a. Update the backend-specific model env var in ~/.ironclaw/.env.
+            //
+            // Env vars have the HIGHEST priority in LlmConfig::resolve_model()
+            // (env var > TOML > DB > default). If the .env file has e.g.
+            // NEARAI_MODEL=old-model, it shadows everything else. We must
+            // update this var or the /model change is invisible on restart.
+            let registry = crate::llm::ProviderRegistry::load();
+            let backend = std::env::var("LLM_BACKEND")
+                .ok()
+                .or_else(|| {
+                    let toml_path = crate::settings::Settings::default_toml_path();
+                    crate::settings::Settings::load_toml(&toml_path)
+                        .ok()
+                        .flatten()
+                        .and_then(|s| s.llm_backend)
+                })
+                .unwrap_or_else(|| "nearai".to_string());
+            let model_env = registry.model_env_var(&backend);
+
+            // Only update the .env file if the var is actually set there
+            // (avoid injecting new vars the user never configured).
+            let env_path = crate::bootstrap::ironclaw_env_path();
+            let env_has_var = std::fs::read_to_string(&env_path)
+                .ok()
+                .is_some_and(|content| {
+                    content
+                        .lines()
+                        .any(|line| line.trim_start().starts_with(model_env))
+                });
+            if env_has_var {
+                if let Err(e) = crate::bootstrap::upsert_bootstrap_var(model_env, &model_owned) {
+                    tracing::warn!("Failed to update {} in .env: {}", model_env, e);
+                } else {
+                    tracing::debug!("Updated {} in .env to {}", model_env, model_owned);
+                }
+            }
+
+            // 2b. Update (or create) the TOML config file.
+            //
+            // The TOML overlay has higher priority than DB settings on
+            // startup, so it MUST stay in sync with the DB.
             let toml_path = crate::settings::Settings::default_toml_path();
             match crate::settings::Settings::load_toml(&toml_path) {
                 Ok(Some(mut settings)) => {
@@ -856,7 +901,15 @@ impl Agent {
                     }
                 }
                 Ok(None) => {
-                    // No config file on disk; nothing to update.
+                    // No config file yet — create one so the model choice
+                    // survives restarts even when the DB is unavailable.
+                    let settings = crate::settings::Settings {
+                        selected_model: Some(model_owned),
+                        ..Default::default()
+                    };
+                    if let Err(e) = settings.save_toml(&toml_path) {
+                        tracing::warn!("Failed to create config.toml for model persistence: {}", e);
+                    }
                 }
                 Err(e) => {
                     tracing::warn!("Failed to load config.toml for model persistence: {}", e);
@@ -865,7 +918,7 @@ impl Agent {
         })
         .await
         {
-            tracing::warn!("Model TOML persistence task failed: {}", e);
+            tracing::warn!("Model persistence task failed: {}", e);
         }
     }
 }
