@@ -1,8 +1,8 @@
 # IronClaw Engine v2: Unified Thread-Capability-CodeAct Architecture
 
 **Date:** 2026-03-20
-**Updated:** 2026-03-22
-**Status:** In Progress (Phases 1-3 complete)
+**Updated:** 2026-03-23
+**Status:** In Progress (Phases 1-6 complete, engine running end-to-end)
 **Goal:** Replace IronClaw's ~10 fragmented abstractions with a unified execution model built on 5 primitives: Thread, Step, Capability, MemoryDoc, Project. Developed as a standalone crate (`ironclaw_engine`) that can be swapped in when it passes all acceptance tests.
 
 ---
@@ -326,44 +326,73 @@ The existing `Channel` trait stays. A bridge adapter translates:
 
 ---
 
-## Phase 6: Main Crate Integration
+## Phase 6: Main Crate Integration — DONE (partial)
 
-**Goal:** Bridge adapters connect the engine to existing IronClaw infrastructure. Prove the engine works end-to-end via acceptance tests.
+**Goal:** Bridge adapters connect the engine to existing IronClaw infrastructure. Strategy C: parallel deployment via `ENGINE_V2=true` env var.
 
-### 6.1 Bridge adapters (`src/bridge/`)
-- `LlmBridgeAdapter` — wraps `Arc<dyn LlmProvider>`, converts `ThreadMessage` ↔ `ChatMessage`, `ActionDef` ↔ `ToolDefinition`. Implements depth-based model routing via existing `cheap_llm` in `AgentDeps`
-- `StoreBridgeAdapter` — wraps `Arc<dyn Database>`, maps engine CRUD to existing sub-traits. New tables for threads/projects/docs/leases/events (migration V14+)
-- `EffectBridgeAdapter` — wraps `ToolRegistry` + `SafetyLayer`. On `execute_action()`: lookup tool → validate params → execute → sanitize output → return. Safety logic lives here, not in the engine
+### 6.1 Bridge adapters — DONE (`src/bridge/`)
+- `LlmBridgeAdapter` — wraps `Arc<dyn LlmProvider>`, converts `ThreadMessage` ↔ `ChatMessage`, `ActionDef` ↔ `ToolDefinition`. Depth-based routing (depth=0 → primary, depth>0 → `cheap_llm`). Code block detection for CodeAct (`extract_code_block` handles ```repl, ```python, ```py, bare ```). Defaults: max_tokens=4096, temperature=0.7, tool_choice="auto". No-tools path uses plain `complete()`.
+- `EffectBridgeAdapter` — wraps `ToolRegistry` + `SafetyLayer`. Underscore↔hyphen name conversion (Python `web_search` ↔ registry `web-search`). JSON output parsing to prevent double-serialization. Routes through `execute_tool_with_safety`.
+- `InMemoryStore` — HashMap-backed Store impl. No DB tables yet. State persists within agent process lifetime.
+- `EngineRouter` — `is_engine_v2_enabled()` checks `ENGINE_V2` env var. `handle_with_engine()` builds engine from Agent deps, manages persistent `EngineState` (OnceLock), routes through ConversationManager.
 
-### 6.2 Database migrations
-New tables (both PostgreSQL and libSQL):
-- `engine_threads`, `engine_steps`, `engine_events`, `engine_projects`, `engine_memory_docs`, `engine_capability_leases`
+### 6.2 Integration touchpoint — DONE
+4 lines in `src/agent/agent_loop.rs` `handle_message()`: after hook processing, before session resolution, checks ENGINE_V2 flag and routes UserInput through engine. Accessor visibility widened to `pub(crate)` for `llm()`, `cheap_llm()`, `safety()`, `tools()`, `channels`.
 
-### 6.3 Integration strategy
-Implement `EngineV2Delegate` that wraps `ExecutionLoop` but presents the `LoopDelegate` interface. The existing dispatcher calls `run_agentic_loop()` with either ChatDelegate or EngineV2Delegate. This enables gradual migration without a flag day.
+### 6.3 Live progress — DONE
+Engine broadcasts `ThreadEvent`s via `tokio::broadcast`. Router subscribes and forwards as `StatusUpdate` to channel: Thinking, ToolCompleted (success/error), Processing results.
 
-### 6.4 Two-phase commit for high-stakes effects
-For `WriteExternal` + `Financial` effects:
-1. **Simulate** — dry-run, return preview
-2. **Approve** — user or policy approves
-3. **Execute** — actual effect
+### 6.4 Conversation persistence — DONE
+`EngineState` persists across messages (OnceLock singleton). ConversationManager builds message history from prior entries for context continuity. State dict (`persisted_state`) carries tool results across code steps.
 
-Commit policies: `Direct` (ReadLocal, ReadExternal), `Approved` (WriteExternal), `TwoPhase` (Financial, production deploys). Implemented in `EffectBridgeAdapter` at the boundary.
+### 6.5 Trace recording + retrospective — DONE
+`ENGINE_V2_TRACE=1` writes full JSON traces. Automatic trace analysis detects 8 issue categories. Reflection pipeline produces Summary/Lesson/Issue/Spec/Playbook docs. All run inside ThreadManager after thread completion.
 
-### 6.5 Acceptance testing
-Use existing `TestRig` + `TraceLlm`:
-- Load pre-recorded LLM trace fixtures
-- Drive engine via bridge adapters
+### 6.6 Bugs found and fixed via traces
+- Tool name hyphens vs underscores (web-search vs web_search)
+- Double-serialization of JSON tool output
+- UTF-8 byte-index slicing panics on multi-byte chars
+- Code block detection missing in plain completion path
+- Missing system prompt and user message on thread spawn
+- Empty messages sent to LLM (no context)
+- `web_fetch` example in prompt (nonexistent tool)
+- False positive `missing_tool_output` trace warning
+
+### 6.7 Remaining work
+
+#### Approval flow (NOT YET IMPLEMENTED)
+
+**Current state:** When `PolicyEngine` returns `RequireApproval`, the engine produces `ThreadOutcome::NeedApproval { action_name, call_id, parameters }`. The bridge router converts this to a plain text message: "Action 'X' requires approval (not yet supported)". No actual pause/resume.
+
+**What's needed:**
+
+1. **Send approval request to channel** — Convert `NeedApproval` to `StatusUpdate::ApprovalNeeded` and send via `channels.send_status()`. This shows the approval UI in CLI/web.
+
+2. **Pause the thread** — Thread transitions to `Waiting` state (already happens). The `ConversationManager` needs to track that the thread is waiting for approval, not for a new user message.
+
+3. **Route approval response** — When user sends `yes`/`no`/`always`, the `SubmissionParser` in `handle_message()` produces `Submission::ApprovalResponse`. The bridge needs to intercept this and route it to the waiting thread instead of spawning a new one.
+
+4. **Resume execution** — On approval: re-execute the denied tool call with policy bypassed (or add it to an auto-approve set on the lease). On denial: inject an error message into the thread and resume the loop so the LLM can try a different approach.
+
+5. **`always` handling** — Add the tool to the thread's auto-approved set (on the capability lease or a separate allowlist). Future calls to the same tool skip approval.
+
+**v1 reference:** `ChatDelegate.execute_tool_calls()` returns `LoopOutcome::NeedApproval(PendingApproval)`. Stored in session thread state. Web gateway sends `approval_needed` SSE event. User response parsed by `SubmissionParser`. `thread_ops.rs` resumes loop with deferred tool calls.
+
+#### Database persistence (NOT YET IMPLEMENTED)
+- Currently using `InMemoryStore` — state lost on restart
+- Need migration V14+ with `engine_*` tables for both PostgreSQL and libSQL
+- `StoreBridgeAdapter` wrapping `Arc<dyn Database>`
+
+#### Acceptance testing (NOT YET IMPLEMENTED)
+- Drive engine via TestRig + TraceLlm fixtures
 - Compare output with `verify_trace_expects()`
-- All existing fixture tests must pass
+- All existing fixture tests must pass through engine path
 
-When all tests pass: make engine the default, deprecate old path.
-
-### 6.6 Tests
-- Bridge adapter conversion: ThreadMessage ↔ ChatMessage round-trips
-- End-to-end: TestRig drives engine, same output as old loop
-- Migration: new tables for both backends
-- Two-phase commit: simulate returns preview, approve triggers execution
+#### Two-phase commit (NOT YET IMPLEMENTED)
+For `WriteExternal` + `Financial` effects:
+1. Simulate → preview
+2. Approve → user/policy
+3. Execute → actual effect
 
 ---
 
@@ -456,18 +485,19 @@ Once boundaries stabilize, split if beneficial:
 
 ## Implementation Progress
 
-| Phase | Scope | Status | Tests | Commits |
-|-------|-------|--------|-------|---------|
+| Phase | Scope | Status | Tests | Key commits |
+|-------|-------|--------|-------|-------------|
 | **1** | Types + traits + state machine | **DONE** | 32 | `8be19a4` |
 | **2** | Tier 0 executor + capability + runtime | **DONE** | 74 | `bf7dfb8` |
 | **3** | CodeAct (Monty + RLM pattern) | **DONE** | 74 | `b59a0b9`, `9538332` |
 | **4** | Budget controls + compaction + reflection | **DONE** | 78 | `4bc7ffd` |
 | **5** | Conversation surface | **DONE** | 85 | `0827235` |
-| **6** | Main crate bridge + acceptance tests | Next | — | — |
+| **6** | Main crate bridge (Strategy C) | **DONE** (partial) | 134 | `ac4ced0`→`7afeaa9c` |
 | **7** | Cleanup + migration | Planned | — | — |
 | **8** | WASM tools + Docker isolation | Planned | — | — |
 
-Phase 6 depends on Phases 1-5 being stable. Phase 7 depends on Phase 6 passing acceptance. Phase 8 is infrastructure integration with existing WASM/Docker systems.
+**Phase 6 remaining:** approval flow, DB persistence, acceptance tests, two-phase commit.
+Phase 7 depends on Phase 6 approval + DB being complete. Phase 8 is infrastructure integration.
 
 ---
 
