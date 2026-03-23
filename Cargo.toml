@@ -20,7 +20,7 @@ exclude = [
 
 [package]
 name = "ironclaw"
-version = "0.18.0"
+version = "0.19.0"
 edition = "2024"
 rust-version = "1.92"
 description = "Secure personal AI assistant that protects your data and expands its capabilities on the fly"
@@ -88,7 +88,7 @@ async-trait = "0.1"
 clap = { version = "4", features = ["derive", "env"] }
 
 # Terminal
-crossterm = "0.28"
+crossterm = "0.29"
 rustyline = { version = "17", features = ["custom-bindings", "derive", "with-file-history"] }
 termimad = "0.34"
 
@@ -144,7 +144,7 @@ rand = "0.8"
 subtle = "2"  # Constant-time comparisons for token validation
 
 # Multi-provider LLM support
-rig-core = "0.30"
+rig-core = { version = "0.30", default-features = false, features = ["reqwest-rustls"] }
 
 # AWS Bedrock (native Converse API, opt-in via --features bedrock)
 aws-config = { version = "1", features = ["behavior-version-latest"], optional = true }
@@ -262,8 +262,10 @@ publish-jobs = []
 targets = [
     "aarch64-apple-darwin",
     "aarch64-unknown-linux-gnu",
+    "aarch64-unknown-linux-musl",
     "x86_64-apple-darwin",
     "x86_64-unknown-linux-gnu",
+    "x86_64-unknown-linux-musl",
     "x86_64-pc-windows-msvc",
 ]
 # The archive format to use for windows builds (defaults .zip)
@@ -281,7 +283,9 @@ cache-builds = true
 
 [workspace.metadata.dist.github-custom-runners]
 aarch64-unknown-linux-gnu = "ubuntu-24.04-arm"
+aarch64-unknown-linux-musl = "ubuntu-24.04-arm"
 x86_64-unknown-linux-gnu = "ubuntu-22.04"
+x86_64-unknown-linux-musl = "ubuntu-22.04"
 x86_64-pc-windows-msvc = "windows-2022"
 x86_64-apple-darwin = "macos-15-intel"
 aarch64-apple-darwin = "macos-14"

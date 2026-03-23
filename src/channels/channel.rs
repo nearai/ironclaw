@@ -305,6 +305,11 @@ pub enum StatusUpdate {
         tool_name: String,
         description: String,
         parameters: serde_json::Value,
+        /// When `true`, the UI should offer an "always" option that auto-approves
+        /// future calls to this tool for the rest of the session.  When `false`
+        /// (i.e. `ApprovalRequirement::Always`), the tool must be approved every
+        /// time and the "always" button should be hidden.
+        allow_always: bool,
     },
     /// Extension needs user authentication (token or OAuth).
     AuthRequired {
@@ -328,6 +333,12 @@ pub enum StatusUpdate {
     },
     /// Suggested follow-up messages for the user.
     Suggestions { suggestions: Vec<String> },
+    /// Per-turn token usage and cost summary (shown as subtle metadata).
+    TurnCost {
+        input_tokens: u64,
+        output_tokens: u64,
+        cost_usd: String,
+    },
 }
 
 impl StatusUpdate {

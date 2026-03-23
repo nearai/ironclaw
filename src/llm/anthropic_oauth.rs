@@ -22,7 +22,6 @@ use crate::llm::provider::{
     ToolCompletionRequest, ToolCompletionResponse, strip_unsupported_completion_params,
     strip_unsupported_tool_params,
 };
-
 const ANTHROPIC_API_URL: &str = "https://api.anthropic.com/v1/messages";
 /// OAuth beta requires 2023-06-01; the 2024-10-22 version is not valid with the beta flag.
 const ANTHROPIC_API_VERSION: &str = "2023-06-01";
@@ -143,14 +142,9 @@ impl AnthropicOAuthProvider {
 
         if !status.is_success() {
             // Parse Retry-After header before consuming the body.
-            // Falls back to 60s if header is missing or unparseable (prevents "retry after None" errors).
-            let retry_after = response
-                .headers()
-                .get("retry-after")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.parse::<u64>().ok())
-                .map(std::time::Duration::from_secs)
-                .or(Some(std::time::Duration::from_secs(60)));
+            let retry_after = Some(crate::llm::retry::parse_retry_after(
+                response.headers().get("retry-after"),
+            ));
 
             let response_text = response
                 .text()
@@ -706,79 +700,5 @@ mod tests {
 
         // Subsequent reads see the updated token
         assert_eq!(token.read().unwrap().expose_secret(), "new_token");
-    }
-
-    // -- Retry-After header parsing tests (regression for rate limit "None" bug) --
-
-    #[test]
-    fn test_retry_after_parsing_delay_seconds() {
-        // Verify delay-seconds format is parsed correctly
-        let header_value = "45";
-        let duration = parse_retry_after_anthropic_for_test(header_value);
-        assert_eq!(
-            duration,
-            Some(std::time::Duration::from_secs(45)),
-            "Should parse delay-seconds format"
-        );
-    }
-
-    #[test]
-    fn test_retry_after_fallback_missing_header() {
-        // Regression test: When Retry-After header is missing,
-        // should fall back to 60s instead of None
-        let duration = parse_retry_after_anthropic_for_test("");
-        assert_eq!(
-            duration,
-            Some(std::time::Duration::from_secs(60)),
-            "Missing header should fallback to 60s"
-        );
-    }
-
-    #[test]
-    fn test_retry_after_fallback_invalid_format() {
-        // Regression test: When Retry-After header is in unexpected format,
-        // should fall back to 60s instead of None
-        let invalid_formats = vec![
-            "invalid",
-            "not-a-number",
-            "30.5", // float instead of int
-            "abc123",
-            "Mon, 02 Mar 2026 18:00:00 GMT", // RFC2822 not supported in anthropic version
-        ];
-
-        for format in invalid_formats {
-            let duration = parse_retry_after_anthropic_for_test(format);
-            assert_eq!(
-                duration,
-                Some(std::time::Duration::from_secs(60)),
-                "Invalid format '{}' should fallback to 60s",
-                format
-            );
-        }
-    }
-
-    #[test]
-    fn test_retry_after_zero_seconds_accepted() {
-        // Verify zero seconds is a valid retry delay
-        let duration = parse_retry_after_anthropic_for_test("0");
-        assert_eq!(duration, Some(std::time::Duration::ZERO));
-    }
-
-    #[test]
-    fn test_retry_after_large_number() {
-        // Verify large numbers are accepted
-        let duration = parse_retry_after_anthropic_for_test("7200"); // 2 hours
-        assert_eq!(duration, Some(std::time::Duration::from_secs(7200)));
-    }
-
-    /// Helper function to test Retry-After header parsing logic for Anthropic
-    /// (simulates the parsing done in send_request without actual HTTP, including fallback)
-    fn parse_retry_after_anthropic_for_test(header_value: &str) -> Option<std::time::Duration> {
-        header_value
-            .trim()
-            .parse::<u64>()
-            .ok()
-            .map(std::time::Duration::from_secs)
-            .or(Some(std::time::Duration::from_secs(60)))
     }
 }

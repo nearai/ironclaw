@@ -17,6 +17,7 @@ use wasmtime::component::Linker;
 use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiView};
 
 use crate::context::JobContext;
+use crate::llm::recording::{HttpExchangeRequest, HttpExchangeResponse, HttpInterceptor};
 use crate::safety::LeakDetector;
 use crate::secrets::SecretsStore;
 use crate::tools::tool::{Tool, ToolError, ToolOutput};
@@ -99,6 +100,9 @@ struct StoreData {
     /// Dedicated tokio runtime for HTTP requests, lazily initialized.
     /// Reused across multiple `http_request` calls within one execution.
     http_runtime: Option<tokio::runtime::Runtime>,
+    /// Optional HTTP interceptor for testing — returns canned responses
+    /// instead of making real requests when set.
+    http_interceptor: Option<Arc<dyn HttpInterceptor>>,
 }
 
 impl StoreData {
@@ -119,6 +123,7 @@ impl StoreData {
             credentials,
             host_credentials,
             http_runtime: None,
+            http_interceptor: None,
         }
     }
 
@@ -344,6 +349,59 @@ impl near::agent::host::Host for StoreData {
             );
         }
         let rt = self.http_runtime.as_ref().expect("just initialized"); // safety: is_none branch above guarantees Some
+
+        // If an HTTP interceptor is set (testing), short-circuit with a canned response.
+        if let Some(interceptor) = &self.http_interceptor {
+            let interceptor = Arc::clone(interceptor);
+            let intercept_url = url.clone();
+            let intercept_method = method.clone();
+            let mut intercept_headers: Vec<(String, String)> = headers
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            intercept_headers.sort_by(|a, b| a.0.cmp(&b.0));
+            let intercept_body = body
+                .as_ref()
+                .map(|b| String::from_utf8_lossy(b).to_string());
+            let intercepted = rt.block_on(async {
+                let req = HttpExchangeRequest {
+                    method: intercept_method,
+                    url: intercept_url,
+                    headers: intercept_headers,
+                    body: intercept_body,
+                };
+                interceptor.before_request(&req).await
+            });
+            if let Some(resp) = intercepted {
+                let resp_headers: HashMap<String, String> = resp
+                    .headers
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+                let resp_headers_json =
+                    serde_json::to_string(&resp_headers).unwrap_or_else(|_| "{}".to_string());
+                return Ok(near::agent::host::HttpResponse {
+                    status: resp.status,
+                    headers_json: resp_headers_json,
+                    body: resp.body.into_bytes(),
+                });
+            }
+        }
+
+        // Capture request metadata before headers/body are consumed by the reqwest
+        // builder. Used for after_response callback when a recording interceptor is set.
+        let interceptor_req = self.http_interceptor.as_ref().map(|_| HttpExchangeRequest {
+            method: method.clone(),
+            url: url.clone(),
+            headers: headers
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+            body: body
+                .as_ref()
+                .map(|b| String::from_utf8_lossy(b).to_string()),
+        });
+
         let result = rt.block_on(async {
             let client = reqwest::Client::builder()
                 .connect_timeout(Duration::from_secs(10))
@@ -434,6 +492,51 @@ impl near::agent::host::Host for StoreData {
             })
         });
 
+        // Notify the interceptor about the completed response (recording mode).
+        // RecordingHttpInterceptor returns None from before_request and captures
+        // exchanges via after_response, so this path is exercised during trace recording.
+        if let (Some(interceptor), Some(req), Ok(resp)) =
+            (&self.http_interceptor, &interceptor_req, &result)
+        {
+            let interceptor = Arc::clone(interceptor);
+
+            // Redact credentials from request before passing to the interceptor
+            // to prevent credential leakage into recorded traces.
+            let mut redacted_req = req.clone();
+            redacted_req.url = self.redact_credentials(&redacted_req.url);
+            redacted_req.headers = redacted_req
+                .headers
+                .into_iter()
+                .map(|(k, v)| (k, self.redact_credentials(&v)))
+                .collect();
+            redacted_req.body = redacted_req.body.map(|b| self.redact_credentials(&b));
+
+            let resp_headers: Vec<(String, String)> =
+                serde_json::from_str::<HashMap<String, String>>(&resp.headers_json)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .collect();
+            let resp_body = String::from_utf8_lossy(&resp.body).to_string();
+
+            // Redact credentials from response as well
+            let redacted_headers: Vec<(String, String)> = resp_headers
+                .into_iter()
+                .map(|(k, v)| (k, self.redact_credentials(&v)))
+                .collect();
+            let redacted_body = self.redact_credentials(&resp_body);
+
+            let exchange_resp = HttpExchangeResponse {
+                status: resp.status,
+                headers: redacted_headers,
+                body: redacted_body,
+            };
+            rt.block_on(async {
+                interceptor
+                    .after_response(&redacted_req, &exchange_resp)
+                    .await;
+            });
+        }
+
         // Redact credentials from error messages before returning to WASM
         result.map_err(|e| self.redact_credentials(&e))
     }
@@ -476,6 +579,9 @@ pub struct WasmToolWrapper {
     secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
     /// OAuth refresh configuration for auto-refreshing expired tokens.
     oauth_refresh: Option<OAuthRefreshConfig>,
+    /// Optional HTTP interceptor for testing — returns canned responses
+    /// instead of making real requests when set.
+    http_interceptor: Option<Arc<dyn HttpInterceptor>>,
 }
 
 #[derive(Debug, Clone)]
@@ -502,23 +608,51 @@ impl WasmToolSchemas {
     }
 
     fn is_permissive_schema(schema: &serde_json::Value) -> bool {
-        schema
+        if schema
             .get("properties")
             .and_then(|p| p.as_object())
-            .is_none_or(|p| p.is_empty())
+            .is_some_and(|p| !p.is_empty())
+        {
+            return false;
+        }
+
+        // Schemas with combinator variants containing properties are not permissive
+        for key in ["oneOf", "anyOf", "allOf"] {
+            if let Some(variants) = schema.get(key).and_then(|v| v.as_array())
+                && variants.iter().any(|v| {
+                    v.get("properties")
+                        .and_then(|p| p.as_object())
+                        .is_some_and(|p| !p.is_empty())
+                })
+            {
+                return false;
+            }
+        }
+
+        true
     }
 
     fn typed_property_count(schema: &serde_json::Value) -> usize {
-        schema
-            .get("properties")
-            .and_then(|p| p.as_object())
-            .map(|props| {
-                props
-                    .values()
-                    .filter(|prop| schema_is_typed_property(prop))
-                    .count()
-            })
-            .unwrap_or(0)
+        let mut all_props = serde_json::Map::new();
+
+        if let Some(props) = schema.get("properties").and_then(|p| p.as_object()) {
+            all_props.extend(props.iter().map(|(k, v)| (k.clone(), v.clone())));
+        }
+
+        for key in ["allOf", "oneOf", "anyOf"] {
+            if let Some(variants) = schema.get(key).and_then(|v| v.as_array()) {
+                for variant in variants {
+                    if let Some(props) = variant.get("properties").and_then(|p| p.as_object()) {
+                        all_props.extend(props.iter().map(|(k, v)| (k.clone(), v.clone())));
+                    }
+                }
+            }
+        }
+
+        all_props
+            .values()
+            .filter(|prop| schema_is_typed_property(prop))
+            .count()
     }
 
     fn new(discovery: serde_json::Value) -> Self {
@@ -564,7 +698,18 @@ impl WasmToolWrapper {
             credentials: HashMap::new(),
             secrets_store: None,
             oauth_refresh: None,
+            http_interceptor: None,
         }
+    }
+
+    /// Set an HTTP interceptor for testing.
+    ///
+    /// When set, WASM tool HTTP requests are routed through the interceptor
+    /// instead of making real network calls. This allows tests to verify the
+    /// exact HTTP requests a WASM tool constructs.
+    pub fn with_http_interceptor(mut self, interceptor: Arc<dyn HttpInterceptor>) -> Self {
+        self.http_interceptor = Some(interceptor);
+        self
     }
 
     /// Override the tool description.
@@ -651,12 +796,13 @@ impl WasmToolWrapper {
         let limits = &self.prepared.limits;
 
         // Create store with fresh state (NEAR pattern: fresh instance per call)
-        let store_data = StoreData::new(
+        let mut store_data = StoreData::new(
             limits.memory_bytes,
             self.capabilities.clone(),
             self.credentials.clone(),
             host_credentials,
         );
+        store_data.http_interceptor = self.http_interceptor.clone();
         let mut store = Store::new(engine, store_data);
 
         // Configure fuel if enabled
@@ -872,6 +1018,7 @@ impl Tool for WasmToolWrapper {
                 credentials,
                 secrets_store: None, // Not needed in blocking task
                 oauth_refresh: None, // Already used above for pre-refresh
+                http_interceptor: self.http_interceptor.clone(),
             };
 
             tokio::task::spawn_blocking(move || {
@@ -1320,15 +1467,33 @@ fn is_private_ip(ip: std::net::IpAddr) -> bool {
 }
 
 fn schema_contains_container_properties(schema: &serde_json::Value) -> bool {
-    schema
+    let has_container = |props: &serde_json::Map<String, serde_json::Value>| {
+        props
+            .values()
+            .any(|prop| schema_declares_type(prop, "array") || schema_declares_type(prop, "object"))
+    };
+
+    if schema
         .get("properties")
         .and_then(|p| p.as_object())
-        .map(|props| {
-            props.values().any(|prop| {
-                schema_declares_type(prop, "array") || schema_declares_type(prop, "object")
+        .is_some_and(has_container)
+    {
+        return true;
+    }
+
+    for key in ["allOf", "oneOf", "anyOf"] {
+        if let Some(variants) = schema.get(key).and_then(|v| v.as_array())
+            && variants.iter().any(|v| {
+                v.get("properties")
+                    .and_then(|p| p.as_object())
+                    .is_some_and(has_container)
             })
-        })
-        .unwrap_or(false)
+        {
+            return true;
+        }
+    }
+
+    false
 }
 
 fn schema_declares_type(schema: &serde_json::Value, expected: &str) -> bool {

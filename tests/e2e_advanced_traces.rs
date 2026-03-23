@@ -705,4 +705,318 @@ mod advanced {
         mock_server.shutdown().await;
         rig.shutdown();
     }
+
+    // -----------------------------------------------------------------------
+    // 9. Message queue during tool execution
+    //
+    // Verifies that messages queued on a thread's pending_messages are
+    // auto-processed by the drain loop after the current turn completes.
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn message_queue_drains_after_tool_turn() {
+        let trace =
+            LlmTrace::from_file(format!("{FIXTURES}/message_queue_during_tools.json")).unwrap();
+        let rig = TestRigBuilder::new()
+            .with_trace(trace.clone())
+            .build()
+            .await;
+
+        // Turn 1: Send initial message to establish the session and thread.
+        rig.send_message("Echo hello for me").await;
+        let r1 = rig.wait_for_responses(1, TIMEOUT).await;
+        assert!(!r1.is_empty(), "Turn 1: no response");
+        assert!(
+            r1[0].content.to_lowercase().contains("hello"),
+            "Turn 1: missing 'hello' in: {}",
+            r1[0].content,
+        );
+
+        // Verify the echo tool was used in turn 1.
+        let started = rig.tool_calls_started();
+        assert!(
+            started.iter().any(|s| s == "echo"),
+            "Turn 1: echo tool not called: {started:?}",
+        );
+
+        // Pre-populate the thread's pending_messages queue.
+        // This simulates what happens when a concurrent request (e.g. gateway
+        // POST) arrives while the thread is in Processing state.
+        {
+            let session = rig
+                .session_manager()
+                .get_or_create_session("test-user")
+                .await;
+            let mut sess = session.lock().await;
+            // Find the active thread and queue a message.
+            let thread = sess
+                .active_thread
+                .and_then(|tid| sess.threads.get_mut(&tid))
+                .expect("active thread should exist after turn 1");
+            thread.queue_message("What is 2+2?".to_string());
+            assert_eq!(thread.pending_messages.len(), 1);
+        }
+
+        // Turn 2: Send a message that triggers tool calls.
+        // After this turn completes, the drain loop should find "What is 2+2?"
+        // in pending_messages and process it automatically.
+        rig.send_message("Now echo world and check the time").await;
+
+        // Wait for 3 total responses:
+        //   r1 = turn 1 response ("hello")
+        //   r2 = turn 2 response ("echo world + time") — sent inline by drain loop
+        //   r3 = queued message response ("2+2 = 4") — processed by drain loop
+        let all = rig.wait_for_responses(3, TIMEOUT).await;
+        assert!(
+            all.len() >= 3,
+            "Expected 3 responses (turn1 + turn2 + queued), got {}:\n{:?}",
+            all.len(),
+            all.iter().map(|r| &r.content).collect::<Vec<_>>(),
+        );
+
+        // The third response should be from the queued message ("What is 2+2?")
+        let queued_response = &all[2].content;
+        assert!(
+            queued_response.contains("4"),
+            "Queued message response should contain '4', got: {queued_response}",
+        );
+
+        // Verify the pending queue was fully drained.
+        {
+            let session = rig
+                .session_manager()
+                .get_or_create_session("test-user")
+                .await;
+            let sess = session.lock().await;
+            let thread = sess
+                .active_thread
+                .and_then(|tid| sess.threads.get(&tid))
+                .expect("active thread should still exist");
+            assert!(
+                thread.pending_messages.is_empty(),
+                "Pending queue should be empty after drain, got: {:?}",
+                thread.pending_messages,
+            );
+        }
+
+        // Verify tool usage across all turns.
+        let all_started = rig.tool_calls_started();
+        let echo_count = all_started.iter().filter(|s| *s == "echo").count();
+        assert_eq!(
+            echo_count, 2,
+            "Expected 2 echo calls (turn 1 + turn 2), got {echo_count}",
+        );
+        assert!(
+            all_started.iter().any(|s| s == "time"),
+            "time tool should have been called in turn 2: {all_started:?}",
+        );
+
+        rig.shutdown();
+    }
+
+    // -----------------------------------------------------------------------
+    // 10. Bootstrap greeting fires on fresh workspace
+    // -----------------------------------------------------------------------
+
+    /// Verifies that a fresh workspace triggers a static bootstrap greeting
+    /// before the user sends any message (no LLM call needed).
+    #[tokio::test]
+    async fn bootstrap_greeting_fires() {
+        let rig = TestRigBuilder::new().with_bootstrap().build().await;
+
+        // The static bootstrap greeting should arrive without us sending any
+        // message and without an LLM call.
+        let responses = rig.wait_for_responses(1, TIMEOUT).await;
+        assert!(
+            !responses.is_empty(),
+            "bootstrap greeting should produce a response"
+        );
+        let greeting = &responses[0].content;
+        assert!(
+            greeting.contains("chief of staff"),
+            "bootstrap greeting should contain the static text, got: {greeting}"
+        );
+
+        // The bootstrap greeting must carry a thread_id so the gateway can
+        // route it to the correct assistant conversation.
+        assert!(
+            responses[0].thread_id.is_some(),
+            "bootstrap greeting response should have a thread_id set"
+        );
+
+        rig.shutdown();
+    }
+
+    // -----------------------------------------------------------------------
+    // 11. Bootstrap onboarding completes and clears BOOTSTRAP.md
+    // -----------------------------------------------------------------------
+
+    /// Exercises the full onboarding flow: bootstrap greeting fires, user
+    /// converses for 3 turns, agent writes profile + memory + identity,
+    /// clears BOOTSTRAP.md, and the workspace reflects all writes.
+    #[tokio::test]
+    async fn bootstrap_onboarding_clears_bootstrap() {
+        use ironclaw::workspace::paths;
+
+        let trace = LlmTrace::from_file(format!("{FIXTURES}/bootstrap_onboarding.json")).unwrap();
+        let rig = TestRigBuilder::new()
+            .with_trace(trace.clone())
+            .with_bootstrap()
+            .build()
+            .await;
+
+        // 1. Wait for the static bootstrap greeting (no user message needed).
+        let greeting_responses = rig.wait_for_responses(1, TIMEOUT).await;
+        assert!(
+            !greeting_responses.is_empty(),
+            "bootstrap greeting should arrive"
+        );
+        assert!(
+            greeting_responses[0].content.contains("chief of staff"),
+            "expected bootstrap greeting, got: {}",
+            greeting_responses[0].content
+        );
+
+        // 2. BOOTSTRAP.md should exist (non-empty) before onboarding completes.
+        let ws = rig.workspace().expect("workspace should exist");
+        let bootstrap_before = ws.read(paths::BOOTSTRAP).await;
+        assert!(
+            bootstrap_before.is_ok_and(|d| !d.content.is_empty()),
+            "BOOTSTRAP.md should be non-empty before onboarding"
+        );
+
+        // 3. Run the 3-turn conversation. The trace has the agent write
+        //    profile, memory, identity, and then clear bootstrap.
+        let mut total = 1; // already have the greeting
+        for turn in &trace.turns {
+            rig.send_message(&turn.user_input).await;
+            total += 1;
+            let _ = rig.wait_for_responses(total, TIMEOUT).await;
+        }
+
+        // 4. Verify all memory_write calls succeeded.
+        let completed = rig.tool_calls_completed();
+        let memory_writes: Vec<_> = completed
+            .iter()
+            .filter(|(name, _)| name == "memory_write")
+            .collect();
+        assert!(
+            memory_writes.len() >= 4,
+            "expected at least 4 memory_write calls (profile, memory, identity, bootstrap), got: {memory_writes:?}"
+        );
+        assert!(
+            memory_writes.iter().all(|(_, ok)| *ok),
+            "all memory_write calls should succeed: {memory_writes:?}"
+        );
+
+        // 5. BOOTSTRAP.md should now be empty (cleared by memory_write target=bootstrap).
+        let bootstrap_after = ws.read(paths::BOOTSTRAP).await.expect("read BOOTSTRAP");
+        assert!(
+            bootstrap_after.content.is_empty(),
+            "BOOTSTRAP.md should be empty after onboarding, got: {:?}",
+            bootstrap_after.content
+        );
+
+        // 6. The bootstrap-completed flag should be set (prevents re-injection).
+        assert!(
+            ws.is_bootstrap_completed(),
+            "bootstrap_completed flag should be set after profile write"
+        );
+
+        // 7. Profile should exist in workspace with expected fields.
+        let profile = ws.read(paths::PROFILE).await.expect("read profile");
+        assert!(
+            !profile.content.is_empty(),
+            "profile.json should not be empty"
+        );
+        assert!(
+            profile.content.contains("Alex"),
+            "profile should contain preferred_name, got: {:?}",
+            &profile.content[..profile.content.len().min(200)]
+        );
+
+        // Try parsing the stored profile to catch deserialization issues early.
+        let stored = ws
+            .read(paths::PROFILE)
+            .await
+            .expect("read profile for deser test");
+        let deser_result =
+            serde_json::from_str::<ironclaw::profile::PsychographicProfile>(&stored.content);
+        assert!(
+            deser_result.is_ok(),
+            "profile should deserialize: {:?}\ncontent: {:?}",
+            deser_result.err(),
+            &stored.content[..stored.content.len().min(300)]
+        );
+        let parsed = deser_result.unwrap();
+        assert!(
+            parsed.is_populated(),
+            "profile should be populated: name={:?}, profession={:?}, goals={:?}",
+            parsed.preferred_name,
+            parsed.context.profession,
+            parsed.assistance.goals
+        );
+
+        // Manually trigger sync.
+        let synced = ws
+            .sync_profile_documents()
+            .await
+            .expect("sync_profile_documents");
+        assert!(
+            synced,
+            "sync_profile_documents should return true for a populated profile"
+        );
+        assert!(
+            profile.content.contains("backend engineer"),
+            "profile should contain profession"
+        );
+        assert!(
+            profile.content.contains("distributed systems"),
+            "profile should contain interests"
+        );
+
+        // 8. USER.md should have been synced from the profile via sync_profile_documents().
+        let user_doc = ws.read(paths::USER).await.expect("read USER.md");
+        assert!(
+            user_doc.content.contains("Alex"),
+            "USER.md should contain user name from profile, got: {:?}",
+            &user_doc.content[..user_doc.content.len().min(300)]
+        );
+        assert!(
+            user_doc.content.contains("direct"),
+            "USER.md should contain communication tone from profile, got: {:?}",
+            &user_doc.content[..user_doc.content.len().min(300)]
+        );
+        assert!(
+            user_doc.content.contains("backend engineer"),
+            "USER.md should contain profession from profile, got: {:?}",
+            &user_doc.content[..user_doc.content.len().min(300)]
+        );
+
+        // 9. Assistant directives should have been synced from the profile.
+        let directives = ws
+            .read(paths::ASSISTANT_DIRECTIVES)
+            .await
+            .expect("read assistant-directives.md");
+        assert!(
+            directives.content.contains("Alex"),
+            "assistant-directives should reference user name, got: {:?}",
+            &directives.content[..directives.content.len().min(300)]
+        );
+        assert!(
+            directives.content.contains("direct"),
+            "assistant-directives should reflect communication style, got: {:?}",
+            &directives.content[..directives.content.len().min(300)]
+        );
+
+        // 10. IDENTITY.md should have been written by the agent.
+        let identity = ws.read(paths::IDENTITY).await.expect("read IDENTITY.md");
+        assert!(
+            identity.content.contains("Claw"),
+            "IDENTITY.md should contain the chosen agent name, got: {:?}",
+            identity.content
+        );
+
+        rig.shutdown();
+    }
 }

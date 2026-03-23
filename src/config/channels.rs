@@ -111,6 +111,10 @@ impl ChannelsConfig {
 
         let gateway_enabled = parse_bool_env("GATEWAY_ENABLED", cs.gateway_enabled)?;
         let gateway = if gateway_enabled {
+            let user_id = optional_env("GATEWAY_USER_ID")?
+                .or_else(|| cs.gateway_user_id.clone())
+                .unwrap_or_else(|| owner_id.to_string());
+
             Some(GatewayConfig {
                 host: optional_env("GATEWAY_HOST")?
                     .or_else(|| cs.gateway_host.clone())
@@ -121,7 +125,7 @@ impl ChannelsConfig {
                 )?,
                 auth_token: optional_env("GATEWAY_AUTH_TOKEN")?
                     .or_else(|| cs.gateway_auth_token.clone()),
-                user_id: owner_id.to_string(),
+                user_id,
             })
         } else {
             None
@@ -232,7 +236,7 @@ fn default_channels_dir() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use crate::config::channels::*;
-    use crate::config::helpers::ENV_MUTEX;
+    use crate::config::helpers::lock_env;
     use crate::settings::Settings;
 
     #[test]
@@ -391,7 +395,7 @@ mod tests {
 
     #[test]
     fn resolve_uses_settings_channel_values_with_owner_scope_user_ids() {
-        let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = lock_env();
         let mut settings = Settings::default();
         settings.channels.http_enabled = true;
         settings.channels.http_host = Some("127.0.0.2".to_string());

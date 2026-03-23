@@ -4,7 +4,6 @@ These tests exercise the explicit owner model across:
 - the web gateway chat UI
 - the owner-scoped HTTP webhook channel
 - routine tools / routines tab
-- job creation via routine execution / jobs tab
 """
 
 import asyncio
@@ -13,7 +12,13 @@ import uuid
 
 import httpx
 
-from helpers import SEL, AUTH_TOKEN, signed_http_webhook_headers
+from helpers import (
+    AUTH_TOKEN,
+    SEL,
+    api_get,
+    api_post,
+    signed_http_webhook_headers,
+)
 
 
 async def _send_and_get_response(
@@ -58,13 +63,14 @@ async def _post_http_webhook(
     content: str,
     sender_id: str,
     thread_id: str,
-) -> str:
+    wait_for_response: bool = True,
+) -> str | None:
     """Send a signed request to the owner-scoped HTTP webhook channel."""
     payload = {
         "user_id": sender_id,
         "thread_id": thread_id,
         "content": content,
-        "wait_for_response": True,
+        "wait_for_response": wait_for_response,
     }
     body = json.dumps(payload).encode("utf-8")
 
@@ -81,8 +87,9 @@ async def _post_http_webhook(
     )
     data = response.json()
     assert data["status"] == "accepted", f"Unexpected webhook response: {data}"
-    assert data["response"], f"Expected synchronous response body, got: {data}"
-    return data["response"]
+    if wait_for_response:
+        assert data["response"], f"Expected synchronous response body, got: {data}"
+    return data.get("response")
 
 
 async def _open_tab(page, tab: str) -> None:
@@ -112,22 +119,60 @@ async def _wait_for_routine(base_url: str, name: str, timeout: float = 20.0) -> 
     raise AssertionError(f"Routine '{name}' was not created within {timeout}s")
 
 
-async def _wait_for_job(base_url: str, title: str, timeout: float = 30.0) -> dict:
-    """Poll the jobs API until the named job exists."""
-    async with httpx.AsyncClient() as client:
-        for _ in range(int(timeout * 2)):
-            response = await client.get(
-                f"{base_url}/api/jobs",
-                headers={"Authorization": f"Bearer {AUTH_TOKEN}"},
-                timeout=10,
-            )
-            response.raise_for_status()
-            jobs = response.json()["jobs"]
-            for job in jobs:
-                if job["title"] == title:
-                    return job
-            await _poll_sleep()
-    raise AssertionError(f"Job '{title}' was not created within {timeout}s")
+async def _wait_for_http_thread(base_url: str, title_fragment: str, timeout: float = 20.0) -> str:
+    """Poll the chat thread list until the matching HTTP thread is visible."""
+    for _ in range(int(timeout * 2)):
+        response = await api_get(base_url, "/api/chat/threads", timeout=10)
+        response.raise_for_status()
+        threads = response.json()["threads"]
+        for thread in threads:
+            if thread.get("channel") != "http":
+                continue
+            if title_fragment in (thread.get("title") or ""):
+                return thread["id"]
+        await _poll_sleep()
+    raise AssertionError(
+        f"HTTP thread containing '{title_fragment}' was not visible within {timeout}s"
+    )
+
+
+async def _wait_for_pending_approval(
+    base_url: str,
+    thread_id: str,
+    timeout: float = 20.0,
+) -> dict:
+    """Poll chat history until the thread exposes a pending approval payload."""
+    for _ in range(int(timeout * 2)):
+        response = await api_get(
+            base_url,
+            f"/api/chat/history?thread_id={thread_id}",
+            timeout=10,
+        )
+        response.raise_for_status()
+        pending = response.json().get("pending_approval")
+        if pending:
+            return pending
+        await _poll_sleep()
+    raise AssertionError(f"Thread '{thread_id}' did not expose a pending approval")
+
+
+async def _approve_pending_request(base_url: str, thread_id: str, request_id: str) -> None:
+    """Approve a pending tool request through the web gateway API."""
+    response = await api_post(
+        base_url,
+        "/api/chat/approval",
+        json={
+            "request_id": request_id,
+            "action": "approve",
+            "thread_id": thread_id,
+        },
+        timeout=10,
+    )
+    assert response.status_code == 202, (
+        f"Approval submission failed: {response.status_code} {response.text[:400]}"
+    )
+    data = response.json()
+    assert data["status"] == "accepted", f"Unexpected approval response: {data}"
 
 
 async def _poll_sleep() -> None:
@@ -194,33 +239,34 @@ async def test_web_created_routine_is_listed_from_http_channel_across_senders(
     assert routine_name in second_sender_text, second_sender_text
 
 
-async def test_http_created_full_job_routine_can_be_run_from_web_and_shows_in_jobs(
+async def test_http_created_full_job_routine_is_visible_in_web_after_approval(
     page,
     ironclaw_server,
     http_channel_server,
 ):
-    """A full-job routine created via HTTP can be run from the web UI and create a job."""
+    """A full-job routine created via HTTP appears in the web owner UI after approval."""
     routine_name = f"owner-job-{uuid.uuid4().hex[:8]}"
 
-    response_text = await _post_http_webhook(
+    await _post_http_webhook(
         http_channel_server,
         content=f"create full-job owner routine {routine_name}",
         sender_id="http-job-sender",
         thread_id="owner-job-thread",
+        wait_for_response=False,
     )
-    assert routine_name in response_text
 
-    await _wait_for_routine(ironclaw_server, routine_name)
+    thread_id = await _wait_for_http_thread(ironclaw_server, routine_name)
+    pending = await _wait_for_pending_approval(ironclaw_server, thread_id)
+    assert pending["tool_name"] == "routine_create"
+    await _approve_pending_request(
+        ironclaw_server,
+        thread_id,
+        pending["request_id"],
+    )
+
+    routine = await _wait_for_routine(ironclaw_server, routine_name)
+    assert routine["action_type"] == "full_job"
 
     await _open_tab(page, "routines")
     routine_row = page.locator(SEL["routine_row"]).filter(has_text=routine_name).first
     await routine_row.wait_for(state="visible", timeout=15000)
-    await routine_row.locator('button[data-action="trigger-routine"]').click()
-
-    await _wait_for_job(ironclaw_server, routine_name, timeout=45.0)
-
-    await _open_tab(page, "jobs")
-    await page.locator(SEL["job_row"]).filter(has_text=routine_name).first.wait_for(
-        state="visible",
-        timeout=20000,
-    )

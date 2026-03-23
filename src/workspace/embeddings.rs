@@ -226,13 +226,9 @@ impl EmbeddingProvider for OpenAiEmbeddings {
         }
 
         if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            let retry_after = response
-                .headers()
-                .get("retry-after")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|s| s.parse::<u64>().ok())
-                .map(std::time::Duration::from_secs)
-                .or(Some(std::time::Duration::from_secs(60)));
+            let retry_after = Some(crate::llm::retry::parse_retry_after(
+                response.headers().get("retry-after"),
+            ));
             return Err(EmbeddingError::RateLimited { retry_after });
         }
 
@@ -368,13 +364,9 @@ impl EmbeddingProvider for NearAiEmbeddings {
         }
 
         if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            let retry_after = response
-                .headers()
-                .get("retry-after")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|s| s.parse::<u64>().ok())
-                .map(std::time::Duration::from_secs)
-                .or(Some(std::time::Duration::from_secs(60)));
+            let retry_after = Some(crate::llm::retry::parse_retry_after(
+                response.headers().get("retry-after"),
+            ));
             return Err(EmbeddingError::RateLimited { retry_after });
         }
 
@@ -647,49 +639,5 @@ mod tests {
     fn test_openai_with_base_url_schemeless_prepends_https() {
         let provider = OpenAiEmbeddings::new("test-key").with_base_url("custom.example.com/v1");
         assert_eq!(provider.base_url, "https://custom.example.com/v1");
-    }
-
-    // -- Retry-After header parsing tests (regression for rate limit "None" bug) --
-
-    #[test]
-    fn test_retry_after_parsing_delay_seconds() {
-        // Verify delay-seconds format is parsed correctly
-        let header_value = "120";
-        let duration = parse_retry_after_embeddings_for_test(header_value);
-        assert_eq!(
-            duration,
-            Some(std::time::Duration::from_secs(120)),
-            "Should parse delay-seconds format"
-        );
-    }
-
-    #[test]
-    fn test_retry_after_fallback_missing_header() {
-        // Regression test: When Retry-After header is missing,
-        // should fall back to 60s instead of None
-        let duration = parse_retry_after_embeddings_for_test("");
-        assert_eq!(
-            duration,
-            Some(std::time::Duration::from_secs(60)),
-            "Missing header should fallback to 60s"
-        );
-    }
-
-    #[test]
-    fn test_retry_after_zero_seconds_accepted() {
-        // Verify zero seconds is a valid retry delay
-        let duration = parse_retry_after_embeddings_for_test("0");
-        assert_eq!(duration, Some(std::time::Duration::ZERO));
-    }
-
-    /// Helper function to test Retry-After header parsing logic for embeddings
-    /// (simulates the parsing done in embed without actual HTTP, including fallback)
-    fn parse_retry_after_embeddings_for_test(header_value: &str) -> Option<std::time::Duration> {
-        header_value
-            .trim()
-            .parse::<u64>()
-            .ok()
-            .map(std::time::Duration::from_secs)
-            .or(Some(std::time::Duration::from_secs(60)))
     }
 }

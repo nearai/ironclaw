@@ -1,5 +1,77 @@
 // IronClaw Web Gateway - Client
 
+// --- Theme Management (dark / light / system) ---
+// Icon switching is handled by pure CSS via data-theme-mode on <html>.
+
+function getSystemTheme() {
+  return window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+}
+
+const VALID_THEME_MODES = { dark: true, light: true, system: true };
+
+function getThemeMode() {
+  const stored = localStorage.getItem('ironclaw-theme');
+  return (stored && VALID_THEME_MODES[stored]) ? stored : 'system';
+}
+
+function resolveTheme(mode) {
+  return mode === 'system' ? getSystemTheme() : mode;
+}
+
+function applyTheme(mode) {
+  const resolved = resolveTheme(mode);
+  document.documentElement.setAttribute('data-theme', resolved);
+  document.documentElement.setAttribute('data-theme-mode', mode);
+  const titleKeys = { dark: 'theme.tooltipDark', light: 'theme.tooltipLight', system: 'theme.tooltipSystem' };
+  const btn = document.getElementById('theme-toggle');
+  if (btn) btn.title = (typeof I18n !== 'undefined' && titleKeys[mode]) ? I18n.t(titleKeys[mode]) : ('Theme: ' + mode);
+  const announce = document.getElementById('theme-announce');
+  if (announce) announce.textContent = (typeof I18n !== 'undefined') ? I18n.t('theme.announce', { mode: mode }) : ('Theme: ' + mode);
+}
+
+function toggleTheme() {
+  const cycle = { dark: 'light', light: 'system', system: 'dark' };
+  const current = getThemeMode();
+  const next = cycle[current] || 'dark';
+  localStorage.setItem('ironclaw-theme', next);
+  applyTheme(next);
+}
+
+// Apply theme immediately (FOUC prevention is done via inline script in <head>,
+// but we call again here to ensure tooltip is set after DOM is ready).
+applyTheme(getThemeMode());
+
+// Delay enabling theme transition to avoid flash on initial load.
+requestAnimationFrame(function() {
+  requestAnimationFrame(function() {
+    document.body.classList.add('theme-transition');
+  });
+});
+
+// Listen for OS theme changes — only re-apply when in 'system' mode.
+const mql = window.matchMedia('(prefers-color-scheme: light)');
+const onSchemeChange = function() {
+  if (getThemeMode() === 'system') {
+    applyTheme('system');
+  }
+};
+if (mql.addEventListener) {
+  mql.addEventListener('change', onSchemeChange);
+} else if (mql.addListener) {
+  mql.addListener(onSchemeChange);
+}
+
+// Bind theme toggle buttons (CSP-compliant — no inline onclick).
+document.getElementById('theme-toggle').addEventListener('click', toggleTheme);
+document.getElementById('settings-theme-toggle')?.addEventListener('click', () => {
+  toggleTheme();
+  const btn = document.getElementById('settings-theme-toggle');
+  if (btn) {
+    const mode = localStorage.getItem('ironclaw-theme') || 'system';
+    btn.textContent = 'Theme: ' + mode.charAt(0).toUpperCase() + mode.slice(1);
+  }
+});
+
 let token = '';
 let eventSource = null;
 let logEventSource = null;
@@ -21,6 +93,20 @@ const MEMORY_SEARCH_QUERY_MAX_LENGTH = 100;
 let stagedImages = [];
 let authFlowPending = false;
 let _ghostSuggestion = '';
+let currentSettingsSubtab = 'inference';
+
+// --- Streaming Debounce State ---
+let _streamBuffer = '';
+let _streamDebounceTimer = null;
+const STREAM_DEBOUNCE_MS = 50;
+
+// --- Connection Status Banner State ---
+let _connectionLostTimer = null;
+let _connectionLostAt = null;
+let _reconnectAttempts = 0;
+
+// --- Send Cooldown State ---
+let _sendCooldown = false;
 
 // --- Slash Commands ---
 
@@ -61,12 +147,36 @@ function authenticate() {
     return;
   }
 
+  // Loading state for Connect button
+  const connectBtn = document.getElementById('auth-connect-btn');
+  if (connectBtn) {
+    connectBtn.disabled = true;
+    connectBtn.textContent = 'Connecting...';
+  }
+
   // Test the token against the health-ish endpoint (chat/threads requires auth)
   apiFetch('/api/chat/threads')
     .then(() => {
       sessionStorage.setItem('ironclaw_token', token);
-      document.getElementById('auth-screen').style.display = 'none';
-      document.getElementById('app').style.display = 'flex';
+      const authScreen = document.getElementById('auth-screen');
+      const app = document.getElementById('app');
+      // Cross-fade: fade out auth screen, then show app
+      if (authScreen) authScreen.style.opacity = '0';
+      // Show app container (invisible — opacity:0 in CSS) so layout computes
+      app.style.display = 'flex';
+      // Position tab indicator instantly (no transition) before fade-in
+      const indicator = document.getElementById('tab-indicator');
+      if (indicator) indicator.style.transition = 'none';
+      updateTabIndicator();
+      // Force layout so the instant position is applied, then restore transition
+      if (indicator) {
+        void indicator.offsetLeft;
+        indicator.style.transition = '';
+      }
+      // Now fade in
+      app.classList.add('visible');
+      // Hide auth screen after fade-out transition completes
+      setTimeout(() => { if (authScreen) authScreen.style.display = 'none'; }, 300);
       // Strip token and log_level from URL so they're not visible in the address bar
       const cleaned = new URL(window.location);
       const urlLogLevel = cleaned.searchParams.get('log_level');
@@ -90,14 +200,23 @@ function authenticate() {
     .catch(() => {
       sessionStorage.removeItem('ironclaw_token');
       document.getElementById('auth-screen').style.display = '';
+      document.getElementById('auth-screen').style.opacity = '';
       document.getElementById('app').style.display = 'none';
       document.getElementById('auth-error').textContent = I18n.t('auth.errorInvalid');
+      // Reset Connect button on error
+      if (connectBtn) {
+        connectBtn.disabled = false;
+        connectBtn.textContent = 'Connect';
+      }
     });
 }
 
 document.getElementById('token-input').addEventListener('keydown', (e) => {
   if (e.key === 'Enter') authenticate();
 });
+
+// Note: main event listener registration is at the bottom of this file (search
+// "Event Listener Registration"). Do NOT add duplicate listeners here.
 
 // Auto-authenticate from URL param or saved session
 (function autoAuth() {
@@ -132,9 +251,12 @@ function apiFetch(path, options) {
   return fetch(path, opts).then((res) => {
     if (!res.ok) {
       return res.text().then(function(body) {
-        throw new Error(body || (res.status + ' ' + res.statusText));
+        const err = new Error(body || (res.status + ' ' + res.statusText));
+        err.status = res.status;
+        throw err;
       });
     }
+    if (res.status === 204) return null;
     return res.json();
   });
 }
@@ -237,6 +359,25 @@ function connectSSE() {
   eventSource.onopen = () => {
     document.getElementById('sse-dot').classList.remove('disconnected');
     document.getElementById('sse-status').textContent = I18n.t('status.connected');
+    _reconnectAttempts = 0;
+
+    // Dismiss connection-lost banner and show reconnected flash
+    if (_connectionLostTimer) {
+      clearTimeout(_connectionLostTimer);
+      _connectionLostTimer = null;
+    }
+    const lostBanner = document.getElementById('connection-banner');
+    if (lostBanner) {
+      const wasDisconnectedLong = _connectionLostAt && (Date.now() - _connectionLostAt > 10000);
+      lostBanner.textContent = 'Reconnected';
+      lostBanner.className = 'connection-banner connection-banner-success';
+      setTimeout(() => { lostBanner.remove(); }, 2000);
+      _connectionLostAt = null;
+      // If disconnected >10s, reload chat history to catch missed messages
+      if (wasDisconnectedLong && currentThreadId) {
+        loadHistory();
+      }
+    }
 
     // If we were restarting, close the modal and reset button now that server is back
     if (isRestarting) {
@@ -257,8 +398,28 @@ function connectSSE() {
   };
 
   eventSource.onerror = () => {
+    _reconnectAttempts++;
     document.getElementById('sse-dot').classList.add('disconnected');
     document.getElementById('sse-status').textContent = I18n.t('status.reconnecting');
+
+    // Update existing banner with attempt count
+    const existingBanner = document.getElementById('connection-banner');
+    if (existingBanner && existingBanner.classList.contains('connection-banner-warning')) {
+      existingBanner.textContent = 'Connection lost. Reconnecting... (attempt ' + _reconnectAttempts + ')';
+    }
+
+    // Start connection-lost banner timer (3s delay)
+    if (!_connectionLostTimer && !existingBanner) {
+      _connectionLostAt = _connectionLostAt || Date.now();
+      _connectionLostTimer = setTimeout(() => {
+        _connectionLostTimer = null;
+        // Only show if still disconnected
+        const dot = document.getElementById('sse-dot');
+        if (dot?.classList.contains('disconnected')) {
+          showConnectionBanner('Connection lost. Reconnecting... (attempt ' + _reconnectAttempts + ')', 'warning');
+        }
+      }, 3000);
+    }
   };
 
   eventSource.addEventListener('response', (e) => {
@@ -270,6 +431,19 @@ function connectSSE() {
       }
       return;
     }
+    // Flush any remaining streaming buffer
+    if (_streamDebounceTimer) {
+      clearInterval(_streamDebounceTimer);
+      _streamDebounceTimer = null;
+    }
+    if (_streamBuffer) {
+      appendToLastAssistant(_streamBuffer);
+      _streamBuffer = '';
+    }
+    // Remove streaming attribute from active assistant message
+    const streamingMsg = document.querySelector('.message.assistant[data-streaming="true"]');
+    if (streamingMsg) streamingMsg.removeAttribute('data-streaming');
+
     finalizeActivityGroup();
     addMessage('assistant', data.content);
     enableChatInput();
@@ -327,7 +501,31 @@ function connectSSE() {
     const data = JSON.parse(e.data);
     if (!isCurrentThread(data.thread_id)) return;
     finalizeActivityGroup();
-    appendToLastAssistant(data.content);
+
+    // Mark the active assistant message as streaming
+    const container = document.getElementById('chat-messages');
+    let lastAssistant = container.querySelector('.message.assistant:last-of-type');
+    if (!lastAssistant) {
+      addMessage('assistant', '');
+      lastAssistant = container.querySelector('.message.assistant:last-of-type');
+    }
+    if (lastAssistant) lastAssistant.setAttribute('data-streaming', 'true');
+
+    // Accumulate chunks and debounce rendering at 50ms intervals
+    _streamBuffer += data.content;
+    // Force flush when buffer exceeds 10K chars to prevent memory buildup
+    if (_streamBuffer.length > 10000) {
+      appendToLastAssistant(_streamBuffer);
+      _streamBuffer = '';
+    }
+    if (!_streamDebounceTimer) {
+      _streamDebounceTimer = setInterval(() => {
+        if (_streamBuffer) {
+          appendToLastAssistant(_streamBuffer);
+          _streamBuffer = '';
+        }
+      }, STREAM_DEBOUNCE_MS);
+    }
   });
 
   eventSource.addEventListener('status', (e) => {
@@ -364,8 +562,8 @@ function connectSSE() {
       debouncedLoadThreads();
     }
 
-    // Extension setup flows can surface approvals while user is on Extensions tab.
-    if (currentTab === 'extensions') loadExtensions();
+    // Extension setup flows can surface approvals from any settings subtab.
+    if (currentTab === 'settings') refreshCurrentSettingsTab();
   });
 
   eventSource.addEventListener('auth_required', (e) => {
@@ -373,11 +571,12 @@ function connectSSE() {
   });
 
   eventSource.addEventListener('auth_completed', (e) => {
-    handleAuthCompleted(JSON.parse(e.data));
+    const data = JSON.parse(e.data);
+    handleAuthCompleted(data);
   });
 
   eventSource.addEventListener('extension_status', (e) => {
-    if (currentTab === 'extensions') loadExtensions();
+    if (currentTab === 'settings') refreshCurrentSettingsTab();
   });
 
   eventSource.addEventListener('image_generated', (e) => {
@@ -393,6 +592,22 @@ function connectSSE() {
       finalizeActivityGroup();
       addMessage('system', 'Error: ' + data.message);
       enableChatInput();
+    }
+  });
+
+  eventSource.addEventListener('turn_cost', (e) => {
+    const event = JSON.parse(e.data);
+    if (!isCurrentThread(event.thread_id)) return;
+    // Add cost badge below last assistant message
+    const messages = document.querySelectorAll('.message.assistant');
+    const lastMsg = messages[messages.length - 1];
+    const tokens = (event.input_tokens || 0) + (event.output_tokens || 0);
+    if (lastMsg && tokens > 0) {
+      const badge = document.createElement('div');
+      badge.className = 'turn-cost-badge';
+      const cost = event.cost_usd ? ' \u00b7 ' + event.cost_usd : '';
+      badge.textContent = tokens.toLocaleString() + ' tokens' + cost;
+      lastMsg.appendChild(badge);
     }
   });
 
@@ -487,6 +702,7 @@ function clearSuggestionChips() {
 
 function sendMessage() {
   clearSuggestionChips();
+  removeWelcomeCard();
   const input = document.getElementById('chat-input');
   if (authFlowPending) {
     showToast('Complete the auth step before sending chat messages.', 'info');
@@ -498,10 +714,11 @@ function sendMessage() {
     console.warn('sendMessage: no thread selected, ignoring');
     return;
   }
+  if (_sendCooldown) return;
   const content = input.value.trim();
   if (!content && stagedImages.length === 0) return;
 
-  addMessage('user', content || '(images attached)');
+  const userMsg = addMessage('user', content || '(images attached)');
   input.value = '';
   autoResizeTextarea(input);
   input.focus();
@@ -517,7 +734,33 @@ function sendMessage() {
     method: 'POST',
     body: body,
   }).catch((err) => {
-    addMessage('system', 'Failed to send: ' + err.message);
+    // Handle rate limiting (429)
+    if (err.status === 429) {
+      showToast('Rate limited. Please wait.', 'error');
+      _sendCooldown = true;
+      const sendBtn = document.getElementById('send-btn');
+      if (sendBtn) sendBtn.disabled = true;
+      setTimeout(() => {
+        _sendCooldown = false;
+        if (sendBtn) sendBtn.disabled = false;
+      }, 2000);
+    }
+    // Keep the user message in DOM, add a retry link
+    if (userMsg) {
+      userMsg.classList.add('send-failed');
+      userMsg.style.borderStyle = 'dashed';
+      const retryLink = document.createElement('a');
+      retryLink.className = 'retry-link';
+      retryLink.href = '#';
+      retryLink.textContent = 'Retry';
+      retryLink.addEventListener('click', (e) => {
+        e.preventDefault();
+        if (userMsg.parentNode) userMsg.parentNode.removeChild(userMsg);
+        input.value = content;
+        sendMessage();
+      });
+      userMsg.appendChild(retryLink);
+    }
   });
 }
 
@@ -796,11 +1039,36 @@ function copyMessage(btn) {
   });
 }
 
+let _lastMessageDate = null;
+
+function maybeInsertTimeSeparator(container, timestamp) {
+  const date = timestamp ? new Date(timestamp) : new Date();
+  const dateStr = date.toDateString();
+  if (_lastMessageDate === dateStr) return;
+  _lastMessageDate = dateStr;
+
+  const now = new Date();
+  const today = now.toDateString();
+  const yesterday = new Date(now.getTime() - 86400000).toDateString();
+
+  let label;
+  if (dateStr === today) label = 'Today';
+  else if (dateStr === yesterday) label = 'Yesterday';
+  else label = date.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+
+  const sep = document.createElement('div');
+  sep.className = 'time-separator';
+  sep.textContent = label;
+  container.appendChild(sep);
+}
+
 function addMessage(role, content) {
   const container = document.getElementById('chat-messages');
+  maybeInsertTimeSeparator(container);
   const div = createMessageElement(role, content);
   container.appendChild(div);
   container.scrollTop = container.scrollHeight;
+  return div;
 }
 
 function appendToLastAssistant(chunk) {
@@ -814,6 +1082,14 @@ function appendToLastAssistant(chunk) {
     const content = last.querySelector('.message-content');
     if (content) {
       content.innerHTML = renderMarkdown(raw);
+      // Syntax highlighting for code blocks
+      if (typeof hljs !== 'undefined') {
+        requestAnimationFrame(() => {
+          content.querySelectorAll('pre code').forEach(block => {
+            hljs.highlightElement(block);
+          });
+        });
+      }
     }
     container.scrollTop = container.scrollHeight;
   } else {
@@ -901,16 +1177,14 @@ function addToolCard(name) {
 
   const body = document.createElement('div');
   body.className = 'activity-tool-body';
-  body.style.display = 'none';
 
   const output = document.createElement('pre');
   output.className = 'activity-tool-output';
   body.appendChild(output);
 
   header.addEventListener('click', () => {
-    const isOpen = body.style.display !== 'none';
-    body.style.display = isOpen ? 'none' : 'block';
-    chevron.classList.toggle('expanded', !isOpen);
+    body.classList.toggle('expanded');
+    chevron.classList.toggle('expanded', body.classList.contains('expanded'));
   });
 
   card.appendChild(header);
@@ -969,7 +1243,7 @@ function completeToolCard(name, success, error, parameters) {
       // Auto-expand so the error is immediately visible
       const body = entry.card.querySelector('.activity-tool-body');
       const chevron = entry.card.querySelector('.activity-tool-chevron');
-      if (body) body.style.display = 'block';
+      if (body) body.classList.add('expanded');
       if (chevron) chevron.classList.add('expanded');
     }
   }
@@ -1135,18 +1409,19 @@ function showApproval(data) {
   approveBtn.textContent = I18n.t('approval.approve');
   approveBtn.addEventListener('click', () => sendApprovalAction(data.request_id, 'approve'));
 
-  const alwaysBtn = document.createElement('button');
-  alwaysBtn.className = 'always';
-  alwaysBtn.textContent = I18n.t('approval.always');
-  alwaysBtn.addEventListener('click', () => sendApprovalAction(data.request_id, 'always'));
-
   const denyBtn = document.createElement('button');
   denyBtn.className = 'deny';
   denyBtn.textContent = I18n.t('approval.deny');
   denyBtn.addEventListener('click', () => sendApprovalAction(data.request_id, 'deny'));
 
   actions.appendChild(approveBtn);
-  actions.appendChild(alwaysBtn);
+  if (data.allow_always !== false) {
+    const alwaysBtn = document.createElement('button');
+    alwaysBtn.className = 'always';
+    alwaysBtn.textContent = I18n.t('approval.always');
+    alwaysBtn.addEventListener('click', () => sendApprovalAction(data.request_id, 'always'));
+    actions.appendChild(alwaysBtn);
+  }
   actions.appendChild(denyBtn);
   card.appendChild(actions);
 
@@ -1232,7 +1507,7 @@ function handleAuthCompleted(data) {
   if (shouldShowChannelConnectedMessage(data.extension_name, data.success)) {
     addMessage('system', 'Telegram is now connected. You can message me there and I can send you notifications.');
   }
-  if (currentTab === 'extensions') loadExtensions();
+  if (currentTab === 'settings') refreshCurrentSettingsTab();
   enableChatInput();
 }
 
@@ -1455,6 +1730,13 @@ function loadHistory(before) {
   const isPaginating = !!before;
   if (isPaginating) loadingOlder = true;
 
+  // Show skeleton while loading (only for fresh loads)
+  if (!isPaginating) {
+    const chatContainer = document.getElementById('chat-messages');
+    chatContainer.innerHTML = '';
+    chatContainer.appendChild(renderSkeleton('message', 3));
+  }
+
   apiFetch(historyUrl).then((data) => {
     const container = document.getElementById('chat-messages');
 
@@ -1471,6 +1753,10 @@ function loadHistory(before) {
         if (turn.response) {
           addMessage('assistant', turn.response);
         }
+      }
+      // Show welcome card when history is empty
+      if (data.turns.length === 0) {
+        showWelcomeCard();
       }
       // Show processing indicator if the last turn is still in-progress
       var lastTurn = data.turns.length > 0 ? data.turns[data.turns.length - 1] : null;
@@ -1518,6 +1804,30 @@ function createMessageElement(role, content) {
   const div = document.createElement('div');
   div.className = 'message ' + role;
 
+  const ts = document.createElement('span');
+  ts.className = 'message-timestamp';
+  ts.textContent = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  div.appendChild(ts);
+
+  // Message content
+  const contentEl = document.createElement('div');
+  contentEl.className = 'message-content';
+  if (role === 'user' || role === 'system') {
+    contentEl.textContent = content;
+  } else {
+    div.setAttribute('data-raw', content);
+    contentEl.innerHTML = renderMarkdown(content);
+    // Syntax highlighting for code blocks
+    if (typeof hljs !== 'undefined') {
+      requestAnimationFrame(() => {
+        contentEl.querySelectorAll('pre code').forEach(block => {
+          hljs.highlightElement(block);
+        });
+      });
+    }
+  }
+  div.appendChild(contentEl);
+
   if (role === 'assistant' || role === 'user') {
     div.classList.add('has-copy');
     div.setAttribute('data-copy-text', content);
@@ -1533,15 +1843,6 @@ function createMessageElement(role, content) {
     div.appendChild(copyBtn);
   }
 
-  const body = document.createElement('div');
-  body.className = 'message-content';
-  if (role === 'user' || role === 'system') {
-    body.textContent = content;
-  } else {
-    div.setAttribute('data-raw', content);
-    body.innerHTML = renderMarkdown(content);
-  }
-  div.appendChild(body);
   return div;
 }
 
@@ -1639,6 +1940,13 @@ function debouncedLoadThreads() {
 }
 
 function loadThreads() {
+  // Show skeleton while loading
+  const threadListEl = document.getElementById('thread-list');
+  if (threadListEl && threadListEl.children.length === 0) {
+    threadListEl.innerHTML = '';
+    threadListEl.appendChild(renderSkeleton('row', 4));
+  }
+
   apiFetch('/api/chat/threads').then((data) => {
     // Pinned assistant thread
     if (data.assistant_thread) {
@@ -1736,6 +2044,11 @@ function switchToAssistant() {
   oldestTimestamp = null;
   loadHistory();
   loadThreads();
+  if (window.innerWidth <= 768) {
+    const sidebar = document.getElementById('thread-sidebar');
+    sidebar.classList.remove('expanded-mobile');
+    document.getElementById('thread-toggle-btn').innerHTML = '&raquo;';
+  }
 }
 
 function switchThread(threadId) {
@@ -1747,12 +2060,18 @@ function switchThread(threadId) {
   oldestTimestamp = null;
   loadHistory();
   loadThreads();
+  if (window.innerWidth <= 768) {
+    const sidebar = document.getElementById('thread-sidebar');
+    sidebar.classList.remove('expanded-mobile');
+    document.getElementById('thread-toggle-btn').innerHTML = '&raquo;';
+  }
 }
 
 function createNewThread() {
   apiFetch('/api/chat/thread/new', { method: 'POST' }).then((data) => {
     currentThreadId = data.id || null;
     document.getElementById('chat-messages').innerHTML = '';
+    showWelcomeCard();
     loadThreads();
   }).catch((err) => {
     showToast('Failed to create thread: ' + err.message, 'error');
@@ -1761,9 +2080,17 @@ function createNewThread() {
 
 function toggleThreadSidebar() {
   const sidebar = document.getElementById('thread-sidebar');
-  sidebar.classList.toggle('collapsed');
+  const isMobile = window.innerWidth <= 768;
+  if (isMobile) {
+    sidebar.classList.toggle('expanded-mobile');
+  } else {
+    sidebar.classList.toggle('collapsed');
+  }
   const btn = document.getElementById('thread-toggle-btn');
-  btn.innerHTML = sidebar.classList.contains('collapsed') ? '&raquo;' : '&laquo;';
+  const isOpen = isMobile
+    ? sidebar.classList.contains('expanded-mobile')
+    : !sidebar.classList.contains('collapsed');
+  btn.innerHTML = isOpen ? '&laquo;' : '&raquo;';
 }
 
 // Chat input auto-resize and keyboard handling
@@ -1830,6 +2157,10 @@ chatInput.addEventListener('input', () => {
     ghost.style.display = 'block';
     wrapper.classList.add('has-ghost');
   }
+  const sendBtn = document.getElementById('send-btn');
+  if (sendBtn) {
+    sendBtn.classList.toggle('active', chatInput.value.trim().length > 0);
+  }
 });
 chatInput.addEventListener('blur', () => {
   // Small delay so mousedown on autocomplete item fires first
@@ -1851,8 +2182,13 @@ document.getElementById('chat-messages').addEventListener('scroll', function () 
 });
 
 function autoResizeTextarea(el) {
+  const prev = el.offsetHeight;
   el.style.height = 'auto';
-  el.style.height = Math.min(el.scrollHeight, 120) + 'px';
+  const target = Math.min(el.scrollHeight, 120);
+  el.style.height = prev + 'px';
+  requestAnimationFrame(() => {
+    el.style.height = target + 'px';
+  });
 }
 
 // --- Tabs ---
@@ -1872,19 +2208,36 @@ function switchTab(tab) {
   document.querySelectorAll('.tab-panel').forEach((p) => {
     p.classList.toggle('active', p.id === 'tab-' + tab);
   });
+  applyAriaAttributes();
 
   if (tab === 'memory') loadMemoryTree();
   if (tab === 'jobs') loadJobs();
   if (tab === 'routines') loadRoutines();
   if (tab === 'logs') applyLogFilters();
-  if (tab === 'extensions') {
-    loadExtensions();
-    startPairingPoll();
+  if (tab === 'settings') {
+    loadSettingsSubtab(currentSettingsSubtab);
   } else {
     stopPairingPoll();
   }
-  if (tab === 'skills') loadSkills();
+  updateTabIndicator();
 }
+
+function updateTabIndicator() {
+  const indicator = document.getElementById('tab-indicator');
+  if (!indicator) return;
+  const activeBtn = document.querySelector('.tab-bar button[data-tab].active');
+  if (!activeBtn) {
+    indicator.style.width = '0';
+    return;
+  }
+  const bar = activeBtn.closest('.tab-bar');
+  const barRect = bar.getBoundingClientRect();
+  const btnRect = activeBtn.getBoundingClientRect();
+  indicator.style.left = (btnRect.left - barRect.left) + 'px';
+  indicator.style.width = btnRect.width + 'px';
+}
+
+window.addEventListener('resize', updateTabIndicator);
 
 // --- Memory (filesystem tree) ---
 
@@ -2270,61 +2623,42 @@ var kindLabels = { 'wasm_channel': 'Channel', 'wasm_tool': 'Tool', 'mcp_server':
 function loadExtensions() {
   const extList = document.getElementById('extensions-list');
   const wasmList = document.getElementById('available-wasm-list');
-  const mcpList = document.getElementById('mcp-servers-list');
-  const toolsTbody = document.getElementById('tools-tbody');
-  const toolsEmpty = document.getElementById('tools-empty');
+  extList.innerHTML = renderCardsSkeleton(3);
 
-  // Fetch all three in parallel
+  // Fetch extensions and registry in parallel
   Promise.all([
     apiFetch('/api/extensions').catch(() => ({ extensions: [] })),
-    apiFetch('/api/extensions/tools').catch(() => ({ tools: [] })),
     apiFetch('/api/extensions/registry').catch(function(err) { console.warn('registry fetch failed:', err); return { entries: [] }; }),
-  ]).then(([extData, toolData, registryData]) => {
-    // Render installed extensions
-    if (extData.extensions.length === 0) {
+  ]).then(([extData, registryData]) => {
+    // Render installed extensions (exclude wasm_channel and mcp_server — shown in their own tabs)
+    var nonChannelExts = extData.extensions.filter(function(e) {
+      return e.kind !== 'wasm_channel' && e.kind !== 'mcp_server';
+    });
+    if (nonChannelExts.length === 0) {
       extList.innerHTML = '<div class="empty-state">' + I18n.t('extensions.noInstalled') + '</div>';
     } else {
       extList.innerHTML = '';
-      for (const ext of extData.extensions) {
+      for (const ext of nonChannelExts) {
         extList.appendChild(renderExtensionCard(ext));
       }
     }
 
-    // Split registry entries by kind
-    var wasmEntries = registryData.entries.filter(function(e) { return e.kind !== 'mcp_server' && !e.installed; });
-    var mcpEntries = registryData.entries.filter(function(e) { return e.kind === 'mcp_server'; });
+    // Available extensions (exclude MCP servers and channels — they have their own tabs)
+    var wasmEntries = registryData.entries.filter(function(e) {
+      return e.kind !== 'mcp_server' && e.kind !== 'wasm_channel' && e.kind !== 'channel' && !e.installed;
+    });
 
-    // Available WASM extensions
+    var wasmSection = document.getElementById('available-wasm-section');
     if (wasmEntries.length === 0) {
-      wasmList.innerHTML = '<div class="empty-state">' + I18n.t('extensions.noAvailable') + '</div>';
+      if (wasmSection) wasmSection.style.display = 'none';
     } else {
+      if (wasmSection) wasmSection.style.display = '';
       wasmList.innerHTML = '';
       for (const entry of wasmEntries) {
         wasmList.appendChild(renderAvailableExtensionCard(entry));
       }
     }
 
-    // MCP servers (show both installed and uninstalled)
-    if (mcpEntries.length === 0) {
-      mcpList.innerHTML = '<div class="empty-state">' + I18n.t('mcp.noServers') + '</div>';
-    } else {
-      mcpList.innerHTML = '';
-      for (const entry of mcpEntries) {
-        var installedExt = extData.extensions.find(function(e) { return e.name === entry.name; });
-        mcpList.appendChild(renderMcpServerCard(entry, installedExt));
-      }
-    }
-
-    // Render tools
-    if (toolData.tools.length === 0) {
-      toolsTbody.innerHTML = '';
-      toolsEmpty.style.display = 'block';
-    } else {
-      toolsEmpty.style.display = 'none';
-      toolsTbody.innerHTML = toolData.tools.map((t) =>
-        '<tr><td>' + escapeHtml(t.name) + '</td><td>' + escapeHtml(t.description) + '</td></tr>'
-      ).join('');
-    }
   });
 }
 
@@ -2390,18 +2724,18 @@ function renderAvailableExtensionCard(entry) {
           showToast('Opening authentication for ' + entry.display_name, 'info');
           openOAuthUrl(res.auth_url);
         }
-        loadExtensions();
+        refreshCurrentSettingsTab();
         // Auto-open configure for WASM channels
         if (entry.kind === 'wasm_channel') {
           showConfigureModal(entry.name);
         }
       } else {
         showToast('Install: ' + (res.message || 'unknown error'), 'error');
-        loadExtensions();
+        refreshCurrentSettingsTab();
       }
     }).catch(function(err) {
       showToast('Install failed: ' + err.message, 'error');
-      loadExtensions();
+      refreshCurrentSettingsTab();
     });
   });
   actions.appendChild(installBtn);
@@ -2457,6 +2791,13 @@ function renderMcpServerCard(entry, installedExt) {
       activeLabel.textContent = I18n.t('ext.active');
       actions.appendChild(activeLabel);
     }
+    if (installedExt.needs_setup || (installedExt.has_auth && installedExt.authenticated)) {
+      var configBtn = document.createElement('button');
+      configBtn.className = 'btn-ext configure';
+      configBtn.textContent = installedExt.authenticated ? I18n.t('ext.reconfigure') : I18n.t('ext.configure');
+      configBtn.addEventListener('click', function() { showConfigureModal(installedExt.name); });
+      actions.appendChild(configBtn);
+    }
     var removeBtn = document.createElement('button');
     removeBtn.className = 'btn-ext remove';
     removeBtn.textContent = I18n.t('ext.remove');
@@ -2478,10 +2819,10 @@ function renderMcpServerCard(entry, installedExt) {
         } else {
           showToast(I18n.t('ext.install') + ': ' + (res.message || 'unknown error'), 'error');
         }
-        loadExtensions();
+        loadMcpServers();
       }).catch(function(err) {
         showToast(I18n.t('ext.installFailed', { message: err.message }), 'error');
-        loadExtensions();
+        loadMcpServers();
       });
     });
     actions.appendChild(installBtn);
@@ -2501,7 +2842,16 @@ function createReconfigureButton(extName) {
 
 function renderExtensionCard(ext) {
   const card = document.createElement('div');
-  card.className = 'ext-card';
+  var stateClass = 'state-inactive';
+  if (ext.kind === 'wasm_channel') {
+    var s = ext.activation_status || 'installed';
+    if (s === 'active') stateClass = 'state-active';
+    else if (s === 'failed') stateClass = 'state-error';
+    else if (s === 'pairing') stateClass = 'state-pairing';
+  } else if (ext.active) {
+    stateClass = 'state-active';
+  }
+  card.className = 'ext-card ' + stateClass;
 
   const header = document.createElement('div');
   header.className = 'ext-header';
@@ -2646,6 +2996,12 @@ function renderExtensionCard(ext) {
   return card;
 }
 
+function refreshCurrentSettingsTab() {
+  if (currentSettingsSubtab === 'extensions') loadExtensions();
+  if (currentSettingsSubtab === 'channels') loadChannelsStatus();
+  if (currentSettingsSubtab === 'mcp') loadMcpServers();
+}
+
 function activateExtension(name) {
   apiFetch('/api/extensions/' + encodeURIComponent(name) + '/activate', { method: 'POST' })
     .then((res) => {
@@ -2659,7 +3015,7 @@ function activateExtension(name) {
           showToast('Opening authentication for ' + name, 'info');
           openOAuthUrl(res.auth_url);
         }
-        loadExtensions();
+        refreshCurrentSettingsTab();
         return;
       }
 
@@ -2675,38 +3031,41 @@ function activateExtension(name) {
       } else {
         showToast('Activate failed: ' + res.message, 'error');
       }
-      loadExtensions();
+      refreshCurrentSettingsTab();
     })
     .catch((err) => showToast('Activate failed: ' + err.message, 'error'));
 }
 
 function removeExtension(name) {
-  if (!confirm(I18n.t('ext.confirmRemove', { name: name }))) return;
-  apiFetch('/api/extensions/' + encodeURIComponent(name) + '/remove', { method: 'POST' })
-    .then((res) => {
-      if (!res.success) {
-        showToast(I18n.t('ext.removeFailed', { message: res.message }), 'error');
-      } else {
-        showToast(I18n.t('ext.removed', { name: name }), 'success');
-      }
-      loadExtensions();
-    })
-    .catch((err) => showToast(I18n.t('ext.removeFailed', { message: err.message }), 'error'));
+  showConfirmModal(I18n.t('ext.confirmRemove', { name: name }), '', function() {
+    apiFetch('/api/extensions/' + encodeURIComponent(name) + '/remove', { method: 'POST' })
+      .then((res) => {
+        if (!res.success) {
+          showToast(I18n.t('ext.removeFailed', { message: res.message }), 'error');
+        } else {
+          showToast(I18n.t('ext.removed', { name: name }), 'success');
+        }
+        refreshCurrentSettingsTab();
+      })
+      .catch((err) => showToast(I18n.t('ext.removeFailed', { message: err.message }), 'error'));
+  }, I18n.t('common.remove'), 'btn-danger');
 }
 
 function showConfigureModal(name) {
   apiFetch('/api/extensions/' + encodeURIComponent(name) + '/setup')
     .then((setup) => {
-      if (!setup.secrets || setup.secrets.length === 0) {
+      const secrets = Array.isArray(setup.secrets) ? setup.secrets : [];
+      const setupFields = Array.isArray(setup.fields) ? setup.fields : [];
+      if (secrets.length === 0 && setupFields.length === 0) {
         showToast('No configuration needed for ' + name, 'info');
         return;
       }
-      renderConfigureModal(name, setup.secrets);
+      renderConfigureModal(name, secrets, setupFields);
     })
     .catch((err) => showToast('Failed to load setup: ' + err.message, 'error'));
 }
 
-function renderConfigureModal(name, secrets) {
+function renderConfigureModal(name, secrets, setupFields) {
   closeConfigureModal();
   const overlay = document.createElement('div');
   overlay.className = 'configure-overlay';
@@ -2779,7 +3138,46 @@ function renderConfigureModal(name, secrets) {
 
     field.appendChild(inputRow);
     form.appendChild(field);
-    fields.push({ name: secret.name, input: input });
+    fields.push({ kind: 'secret', name: secret.name, input: input });
+  }
+
+  for (const setupField of setupFields) {
+    const field = document.createElement('div');
+    field.className = 'configure-field';
+
+    const label = document.createElement('label');
+    label.textContent = setupField.prompt;
+    if (setupField.optional) {
+      const opt = document.createElement('span');
+      opt.className = 'field-optional';
+      opt.textContent = I18n.t('config.optional');
+      label.appendChild(opt);
+    }
+    field.appendChild(label);
+
+    const inputRow = document.createElement('div');
+    inputRow.className = 'configure-input-row';
+
+    const input = document.createElement('input');
+    input.type = setupField.input_type === 'password' ? 'password' : 'text';
+    input.name = setupField.name;
+    input.placeholder = setupField.provided ? I18n.t('config.alreadySet') : '';
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') submitConfigureModal(name, fields);
+    });
+    inputRow.appendChild(input);
+
+    if (setupField.provided) {
+      const badge = document.createElement('span');
+      badge.className = 'field-provided';
+      badge.textContent = '\u2713';
+      badge.title = I18n.t('config.alreadyConfigured');
+      inputRow.appendChild(badge);
+    }
+
+    field.appendChild(inputRow);
+    form.appendChild(field);
+    fields.push({ kind: 'field', name: setupField.name, input: input });
   }
 
   modal.appendChild(form);
@@ -2921,9 +3319,16 @@ function startTelegramAutoVerify(name, fields) {
 function submitConfigureModal(name, fields, options) {
   options = options || {};
   const secrets = {};
+  const setupFields = {};
   for (const f of fields) {
-    if (f.input.value.trim()) {
-      secrets[f.name] = f.input.value.trim();
+    const value = f.input.value.trim();
+    if (!value) {
+      continue;
+    }
+    if (f.kind === 'secret') {
+      secrets[f.name] = value;
+    } else {
+      setupFields[f.name] = value;
     }
   }
 
@@ -2940,7 +3345,7 @@ function submitConfigureModal(name, fields, options) {
 
   apiFetch('/api/extensions/' + encodeURIComponent(name) + '/setup', {
     method: 'POST',
-    body: { secrets },
+    body: { secrets, fields: setupFields },
   })
     .then((res) => {
       if (res.success) {
@@ -2969,7 +3374,9 @@ function submitConfigureModal(name, fields, options) {
           });
           showToast('Opening OAuth authorization for ' + name, 'info');
           openOAuthUrl(res.auth_url);
-          loadExtensions();
+          refreshCurrentSettingsTab();
+        } else if (res.needs_restart) {
+          showToast('Configured ' + name + '. Restart IronClaw to apply all changes.', 'info');
         }
         // For non-OAuth success: the server always broadcasts auth_completed SSE,
         // which will show the toast and refresh extensions — no need to do it here too.
@@ -3078,7 +3485,7 @@ function approvePairing(channel, code, container) {
   }).then(res => {
     if (res.success) {
       showToast('Pairing approved', 'success');
-      loadExtensions();
+      refreshCurrentSettingsTab();
     } else {
       showToast(res.message || 'Approve failed', 'error');
     }
@@ -3848,7 +4255,6 @@ function renderRoutineDetail(routine) {
       + '<pre class="action-json">' + escapeHtml(JSON.stringify(routine.trigger, null, 2)) + '</pre></div>';
   }
 
-  // Action config
   html += '<div class="job-description"><h3>Action</h3>'
     + '<pre class="action-json">' + escapeHtml(JSON.stringify(routine.action, null, 2)) + '</pre></div>';
 
@@ -3919,7 +4325,7 @@ function formatRelativeTime(isoString) {
   const absDiff = Math.abs(diffMs);
   const future = diffMs < 0;
 
-  if (absDiff < 60000) 
+  if (absDiff < 60000)
     return future ? I18n.t('time.lessThan1MinuteFromNow') : I18n.t('time.lessThan1MinuteAgo');
   if (absDiff < 3600000) {
     const m = Math.floor(absDiff / 60000);
@@ -4184,7 +4590,7 @@ function addMcpServer() {
       showToast('Added MCP server ' + name, 'success');
       document.getElementById('mcp-install-name').value = '';
       document.getElementById('mcp-install-url').value = '';
-      loadExtensions();
+      loadMcpServers();
     } else {
       showToast('Failed to add MCP server: ' + (res.message || 'unknown error'), 'error');
     }
@@ -4197,6 +4603,7 @@ function addMcpServer() {
 
 function loadSkills() {
   var skillsList = document.getElementById('skills-list');
+  skillsList.innerHTML = renderCardsSkeleton(3);
   apiFetch('/api/skills').then(function(data) {
     if (!data.skills || data.skills.length === 0) {
       skillsList.innerHTML = '<div class="empty-state">' + I18n.t('skills.noInstalled') + '</div>';
@@ -4213,7 +4620,7 @@ function loadSkills() {
 
 function renderSkillCard(skill) {
   var card = document.createElement('div');
-  card.className = 'ext-card';
+  card.className = 'ext-card state-active';
 
   var header = document.createElement('div');
   header.className = 'ext-header';
@@ -4480,20 +4887,21 @@ function installSkill(nameOrSlug, url, btn) {
 }
 
 function removeSkill(name) {
-  if (!confirm(I18n.t('skills.confirmRemove', { name: name }))) return;
-  apiFetch('/api/skills/' + encodeURIComponent(name), {
-    method: 'DELETE',
-    headers: { 'X-Confirm-Action': 'true' },
-  }).then(function(res) {
-    if (res.success) {
-      showToast(I18n.t('skills.removed', { name: name }), 'success');
-    } else {
-      showToast(I18n.t('skills.removeFailed', { message: res.message || 'unknown error' }), 'error');
-    }
-    loadSkills();
-  }).catch(function(err) {
-    showToast(I18n.t('skills.removeFailed', { message: err.message }), 'error');
-  });
+  showConfirmModal(I18n.t('skills.confirmRemove', { name: name }), '', function() {
+    apiFetch('/api/skills/' + encodeURIComponent(name), {
+      method: 'DELETE',
+      headers: { 'X-Confirm-Action': 'true' },
+    }).then(function(res) {
+      if (res.success) {
+        showToast(I18n.t('skills.removed', { name: name }), 'success');
+      } else {
+        showToast(I18n.t('skills.removeFailed', { message: res.message || 'unknown error' }), 'error');
+      }
+      loadSkills();
+    }).catch(function(err) {
+      showToast(I18n.t('skills.removeFailed', { message: err.message }), 'error');
+    });
+  }, I18n.t('common.remove'), 'btn-danger');
 }
 
 function installSkillFromForm() {
@@ -4522,10 +4930,10 @@ document.addEventListener('keydown', (e) => {
   const tag = (e.target.tagName || '').toLowerCase();
   const inInput = tag === 'input' || tag === 'textarea';
 
-  // Mod+1-6: switch tabs
-  if (mod && e.key >= '1' && e.key <= '6') {
+  // Mod+1-5: switch tabs
+  if (mod && e.key >= '1' && e.key <= '5') {
     e.preventDefault();
-    const tabs = ['chat', 'memory', 'jobs', 'routines', 'extensions', 'skills'];
+    const tabs = ['chat', 'memory', 'jobs', 'routines', 'settings'];
     const idx = parseInt(e.key) - 1;
     if (tabs[idx]) switchTab(tabs[idx]);
     return;
@@ -4549,13 +4957,27 @@ document.addEventListener('keydown', (e) => {
     return;
   }
 
-  // Escape: close autocomplete, job detail, or blur input
+  // Mod+/: toggle shortcuts overlay
+  if (mod && e.key === '/') {
+    e.preventDefault();
+    toggleShortcutsOverlay();
+    return;
+  }
+
+  // Escape: close modals, autocomplete, job detail, or blur input
   if (e.key === 'Escape') {
     const acEl = document.getElementById('slash-autocomplete');
     if (acEl && acEl.style.display !== 'none') {
       hideSlashAutocomplete();
       return;
     }
+    // Close shortcuts overlay if open
+    const shortcutsOverlay = document.getElementById('shortcuts-overlay');
+    if (shortcutsOverlay?.style.display === 'flex') {
+      shortcutsOverlay.style.display = 'none';
+      return;
+    }
+    closeModals();
     if (currentJobId) {
       closeJobDetail();
     } else if (inInput) {
@@ -4565,21 +4987,936 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
+// --- Settings Tab ---
+
+document.querySelectorAll('.settings-subtab').forEach(function(btn) {
+  btn.addEventListener('click', function() {
+    switchSettingsSubtab(btn.getAttribute('data-settings-subtab'));
+  });
+});
+
+function switchSettingsSubtab(subtab) {
+  currentSettingsSubtab = subtab;
+  document.querySelectorAll('.settings-subtab').forEach(function(b) {
+    b.classList.toggle('active', b.getAttribute('data-settings-subtab') === subtab);
+  });
+  document.querySelectorAll('.settings-subpanel').forEach(function(p) {
+    p.classList.toggle('active', p.id === 'settings-' + subtab);
+  });
+  // Clear search when switching subtabs so stale filters don't apply
+  var searchInput = document.getElementById('settings-search-input');
+  if (searchInput && searchInput.value) {
+    searchInput.value = '';
+    searchInput.dispatchEvent(new Event('input'));
+  }
+  // On mobile, drill into detail view
+  if (window.innerWidth <= 768) {
+    document.querySelector('.settings-layout').classList.add('settings-detail-active');
+  }
+  loadSettingsSubtab(subtab);
+}
+
+function settingsBack() {
+  document.querySelector('.settings-layout').classList.remove('settings-detail-active');
+}
+
+function loadSettingsSubtab(subtab) {
+  if (subtab === 'inference') loadInferenceSettings();
+  else if (subtab === 'agent') loadAgentSettings();
+  else if (subtab === 'channels') { loadChannelsStatus(); startPairingPoll(); }
+  else if (subtab === 'networking') loadNetworkingSettings();
+  else if (subtab === 'extensions') { loadExtensions(); startPairingPoll(); }
+  else if (subtab === 'mcp') loadMcpServers();
+  else if (subtab === 'skills') loadSkills();
+  if (subtab !== 'extensions' && subtab !== 'channels') stopPairingPoll();
+}
+
+// --- Structured Settings Definitions ---
+
+var INFERENCE_SETTINGS = [
+  {
+    group: 'cfg.group.llm',
+    settings: [
+      { key: 'llm_backend', label: 'cfg.llm_backend.label', description: 'cfg.llm_backend.desc',
+        type: 'select', options: ['nearai', 'anthropic', 'openai', 'ollama', 'openai_compatible', 'tinfoil', 'bedrock'] },
+      { key: 'selected_model', label: 'cfg.selected_model.label', description: 'cfg.selected_model.desc', type: 'text' },
+      { key: 'ollama_base_url', label: 'cfg.ollama_base_url.label', description: 'cfg.ollama_base_url.desc', type: 'text',
+        showWhen: { key: 'llm_backend', value: 'ollama' } },
+      { key: 'openai_compatible_base_url', label: 'cfg.openai_compatible_base_url.label', description: 'cfg.openai_compatible_base_url.desc', type: 'text',
+        showWhen: { key: 'llm_backend', value: 'openai_compatible' } },
+      { key: 'bedrock_region', label: 'cfg.bedrock_region.label', description: 'cfg.bedrock_region.desc', type: 'text',
+        showWhen: { key: 'llm_backend', value: 'bedrock' } },
+      { key: 'bedrock_cross_region', label: 'cfg.bedrock_cross_region.label', description: 'cfg.bedrock_cross_region.desc',
+        type: 'select', options: ['us', 'eu', 'apac', 'global'],
+        showWhen: { key: 'llm_backend', value: 'bedrock' } },
+      { key: 'bedrock_profile', label: 'cfg.bedrock_profile.label', description: 'cfg.bedrock_profile.desc', type: 'text',
+        showWhen: { key: 'llm_backend', value: 'bedrock' } },
+    ]
+  },
+  {
+    group: 'cfg.group.embeddings',
+    settings: [
+      { key: 'embeddings.enabled', label: 'cfg.embeddings_enabled.label', description: 'cfg.embeddings_enabled.desc', type: 'boolean' },
+      { key: 'embeddings.provider', label: 'cfg.embeddings_provider.label', description: 'cfg.embeddings_provider.desc',
+        type: 'select', options: ['openai', 'nearai'] },
+      { key: 'embeddings.model', label: 'cfg.embeddings_model.label', description: 'cfg.embeddings_model.desc', type: 'text' },
+    ]
+  },
+];
+
+var AGENT_SETTINGS = [
+  {
+    group: 'cfg.group.agent',
+    settings: [
+      { key: 'agent.name', label: 'cfg.agent_name.label', description: 'cfg.agent_name.desc', type: 'text' },
+      { key: 'agent.max_parallel_jobs', label: 'cfg.agent_max_parallel_jobs.label', description: 'cfg.agent_max_parallel_jobs.desc', type: 'number' },
+      { key: 'agent.job_timeout_secs', label: 'cfg.agent_job_timeout.label', description: 'cfg.agent_job_timeout.desc', type: 'number' },
+      { key: 'agent.max_tool_iterations', label: 'cfg.agent_max_tool_iterations.label', description: 'cfg.agent_max_tool_iterations.desc', type: 'number' },
+      { key: 'agent.use_planning', label: 'cfg.agent_use_planning.label', description: 'cfg.agent_use_planning.desc', type: 'boolean' },
+      { key: 'agent.auto_approve_tools', label: 'cfg.agent_auto_approve.label', description: 'cfg.agent_auto_approve.desc', type: 'boolean' },
+      { key: 'agent.default_timezone', label: 'cfg.agent_timezone.label', description: 'cfg.agent_timezone.desc', type: 'text' },
+      { key: 'agent.session_idle_timeout_secs', label: 'cfg.agent_session_idle.label', description: 'cfg.agent_session_idle.desc', type: 'number' },
+      { key: 'agent.stuck_threshold_secs', label: 'cfg.agent_stuck_threshold.label', description: 'cfg.agent_stuck_threshold.desc', type: 'number' },
+      { key: 'agent.max_repair_attempts', label: 'cfg.agent_max_repair.label', description: 'cfg.agent_max_repair.desc', type: 'number' },
+      { key: 'agent.max_cost_per_day_cents', label: 'cfg.agent_max_cost.label', description: 'cfg.agent_max_cost.desc', type: 'number', min: 0 },
+      { key: 'agent.max_actions_per_hour', label: 'cfg.agent_max_actions.label', description: 'cfg.agent_max_actions.desc', type: 'number', min: 0 },
+      { key: 'agent.allow_local_tools', label: 'cfg.agent_allow_local.label', description: 'cfg.agent_allow_local.desc', type: 'boolean' },
+    ]
+  },
+  {
+    group: 'cfg.group.heartbeat',
+    settings: [
+      { key: 'heartbeat.enabled', label: 'cfg.heartbeat_enabled.label', description: 'cfg.heartbeat_enabled.desc', type: 'boolean' },
+      { key: 'heartbeat.interval_secs', label: 'cfg.heartbeat_interval.label', description: 'cfg.heartbeat_interval.desc', type: 'number' },
+      { key: 'heartbeat.notify_channel', label: 'cfg.heartbeat_notify_channel.label', description: 'cfg.heartbeat_notify_channel.desc', type: 'text' },
+      { key: 'heartbeat.notify_user', label: 'cfg.heartbeat_notify_user.label', description: 'cfg.heartbeat_notify_user.desc', type: 'text' },
+      { key: 'heartbeat.quiet_hours_start', label: 'cfg.heartbeat_quiet_start.label', description: 'cfg.heartbeat_quiet_start.desc', type: 'number', min: 0, max: 23 },
+      { key: 'heartbeat.quiet_hours_end', label: 'cfg.heartbeat_quiet_end.label', description: 'cfg.heartbeat_quiet_end.desc', type: 'number', min: 0, max: 23 },
+      { key: 'heartbeat.timezone', label: 'cfg.heartbeat_timezone.label', description: 'cfg.heartbeat_timezone.desc', type: 'text' },
+    ]
+  },
+  {
+    group: 'cfg.group.sandbox',
+    settings: [
+      { key: 'sandbox.enabled', label: 'cfg.sandbox_enabled.label', description: 'cfg.sandbox_enabled.desc', type: 'boolean' },
+      { key: 'sandbox.policy', label: 'cfg.sandbox_policy.label', description: 'cfg.sandbox_policy.desc',
+        type: 'select', options: ['readonly', 'workspace_write', 'full_access'] },
+      { key: 'sandbox.timeout_secs', label: 'cfg.sandbox_timeout.label', description: 'cfg.sandbox_timeout.desc', type: 'number', min: 0 },
+      { key: 'sandbox.memory_limit_mb', label: 'cfg.sandbox_memory.label', description: 'cfg.sandbox_memory.desc', type: 'number', min: 0 },
+      { key: 'sandbox.image', label: 'cfg.sandbox_image.label', description: 'cfg.sandbox_image.desc', type: 'text' },
+    ]
+  },
+  {
+    group: 'cfg.group.routines',
+    settings: [
+      { key: 'routines.max_concurrent', label: 'cfg.routines_max_concurrent.label', description: 'cfg.routines_max_concurrent.desc', type: 'number', min: 0 },
+      { key: 'routines.default_cooldown_secs', label: 'cfg.routines_cooldown.label', description: 'cfg.routines_cooldown.desc', type: 'number', min: 0 },
+    ]
+  },
+  {
+    group: 'cfg.group.safety',
+    settings: [
+      { key: 'safety.max_output_length', label: 'cfg.safety_max_output.label', description: 'cfg.safety_max_output.desc', type: 'number', min: 0 },
+      { key: 'safety.injection_check_enabled', label: 'cfg.safety_injection_check.label', description: 'cfg.safety_injection_check.desc', type: 'boolean' },
+    ]
+  },
+  {
+    group: 'cfg.group.skills',
+    settings: [
+      { key: 'skills.max_active', label: 'cfg.skills_max_active.label', description: 'cfg.skills_max_active.desc', type: 'number', min: 0 },
+      { key: 'skills.max_context_tokens', label: 'cfg.skills_max_tokens.label', description: 'cfg.skills_max_tokens.desc', type: 'number', min: 0 },
+    ]
+  },
+  {
+    group: 'cfg.group.search',
+    settings: [
+      { key: 'search.fusion_strategy', label: 'cfg.search_fusion.label', description: 'cfg.search_fusion.desc',
+        type: 'select', options: ['rrf', 'weighted'] },
+    ]
+  },
+];
+
+function renderSettingsSkeleton(rows) {
+  var html = '<div class="settings-group" style="border:none;background:none">';
+  for (var i = 0; i < (rows || 5); i++) {
+    var w1 = 100 + Math.floor(Math.random() * 60);
+    var w2 = 140 + Math.floor(Math.random() * 60);
+    html += '<div class="skeleton-row"><div class="skeleton-bar" style="width:' + w1 + 'px"></div><div class="skeleton-bar" style="width:' + w2 + 'px"></div></div>';
+  }
+  html += '</div>';
+  return html;
+}
+
+function renderCardsSkeleton(count) {
+  var html = '';
+  for (var i = 0; i < (count || 3); i++) {
+    html += '<div class="skeleton-card"><div class="skeleton-bar" style="width:60%;height:14px"></div><div class="skeleton-bar" style="width:90%;height:10px"></div><div class="skeleton-bar" style="width:40%;height:10px"></div></div>';
+  }
+  return html;
+}
+
+function renderSkeleton(type, count) {
+  count = count || 3;
+  var container = document.createElement('div');
+  container.className = 'skeleton-container';
+  for (var i = 0; i < count; i++) {
+    var el = document.createElement('div');
+    el.className = 'skeleton-' + type;
+    el.innerHTML = '<div class="skeleton-bar shimmer"></div>';
+    container.appendChild(el);
+  }
+  return container;
+}
+
+function loadInferenceSettings() {
+  var container = document.getElementById('settings-inference-content');
+  container.innerHTML = renderSettingsSkeleton(6);
+
+  Promise.all([
+    apiFetch('/api/settings/export'),
+    apiFetch('/api/gateway/status').catch(function() { return {}; }),
+    apiFetch('/v1/models').catch(function() { return { data: [] }; })
+  ]).then(function(results) {
+    var settings = results[0].settings || {};
+    var status = results[1];
+    var modelsData = results[2];
+    var activeValues = {
+      'llm_backend': status.llm_backend,
+      'selected_model': status.llm_model
+    };
+    // Inject available model IDs as suggestions for the selected_model field
+    var modelIds = (modelsData.data || []).map(function(m) { return m.id; }).filter(Boolean);
+    if (modelIds.length > 0) {
+      var llmGroup = INFERENCE_SETTINGS[0];
+      for (var i = 0; i < llmGroup.settings.length; i++) {
+        if (llmGroup.settings[i].key === 'selected_model') {
+          llmGroup.settings[i].suggestions = modelIds;
+          break;
+        }
+      }
+    }
+    container.innerHTML = '';
+    renderStructuredSettingsInto(container, INFERENCE_SETTINGS, settings, activeValues);
+  }).catch(function(err) {
+    container.innerHTML = '<div class="empty-state">' + I18n.t('common.loadFailed') + ': '
+      + escapeHtml(err.message) + '</div>';
+  });
+}
+
+function loadAgentSettings() {
+  loadStructuredSettings('settings-agent-content', AGENT_SETTINGS);
+}
+
+function loadStructuredSettings(containerId, settingsDefs) {
+  var container = document.getElementById(containerId);
+  container.innerHTML = renderSettingsSkeleton(8);
+
+  apiFetch('/api/settings/export').then(function(data) {
+    var settings = data.settings || {};
+    container.innerHTML = '';
+    renderStructuredSettingsInto(container, settingsDefs, settings, {});
+  }).catch(function(err) {
+    container.innerHTML = '<div class="empty-state">' + I18n.t('common.loadFailed') + ': '
+      + escapeHtml(err.message) + '</div>';
+  });
+}
+
+function renderStructuredSettingsInto(container, settingsDefs, settings, activeValues) {
+    for (var gi = 0; gi < settingsDefs.length; gi++) {
+      var groupDef = settingsDefs[gi];
+      var group = document.createElement('div');
+      group.className = 'settings-group';
+
+      var title = document.createElement('div');
+      title.className = 'settings-group-title';
+      title.textContent = I18n.t(groupDef.group);
+      group.appendChild(title);
+
+      var rows = [];
+      for (var si = 0; si < groupDef.settings.length; si++) {
+        var def = groupDef.settings[si];
+        var activeVal = activeValues ? activeValues[def.key] : undefined;
+        var row = renderStructuredSettingsRow(def, settings[def.key], activeVal);
+        if (def.showWhen) {
+          row.setAttribute('data-show-when-key', def.showWhen.key);
+          row.setAttribute('data-show-when-value', def.showWhen.value);
+          var currentVal = settings[def.showWhen.key];
+          if (currentVal === def.showWhen.value) {
+            row.classList.remove('hidden');
+          } else {
+            row.classList.add('hidden');
+          }
+        }
+        rows.push(row);
+        group.appendChild(row);
+      }
+
+      container.appendChild(group);
+
+      // Wire up showWhen reactivity for select fields in this group
+      (function(groupRows, allSettings) {
+        for (var ri = 0; ri < groupRows.length; ri++) {
+          var sel = groupRows[ri].querySelector('.settings-select');
+          if (sel) {
+            sel.addEventListener('change', function() {
+              var changedKey = this.getAttribute('data-setting-key');
+              var changedVal = this.value;
+              for (var rj = 0; rj < groupRows.length; rj++) {
+                var whenKey = groupRows[rj].getAttribute('data-show-when-key');
+                var whenVal = groupRows[rj].getAttribute('data-show-when-value');
+                if (whenKey === changedKey) {
+                  if (changedVal === whenVal) {
+                    groupRows[rj].classList.remove('hidden');
+                  } else {
+                    groupRows[rj].classList.add('hidden');
+                  }
+                }
+              }
+            });
+          }
+        }
+      })(rows, settings);
+    }
+
+    if (container.children.length === 0) {
+      container.innerHTML = '<div class="empty-state">' + I18n.t('settings.noSettings') + '</div>';
+    }
+}
+
+function renderStructuredSettingsRow(def, value, activeValue) {
+  var row = document.createElement('div');
+  row.className = 'settings-row';
+
+  var labelWrap = document.createElement('div');
+  labelWrap.className = 'settings-label-wrap';
+
+  var label = document.createElement('div');
+  label.className = 'settings-label';
+  label.textContent = I18n.t(def.label);
+  labelWrap.appendChild(label);
+
+  if (def.description) {
+    var desc = document.createElement('div');
+    desc.className = 'settings-description';
+    desc.textContent = I18n.t(def.description);
+    labelWrap.appendChild(desc);
+  }
+
+  row.appendChild(labelWrap);
+
+  var inputWrap = document.createElement('div');
+  inputWrap.style.display = 'flex';
+  inputWrap.style.alignItems = 'center';
+  inputWrap.style.gap = '8px';
+
+  var ariaLabel = I18n.t(def.label) + (def.description ? '. ' + I18n.t(def.description) : '');
+  function formatSettingValue(raw) {
+    if (Array.isArray(raw)) return raw.join(', ');
+    if (raw === null || raw === undefined) return '';
+    return String(raw);
+  }
+
+  var activeValueText = formatSettingValue(activeValue);
+  var placeholderText = activeValueText ? I18n.t('settings.envValue', { value: activeValueText }) : (def.placeholder || I18n.t('settings.envDefault'));
+
+  if (def.type === 'boolean') {
+    var toggle = document.createElement('div');
+    toggle.className = 'toggle-switch' + (value === 'true' || value === true ? ' on' : '');
+    toggle.setAttribute('role', 'switch');
+    toggle.setAttribute('aria-checked', value === 'true' || value === true ? 'true' : 'false');
+    toggle.setAttribute('aria-label', ariaLabel);
+    toggle.setAttribute('tabindex', '0');
+
+    var savedIndicator = document.createElement('span');
+    savedIndicator.className = 'settings-saved-indicator';
+    savedIndicator.textContent = I18n.t('settings.saved');
+
+    toggle.addEventListener('click', function() {
+      var isOn = this.classList.toggle('on');
+      this.setAttribute('aria-checked', isOn ? 'true' : 'false');
+      saveSetting(def.key, isOn ? 'true' : 'false', savedIndicator);
+    });
+    toggle.addEventListener('keydown', function(e) {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        this.click();
+      }
+    });
+    inputWrap.appendChild(toggle);
+    inputWrap.appendChild(savedIndicator);
+  } else if (def.type === 'select' && def.options) {
+    var sel = document.createElement('select');
+    sel.className = 'settings-select';
+    sel.setAttribute('data-setting-key', def.key);
+    sel.setAttribute('aria-label', ariaLabel);
+    var emptyOpt = document.createElement('option');
+    emptyOpt.value = '';
+    emptyOpt.textContent = activeValue ? '\u2014 ' + I18n.t('settings.envValue', { value: activeValue }) + ' \u2014' : '\u2014 ' + I18n.t('settings.useEnvDefault') + ' \u2014';
+    if (!value && value !== false && value !== 0) emptyOpt.selected = true;
+    sel.appendChild(emptyOpt);
+    for (var oi = 0; oi < def.options.length; oi++) {
+      var opt = document.createElement('option');
+      opt.value = def.options[oi];
+      opt.textContent = def.options[oi];
+      if (String(value) === def.options[oi]) opt.selected = true;
+      sel.appendChild(opt);
+    }
+    sel.addEventListener('change', (function(k, el) {
+      return function() { saveSetting(k, el.value === '' ? null : el.value); };
+    })(def.key, sel));
+    inputWrap.appendChild(sel);
+  } else if (def.type === 'number') {
+    var numInp = document.createElement('input');
+    numInp.type = 'number';
+    numInp.step = '1';
+    numInp.className = 'settings-input';
+    numInp.setAttribute('aria-label', ariaLabel);
+    numInp.value = (value === null || value === undefined) ? '' : value;
+    if (!value && value !== 0) numInp.placeholder = placeholderText;
+    if (def.min !== undefined) numInp.min = def.min;
+    if (def.max !== undefined) numInp.max = def.max;
+    numInp.addEventListener('change', (function(k, el) {
+      return function() {
+        if (el.value === '') return saveSetting(k, null);
+        var parsed = parseInt(el.value, 10);
+        if (isNaN(parsed)) return;
+        el.value = parsed;
+        saveSetting(k, parsed);
+      };
+    })(def.key, numInp));
+    inputWrap.appendChild(numInp);
+  } else if (def.type === 'list') {
+    var listInp = document.createElement('input');
+    listInp.type = 'text';
+    listInp.className = 'settings-input';
+    listInp.setAttribute('aria-label', ariaLabel);
+    var listValue = '';
+    if (Array.isArray(value)) listValue = value.join(', ');
+    else if (typeof value === 'string') listValue = value;
+    listInp.value = listValue;
+    if (!listValue) listInp.placeholder = placeholderText;
+    listInp.addEventListener('change', (function(k, el) {
+      return function() {
+        if (el.value.trim() === '') return saveSetting(k, null);
+        var items = el.value.split(/[\n,]/).map(function(item) {
+          return item.trim();
+        }).filter(Boolean);
+        saveSetting(k, items);
+      };
+    })(def.key, listInp));
+    inputWrap.appendChild(listInp);
+  } else {
+    var textInp = document.createElement('input');
+    textInp.type = 'text';
+    textInp.className = 'settings-input';
+    textInp.setAttribute('aria-label', ariaLabel);
+    textInp.value = (value === null || value === undefined) ? '' : String(value);
+    if (!value) textInp.placeholder = placeholderText;
+    // Attach datalist for autocomplete suggestions (e.g., model list)
+    if (def.suggestions && def.suggestions.length > 0) {
+      var dlId = 'dl-' + def.key.replace(/\./g, '-');
+      var dl = document.createElement('datalist');
+      dl.id = dlId;
+      for (var di = 0; di < def.suggestions.length; di++) {
+        var dlOpt = document.createElement('option');
+        dlOpt.value = def.suggestions[di];
+        dl.appendChild(dlOpt);
+      }
+      textInp.setAttribute('list', dlId);
+      inputWrap.appendChild(dl);
+    }
+    textInp.addEventListener('change', (function(k, el) {
+      return function() { saveSetting(k, el.value === '' ? null : el.value); };
+    })(def.key, textInp));
+    inputWrap.appendChild(textInp);
+  }
+
+  var saved = document.createElement('span');
+  saved.className = 'settings-saved-indicator';
+  saved.textContent = '\u2713 ' + I18n.t('settings.saved');
+  saved.setAttribute('data-key', def.key);
+  saved.setAttribute('role', 'status');
+  saved.setAttribute('aria-live', 'polite');
+  inputWrap.appendChild(saved);
+
+  row.appendChild(inputWrap);
+  return row;
+}
+
+var RESTART_REQUIRED_KEYS = ['llm_backend', 'selected_model', 'ollama_base_url', 'openai_compatible_base_url',
+  'bedrock_region', 'bedrock_cross_region', 'bedrock_profile', 'embeddings.enabled', 'embeddings.provider', 'embeddings.model',
+  'agent.auto_approve_tools', 'tunnel.provider', 'tunnel.public_url', 'gateway.rate_limit', 'gateway.max_connections'];
+
+var _settingsSavedTimers = {};
+
+function saveSetting(key, value) {
+  var method = (value === null || value === undefined) ? 'DELETE' : 'PUT';
+  var opts = { method: method };
+  if (method === 'PUT') opts.body = { value: value };
+  apiFetch('/api/settings/' + encodeURIComponent(key), opts).then(function() {
+    var indicator = document.querySelector('.settings-saved-indicator[data-key="' + key + '"]');
+    if (indicator) {
+      if (_settingsSavedTimers[key]) clearTimeout(_settingsSavedTimers[key]);
+      indicator.classList.add('visible');
+      _settingsSavedTimers[key] = setTimeout(function() { indicator.classList.remove('visible'); }, 2000);
+    }
+    // Show restart banner for inference settings
+    if (RESTART_REQUIRED_KEYS.indexOf(key) !== -1) {
+      showRestartBanner();
+    }
+  }).catch(function(err) {
+    showToast('Failed to save ' + key + ': ' + err.message, 'error');
+  });
+}
+
+function showRestartBanner() {
+  var container = document.querySelector('.settings-content');
+  if (!container || container.querySelector('.restart-banner')) return;
+  var banner = document.createElement('div');
+  banner.className = 'restart-banner';
+  banner.setAttribute('role', 'alert');
+  var textSpan = document.createElement('span');
+  textSpan.className = 'restart-banner-text';
+  textSpan.textContent = '\u26A0\uFE0F ' + I18n.t('settings.restartRequired');
+  banner.appendChild(textSpan);
+  var restartBtn = document.createElement('button');
+  restartBtn.className = 'restart-banner-btn';
+  restartBtn.textContent = I18n.t('settings.restartNow');
+  restartBtn.addEventListener('click', function() { triggerRestart(); });
+  banner.appendChild(restartBtn);
+  container.insertBefore(banner, container.firstChild);
+}
+
+function loadMcpServers() {
+  var mcpList = document.getElementById('mcp-servers-list');
+  mcpList.innerHTML = renderCardsSkeleton(2);
+
+  Promise.all([
+    apiFetch('/api/extensions').catch(function() { return { extensions: [] }; }),
+    apiFetch('/api/extensions/registry').catch(function() { return { entries: [] }; }),
+  ]).then(function(results) {
+    var extData = results[0];
+    var registryData = results[1];
+    var mcpEntries = (registryData.entries || []).filter(function(e) { return e.kind === 'mcp_server'; });
+    var installedMcp = (extData.extensions || []).filter(function(e) { return e.kind === 'mcp_server'; });
+
+    mcpList.innerHTML = '';
+    var renderedNames = {};
+
+    // Registry entries (cross-referenced with installed)
+    for (var i = 0; i < mcpEntries.length; i++) {
+      renderedNames[mcpEntries[i].name] = true;
+      var installedExt = installedMcp.find(function(e) { return e.name === mcpEntries[i].name; });
+      mcpList.appendChild(renderMcpServerCard(mcpEntries[i], installedExt));
+    }
+
+    // Custom installed MCP servers not in registry
+    for (var j = 0; j < installedMcp.length; j++) {
+      if (!renderedNames[installedMcp[j].name]) {
+        mcpList.appendChild(renderExtensionCard(installedMcp[j]));
+      }
+    }
+
+    if (mcpList.children.length === 0) {
+      mcpList.innerHTML = '<div class="empty-state">' + I18n.t('mcp.noServers') + '</div>';
+    }
+  }).catch(function(err) {
+    mcpList.innerHTML = '<div class="empty-state">' + I18n.t('common.loadFailed') + ': '
+      + escapeHtml(err.message) + '</div>';
+  });
+}
+
+function loadChannelsStatus() {
+  var container = document.getElementById('settings-channels-content');
+  container.innerHTML = renderCardsSkeleton(4);
+
+  Promise.all([
+    apiFetch('/api/gateway/status').catch(function() { return {}; }),
+    apiFetch('/api/extensions').catch(function() { return { extensions: [] }; }),
+    apiFetch('/api/extensions/registry').catch(function() { return { entries: [] }; }),
+  ]).then(function(results) {
+    var status = results[0];
+    var extensions = results[1].extensions || [];
+    var registry = results[2].entries || [];
+
+    container.innerHTML = '';
+
+    // Built-in Channels section
+    var builtinSection = document.createElement('div');
+    builtinSection.className = 'extensions-section';
+    var builtinTitle = document.createElement('h3');
+    builtinTitle.textContent = I18n.t('channels.builtin');
+    builtinSection.appendChild(builtinTitle);
+    var builtinList = document.createElement('div');
+    builtinList.className = 'extensions-list';
+
+    builtinList.appendChild(renderBuiltinChannelCard(
+      I18n.t('channels.webGateway'),
+      I18n.t('channels.webGatewayDesc'),
+      true,
+      'SSE: ' + (status.sse_connections || 0) + ' \u00B7 WS: ' + (status.ws_connections || 0)
+    ));
+
+    var enabledChannels = status.enabled_channels || [];
+
+    builtinList.appendChild(renderBuiltinChannelCard(
+      I18n.t('channels.httpWebhook'),
+      I18n.t('channels.httpWebhookDesc'),
+      enabledChannels.indexOf('http') !== -1,
+      I18n.t('channels.configureVia', { env: 'ENABLE_HTTP=true' })
+    ));
+
+    builtinList.appendChild(renderBuiltinChannelCard(
+      I18n.t('channels.cli'),
+      I18n.t('channels.cliDesc'),
+      enabledChannels.indexOf('cli') !== -1,
+      I18n.t('channels.runWith', { cmd: 'ironclaw run --cli' })
+    ));
+
+    builtinList.appendChild(renderBuiltinChannelCard(
+      I18n.t('channels.repl'),
+      I18n.t('channels.replDesc'),
+      enabledChannels.indexOf('repl') !== -1,
+      I18n.t('channels.runWith', { cmd: 'ironclaw run --repl' })
+    ));
+
+    builtinSection.appendChild(builtinList);
+    container.appendChild(builtinSection);
+
+    // Messaging Channels section — use extension cards with full stepper/pairing UI
+    var channelEntries = registry.filter(function(e) {
+      return e.kind === 'wasm_channel' || e.kind === 'channel';
+    });
+    var installedChannels = extensions.filter(function(e) {
+      return e.kind === 'wasm_channel';
+    });
+
+    if (channelEntries.length > 0 || installedChannels.length > 0) {
+      var messagingSection = document.createElement('div');
+      messagingSection.className = 'extensions-section';
+      var messagingTitle = document.createElement('h3');
+      messagingTitle.textContent = I18n.t('channels.messaging');
+      messagingSection.appendChild(messagingTitle);
+      var messagingList = document.createElement('div');
+      messagingList.className = 'extensions-list';
+
+      var renderedNames = {};
+
+      // Registry entries: show full ext card if installed, available card if not
+      for (var i = 0; i < channelEntries.length; i++) {
+        var entry = channelEntries[i];
+        renderedNames[entry.name] = true;
+        var installed = null;
+        for (var k = 0; k < installedChannels.length; k++) {
+          if (installedChannels[k].name === entry.name) { installed = installedChannels[k]; break; }
+        }
+        if (installed) {
+          messagingList.appendChild(renderExtensionCard(installed));
+        } else {
+          messagingList.appendChild(renderAvailableExtensionCard(entry));
+        }
+      }
+
+      // Installed channels not in registry (custom installs)
+      for (var j = 0; j < installedChannels.length; j++) {
+        if (!renderedNames[installedChannels[j].name]) {
+          messagingList.appendChild(renderExtensionCard(installedChannels[j]));
+        }
+      }
+
+      messagingSection.appendChild(messagingList);
+      container.appendChild(messagingSection);
+    }
+  });
+}
+
+function renderBuiltinChannelCard(name, description, active, detail) {
+  var card = document.createElement('div');
+  card.className = 'ext-card ' + (active ? 'state-active' : 'state-inactive');
+
+  var header = document.createElement('div');
+  header.className = 'ext-header';
+
+  var nameEl = document.createElement('span');
+  nameEl.className = 'ext-name';
+  nameEl.textContent = name;
+  header.appendChild(nameEl);
+
+  var kindEl = document.createElement('span');
+  kindEl.className = 'ext-kind kind-builtin';
+  kindEl.textContent = I18n.t('ext.builtin');
+  header.appendChild(kindEl);
+
+  var statusDot = document.createElement('span');
+  statusDot.className = 'ext-auth-dot ' + (active ? 'authed' : 'unauthed');
+  statusDot.title = active ? I18n.t('ext.active') : I18n.t('ext.inactive');
+  header.appendChild(statusDot);
+
+  card.appendChild(header);
+
+  var desc = document.createElement('div');
+  desc.className = 'ext-desc';
+  desc.textContent = description;
+  card.appendChild(desc);
+
+  if (detail) {
+    var detailEl = document.createElement('div');
+    detailEl.className = 'ext-url';
+    detailEl.textContent = detail;
+    card.appendChild(detailEl);
+  }
+
+  var actions = document.createElement('div');
+  actions.className = 'ext-actions';
+  var label = document.createElement('span');
+  label.className = 'ext-active-label';
+  label.textContent = active ? I18n.t('ext.active') : I18n.t('ext.inactive');
+  actions.appendChild(label);
+  card.appendChild(actions);
+
+  return card;
+}
+
+// --- Networking Settings ---
+
+var NETWORKING_SETTINGS = [
+  {
+    group: 'cfg.group.tunnel',
+    settings: [
+      { key: 'tunnel.provider', label: 'cfg.tunnel_provider.label', description: 'cfg.tunnel_provider.desc',
+        type: 'select', options: ['none', 'cloudflare', 'ngrok', 'tailscale', 'custom'] },
+      { key: 'tunnel.public_url', label: 'cfg.tunnel_public_url.label', description: 'cfg.tunnel_public_url.desc', type: 'text' },
+    ]
+  },
+  {
+    group: 'cfg.group.gateway',
+    settings: [
+      { key: 'gateway.rate_limit', label: 'cfg.gateway_rate_limit.label', description: 'cfg.gateway_rate_limit.desc', type: 'number', min: 0 },
+      { key: 'gateway.max_connections', label: 'cfg.gateway_max_connections.label', description: 'cfg.gateway_max_connections.desc', type: 'number', min: 0 },
+    ]
+  },
+];
+
+function loadNetworkingSettings() {
+  var container = document.getElementById('settings-networking-content');
+  container.innerHTML = renderSettingsSkeleton(4);
+
+  apiFetch('/api/settings/export').then(function(data) {
+    var settings = data.settings || {};
+    container.innerHTML = '';
+    renderStructuredSettingsInto(container, NETWORKING_SETTINGS, settings, {});
+  }).catch(function(err) {
+    container.innerHTML = '<div class="empty-state">' + I18n.t('common.loadFailed') + ': '
+      + escapeHtml(err.message) + '</div>';
+  });
+}
+
 // --- Toasts ---
 
 function showToast(message, type) {
   const container = document.getElementById('toasts');
   const toast = document.createElement('div');
   toast.className = 'toast toast-' + (type || 'info');
-  toast.textContent = message;
+
+  // Icon prefix
+  const icon = document.createElement('span');
+  icon.className = 'toast-icon';
+  if (type === 'success') icon.textContent = '\u2713';
+  else if (type === 'error') icon.textContent = '\u2717';
+  else icon.textContent = '\u2139';
+  toast.appendChild(icon);
+
+  // Message text
+  const text = document.createElement('span');
+  text.textContent = message;
+  toast.appendChild(text);
+
+  // Countdown bar
+  const countdown = document.createElement('div');
+  countdown.className = 'toast-countdown';
+  toast.appendChild(countdown);
+
   container.appendChild(toast);
   // Trigger slide-in
   requestAnimationFrame(() => toast.classList.add('visible'));
   setTimeout(() => {
-    toast.classList.remove('visible');
-    toast.addEventListener('transitionend', () => toast.remove());
+    toast.classList.add('dismissing');
+    toast.addEventListener('transitionend', () => toast.remove(), { once: true });
+    // Fallback removal if transitionend doesn't fire
+    setTimeout(() => { if (toast.parentNode) toast.remove(); }, 500);
   }, 4000);
 }
+
+// --- Welcome Card (Phase 4.2) ---
+
+function showWelcomeCard() {
+  const container = document.getElementById('chat-messages');
+  if (!container || container.querySelector('.welcome-card')) return;
+  const card = document.createElement('div');
+  card.className = 'welcome-card';
+
+  const heading = document.createElement('h2');
+  heading.className = 'welcome-heading';
+  heading.textContent = I18n.t('welcome.heading');
+  card.appendChild(heading);
+
+  const desc = document.createElement('p');
+  desc.className = 'welcome-description';
+  desc.textContent = I18n.t('welcome.description');
+  card.appendChild(desc);
+
+  const chips = document.createElement('div');
+  chips.className = 'welcome-chips';
+
+  const suggestions = [
+    { key: 'welcome.runTool', fallback: 'Run a tool' },
+    { key: 'welcome.checkJobs', fallback: 'Check job status' },
+    { key: 'welcome.searchMemory', fallback: 'Search memory' },
+    { key: 'welcome.manageRoutines', fallback: 'Manage routines' },
+    { key: 'welcome.systemStatus', fallback: 'System status' },
+    { key: 'welcome.writeCode', fallback: 'Write code' },
+  ];
+  suggestions.forEach(({ key, fallback }) => {
+    const chip = document.createElement('button');
+    chip.className = 'welcome-chip';
+    chip.textContent = I18n.t(key) || fallback;
+    chip.addEventListener('click', () => sendSuggestion(chip));
+    chips.appendChild(chip);
+  });
+
+  card.appendChild(chips);
+  container.appendChild(card);
+}
+
+function renderEmptyState({ icon, title, hint, action }) {
+  const wrapper = document.createElement('div');
+  wrapper.className = 'empty-state-card';
+
+  if (icon) {
+    const iconEl = document.createElement('div');
+    iconEl.className = 'empty-state-icon';
+    iconEl.textContent = icon;
+    wrapper.appendChild(iconEl);
+  }
+
+  if (title) {
+    const titleEl = document.createElement('div');
+    titleEl.className = 'empty-state-title';
+    titleEl.textContent = title;
+    wrapper.appendChild(titleEl);
+  }
+
+  if (hint) {
+    const hintEl = document.createElement('div');
+    hintEl.className = 'empty-state-hint';
+    hintEl.textContent = hint;
+    wrapper.appendChild(hintEl);
+  }
+
+  if (action) {
+    const btn = document.createElement('button');
+    btn.className = 'empty-state-action';
+    btn.textContent = action.label || 'Go';
+    if (action.onClick) btn.addEventListener('click', action.onClick);
+    wrapper.appendChild(btn);
+  }
+
+  return wrapper;
+}
+
+function sendSuggestion(btn) {
+  const textarea = document.getElementById('chat-input');
+  if (textarea) {
+    textarea.value = btn.textContent;
+    sendMessage();
+  }
+}
+
+function removeWelcomeCard() {
+  const card = document.querySelector('.welcome-card');
+  if (card) card.remove();
+}
+
+// --- Connection Status Banner (Phase 4.1) ---
+
+function showConnectionBanner(message, type) {
+  const existing = document.getElementById('connection-banner');
+  if (existing) existing.remove();
+
+  const banner = document.createElement('div');
+  banner.id = 'connection-banner';
+  banner.className = 'connection-banner connection-banner-' + type;
+  banner.textContent = message;
+  document.body.appendChild(banner);
+}
+
+// --- Keyboard Shortcut Helpers (Phase 7.4) ---
+
+function focusMemorySearch() {
+  const memSearch = document.getElementById('memory-search');
+  if (memSearch) {
+    if (currentTab !== 'memory') switchTab('memory');
+    memSearch.focus();
+  }
+}
+
+function toggleShortcutsOverlay() {
+  let overlay = document.getElementById('shortcuts-overlay');
+  if (!overlay) {
+    overlay = document.createElement('div');
+    overlay.id = 'shortcuts-overlay';
+    overlay.className = 'shortcuts-overlay';
+    overlay.style.display = 'none';
+    overlay.innerHTML =
+      '<div class="shortcuts-content">'
+      + '<h3>Keyboard Shortcuts</h3>'
+      + '<div class="shortcut-row"><kbd>Ctrl/Cmd + 1-5</kbd> Switch tabs</div>'
+      + '<div class="shortcut-row"><kbd>Ctrl/Cmd + N</kbd> New thread</div>'
+      + '<div class="shortcut-row"><kbd>Ctrl/Cmd + K</kbd> Focus search/input</div>'
+      + '<div class="shortcut-row"><kbd>Ctrl/Cmd + /</kbd> Toggle this overlay</div>'
+      + '<div class="shortcut-row"><kbd>Escape</kbd> Close modals</div>'
+      + '<button class="shortcuts-close">Close</button>'
+      + '</div>';
+    document.body.appendChild(overlay);
+    overlay.querySelector('.shortcuts-close').addEventListener('click', () => {
+      overlay.style.display = 'none';
+    });
+    overlay.addEventListener('click', (e) => {
+      if (e.target === overlay) overlay.style.display = 'none';
+    });
+  }
+  overlay.style.display = overlay.style.display === 'flex' ? 'none' : 'flex';
+}
+
+function closeModals() {
+  // Close shortcuts overlay
+  const shortcutsOverlay = document.getElementById('shortcuts-overlay');
+  if (shortcutsOverlay) shortcutsOverlay.style.display = 'none';
+
+  // Close restart confirmation modal
+  const restartModal = document.getElementById('restart-confirm-modal');
+  if (restartModal) restartModal.style.display = 'none';
+}
+
+// --- ARIA Accessibility (Phase 5.2) ---
+
+function applyAriaAttributes() {
+  const tabBar = document.querySelector('.tab-bar');
+  if (tabBar) tabBar.setAttribute('role', 'tablist');
+
+  document.querySelectorAll('.tab-bar button[data-tab]').forEach(btn => {
+    btn.setAttribute('role', 'tab');
+    btn.setAttribute('aria-selected', btn.classList.contains('active') ? 'true' : 'false');
+  });
+
+  document.querySelectorAll('.tab-panel').forEach(panel => {
+    panel.setAttribute('role', 'tabpanel');
+    panel.setAttribute('aria-hidden', panel.classList.contains('active') ? 'false' : 'true');
+  });
+}
+
+// Apply ARIA attributes on initial load
+applyAriaAttributes();
 
 // --- Utilities ---
 
@@ -4617,6 +5954,19 @@ document.getElementById('wasm-install-btn').addEventListener('click', () => inst
 document.getElementById('mcp-add-btn').addEventListener('click', () => addMcpServer());
 document.getElementById('skill-search-btn').addEventListener('click', () => searchClawHub());
 document.getElementById('skill-install-btn').addEventListener('click', () => installSkillFromForm());
+document.getElementById('settings-export-btn').addEventListener('click', () => exportSettings());
+document.getElementById('settings-import-btn').addEventListener('click', () => importSettings());
+document.getElementById('settings-back-btn')?.addEventListener('click', () => settingsBack());
+
+// --- Mobile: close thread sidebar on outside click ---
+document.addEventListener('click', function(e) {
+  const sidebar = document.getElementById('thread-sidebar');
+  if (sidebar && sidebar.classList.contains('expanded-mobile') &&
+      !sidebar.contains(e.target)) {
+    sidebar.classList.remove('expanded-mobile');
+    document.getElementById('thread-toggle-btn').innerHTML = '&raquo;';
+  }
+});
 
 // --- Delegated Event Handlers (for dynamically generated HTML) ---
 
@@ -4684,4 +6034,126 @@ document.addEventListener('click', function(e) {
 
 document.getElementById('language-btn').addEventListener('click', function() {
   if (typeof toggleLanguageMenu === 'function') toggleLanguageMenu();
+});
+
+// --- Confirmation Modal ---
+
+var _confirmModalCallback = null;
+
+function showConfirmModal(title, message, onConfirm, confirmLabel, confirmClass) {
+  var modal = document.getElementById('confirm-modal');
+  document.getElementById('confirm-modal-title').textContent = title;
+  document.getElementById('confirm-modal-message').textContent = message || '';
+  document.getElementById('confirm-modal-message').style.display = message ? '' : 'none';
+  var btn = document.getElementById('confirm-modal-btn');
+  btn.textContent = confirmLabel || I18n.t('btn.confirm');
+  btn.className = confirmClass || 'btn-danger';
+  _confirmModalCallback = onConfirm;
+  modal.style.display = 'flex';
+  btn.focus();
+}
+
+function closeConfirmModal() {
+  document.getElementById('confirm-modal').style.display = 'none';
+  _confirmModalCallback = null;
+}
+
+document.getElementById('confirm-modal-btn').addEventListener('click', function() {
+  if (_confirmModalCallback) _confirmModalCallback();
+  closeConfirmModal();
+});
+document.getElementById('confirm-modal-cancel-btn').addEventListener('click', closeConfirmModal);
+document.getElementById('confirm-modal').addEventListener('click', function(e) {
+  if (e.target === this) closeConfirmModal();
+});
+document.addEventListener('keydown', function(e) {
+  if (e.key === 'Escape' && document.getElementById('confirm-modal').style.display === 'flex') {
+    closeConfirmModal();
+  }
+});
+
+// --- Settings Import/Export ---
+
+function exportSettings() {
+  apiFetch('/api/settings/export').then(function(data) {
+    var blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = 'ironclaw-settings.json';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    showToast(I18n.t('settings.exportSuccess'), 'success');
+  }).catch(function(err) {
+    showToast(I18n.t('settings.exportFailed', { message: err.message }), 'error');
+  });
+}
+
+function importSettings() {
+  var input = document.createElement('input');
+  input.type = 'file';
+  input.accept = '.json,application/json';
+  input.addEventListener('change', function() {
+    if (!input.files || !input.files[0]) return;
+    var reader = new FileReader();
+    reader.onload = function() {
+      try {
+        var data = JSON.parse(reader.result);
+        apiFetch('/api/settings/import', {
+          method: 'POST',
+          body: data,
+        }).then(function() {
+          showToast(I18n.t('settings.importSuccess'), 'success');
+          loadSettingsSubtab(currentSettingsSubtab);
+        }).catch(function(err) {
+          showToast(I18n.t('settings.importFailed', { message: err.message }), 'error');
+        });
+      } catch (e) {
+        showToast(I18n.t('settings.importFailed', { message: e.message }), 'error');
+      }
+    };
+    reader.readAsText(input.files[0]);
+  });
+  input.click();
+}
+
+// --- Settings Search ---
+
+document.getElementById('settings-search-input').addEventListener('input', function() {
+  var query = this.value.toLowerCase();
+  var activePanel = document.querySelector('.settings-subpanel.active');
+  if (!activePanel) return;
+  var rows = activePanel.querySelectorAll('.settings-row');
+  if (rows.length === 0) return;
+  var visibleCount = 0;
+  rows.forEach(function(row) {
+    var text = row.textContent.toLowerCase();
+    if (query === '' || text.indexOf(query) !== -1) {
+      row.classList.remove('search-hidden');
+      if (!row.classList.contains('hidden')) visibleCount++;
+    } else {
+      row.classList.add('search-hidden');
+    }
+  });
+  // Show/hide group titles based on visible children
+  var groups = activePanel.querySelectorAll('.settings-group');
+  groups.forEach(function(group) {
+    var visibleRows = group.querySelectorAll('.settings-row:not(.search-hidden):not(.hidden)');
+    if (visibleRows.length === 0 && query !== '') {
+      group.style.display = 'none';
+    } else {
+      group.style.display = '';
+    }
+  });
+  // Show/hide empty state
+  var existingEmpty = activePanel.querySelector('.settings-search-empty');
+  if (existingEmpty) existingEmpty.remove();
+  if (query !== '' && visibleCount === 0) {
+    var empty = document.createElement('div');
+    empty.className = 'settings-search-empty';
+    empty.textContent = I18n.t('settings.noMatchingSettings', { query: this.value });
+    activePanel.appendChild(empty);
+  }
 });

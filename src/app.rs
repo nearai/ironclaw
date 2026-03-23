@@ -25,7 +25,7 @@ use crate::tools::ToolRegistry;
 use crate::tools::mcp::{McpProcessManager, McpSessionManager};
 use crate::tools::wasm::SharedCredentialRegistry;
 use crate::tools::wasm::WasmToolRuntime;
-use crate::workspace::{EmbeddingProvider, Workspace};
+use crate::workspace::{EmbeddingCacheConfig, EmbeddingProvider, Workspace};
 
 /// Fully initialized application components, ready for channel wiring
 /// and agent construction.
@@ -56,6 +56,7 @@ pub struct AppComponents {
     pub session: Arc<SessionManager>,
     pub catalog_entries: Vec<crate::extensions::RegistryEntry>,
     pub dev_loaded_tool_names: Vec<String>,
+    pub builder: Option<Arc<dyn crate::tools::SoftwareBuilder>>,
 }
 
 /// Options that control optional init phases.
@@ -280,6 +281,7 @@ impl AppBuilder {
             Arc<ToolRegistry>,
             Option<Arc<dyn EmbeddingProvider>>,
             Option<Arc<Workspace>>,
+            Option<Arc<dyn crate::tools::SoftwareBuilder>>,
         ),
         anyhow::Error,
     > {
@@ -310,12 +312,34 @@ impl AppBuilder {
             .create_provider(&self.config.llm.nearai.base_url, self.session.clone());
 
         // Register memory tools if database is available
+        let workspace_user_id = self
+            .config
+            .channels
+            .gateway
+            .as_ref()
+            .map(|gw| gw.user_id.as_str())
+            .unwrap_or("default");
         let workspace = if let Some(ref db) = self.db {
-            let mut ws = Workspace::new_with_db(&self.config.owner_id, db.clone())
+            let emb_cache_config = EmbeddingCacheConfig {
+                max_entries: self.config.embeddings.cache_size,
+            };
+            let mut ws = Workspace::new_with_db(workspace_user_id, db.clone())
                 .with_search_config(&self.config.search);
+
             if let Some(ref emb) = embeddings {
-                ws = ws.with_embeddings(emb.clone());
+                ws = ws.with_embeddings_cached(emb.clone(), emb_cache_config);
             }
+
+            // Wire workspace-level settings (read scopes, memory layers)
+            if !self.config.workspace.read_scopes.is_empty() {
+                ws = ws.with_additional_read_scopes(self.config.workspace.read_scopes.clone());
+                tracing::info!(
+                    user_id = workspace_user_id,
+                    read_scopes = ?ws.read_user_ids(),
+                    "Workspace configured with multi-scope reads"
+                );
+            }
+            ws = ws.with_memory_layers(self.config.workspace.memory_layers.clone());
             let ws = Arc::new(ws);
             tools.register_memory_tools(Arc::clone(&ws));
             Some(ws)
@@ -367,16 +391,19 @@ impl AppBuilder {
         }
 
         // Register builder tool if enabled
-        if self.config.builder.enabled
+        let builder = if self.config.builder.enabled
             && (self.config.agent.allow_local_tools || !self.config.sandbox.enabled)
         {
-            tools
+            let b = tools
                 .register_builder_tool(llm.clone(), Some(self.config.builder.to_builder_config()))
                 .await;
             tracing::debug!("Builder mode enabled");
-        }
+            Some(b)
+        } else {
+            None
+        };
 
-        Ok((safety, tools, embeddings, workspace))
+        Ok((safety, tools, embeddings, workspace, builder))
     }
 
     /// Phase 5: Load WASM tools, MCP servers, and create extension manager.
@@ -520,7 +547,7 @@ impl AppBuilder {
                                             server_name,
                                             e
                                         );
-                                        return;
+                                        return None;
                                     }
                                 };
 
@@ -537,6 +564,10 @@ impl AppBuilder {
                                                     tool_count,
                                                     server_name
                                                 );
+                                                return Some((
+                                                    server_name,
+                                                    Arc::new(client),
+                                                ));
                                             }
                                             Err(e) => {
                                                 tracing::warn!(
@@ -567,14 +598,27 @@ impl AppBuilder {
                                         }
                                     }
                                 }
+                                None
                             });
                         }
 
+                        let mut startup_clients = Vec::new();
                         while let Some(result) = join_set.join_next().await {
-                            if let Err(e) = result {
-                                tracing::warn!("MCP server loading task panicked: {}", e);
+                            match result {
+                                Ok(Some(client_pair)) => {
+                                    startup_clients.push(client_pair);
+                                }
+                                Ok(None) => {}
+                                Err(e) => {
+                                    if e.is_panic() {
+                                        tracing::error!("MCP server loading task panicked: {}", e);
+                                    } else {
+                                        tracing::warn!("MCP server loading task failed: {}", e);
+                                    }
+                                }
                             }
                         }
+                        return startup_clients;
                     }
                     Err(e) => {
                         if matches!(
@@ -592,10 +636,12 @@ impl AppBuilder {
                         }
                     }
                 }
+                Vec::new()
             }
         };
 
-        let (dev_loaded_tool_names, _) = tokio::join!(wasm_tools_future, mcp_servers_future);
+        let (dev_loaded_tool_names, startup_mcp_clients) =
+            tokio::join!(wasm_tools_future, mcp_servers_future);
 
         // Load registry catalog entries for extension discovery
         let mut catalog_entries = match crate::registry::RegistryCatalog::load_or_embedded() {
@@ -657,6 +703,17 @@ impl AppBuilder {
             ));
             tools.register_extension_tools(Arc::clone(&manager));
             tracing::debug!("Extension manager initialized with in-chat discovery tools");
+
+            if !startup_mcp_clients.is_empty() {
+                tracing::info!(
+                    count = startup_mcp_clients.len(),
+                    "Injecting startup MCP clients into extension manager"
+                );
+                for (name, client) in startup_mcp_clients {
+                    manager.inject_mcp_client(name, client).await;
+                }
+            }
+
             Some(manager)
         };
 
@@ -683,10 +740,14 @@ impl AppBuilder {
         self.init_database().await?;
         self.init_secrets().await?;
 
-        // Post-init validation: if a non-nearai backend was selected but
-        // credentials were never resolved (deferred resolution found no keys),
-        // fail early with a clear error instead of a confusing runtime failure.
-        if self.config.llm.backend != "nearai" && self.config.llm.provider.is_none() {
+        // Post-init validation: backends with dedicated config (nearai, gemini_oauth,
+        // bedrock, openai_codex) handle their own credential resolution. For registry-based
+        // backends, fail early if no provider config was resolved.
+        if !matches!(
+            self.config.llm.backend.as_str(),
+            "nearai" | "gemini_oauth" | "bedrock" | "openai_codex"
+        ) && self.config.llm.provider.is_none()
+        {
             let backend = &self.config.llm.backend;
             anyhow::bail!(
                 "LLM_BACKEND={backend} is configured but no credentials were found. \
@@ -699,7 +760,7 @@ impl AppBuilder {
         } else {
             self.init_llm().await?
         };
-        let (safety, tools, embeddings, workspace) = self.init_tools(&llm).await?;
+        let (safety, tools, embeddings, workspace, builder) = self.init_tools(&llm).await?;
 
         // Create hook registry early so runtime extension activation can register hooks.
         let hooks = Arc::new(HookRegistry::new());
@@ -714,6 +775,17 @@ impl AppBuilder {
             catalog_entries,
             dev_loaded_tool_names,
         ) = self.init_extensions(&tools, &hooks).await?;
+
+        // Load bootstrap-completed flag from settings so that existing users
+        // who already completed onboarding don't re-get bootstrap injection.
+        if let Some(ref ws) = workspace {
+            let toml_path = crate::settings::Settings::default_toml_path();
+            if let Ok(Some(settings)) = crate::settings::Settings::load_toml(&toml_path)
+                && settings.profile_onboarding_completed
+            {
+                ws.mark_bootstrap_completed();
+            }
+        }
 
         // Seed workspace and backfill embeddings
         if let Some(ref ws) = workspace {
@@ -819,6 +891,7 @@ impl AppBuilder {
             session: self.session,
             catalog_entries,
             dev_loaded_tool_names,
+            builder,
         })
     }
 }
