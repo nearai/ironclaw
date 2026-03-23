@@ -206,6 +206,8 @@ CREATE TABLE IF NOT EXISTS memory_documents (
     agent_id TEXT,
     path TEXT NOT NULL,
     content TEXT NOT NULL,
+    summary_l0 TEXT,
+    summary_l1 TEXT,
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     metadata TEXT NOT NULL DEFAULT '{}',
@@ -723,6 +725,14 @@ CREATE INDEX IF NOT EXISTS idx_routines_event_triggers
     WHERE enabled = 1 AND trigger_type IN ('event', 'system_event');
 
 PRAGMA foreign_keys=ON;
+"#,
+    ),
+    (
+        14,
+        "workspace_tiered_summaries",
+        r#"
+ALTER TABLE memory_documents ADD COLUMN summary_l0 TEXT;
+ALTER TABLE memory_documents ADD COLUMN summary_l1 TEXT;
 "#,
     ),
 ];

@@ -19,7 +19,7 @@ use async_trait::async_trait;
 
 use crate::context::JobContext;
 use crate::tools::tool::{Tool, ToolError, ToolOutput, require_str};
-use crate::workspace::{Workspace, paths};
+use crate::workspace::{SearchDetailLevel, Workspace, paths};
 
 /// Detect paths that are clearly local filesystem references, not workspace-memory docs.
 ///
@@ -81,7 +81,7 @@ impl Tool for MemorySearchTool {
     fn description(&self) -> &str {
         "Search past memories, decisions, and context. MUST be called before answering \
          questions about prior work, decisions, dates, people, preferences, or todos. \
-         Returns relevant snippets with relevance scores."
+         Returns relevant snippets with relevance scores and tiered summaries."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -98,6 +98,12 @@ impl Tool for MemorySearchTool {
                     "default": 5,
                     "minimum": 1,
                     "maximum": 20
+                },
+                "detail": {
+                    "type": "string",
+                    "enum": ["l0", "l1", "l2"],
+                    "description": "Which summary tier to return as the content field (default: l1)",
+                    "default": "l1"
                 }
             },
             "required": ["query"]
@@ -119,9 +125,29 @@ impl Tool for MemorySearchTool {
             .unwrap_or(5)
             .min(20) as usize;
 
+        let detail = match params
+            .get("detail")
+            .and_then(|v| v.as_str())
+            .unwrap_or("l1")
+        {
+            "l0" => SearchDetailLevel::L0,
+            "l1" => SearchDetailLevel::L1,
+            "l2" => SearchDetailLevel::L2,
+            other => {
+                return Err(ToolError::InvalidParameters(format!(
+                    "invalid detail '{other}', expected one of: l0, l1, l2"
+                )));
+            }
+        };
+
         let results = self
             .workspace
-            .search(query, limit)
+            .search_with_config(
+                query,
+                crate::workspace::SearchConfig::default()
+                    .with_limit(limit)
+                    .with_detail(detail),
+            )
             .await
             .map_err(|e| ToolError::ExecutionFailed(format!("Search failed: {}", e)))?;
 
@@ -130,6 +156,8 @@ impl Tool for MemorySearchTool {
             "query": query,
             "results": results.into_iter().map(|r| serde_json::json!({
                 "content": r.content,
+                "summary_l0": r.summary_l0,
+                "summary_l1": r.summary_l1,
                 "score": r.score,
                 "path": r.document_path,
                 "document_id": r.document_id.to_string(),

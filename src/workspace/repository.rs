@@ -15,6 +15,7 @@ use crate::workspace::document::{MemoryChunk, MemoryDocument, WorkspaceEntry};
 use crate::workspace::search::{RankedResult, SearchConfig, SearchResult, fuse_results};
 
 /// Database repository for workspace operations.
+#[derive(Clone)]
 pub struct Repository {
     pool: Pool,
 }
@@ -50,7 +51,7 @@ impl Repository {
             .query_opt(
                 r#"
                 SELECT id, user_id, agent_id, path, content,
-                       created_at, updated_at, metadata
+                       summary_l0, summary_l1, created_at, updated_at, metadata
                 FROM memory_documents
                 WHERE user_id = $1 AND agent_id IS NOT DISTINCT FROM $2 AND path = $3
                 "#,
@@ -78,7 +79,7 @@ impl Repository {
             .query_opt(
                 r#"
                 SELECT id, user_id, agent_id, path, content,
-                       created_at, updated_at, metadata
+                       summary_l0, summary_l1, created_at, updated_at, metadata
                 FROM memory_documents WHERE id = $1
                 "#,
                 &[&id],
@@ -139,7 +140,7 @@ impl Repository {
         let conn = self.conn().await?;
 
         conn.execute(
-            "UPDATE memory_documents SET content = $2, updated_at = NOW() WHERE id = $1",
+            "UPDATE memory_documents SET content = $2, summary_l0 = NULL, summary_l1 = NULL, updated_at = NOW() WHERE id = $1",
             &[&id, &content],
         )
         .await
@@ -252,7 +253,7 @@ impl Repository {
             .query(
                 r#"
                 SELECT id, user_id, agent_id, path, content,
-                       created_at, updated_at, metadata
+                       summary_l0, summary_l1, created_at, updated_at, metadata
                 FROM memory_documents
                 WHERE user_id = $1 AND agent_id IS NOT DISTINCT FROM $2
                 ORDER BY updated_at DESC
@@ -274,6 +275,8 @@ impl Repository {
             agent_id: row.get("agent_id"),
             path: row.get("path"),
             content: row.get("content"),
+            summary_l0: row.get("summary_l0"),
+            summary_l1: row.get("summary_l1"),
             created_at: row.get("created_at"),
             updated_at: row.get("updated_at"),
             metadata: row.get("metadata"),
@@ -432,6 +435,7 @@ impl Repository {
             .query(
                 r#"
                 SELECT c.id as chunk_id, c.document_id, d.path as document_path, c.content,
+                       d.summary_l0, d.summary_l1,
                        ts_rank_cd(c.content_tsv, plainto_tsquery('english', $3)) as rank
                 FROM memory_chunks c
                 JOIN memory_documents d ON d.id = c.document_id
@@ -455,6 +459,8 @@ impl Repository {
                 document_id: row.get("document_id"),
                 document_path: row.get("document_path"),
                 content: row.get("content"),
+                summary_l0: row.get("summary_l0"),
+                summary_l1: row.get("summary_l1"),
                 rank: (i + 1) as u32,
             })
             .collect())
@@ -475,6 +481,7 @@ impl Repository {
             .query(
                 r#"
                 SELECT c.id as chunk_id, c.document_id, d.path as document_path, c.content,
+                       d.summary_l0, d.summary_l1,
                        1 - (c.embedding <=> $3) as similarity
                 FROM memory_chunks c
                 JOIN memory_documents d ON d.id = c.document_id
@@ -498,8 +505,31 @@ impl Repository {
                 document_id: row.get("document_id"),
                 document_path: row.get("document_path"),
                 content: row.get("content"),
+                summary_l0: row.get("summary_l0"),
+                summary_l1: row.get("summary_l1"),
                 rank: (i + 1) as u32,
             })
             .collect())
+    }
+
+    /// Update summary fields on a document.
+    pub async fn update_document_summaries(
+        &self,
+        id: Uuid,
+        summary_l0: Option<&str>,
+        summary_l1: Option<&str>,
+    ) -> Result<(), WorkspaceError> {
+        let conn = self.conn().await?;
+
+        conn.execute(
+            "UPDATE memory_documents SET summary_l0 = $2, summary_l1 = $3, updated_at = NOW() WHERE id = $1",
+            &[&id, &summary_l0, &summary_l1],
+        )
+        .await
+        .map_err(|e| WorkspaceError::SearchFailed {
+            reason: format!("Summary update failed: {}", e),
+        })?;
+
+        Ok(())
     }
 }
