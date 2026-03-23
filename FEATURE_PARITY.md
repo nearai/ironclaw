@@ -298,6 +298,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 
 | Feature | OpenClaw | IronClaw | Notes |
 |---------|----------|----------|-------|
+| GWS Bridge (Fallback) | ❌ | ✅ | Optional wrapper for local 'gws' binary (read-only phase 1) |
 | Dynamic loading | ✅ | ✅ | WASM modules |
 | Manifest validation | ✅ | ✅ | WASM metadata |
 | HTTP path registration | ✅ | ❌ | Plugin routes |

@@ -633,18 +633,22 @@ mod tests {
 
     #[cfg(feature = "postgres")]
     mod postgres_schema_tests {
-        use super::*;
+        use super::super::*;
 
         fn make_test_workspace() -> Arc<Workspace> {
-            Arc::new(Workspace::new(
-                "test_user",
-                deadpool_postgres::Pool::builder(deadpool_postgres::Manager::new(
-                    tokio_postgres::Config::new(),
-                    tokio_postgres::NoTls,
-                ))
-                .build()
-                .unwrap(),
+            let pool_result = deadpool_postgres::Pool::builder(deadpool_postgres::Manager::new(
+                tokio_postgres::Config::new(),
+                tokio_postgres::NoTls,
             ))
+            .build();
+            let pool = match pool_result {
+                Ok(pool) => pool,
+                Err(err) => {
+                    eprintln!("failed to build postgres pool for memory test: {err}");
+                    std::process::exit(1);
+                }
+            };
+            Arc::new(Workspace::new("test_user", pool))
         }
 
         #[test]
@@ -657,11 +661,12 @@ mod tests {
 
             let schema = tool.parameters_schema();
             assert!(schema["properties"]["query"].is_object());
-            assert!(
+            assert_eq!(
                 schema["required"]
                     .as_array()
-                    .unwrap()
-                    .contains(&"query".into())
+                    .map(|required| required.contains(&"query".into())),
+                Some(true),
+                "expected query schema to include required array"
             );
         }
 
@@ -687,11 +692,12 @@ mod tests {
 
             let schema = tool.parameters_schema();
             assert!(schema["properties"]["path"].is_object());
-            assert!(
+            assert_eq!(
                 schema["required"]
                     .as_array()
-                    .unwrap()
-                    .contains(&"path".into())
+                    .map(|required| required.contains(&"path".into())),
+                Some(true),
+                "expected path schema to include required array"
             );
         }
 
