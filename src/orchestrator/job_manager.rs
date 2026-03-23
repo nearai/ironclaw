@@ -23,6 +23,8 @@ pub enum JobMode {
     Worker,
     /// Claude Code bridge that spawns the `claude` CLI directly.
     ClaudeCode,
+    /// ACP (Agent Client Protocol) bridge that spawns any ACP-compliant agent.
+    Acp,
 }
 
 impl JobMode {
@@ -30,6 +32,7 @@ impl JobMode {
         match self {
             Self::Worker => "worker",
             Self::ClaudeCode => "claude_code",
+            Self::Acp => "acp",
         }
     }
 }
@@ -66,6 +69,8 @@ pub struct ContainerJobConfig {
     pub claude_code_memory_limit_mb: u64,
     /// Allowed tool patterns for Claude Code (passed as CLAUDE_CODE_ALLOWED_TOOLS env var).
     pub claude_code_allowed_tools: Vec<String>,
+    /// Memory limit for ACP containers.
+    pub acp_memory_limit_mb: u64,
 }
 
 impl Default for ContainerJobConfig {
@@ -81,6 +86,7 @@ impl Default for ContainerJobConfig {
             claude_code_max_turns: 50,
             claude_code_memory_limit_mb: 4096,
             claude_code_allowed_tools: crate::config::ClaudeCodeConfig::default().allowed_tools,
+            acp_memory_limit_mb: 4096,
         }
     }
 }
@@ -255,6 +261,7 @@ impl ContainerJobManager {
         project_dir: Option<PathBuf>,
         mode: JobMode,
         credential_grants: Vec<CredentialGrant>,
+        acp_agent: Option<crate::config::acp::AcpAgentConfig>,
     ) -> Result<String, OrchestratorError> {
         // Generate auth token (stored in TokenStore, never logged)
         let token = self.token_store.create_token(job_id).await;
@@ -282,7 +289,7 @@ impl ContainerJobManager {
         // Run the actual container creation. On any failure, revoke the token
         // and remove the handle so we don't leak resources.
         match self
-            .create_job_inner(job_id, &token, project_dir, mode)
+            .create_job_inner(job_id, &token, project_dir, mode, acp_agent)
             .await
         {
             Ok(()) => Ok(token),
@@ -301,16 +308,15 @@ impl ContainerJobManager {
         token: &str,
         project_dir: Option<PathBuf>,
         mode: JobMode,
+        acp_agent: Option<crate::config::acp::AcpAgentConfig>,
     ) -> Result<(), OrchestratorError> {
         // Connect to Docker (reuses cached connection)
         let docker = self.docker().await?;
 
         // Build container configuration
-        let orchestrator_host = if cfg!(target_os = "linux") {
-            "172.17.0.1"
-        } else {
-            "host.docker.internal"
-        };
+        // Use host.docker.internal on all platforms — the extra_hosts mapping
+        // below resolves it to the actual host IP via Docker's host-gateway.
+        let orchestrator_host = "host.docker.internal";
 
         let orchestrator_url = format!(
             "http://{}:{}",
@@ -351,9 +357,25 @@ impl ContainerJobManager {
             }
         }
 
-        // Memory limit: Claude Code gets more memory
+        // ACP mode: inject per-job agent command/args/env for the bridge to spawn.
+        if let Some(ref agent) = acp_agent {
+            env_vec.push(format!("ACP_AGENT_COMMAND={}", agent.command));
+            if !agent.args.is_empty()
+                && let Ok(json) = serde_json::to_string(&agent.args)
+            {
+                env_vec.push(format!("ACP_AGENT_ARGS={}", json));
+            }
+            if !agent.env.is_empty()
+                && let Ok(json) = serde_json::to_string(&agent.env)
+            {
+                env_vec.push(format!("ACP_AGENT_ENV={}", json));
+            }
+        }
+
+        // Memory limit per mode
         let memory_mb = match mode {
             JobMode::ClaudeCode => self.config.claude_code_memory_limit_mb,
+            JobMode::Acp => self.config.acp_memory_limit_mb,
             JobMode::Worker => self.config.memory_limit_mb,
         };
 
@@ -398,6 +420,13 @@ impl ContainerJobManager {
                 "--model".to_string(),
                 self.config.claude_code_model.clone(),
             ],
+            JobMode::Acp => vec![
+                "acp-bridge".to_string(),
+                "--job-id".to_string(),
+                job_id.to_string(),
+                "--orchestrator-url".to_string(),
+                orchestrator_url,
+            ],
         };
 
         // Add Docker labels for reaper identification and orphan detection
@@ -422,6 +451,7 @@ impl ContainerJobManager {
         let container_name = match mode {
             JobMode::Worker => format!("ironclaw-worker-{}", job_id),
             JobMode::ClaudeCode => format!("ironclaw-claude-{}", job_id),
+            JobMode::Acp => format!("ironclaw-acp-{}", job_id),
         };
         let options = CreateContainerOptions {
             name: container_name,
@@ -704,5 +734,21 @@ mod tests {
         let handle = mgr.get_handle(job_id).await.unwrap();
         assert_eq!(handle.worker_iteration, 3);
         assert_eq!(handle.last_worker_status.as_deref(), Some("Iteration 3"));
+    }
+
+    #[test]
+    fn test_job_mode_acp_as_str() {
+        assert_eq!(JobMode::Acp.as_str(), "acp");
+    }
+
+    #[test]
+    fn test_job_mode_acp_display() {
+        assert_eq!(format!("{}", JobMode::Acp), "acp");
+    }
+
+    #[test]
+    fn test_container_job_config_acp_memory_default() {
+        let config = ContainerJobConfig::default();
+        assert_eq!(config.acp_memory_limit_mb, 4096);
     }
 }

@@ -182,6 +182,17 @@ pub async fn run_status_command() -> anyhow::Result<()> {
     };
     println!("{}", fmt::kv_line("MCP Servers", &mcp_value, 12));
 
+    // ACP agents
+    let acp_value = match crate::config::acp::load_acp_agents().await {
+        Ok(agents) => {
+            let enabled = agents.agents.iter().filter(|a| a.enabled).count();
+            let total = agents.agents.len();
+            format!("{} enabled / {} configured", enabled, total)
+        }
+        Err(_) => "none configured".to_string(),
+    };
+    println!("{}", fmt::kv_line("ACP Agents", &acp_value, 12));
+
     // Config path
     println!();
     println!(

@@ -103,6 +103,14 @@ pub async fn run_doctor_command() -> anyhow::Result<()> {
     );
 
     check(
+        "ACP agents",
+        check_acp_config().await,
+        &mut passed,
+        &mut failed,
+        &mut skipped,
+    );
+
+    check(
         "Skills",
         check_skills().await,
         &mut passed,
@@ -513,6 +521,43 @@ async fn check_mcp_config() -> CheckResult {
             let msg = e.to_string();
             if msg.contains("not found") || msg.contains("No such file") {
                 CheckResult::Skip("no MCP config file".into())
+            } else {
+                CheckResult::Fail(format!("config error: {e}"))
+            }
+        }
+    }
+}
+
+async fn check_acp_config() -> CheckResult {
+    match crate::config::acp::load_acp_agents().await {
+        Ok(file) => {
+            let agents: Vec<_> = file.enabled_agents().collect();
+            if agents.is_empty() {
+                return CheckResult::Skip("no ACP agents configured".into());
+            }
+
+            let mut invalid = Vec::new();
+            for agent in &agents {
+                if let Err(e) = agent.validate() {
+                    invalid.push(format!("{}: {}", agent.name, e));
+                }
+            }
+
+            if invalid.is_empty() {
+                CheckResult::Pass(format!("{} agent(s) configured, all valid", agents.len()))
+            } else {
+                CheckResult::Fail(format!(
+                    "{} agent(s), {} invalid: {}",
+                    agents.len(),
+                    invalid.len(),
+                    invalid.join("; ")
+                ))
+            }
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("not found") || msg.contains("No such file") {
+                CheckResult::Skip("no ACP config file".into())
             } else {
                 CheckResult::Fail(format!("config error: {e}"))
             }

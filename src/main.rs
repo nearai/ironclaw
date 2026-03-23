@@ -165,6 +165,10 @@ async fn async_main() -> anyhow::Result<()> {
             let config = ironclaw::config::Config::from_env().await?;
             return ironclaw::cli::run_import_command(import_cmd, &config).await;
         }
+        Some(Command::Acp(acp_cmd)) => {
+            init_cli_tracing();
+            return ironclaw::cli::run_acp_command(acp_cmd.clone()).await;
+        }
         Some(Command::Worker {
             job_id,
             orchestrator_url,
@@ -187,6 +191,13 @@ async fn async_main() -> anyhow::Result<()> {
                 model,
             )
             .await;
+        }
+        Some(Command::AcpBridge {
+            job_id,
+            orchestrator_url,
+        }) => {
+            init_worker_tracing();
+            return ironclaw::worker::run_acp_bridge(*job_id, orchestrator_url).await;
         }
         Some(Command::Login { openai_codex }) => {
             init_cli_tracing();
@@ -731,6 +742,7 @@ async fn async_main() -> anyhow::Result<()> {
             sandbox_enabled: config.sandbox.enabled,
             docker_status,
             claude_code_enabled: config.claude_code.enabled,
+            acp_enabled: config.acp.enabled,
             routines_enabled: config.routines.enabled,
             skills_enabled: config.skills.enabled,
             channels: channel_names,

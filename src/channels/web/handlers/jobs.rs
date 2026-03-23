@@ -182,7 +182,9 @@ pub async fn jobs_detail_handler(
         }
 
         let mode = store.get_sandbox_job_mode(job.id).await.ok().flatten();
-        let is_claude_code = mode.as_deref() == Some("claude_code");
+        let supports_prompts = mode
+            .as_deref()
+            .is_some_and(|m| m == "claude_code" || m.starts_with("acp"));
 
         return Ok(Json(JobDetailResponse {
             id: job.id,
@@ -199,7 +201,7 @@ pub async fn jobs_detail_handler(
             job_mode: mode.filter(|m| m != "worker"),
             transitions,
             can_restart: state.job_manager.is_some(),
-            can_prompt: is_claude_code && state.prompt_queue.is_some(),
+            can_prompt: supports_prompts && state.prompt_queue.is_some(),
             job_kind: Some("sandbox".to_string()),
         }));
     }
@@ -370,11 +372,34 @@ pub async fn jobs_restart_handler(
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-        let mode = match store.get_sandbox_job_mode(old_job_id).await {
-            Ok(Some(m)) if m == "claude_code" => {
-                crate::orchestrator::job_manager::JobMode::ClaudeCode
-            }
-            _ => crate::orchestrator::job_manager::JobMode::Worker,
+        let stored_mode = store
+            .get_sandbox_job_mode(old_job_id)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+
+        // Parse mode string — ACP jobs are stored as "acp:<agent_name>".
+        let (mode, acp_agent) = if stored_mode == "claude_code" {
+            (crate::orchestrator::job_manager::JobMode::ClaudeCode, None)
+        } else if let Some(agent_name) = stored_mode.strip_prefix("acp:") {
+            let agent = if let Some(ref s) = state.store {
+                crate::config::acp::load_acp_agents_from_db(s.as_ref(), &state.user_id)
+                    .await
+                    .ok()
+                    .and_then(|f| f.get(agent_name).cloned())
+            } else {
+                crate::config::acp::load_acp_agents()
+                    .await
+                    .ok()
+                    .and_then(|f| f.get(agent_name).cloned())
+            };
+            (crate::orchestrator::job_manager::JobMode::Acp, agent)
+        } else if stored_mode == "acp" {
+            // Legacy: "acp" without agent name — no agent config available
+            (crate::orchestrator::job_manager::JobMode::Acp, None)
+        } else {
+            (crate::orchestrator::job_manager::JobMode::Worker, None)
         };
 
         let credential_grants: Vec<crate::orchestrator::auth::CredentialGrant> =
@@ -396,6 +421,7 @@ pub async fn jobs_restart_handler(
                 Some(project_dir),
                 mode,
                 credential_grants,
+                acp_agent,
             )
             .await
             .map_err(|e| {
@@ -498,9 +524,12 @@ pub async fn jobs_prompt_handler(
     if let Some(ref s) = state.store
         && let Ok(Some(_)) = s.get_sandbox_job(job_id).await
     {
-        // It's a sandbox job. Check if Claude Code mode.
+        // It's a sandbox job. Check if Claude Code or ACP mode (both support follow-up prompts).
         let mode = s.get_sandbox_job_mode(job_id).await.ok().flatten();
-        if mode.as_deref() == Some("claude_code") {
+        if mode
+            .as_deref()
+            .is_some_and(|m| m == "claude_code" || m.starts_with("acp"))
+        {
             let prompt_queue = state.prompt_queue.as_ref().ok_or((
                 StatusCode::NOT_IMPLEMENTED,
                 "Claude Code not configured".to_string(),

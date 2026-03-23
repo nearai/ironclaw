@@ -1,5 +1,6 @@
 ---
 source: src/cli/mod.rs
+assertion_line: 438
 expression: help
 ---
 IronClaw is a secure AI assistant. Use 'ironclaw <subcommand> --help' for details.
@@ -29,6 +30,7 @@ Commands:
   status      Show system status
   completion  Generate completions
   login       Authenticate with a provider
+  acp         Manage ACP agents
   help        Print this message or the help of the given subcommand(s)
 
 Options:
