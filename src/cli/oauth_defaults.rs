@@ -748,6 +748,7 @@ pub async fn exchange_via_proxy(
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(60))
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|e| OAuthCallbackError::Io(format!("Failed to build HTTP client: {}", e)))?;
     let mut params = vec![
@@ -883,7 +884,8 @@ mod tests {
     #[derive(Clone)]
     struct MockProxyState {
         requests: Arc<Mutex<Vec<RecordedProxyRequest>>>,
-        redirect_target: String,
+        exchange_redirect_target: String,
+        refresh_redirect_target: String,
     }
 
     struct MockProxyServer {
@@ -895,6 +897,25 @@ mod tests {
 
     impl MockProxyServer {
         async fn start() -> Self {
+            async fn exchange_handler(
+                State(state): State<MockProxyState>,
+                headers: HeaderMap,
+                Form(form): Form<HashMap<String, String>>,
+            ) -> Json<serde_json::Value> {
+                state.requests.lock().await.push(RecordedProxyRequest {
+                    authorization: headers
+                        .get(axum::http::header::AUTHORIZATION)
+                        .and_then(|value| value.to_str().ok())
+                        .map(str::to_string),
+                    form,
+                });
+                Json(json!({
+                    "access_token": "proxy-access-token",
+                    "refresh_token": "proxy-refresh-token",
+                    "expires_in": 7200
+                }))
+            }
+
             async fn refresh_handler(
                 State(state): State<MockProxyState>,
                 headers: HeaderMap,
@@ -914,8 +935,12 @@ mod tests {
                 }))
             }
 
-            async fn redirect_handler(State(state): State<MockProxyState>) -> Redirect {
-                Redirect::temporary(&state.redirect_target)
+            async fn exchange_redirect_handler(State(state): State<MockProxyState>) -> Redirect {
+                Redirect::temporary(&state.exchange_redirect_target)
+            }
+
+            async fn refresh_redirect_handler(State(state): State<MockProxyState>) -> Redirect {
+                Redirect::temporary(&state.refresh_redirect_target)
             }
 
             let requests = Arc::new(Mutex::new(Vec::new()));
@@ -923,13 +948,17 @@ mod tests {
                 .await
                 .expect("bind mock proxy");
             let addr = listener.local_addr().expect("read mock proxy addr");
-            let redirect_target = format!("http://{addr}/oauth/refresh");
+            let exchange_redirect_target = format!("http://{addr}/oauth/exchange");
+            let refresh_redirect_target = format!("http://{addr}/oauth/refresh");
             let app = Router::new()
+                .route("/oauth/exchange", post(exchange_handler))
                 .route("/oauth/refresh", post(refresh_handler))
-                .route("/redirect/oauth/refresh", post(redirect_handler))
+                .route("/redirect/oauth/exchange", post(exchange_redirect_handler))
+                .route("/redirect/oauth/refresh", post(refresh_redirect_handler))
                 .with_state(MockProxyState {
                     requests: Arc::clone(&requests),
-                    redirect_target,
+                    exchange_redirect_target,
+                    refresh_redirect_target,
                 });
             let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
             let server_task = tokio::spawn(async move {
@@ -1050,6 +1079,34 @@ mod tests {
             requests[0].form.get("provider").map(String::as_str),
             Some("google")
         );
+
+        server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn test_exchange_via_proxy_does_not_follow_redirects() {
+        let server = MockProxyServer::start().await;
+
+        let error = match super::exchange_via_proxy(super::ProxyTokenExchangeRequest {
+            proxy_url: &server.redirecting_base_url(),
+            gateway_token: "gateway-test-token",
+            code: "auth-code-123",
+            redirect_uri: "http://localhost:3000/oauth/callback",
+            token_url: "https://oauth2.googleapis.com/token",
+            client_id: TEST_OAUTH_CLIENT_ID,
+            client_secret: Some(TEST_OAUTH_CLIENT_SECRET),
+            access_token_field: "access_token",
+            code_verifier: Some("code-verifier-123"),
+            extra_token_params: &HashMap::new(),
+        })
+        .await
+        {
+            Ok(_) => panic!("redirected proxy exchange should fail"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("307"));
+        assert!(server.requests().await.is_empty());
 
         server.shutdown().await;
     }
