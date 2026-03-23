@@ -169,6 +169,9 @@ pub struct AgentDeps {
     pub sandbox_readiness: crate::agent::routine_engine::SandboxReadiness,
     /// Software builder for self-repair tool rebuilding.
     pub builder: Option<Arc<dyn crate::tools::SoftwareBuilder>>,
+    /// Per-channel tool routing config. Wrapped in RwLock for hot-reload support.
+    pub channel_routing:
+        Arc<tokio::sync::RwLock<Option<crate::agent::channel_routing::ChannelRoutingConfig>>>,
 }
 
 /// The main agent that coordinates all components.

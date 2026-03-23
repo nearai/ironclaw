@@ -200,6 +200,7 @@ mod tests {
             document_extraction: None,
             sandbox_readiness: ironclaw::agent::SandboxReadiness::DisabledByConfig,
             builder: None,
+            channel_routing: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         };
 
         let gateway = Arc::new(TestChannel::new());
