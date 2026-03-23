@@ -748,8 +748,27 @@ mod tests {
     use crate::testing::credentials::{TEST_OAUTH_CLIENT_ID, TEST_OAUTH_CLIENT_SECRET};
     use crate::tools::wasm::loader::{WasmLoadError, check_wit_version_compat, discover_tools};
 
-    fn set_env_var(key: &str, value: Option<&str>) -> Option<String> {
-        let original = std::env::var(key).ok();
+    /// Restores a test-scoped env var override on drop.
+    struct EnvVarGuard {
+        key: String,
+        previous: Option<String>,
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            // SAFETY: Tests use lock_env() to serialize environment access.
+            unsafe {
+                if let Some(ref value) = self.previous {
+                    std::env::set_var(&self.key, value);
+                } else {
+                    std::env::remove_var(&self.key);
+                }
+            }
+        }
+    }
+
+    fn set_env_var(key: &str, value: Option<&str>) -> EnvVarGuard {
+        let previous = std::env::var(key).ok();
         // SAFETY: Tests use lock_env() to serialize environment access.
         unsafe {
             match value {
@@ -757,17 +776,9 @@ mod tests {
                 None => std::env::remove_var(key),
             }
         }
-        original
-    }
-
-    fn restore_env_var(key: &str, value: Option<String>) {
-        // SAFETY: Tests use lock_env() to serialize environment access.
-        unsafe {
-            if let Some(value) = value {
-                std::env::set_var(key, value);
-            } else {
-                std::env::remove_var(key);
-            }
+        EnvVarGuard {
+            key: key.to_string(),
+            previous,
         }
     }
 
@@ -991,8 +1002,8 @@ mod tests {
         };
 
         let _guard = lock_env();
-        let original_proxy = set_env_var("IRONCLAW_OAUTH_EXCHANGE_URL", None);
-        let original_gateway_token = set_env_var("GATEWAY_AUTH_TOKEN", None);
+        let _proxy_guard = set_env_var("IRONCLAW_OAUTH_EXCHANGE_URL", None);
+        let _gateway_token_guard = set_env_var("GATEWAY_AUTH_TOKEN", None);
 
         // google_oauth_token should fall back to built-in credentials
         let caps = CapabilitiesFile {
@@ -1017,9 +1028,6 @@ mod tests {
         assert!(config.client_secret.is_some());
         assert_eq!(config.exchange_proxy_url, None);
         assert_eq!(config.gateway_token, None);
-
-        restore_env_var("IRONCLAW_OAUTH_EXCHANGE_URL", original_proxy);
-        restore_env_var("GATEWAY_AUTH_TOKEN", original_gateway_token);
     }
 
     #[test]
@@ -1030,12 +1038,12 @@ mod tests {
         };
 
         let _guard = lock_env();
-        let original_proxy = set_env_var(
+        let _proxy_guard = set_env_var(
             "IRONCLAW_OAUTH_EXCHANGE_URL",
             Some("https://compose-api.example.com"),
         );
-        let original_gateway_token = set_env_var("GATEWAY_AUTH_TOKEN", Some("gateway-test-token"));
-        let original_client_id =
+        let _gateway_token_guard = set_env_var("GATEWAY_AUTH_TOKEN", Some("gateway-test-token"));
+        let _client_id_guard =
             set_env_var("GOOGLE_OAUTH_CLIENT_ID", Some("hosted-google-client-id"));
 
         let caps = CapabilitiesFile {
@@ -1061,10 +1069,6 @@ mod tests {
             Some("https://compose-api.example.com")
         );
         assert_eq!(config.gateway_token.as_deref(), Some("gateway-test-token"));
-
-        restore_env_var("IRONCLAW_OAUTH_EXCHANGE_URL", original_proxy);
-        restore_env_var("GATEWAY_AUTH_TOKEN", original_gateway_token);
-        restore_env_var("GOOGLE_OAUTH_CLIENT_ID", original_client_id);
     }
 
     #[test]
@@ -1074,14 +1078,14 @@ mod tests {
         };
 
         let _guard = lock_env();
-        let original_proxy = set_env_var(
+        let _proxy_guard = set_env_var(
             "IRONCLAW_OAUTH_EXCHANGE_URL",
             Some("https://compose-api.example.com"),
         );
-        let original_gateway_token = set_env_var("GATEWAY_AUTH_TOKEN", Some("gateway-test-token"));
-        let original_client_id =
+        let _gateway_token_guard = set_env_var("GATEWAY_AUTH_TOKEN", Some("gateway-test-token"));
+        let _client_id_guard =
             set_env_var("GOOGLE_OAUTH_CLIENT_ID", Some("hosted-google-client-id"));
-        let original_client_secret =
+        let _client_secret_guard =
             set_env_var("GOOGLE_OAUTH_CLIENT_SECRET", Some("hosted-server-secret"));
 
         let caps = CapabilitiesFile {
@@ -1111,11 +1115,6 @@ mod tests {
             Some("https://compose-api.example.com")
         );
         assert_eq!(config.gateway_token.as_deref(), Some("gateway-test-token"));
-
-        restore_env_var("IRONCLAW_OAUTH_EXCHANGE_URL", original_proxy);
-        restore_env_var("GATEWAY_AUTH_TOKEN", original_gateway_token);
-        restore_env_var("GOOGLE_OAUTH_CLIENT_ID", original_client_id);
-        restore_env_var("GOOGLE_OAUTH_CLIENT_SECRET", original_client_secret);
     }
 
     // ---------------------------------------------------------------

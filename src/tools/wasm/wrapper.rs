@@ -1118,7 +1118,7 @@ async fn refresh_oauth_token(
     if let Some(proxy_url) = config.exchange_proxy_url.as_deref() {
         let Some(gateway_token) = config.gateway_token.as_deref() else {
             tracing::warn!(
-                "OAuth exchange proxy is configured, but no gateway auth token is available"
+                "OAuth refresh proxy is configured, but no gateway auth token is available"
             );
             return false;
         };
