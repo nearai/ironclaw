@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::channels::web::util::truncate_preview;
-use crate::llm::{ChatMessage, ToolCall};
+use crate::llm::{ChatMessage, ToolCall, generate_tool_call_id};
 
 /// A session containing one or more threads.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -414,7 +414,12 @@ impl Thread {
     /// completed actions in subsequent turns.
     pub fn messages(&self) -> Vec<ChatMessage> {
         let mut messages = Vec::new();
-        for turn in &self.turns {
+        // We use the enumeration index (`turn_idx`) rather than `turn.turn_number`
+        // intentionally: after `truncate_turns()`, the remaining turns are
+        // re-numbered starting from 0, so the enumeration index and turn_number
+        // are equivalent. Using the index avoids coupling to the field and keeps
+        // tool-call ID generation deterministic for the current message window.
+        for (turn_idx, turn) in self.turns.iter().enumerate() {
             if turn.image_content_parts.is_empty() {
                 messages.push(ChatMessage::user(&turn.user_input));
             } else {
@@ -425,13 +430,23 @@ impl Thread {
             }
 
             if !turn.tool_calls.is_empty() {
-                // Build ToolCall objects with synthetic stable IDs
-                let tool_calls: Vec<ToolCall> = turn
+                // Assign synthetic call IDs for this turn's tool calls, so that
+                // declarations and results can be consistently correlated.
+                let tool_calls_with_ids: Vec<(String, &_)> = turn
                     .tool_calls
                     .iter()
                     .enumerate()
-                    .map(|(i, tc)| ToolCall {
-                        id: format!("turn{}_{}", turn.turn_number, i),
+                    .map(|(tc_idx, tc)| {
+                        // Use provider-compatible tool call IDs derived from turn/tool indices.
+                        (generate_tool_call_id(turn_idx, tc_idx), tc)
+                    })
+                    .collect();
+
+                // Build ToolCall objects using the synthetic call IDs.
+                let tool_calls: Vec<ToolCall> = tool_calls_with_ids
+                    .iter()
+                    .map(|(call_id, tc)| ToolCall {
+                        id: call_id.clone(),
                         name: tc.name.clone(),
                         arguments: tc.parameters.clone(),
                     })
@@ -441,8 +456,7 @@ impl Thread {
                 messages.push(ChatMessage::assistant_with_tool_calls(None, tool_calls));
 
                 // Individual tool result messages, truncated to limit context size.
-                for (i, tc) in turn.tool_calls.iter().enumerate() {
-                    let call_id = format!("turn{}_{}", turn.turn_number, i);
+                for (call_id, tc) in tool_calls_with_ids {
                     let content = if let Some(ref err) = tc.error {
                         // .error already contains the full error text;
                         // pass through without wrapping to avoid double-prefix.
