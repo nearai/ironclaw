@@ -206,17 +206,61 @@ impl ExecutionLoop {
                 ..LlmCallConfig::default()
             };
 
+            debug!(
+                thread_id = %self.thread.id,
+                iteration,
+                message_count = messages.len(),
+                force_text,
+                "LLM call: sending {} messages",
+                messages.len(),
+            );
+            if tracing::enabled!(tracing::Level::TRACE) {
+                for (i, msg) in messages.iter().enumerate() {
+                    let preview: String = msg.content.chars().take(200).collect();
+                    tracing::trace!(
+                        "[msg {i}] role={:?} len={} preview={preview}...",
+                        msg.role,
+                        msg.content.len(),
+                    );
+                }
+            }
+
             let llm_output = self.llm.complete(&messages, &[], &config).await?;
             step.tokens_used = llm_output.usage;
             self.thread.total_tokens_used += llm_output.usage.total();
             step.llm_response = Some(llm_output.response.clone());
 
+            debug!(
+                thread_id = %self.thread.id,
+                iteration,
+                input_tokens = llm_output.usage.input_tokens,
+                output_tokens = llm_output.usage.output_tokens,
+                response_type = match &llm_output.response {
+                    LlmResponse::Text(_) => "text",
+                    LlmResponse::ActionCalls { .. } => "action_calls",
+                    LlmResponse::Code { .. } => "code",
+                },
+                "LLM response received"
+            );
+
             // 6. Handle response
             match llm_output.response {
                 LlmResponse::Text(text) => {
+                    debug!(
+                        thread_id = %self.thread.id,
+                        iteration,
+                        text_len = text.len(),
+                        "Text response (no code block detected)"
+                    );
+                    if tracing::enabled!(tracing::Level::TRACE) {
+                        let preview: String = text.chars().take(500).collect();
+                        tracing::trace!("Text: {preview}...");
+                    }
+
                     // Check for FINAL() in text (regex fallback — models
                     // sometimes write FINAL() outside code blocks)
                     if let Some(answer) = extract_final_from_text(&text) {
+                        debug!(thread_id = %self.thread.id, "FINAL() detected in text response");
                         self.thread
                             .add_message(ThreadMessage::assistant(text));
                         step.status = StepStatus::Completed;
@@ -346,6 +390,16 @@ impl ExecutionLoop {
                 LlmResponse::Code { code, content } => {
                     nudge_count = 0;
 
+                    debug!(
+                        thread_id = %self.thread.id,
+                        iteration,
+                        code_len = code.len(),
+                        "Executing Python code"
+                    );
+                    if tracing::enabled!(tracing::Level::TRACE) {
+                        tracing::trace!("Code block:\n{code}");
+                    }
+
                     // Record assistant message with the code
                     self.thread.add_message(ThreadMessage::assistant(
                         content.unwrap_or_else(|| format!("```python\n{code}\n```")),
@@ -381,6 +435,35 @@ impl ExecutionLoop {
                         &[],
                     )
                     .await?;
+
+                    debug!(
+                        thread_id = %self.thread.id,
+                        iteration,
+                        had_error = code_result.had_error,
+                        action_count = code_result.action_results.len(),
+                        stdout_len = code_result.stdout.len(),
+                        final_answer = code_result.final_answer.is_some(),
+                        recursive_tokens = code_result.recursive_tokens.total(),
+                        "Code execution complete"
+                    );
+                    if tracing::enabled!(tracing::Level::TRACE) {
+                        if !code_result.stdout.is_empty() {
+                            let preview: String = code_result.stdout.chars().take(500).collect();
+                            tracing::trace!("stdout: {preview}");
+                        }
+                        for r in &code_result.action_results {
+                            let output_preview: String = serde_json::to_string(&r.output)
+                                .unwrap_or_default()
+                                .chars()
+                                .take(300)
+                                .collect();
+                            tracing::trace!(
+                                "  tool={} ok={} output={output_preview}...",
+                                r.action_name,
+                                !r.is_error,
+                            );
+                        }
+                    }
 
                     // Track recursive LLM token usage
                     self.thread.total_tokens_used += code_result.recursive_tokens.total();
