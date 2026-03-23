@@ -3,11 +3,13 @@
 //! When the context window approaches its limit, compaction:
 //! 1. Summarizes old turns
 //! 2. Writes the summary to the workspace daily log
-//! 3. Trims the context to keep only recent turns
+//! 3. Extracts durable memories from the archived turns into MEMORY.md
+//! 4. Trims the context to keep only recent turns
 
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 use chrono::Utc;
+use serde::Deserialize;
 
 use crate::agent::context_monitor::{CompactionStrategy, ContextBreakdown};
 use crate::agent::session::Thread;
@@ -26,6 +28,8 @@ pub struct CompactionResult {
     pub tokens_after: usize,
     /// Whether a summary was written to workspace.
     pub summary_written: bool,
+    /// Number of structured memories written to workspace.
+    pub memories_written: usize,
     /// The generated summary (if any).
     pub summary: Option<String>,
 }
@@ -57,7 +61,7 @@ impl ContextCompactor {
                     .await?
             }
             CompactionStrategy::Truncate { keep_recent } => {
-                self.compact_truncate(thread, keep_recent)
+                self.compact_truncate(thread, keep_recent, workspace).await
             }
             CompactionStrategy::MoveToWorkspace => {
                 self.compact_to_workspace(thread, workspace).await?
@@ -72,6 +76,7 @@ impl ContextCompactor {
             tokens_before,
             tokens_after,
             summary_written: result.summary_written,
+            memories_written: result.memories_written,
             summary: result.summary,
         })
     }
@@ -105,38 +110,61 @@ impl ContextCompactor {
 
         // Write to workspace if available.
         // If archival fails, preserve turns to avoid context loss.
-        let (summary_written, turns_removed) = if let Some(ws) = workspace {
+        let (summary_written, memories_written, turns_removed) = if let Some(ws) = workspace {
             match self.write_summary_to_workspace(ws, &summary).await {
                 Ok(()) => {
+                    let memories_written = self.extract_structured_memories(ws, old_turns).await;
                     thread.truncate_turns(keep_recent);
-                    (true, turns_to_remove)
+                    (true, memories_written, turns_to_remove)
                 }
                 Err(e) => {
                     tracing::warn!("Compaction summary write failed (turns preserved): {}", e);
-                    (false, 0)
+                    (false, 0, 0)
                 }
             }
         } else {
             thread.truncate_turns(keep_recent);
-            (false, turns_to_remove)
+            (false, 0, turns_to_remove)
         };
 
         Ok(CompactionPartial {
             turns_removed,
             summary_written,
+            memories_written,
             summary: Some(summary),
         })
     }
 
     /// Compact by simple truncation (no summary).
-    fn compact_truncate(&self, thread: &mut Thread, keep_recent: usize) -> CompactionPartial {
+    async fn compact_truncate(
+        &self,
+        thread: &mut Thread,
+        keep_recent: usize,
+        workspace: Option<&Workspace>,
+    ) -> CompactionPartial {
         let turns_before = thread.turns.len();
+        let turns_to_remove = turns_before.saturating_sub(keep_recent);
+
+        if let Some(ws) = workspace {
+            let old_turns = &thread.turns[..turns_to_remove];
+            let memories_written = self.extract_structured_memories(ws, old_turns).await;
+            thread.truncate_turns(keep_recent);
+            let turns_removed = turns_before - thread.turns.len();
+            return CompactionPartial {
+                turns_removed,
+                summary_written: false,
+                memories_written,
+                summary: None,
+            };
+        }
+
         thread.truncate_turns(keep_recent);
         let turns_removed = turns_before - thread.turns.len();
 
         CompactionPartial {
             turns_removed,
             summary_written: false,
+            memories_written: 0,
             summary: None,
         }
     }
@@ -149,7 +177,7 @@ impl ContextCompactor {
     ) -> Result<CompactionPartial, Error> {
         let Some(ws) = workspace else {
             // Fall back to truncation if no workspace
-            return Ok(self.compact_truncate(thread, 5));
+            return Ok(self.compact_truncate(thread, 5, None).await);
         };
 
         // Keep more turns when moving to workspace (we have a backup)
@@ -165,20 +193,23 @@ impl ContextCompactor {
         let content = format_turns_for_storage(old_turns);
 
         // Write to workspace. If archival fails, preserve turns.
-        let (written, turns_removed) = match self.write_context_to_workspace(ws, &content).await {
-            Ok(()) => {
-                thread.truncate_turns(keep_recent);
-                (true, turns_to_remove)
-            }
-            Err(e) => {
-                tracing::warn!("Compaction context write failed (turns preserved): {}", e);
-                (false, 0)
-            }
-        };
+        let (written, memories_written, turns_removed) =
+            match self.write_context_to_workspace(ws, &content).await {
+                Ok(()) => {
+                    let memories_written = self.extract_structured_memories(ws, old_turns).await;
+                    thread.truncate_turns(keep_recent);
+                    (true, memories_written, turns_to_remove)
+                }
+                Err(e) => {
+                    tracing::warn!("Compaction context write failed (turns preserved): {}", e);
+                    (false, 0, 0)
+                }
+            };
 
         Ok(CompactionPartial {
             turns_removed,
             summary_written: written,
+            memories_written,
             summary: None,
         })
     }
@@ -270,12 +301,142 @@ Be brief but capture all important details. Use bullet points."#,
             .await?;
         Ok(())
     }
+
+    /// Extract structured memories from archived turns and append them to MEMORY.md.
+    ///
+    /// This is best-effort: failures are logged and skipped so compaction
+    /// itself can still complete after the archive write succeeds.
+    async fn extract_structured_memories(
+        &self,
+        workspace: &Workspace,
+        turns: &[crate::agent::session::Turn],
+    ) -> usize {
+        if turns.is_empty() {
+            return 0;
+        }
+
+        let prompt = ChatMessage::system(
+            r#"Extract durable memories from the conversation below.
+
+Return ONLY JSON with this shape:
+{
+  "memories": [
+    {
+      "kind": "preference | identity | project | plan | fact",
+      "content": "short durable memory in one sentence",
+      "confidence": 0.0-1.0,
+      "evidence": "optional short supporting quote"
+    }
+  ]
+}
+
+Rules:
+- Return at most 5 memories.
+- Only include high-confidence memories that are likely useful later.
+- Skip greetings, transient chat, and one-off task steps.
+- Prefer stable user preferences, long-term plans, active projects, and important facts.
+- If there are no durable memories, return {"memories":[]}.
+"#,
+        );
+
+        let conversation = format_turns_for_storage(turns);
+        let request = CompletionRequest::new(vec![
+            prompt,
+            ChatMessage::user(format!("Conversation to analyze:\n\n{}", conversation)),
+        ])
+        .with_max_tokens(512)
+        .with_temperature(0.0);
+
+        let reasoning =
+            Reasoning::new(self.llm.clone()).with_model_name(self.llm.active_model_name());
+        let Ok((response, _)) = reasoning.complete(request).await else {
+            tracing::warn!("Structured memory extraction failed: LLM call failed");
+            return 0;
+        };
+
+        let Some(json) = extract_json_object(&response) else {
+            tracing::warn!("Structured memory extraction failed: no JSON object in response");
+            return 0;
+        };
+
+        let Ok(parsed) = serde_json::from_str::<MemoryExtraction>(json) else {
+            tracing::warn!("Structured memory extraction failed: invalid JSON");
+            return 0;
+        };
+
+        let mut seen = HashSet::new();
+        let mut entries = Vec::new();
+        for memory in parsed
+            .memories
+            .into_iter()
+            .take(MEMORY_EXTRACTION_MAX_CANDIDATES)
+        {
+            if memory.confidence < MEMORY_EXTRACTION_MIN_CONFIDENCE {
+                continue;
+            }
+
+            let normalized_content = normalize_memory_text(&memory.content);
+            if normalized_content.is_empty() || !seen.insert(normalized_content) {
+                continue;
+            }
+
+            if self
+                .structured_memory_exists(workspace, &memory.content)
+                .await
+            {
+                continue;
+            }
+
+            entries.push(format_structured_memory_entry(&memory));
+        }
+
+        if entries.is_empty() {
+            return 0;
+        }
+
+        let entry = format!(
+            "\n## Structured Memory Extraction ({})\n\n{}\n",
+            Utc::now().format("%Y-%m-%d %H:%M UTC"),
+            entries.join("\n\n")
+        );
+
+        match workspace.append_memory(&entry).await {
+            Ok(()) => entries.len(),
+            Err(e) => {
+                tracing::warn!("Structured memory append failed: {}", e);
+                0
+            }
+        }
+    }
+
+    /// Check whether a structured memory already appears in workspace search results.
+    async fn structured_memory_exists(&self, workspace: &Workspace, content: &str) -> bool {
+        let query = content.trim();
+        if query.is_empty() {
+            return true;
+        }
+
+        let normalized_query = normalize_memory_text(query);
+
+        let Ok(memory_doc) = workspace.memory().await else {
+            tracing::warn!("Structured memory dedupe read failed; treating as new");
+            return false;
+        };
+
+        memory_doc.content.lines().any(|line| {
+            let normalized_line = normalize_memory_text(line);
+            normalized_line.starts_with("- **")
+                && (normalized_line.contains(&normalized_query)
+                    || normalized_query.contains(&normalized_line))
+        })
+    }
 }
 
 /// Partial result during compaction (internal).
 struct CompactionPartial {
     turns_removed: usize,
     summary_written: bool,
+    memories_written: usize,
     summary: Option<String>,
 }
 
@@ -284,10 +445,28 @@ impl CompactionPartial {
         Self {
             turns_removed: 0,
             summary_written: false,
+            memories_written: 0,
             summary: None,
         }
     }
 }
+
+#[derive(Debug, Clone, Deserialize)]
+struct MemoryExtraction {
+    memories: Vec<StructuredMemory>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct StructuredMemory {
+    kind: String,
+    content: String,
+    confidence: f32,
+    #[serde(default)]
+    evidence: Option<String>,
+}
+
+const MEMORY_EXTRACTION_MAX_CANDIDATES: usize = 5;
+const MEMORY_EXTRACTION_MIN_CONFIDENCE: f32 = 0.75;
 
 /// Format turns for storage in workspace.
 fn format_turns_for_storage(turns: &[crate::agent::session::Turn]) -> String {
@@ -311,10 +490,42 @@ fn format_turns_for_storage(turns: &[crate::agent::session::Turn]) -> String {
         .join("\n")
 }
 
+fn format_structured_memory_entry(memory: &StructuredMemory) -> String {
+    let mut entry = format!(
+        "- **{}**: {}\n  - Confidence: {:.2}",
+        memory.kind.trim(),
+        memory.content.trim(),
+        memory.confidence
+    );
+    if let Some(evidence) = memory
+        .evidence
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        entry.push_str(&format!("\n  - Evidence: {}", evidence));
+    }
+    entry
+}
+
+fn normalize_memory_text(text: &str) -> String {
+    text.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
+fn extract_json_object(text: &str) -> Option<&str> {
+    let start = text.find('{')?;
+    let end = text.rfind('}')?;
+    (start < end).then(|| &text[start..=end])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::agent::session::Thread;
+    use crate::workspace::paths;
     use uuid::Uuid;
 
     #[test]
@@ -370,6 +581,22 @@ mod tests {
             .expect("should create in-memory libsql backend");
         let db: Arc<dyn Database> = Arc::new(backend);
         crate::workspace::Workspace::new_with_db("compaction-test", db)
+    }
+
+    #[cfg(feature = "libsql")]
+    async fn make_test_workspace() -> (crate::workspace::Workspace, tempfile::TempDir) {
+        use crate::db::Database;
+        use crate::db::libsql::LibSqlBackend;
+
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let db_path = temp_dir.path().join("compaction_memory_test.db");
+        let backend = LibSqlBackend::new_local(&db_path)
+            .await
+            .expect("LibSqlBackend::new_local");
+        backend.run_migrations().await.expect("run_migrations");
+        let db: Arc<dyn Database> = Arc::new(backend);
+        let ws = crate::workspace::Workspace::new_with_db("compaction-memory-test", db);
+        (ws, temp_dir)
     }
 
     // ------------------------------------------------------------------
@@ -690,6 +917,93 @@ mod tests {
         assert_eq!(result.turns_removed, 0);
         assert!(!result.summary_written);
         assert_eq!(llm.calls(), 0);
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_move_to_workspace_extracts_structured_memories() {
+        let memory_json = r#"{
+            "memories": [
+                {
+                    "kind": "preference",
+                    "content": "User prefers concise answers.",
+                    "confidence": 0.96,
+                    "evidence": "Please keep responses brief."
+                }
+            ]
+        }"#;
+        let llm = Arc::new(StubLlm::new(memory_json));
+        let compactor = make_compactor(llm.clone());
+        let mut thread = make_thread(12);
+        let (workspace, _tmp) = make_test_workspace().await;
+
+        let result = compactor
+            .compact(
+                &mut thread,
+                CompactionStrategy::MoveToWorkspace,
+                Some(&workspace),
+            )
+            .await
+            .expect("compact should succeed");
+
+        assert_eq!(result.turns_removed, 2);
+        assert_eq!(result.memories_written, 1);
+        assert_eq!(llm.calls(), 1);
+        assert_eq!(thread.turns.len(), 10);
+
+        let memory_doc = workspace.read(paths::MEMORY).await.expect("read MEMORY.md");
+        assert!(memory_doc.content.contains("Structured Memory Extraction"));
+        assert!(memory_doc.content.contains("User prefers concise answers."));
+        assert!(memory_doc.content.contains("preference"));
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_move_to_workspace_skips_duplicate_structured_memories() {
+        let memory_json = r#"{
+            "memories": [
+                {
+                    "kind": "preference",
+                    "content": "User prefers concise answers.",
+                    "confidence": 0.96,
+                    "evidence": "Please keep responses brief."
+                }
+            ]
+        }"#;
+        let llm = Arc::new(StubLlm::new(memory_json));
+        let compactor = make_compactor(llm.clone());
+        let mut thread = make_thread(12);
+        let (workspace, _tmp) = make_test_workspace().await;
+
+        workspace
+            .append_memory(
+                "## Structured Memory Extraction (2026-03-23 00:00 UTC)\n\n- **preference**: User prefers concise answers.\n  - Confidence: 0.96",
+            )
+            .await
+            .expect("seed existing MEMORY.md content");
+
+        let result = compactor
+            .compact(
+                &mut thread,
+                CompactionStrategy::MoveToWorkspace,
+                Some(&workspace),
+            )
+            .await
+            .expect("compact should succeed");
+
+        assert_eq!(result.turns_removed, 2);
+        assert_eq!(result.memories_written, 0);
+        assert_eq!(llm.calls(), 1);
+        assert_eq!(thread.turns.len(), 10);
+
+        let memory_doc = workspace.read(paths::MEMORY).await.expect("read MEMORY.md");
+        assert_eq!(
+            memory_doc
+                .content
+                .matches("User prefers concise answers.")
+                .count(),
+            1
+        );
     }
 
     // ------------------------------------------------------------------
