@@ -516,8 +516,8 @@ fn parse_sse_response(body: &str) -> Result<ParsedResponse, LlmError> {
                         }
                         continue;
                     }
-                    let arguments = serde_json::from_str(&arguments)
-                        .unwrap_or_else(|_| Value::String(arguments));
+                    let arguments =
+                        serde_json::from_str(&arguments).unwrap_or(Value::String(arguments));
                     tool_calls.push(ToolCall {
                         id: call_id,
                         name,
