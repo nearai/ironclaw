@@ -428,8 +428,16 @@ fn parse_sse_response(body: &str) -> Result<ParsedResponse, LlmError> {
                         .get("id")
                         .or_else(|| item.get("item_id"))
                         .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
+                        .filter(|id| !id.is_empty())
+                        .map(ToString::to_string);
+                    let Some(item_id) = item_id else {
+                        tracing::warn!(
+                            provider = PROVIDER_NAME,
+                            item = %item,
+                            "Skipping function_call add event without non-empty item_id"
+                        );
+                        continue;
+                    };
                     let call_id = item
                         .get("call_id")
                         .and_then(|v| v.as_str())
@@ -472,18 +480,22 @@ fn parse_sse_response(body: &str) -> Result<ParsedResponse, LlmError> {
                         .get("id")
                         .or_else(|| item.get("item_id"))
                         .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    let state = active_function_calls.get(&item_id);
+                        .filter(|id| !id.is_empty())
+                        .map(ToString::to_string);
+                    let state = item_id
+                        .as_ref()
+                        .and_then(|existing_item_id| active_function_calls.get(existing_item_id));
                     let call_id = item
                         .get("call_id")
                         .and_then(|v| v.as_str())
+                        .filter(|id| !id.is_empty())
                         .or_else(|| state.map(|s| s.call_id.as_str()))
                         .unwrap_or("")
                         .to_string();
                     let name = item
                         .get("name")
                         .and_then(|v| v.as_str())
+                        .filter(|name| !name.is_empty())
                         .or_else(|| state.map(|s| s.name.as_str()))
                         .unwrap_or("")
                         .to_string();
@@ -493,6 +505,17 @@ fn parse_sse_response(body: &str) -> Result<ParsedResponse, LlmError> {
                         .map(ToString::to_string)
                         .or_else(|| state.map(|s| s.arguments.clone()))
                         .unwrap_or_default();
+                    if call_id.is_empty() || name.is_empty() {
+                        tracing::warn!(
+                            provider = PROVIDER_NAME,
+                            item = %item,
+                            "Skipping function_call done event without enough identifiers"
+                        );
+                        if let Some(item_id) = item_id {
+                            active_function_calls.remove(&item_id);
+                        }
+                        continue;
+                    }
                     let arguments = serde_json::from_str(&arguments)
                         .unwrap_or_else(|_| Value::String(arguments));
                     tool_calls.push(ToolCall {
@@ -500,7 +523,9 @@ fn parse_sse_response(body: &str) -> Result<ParsedResponse, LlmError> {
                         name,
                         arguments,
                     });
-                    active_function_calls.remove(&item_id);
+                    if let Some(item_id) = item_id {
+                        active_function_calls.remove(&item_id);
+                    }
                 }
             }
             "response.completed" => {
@@ -619,6 +644,38 @@ data: {"type":"response.completed","response":{"status":"completed","usage":{"in
         assert_eq!(parsed.text_content, "Done");
         assert_eq!(parsed.input_tokens, 11);
         assert_eq!(parsed.output_tokens, 7);
+        assert_eq!(parsed.tool_calls.len(), 1);
+        assert_eq!(parsed.tool_calls[0].id, "call_abc");
+        assert_eq!(parsed.tool_calls[0].name, "search");
+        assert_eq!(parsed.tool_calls[0].arguments["query"], "test");
+    }
+
+    #[test]
+    fn parse_sse_response_skips_malformed_tool_call_without_item_id() {
+        let sse_body = r#"data: {"type":"response.output_item.added","item":{"type":"function_call","call_id":"call_a","name":"search"}}
+
+data: {"type":"response.output_item.added","item":{"type":"function_call","call_id":"call_b","name":"lookup"}}
+
+data: {"type":"response.output_item.done","item":{"type":"function_call"}}
+
+data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":3,"output_tokens":1}}}
+"#;
+
+        let parsed = parse_sse_response(sse_body).expect("malformed SSE should still parse");
+        assert!(
+            parsed.tool_calls.is_empty(),
+            "malformed function_call without stable identifiers should be skipped"
+        );
+    }
+
+    #[test]
+    fn parse_sse_response_allows_complete_tool_call_without_item_id() {
+        let sse_body = r#"data: {"type":"response.output_item.done","item":{"type":"function_call","call_id":"call_abc","name":"search","arguments":"{\"query\":\"test\"}"}}
+
+data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":5,"output_tokens":2}}}
+"#;
+
+        let parsed = parse_sse_response(sse_body).expect("complete function_call should parse");
         assert_eq!(parsed.tool_calls.len(), 1);
         assert_eq!(parsed.tool_calls[0].id, "call_abc");
         assert_eq!(parsed.tool_calls[0].name, "search");
