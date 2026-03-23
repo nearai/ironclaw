@@ -398,7 +398,12 @@ pub enum RoutineError {
     Database { reason: String },
 
     #[error("LLM call failed: {reason}")]
-    LlmFailed { reason: String },
+    LlmFailed {
+        reason: String,
+        /// Partial token count consumed before the failure (if any).
+        /// Used to accumulate usage across retry attempts.
+        partial_tokens: Option<i32>,
+    },
 
     #[error("Failed to dispatch full job: {reason}")]
     JobDispatchFailed { reason: String },
@@ -408,6 +413,47 @@ pub enum RoutineError {
 
     #[error("LLM response truncated (finish_reason=length) with no content")]
     TruncatedResponse,
+}
+
+impl RoutineError {
+    /// Known permanent failure substrings in LLM error reasons.
+    ///
+    /// These map to `LlmError` variants that the LLM retry layer already
+    /// considers non-retryable (`AuthFailed`, `ContextLengthExceeded`,
+    /// `ModelNotAvailable`) plus content-policy rejections surfaced as
+    /// provider-level `RequestFailed` with descriptive messages.
+    const PERMANENT_LLM_PATTERNS: &'static [&'static str] = &[
+        "auth",
+        "authentication",
+        "invalid_api_key",
+        "content policy",
+        "content_policy",
+        "content_filter",
+        "context length",
+        "context_length",
+        "model not available",
+        "model_not_available",
+        "moderation",
+    ];
+
+    /// Whether this error is transient and worth retrying with backoff.
+    ///
+    /// Retryable: LLM failures (unless the reason matches a known permanent
+    /// pattern), empty responses, truncated responses.
+    /// Non-retryable: configuration errors, authorization, resource limits,
+    /// DB errors, and LLM failures caused by auth/content-policy/context-length.
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            RoutineError::LlmFailed { reason, .. } => {
+                let lower = reason.to_ascii_lowercase();
+                !Self::PERMANENT_LLM_PATTERNS
+                    .iter()
+                    .any(|pat| lower.contains(pat))
+            }
+            RoutineError::EmptyResponse | RoutineError::TruncatedResponse => true,
+            _ => false,
+        }
+    }
 }
 
 /// Result type alias for the agent.
@@ -515,6 +561,79 @@ mod tests {
         };
         let msg = err.to_string();
         assert!(msg.contains("bad format"), "Should mention reason: {msg}");
+    }
+
+    #[test]
+    fn routine_error_retryable_classification() {
+        // Transient errors should be retryable
+        assert!(
+            RoutineError::LlmFailed {
+                reason: "timeout".into(),
+                partial_tokens: None,
+            }
+            .is_retryable()
+        );
+        assert!(RoutineError::EmptyResponse.is_retryable());
+        assert!(RoutineError::TruncatedResponse.is_retryable());
+
+        // Hard failures should NOT be retryable
+        assert!(
+            !RoutineError::Disabled {
+                name: "test".into()
+            }
+            .is_retryable()
+        );
+        assert!(
+            !RoutineError::JobDispatchFailed {
+                reason: "no docker".into()
+            }
+            .is_retryable()
+        );
+        assert!(
+            !RoutineError::Database {
+                reason: "conn refused".into()
+            }
+            .is_retryable()
+        );
+        assert!(!RoutineError::NotFound { id: Uuid::new_v4() }.is_retryable());
+        assert!(!RoutineError::NotAuthorized { id: Uuid::new_v4() }.is_retryable());
+        assert!(
+            !RoutineError::MaxConcurrent {
+                name: "test".into()
+            }
+            .is_retryable()
+        );
+        assert!(
+            !RoutineError::UnknownTriggerType {
+                trigger_type: "x".into()
+            }
+            .is_retryable()
+        );
+        assert!(
+            !RoutineError::UnknownActionType {
+                action_type: "x".into()
+            }
+            .is_retryable()
+        );
+        assert!(
+            !RoutineError::MissingField {
+                context: "c".into(),
+                field: "f".into()
+            }
+            .is_retryable()
+        );
+        assert!(
+            !RoutineError::InvalidCron {
+                reason: "bad".into()
+            }
+            .is_retryable()
+        );
+        assert!(
+            !RoutineError::UnknownRunStatus {
+                status: "bad".into()
+            }
+            .is_retryable()
+        );
     }
 
     #[test]

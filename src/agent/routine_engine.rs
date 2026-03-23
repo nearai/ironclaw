@@ -978,36 +978,105 @@ async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) 
     // Increment running count (atomic: survives panics in the execution below)
     ctx.running_count.fetch_add(1, Ordering::Relaxed);
 
-    let result = match &routine.action {
-        RoutineAction::Lightweight {
-            prompt,
-            context_paths,
-            max_tokens,
-            use_tools,
-            max_tool_rounds,
-        } => {
-            execute_lightweight(
-                &ctx,
-                &routine,
-                prompt,
-                context_paths,
-                *max_tokens,
-                *use_tools,
-                *max_tool_rounds,
-            )
-            .await
-        }
-        RoutineAction::FullJob {
-            title,
-            description,
-            max_iterations,
-        } => {
-            let execution = FullJobExecutionConfig {
-                title,
-                description,
-                max_iterations: *max_iterations,
+    // Retry constants for transient lightweight execution failures.
+    const MAX_RETRIES: u32 = 3;
+    const BASE_DELAY_MS: u64 = 1000;
+
+    let is_lightweight = matches!(routine.action, RoutineAction::Lightweight { .. });
+
+    let result = {
+        let mut attempt = 0u32;
+        let mut accumulated_tokens: i32 = 0;
+        let uses_tools = matches!(
+            routine.action,
+            RoutineAction::Lightweight {
+                use_tools: true,
+                ..
+            }
+        ) && ctx.config.lightweight_tools_enabled;
+
+        loop {
+            let execution_result = match &routine.action {
+                RoutineAction::Lightweight {
+                    prompt,
+                    context_paths,
+                    max_tokens,
+                    use_tools,
+                    max_tool_rounds,
+                } => {
+                    execute_lightweight(
+                        &ctx,
+                        &routine,
+                        prompt,
+                        context_paths,
+                        *max_tokens,
+                        *use_tools,
+                        *max_tool_rounds,
+                    )
+                    .await
+                }
+                RoutineAction::FullJob {
+                    title,
+                    description,
+                    max_iterations,
+                } => {
+                    let execution = FullJobExecutionConfig {
+                        title,
+                        description,
+                        max_iterations: *max_iterations,
+                    };
+                    execute_full_job(&ctx, &routine, &run, &execution).await
+                }
             };
-            execute_full_job(&ctx, &routine, &run, &execution).await
+
+            match execution_result {
+                Ok((status, summary, tokens)) => {
+                    // Accumulate tokens from this attempt with any previous attempts
+                    let total = Some(accumulated_tokens + tokens.unwrap_or(0));
+                    break Ok((status, summary, total));
+                }
+                Err(ref e) if is_lightweight && e.is_retryable() && attempt < MAX_RETRIES => {
+                    // Accumulate any partial tokens from the failed attempt
+                    if let RoutineError::LlmFailed {
+                        partial_tokens: Some(t),
+                        ..
+                    } = e
+                    {
+                        accumulated_tokens += t;
+                    }
+
+                    attempt += 1;
+
+                    // NOTE: When retrying a tools-enabled routine, the entire
+                    // execute_lightweight() call is re-run, which means
+                    // already-executed tool calls will be repeated. This is a
+                    // known limitation — restructuring the retry to wrap only
+                    // the LLM call would require splitting the tool loop from
+                    // the LLM call, which is too invasive for the current
+                    // architecture.
+                    if uses_tools {
+                        tracing::warn!(
+                            routine = %routine.name,
+                            attempt = attempt,
+                            "Retrying tools-enabled routine; previously executed tool calls \
+                             may be repeated causing duplicate side effects"
+                        );
+                    }
+
+                    let delay = Duration::from_millis(
+                        BASE_DELAY_MS.saturating_mul(2u64.saturating_pow(attempt - 1)),
+                    );
+                    tracing::warn!(
+                        routine = %routine.name,
+                        attempt = attempt,
+                        max_retries = MAX_RETRIES,
+                        delay_ms = delay.as_millis() as u64,
+                        "Transient routine error, retrying: {}", e
+                    );
+                    tokio::time::sleep(delay).await;
+                }
+                Err(e) => break Err(e),
+            }
         }
     };
 
@@ -1391,6 +1460,7 @@ async fn execute_lightweight_no_tools(
         .await
         .map_err(|e| RoutineError::LlmFailed {
             reason: e.to_string(),
+            partial_tokens: None,
         })?;
 
     handle_text_response(
@@ -1491,13 +1561,13 @@ async fn execute_lightweight_with_tools(
                 .with_max_tokens(effective_max_tokens)
                 .with_temperature(0.3);
 
-            let response =
-                ctx.llm
-                    .complete(request)
-                    .await
-                    .map_err(|e| RoutineError::LlmFailed {
-                        reason: e.to_string(),
-                    })?;
+            let response = ctx.llm.complete(request).await.map_err(|e| {
+                let partial = (total_input_tokens + total_output_tokens) as i32;
+                RoutineError::LlmFailed {
+                    reason: e.to_string(),
+                    partial_tokens: if partial > 0 { Some(partial) } else { None },
+                }
+            })?;
 
             total_input_tokens += response.input_tokens;
             total_output_tokens += response.output_tokens;
@@ -1524,8 +1594,10 @@ async fn execute_lightweight_with_tools(
                 .with_temperature(0.3);
 
             let response = ctx.llm.complete_with_tools(request).await.map_err(|e| {
+                let partial = (total_input_tokens + total_output_tokens) as i32;
                 RoutineError::LlmFailed {
                     reason: e.to_string(),
+                    partial_tokens: if partial > 0 { Some(partial) } else { None },
                 }
             })?;
 
@@ -1698,6 +1770,7 @@ async fn execute_routine_tool(
 }
 
 /// Send a notification based on the routine's notify config and run status.
+#[allow(clippy::too_many_arguments)]
 async fn send_notification(
     tx: &mpsc::Sender<OutgoingResponse>,
     notify: &NotifyConfig,
@@ -2252,6 +2325,90 @@ mod tests {
                 "{:?} should not finalize the routine run",
                 state
             );
+        }
+    }
+
+    /// Regression test for #1320: transient errors are retried for lightweight
+    /// routines but not for full-job routines or hard failures.
+    #[test]
+    fn test_retry_classification_for_routine_errors() {
+        use crate::error::RoutineError;
+
+        // Transient errors (retryable for lightweight routines)
+        let transient_errors: Vec<RoutineError> = vec![
+            RoutineError::LlmFailed {
+                reason: "rate limit".into(),
+                partial_tokens: None,
+            },
+            RoutineError::LlmFailed {
+                reason: "network timeout".into(),
+                partial_tokens: Some(42),
+            },
+            RoutineError::EmptyResponse,
+            RoutineError::TruncatedResponse,
+        ];
+        for err in &transient_errors {
+            assert!(err.is_retryable(), "{} should be retryable", err);
+        }
+
+        // Permanent LLM failures that should NOT be retried
+        let permanent_llm_errors: Vec<RoutineError> = vec![
+            RoutineError::LlmFailed {
+                reason: "Authentication failed for provider openai".into(),
+                partial_tokens: None,
+            },
+            RoutineError::LlmFailed {
+                reason: "invalid_api_key: bad key".into(),
+                partial_tokens: None,
+            },
+            RoutineError::LlmFailed {
+                reason: "content policy violation".into(),
+                partial_tokens: None,
+            },
+            RoutineError::LlmFailed {
+                reason: "content_filter triggered".into(),
+                partial_tokens: None,
+            },
+            RoutineError::LlmFailed {
+                reason: "context length exceeded: 150000 tokens used, 128000 allowed".into(),
+                partial_tokens: Some(100),
+            },
+            RoutineError::LlmFailed {
+                reason: "model not available on provider anthropic".into(),
+                partial_tokens: None,
+            },
+            RoutineError::LlmFailed {
+                reason: "content moderation flagged".into(),
+                partial_tokens: None,
+            },
+        ];
+        for err in &permanent_llm_errors {
+            assert!(!err.is_retryable(), "{} should NOT be retryable", err);
+        }
+
+        // Hard failures (never retried)
+        let hard_errors: Vec<RoutineError> = vec![
+            RoutineError::Disabled {
+                name: "test".into(),
+            },
+            RoutineError::NotFound {
+                id: uuid::Uuid::new_v4(),
+            },
+            RoutineError::NotAuthorized {
+                id: uuid::Uuid::new_v4(),
+            },
+            RoutineError::MaxConcurrent {
+                name: "test".into(),
+            },
+            RoutineError::JobDispatchFailed {
+                reason: "no docker".into(),
+            },
+            RoutineError::Database {
+                reason: "connection refused".into(),
+            },
+        ];
+        for err in &hard_errors {
+            assert!(!err.is_retryable(), "{} should NOT be retryable", err);
         }
     }
 
