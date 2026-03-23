@@ -201,11 +201,7 @@ impl RoutineEngine {
     }
 
     /// Check incoming message against event triggers. Returns number of routines fired.
-    pub async fn check_event_triggers(
-        &self,
-        message: &IncomingMessage,
-        content: &str,
-    ) -> usize {
+    pub async fn check_event_triggers(&self, message: &IncomingMessage, content: &str) -> usize {
         let cache = self.event_cache.read().await;
 
         // Early return if there are no message matchers at all.

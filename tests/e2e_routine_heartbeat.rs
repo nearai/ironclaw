@@ -560,7 +560,9 @@ mod tests {
             "default",
             "deploy to production now",
         );
-        let fired = engine.check_event_triggers(&matching_msg, &matching_msg.content).await;
+        let fired = engine
+            .check_event_triggers(&matching_msg, &matching_msg.content)
+            .await;
         assert!(
             fired >= 1,
             "Expected >= 1 routine fired on match, got {fired}"
@@ -577,7 +579,9 @@ mod tests {
             "default",
             "check the staging environment",
         );
-        let fired_neg = engine.check_event_triggers(&non_matching_msg, &non_matching_msg.content).await;
+        let fired_neg = engine
+            .check_event_triggers(&non_matching_msg, &non_matching_msg.content)
+            .await;
         assert_eq!(fired_neg, 0, "Expected 0 routines fired on non-match");
     }
 
@@ -639,7 +643,9 @@ mod tests {
             "guest-sender",
             "deploy to production now",
         );
-        let guest_fired = engine.check_event_triggers(&guest_msg, &guest_msg.content).await;
+        let guest_fired = engine
+            .check_event_triggers(&guest_msg, &guest_msg.content)
+            .await;
         assert_eq!(
             guest_fired, 0,
             "Guest scope must not fire owner event routines"
@@ -662,7 +668,9 @@ mod tests {
             "owner-sender",
             "deploy to production now",
         );
-        let owner_fired = engine.check_event_triggers(&owner_msg, &owner_msg.content).await;
+        let owner_fired = engine
+            .check_event_triggers(&owner_msg, &owner_msg.content)
+            .await;
         assert!(
             owner_fired >= 1,
             "Owner scope should fire matching owner event routine"
