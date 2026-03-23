@@ -221,14 +221,7 @@ impl AcpBridgeRuntime {
                     });
                 tokio::task::spawn_local(handle_io);
 
-                // ACP initialization handshake
-                let init_request = acp::InitializeRequest::new(acp::ProtocolVersion::V1)
-                    .client_info(
-                        acp::Implementation::new("ironclaw", env!("CARGO_PKG_VERSION"))
-                            .title("IronClaw"),
-                    );
-
-                conn.initialize(init_request)
+                conn.initialize(ironclaw_init_request())
                     .await
                     .map_err(|e| WorkerError::ExecutionFailed {
                         reason: format!("ACP initialize failed: {}", e),
@@ -366,24 +359,37 @@ impl AcpBridgeRuntime {
 
 // ==================== ACP Client trait implementation ====================
 
-/// IronClaw's implementation of the ACP Client trait.
+/// Sink for ACP events translated from session notifications.
 ///
-/// Handles callbacks from the agent: session notifications (streaming output),
-/// permission requests (auto-approved), and file operations.
-struct IronClawAcpClient {
-    orchestrator_client: Arc<WorkerHttpClient>,
+/// The bridge posts events to the orchestrator via HTTP; the CLI test
+/// command prints them to stdout. Both share the same `IronClawAcpClient`.
+pub(crate) trait AcpEventSink: 'static {
+    fn emit_event(&self, payload: &JobEventPayload) -> impl std::future::Future<Output = ()>;
 }
 
-impl IronClawAcpClient {
-    fn new(orchestrator_client: Arc<WorkerHttpClient>) -> Self {
-        Self {
-            orchestrator_client,
-        }
+impl AcpEventSink for Arc<WorkerHttpClient> {
+    async fn emit_event(&self, payload: &JobEventPayload) {
+        self.post_event(payload).await;
+    }
+}
+
+/// IronClaw's implementation of the ACP Client trait.
+///
+/// Handles callbacks from the agent: session notifications (streaming output)
+/// and permission requests (auto-approved). Generic over the event sink so
+/// both the container bridge and CLI test command can reuse it.
+pub(crate) struct IronClawAcpClient<S: AcpEventSink> {
+    sink: S,
+}
+
+impl<S: AcpEventSink> IronClawAcpClient<S> {
+    pub(crate) fn new(sink: S) -> Self {
+        Self { sink }
     }
 }
 
 #[async_trait::async_trait(?Send)]
-impl acp::Client for IronClawAcpClient {
+impl<S: AcpEventSink> acp::Client for IronClawAcpClient<S> {
     async fn request_permission(
         &self,
         args: acp::RequestPermissionRequest,
@@ -401,10 +407,17 @@ impl acp::Client for IronClawAcpClient {
 
     async fn session_notification(&self, args: acp::SessionNotification) -> acp::Result<()> {
         if let Some(payload) = session_update_to_payload(&args.update) {
-            self.orchestrator_client.post_event(&payload).await;
+            self.sink.emit_event(&payload).await;
         }
         Ok(())
     }
+}
+
+/// Build the standard IronClaw ACP initialization request.
+pub(crate) fn ironclaw_init_request() -> acp::InitializeRequest {
+    acp::InitializeRequest::new(acp::ProtocolVersion::V1).client_info(
+        acp::Implementation::new("ironclaw", env!("CARGO_PKG_VERSION")).title("IronClaw"),
+    )
 }
 
 // ==================== Event translation ====================

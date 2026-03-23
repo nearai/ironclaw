@@ -167,6 +167,30 @@ async fn test_agent(name: &str) -> anyhow::Result<()> {
     use agent_client_protocol::{self as acp, Agent as _};
     use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
+    use crate::worker::acp_bridge;
+    use crate::worker::api::JobEventPayload;
+
+    /// Event sink that prints agent output to stdout during `ironclaw acp test`.
+    struct PrintEventSink;
+
+    impl acp_bridge::AcpEventSink for PrintEventSink {
+        async fn emit_event(&self, payload: &JobEventPayload) {
+            match payload.event_type.as_str() {
+                "message" => {
+                    if let Some(content) = payload.data["content"].as_str() {
+                        println!("    | {}", content);
+                    }
+                }
+                "tool_use" => {
+                    if let Some(tool) = payload.data["tool_name"].as_str() {
+                        println!("    [tool: {}]", tool);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
     let db = connect_db().await;
     let agents = load_agents(db.as_ref()).await?;
     let agent = agents
@@ -197,45 +221,26 @@ async fn test_agent(name: &str) -> anyhow::Result<()> {
         .take()
         .ok_or_else(|| anyhow::anyhow!("failed to capture agent stdout"))?;
 
-    // Run ACP handshake inside a LocalSet (!Send futures)
+    // Run ACP handshake inside a LocalSet (!Send futures).
+    // Uses IronClawAcpClient with a PrintEventSink so the test exercises
+    // the same permission auto-approval and event translation as real jobs.
     let local_set = tokio::task::LocalSet::new();
     let result = local_set
         .run_until(async move {
-            struct NoopClient;
-
-            #[async_trait::async_trait(?Send)]
-            impl acp::Client for NoopClient {
-                async fn request_permission(
-                    &self,
-                    _args: acp::RequestPermissionRequest,
-                ) -> acp::Result<acp::RequestPermissionResponse> {
-                    Err(acp::Error::method_not_found())
-                }
-
-                async fn session_notification(
-                    &self,
-                    _args: acp::SessionNotification,
-                ) -> acp::Result<()> {
-                    Ok(())
-                }
-            }
-
             let outgoing = child_stdin.compat_write();
             let incoming = child_stdout.compat();
 
+            let client = acp_bridge::IronClawAcpClient::new(PrintEventSink);
+
             let (conn, handle_io) =
-                acp::ClientSideConnection::new(NoopClient, outgoing, incoming, |fut| {
+                acp::ClientSideConnection::new(client, outgoing, incoming, |fut| {
                     tokio::task::spawn_local(fut);
                 });
             tokio::task::spawn_local(handle_io);
 
-            let init_request = acp::InitializeRequest::new(acp::ProtocolVersion::V1).client_info(
-                acp::Implementation::new("ironclaw", env!("CARGO_PKG_VERSION")).title("IronClaw"),
-            );
-
             let handshake = tokio::time::timeout(
                 std::time::Duration::from_secs(15),
-                conn.initialize(init_request),
+                conn.initialize(acp_bridge::ironclaw_init_request()),
             )
             .await;
 
