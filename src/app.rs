@@ -309,7 +309,12 @@ impl AppBuilder {
         let embeddings = self
             .config
             .embeddings
-            .create_provider(&self.config.llm.nearai.base_url, self.session.clone());
+            .create_provider(
+                &self.config.llm.nearai.base_url,
+                self.session.clone(),
+                self.config.llm.bedrock.as_ref(),
+            )
+            .await;
 
         // Register memory tools if database is available
         let workspace_user_id = self
