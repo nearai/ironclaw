@@ -271,12 +271,13 @@ impl Tool for MemoryWriteTool {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
+        // Parse timezone once for targets that need it (daily_log).
+        let tz = crate::timezone::parse_timezone(&ctx.user_timezone).unwrap_or(chrono_tz::Tz::UTC);
+
         // Resolve the target to a workspace path
         let resolved_path = match target {
             "memory" => paths::MEMORY.to_string(),
             "daily_log" => {
-                let tz = crate::timezone::parse_timezone(&ctx.user_timezone)
-                    .unwrap_or(chrono_tz::Tz::UTC);
                 let now = chrono::Utc::now().with_timezone(&tz);
                 format!("daily/{}.md", now.format("%Y-%m-%d"))
             }
@@ -318,8 +319,6 @@ impl Tool for MemoryWriteTool {
                     }
                 }
                 "daily_log" => {
-                    let tz = crate::timezone::parse_timezone(&ctx.user_timezone)
-                        .unwrap_or(chrono_tz::Tz::UTC);
                     self.workspace
                         .append_daily_log_tz(content, tz)
                         .await

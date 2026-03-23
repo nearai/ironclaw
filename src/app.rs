@@ -325,8 +325,19 @@ impl AppBuilder {
             };
             let mut ws = Workspace::new_with_db(workspace_user_id, db.clone())
                 .with_search_config(&self.config.search);
+
             if let Some(ref emb) = embeddings {
                 ws = ws.with_embeddings_cached(emb.clone(), emb_cache_config);
+            }
+
+            // Wire workspace-level settings (read scopes, memory layers)
+            if !self.config.workspace.read_scopes.is_empty() {
+                ws = ws.with_additional_read_scopes(self.config.workspace.read_scopes.clone());
+                tracing::info!(
+                    user_id = workspace_user_id,
+                    read_scopes = ?ws.read_user_ids(),
+                    "Workspace configured with multi-scope reads"
+                );
             }
             ws = ws.with_memory_layers(self.config.workspace.memory_layers.clone());
             let ws = Arc::new(ws);
