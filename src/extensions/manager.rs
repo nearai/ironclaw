@@ -509,6 +509,21 @@ impl ExtensionManager {
         names
     }
 
+    /// Build a compact summary of active extensions for LLM prompt context.
+    pub async fn active_extension_summary(&self) -> String {
+        match self.list(None, false).await {
+            Ok(extensions) => Self::format_active_extensions(&extensions),
+            Err(err) => {
+                tracing::warn!(
+                    owner_id = %self.user_id,
+                    "Failed to list active extensions for prompt context: {}",
+                    err
+                );
+                String::new()
+            }
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         mcp_session_manager: Arc<McpSessionManager>,
@@ -563,6 +578,39 @@ impl ExtensionManager {
             test_wasm_channel_loader: RwLock::new(None),
             #[cfg(test)]
             test_telegram_binding_resolver: RwLock::new(None),
+        }
+    }
+
+    pub(crate) fn format_active_extensions(extensions: &[InstalledExtension]) -> String {
+        let mut lines = Vec::new();
+
+        for extension in extensions.iter().filter(|extension| extension.active) {
+            let label = extension.display_name.as_deref().unwrap_or(&extension.name);
+            let mut status = Vec::new();
+            status.push("active");
+            if extension.authenticated {
+                status.push("authenticated");
+            }
+            if extension.needs_setup {
+                status.push("needs-setup");
+            }
+            if extension.has_auth && !extension.authenticated {
+                status.push("auth-pending");
+            }
+            let mut detail = format!("- {} ({})", label, extension.kind);
+            if !status.is_empty() {
+                detail.push_str(&format!(": {}", status.join(", ")));
+            }
+            if !extension.tools.is_empty() {
+                detail.push_str(&format!("; tools: {}", extension.tools.join(", ")));
+            }
+            lines.push(detail);
+        }
+
+        if lines.is_empty() {
+            String::new()
+        } else {
+            format!("{}\n", lines.join("\n"))
         }
     }
 
@@ -5637,7 +5685,8 @@ mod tests {
         telegram_message_matches_verification_code,
     };
     use crate::extensions::{
-        ExtensionError, ExtensionKind, ExtensionSource, InstallResult, VerificationChallenge,
+        ExtensionError, ExtensionKind, ExtensionSource, InstallResult, InstalledExtension,
+        VerificationChallenge,
     };
     use crate::pairing::PairingStore;
 
@@ -5942,6 +5991,52 @@ mod tests {
         tools_dir: std::path::PathBuf,
     ) -> crate::extensions::manager::ExtensionManager {
         make_test_manager_with_dirs(wasm_runtime, tools_dir.clone(), tools_dir, None)
+    }
+
+    #[test]
+    fn test_format_active_extensions_lists_only_active_items() {
+        let extensions = vec![
+            InstalledExtension {
+                name: "telegram".to_string(),
+                kind: ExtensionKind::WasmChannel,
+                display_name: Some("Telegram".to_string()),
+                description: None,
+                url: None,
+                authenticated: true,
+                active: true,
+                tools: Vec::new(),
+                needs_setup: false,
+                has_auth: true,
+                installed: true,
+                activation_error: None,
+                version: None,
+            },
+            InstalledExtension {
+                name: "gmail".to_string(),
+                kind: ExtensionKind::WasmTool,
+                display_name: None,
+                description: None,
+                url: None,
+                authenticated: false,
+                active: false,
+                tools: vec!["gmail".to_string()],
+                needs_setup: true,
+                has_auth: true,
+                installed: true,
+                activation_error: None,
+                version: None,
+            },
+        ];
+
+        let summary = ExtensionManager::format_active_extensions(&extensions);
+        assert!(
+            summary.contains("Telegram (wasm_channel): active, authenticated"),
+            "summary should include the active Telegram channel: {summary}"
+        );
+        assert!(
+            !summary.contains("gmail"),
+            "inactive extensions should not be included: {summary}"
+        );
     }
 
     fn write_test_tool(
