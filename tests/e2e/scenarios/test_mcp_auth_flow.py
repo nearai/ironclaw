@@ -99,6 +99,10 @@ async def test_mcp_activate_triggers_auth(ironclaw_server):
     assert auth_url is not None or awaiting_token, (
         f"Activate should require auth, got: {data}"
     )
+    if auth_url is not None:
+        assert _extract_state(auth_url).startswith("ic2."), (
+            f"Hosted MCP OAuth should emit versioned state, got: {auth_url}"
+        )
 
 
 # ── Section C: OAuth Round-Trip ──────────────────────────────────────────

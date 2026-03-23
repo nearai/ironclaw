@@ -162,6 +162,8 @@ src/
 │
 ├── secrets/            # Secrets management (AES-256-GCM, OS keychain for master key)
 │
+├── profile.rs          # Psychographic profile types, 9-dimension analysis framework
+│
 ├── setup/              # 7-step onboarding wizard — see src/setup/README.md
 │
 ├── skills/             # SKILL.md prompt extension system — see .claude/rules/skills.md

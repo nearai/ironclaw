@@ -25,7 +25,69 @@ DEFAULT_RESPONSE = "I understand your request."
 
 TOOL_CALL_PATTERNS = [
     (re.compile(r"echo (.+)", re.IGNORECASE), "echo", lambda m: {"message": m.group(1)}),
+    (
+        re.compile(r"make approval post (?P<label>[a-z0-9_-]+)", re.IGNORECASE),
+        "http",
+        lambda m: {
+            "method": "POST",
+            "url": f"https://example.com/{m.group('label')}",
+            "body": {"label": m.group("label")},
+        },
+    ),
     (re.compile(r"what time|current time", re.IGNORECASE), "time", lambda _: {"operation": "now"}),
+    (
+        re.compile(
+            r"create lightweight owner routine (?P<name>[a-z0-9][a-z0-9_-]*)",
+            re.IGNORECASE,
+        ),
+        "routine_create",
+        lambda m: {
+            "name": m.group("name"),
+            "description": f"Owner-scope routine {m.group('name')}",
+            "trigger_type": "manual",
+            "prompt": f"Confirm that {m.group('name')} executed.",
+            "action_type": "lightweight",
+            "use_tools": False,
+        },
+    ),
+    (
+        re.compile(
+            r"create full[- ]job owner routine (?P<name>[a-z0-9][a-z0-9_-]*)",
+            re.IGNORECASE,
+        ),
+        "routine_create",
+        lambda m: {
+            "name": m.group("name"),
+            "description": f"Owner-scope full-job routine {m.group('name')}",
+            "trigger_type": "manual",
+            "prompt": f"Complete the routine job for {m.group('name')}.",
+            "action_type": "full_job",
+        },
+    ),
+    (
+        re.compile(
+            r"create event routine (?P<name>[a-z0-9][a-z0-9_-]*) "
+            r"channel (?P<channel>[a-z0-9_-]+) pattern (?P<pattern>[a-z0-9_|-]+)",
+            re.IGNORECASE,
+        ),
+        "routine_create",
+        lambda m: {
+            "name": m.group("name"),
+            "description": f"Event routine {m.group('name')}",
+            "trigger_type": "event",
+            "event_channel": None if m.group("channel").lower() == "any" else m.group("channel"),
+            "event_pattern": m.group("pattern"),
+            "prompt": f"Acknowledge that {m.group('name')} fired.",
+            "action_type": "lightweight",
+            "use_tools": False,
+            "cooldown_secs": 0,
+        },
+    ),
+    (
+        re.compile(r"list owner routines", re.IGNORECASE),
+        "routine_list",
+        lambda _: {},
+    ),
 ]
 
 
@@ -205,14 +267,24 @@ async def _stream_tool_call(request: web.Request, cid: str, tc: dict) -> web.Str
 async def oauth_exchange(request: web.Request) -> web.Response:
     """Mock OAuth token exchange proxy for E2E tests.
 
-    Accepts form params (code, redirect_uri, code_verifier) and returns
-    a fake token response. Called by ironclaw's exchange_via_proxy() when
-    IRONCLAW_OAUTH_EXCHANGE_URL is set.
+    Accepts the generic hosted OAuth proxy contract used by IronClaw and
+    returns a fake token response. MCP callback tests assert that provider-
+    specific token params such as RFC 8707 `resource` are forwarded here.
     """
     data = await request.post()
     code = data.get("code", "")
+    access_token_field = data.get("access_token_field", "access_token")
+
+    if code == "mock_mcp_code":
+        if not data.get("token_url", "").endswith("/oauth/token"):
+            return web.json_response({"error": "missing_token_url"}, status=400)
+        if not data.get("client_id"):
+            return web.json_response({"error": "missing_client_id"}, status=400)
+        if not data.get("resource"):
+            return web.json_response({"error": "missing_resource"}, status=400)
+
     return web.json_response({
-        "access_token": f"mock-token-{code}",
+        access_token_field: f"mock-token-{code}",
         "refresh_token": "mock-refresh-token",
         "expires_in": 3600,
     })

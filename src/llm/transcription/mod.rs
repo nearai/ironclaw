@@ -4,8 +4,10 @@
 //! backends and a [`TranscriptionMiddleware`] that detects audio attachments
 //! on incoming messages and replaces them with transcribed text.
 
+mod chat_completions;
 mod openai;
 
+pub use self::chat_completions::ChatCompletionsTranscriptionProvider;
 pub use self::openai::OpenAiWhisperProvider;
 
 use async_trait::async_trait;
