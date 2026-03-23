@@ -25,6 +25,7 @@ mod nearai_chat;
 pub mod oauth_helpers;
 pub mod openai_codex_provider;
 pub mod openai_codex_session;
+mod openai_responses;
 mod provider;
 mod reasoning;
 pub mod recording;
@@ -178,6 +179,9 @@ fn create_registry_provider(
 
     match config.protocol {
         ProviderProtocol::OpenAiCompletions => create_openai_compat_from_registry(config),
+        ProviderProtocol::OpenAiResponses => {
+            create_openai_responses_from_registry(config, request_timeout_secs)
+        }
         ProviderProtocol::Anthropic => create_anthropic_from_registry(config),
         ProviderProtocol::Ollama => create_ollama_from_registry(config),
         ProviderProtocol::GithubCopilot => {
@@ -192,6 +196,20 @@ fn create_registry_provider(
             Ok(Arc::new(provider))
         }
     }
+}
+
+fn create_openai_responses_from_registry(
+    config: &RegistryProviderConfig,
+    request_timeout_secs: u64,
+) -> Result<Arc<dyn LlmProvider>, LlmError> {
+    let provider = openai_responses::OpenAiResponsesProvider::new(config, request_timeout_secs)?;
+    tracing::debug!(
+        provider = %config.provider_id,
+        model = %config.model,
+        base_url = %config.base_url,
+        "Using OpenAI Responses provider"
+    );
+    Ok(Arc::new(provider))
 }
 
 fn create_codex_chatgpt_from_registry(
@@ -864,5 +882,27 @@ mod tests {
         // None when nothing configured
         let config = test_llm_config();
         assert_eq!(config.cheap_model_name(), None);
+    }
+
+    #[test]
+    fn test_create_registry_provider_uses_generic_responses_provider() {
+        let config = RegistryProviderConfig {
+            protocol: ProviderProtocol::OpenAiResponses,
+            provider_id: "openai".to_string(),
+            api_key: Some(secrecy::SecretString::from("test-key".to_string())),
+            base_url: "https://example.com/v1".to_string(),
+            model: "gpt-5.4".to_string(),
+            extra_headers: Vec::new(),
+            oauth_token: None,
+            is_codex_chatgpt: false,
+            refresh_token: None,
+            auth_path: None,
+            cache_retention: crate::llm::config::CacheRetention::None,
+            unsupported_params: Vec::new(),
+        };
+
+        let provider =
+            create_registry_provider(&config, 120).expect("responses provider should build");
+        assert_eq!(provider.model_name(), "gpt-5.4");
     }
 }

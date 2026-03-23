@@ -88,8 +88,8 @@ pub struct RegistryProviderConfig {
     /// OAuth token for providers that support Bearer auth (e.g. Anthropic via `claude login`).
     /// When set, the provider factory routes to the OAuth-specific provider implementation.
     pub oauth_token: Option<SecretString>,
-    /// When true, route OpenAI-compatible traffic to the Codex ChatGPT
-    /// Responses API provider instead of rig-core's Chat Completions path.
+    /// When true, route traffic to the ChatGPT/Codex OAuth-specific
+    /// Responses provider instead of the generic registry protocol path.
     pub is_codex_chatgpt: bool,
     /// OAuth refresh token for Codex ChatGPT token refresh.
     pub refresh_token: Option<SecretString>,
