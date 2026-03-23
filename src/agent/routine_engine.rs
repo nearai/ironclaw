@@ -201,8 +201,11 @@ impl RoutineEngine {
     }
 
     /// Check incoming message against event triggers. Returns number of routines fired.
-    pub async fn check_event_triggers(&self, message: &IncomingMessage) -> usize {
-        let content = &message.content;
+    pub async fn check_event_triggers(
+        &self,
+        message: &IncomingMessage,
+        content: &str,
+    ) -> usize {
         let cache = self.event_cache.read().await;
 
         // Early return if there are no message matchers at all.
@@ -1805,6 +1808,7 @@ pub fn spawn_cron_ticker(
         engine.check_cron_triggers().await;
 
         let mut ticker = tokio::time::interval(interval);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         // Periodic event cache refresh so web/CLI mutations are picked up
         // without requiring tool-path code to call refresh_event_cache().
         // Uses wall-clock elapsed time so the refresh cadence is stable

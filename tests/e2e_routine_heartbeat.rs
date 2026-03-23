@@ -560,7 +560,7 @@ mod tests {
             "default",
             "deploy to production now",
         );
-        let fired = engine.check_event_triggers(&matching_msg).await;
+        let fired = engine.check_event_triggers(&matching_msg, &matching_msg.content).await;
         assert!(
             fired >= 1,
             "Expected >= 1 routine fired on match, got {fired}"
@@ -577,7 +577,7 @@ mod tests {
             "default",
             "check the staging environment",
         );
-        let fired_neg = engine.check_event_triggers(&non_matching_msg).await;
+        let fired_neg = engine.check_event_triggers(&non_matching_msg, &non_matching_msg.content).await;
         assert_eq!(fired_neg, 0, "Expected 0 routines fired on non-match");
     }
 
@@ -639,7 +639,7 @@ mod tests {
             "guest-sender",
             "deploy to production now",
         );
-        let guest_fired = engine.check_event_triggers(&guest_msg).await;
+        let guest_fired = engine.check_event_triggers(&guest_msg, &guest_msg.content).await;
         assert_eq!(
             guest_fired, 0,
             "Guest scope must not fire owner event routines"
@@ -662,7 +662,7 @@ mod tests {
             "owner-sender",
             "deploy to production now",
         );
-        let owner_fired = engine.check_event_triggers(&owner_msg).await;
+        let owner_fired = engine.check_event_triggers(&owner_msg, &owner_msg.content).await;
         assert!(
             owner_fired >= 1,
             "Owner scope should fire matching owner event routine"
@@ -890,7 +890,7 @@ mod tests {
             "default",
             "test-cooldown trigger",
         );
-        let fired1 = engine.check_event_triggers(&msg).await;
+        let fired1 = engine.check_event_triggers(&msg, &msg.content).await;
         assert!(fired1 >= 1, "First fire should work");
 
         // Give spawn time, then update last_run_at to simulate recent execution.
@@ -905,7 +905,7 @@ mod tests {
         engine.refresh_event_cache().await;
 
         // Second fire should be blocked by cooldown.
-        let fired2 = engine.check_event_triggers(&msg).await;
+        let fired2 = engine.check_event_triggers(&msg, &msg.content).await;
         assert_eq!(fired2, 0, "Second fire should be blocked by cooldown");
     }
 
@@ -1075,7 +1075,7 @@ mod tests {
         engine.refresh_event_cache().await;
 
         let msg = IncomingMessage::new("test", "default", "DISABLE_ME");
-        let fired_before = engine.check_event_triggers(&msg).await;
+        let fired_before = engine.check_event_triggers(&msg, &msg.content).await;
         assert!(fired_before >= 1, "Expected routine to fire before disable");
 
         // Simulate what routines_toggle_handler now does: update DB, then refresh.
@@ -1084,7 +1084,7 @@ mod tests {
         db.update_routine(&routine).await.expect("update_routine");
         engine.refresh_event_cache().await;
 
-        let fired_after = engine.check_event_triggers(&msg).await;
+        let fired_after = engine.check_event_triggers(&msg, &msg.content).await;
         assert_eq!(
             fired_after, 0,
             "Disabled routine must not fire after cache refresh"
@@ -1110,7 +1110,7 @@ mod tests {
 
         let msg = IncomingMessage::new("test", "default", "DELETE_ME");
         assert!(
-            engine.check_event_triggers(&msg).await >= 1,
+            engine.check_event_triggers(&msg, &msg.content).await >= 1,
             "Expected routine to fire before delete"
         );
 
@@ -1119,7 +1119,7 @@ mod tests {
         engine.refresh_event_cache().await;
 
         assert_eq!(
-            engine.check_event_triggers(&msg).await,
+            engine.check_event_triggers(&msg, &msg.content).await,
             0,
             "Deleted routine must not fire after cache refresh"
         );
@@ -1433,8 +1433,9 @@ mod tests {
         db.create_routine(&routine).await.expect("create_routine");
         engine.refresh_event_cache().await;
 
+        let trigger_msg = IncomingMessage::new("test", "default", "owner-gate");
         let fired = engine
-            .check_event_triggers(&IncomingMessage::new("test", "default", "owner-gate"))
+            .check_event_triggers(&trigger_msg, &trigger_msg.content)
             .await;
         assert_eq!(fired, 1, "expected one matching event routine");
 

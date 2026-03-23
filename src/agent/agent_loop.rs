@@ -1133,10 +1133,12 @@ impl Agent {
         );
 
         if !message.is_internal
-            && let Submission::UserInput { content: _ } = submission
+            && let Submission::UserInput { ref content } = submission
             && let Some(engine) = self.routine_engine().await
         {
-            let fired = engine.check_event_triggers(message).await;
+            // Use post-hook content so that BeforeInbound hooks that rewrite
+            // input are respected by event trigger matching.
+            let fired = engine.check_event_triggers(message, content).await;
             if fired > 0 {
                 tracing::debug!(
                     channel = %message.channel,
