@@ -1086,7 +1086,7 @@ struct EngineContext {
 }
 
 /// Execute a routine run. Handles both lightweight and full_job modes.
-async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) {
+async fn execute_routine(ctx: EngineContext, routine: Routine, mut run: RoutineRun) {
     // Increment running count (atomic: survives panics in the execution below)
     ctx.running_count.fetch_add(1, Ordering::Relaxed);
 
@@ -1255,7 +1255,7 @@ struct FullJobExecutionConfig<'a> {
 async fn execute_full_job(
     ctx: &EngineContext,
     routine: &Routine,
-    run: &RoutineRun,
+    run: &mut RoutineRun,
     execution: &FullJobExecutionConfig<'_>,
 ) -> Result<(RunStatus, Option<String>, Option<i32>), RoutineError> {
     // Full-job routines dispatch through the scheduler (same as /job
