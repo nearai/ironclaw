@@ -134,9 +134,8 @@ impl SessionManager {
         };
 
         // Use pre-parsed UUID if available, otherwise parse from string.
-        let ext_uuid = parsed_uuid.or_else(|| {
-            external_thread_id.and_then(|ext_tid| Uuid::parse_str(ext_tid).ok())
-        });
+        let ext_uuid = parsed_uuid
+            .or_else(|| external_thread_id.and_then(|ext_tid| Uuid::parse_str(ext_tid).ok()));
 
         // Single read lock for both the key lookup and UUID adoption check
         let adoptable_uuid = {
@@ -945,9 +944,13 @@ mod tests {
         let manager = SessionManager::new();
 
         // Case 1: Normal resolution creates thread and maps it
-        let (session1, tid1) = manager.resolve_thread("user1", "chan1", Some("ext-1")).await;
+        let (session1, tid1) = manager
+            .resolve_thread("user1", "chan1", Some("ext-1"))
+            .await;
         // Resolving again with same key should return same thread (fast path)
-        let (_, tid1_again) = manager.resolve_thread("user1", "chan1", Some("ext-1")).await;
+        let (_, tid1_again) = manager
+            .resolve_thread("user1", "chan1", Some("ext-1"))
+            .await;
         assert_eq!(tid1, tid1_again);
 
         // Case 2: UUID adoption - insert a thread directly into session
@@ -1052,12 +1055,7 @@ mod tests {
         // Resolve with parsed_uuid=None but a valid UUID string -- should
         // fall back to parsing the string and still adopt the thread
         let (_, resolved) = manager
-            .resolve_thread_with_parsed_uuid(
-                "user2",
-                "chan2",
-                Some(&known_id.to_string()),
-                None,
-            )
+            .resolve_thread_with_parsed_uuid("user2", "chan2", Some(&known_id.to_string()), None)
             .await;
         assert_eq!(resolved, known_id);
     }
