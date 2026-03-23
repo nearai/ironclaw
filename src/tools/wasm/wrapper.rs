@@ -1116,10 +1116,20 @@ async fn refresh_oauth_token(
     };
 
     if let Some(proxy_url) = config.exchange_proxy_url.as_deref() {
+        let Some(gateway_token) = config.gateway_token.as_deref() else {
+            tracing::warn!(
+                "OAuth exchange proxy is configured, but no gateway auth token is available"
+            );
+            return false;
+        };
+
+        // In hosted mode, the configured exchange proxy owns the outbound token
+        // refresh and validation policy for the provider token_url. Direct-mode
+        // HTTPS/private-IP checks remain in place for self-hosted refreshes below.
         let token_response = match oauth_defaults::refresh_token_via_proxy(
             oauth_defaults::ProxyRefreshTokenRequest {
                 proxy_url,
-                gateway_token: config.gateway_token.as_deref().unwrap_or_default(),
+                gateway_token,
                 token_url: &config.token_url,
                 client_id: &config.client_id,
                 client_secret: config.client_secret.as_deref(),

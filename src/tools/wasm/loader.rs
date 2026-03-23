@@ -468,8 +468,7 @@ fn resolve_oauth_refresh_config(cap_file: &CapabilitiesFile) -> Option<OAuthRefr
         builtin.as_ref(),
         exchange_proxy_url.is_some(),
     );
-    let gateway_token = std::env::var("GATEWAY_AUTH_TOKEN")
-        .ok()
+    let gateway_token = crate::config::helpers::env_or_override("GATEWAY_AUTH_TOKEN")
         .map(|token| token.trim().to_string())
         .filter(|token| !token.is_empty());
 

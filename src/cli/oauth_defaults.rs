@@ -809,7 +809,7 @@ pub async fn refresh_token_via_proxy(
 
     let refresh_url = format!("{}/oauth/refresh", request.proxy_url.trim_end_matches('/'));
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(60))
+        .timeout(Duration::from_secs(15))
         .build()
         .map_err(|e| OAuthCallbackError::Io(format!("Failed to build HTTP client: {}", e)))?;
 
