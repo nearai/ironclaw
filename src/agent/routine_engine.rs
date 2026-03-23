@@ -56,10 +56,12 @@ pub enum SandboxReadiness {
     DockerUnavailable,
 }
 
-/// Check whether a routine's user/channel filters match an incoming message.
+/// Check whether an event-triggered routine's user/channel filters match an
+/// incoming message.
 ///
 /// Returns `true` if:
-/// - The routine's `user_id` matches the message sender
+/// - The routine has an `Event` trigger (non-Event routines always return `false`)
+/// - The routine's `user_id` matches the message's user scope
 /// - The routine's channel filter (if any) matches the message channel
 ///   case-insensitively
 ///
@@ -71,7 +73,7 @@ pub(crate) fn routine_matches_message(routine: &Routine, message: &IncomingMessa
         return false;
     }
 
-    // User ownership filter — only fire routines owned by the message sender.
+    // User ownership filter — only fire routines scoped to this user.
     if routine.user_id != message.user_id {
         return false;
     }
@@ -240,12 +242,22 @@ impl RoutineEngine {
 
             // User ownership + channel filter (extracted for testability).
             if !routine_matches_message(routine, message) {
-                tracing::trace!(
-                    routine = %routine.name,
-                    routine_user = %routine.user_id,
-                    message_user = %message.user_id,
-                    "Skipped: user or channel mismatch"
-                );
+                // User mismatch is expected for multi-user setups — keep at
+                // trace to avoid one log per routine per inbound message.
+                if routine.user_id != message.user_id {
+                    tracing::trace!(
+                        routine = %routine.name,
+                        routine_user = %routine.user_id,
+                        message_user = %message.user_id,
+                        "Skipped: user scope mismatch"
+                    );
+                } else {
+                    tracing::debug!(
+                        routine = %routine.name,
+                        channel = %message.channel,
+                        "Skipped: channel mismatch"
+                    );
+                }
                 continue;
             }
 
@@ -1795,8 +1807,10 @@ pub fn spawn_cron_ticker(
         let mut ticker = tokio::time::interval(interval);
         // Periodic event cache refresh so web/CLI mutations are picked up
         // without requiring tool-path code to call refresh_event_cache().
-        let mut refresh_counter: u64 = 0;
-        let refresh_every = 4; // refresh every 4 ticks (~60s at default 15s interval)
+        // Uses wall-clock elapsed time so the refresh cadence is stable
+        // regardless of the cron tick interval configuration.
+        let refresh_interval = Duration::from_secs(60);
+        let mut last_refresh = tokio::time::Instant::now();
 
         loop {
             ticker.tick().await;
@@ -1805,9 +1819,9 @@ pub fn spawn_cron_ticker(
             engine.sync_dispatched_runs().await;
             engine.check_cron_triggers().await;
 
-            refresh_counter += 1;
-            if refresh_counter.is_multiple_of(refresh_every) {
+            if last_refresh.elapsed() >= refresh_interval {
                 engine.refresh_event_cache().await;
+                last_refresh = tokio::time::Instant::now();
             }
         }
     })
