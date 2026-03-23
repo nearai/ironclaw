@@ -38,10 +38,49 @@ fn main() -> anyhow::Result<()> {
     let _ = dotenvy::dotenv();
     ironclaw::bootstrap::load_ironclaw_env();
 
-    tokio::runtime::Builder::new_multi_thread()
+    let result = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
-        .block_on(async_main())
+        .block_on(async_main());
+
+    if let Err(ref e) = result {
+        format_top_level_error(e);
+    }
+    result
+}
+
+/// Format a top-level error with color and recovery hints.
+fn format_top_level_error(err: &anyhow::Error) {
+    use ironclaw::cli::fmt;
+    let msg = format!("{err:#}");
+
+    eprintln!();
+    eprintln!("  {}\u{2717}{} {}", fmt::error(), fmt::reset(), msg);
+
+    // Provide recovery hints for common errors
+    let lower = msg.to_ascii_lowercase();
+    let hint = if lower.contains("database_url")
+        || lower.contains("database") && lower.contains("not set")
+    {
+        Some("run `ironclaw onboard` or set DATABASE_URL in .env")
+    } else if lower.contains("connection refused") || lower.contains("connect error") {
+        Some("check that the database server is running")
+    } else if lower.contains("session") && lower.contains("not found") {
+        Some("run `ironclaw onboard` to set up authentication")
+    } else if lower.contains("secrets_master_key") {
+        Some("run `ironclaw onboard` or set SECRETS_MASTER_KEY in .env")
+    } else if lower.contains("already running") {
+        Some("stop the other instance or remove the stale PID file")
+    } else if lower.contains("onboard") {
+        Some("run `ironclaw onboard` to complete setup")
+    } else {
+        None
+    };
+
+    if let Some(hint_text) = hint {
+        eprintln!("  {}hint:{} {}", fmt::dim(), fmt::reset(), hint_text,);
+    }
+    eprintln!();
 }
 
 async fn async_main() -> anyhow::Result<()> {
@@ -94,6 +133,11 @@ async fn async_main() -> anyhow::Result<()> {
             return ironclaw::cli::run_skills_command(skills_cmd.clone(), cli.config.as_deref())
                 .await;
         }
+        Some(Command::Hooks(hooks_cmd)) => {
+            init_cli_tracing();
+            return ironclaw::cli::run_hooks_command(hooks_cmd.clone(), cli.config.as_deref())
+                .await;
+        }
         Some(Command::Logs(logs_cmd)) => {
             init_cli_tracing();
             return ironclaw::cli::run_logs_command(logs_cmd.clone(), cli.config.as_deref()).await;
@@ -139,11 +183,53 @@ async fn async_main() -> anyhow::Result<()> {
             )
             .await;
         }
+        Some(Command::Login { openai_codex }) => {
+            init_cli_tracing();
+            if *openai_codex {
+                // Resolve codex config so OPENAI_CODEX_* env overrides are
+                // honoured even when LLM_BACKEND isn't set to openai_codex.
+                let codex_config = {
+                    let config = Config::from_env()
+                        .await
+                        .map_err(|e| anyhow::anyhow!("{}", e))?;
+                    config.llm.openai_codex.unwrap_or_else(|| {
+                        use ironclaw::llm::OpenAiCodexConfig;
+                        let mut cfg = OpenAiCodexConfig::default();
+                        if let Ok(v) = std::env::var("OPENAI_CODEX_AUTH_URL") {
+                            cfg.auth_endpoint = v;
+                        }
+                        if let Ok(v) = std::env::var("OPENAI_CODEX_API_URL") {
+                            cfg.api_base_url = v;
+                        }
+                        if let Ok(v) = std::env::var("OPENAI_CODEX_CLIENT_ID") {
+                            cfg.client_id = v;
+                        }
+                        if let Ok(v) = std::env::var("OPENAI_CODEX_SESSION_PATH") {
+                            cfg.session_path = std::path::PathBuf::from(v);
+                        }
+                        cfg
+                    })
+                };
+                let mgr = ironclaw::llm::OpenAiCodexSessionManager::new(codex_config)
+                    .map_err(|e| anyhow::anyhow!("{}", e))?;
+                mgr.device_code_login()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{}", e))?;
+                println!(
+                    "OpenAI Codex authentication complete. Set LLM_BACKEND=openai_codex to use it."
+                );
+            } else {
+                println!("Specify a provider to authenticate with:");
+                println!("  ironclaw login --openai-codex   (ChatGPT subscription)");
+            }
+            return Ok(());
+        }
         Some(Command::Onboard {
             skip_auth,
             channels_only,
             provider_only,
             quick,
+            step,
         }) => {
             #[cfg(any(feature = "postgres", feature = "libsql"))]
             {
@@ -152,6 +238,7 @@ async fn async_main() -> anyhow::Result<()> {
                     channels_only: *channels_only,
                     provider_only: *provider_only,
                     quick: *quick,
+                    steps: step.clone(),
                 };
                 let mut wizard =
                     SetupWizard::try_with_config_and_toml(config, cli.config.as_deref())?;
@@ -159,7 +246,7 @@ async fn async_main() -> anyhow::Result<()> {
             }
             #[cfg(not(any(feature = "postgres", feature = "libsql")))]
             {
-                let _ = (skip_auth, channels_only, provider_only, quick);
+                let _ = (skip_auth, channels_only, provider_only, quick, step);
                 eprintln!("Onboarding wizard requires the 'postgres' or 'libsql' feature.");
             }
             return Ok(());
@@ -186,6 +273,8 @@ async fn async_main() -> anyhow::Result<()> {
             None
         }
     };
+
+    let startup_start = std::time::Instant::now();
 
     // ── Agent startup ──────────────────────────────────────────────────
 
@@ -272,6 +361,21 @@ async fn async_main() -> anyhow::Result<()> {
     let prompt_queue = orch.prompt_queue;
     let docker_status = orch.docker_status;
 
+    // Derive user-facing warning from docker_status for channel notification
+    let docker_user_warning: Option<String> = match docker_status {
+        ironclaw::sandbox::DockerStatus::NotInstalled => Some(
+            "Sandbox is enabled but Docker is not installed -- \
+             full_job routines will fail until Docker is available."
+                .to_string(),
+        ),
+        ironclaw::sandbox::DockerStatus::NotRunning => Some(
+            "Sandbox is enabled but Docker is not running -- \
+             full_job routines will fail until Docker is started."
+                .to_string(),
+        ),
+        _ => None,
+    };
+
     // ── Channel setup ──────────────────────────────────────────────────
 
     let channels = ChannelManager::new();
@@ -323,6 +427,17 @@ async fn async_main() -> anyhow::Result<()> {
     }));
 
     // Load WASM channels and register their webhook routes.
+    // Ensure the channels directory exists so the WASM runtime initializes even when
+    // no channels are installed yet — hot-activation needs the runtime to be available.
+    if config.channels.wasm_channels_enabled
+        && let Err(e) = std::fs::create_dir_all(&config.channels.wasm_channels_dir)
+    {
+        tracing::warn!(
+            path = %config.channels.wasm_channels_dir.display(),
+            error = %e,
+            "Failed to create WASM channels directory"
+        );
+    }
     if config.channels.wasm_channels_enabled && config.channels.wasm_channels_dir.exists() {
         let wasm_result = ironclaw::channels::wasm::setup_wasm_channels(
             &config,
@@ -511,6 +626,16 @@ async fn async_main() -> anyhow::Result<()> {
             gw = gw.with_skill_catalog(Arc::clone(sc));
         }
         gw = gw.with_cost_guard(Arc::clone(&components.cost_guard));
+        {
+            let active_model = components.llm.model_name().to_string();
+            let mut enabled = channel_names.clone();
+            enabled.push("gateway".into());
+            gw = gw.with_active_config(ironclaw::channels::web::server::ActiveConfigSnapshot {
+                llm_backend: config.llm.backend.to_string(),
+                llm_model: active_model,
+                enabled_channels: enabled,
+            });
+        }
         if config.sandbox.enabled {
             gw = gw.with_prompt_queue(Arc::clone(&prompt_queue));
 
@@ -609,6 +734,7 @@ async fn async_main() -> anyhow::Result<()> {
                 .and_then(|t| t.public_url())
                 .or_else(|| config.tunnel.public_url.clone()),
             tunnel_provider: active_tunnel.as_ref().map(|t| t.name().to_string()),
+            startup_elapsed: Some(startup_start.elapsed()),
         };
         ironclaw::boot_screen::print_boot_screen(&boot_info);
     }
@@ -620,7 +746,7 @@ async fn async_main() -> anyhow::Result<()> {
     // Register message tool for sending messages to connected channels
     components
         .tools
-        .register_message_tools(Arc::clone(&channels))
+        .register_message_tools(Arc::clone(&channels), components.extension_manager.clone())
         .await;
 
     // Wire up channel runtime for hot-activation of WASM channels.
@@ -720,15 +846,25 @@ async fn async_main() -> anyhow::Result<()> {
         cost_guard: components.cost_guard,
         sse_tx: sse_sender,
         http_interceptor,
-        transcription: config
-            .transcription
-            .create_provider()
-            .map(|p| Arc::new(ironclaw::transcription::TranscriptionMiddleware::new(p))),
+        transcription: config.transcription.create_provider().map(|p| {
+            Arc::new(ironclaw::llm::transcription::TranscriptionMiddleware::new(
+                p,
+            ))
+        }),
         document_extraction: Some(Arc::new(
             ironclaw::document_extraction::DocumentExtractionMiddleware::new(),
         )),
+        sandbox_readiness: if !config.sandbox.enabled {
+            ironclaw::agent::routine_engine::SandboxReadiness::DisabledByConfig
+        } else if docker_status.is_ok() {
+            ironclaw::agent::routine_engine::SandboxReadiness::Available
+        } else {
+            ironclaw::agent::routine_engine::SandboxReadiness::DockerUnavailable
+        },
+        builder: components.builder,
     };
 
+    let channels_for_warnings = Arc::clone(&channels);
     let mut agent = Agent::new(
         config.agent.clone(),
         deps,
@@ -932,6 +1068,27 @@ async fn async_main() -> anyhow::Result<()> {
                     }
                 }
             }
+        });
+    }
+
+    // Notify user if sandbox is unavailable (Docker missing/not running)
+    if let Some(warning) = docker_user_warning {
+        let channels_ref = Arc::clone(&channels_for_warnings);
+        tokio::spawn(async move {
+            // Delay to let channels finish connecting before sending the warning.
+            // 5s is generous but avoids the message being lost on slow startups.
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            tracing::debug!("Sending sandbox-unavailable warning to connected channels");
+            let response = ironclaw::channels::OutgoingResponse {
+                content: format!("Warning: {warning}"),
+                thread_id: None,
+                attachments: Vec::new(),
+                metadata: serde_json::json!({
+                    "source": "system",
+                    "type": "warning",
+                }),
+            };
+            let _ = channels_ref.broadcast_all("default", response).await;
         });
     }
 

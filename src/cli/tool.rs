@@ -651,8 +651,8 @@ async fn auth_tool(name: String, dir: Option<PathBuf>, user_id: String) -> anyho
 
     // Check for OAuth configuration
     if let Some(ref oauth) = auth.oauth {
-        // For providers with shared tokens (e.g., all Google tools share google_oauth_token),
-        // combine scopes from all installed tools so one auth covers everything.
+        // For providers with shared tokens, combine scopes from all installed
+        // tools so one auth covers everything.
         let combined = combine_provider_scopes(&tools_dir, &auth.secret_name, oauth).await;
         if combined.scopes.len() > oauth.scopes.len() {
             let extra = combined.scopes.len() - oauth.scopes.len();
@@ -670,8 +670,8 @@ async fn auth_tool(name: String, dir: Option<PathBuf>, user_id: String) -> anyho
 }
 
 /// Scan the tools directory for all capabilities files sharing the same secret_name
-/// and combine their OAuth scopes. This way, authing any Google tool requests scopes
-/// for ALL installed Google tools, so one login covers everything.
+/// and combine their OAuth scopes so one authorization covers the full shared
+/// credential set.
 async fn combine_provider_scopes(
     tools_dir: &Path,
     secret_name: &str,
@@ -736,11 +736,18 @@ async fn auth_tool_oauth(
         })
         .or_else(|| builtin.as_ref().map(|c| c.client_id.to_string()))
         .ok_or_else(|| {
-            anyhow::anyhow!(
+            let mut message = format!(
                 "OAuth client_id not configured.\n\
-                 Set {} env var, or build with IRONCLAW_GOOGLE_CLIENT_ID.",
+                 Set {} env var",
                 oauth.client_id_env.as_deref().unwrap_or("the client_id")
-            )
+            );
+            if let Some(override_env) =
+                oauth_defaults::builtin_client_id_override_env(&auth.secret_name)
+            {
+                message.push_str(&format!(", or build with {override_env}"));
+            }
+            message.push('.');
+            anyhow::anyhow!(message)
         })?;
 
     // Get client_secret: capabilities file > runtime env var > built-in defaults

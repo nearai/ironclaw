@@ -81,6 +81,15 @@ impl JobState {
     pub fn is_active(&self) -> bool {
         !self.is_terminal()
     }
+
+    /// Check if this job consumes a parallel execution slot.
+    ///
+    /// Only jobs in Pending, InProgress, or Stuck states consume execution resources
+    /// and should count toward the parallel job limit. Completed and Submitted jobs
+    /// are in the state machine but are no longer actively executing.
+    pub fn is_parallel_blocking(&self) -> bool {
+        matches!(self, Self::Pending | Self::InProgress | Self::Stuck)
+    }
 }
 
 impl std::fmt::Display for JobState {

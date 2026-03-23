@@ -9,7 +9,7 @@ mod agent;
 mod builder;
 mod channels;
 mod database;
-mod embeddings;
+pub(crate) mod embeddings;
 mod heartbeat;
 pub(crate) mod helpers;
 mod hygiene;
@@ -24,6 +24,7 @@ mod skills;
 mod transcription;
 mod tunnel;
 mod wasm;
+mod workspace;
 
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex, Once};
@@ -38,7 +39,7 @@ pub use self::channels::{
     ChannelsConfig, CliConfig, DEFAULT_GATEWAY_PORT, GatewayConfig, HttpConfig, SignalConfig,
 };
 pub use self::database::{DatabaseBackend, DatabaseConfig, SslMode, default_libsql_path};
-pub use self::embeddings::EmbeddingsConfig;
+pub use self::embeddings::{DEFAULT_EMBEDDING_CACHE_SIZE, EmbeddingsConfig};
 pub use self::heartbeat::HeartbeatConfig;
 pub use self::hygiene::HygieneConfig;
 pub use self::llm::default_session_path;
@@ -53,9 +54,10 @@ pub use self::skills::SkillsConfig;
 pub use self::transcription::TranscriptionConfig;
 pub use self::tunnel::TunnelConfig;
 pub use self::wasm::WasmConfig;
+pub use self::workspace::WorkspaceConfig;
 pub use crate::llm::config::{
-    BedrockConfig, CacheRetention, LlmConfig, NearAiConfig, OAUTH_PLACEHOLDER,
-    RegistryProviderConfig,
+    BedrockConfig, CacheRetention, GeminiOauthConfig, LlmConfig, NearAiConfig, OAUTH_PLACEHOLDER,
+    OpenAiCodexConfig, RegistryProviderConfig,
 };
 pub use crate::llm::session::SessionConfig;
 
@@ -98,6 +100,7 @@ pub struct Config {
     pub skills: SkillsConfig,
     pub transcription: TranscriptionConfig,
     pub search: WorkspaceSearchConfig,
+    pub workspace: WorkspaceConfig,
     pub observability: crate::observability::ObservabilityConfig,
     /// Channel-relay integration (Slack via external relay service).
     /// Present only when both `CHANNEL_RELAY_URL` and `CHANNEL_RELAY_API_KEY` are set.
@@ -175,6 +178,9 @@ impl Config {
             },
             transcription: TranscriptionConfig::default(),
             search: WorkspaceSearchConfig::default(),
+            workspace: WorkspaceConfig {
+                memory_layers: vec![],
+            },
             observability: crate::observability::ObservabilityConfig::default(),
             relay: None,
         }
@@ -305,13 +311,21 @@ impl Config {
     async fn build(settings: &Settings) -> Result<Self, ConfigError> {
         let owner_id = resolve_owner_id(settings)?;
 
+        let tunnel = TunnelConfig::resolve(settings)?;
+        let channels = ChannelsConfig::resolve(settings, &owner_id)?;
+        let workspace_user_id = channels
+            .gateway
+            .as_ref()
+            .map(|gw| gw.user_id.clone())
+            .unwrap_or_else(|| "default".to_string());
+
         Ok(Self {
             owner_id: owner_id.clone(),
             database: DatabaseConfig::resolve()?,
             llm: LlmConfig::resolve(settings)?,
             embeddings: EmbeddingsConfig::resolve(settings)?,
-            tunnel: TunnelConfig::resolve(settings)?,
-            channels: ChannelsConfig::resolve(settings, &owner_id)?,
+            tunnel,
+            channels,
             agent: AgentConfig::resolve(settings)?,
             safety: resolve_safety_config(settings)?,
             wasm: WasmConfig::resolve(settings)?,
@@ -325,6 +339,7 @@ impl Config {
             skills: SkillsConfig::resolve()?,
             transcription: TranscriptionConfig::resolve(settings)?,
             search: WorkspaceSearchConfig::resolve()?,
+            workspace: WorkspaceConfig::resolve(&workspace_user_id)?,
             observability: crate::observability::ObservabilityConfig {
                 backend: std::env::var("OBSERVABILITY_BACKEND").unwrap_or_else(|_| "none".into()),
             },
@@ -377,7 +392,7 @@ pub(crate) fn resolve_owner_id(settings: &Settings) -> Result<String, ConfigErro
 /// are read by `optional_env()` before falling back to `std::env::var()`,
 /// so explicit env vars always win.
 ///
-/// Also loads tokens from OS credential stores (macOS Keychain, Linux
+/// Also loads tokens from OS credential stores (macOS Keychain / Linux
 /// credentials files) which don't require the secrets DB.
 pub async fn inject_llm_keys_from_secrets(
     secrets: &dyn crate::secrets::SecretsStore,

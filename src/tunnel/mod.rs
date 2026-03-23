@@ -190,7 +190,7 @@ pub async fn start_managed_tunnel(
     mut config: crate::config::Config,
 ) -> (crate::config::Config, Option<Box<dyn Tunnel>>) {
     if config.tunnel.public_url.is_some() {
-        tracing::info!(
+        tracing::debug!(
             "Static tunnel URL in use: {}",
             config.tunnel.public_url.as_deref().unwrap_or("?")
         );
@@ -216,7 +216,7 @@ pub async fn start_managed_tunnel(
 
     match create_tunnel(provider_config) {
         Ok(Some(tunnel)) => {
-            tracing::info!(
+            tracing::debug!(
                 "Starting {} tunnel on {}:{}...",
                 tunnel.name(),
                 gateway_host,
@@ -224,7 +224,7 @@ pub async fn start_managed_tunnel(
             );
             match tunnel.start(gateway_host, gateway_port).await {
                 Ok(url) => {
-                    tracing::info!("Tunnel started: {}", url);
+                    tracing::debug!("Tunnel started: {}", url);
                     config.tunnel.public_url = Some(url);
                     (config, Some(tunnel))
                 }

@@ -35,6 +35,21 @@ pub struct ModelInfo {
     pub provider: Option<String>,
 }
 
+/// Default NEAR AI model used when no model is configured.
+pub const DEFAULT_MODEL: &str = "Qwen/Qwen3.5-122B-A10B";
+
+/// Fallback model list used by the setup wizard when the `/models` API is
+/// unreachable. Returns `(model_id, display_label)` pairs.
+pub fn default_models() -> Vec<(String, String)> {
+    vec![
+        (DEFAULT_MODEL.into(), "Qwen 3.5 122B (default)".into()),
+        (
+            "Qwen/Qwen3-32B".into(),
+            "Qwen 3 32B (smaller, faster)".into(),
+        ),
+    ]
+}
+
 /// NEAR AI provider (Chat Completions API, dual auth).
 pub struct NearAiChatProvider {
     client: Client,
@@ -243,28 +258,9 @@ impl NearAiChatProvider {
 
         let status = response.status();
         // Extract Retry-After header before consuming the response body.
-        // Supports both delay-seconds (RFC 7231 §7.1.3) and HTTP-date formats.
-        let retry_after_header = response
-            .headers()
-            .get("retry-after")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| {
-                // Try delay-seconds first (most common from API providers)
-                if let Ok(secs) = v.trim().parse::<u64>() {
-                    return Some(std::time::Duration::from_secs(secs));
-                }
-                // Try HTTP-date (e.g. "Mon, 02 Mar 2026 18:00:00 GMT")
-                if let Ok(dt) = chrono::DateTime::parse_from_rfc2822(v.trim()) {
-                    let now = chrono::Utc::now();
-                    let delta = dt.signed_duration_since(now);
-                    // Use max(0) so past/present dates yield Duration::ZERO
-                    // rather than None (which would cause an immediate retry).
-                    return Some(std::time::Duration::from_secs(
-                        delta.num_seconds().max(0) as u64
-                    ));
-                }
-                None
-            });
+        let retry_after_header = Some(crate::llm::retry::parse_retry_after(
+            response.headers().get("retry-after"),
+        ));
         let response_text = response.text().await.map_err(|e| LlmError::RequestFailed {
             provider: "nearai_chat".to_string(),
             reason: format!("Failed to read response body: {}", e),

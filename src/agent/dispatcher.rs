@@ -29,7 +29,7 @@ pub(super) enum AgenticLoopResult {
     /// A tool requires approval before continuing.
     NeedApproval {
         /// The pending approval request to store.
-        pending: PendingApproval,
+        pending: Box<PendingApproval>,
     },
 }
 
@@ -144,12 +144,7 @@ impl Agent {
                 .with_requester_id(&message.sender_id);
         job_ctx.http_interceptor = self.deps.http_interceptor.clone();
         job_ctx.user_timezone = user_tz.name().to_string();
-        job_ctx.metadata = serde_json::json!({
-            "notify_channel": message.channel,
-            "notify_user": message.user_id,
-            "notify_thread_id": message.thread_id,
-            "notify_metadata": message.metadata,
-        });
+        job_ctx.metadata = crate::agent::agent_loop::chat_tool_execution_metadata(message);
 
         // Build system prompts once for this turn. Two variants: with tools
         // (normal iterations) and without (force_text final iteration).
@@ -217,9 +212,7 @@ impl Agent {
                 reason: format!("Exceeded maximum tool iterations ({max_tool_iterations})"),
             }
             .into()),
-            LoopOutcome::NeedApproval(pending) => {
-                Ok(AgenticLoopResult::NeedApproval { pending: *pending })
-            }
+            LoopOutcome::NeedApproval(pending) => Ok(AgenticLoopResult::NeedApproval { pending }),
         }
     }
 
@@ -324,7 +317,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
             .channels
             .send_status(
                 &self.message.channel,
-                StatusUpdate::Thinking("Calling LLM...".into()),
+                StatusUpdate::Thinking(format!("Thinking (step {iteration})...")),
                 &self.message.metadata,
             )
             .await;
@@ -442,7 +435,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
             .channels
             .send_status(
                 &self.message.channel,
-                StatusUpdate::Thinking(format!("Executing {} tool(s)...", tool_calls.len())),
+                StatusUpdate::Thinking(contextual_tool_message(&tool_calls)),
                 &self.message.metadata,
             )
             .await;
@@ -482,6 +475,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
             usize,
             crate::llm::ToolCall,
             Arc<dyn crate::tools::Tool>,
+            bool, // allow_always
         )> = None;
 
         for (idx, original_tc) in tool_calls.iter().enumerate() {
@@ -551,7 +545,8 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                 && let Some(tool) = tool_opt
             {
                 use crate::tools::ApprovalRequirement;
-                let needs_approval = match tool.requires_approval(&tc.arguments) {
+                let requirement = tool.requires_approval(&tc.arguments);
+                let needs_approval = match requirement {
                     ApprovalRequirement::Never => false,
                     ApprovalRequirement::UnlessAutoApproved => {
                         let sess = self.session.lock().await;
@@ -586,7 +581,8 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                         continue;
                     }
 
-                    approval_needed = Some((idx, tc, tool));
+                    let allow_always = !matches!(requirement, ApprovalRequirement::Always);
+                    approval_needed = Some((idx, tc, tool, allow_always));
                     break;
                 }
             }
@@ -849,11 +845,9 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                         Ok(output) => {
                             let sanitized =
                                 self.agent.safety().sanitize_tool_output(&tc.name, &output);
-                            self.agent.safety().wrap_for_llm(
-                                &tc.name,
-                                &sanitized.content,
-                                sanitized.was_modified,
-                            )
+                            self.agent
+                                .safety()
+                                .wrap_for_llm(&tc.name, &sanitized.content)
                         }
                         Err(e) => format!("Tool '{}' failed: {}", tc.name, e),
                     };
@@ -887,7 +881,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
         }
 
         // Handle approval if a tool needed it
-        if let Some((approval_idx, tc, tool)) = approval_needed {
+        if let Some((approval_idx, tc, tool, allow_always)) = approval_needed {
             let display_params = redact_params(&tc.arguments, tool.sensitive_params());
             let pending = PendingApproval {
                 request_id: Uuid::new_v4(),
@@ -899,6 +893,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                 context_messages: reason_ctx.messages.clone(),
                 deferred_tool_calls: tool_calls[approval_idx + 1..].to_vec(),
                 user_timezone: Some(self.user_tz.name().to_string()),
+                allow_always,
             };
 
             return Ok(Some(LoopOutcome::NeedApproval(Box::new(pending))));
@@ -920,7 +915,14 @@ pub(super) async fn execute_chat_tool_standalone(
     params: &serde_json::Value,
     job_ctx: &crate::context::JobContext,
 ) -> Result<String, Error> {
-    crate::tools::execute::execute_tool_with_safety(tools, safety, tool_name, params, job_ctx).await
+    crate::tools::execute::execute_tool_with_safety(
+        tools,
+        safety,
+        tool_name,
+        params.clone(),
+        job_ctx,
+    )
+    .await
 }
 
 /// Parsed auth result fields for emitting StatusUpdate::AuthRequired.
@@ -972,6 +974,30 @@ pub(super) fn check_auth_required(
         .unwrap_or("Please provide your API token/key.")
         .to_string();
     Some((name, instructions))
+}
+
+/// Build a contextual thinking message based on tool names.
+///
+/// Instead of a generic "Executing 2 tool(s)..." this returns messages like
+/// "Running command..." or "Fetching page..." for single-tool calls, falling
+/// back to "Executing N tool(s)..." for multi-tool calls.
+fn contextual_tool_message(tool_calls: &[crate::llm::ToolCall]) -> String {
+    if tool_calls.len() == 1 {
+        match tool_calls[0].name.as_str() {
+            "shell" => "Running command...".into(),
+            "web_fetch" => "Fetching page...".into(),
+            "memory_search" => "Searching memory...".into(),
+            "memory_write" => "Writing to memory...".into(),
+            "memory_read" => "Reading memory...".into(),
+            "http_request" => "Making HTTP request...".into(),
+            "file_read" => "Reading file...".into(),
+            "file_write" => "Writing file...".into(),
+            "json_transform" => "Transforming data...".into(),
+            name => format!("Running {name}..."),
+        }
+    } else {
+        format!("Executing {} tool(s)...", tool_calls.len())
+    }
 }
 
 /// Compact messages for retry after a context-length-exceeded error.
@@ -1197,6 +1223,8 @@ mod tests {
             http_interceptor: None,
             transcription: None,
             document_extraction: None,
+            sandbox_readiness: crate::agent::routine_engine::SandboxReadiness::DisabledByConfig,
+            builder: None,
         };
 
         Agent::new(
@@ -1247,9 +1275,10 @@ mod tests {
 
     #[test]
     fn test_shell_destructive_command_requires_explicit_approval() {
-        // requires_explicit_approval() detects destructive commands that
-        // should return ApprovalRequirement::Always from ShellTool.
-        use crate::tools::builtin::shell::requires_explicit_approval;
+        // classify_command_risk() classifies destructive commands as High, which
+        // maps to ApprovalRequirement::Always in ShellTool::requires_approval().
+        use crate::tools::RiskLevel;
+        use crate::tools::builtin::shell::classify_command_risk;
 
         let destructive_cmds = [
             "rm -rf /tmp/test",
@@ -1257,20 +1286,14 @@ mod tests {
             "git reset --hard HEAD~5",
         ];
         for cmd in &destructive_cmds {
-            assert!(
-                requires_explicit_approval(cmd),
-                "'{}' should require explicit approval",
-                cmd
-            );
+            let r = classify_command_risk(cmd);
+            assert_eq!(r, RiskLevel::High, "'{}'", cmd); // safety: test code
         }
 
         let safe_cmds = ["git status", "cargo build", "ls -la"];
         for cmd in &safe_cmds {
-            assert!(
-                !requires_explicit_approval(cmd),
-                "'{}' should not require explicit approval",
-                cmd
-            );
+            let r = classify_command_risk(cmd);
+            assert_ne!(r, RiskLevel::High, "'{}'", cmd); // safety: test code
         }
     }
 
@@ -1364,6 +1387,35 @@ mod tests {
         assert!(always_needs, "Always must always require approval");
     }
 
+    /// Regression test: `allow_always` must be `false` for `Always` and
+    /// `true` for `UnlessAutoApproved`, so the UI hides the "always" button
+    /// for tools that truly cannot be auto-approved.
+    #[test]
+    fn test_allow_always_matches_approval_requirement() {
+        use crate::tools::ApprovalRequirement;
+
+        // Mirrors the expression used in dispatcher.rs and thread_ops.rs:
+        //   let allow_always = !matches!(requirement, ApprovalRequirement::Always);
+
+        // UnlessAutoApproved → allow_always = true
+        let req = ApprovalRequirement::UnlessAutoApproved;
+        let allow_always = !matches!(req, ApprovalRequirement::Always);
+        assert!(
+            allow_always,
+            "UnlessAutoApproved should set allow_always = true"
+        );
+
+        // Always → allow_always = false
+        let req = ApprovalRequirement::Always;
+        let allow_always = !matches!(req, ApprovalRequirement::Always);
+        assert!(!allow_always, "Always should set allow_always = false");
+
+        // Never → allow_always = true (approval is never needed, but if it were, always would be ok)
+        let req = ApprovalRequirement::Never;
+        let allow_always = !matches!(req, ApprovalRequirement::Always);
+        assert!(allow_always, "Never should set allow_always = true");
+    }
+
     #[test]
     fn test_pending_approval_serialization_backcompat_without_deferred_calls() {
         // PendingApproval from before the deferred_tool_calls field was added
@@ -1409,6 +1461,7 @@ mod tests {
                 },
             ],
             user_timezone: None,
+            allow_always: true,
         };
 
         let json = serde_json::to_string(&pending).expect("serialize");
@@ -1847,7 +1900,7 @@ mod tests {
             Ok(ToolCompletionResponse {
                 content: None,
                 tool_calls: vec![ToolCall {
-                    id: format!("call_{}", uuid::Uuid::new_v4()),
+                    id: crate::llm::generate_tool_call_id(0, 0),
                     name: "echo".to_string(),
                     arguments: serde_json::json!({"message": "looping"}),
                 }],
@@ -2000,7 +2053,7 @@ mod tests {
             Ok(ToolCompletionResponse {
                 content: None,
                 tool_calls: vec![ToolCall {
-                    id: format!("call_{}", uuid::Uuid::new_v4()),
+                    id: crate::llm::generate_tool_call_id(0, 0),
                     name: "nonexistent_tool".to_string(),
                     arguments: serde_json::json!({}),
                 }],
@@ -2037,6 +2090,8 @@ mod tests {
             http_interceptor: None,
             transcription: None,
             document_extraction: None,
+            sandbox_readiness: crate::agent::routine_engine::SandboxReadiness::DisabledByConfig,
+            builder: None,
         };
 
         Agent::new(
@@ -2155,6 +2210,8 @@ mod tests {
                 http_interceptor: None,
                 transcription: None,
                 document_extraction: None,
+                sandbox_readiness: crate::agent::routine_engine::SandboxReadiness::DisabledByConfig,
+                builder: None,
             };
 
             Agent::new(

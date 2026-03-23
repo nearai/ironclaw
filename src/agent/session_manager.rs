@@ -772,6 +772,33 @@ mod tests {
         assert_ne!(resolved, tid);
     }
 
+    #[tokio::test]
+    async fn test_register_then_resolve_same_uuid_on_second_channel_reuses_thread() {
+        use crate::agent::session::{Session, Thread};
+
+        let manager = SessionManager::new();
+        let tid = Uuid::new_v4();
+
+        let session = Arc::new(Mutex::new(Session::new("user-cross")));
+        {
+            let mut sess = session.lock().await;
+            let thread = Thread::with_id(tid, sess.id);
+            sess.threads.insert(tid, thread);
+        }
+
+        manager
+            .register_thread("user-cross", "http", tid, Arc::clone(&session))
+            .await;
+        manager
+            .register_thread("user-cross", "gateway", tid, Arc::clone(&session))
+            .await;
+
+        let (_, resolved) = manager
+            .resolve_thread("user-cross", "gateway", Some(&tid.to_string()))
+            .await;
+        assert_eq!(resolved, tid);
+    }
+
     // === QA Plan P3 - 4.2: Concurrent session stress tests ===
 
     #[tokio::test]

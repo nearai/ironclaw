@@ -14,12 +14,15 @@
 //!                                                   Agent Loop
 //! ```
 
+use std::sync::Arc;
+
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 use crate::channels::IncomingMessage;
 use crate::channels::web::types::SseEvent;
+use crate::context::{ContextManager, JobState};
 
 /// Route context for forwarding job monitor events back to the user's channel.
 #[derive(Debug, Clone)]
@@ -41,9 +44,22 @@ pub struct JobMonitorRoute {
 /// the main agent's context window).
 pub fn spawn_job_monitor(
     job_id: Uuid,
+    event_rx: broadcast::Receiver<(Uuid, SseEvent)>,
+    inject_tx: mpsc::Sender<IncomingMessage>,
+    route: JobMonitorRoute,
+) -> JoinHandle<()> {
+    spawn_job_monitor_with_context(job_id, event_rx, inject_tx, route, None)
+}
+
+/// Like `spawn_job_monitor`, but also transitions the job's in-memory state
+/// when it receives a `JobResult` event. This ensures fire-and-forget sandbox
+/// jobs don't stay `InProgress` forever in the `ContextManager`.
+pub fn spawn_job_monitor_with_context(
+    job_id: Uuid,
     mut event_rx: broadcast::Receiver<(Uuid, SseEvent)>,
     inject_tx: mpsc::Sender<IncomingMessage>,
     route: JobMonitorRoute,
+    context_manager: Option<Arc<ContextManager>>,
 ) -> JoinHandle<()> {
     let short_id = job_id.to_string()[..8].to_string();
 
@@ -77,6 +93,26 @@ pub fn spawn_job_monitor(
                             }
                         }
                         SseEvent::JobResult { status, .. } => {
+                            // Transition in-memory state so the job frees its
+                            // max_jobs slot and query tools show the final state.
+                            if let Some(ref cm) = context_manager {
+                                let target = if status == "completed" {
+                                    JobState::Completed
+                                } else {
+                                    JobState::Failed
+                                };
+                                let reason = if status != "completed" {
+                                    Some(format!("Container finished: {}", status))
+                                } else {
+                                    None
+                                };
+                                let _ = cm
+                                    .update_context(job_id, |ctx| {
+                                        let _ = ctx.transition_to(target, reason);
+                                    })
+                                    .await;
+                            }
+
                             let mut msg = IncomingMessage::new(
                                 route.channel.clone(),
                                 route.user_id.clone(),
@@ -113,6 +149,62 @@ pub fn spawn_job_monitor(
                     tracing::debug!(
                         job_id = %short_id,
                         "Broadcast channel closed, stopping monitor"
+                    );
+                    break;
+                }
+            }
+        }
+    })
+}
+
+/// Lightweight watcher that only transitions ContextManager state on job
+/// completion. Used when monitor routing metadata is absent (no channel to
+/// inject messages into) but we still need to free the `max_jobs` slot.
+pub fn spawn_completion_watcher(
+    job_id: Uuid,
+    mut event_rx: broadcast::Receiver<(Uuid, SseEvent)>,
+    context_manager: Arc<ContextManager>,
+) -> JoinHandle<()> {
+    let short_id = job_id.to_string()[..8].to_string();
+
+    tokio::spawn(async move {
+        loop {
+            match event_rx.recv().await {
+                Ok((ev_job_id, SseEvent::JobResult { status, .. })) if ev_job_id == job_id => {
+                    let target = if status == "completed" {
+                        JobState::Completed
+                    } else {
+                        JobState::Failed
+                    };
+                    let reason = if status != "completed" {
+                        Some(format!("Container finished: {}", status))
+                    } else {
+                        None
+                    };
+                    let _ = context_manager
+                        .update_context(job_id, |ctx| {
+                            let _ = ctx.transition_to(target, reason);
+                        })
+                        .await;
+                    tracing::debug!(
+                        job_id = %short_id,
+                        status = %status,
+                        "Completion watcher exiting (job finished)"
+                    );
+                    break;
+                }
+                Ok(_) => {}
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    tracing::warn!(
+                        job_id = %short_id,
+                        skipped = n,
+                        "Completion watcher lagged"
+                    );
+                }
+                Err(broadcast::error::RecvError::Closed) => {
+                    tracing::debug!(
+                        job_id = %short_id,
+                        "Broadcast channel closed, stopping completion watcher"
                     );
                     break;
                 }
@@ -211,6 +303,7 @@ mod tests {
                     job_id: job_id.to_string(),
                     status: "completed".to_string(),
                     session_id: None,
+                    fallback_deliverable: None,
                 },
             ))
             .unwrap();
@@ -292,5 +385,140 @@ mod tests {
     fn test_into_internal_sets_flag() {
         let msg = IncomingMessage::new("monitor", "system", "test").into_internal();
         assert!(msg.is_internal);
+    }
+
+    // === Regression: fire-and-forget sandbox jobs must transition out of InProgress ===
+    // Before this fix, spawn_job_monitor only forwarded SSE messages but never
+    // updated ContextManager. Background sandbox jobs stayed InProgress forever,
+    // permanently consuming a max_jobs slot.
+
+    #[tokio::test]
+    async fn test_monitor_transitions_context_on_completion() {
+        use crate::context::{ContextManager, JobState};
+
+        let cm = Arc::new(ContextManager::new(5));
+        let job_id = Uuid::new_v4();
+        cm.register_sandbox_job(job_id, "user-1", "Build app", "desc")
+            .await
+            .unwrap();
+
+        let (event_tx, _) = broadcast::channel::<(Uuid, SseEvent)>(16);
+        let (inject_tx, mut inject_rx) = mpsc::channel::<IncomingMessage>(16);
+
+        let handle = spawn_job_monitor_with_context(
+            job_id,
+            event_tx.subscribe(),
+            inject_tx,
+            test_route(),
+            Some(Arc::clone(&cm)),
+        );
+
+        // Send completion event
+        event_tx
+            .send((
+                job_id,
+                SseEvent::JobResult {
+                    job_id: job_id.to_string(),
+                    status: "completed".to_string(),
+                    session_id: None,
+                    fallback_deliverable: None,
+                },
+            ))
+            .unwrap();
+
+        // Drain the injected message
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(1), inject_rx.recv()).await;
+
+        // Wait for monitor to exit
+        tokio::time::timeout(std::time::Duration::from_secs(1), handle)
+            .await
+            .expect("monitor should exit")
+            .expect("monitor should not panic");
+
+        // Job should now be Completed, not InProgress
+        let ctx = cm.get_context(job_id).await.unwrap();
+        assert_eq!(ctx.state, JobState::Completed);
+    }
+
+    #[tokio::test]
+    async fn test_monitor_transitions_context_on_failure() {
+        use crate::context::{ContextManager, JobState};
+
+        let cm = Arc::new(ContextManager::new(5));
+        let job_id = Uuid::new_v4();
+        cm.register_sandbox_job(job_id, "user-1", "Build app", "desc")
+            .await
+            .unwrap();
+
+        let (event_tx, _) = broadcast::channel::<(Uuid, SseEvent)>(16);
+        let (inject_tx, mut inject_rx) = mpsc::channel::<IncomingMessage>(16);
+
+        let handle = spawn_job_monitor_with_context(
+            job_id,
+            event_tx.subscribe(),
+            inject_tx,
+            test_route(),
+            Some(Arc::clone(&cm)),
+        );
+
+        // Send failure event
+        event_tx
+            .send((
+                job_id,
+                SseEvent::JobResult {
+                    job_id: job_id.to_string(),
+                    status: "failed".to_string(),
+                    session_id: None,
+                    fallback_deliverable: None,
+                },
+            ))
+            .unwrap();
+
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(1), inject_rx.recv()).await;
+        tokio::time::timeout(std::time::Duration::from_secs(1), handle)
+            .await
+            .expect("monitor should exit")
+            .expect("monitor should not panic");
+
+        let ctx = cm.get_context(job_id).await.unwrap();
+        assert_eq!(ctx.state, JobState::Failed);
+    }
+
+    // === Regression: completion watcher (no route metadata) ===
+    // When monitor_route_from_ctx() returns None, spawn_completion_watcher
+    // must still transition the job so the max_jobs slot is freed.
+
+    #[tokio::test]
+    async fn test_completion_watcher_transitions_on_result() {
+        use crate::context::{ContextManager, JobState};
+
+        let cm = Arc::new(ContextManager::new(5));
+        let job_id = Uuid::new_v4();
+        cm.register_sandbox_job(job_id, "user-1", "Build app", "desc")
+            .await
+            .unwrap();
+
+        let (event_tx, _) = broadcast::channel::<(Uuid, SseEvent)>(16);
+        let handle = spawn_completion_watcher(job_id, event_tx.subscribe(), Arc::clone(&cm));
+
+        event_tx
+            .send((
+                job_id,
+                SseEvent::JobResult {
+                    job_id: job_id.to_string(),
+                    status: "completed".to_string(),
+                    session_id: None,
+                    fallback_deliverable: None,
+                },
+            ))
+            .unwrap();
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), handle)
+            .await
+            .expect("watcher should exit")
+            .expect("watcher should not panic");
+
+        let ctx = cm.get_context(job_id).await.unwrap();
+        assert_eq!(ctx.state, JobState::Completed);
     }
 }
