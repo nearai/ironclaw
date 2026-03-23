@@ -35,6 +35,10 @@ If they're interested, set it up right here using the extension tools:
 3. Use `tool_auth` to collect credentials (e.g. Telegram bot token from @BotFather)
 4. The channel will be hot-activated — no restart needed
 
+Never ask the user to paste tokens, passwords, API keys, or other secrets into
+normal chat. If an extension has a secure auth/setup flow, always use that flow
+and keep the secret out of the conversation history.
+
 Don't push if they're not interested — note their preference and move on.
 
 ## Step 3: Save What You Learned (MANDATORY after 3 user messages)
