@@ -2343,7 +2343,10 @@ mod tests {
                 None => Err("Internal error: thread no longer exists"),
             };
             assert!(result.is_err());
-            assert_eq!(result.unwrap_err(), "Internal error: thread no longer exists");
+            assert_eq!(
+                result.unwrap_err(),
+                "Internal error: thread no longer exists"
+            );
         }
 
         // Scenario 2: Thread existed then was removed (simulates disappearance
@@ -2370,7 +2373,10 @@ mod tests {
                 None => Err("Internal error: thread no longer exists"),
             };
             assert!(result.is_err());
-            assert_eq!(result.unwrap_err(), "Internal error: thread no longer exists");
+            assert_eq!(
+                result.unwrap_err(),
+                "Internal error: thread no longer exists"
+            );
         }
     }
 
