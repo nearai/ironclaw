@@ -146,6 +146,8 @@ impl SseManager {
                     SseEvent::Suggestions { .. } => "suggestions",
                     SseEvent::TurnCost { .. } => "turn_cost",
                     SseEvent::ExtensionStatus { .. } => "extension_status",
+                    SseEvent::ReasoningUpdate { .. } => "reasoning_update",
+                    SseEvent::JobReasoning { .. } => "job_reasoning",
                 };
                 Ok(Event::default().event(event_type).data(data))
             });

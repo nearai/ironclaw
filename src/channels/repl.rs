@@ -75,6 +75,7 @@ const SLASH_COMMANDS: &[&str] = &[
     "/suggest",
     "/thread",
     "/resume",
+    "/reasoning",
 ];
 
 /// Rustyline helper for slash-command tab completion.
@@ -840,6 +841,19 @@ impl Channel for ReplChannel {
             }
             StatusUpdate::Suggestions { .. } => {
                 // Suggestions are only rendered by the web gateway
+            }
+            StatusUpdate::ReasoningUpdate {
+                narrative,
+                decisions,
+            } => {
+                if !narrative.is_empty() {
+                    let display = truncate_for_preview(&narrative, CLI_STATUS_MAX);
+                    eprintln!("  \x1b[94m\u{25B6} {display}\x1b[0m");
+                }
+                for d in &decisions {
+                    let display = truncate_for_preview(&d.rationale, CLI_STATUS_MAX);
+                    eprintln!("    \x1b[90m\u{2192} {}: {display}\x1b[0m", d.tool_name);
+                }
             }
             StatusUpdate::TurnCost { .. } => {
                 // Cost display is handled by the TUI channel

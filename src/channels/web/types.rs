@@ -63,6 +63,9 @@ pub struct TurnInfo {
     pub started_at: String,
     pub completed_at: Option<String>,
     pub tool_calls: Vec<ToolCallInfo>,
+    /// Agent's reasoning narrative for this turn.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub narrative: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -74,6 +77,9 @@ pub struct ToolCallInfo {
     pub result_preview: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Agent's reasoning for choosing this tool.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rationale: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -272,6 +278,49 @@ pub enum SseEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         message: Option<String>,
     },
+
+    /// Agent reasoning update (why it chose specific tools).
+    #[serde(rename = "reasoning_update")]
+    ReasoningUpdate {
+        narrative: String,
+        decisions: Vec<ToolDecisionDto>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
+    },
+
+    /// Reasoning update for a sandbox job.
+    #[serde(rename = "job_reasoning")]
+    JobReasoning {
+        job_id: String,
+        narrative: String,
+        decisions: Vec<ToolDecisionDto>,
+    },
+}
+
+/// A single tool decision in a reasoning update (SSE DTO).
+#[derive(Debug, Clone, Serialize)]
+pub struct ToolDecisionDto {
+    pub tool_name: String,
+    pub rationale: String,
+}
+
+impl ToolDecisionDto {
+    /// Parse a list of tool decisions from a JSON array value.
+    pub fn from_json_array(value: &serde_json::Value) -> Vec<Self> {
+        value
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|d| {
+                        Some(Self {
+                            tool_name: d.get("tool_name")?.as_str()?.to_string(),
+                            rationale: d.get("rationale")?.as_str()?.to_string(),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
 }
 
 // --- Memory ---
@@ -809,6 +858,8 @@ impl WsServerMessage {
             SseEvent::Suggestions { .. } => "suggestions",
             SseEvent::TurnCost { .. } => "turn_cost",
             SseEvent::ExtensionStatus { .. } => "extension_status",
+            SseEvent::ReasoningUpdate { .. } => "reasoning_update",
+            SseEvent::JobReasoning { .. } => "job_reasoning",
         };
         let data = serde_json::to_value(event).unwrap_or(serde_json::Value::Null);
         WsServerMessage::Event {

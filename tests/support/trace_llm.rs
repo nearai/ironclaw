@@ -566,6 +566,7 @@ impl LlmProvider for TraceLlm {
                         id: tc.id,
                         name: tc.name,
                         arguments: tc.arguments,
+                        reasoning: None,
                     })
                     .collect();
                 Ok(ToolCompletionResponse {

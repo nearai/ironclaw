@@ -18,7 +18,7 @@ use crate::agent::agentic_loop::{
 };
 use crate::agent::scheduler::WorkerMessage;
 use crate::agent::task::TaskOutput;
-use crate::channels::web::types::SseEvent;
+use crate::channels::web::types::{SseEvent, ToolDecisionDto};
 use crate::context::{ContextManager, JobState};
 use crate::db::Database;
 use crate::error::Error;
@@ -200,6 +200,19 @@ impl Worker {
                         .map(|s| s.to_string()),
                     fallback_deliverable: data.get("fallback_deliverable").cloned(),
                 }),
+                "reasoning" => {
+                    let narrative = data
+                        .get("narrative")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let decisions = ToolDecisionDto::from_json_array(&data["decisions"]);
+                    Some(SseEvent::JobReasoning {
+                        job_id: job_id_str,
+                        narrative,
+                        decisions,
+                    })
+                }
                 _ => None,
             };
             if let Some(event) = event {
@@ -897,6 +910,11 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                         id: selection.tool_call_id.clone(),
                         name: selection.tool_name.clone(),
                         arguments: selection.parameters.clone(),
+                        reasoning: if action.reasoning.is_empty() {
+                            None
+                        } else {
+                            Some(action.reasoning.clone())
+                        },
                     }],
                 ));
 
@@ -1352,6 +1370,28 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
             );
         }
 
+        // Emit reasoning event if any tool calls carry reasoning
+        let decisions: Vec<serde_json::Value> = tool_calls
+            .iter()
+            .filter_map(|tc| {
+                tc.reasoning.as_ref().map(|r| {
+                    serde_json::json!({
+                        "tool_name": tc.name,
+                        "rationale": r,
+                    })
+                })
+            })
+            .collect();
+        if !decisions.is_empty() {
+            self.worker.log_event(
+                "reasoning",
+                serde_json::json!({
+                    "narrative": content.as_deref().unwrap_or(""),
+                    "decisions": decisions,
+                }),
+            );
+        }
+
         // Add assistant message with tool_calls (OpenAI protocol)
         reason_ctx
             .messages
@@ -1366,7 +1406,7 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
             .map(|tc| ToolSelection {
                 tool_name: tc.name.clone(),
                 parameters: tc.arguments.clone(),
-                reasoning: String::new(),
+                reasoning: tc.reasoning.clone().unwrap_or_default(),
                 alternatives: vec![],
                 tool_call_id: tc.id.clone(),
             })
@@ -1419,6 +1459,11 @@ fn selections_to_tool_calls(selections: &[ToolSelection]) -> Vec<ToolCall> {
             id: s.tool_call_id.clone(),
             name: s.tool_name.clone(),
             arguments: s.parameters.clone(),
+            reasoning: if s.reasoning.is_empty() {
+                None
+            } else {
+                Some(s.reasoning.clone())
+            },
         })
         .collect()
 }

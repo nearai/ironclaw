@@ -490,6 +490,7 @@ fn extract_response(
                     id: tc.id.clone(),
                     name: tc.function.name.clone(),
                     arguments: tc.function.arguments.clone(),
+                    reasoning: None,
                 });
             }
             // Reasoning and Image variants are not mapped to IronClaw types
@@ -880,6 +881,7 @@ mod tests {
             id: "Xt7mK9pQ2".to_string(),
             name: "search".to_string(),
             arguments: serde_json::json!({"query": "test"}),
+            reasoning: None,
         };
         let msg = ChatMessage::assistant_with_tool_calls(Some("thinking".to_string()), vec![tc]);
         let messages = vec![msg];
@@ -997,6 +999,7 @@ mod tests {
             id: "".to_string(),
             name: "search".to_string(),
             arguments: serde_json::json!({"query": "test"}),
+            reasoning: None,
         };
         let messages = vec![ChatMessage::assistant_with_tool_calls(None, vec![tc])];
         let (_preamble, history) = convert_messages(&messages);
@@ -1028,6 +1031,7 @@ mod tests {
             id: "   ".to_string(),
             name: "search".to_string(),
             arguments: serde_json::json!({"query": "test"}),
+            reasoning: None,
         };
         let messages = vec![ChatMessage::assistant_with_tool_calls(None, vec![tc])];
         let (_preamble, history) = convert_messages(&messages);
@@ -1061,6 +1065,7 @@ mod tests {
             id: "".to_string(),
             name: "search".to_string(),
             arguments: serde_json::json!({"query": "test"}),
+            reasoning: None,
         };
         let assistant_msg = ChatMessage::assistant_with_tool_calls(None, vec![tc]);
         let tool_result_msg = ChatMessage {
@@ -1380,11 +1385,13 @@ mod tests {
             id: "call_a".to_string(),
             name: "search".to_string(),
             arguments: serde_json::json!({"q": "rust"}),
+            reasoning: None,
         };
         let tc2 = IronToolCall {
             id: "call_b".to_string(),
             name: "fetch".to_string(),
             arguments: serde_json::json!({"url": "https://example.com"}),
+            reasoning: None,
         };
         let assistant = ChatMessage::assistant_with_tool_calls(None, vec![tc1, tc2]);
         let result_a = ChatMessage::tool_result("call_a", "search", "search results");

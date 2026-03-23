@@ -513,10 +513,10 @@ impl Agent {
                 };
 
                 thread.complete_turn(&response);
-                let (turn_number, tool_calls) = thread
+                let (turn_number, tool_calls, narrative) = thread
                     .turns
                     .last()
-                    .map(|t| (t.turn_number, t.tool_calls.clone()))
+                    .map(|t| (t.turn_number, t.tool_calls.clone(), t.narrative.clone()))
                     .unwrap_or_default();
                 let _ = self
                     .channels
@@ -534,6 +534,7 @@ impl Agent {
                     &message.user_id,
                     turn_number,
                     &tool_calls,
+                    narrative.as_deref(),
                 )
                 .await;
                 self.persist_assistant_response(
@@ -733,6 +734,7 @@ impl Agent {
         user_id: &str,
         turn_number: usize,
         tool_calls: &[crate::agent::session::TurnToolCall],
+        narrative: Option<&str>,
     ) {
         if tool_calls.is_empty() {
             return;
@@ -767,11 +769,29 @@ impl Agent {
                 if let Some(ref error) = tc.error {
                     obj["error"] = serde_json::Value::String(truncate_preview(error, 200));
                 }
+                if let Some(ref rationale) = tc.rationale {
+                    obj["rationale"] = serde_json::Value::String(truncate_preview(rationale, 500));
+                }
+                if let Some(ref tool_call_id) = tc.tool_call_id {
+                    obj["tool_call_id"] = serde_json::Value::String(tool_call_id.clone());
+                }
                 obj
             })
             .collect();
 
-        let content = match serde_json::to_string(&summaries) {
+        // Wrap in an object with optional narrative so it can be reconstructed.
+        // safety: no byte-index slicing here; comment describes JSON shape
+        let wrapper = if let Some(n) = narrative {
+            serde_json::json!({
+                "narrative": truncate_preview(n, 1000),
+                "calls": summaries,
+            })
+        } else {
+            serde_json::json!({
+                "calls": summaries,
+            })
+        };
+        let content = match serde_json::to_string(&wrapper) {
             Ok(c) => c,
             Err(e) => {
                 tracing::warn!("Failed to serialize tool calls: {}", e);
@@ -1459,10 +1479,10 @@ impl Agent {
                     let (response, suggestions) =
                         crate::agent::dispatcher::extract_suggestions(&response);
                     thread.complete_turn(&response);
-                    let (turn_number, tool_calls) = thread
+                    let (turn_number, tool_calls, narrative) = thread
                         .turns
                         .last()
-                        .map(|t| (t.turn_number, t.tool_calls.clone()))
+                        .map(|t| (t.turn_number, t.tool_calls.clone(), t.narrative.clone()))
                         .unwrap_or_default();
                     // User message already persisted at turn start; save tool calls then assistant response
                     self.persist_tool_calls(
@@ -1471,6 +1491,7 @@ impl Agent {
                         &message.user_id,
                         turn_number,
                         &tool_calls,
+                        narrative.as_deref(),
                     )
                     .await;
                     self.persist_assistant_response(
@@ -1839,6 +1860,7 @@ fn rebuild_chat_messages_from_db(
                                     .get("parameters")
                                     .cloned()
                                     .unwrap_or(serde_json::json!({})),
+                                reasoning: None,
                             })
                             .collect();
 

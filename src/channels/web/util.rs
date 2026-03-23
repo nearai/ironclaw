@@ -26,6 +26,21 @@ pub fn truncate_preview(s: &str, max_bytes: usize) -> String {
     result
 }
 
+/// Parse tool call summary JSON objects into `ToolCallInfo` structs.
+fn parse_tool_call_infos(calls: &[serde_json::Value]) -> Vec<ToolCallInfo> {
+    calls
+        .iter()
+        .map(|c| ToolCallInfo {
+            name: c["name"].as_str().unwrap_or("unknown").to_string(),
+            has_result: c.get("result_preview").is_some(),
+            has_error: c.get("error").is_some(),
+            result_preview: c["result_preview"].as_str().map(String::from),
+            error: c["error"].as_str().map(String::from),
+            rationale: c["rationale"].as_str().map(String::from),
+        })
+        .collect()
+}
+
 /// Build TurnInfo pairs from flat DB messages (user/tool_calls/assistant triples).
 ///
 /// Handles three message patterns:
@@ -49,6 +64,7 @@ pub fn build_turns_from_db_messages(
                 started_at: msg.created_at.to_rfc3339(),
                 completed_at: None,
                 tool_calls: Vec::new(),
+                narrative: None,
             };
 
             // Check if next message is a tool_calls record
@@ -56,18 +72,28 @@ pub fn build_turns_from_db_messages(
                 && next.role == "tool_calls"
             {
                 let tc_msg = iter.next().expect("peeked");
-                match serde_json::from_str::<Vec<serde_json::Value>>(&tc_msg.content) {
-                    Ok(calls) => {
-                        turn.tool_calls = calls
-                            .iter()
-                            .map(|c| ToolCallInfo {
-                                name: c["name"].as_str().unwrap_or("unknown").to_string(),
-                                has_result: c.get("result_preview").is_some(),
-                                has_error: c.get("error").is_some(),
-                                result_preview: c["result_preview"].as_str().map(String::from),
-                                error: c["error"].as_str().map(String::from),
-                            })
-                            .collect();
+                // Parse tool_calls JSON — supports two formats:
+                // safety: no byte-index slicing; comment describes JSON shape
+                match serde_json::from_str::<serde_json::Value>(&tc_msg.content) {
+                    Ok(serde_json::Value::Array(calls)) => {
+                        // Old format: plain array
+                        turn.tool_calls = parse_tool_call_infos(&calls);
+                    }
+                    Ok(serde_json::Value::Object(obj)) => {
+                        // New wrapped format with narrative
+                        turn.narrative = obj
+                            .get("narrative")
+                            .and_then(|v| v.as_str())
+                            .map(String::from);
+                        if let Some(serde_json::Value::Array(calls)) = obj.get("calls") {
+                            turn.tool_calls = parse_tool_call_infos(calls);
+                        }
+                    }
+                    Ok(_) => {
+                        tracing::warn!(
+                            message_id = %tc_msg.id,
+                            "Unexpected tool_calls JSON shape in DB, skipping"
+                        );
                     }
                     Err(e) => {
                         tracing::warn!(
@@ -105,6 +131,7 @@ pub fn build_turns_from_db_messages(
                 started_at: msg.created_at.to_rfc3339(),
                 completed_at: Some(msg.created_at.to_rfc3339()),
                 tool_calls: Vec::new(),
+                narrative: None,
             });
             turn_number += 1;
         }
@@ -304,5 +331,53 @@ mod tests {
         assert_eq!(turns.len(), 1);
         assert!(turns[0].tool_calls.is_empty());
         assert_eq!(turns[0].state, "Completed");
+    }
+
+    #[test]
+    fn test_build_turns_with_wrapped_tool_calls_format() {
+        let tc_json = serde_json::json!({
+            "narrative": "Searching memory for context before proceeding.",
+            "calls": [
+                {"name": "memory_search", "result_preview": "found 3 items", "rationale": "consult prior context"},
+                {"name": "shell", "error": "permission denied"}
+            ]
+        });
+        let messages = vec![
+            make_msg("user", "Find info", 0),
+            make_msg("tool_calls", &tc_json.to_string(), 500),
+            make_msg("assistant", "Here's what I found", 1000),
+        ];
+        let turns = build_turns_from_db_messages(&messages);
+        assert_eq!(turns.len(), 1);
+        assert_eq!(
+            turns[0].narrative.as_deref(),
+            Some("Searching memory for context before proceeding.")
+        );
+        assert_eq!(turns[0].tool_calls.len(), 2);
+        assert_eq!(turns[0].tool_calls[0].name, "memory_search");
+        assert_eq!(
+            turns[0].tool_calls[0].rationale.as_deref(),
+            Some("consult prior context")
+        );
+        assert!(turns[0].tool_calls[0].has_result);
+        assert_eq!(turns[0].tool_calls[1].name, "shell");
+        assert!(turns[0].tool_calls[1].has_error);
+        assert_eq!(turns[0].response.as_deref(), Some("Here's what I found"));
+    }
+
+    #[test]
+    fn test_build_turns_wrapped_format_without_narrative() {
+        let tc_json = serde_json::json!({
+            "calls": [{"name": "echo", "result_preview": "hello"}]
+        });
+        let messages = vec![
+            make_msg("user", "Say hi", 0),
+            make_msg("tool_calls", &tc_json.to_string(), 500),
+            make_msg("assistant", "Done", 1000),
+        ];
+        let turns = build_turns_from_db_messages(&messages);
+        assert_eq!(turns.len(), 1);
+        assert!(turns[0].narrative.is_none());
+        assert_eq!(turns[0].tool_calls.len(), 1);
     }
 }

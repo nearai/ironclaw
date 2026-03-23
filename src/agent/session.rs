@@ -449,6 +449,7 @@ impl Thread {
                         id: call_id.clone(),
                         name: tc.name.clone(),
                         arguments: tc.parameters.clone(),
+                        reasoning: None,
                     })
                     .collect();
 
@@ -602,6 +603,10 @@ pub struct Turn {
     pub completed_at: Option<DateTime<Utc>>,
     /// Error message (if failed).
     pub error: Option<String>,
+    /// Agent's reasoning narrative for this turn (why it chose these actions).
+    /// Sanitized before storage — no raw LLM output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub narrative: Option<String>,
     /// Transient image content parts for multimodal LLM input.
     /// Not serialized — images are only needed for the current LLM call.
     /// The text description in `user_input` persists for compaction/context.
@@ -621,6 +626,7 @@ impl Turn {
             started_at: Utc::now(),
             completed_at: None,
             error: None,
+            narrative: None,
             image_content_parts: Vec::new(),
         }
     }
@@ -656,6 +662,26 @@ impl Turn {
             parameters: params,
             result: None,
             error: None,
+            rationale: None,
+            tool_call_id: None,
+        });
+    }
+
+    /// Record a tool call with reasoning context.
+    pub fn record_tool_call_with_reasoning(
+        &mut self,
+        name: impl Into<String>,
+        params: serde_json::Value,
+        rationale: Option<String>,
+        tool_call_id: Option<String>,
+    ) {
+        self.tool_calls.push(TurnToolCall {
+            name: name.into(),
+            parameters: params,
+            result: None,
+            error: None,
+            rationale,
+            tool_call_id,
         });
     }
 
@@ -672,6 +698,40 @@ impl Turn {
             call.error = Some(error.into());
         }
     }
+
+    /// Record a tool result by tool_call_id, with fallback to first pending call.
+    pub fn record_tool_result_for(&mut self, tool_call_id: &str, result: serde_json::Value) {
+        if let Some(call) = self
+            .tool_calls
+            .iter_mut()
+            .find(|c| c.tool_call_id.as_deref() == Some(tool_call_id))
+        {
+            call.result = Some(result);
+        } else if let Some(call) = self
+            .tool_calls
+            .iter_mut()
+            .find(|c| c.result.is_none() && c.error.is_none())
+        {
+            call.result = Some(result);
+        }
+    }
+
+    /// Record a tool error by tool_call_id, with fallback to first pending call.
+    pub fn record_tool_error_for(&mut self, tool_call_id: &str, error: impl Into<String>) {
+        if let Some(call) = self
+            .tool_calls
+            .iter_mut()
+            .find(|c| c.tool_call_id.as_deref() == Some(tool_call_id))
+        {
+            call.error = Some(error.into());
+        } else if let Some(call) = self
+            .tool_calls
+            .iter_mut()
+            .find(|c| c.result.is_none() && c.error.is_none())
+        {
+            call.error = Some(error.into());
+        }
+    }
 }
 
 /// Record of a tool call made during a turn.
@@ -685,6 +745,12 @@ pub struct TurnToolCall {
     pub result: Option<serde_json::Value>,
     /// Error from the tool (if failed).
     pub error: Option<String>,
+    /// Agent's reasoning for choosing this tool.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rationale: Option<String>,
+    /// The tool_call_id from the LLM, for identity-based result matching.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
 }
 
 #[cfg(test)]
@@ -1309,6 +1375,7 @@ mod tests {
             id: "call_0".to_string(),
             name: "search".to_string(),
             arguments: serde_json::json!({"q": "test"}),
+            reasoning: None,
         };
         let messages = vec![
             ChatMessage::user("Find test"),
@@ -1339,6 +1406,7 @@ mod tests {
             id: "call_0".to_string(),
             name: "http".to_string(),
             arguments: serde_json::json!({}),
+            reasoning: None,
         };
         let messages = vec![
             ChatMessage::user("Fetch URL"),
@@ -1404,11 +1472,13 @@ mod tests {
             id: "call_a".to_string(),
             name: "search".to_string(),
             arguments: serde_json::json!({"q": "data"}),
+            reasoning: None,
         };
         let tc2 = ToolCall {
             id: "call_b".to_string(),
             name: "write".to_string(),
             arguments: serde_json::json!({"path": "out.txt"}),
+            reasoning: None,
         };
         let messages = vec![
             ChatMessage::user("Find and save"),

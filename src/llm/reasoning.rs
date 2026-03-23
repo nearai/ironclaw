@@ -525,17 +525,31 @@ impl Reasoning {
 
         let response = self.llm.complete_with_tools(request).await?;
 
-        let reasoning = response.content.unwrap_or_default();
+        let shared_reasoning = response
+            .content
+            .map(|c| {
+                let pre_truncated = truncate_at_tool_tags(&c);
+                clean_response(&pre_truncated)
+            })
+            .unwrap_or_default();
 
         let selections: Vec<ToolSelection> = response
             .tool_calls
             .into_iter()
-            .map(|tool_call| ToolSelection {
-                tool_name: tool_call.name,
-                parameters: tool_call.arguments,
-                reasoning: reasoning.clone(),
-                alternatives: vec![],
-                tool_call_id: tool_call.id,
+            .map(|tool_call| {
+                // Prefer per-tool reasoning if the provider supplied it,
+                // otherwise fall back to the shared response content.
+                let rationale = tool_call
+                    .reasoning
+                    .filter(|r| !r.trim().is_empty())
+                    .unwrap_or_else(|| shared_reasoning.clone());
+                ToolSelection {
+                    tool_name: tool_call.name,
+                    parameters: tool_call.arguments,
+                    reasoning: rationale,
+                    alternatives: vec![],
+                    tool_call_id: tool_call.id,
+                }
             })
             .collect();
 
@@ -664,13 +678,26 @@ Respond in JSON format:
 
             // If there were tool calls, return them for execution
             if !response.tool_calls.is_empty() {
+                let narrative = response.content.map(|c| {
+                    let pre_truncated = truncate_at_tool_tags(&c);
+                    clean_response(&pre_truncated)
+                });
+                // Populate per-tool reasoning from the shared narrative when the
+                // provider did not supply per-tool rationale.
+                let tool_calls: Vec<ToolCall> = response
+                    .tool_calls
+                    .into_iter()
+                    .map(|mut tc| {
+                        if tc.reasoning.as_ref().is_none_or(|r| r.trim().is_empty()) {
+                            tc.reasoning = narrative.as_ref().filter(|n| !n.is_empty()).cloned();
+                        }
+                        tc
+                    })
+                    .collect();
                 return Ok(RespondOutput {
                     result: RespondResult::ToolCalls {
-                        tool_calls: response.tool_calls,
-                        content: response.content.map(|c| {
-                            let pre_truncated = truncate_at_tool_tags(&c);
-                            clean_response(&pre_truncated)
-                        }),
+                        tool_calls,
+                        content: narrative,
                     },
                     usage,
                 });
@@ -1350,6 +1377,7 @@ fn recover_tool_calls_from_content(
                     ),
                     name: name.to_string(),
                     arguments,
+                    reasoning: None,
                 });
                 continue;
             }
@@ -1364,6 +1392,7 @@ fn recover_tool_calls_from_content(
                     ),
                     name: name.to_string(),
                     arguments: serde_json::Value::Object(Default::default()),
+                    reasoning: None,
                 });
             }
         }
@@ -1401,6 +1430,7 @@ fn recover_tool_calls_from_content(
                         ),
                         name: name.to_string(),
                         arguments,
+                        reasoning: None,
                     });
                     remaining = &args_start[bracket_end + 1..];
                     continue;
@@ -1412,6 +1442,7 @@ fn recover_tool_calls_from_content(
                 id: super::provider::generate_tool_call_id(calls.len(), RECOVERED_TOOL_CALL_SEED),
                 name: name.to_string(),
                 arguments: serde_json::Value::Object(Default::default()),
+                reasoning: None,
             });
             remaining = after_name;
         }
