@@ -33,6 +33,9 @@ pub enum ProviderProtocol {
     /// OpenAI Chat Completions API (`/v1/chat/completions`).
     /// Used by: OpenAI, Tinfoil, Groq, NVIDIA NIM, OpenRouter, etc.
     OpenAiCompletions,
+    /// OpenAI Responses API (`/v1/responses`).
+    /// Used by: custom OpenAI-compatible gateways that expose Responses natively.
+    OpenAiResponses,
     /// Anthropic Messages API.
     Anthropic,
     /// Ollama API (OpenAI-ish, no API key required).
@@ -496,6 +499,19 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn test_openai_responses_provider_exists() {
+        let registry = ProviderRegistry::new(
+            serde_json::from_str(include_str!("../../providers.json")).unwrap(),
+        );
+        let provider = registry
+            .find("openai_responses")
+            .expect("openai_responses should exist");
+        assert_eq!(provider.protocol, ProviderProtocol::OpenAiResponses);
+        assert_eq!(provider.base_url_env.as_deref(), Some("LLM_BASE_URL"));
+        assert_eq!(provider.api_key_env.as_deref(), Some("LLM_API_KEY"));
     }
 
     #[test]

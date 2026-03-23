@@ -15,6 +15,7 @@ Multi-provider LLM integration with circuit breaker, retry, failover, and respon
 | `codex_chatgpt.rs` | Custom Responses API provider for Codex ChatGPT backend (`/backend-api/codex`) |
 | `openai_codex_provider.rs` | OpenAI Codex Responses API client (SSE streaming, JWT auth, subscription billing) |
 | `openai_codex_session.rs` | OAuth 2.0 session manager for OpenAI Codex (device code flow, token persistence) |
+| `openai_responses.rs` | Generic OpenAI Responses API provider for API-key-authenticated custom gateways |
 | `token_refreshing.rs` | Token-refreshing `LlmProvider` decorator for OpenAI Codex (pre-emptive refresh, zero-cost billing) |
 | `reasoning.rs` | `Reasoning` struct, `ReasoningContext`, `RespondResult`, `ActionPlan`, `ToolSelection`; thinking-tag stripping; `SILENT_REPLY_TOKEN` |
 | `session.rs` | NEAR AI session token management with disk + DB persistence, OAuth login flow |
@@ -40,6 +41,7 @@ Set via `LLM_BACKEND` env var:
 | `github_copilot` | GitHub Copilot Chat API | `GITHUB_COPILOT_TOKEN`, `GITHUB_COPILOT_MODEL` |
 | `ollama` | Ollama local | `OLLAMA_BASE_URL` |
 | `openai_compatible` | Any OpenAI-compatible endpoint | `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL` |
+| `openai_responses` | OpenAI Responses-compatible endpoint | `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL` |
 | `tinfoil` | Tinfoil TEE inference | `TINFOIL_API_KEY`, `TINFOIL_MODEL` |
 | `bedrock` | AWS Bedrock (requires `--features bedrock`) | `BEDROCK_REGION`, `BEDROCK_MODEL`, `AWS_PROFILE` |
 | `openai_codex` | OpenAI Codex (ChatGPT subscription) | `OPENAI_CODEX_MODEL`, `OPENAI_CODEX_CLIENT_ID` |
@@ -49,6 +51,11 @@ Codex auth reuse:
 - If Codex is logged in with API-key mode, IronClaw uses the standard OpenAI endpoint.
 - If Codex is logged in with ChatGPT OAuth mode, IronClaw routes to the private `chatgpt.com/backend-api/codex` Responses API via `codex_chatgpt.rs`.
 - ChatGPT mode supports one automatic 401 refresh using the refresh token persisted in `auth.json`.
+
+Responses API routing:
+- Set `LLM_USE_RESPONSES_API=true` to switch registry-backed OpenAI traffic from Chat Completions to the generic `/responses` transport.
+- This is intended for custom gateways that expose the public OpenAI Responses API.
+- It does not replace the dedicated `openai_codex` / ChatGPT OAuth path.
 
 ## AWS Bedrock Provider
 

@@ -40,7 +40,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Session management/routing | ✅ | ✅ | SessionManager exists |
 | Configuration hot-reload | ✅ | ❌ | |
 | Network modes (loopback/LAN/remote) | ✅ | 🚧 | HTTP only |
-| OpenAI-compatible HTTP API | ✅ | ✅ | /v1/chat/completions, per-request `model` override |
+| OpenAI-compatible HTTP API | ✅ | ✅ | `/v1/chat/completions` plus generic `/v1/responses`, per-request `model` override |
 | Canvas hosting | ✅ | ❌ | Agent-driven UI |
 | Gateway lock (PID-based) | ✅ | ❌ | |
 | launchd/systemd integration | ✅ | ❌ | |
@@ -246,7 +246,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | NVIDIA API | ✅ | ✅ | P3 | Via `nvidia` adapter and `providers.json` |
 | OpenRouter | ✅ | ✅ | - | Via OpenAI-compatible provider (RigAdapter) |
 | Tinfoil | ❌ | ✅ | - | Private inference provider (IronClaw-only) |
-| OpenAI-compatible | ❌ | ✅ | - | Generic OpenAI-compatible endpoint (RigAdapter) |
+| OpenAI-compatible | ❌ | ✅ | - | Generic OpenAI-compatible endpoint (chat completions + optional Responses transport) |
 | GitHub Copilot | ✅ | ✅ | - | Dedicated provider with OAuth token exchange (`GithubCopilotProvider`) |
 | Ollama (local) | ✅ | ✅ | - | via `rig::providers::ollama` (full support) |
 | Perplexity | ✅ | ❌ | P3 | Freshness parameter for web_search |
