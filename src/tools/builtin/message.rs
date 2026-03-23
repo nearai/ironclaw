@@ -80,6 +80,8 @@ fn metadata_notify_user(metadata: &serde_json::Value) -> Option<String> {
     metadata_string(metadata, "notify_user").filter(|value| value != "default")
 }
 
+// Autonomous runs include `owner_id` when the job is executing on behalf of a
+// durable owner scope instead of an interactive channel actor.
 fn metadata_owner_id(metadata: &serde_json::Value) -> Option<String> {
     metadata_string(metadata, "owner_id")
 }
@@ -98,6 +100,8 @@ async fn resolve_channel_fallback_target(
     owner_scope_target: Option<&str>,
     ctx_user_id: &str,
 ) -> Option<String> {
+    // Prefer an explicit channel binding when the extension manager knows the
+    // durable delivery target (for example, a bound Telegram chat ID).
     if let Some(channel_name) = channel
         && let Some(extension_manager) = extension_manager
         && let Some(target) = extension_manager
@@ -107,6 +111,9 @@ async fn resolve_channel_fallback_target(
         return Some(target);
     }
 
+    // `owner_id` is only present for autonomous owner-scoped executions.
+    // Interactive chat turns intentionally fall back to `ctx.user_id`, which is
+    // already the active conversation target for the current channel.
     owner_scope_target
         .map(ToOwned::to_owned)
         .or_else(|| Some(ctx_user_id.to_string()))
@@ -153,6 +160,8 @@ async fn resolve_message_target(inputs: MessageTargetResolution<'_>) -> Option<S
     }
 
     if inputs.channel.is_some() {
+        // Shared per-turn conversation defaults are already scoped to the
+        // active interactive target, so owner scope metadata is irrelevant.
         return resolve_channel_fallback_target(
             inputs.extension_manager,
             inputs.channel,
@@ -416,83 +425,13 @@ impl Tool for MessageTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use async_trait::async_trait;
-    use tokio::sync::{Mutex, mpsc};
-
-    use crate::channels::{
-        Channel, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate,
-    };
-    use crate::error::ChannelError;
-
-    type BroadcastCapture = Arc<Mutex<Vec<(String, OutgoingResponse)>>>;
-
-    struct RecordingChannel {
-        name: &'static str,
-        captures: BroadcastCapture,
-    }
-
-    impl RecordingChannel {
-        fn new(name: &'static str) -> (Self, BroadcastCapture) {
-            let captures = Arc::new(Mutex::new(Vec::new()));
-            (
-                Self {
-                    name,
-                    captures: Arc::clone(&captures),
-                },
-                captures,
-            )
-        }
-    }
-
-    #[async_trait]
-    impl Channel for RecordingChannel {
-        fn name(&self) -> &str {
-            self.name
-        }
-
-        async fn start(&self) -> Result<MessageStream, ChannelError> {
-            let (_tx, rx) = mpsc::channel::<IncomingMessage>(1);
-            Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))
-        }
-
-        async fn respond(
-            &self,
-            _msg: &IncomingMessage,
-            _response: OutgoingResponse,
-        ) -> Result<(), ChannelError> {
-            Ok(())
-        }
-
-        async fn send_status(
-            &self,
-            _status: StatusUpdate,
-            _metadata: &serde_json::Value,
-        ) -> Result<(), ChannelError> {
-            Ok(())
-        }
-
-        async fn broadcast(
-            &self,
-            user_id: &str,
-            response: OutgoingResponse,
-        ) -> Result<(), ChannelError> {
-            self.captures
-                .lock()
-                .await
-                .push((user_id.to_string(), response));
-            Ok(())
-        }
-
-        async fn health_check(&self) -> Result<(), ChannelError> {
-            Ok(())
-        }
-    }
+    use crate::testing::{BroadcastCapture, RecordingBroadcastChannel};
 
     async fn message_tool_with_recording_channels()
     -> (MessageTool, BroadcastCapture, BroadcastCapture) {
         let channel_manager = ChannelManager::new();
-        let (gateway, gateway_captures) = RecordingChannel::new("gateway");
-        let (telegram, telegram_captures) = RecordingChannel::new("telegram");
+        let (gateway, gateway_captures) = RecordingBroadcastChannel::new("gateway");
+        let (telegram, telegram_captures) = RecordingBroadcastChannel::new("telegram");
         channel_manager.add(Box::new(gateway)).await;
         channel_manager.add(Box::new(telegram)).await;
 
@@ -905,6 +844,38 @@ mod tests {
         let telegram = telegram_captures.lock().await.clone();
         assert_eq!(telegram.len(), 1);
         assert_eq!(telegram[0].0, "owner-scope");
+        assert_eq!(telegram[0].1.content, "NEAR price is $5");
+    }
+
+    #[tokio::test]
+    async fn message_tool_falls_back_to_ctx_user_when_owner_scope_absent() {
+        let (tool, gateway_captures, telegram_captures) =
+            message_tool_with_recording_channels().await;
+
+        let mut ctx = crate::context::JobContext::with_user(
+            "interactive-chat-user",
+            "routine-job",
+            "price alert",
+        );
+        ctx.metadata = serde_json::json!({
+            "notify_channel": "telegram",
+        });
+
+        let result = tool
+            .execute(serde_json::json!({"content": "NEAR price is $5"}), &ctx)
+            .await
+            .expect(
+                "message tool should fall back to ctx.user_id when owner scope metadata is absent",
+            );
+
+        assert_eq!(
+            result.result.as_str(),
+            Some("Sent message to telegram:interactive-chat-user")
+        );
+        assert!(gateway_captures.lock().await.is_empty());
+        let telegram = telegram_captures.lock().await.clone();
+        assert_eq!(telegram.len(), 1);
+        assert_eq!(telegram[0].0, "interactive-chat-user");
         assert_eq!(telegram[0].1.content, "NEAR price is $5");
     }
 

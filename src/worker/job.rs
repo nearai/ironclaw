@@ -1434,90 +1434,20 @@ impl From<TaskOutput> for Result<String, Error> {
 mod tests {
     use std::sync::Arc;
 
-    use async_trait::async_trait;
-    use futures::StreamExt;
-    use tokio::sync::{Mutex, mpsc};
-
-    use crate::channels::{
-        Channel, ChannelManager, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate,
-    };
+    use crate::channels::ChannelManager;
     use crate::llm::ToolSelection;
 
     use super::*;
     use crate::config::SafetyConfig;
     use crate::context::JobContext;
-    use crate::error::ChannelError;
     use crate::llm::{
         CompletionRequest, CompletionResponse, LlmProvider, ToolCompletionRequest,
         ToolCompletionResponse,
     };
     use crate::safety::SafetyLayer;
+    use crate::testing::{BroadcastCapture, RecordingBroadcastChannel};
     use crate::tools::builtin::MessageTool;
     use crate::tools::{Tool, ToolError as ToolExecError, ToolOutput};
-
-    type BroadcastCapture = Arc<Mutex<Vec<(String, OutgoingResponse)>>>;
-
-    struct RecordingBroadcastChannel {
-        name: &'static str,
-        captures: BroadcastCapture,
-    }
-
-    impl RecordingBroadcastChannel {
-        fn new(name: &'static str) -> (Self, BroadcastCapture) {
-            let captures = Arc::new(Mutex::new(Vec::new()));
-            (
-                Self {
-                    name,
-                    captures: Arc::clone(&captures),
-                },
-                captures,
-            )
-        }
-    }
-
-    #[async_trait]
-    impl Channel for RecordingBroadcastChannel {
-        fn name(&self) -> &str {
-            self.name
-        }
-
-        async fn start(&self) -> Result<MessageStream, ChannelError> {
-            let (_tx, rx) = mpsc::channel::<IncomingMessage>(1);
-            Ok(tokio_stream::wrappers::ReceiverStream::new(rx).boxed())
-        }
-
-        async fn respond(
-            &self,
-            _msg: &IncomingMessage,
-            _response: OutgoingResponse,
-        ) -> Result<(), ChannelError> {
-            Ok(())
-        }
-
-        async fn send_status(
-            &self,
-            _status: StatusUpdate,
-            _metadata: &serde_json::Value,
-        ) -> Result<(), ChannelError> {
-            Ok(())
-        }
-
-        async fn broadcast(
-            &self,
-            user_id: &str,
-            response: OutgoingResponse,
-        ) -> Result<(), ChannelError> {
-            self.captures
-                .lock()
-                .await
-                .push((user_id.to_string(), response));
-            Ok(())
-        }
-
-        async fn health_check(&self) -> Result<(), ChannelError> {
-            Ok(())
-        }
-    }
 
     /// A test tool that sleeps for a configurable duration before returning.
     struct SlowTool {
