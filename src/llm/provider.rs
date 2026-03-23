@@ -231,6 +231,14 @@ pub struct ToolCall {
     pub id: String,
     pub name: String,
     pub arguments: serde_json::Value,
+    /// Provider-specific opaque fields preserved through round-trips
+    /// (e.g. Gemini's `thought_signature`).
+    #[serde(flatten, default, skip_serializing_if = "extra_is_empty")]
+    pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
+fn extra_is_empty(m: &serde_json::Map<String, serde_json::Value>) -> bool {
+    m.is_empty()
 }
 
 /// Result of a tool execution to send back to the LLM.
@@ -540,6 +548,7 @@ mod tests {
             id: "call_1".to_string(),
             name: "echo".to_string(),
             arguments: serde_json::json!({}),
+            extra: Default::default(),
         };
         let mut messages = vec![
             ChatMessage::user("hello"),
@@ -583,6 +592,7 @@ mod tests {
             id: "call_1".to_string(),
             name: "echo".to_string(),
             arguments: serde_json::json!({}),
+            extra: Default::default(),
         };
         let mut messages = vec![
             ChatMessage::user("test"),
@@ -608,11 +618,13 @@ mod tests {
             id: "call_sel_1".to_string(),
             name: "search".to_string(),
             arguments: serde_json::json!({"q": "test"}),
+            extra: Default::default(),
         };
         let tc2 = ToolCall {
             id: "call_sel_2".to_string(),
             name: "http".to_string(),
             arguments: serde_json::json!({"url": "https://example.com"}),
+            extra: Default::default(),
         };
         let mut messages = vec![
             ChatMessage::system("You are a helpful assistant."),

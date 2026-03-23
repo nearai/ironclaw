@@ -582,10 +582,18 @@ impl LlmProvider for NearAiChatProvider {
             .map(|tc| {
                 let arguments = serde_json::from_str(&tc.function.arguments)
                     .unwrap_or(serde_json::Value::Object(Default::default()));
+                let mut extra = serde_json::Map::new();
+                if let Some(sig) = tc.thought_signature {
+                    extra.insert(
+                        "thought_signature".to_string(),
+                        serde_json::Value::String(sig),
+                    );
+                }
                 ToolCall {
                     id: tc.id,
                     name: tc.function.name,
                     arguments,
+                    extra,
                 }
             })
             .collect();
@@ -971,13 +979,21 @@ impl From<ChatMessage> for ChatCompletionMessage {
         let tool_calls = msg.tool_calls.map(|calls| {
             calls
                 .into_iter()
-                .map(|tc| ChatCompletionToolCall {
-                    id: tc.id,
-                    call_type: "function".to_string(),
-                    function: ChatCompletionToolCallFunction {
-                        name: tc.name,
-                        arguments: tc.arguments.to_string(),
-                    },
+                .map(|tc| {
+                    let thought_signature = tc
+                        .extra
+                        .get("thought_signature")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+                    ChatCompletionToolCall {
+                        id: tc.id,
+                        call_type: "function".to_string(),
+                        function: ChatCompletionToolCallFunction {
+                            name: tc.name,
+                            arguments: tc.arguments.to_string(),
+                        },
+                        thought_signature,
+                    }
                 })
                 .collect()
         });
@@ -1054,6 +1070,10 @@ struct ChatCompletionToolCall {
     #[allow(dead_code)]
     call_type: String,
     function: ChatCompletionToolCallFunction,
+    /// Gemini thinking models attach a signature to function calls that must
+    /// be echoed back in subsequent requests.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thought_signature: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1179,11 +1199,13 @@ mod tests {
                 id: "call_1".to_string(),
                 name: "list_issues".to_string(),
                 arguments: serde_json::json!({"owner": "foo", "repo": "bar"}),
+                extra: Default::default(),
             },
             ToolCall {
                 id: "call_2".to_string(),
                 name: "search".to_string(),
                 arguments: serde_json::json!({"query": "test"}),
+                extra: Default::default(),
             },
         ];
 
@@ -1216,6 +1238,7 @@ mod tests {
             id: "call_1".to_string(),
             name: "test".to_string(),
             arguments: serde_json::json!({"key": "value"}),
+            extra: Default::default(),
         };
         let msg = ChatMessage::assistant_with_tool_calls(None, vec![tc]);
         let chat_msg: ChatCompletionMessage = msg.into();
@@ -1273,6 +1296,7 @@ mod tests {
                         name: "echo".to_string(),
                         arguments: r#"{"message":"hi"}"#.to_string(),
                     },
+                    thought_signature: None,
                 }]),
             },
             ChatCompletionMessage {
@@ -1327,6 +1351,7 @@ mod tests {
                         name: "search".to_string(),
                         arguments: r#"{"q":"test"}"#.to_string(),
                     },
+                    thought_signature: None,
                 }]),
             },
             ChatCompletionMessage {
@@ -1459,6 +1484,7 @@ mod tests {
                     id: tc.id,
                     name: tc.function.name,
                     arguments,
+                    extra: Default::default(),
                 }
             })
             .collect();
@@ -1508,6 +1534,7 @@ mod tests {
                     id: tc.id,
                     name: tc.function.name,
                     arguments,
+                    extra: Default::default(),
                 }
             })
             .collect();
@@ -1740,6 +1767,7 @@ mod tests {
                     name: "echo".to_string(),
                     arguments: "{}".to_string(),
                 },
+                thought_signature: None,
             }]),
         };
         let json = serde_json::to_value(&msg).unwrap();
@@ -2080,6 +2108,7 @@ mod tests {
                             name: "search".to_string(),
                             arguments: r#"{"q":"a"}"#.to_string(),
                         },
+                        thought_signature: None,
                     },
                     ChatCompletionToolCall {
                         id: "call_2".to_string(),
@@ -2088,6 +2117,7 @@ mod tests {
                             name: "fetch".to_string(),
                             arguments: r#"{"url":"http://x"}"#.to_string(),
                         },
+                        thought_signature: None,
                     },
                 ]),
             },
@@ -2130,6 +2160,7 @@ mod tests {
                 id: "call_1".to_string(),
                 name: "test".to_string(),
                 arguments: serde_json::json!({}),
+                extra: Default::default(),
             }],
         );
         let chat_msg: ChatCompletionMessage = msg.into();
@@ -2184,6 +2215,7 @@ mod tests {
                 name: "get_weather".to_string(),
                 arguments: r#"{"city":"London"}"#.to_string(),
             },
+            thought_signature: None,
         };
         let json = serde_json::to_value(&tc).unwrap();
         // "type" not "call_type" in serialized form
@@ -2197,6 +2229,79 @@ mod tests {
         assert_eq!(deserialized.call_type, "function");
         assert_eq!(deserialized.function.name, "get_weather");
         assert_eq!(deserialized.function.arguments, r#"{"city":"London"}"#);
+    }
+
+    #[test]
+    fn test_thought_signature_preserved_through_round_trip() {
+        // Simulate a Gemini response with thought_signature on tool calls
+        let response_json = serde_json::json!({
+            "id": "resp_1",
+            "object": "chat.completion",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "memory_write",
+                            "arguments": "{\"key\":\"test\"}"
+                        },
+                        "thought_signature": "abc123sig"
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        });
+
+        // Step 1: Deserialize API response
+        let response: ChatCompletionResponse = serde_json::from_value(response_json).unwrap();
+        let choice = response.choices.into_iter().next().unwrap();
+        let tc = choice
+            .message
+            .tool_calls
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        assert_eq!(tc.thought_signature.as_deref(), Some("abc123sig"));
+
+        // Step 2: Convert to internal ToolCall (as complete_with_tools does)
+        let arguments = serde_json::from_str(&tc.function.arguments)
+            .unwrap_or(serde_json::Value::Object(Default::default()));
+        let mut extra = serde_json::Map::new();
+        if let Some(sig) = tc.thought_signature {
+            extra.insert(
+                "thought_signature".to_string(),
+                serde_json::Value::String(sig),
+            );
+        }
+        let tool_call = ToolCall {
+            id: tc.id,
+            name: tc.function.name,
+            arguments,
+            extra,
+        };
+        assert_eq!(
+            tool_call
+                .extra
+                .get("thought_signature")
+                .and_then(|v| v.as_str()),
+            Some("abc123sig")
+        );
+
+        // Step 3: Store in ChatMessage and convert back to ChatCompletionMessage
+        let msg = ChatMessage::assistant_with_tool_calls(None, vec![tool_call]);
+        let chat_msg: ChatCompletionMessage = msg.into();
+        let replayed = chat_msg.tool_calls.unwrap();
+        assert_eq!(replayed.len(), 1);
+        assert_eq!(replayed[0].thought_signature.as_deref(), Some("abc123sig"));
+
+        // Step 4: Verify serialized JSON includes thought_signature
+        let serialized = serde_json::to_value(&replayed[0]).unwrap();
+        assert_eq!(serialized["thought_signature"], "abc123sig");
     }
 
     // -- api_url edge cases ---------------------------------------------------
