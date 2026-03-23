@@ -20,6 +20,7 @@ use rust_decimal_macros::dec;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value as JsonValue;
+use sha2::{Digest, Sha256};
 
 use std::collections::HashSet;
 
@@ -400,11 +401,48 @@ fn convert_messages(messages: &[ChatMessage]) -> (Option<String>, Vec<RigMessage
 }
 
 /// Responses-style providers require a non-empty tool call ID.
+///
+/// IDs must be compatible with providers like Mistral, which constrain IDs
+/// to `[a-zA-Z0-9]{9}`. We therefore:
+/// - pass through any non-empty raw ID that already matches this constraint;
+/// - otherwise deterministically map the raw string into a provider-compliant ID;
+/// - and when `raw` is empty/None, delegate to `generate_tool_call_id`.
 fn normalized_tool_call_id(raw: Option<&str>, seed: usize) -> String {
-    match raw.map(str::trim).filter(|id| !id.is_empty()) {
-        Some(id) => id.to_string(),
-        None => format!("generated_tool_call_{seed}"),
+    // Trim and treat empty as None.
+    let trimmed = raw.and_then(|s| {
+        let t = s.trim();
+        if t.is_empty() { None } else { Some(t) }
+    });
+
+    if let Some(id) = trimmed {
+        // If the ID already satisfies `[a-zA-Z0-9]{9}`, pass it through unchanged.
+        if id.len() == 9 && id.chars().all(|c| c.is_ascii_alphanumeric()) {
+            return id.to_string();
+        }
+
+        // Otherwise, deterministically hash the raw ID and feed the hash-derived
+        // seed into the provider-level generator so that the encoding and any
+        // provider-specific constraints remain centralized in one place.
+        let digest = Sha256::digest(id.as_bytes());
+        // Derive a 64-bit value from the first 8 bytes of the digest, then
+        // split it into two usize seeds so we preserve all 64 bits of entropy
+        // even on 32-bit targets.
+        let hash64 = {
+            // SHA-256 always produces 32 bytes, so indexing the first 8 is safe.
+            let bytes: [u8; 8] = [
+                digest[0], digest[1], digest[2], digest[3], digest[4], digest[5], digest[6],
+                digest[7],
+            ];
+            u64::from_be_bytes(bytes)
+        };
+        let hi_seed: usize = (hash64 >> 32) as usize;
+        let lo_seed: usize = (hash64 & 0xFFFF_FFFF) as usize;
+        return super::provider::generate_tool_call_id(hi_seed, lo_seed);
     }
+
+    // Fallback for missing/empty raw IDs: use the provider-level generator,
+    // which already produces compliant IDs.
+    super::provider::generate_tool_call_id(seed, 0)
 }
 
 /// Convert IronClaw tool definitions to rig-core format.
@@ -814,8 +852,9 @@ mod tests {
 
     #[test]
     fn test_convert_messages_tool_result() {
+        // Use a conforming 9-char alphanumeric ID so it passes through unchanged.
         let messages = vec![ChatMessage::tool_result(
-            "call_123",
+            "abcDE1234",
             "search",
             "result text",
         )];
@@ -826,8 +865,8 @@ mod tests {
         match &history[0] {
             RigMessage::User { content } => match content.first() {
                 UserContent::ToolResult(r) => {
-                    assert_eq!(r.id, "call_123");
-                    assert_eq!(r.call_id.as_deref(), Some("call_123"));
+                    assert_eq!(r.id, "abcDE1234");
+                    assert_eq!(r.call_id.as_deref(), Some("abcDE1234"));
                 }
                 other => panic!("Expected tool result content, got: {:?}", other),
             },
@@ -837,8 +876,9 @@ mod tests {
 
     #[test]
     fn test_convert_messages_assistant_with_tool_calls() {
+        // Use a conforming 9-char alphanumeric ID so it passes through unchanged.
         let tc = IronToolCall {
-            id: "call_1".to_string(),
+            id: "Xt7mK9pQ2".to_string(),
             name: "search".to_string(),
             arguments: serde_json::json!({"query": "test"}),
             reasoning: None,
@@ -853,7 +893,7 @@ mod tests {
                 assert!(content.iter().count() >= 2);
                 for item in content.iter() {
                     if let AssistantContent::ToolCall(tc) = item {
-                        assert_eq!(tc.call_id.as_deref(), Some("call_1"));
+                        assert_eq!(tc.call_id.as_deref(), Some("Xt7mK9pQ2"));
                     }
                 }
             }
@@ -875,7 +915,14 @@ mod tests {
         match &history[0] {
             RigMessage::User { content } => match content.first() {
                 UserContent::ToolResult(r) => {
-                    assert!(r.id.starts_with("generated_tool_call_"));
+                    // Missing ID → normalized_tool_call_id generates a 9-char alphanumeric ID.
+                    assert_eq!(
+                        r.id.len(),
+                        9,
+                        "fallback ID should be 9 chars, got: {}",
+                        r.id
+                    );
+                    assert!(r.id.chars().all(|c| c.is_ascii_alphanumeric()));
                     assert_eq!(r.call_id.as_deref(), Some(r.id.as_str()));
                 }
                 other => panic!("Expected tool result content, got: {:?}", other),
@@ -964,12 +1011,14 @@ mod tests {
                     _ => None,
                 });
                 let tc = tool_call.expect("should have a tool call");
-                assert!(!tc.id.is_empty(), "tool call id must not be empty");
-                assert!(
-                    tc.id.starts_with("generated_tool_call_"),
-                    "empty id should be replaced with generated id, got: {}",
+                // Empty ID → normalized_tool_call_id generates a 9-char alphanumeric ID.
+                assert_eq!(
+                    tc.id.len(),
+                    9,
+                    "generated id should be 9 chars, got: {}",
                     tc.id
                 );
+                assert!(tc.id.chars().all(|c| c.is_ascii_alphanumeric()));
                 assert_eq!(tc.call_id.as_deref(), Some(tc.id.as_str()));
             }
             other => panic!("Expected Assistant message, got: {:?}", other),
@@ -994,11 +1043,14 @@ mod tests {
                     _ => None,
                 });
                 let tc = tool_call.expect("should have a tool call");
-                assert!(
-                    tc.id.starts_with("generated_tool_call_"),
-                    "whitespace-only id should be replaced, got: {:?}",
+                // Whitespace-only ID → normalized_tool_call_id generates a 9-char alphanumeric ID.
+                assert_eq!(
+                    tc.id.len(),
+                    9,
+                    "generated id should be 9 chars, got: {}",
                     tc.id
                 );
+                assert!(tc.id.chars().all(|c| c.is_ascii_alphanumeric()));
             }
             other => panic!("Expected Assistant message, got: {:?}", other),
         }
@@ -1387,5 +1439,68 @@ mod tests {
 
         // Should be 2 separate User messages (text user + tool result user)
         assert_eq!(history.len(), 2);
+    }
+
+    // -- normalized_tool_call_id tests --
+
+    #[test]
+    fn test_normalized_tool_call_id_conforming_passthrough() {
+        // A 9-char alphanumeric ID should pass through unchanged.
+        let id = normalized_tool_call_id(Some("abcDE1234"), 42);
+        assert_eq!(id, "abcDE1234");
+    }
+
+    #[test]
+    fn test_normalized_tool_call_id_non_conforming_hashed() {
+        // An ID that doesn't match [a-zA-Z0-9]{9} should be hashed into one.
+        let id = normalized_tool_call_id(Some("call_abc_long_id"), 0);
+        assert_eq!(id.len(), 9);
+        assert!(id.chars().all(|c| c.is_ascii_alphanumeric()));
+        // Should NOT be the raw input.
+        assert_ne!(id, "call_abc_l");
+    }
+
+    #[test]
+    fn test_normalized_tool_call_id_empty_input() {
+        let id = normalized_tool_call_id(Some(""), 5);
+        assert_eq!(id.len(), 9);
+        assert!(id.chars().all(|c| c.is_ascii_alphanumeric()));
+    }
+
+    #[test]
+    fn test_normalized_tool_call_id_whitespace_input() {
+        let id = normalized_tool_call_id(Some("   "), 5);
+        assert_eq!(id.len(), 9);
+        assert!(id.chars().all(|c| c.is_ascii_alphanumeric()));
+        // Empty and whitespace-only with the same seed should produce identical results.
+        let id_empty = normalized_tool_call_id(Some(""), 5);
+        assert_eq!(id, id_empty);
+    }
+
+    #[test]
+    fn test_normalized_tool_call_id_none_input() {
+        let id = normalized_tool_call_id(None, 7);
+        assert_eq!(id.len(), 9);
+        assert!(id.chars().all(|c| c.is_ascii_alphanumeric()));
+        // None and empty string with same seed should produce identical results.
+        let id_empty = normalized_tool_call_id(Some(""), 7);
+        assert_eq!(id, id_empty);
+    }
+
+    #[test]
+    fn test_normalized_tool_call_id_deterministic() {
+        let id1 = normalized_tool_call_id(Some("call_xyz_123"), 0);
+        let id2 = normalized_tool_call_id(Some("call_xyz_123"), 0);
+        assert_eq!(id1, id2, "same input must produce same output");
+    }
+
+    #[test]
+    fn test_normalized_tool_call_id_different_inputs_differ() {
+        let id_a = normalized_tool_call_id(Some("call_aaa"), 0);
+        let id_b = normalized_tool_call_id(Some("call_bbb"), 0);
+        assert_ne!(
+            id_a, id_b,
+            "different raw IDs should produce different hashed IDs"
+        );
     }
 }

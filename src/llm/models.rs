@@ -344,6 +344,7 @@ pub(crate) fn build_nearai_model_fetch_config() -> crate::config::LlmConfig {
         nearai: crate::config::NearAiConfig::for_model_discovery(),
         provider: None,
         bedrock: None,
+        gemini_oauth: None,
         request_timeout_secs: 120,
         cheap_model: None,
         smart_routing_cascade: false,

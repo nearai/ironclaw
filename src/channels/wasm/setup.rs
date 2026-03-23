@@ -117,7 +117,7 @@ async fn register_channel(
     wasm_router: &Arc<WasmChannelRouter>,
 ) -> (String, Box<dyn crate::channels::Channel>) {
     let channel_name = loaded.name().to_string();
-    tracing::info!("Loaded WASM channel: {}", channel_name);
+    tracing::debug!("Loaded WASM channel: {}", channel_name);
     let owner_actor_id = config
         .channels
         .wasm_channel_owner_ids

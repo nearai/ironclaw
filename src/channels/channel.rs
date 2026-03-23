@@ -349,6 +349,12 @@ pub enum StatusUpdate {
         /// Per-tool decisions.
         decisions: Vec<ToolDecision>,
     },
+    /// Per-turn token usage and cost summary (shown as subtle metadata).
+    TurnCost {
+        input_tokens: u64,
+        output_tokens: u64,
+        cost_usd: String,
+    },
 }
 
 impl StatusUpdate {

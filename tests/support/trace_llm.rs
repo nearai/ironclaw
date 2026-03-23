@@ -428,18 +428,11 @@ impl TraceLlm {
         vars
     }
 
-    /// Strip `<tool_output name="..." sanitized="...">...\n</tool_output>`
-    /// wrapper from safety-layer output.
+    /// Strip `<tool_output name="...">...\n</tool_output>` wrapper from
+    /// safety-layer output and reverse the targeted `</tool_output` escape.
     fn unwrap_tool_output(content: &str) -> std::borrow::Cow<'_, str> {
-        let trimmed = content.trim();
-        if let Some(rest) = trimmed.strip_prefix("<tool_output")
-            && let Some(tag_end) = rest.find('>')
-        {
-            let inner = &rest[tag_end + 1..];
-            if let Some(close) = inner.rfind("</tool_output>") {
-                let body = inner[..close].trim();
-                return std::borrow::Cow::Borrowed(body);
-            }
+        if let Some(body) = ironclaw_safety::SafetyLayer::unwrap_tool_output(content) {
+            return std::borrow::Cow::Owned(body);
         }
         std::borrow::Cow::Borrowed(content)
     }

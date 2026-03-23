@@ -325,8 +325,19 @@ impl AppBuilder {
             };
             let mut ws = Workspace::new_with_db(workspace_user_id, db.clone())
                 .with_search_config(&self.config.search);
+
             if let Some(ref emb) = embeddings {
                 ws = ws.with_embeddings_cached(emb.clone(), emb_cache_config);
+            }
+
+            // Wire workspace-level settings (read scopes, memory layers)
+            if !self.config.workspace.read_scopes.is_empty() {
+                ws = ws.with_additional_read_scopes(self.config.workspace.read_scopes.clone());
+                tracing::info!(
+                    user_id = workspace_user_id,
+                    read_scopes = ?ws.read_user_ids(),
+                    "Workspace configured with multi-scope reads"
+                );
             }
             ws = ws.with_memory_layers(self.config.workspace.memory_layers.clone());
             let ws = Arc::new(ws);
@@ -386,7 +397,7 @@ impl AppBuilder {
             let b = tools
                 .register_builder_tool(llm.clone(), Some(self.config.builder.to_builder_config()))
                 .await;
-            tracing::info!("Builder mode enabled");
+            tracing::debug!("Builder mode enabled");
             Some(b)
         } else {
             None
@@ -729,13 +740,13 @@ impl AppBuilder {
         self.init_database().await?;
         self.init_secrets().await?;
 
-        // Post-init validation: if a non-nearai backend was selected but
-        // credentials were never resolved (deferred resolution found no keys),
-        // fail early with a clear error instead of a confusing runtime failure.
-        if self.config.llm.backend != "nearai"
-            && self.config.llm.backend != "bedrock"
-            && self.config.llm.backend != "openai_codex"
-            && self.config.llm.provider.is_none()
+        // Post-init validation: backends with dedicated config (nearai, gemini_oauth,
+        // bedrock, openai_codex) handle their own credential resolution. For registry-based
+        // backends, fail early if no provider config was resolved.
+        if !matches!(
+            self.config.llm.backend.as_str(),
+            "nearai" | "gemini_oauth" | "bedrock" | "openai_codex"
+        ) && self.config.llm.provider.is_none()
         {
             let backend = &self.config.llm.backend;
             anyhow::bail!(

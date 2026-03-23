@@ -520,4 +520,29 @@ I18n.register('zh-CN', {
   'channels.replDesc': '用于测试的简单读取-求值-打印循环',
   'channels.configureVia': '通过 {env} 配置',
   'channels.runWith': '运行命令: {cmd}',
+
+  // Welcome Card
+  'welcome.heading': '有什么可以帮助您的？',
+  'welcome.description': 'IronClaw 是您的安全 AI 助手。选择下方的建议或输入您自己的消息。',
+  'welcome.runTool': '运行工具',
+  'welcome.checkJobs': '查看任务状态',
+  'welcome.searchMemory': '搜索记忆',
+  'welcome.manageRoutines': '管理例程',
+  'welcome.systemStatus': '系统状态',
+  'welcome.writeCode': '编写代码',
+
+  // Connection
+  'connection.disconnected': '已断开连接 — 正在尝试重新连接',
+  'connection.reconnecting': '正在重新连接（第 {count} 次尝试）...',
+  'connection.reconnected': '已重新连接',
+
+  // Messages
+  'message.you': '你',
+  'message.assistant': 'IronClaw',
+  'message.system': '系统',
+  'message.copy': '复制',
+  'message.copied': '已复制！',
+
+  // Approval
+  'approval.pressY': '按 Y 批准，N 拒绝',
 });

@@ -549,11 +549,7 @@ impl Scheduler {
 
         // Delegate to shared tool execution pipeline
         let output_str = crate::tools::execute::execute_tool_with_safety(
-            &tools,
-            &safety,
-            tool_name,
-            &normalized_params,
-            &job_ctx,
+            &tools, &safety, tool_name, params, &job_ctx,
         )
         .await?;
 

@@ -312,7 +312,7 @@ impl WasmToolRuntime {
                 .insert(prepared.name.clone(), Arc::clone(&prepared));
         }
 
-        tracing::info!(
+        tracing::debug!(
             name = %prepared.name,
             "Prepared WASM tool for execution"
         );

@@ -605,10 +605,12 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
 
         // Redact sensitive parameter values before they touch any observability or audit path.
         let safe_params = redact_params(&effective_params, tool.sensitive_params());
+        let risk = tool.risk_level_for(&effective_params);
         tracing::debug!(
             tool = %tool_name,
             params = %safe_params,
             job = %job_id,
+            risk = %risk,
             "Tool call started"
         );
 
@@ -811,12 +813,16 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                     });
                 }
 
+                let error_preview = {
+                    let msg = format!("Error: {}", e);
+                    truncate_for_preview(&msg, 500).into_owned()
+                };
                 self.log_event(
                     "tool_result",
                     serde_json::json!({
                         "tool_name": selection.tool_name,
                         "success": false,
-                        "output": truncate_for_preview(&format!("Error: {}", e), 500),
+                        "output": error_preview,
                     }),
                 );
 
@@ -1477,6 +1483,9 @@ impl From<TaskOutput> for Result<String, Error> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use crate::channels::ChannelManager;
     use crate::llm::ToolSelection;
 
     use super::*;
@@ -1487,6 +1496,8 @@ mod tests {
         ToolCompletionResponse,
     };
     use crate::safety::SafetyLayer;
+    use crate::testing::{BroadcastCapture, RecordingBroadcastChannel};
+    use crate::tools::builtin::MessageTool;
     use crate::tools::{Tool, ToolError as ToolExecError, ToolOutput};
 
     /// A test tool that sleeps for a configurable duration before returning.
@@ -1576,6 +1587,20 @@ mod tests {
         };
 
         Worker::new(job_id, deps)
+    }
+
+    async fn make_worker_with_message_tool()
+    -> (Worker, Arc<MessageTool>, BroadcastCapture, BroadcastCapture) {
+        let channel_manager = ChannelManager::new();
+        let (gateway, gateway_captures) = RecordingBroadcastChannel::new("gateway");
+        let (telegram, telegram_captures) = RecordingBroadcastChannel::new("telegram");
+        channel_manager.add(Box::new(gateway)).await;
+        channel_manager.add(Box::new(telegram)).await;
+
+        let message_tool = Arc::new(MessageTool::new(Arc::new(channel_manager)));
+        let worker = make_worker(vec![message_tool.clone()]).await;
+
+        (worker, message_tool, gateway_captures, telegram_captures)
     }
 
     #[test]
@@ -2185,5 +2210,51 @@ mod tests {
         store_fallback_in_metadata(&mut ctx, None);
 
         assert_eq!(ctx.metadata, original); // safety: test
+    }
+
+    #[tokio::test]
+    async fn autonomous_message_tool_ignores_stale_gateway_context_when_routine_metadata_targets_telegram()
+     {
+        let (worker, message_tool, gateway_captures, telegram_captures) =
+            make_worker_with_message_tool().await;
+
+        message_tool
+            .set_context(
+                Some("gateway".to_string()),
+                Some("stale-gateway-target".to_string()),
+            )
+            .await;
+
+        worker
+            .context_manager()
+            .update_context(worker.job_id, |ctx| {
+                ctx.user_id = "telegram".to_string();
+                ctx.metadata = serde_json::json!({
+                    "notify_channel": "telegram",
+                    "owner_id": "owner-scope",
+                });
+                Ok::<(), String>(())
+            })
+            .await
+            .unwrap() // safety: test
+            .unwrap(); // safety: test
+
+        let result = worker
+            .execute_tool(
+                "message",
+                &serde_json::json!({"content": "hello from routine"}),
+            )
+            .await
+            .unwrap(); // safety: test
+        assert!(
+            result.contains("telegram:owner-scope"),
+            "expected telegram owner-scope routing, got: {result}"
+        );
+
+        assert!(gateway_captures.lock().await.is_empty());
+        let telegram = telegram_captures.lock().await.clone();
+        assert_eq!(telegram.len(), 1);
+        assert_eq!(telegram[0].0, "owner-scope");
+        assert_eq!(telegram[0].1.content, "hello from routine");
     }
 }
