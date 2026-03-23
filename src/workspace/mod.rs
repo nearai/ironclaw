@@ -894,7 +894,9 @@ impl Workspace {
     pub async fn list(&self, directory: &str) -> Result<Vec<WorkspaceEntry>, WorkspaceError> {
         let directory = normalize_directory(directory);
         if self.is_multi_scope() {
-            // Iterate per-scope: primary unfiltered, secondary filtered.
+            // Iterate per-scope rather than using list_directory_multi because
+            // we need to filter identity paths from secondary scopes only — the
+            // merged _multi result loses scope attribution.
             let primary = self
                 .storage
                 .list_directory(&self.user_id, self.agent_id, &directory)
@@ -920,6 +922,8 @@ impl Workspace {
     /// When multi-scope reads are configured, lists across all read scopes.
     pub async fn list_all(&self) -> Result<Vec<String>, WorkspaceError> {
         if self.is_multi_scope() {
+            // Iterate per-scope rather than using list_all_paths_multi because
+            // we need to filter identity paths from secondary scopes only.
             // Primary scope: all paths. Secondary scopes: filter identity paths.
             let mut all_paths = self
                 .storage

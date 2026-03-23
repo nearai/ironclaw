@@ -667,7 +667,7 @@ pub trait WorkspaceStore: Send + Sync {
         config: &SearchConfig,
     ) -> Result<Vec<SearchResult>, WorkspaceError> {
         if user_ids.len() > 1 {
-            tracing::info!(
+            tracing::debug!(
                 scope_count = user_ids.len(),
                 "hybrid_search_multi: using default per-scope RRF merge; \
                  cross-scope score comparison may be unreliable"
