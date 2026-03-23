@@ -129,10 +129,10 @@ impl SseManager {
                 // Global events (user_id=None) always pass through.
                 // Scoped events only pass if the subscriber matches (or subscriber is unscoped).
                 match (&user_id, &scoped.user_id) {
-                    (_, None) => Some(scoped.event),                          // global -> all
-                    (None, _) => Some(scoped.event),                          // unscoped subscriber -> all
+                    (_, None) => Some(scoped.event), // global -> all
+                    (None, _) => Some(scoped.event), // unscoped subscriber -> all
                     (Some(sub), Some(ev)) if sub == ev => Some(scoped.event), // match
-                    _ => None,                                                // different user -> skip
+                    _ => None,                       // different user -> skip
                 }
             }
             Err(_) => None,
@@ -178,8 +178,14 @@ impl SseManager {
                 },
                 Err(_) => None,
             })
-            .map(|event| {
-                let data = serde_json::to_string(&event).unwrap_or_default();
+            .filter_map(|event| {
+                let data = match serde_json::to_string(&event) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::warn!("Failed to serialize SSE event: {}", e);
+                        return None;
+                    }
+                };
                 let event_type = match &event {
                     SseEvent::Response { .. } => "response",
                     SseEvent::Thinking { .. } => "thinking",
@@ -204,7 +210,7 @@ impl SseManager {
                     SseEvent::TurnCost { .. } => "turn_cost",
                     SseEvent::ExtensionStatus { .. } => "extension_status",
                 };
-                Ok(Event::default().event(event_type).data(data))
+                Some(Ok(Event::default().event(event_type).data(data)))
             });
 
         // Wrap in a stream that decrements on drop

@@ -668,8 +668,13 @@ impl MemoryTreeTool {
             };
 
             if entry.is_directory && current_depth < max_depth {
-                let children =
-                    Box::pin(Self::build_tree(workspace, &entry.path, current_depth + 1, max_depth)).await?;
+                let children = Box::pin(Self::build_tree(
+                    workspace,
+                    &entry.path,
+                    current_depth + 1,
+                    max_depth,
+                ))
+                .await?;
                 if children.is_empty() {
                     result.push(serde_json::Value::String(display_path));
                 } else {

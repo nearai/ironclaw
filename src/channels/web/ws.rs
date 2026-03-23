@@ -267,7 +267,10 @@ async fn handle_client_message(
             token,
         } => {
             if let Some(ref ext_mgr) = state.extension_manager {
-                match ext_mgr.configure_token(&extension_name, &token, user_id).await {
+                match ext_mgr
+                    .configure_token(&extension_name, &token, user_id)
+                    .await
+                {
                     Ok(result) => {
                         if result.verification.is_some() {
                             state.sse.broadcast_for_user(

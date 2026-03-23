@@ -158,10 +158,7 @@ impl ChannelsConfig {
                 if layer.name.len() > 64 {
                     return Err(ConfigError::InvalidValue {
                         key: "MEMORY_LAYERS".to_string(),
-                        message: format!(
-                            "layer name '{}' exceeds 64 characters",
-                            layer.name
-                        ),
+                        message: format!("layer name '{}' exceeds 64 characters", layer.name),
                     });
                 }
                 if !layer
@@ -181,10 +178,7 @@ impl ChannelsConfig {
                 if layer.scope.trim().is_empty() {
                     return Err(ConfigError::InvalidValue {
                         key: "MEMORY_LAYERS".to_string(),
-                        message: format!(
-                            "layer '{}' has an empty scope",
-                            layer.name
-                        ),
+                        message: format!("layer '{}' has an empty scope", layer.name),
                     });
                 }
             }
@@ -205,20 +199,22 @@ impl ChannelsConfig {
             let user_tokens: Option<HashMap<String, UserTokenConfig>> =
                 match optional_env("GATEWAY_USER_TOKENS")? {
                     Some(json_str) => {
-                        let tokens: HashMap<String, UserTokenConfig> =
-                            serde_json::from_str(&json_str).map_err(|e| {
-                                ConfigError::InvalidValue {
-                                    key: "GATEWAY_USER_TOKENS".to_string(),
-                                    message: format!(
-                                        "must be valid JSON object mapping tokens to user configs: {e}"
-                                    ),
-                                }
-                            })?;
+                        let tokens: HashMap<String, UserTokenConfig> = serde_json::from_str(
+                            &json_str,
+                        )
+                        .map_err(|e| ConfigError::InvalidValue {
+                            key: "GATEWAY_USER_TOKENS".to_string(),
+                            message: format!(
+                                "must be valid JSON object mapping tokens to user configs: {e}"
+                            ),
+                        })?;
                         if tokens.is_empty() {
                             return Err(ConfigError::InvalidValue {
-                                key: "GATEWAY_USER_TOKENS".to_string(),
-                                message: "token map is empty — remove the variable to use single-user mode".to_string(),
-                            });
+                            key: "GATEWAY_USER_TOKENS".to_string(),
+                            message:
+                                "token map is empty — remove the variable to use single-user mode"
+                                    .to_string(),
+                        });
                         }
                         for (tok, cfg) in &tokens {
                             if cfg.user_id.trim().is_empty() {
@@ -248,10 +244,7 @@ impl ChannelsConfig {
                 if scope.len() > 128 {
                     return Err(ConfigError::InvalidValue {
                         key: "WORKSPACE_READ_SCOPES".to_string(),
-                        message: format!(
-                            "scope '{}...' exceeds 128 characters",
-                            &scope[..32]
-                        ),
+                        message: format!("scope '{}...' exceeds 128 characters", &scope[..32]),
                     });
                 }
             }

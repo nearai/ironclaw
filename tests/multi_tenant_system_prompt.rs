@@ -98,10 +98,7 @@ mod tests {
     #[tokio::test]
     async fn alice_system_prompt_contains_alice_identity() {
         let trace = simple_trace(1);
-        let rig = TestRigBuilder::new()
-            .with_trace(trace)
-            .build()
-            .await;
+        let rig = TestRigBuilder::new().with_trace(trace).build().await;
 
         // Seed alice's identity into the database
         let db = rig.database();
@@ -114,8 +111,8 @@ mod tests {
 
         // The system prompt sent to the LLM should contain Alice's identity
         let requests = rig.captured_llm_requests();
-        let system_prompt = extract_system_prompt(&requests)
-            .expect("Expected a system prompt in the LLM request");
+        let system_prompt =
+            extract_system_prompt(&requests).expect("Expected a system prompt in the LLM request");
 
         assert!(
             system_prompt.contains("Alice is a software engineer"),
@@ -134,10 +131,7 @@ mod tests {
     #[tokio::test]
     async fn bob_system_prompt_contains_bob_identity() {
         let trace = simple_trace(1);
-        let rig = TestRigBuilder::new()
-            .with_trace(trace)
-            .build()
-            .await;
+        let rig = TestRigBuilder::new().with_trace(trace).build().await;
 
         // Seed bob's identity into the database
         let db = rig.database();
@@ -150,8 +144,8 @@ mod tests {
 
         // The system prompt should contain Bob's identity
         let requests = rig.captured_llm_requests();
-        let system_prompt = extract_system_prompt(&requests)
-            .expect("Expected a system prompt in the LLM request");
+        let system_prompt =
+            extract_system_prompt(&requests).expect("Expected a system prompt in the LLM request");
 
         assert!(
             system_prompt.contains("Bob is a marine biologist"),
@@ -169,10 +163,7 @@ mod tests {
     #[tokio::test]
     async fn alice_identity_does_not_leak_into_bob_prompt() {
         let trace = simple_trace(1);
-        let rig = TestRigBuilder::new()
-            .with_trace(trace)
-            .build()
-            .await;
+        let rig = TestRigBuilder::new().with_trace(trace).build().await;
 
         // Seed BOTH users' identities
         let db = rig.database();
@@ -196,8 +187,7 @@ mod tests {
             );
         }
         // Also verify Bob's identity IS present (compound check)
-        let prompt = system_prompt
-            .expect("Expected a system prompt in the LLM request");
+        let prompt = system_prompt.expect("Expected a system prompt in the LLM request");
         assert!(
             prompt.contains("Bob is a marine biologist"),
             "Bob's own identity should be in his system prompt.\n\
@@ -214,10 +204,7 @@ mod tests {
     #[tokio::test]
     async fn bob_identity_does_not_leak_into_alice_prompt() {
         let trace = simple_trace(1);
-        let rig = TestRigBuilder::new()
-            .with_trace(trace)
-            .build()
-            .await;
+        let rig = TestRigBuilder::new().with_trace(trace).build().await;
 
         // Seed BOTH users' identities
         let db = rig.database();
@@ -241,8 +228,7 @@ mod tests {
             );
         }
         // Also verify Alice's identity IS present
-        let prompt = system_prompt
-            .expect("Expected a system prompt in the LLM request");
+        let prompt = system_prompt.expect("Expected a system prompt in the LLM request");
         assert!(
             prompt.contains("Alice is a software engineer"),
             "Alice's own identity should be in her system prompt.\n\

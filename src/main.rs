@@ -820,7 +820,9 @@ async fn async_main() -> anyhow::Result<()> {
             .unwrap_or_else(|| "default".to_string());
         let persisted = ext_mgr.load_persisted_active_channels(&ext_user_id).await;
         for name in &persisted {
-            if active_at_startup.contains(name) || ext_mgr.is_relay_channel(name, &ext_user_id).await {
+            if active_at_startup.contains(name)
+                || ext_mgr.is_relay_channel(name, &ext_user_id).await
+            {
                 continue;
             }
             match ext_mgr.activate(name, &ext_user_id).await {

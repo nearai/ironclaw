@@ -12,11 +12,11 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use axum::middleware;
 use axum::routing::{get, post};
-use axum::Router;
 use tower::ServiceExt;
 
 use ironclaw::channels::web::auth::{
@@ -60,15 +60,11 @@ fn two_user_auth() -> MultiAuthState {
 
 /// Build a test Router that echoes the authenticated user_id back.
 fn user_echo_app(auth: MultiAuthState) -> Router {
-    async fn echo_user(
-        AuthenticatedUser(user): AuthenticatedUser,
-    ) -> String {
+    async fn echo_user(AuthenticatedUser(user): AuthenticatedUser) -> String {
         user.user_id
     }
 
-    async fn echo_user_with_scopes(
-        AuthenticatedUser(user): AuthenticatedUser,
-    ) -> String {
+    async fn echo_user_with_scopes(AuthenticatedUser(user): AuthenticatedUser) -> String {
         format!("{}:{}", user.user_id, user.workspace_read_scopes.join(","))
     }
 
@@ -870,7 +866,10 @@ async fn start_multi_user_server_with_db() -> (
     let backend = ironclaw::db::libsql::LibSqlBackend::new_local(&path)
         .await
         .expect("failed to create test DB");
-    backend.run_migrations().await.expect("failed to run migrations");
+    backend
+        .run_migrations()
+        .await
+        .expect("failed to run migrations");
     let db: Arc<dyn Database> = Arc::new(backend);
     let (agent_tx, _agent_rx) = tokio::sync::mpsc::channel(64);
     let auth = two_user_auth();
@@ -1027,7 +1026,11 @@ async fn full_server_bob_sees_own_jobs_only() {
     let body: serde_json::Value = resp.json().await.unwrap();
     let jobs = body["jobs"].as_array().unwrap();
 
-    assert_eq!(jobs.len(), 2, "Bob should see only his 2 jobs, not Alice's 3");
+    assert_eq!(
+        jobs.len(),
+        2,
+        "Bob should see only his 2 jobs, not Alice's 3"
+    );
     for job in jobs {
         let title = job["title"].as_str().unwrap();
         assert!(
