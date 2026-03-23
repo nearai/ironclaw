@@ -1052,10 +1052,11 @@ impl Agent {
             } else {
                 drop(sess);
                 self.session_manager
-                    .resolve_thread(
+                    .resolve_thread_with_parsed_uuid(
                         &message.user_id,
                         &message.channel,
                         message.conversation_scope(),
+                        approval_thread_uuid,
                     )
                     .await
             }

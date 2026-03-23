@@ -108,6 +108,20 @@ impl SessionManager {
         channel: &str,
         external_thread_id: Option<&str>,
     ) -> (Arc<Mutex<Session>>, Uuid) {
+        self.resolve_thread_with_parsed_uuid(user_id, channel, external_thread_id, None)
+            .await
+    }
+
+    /// Like [`resolve_thread`](Self::resolve_thread), but accepts a pre-parsed
+    /// UUID to skip redundant parsing when the caller has already validated
+    /// the external thread ID as a UUID (e.g. the approval routing path).
+    pub async fn resolve_thread_with_parsed_uuid(
+        &self,
+        user_id: &str,
+        channel: &str,
+        external_thread_id: Option<&str>,
+        parsed_uuid: Option<Uuid>,
+    ) -> (Arc<Mutex<Session>>, Uuid) {
         let session = self.get_or_create_session(user_id).await;
 
         let key = ThreadKey {
@@ -133,9 +147,12 @@ impl SessionManager {
         // (e.g. created by chat_new_thread_handler or hydrated from DB).
         // We only adopt it if no thread_map entry maps to this UUID —
         // otherwise it belongs to a different channel scope.
-        if let Some(ext_tid) = external_thread_id
-            && let Ok(ext_uuid) = Uuid::parse_str(ext_tid)
-        {
+        // Use pre-parsed UUID if available, otherwise parse from string.
+        let ext_uuid = parsed_uuid.or_else(|| {
+            external_thread_id.and_then(|ext_tid| Uuid::parse_str(ext_tid).ok())
+        });
+
+        if let Some(ext_uuid) = ext_uuid {
             let thread_map = self.thread_map.read().await;
             let mapped_elsewhere = thread_map.values().any(|&v| v == ext_uuid);
             drop(thread_map);
@@ -946,5 +963,60 @@ mod tests {
             1,
             "should have exactly 1 thread, not a duplicate"
         );
+    }
+
+    #[tokio::test]
+    async fn test_resolve_thread_with_pre_parsed_uuid_adopts_thread() {
+        use crate::agent::session::Thread;
+
+        let manager = SessionManager::new();
+        let (session, _) = manager.resolve_thread("user1", "chan1", None).await;
+
+        // Manually insert a thread with a known UUID
+        let known_id = Uuid::new_v4();
+        {
+            let mut sess = session.lock().await;
+            let thread = Thread::with_id(known_id, sess.id);
+            sess.threads.insert(known_id, thread);
+        }
+
+        // Resolve with pre-parsed UUID -- should adopt it without re-parsing
+        let (_, resolved) = manager
+            .resolve_thread_with_parsed_uuid(
+                "user1",
+                "chan1",
+                Some(&known_id.to_string()),
+                Some(known_id),
+            )
+            .await;
+        assert_eq!(resolved, known_id);
+    }
+
+    #[tokio::test]
+    async fn test_resolve_thread_with_parsed_uuid_none_delegates_to_parse() {
+        use crate::agent::session::Thread;
+
+        let manager = SessionManager::new();
+        let (session, _) = manager.resolve_thread("user2", "chan2", None).await;
+
+        // Insert a thread with a known UUID
+        let known_id = Uuid::new_v4();
+        {
+            let mut sess = session.lock().await;
+            let thread = Thread::with_id(known_id, sess.id);
+            sess.threads.insert(known_id, thread);
+        }
+
+        // Resolve with parsed_uuid=None but a valid UUID string -- should
+        // fall back to parsing the string and still adopt the thread
+        let (_, resolved) = manager
+            .resolve_thread_with_parsed_uuid(
+                "user2",
+                "chan2",
+                Some(&known_id.to_string()),
+                None,
+            )
+            .await;
+        assert_eq!(resolved, known_id);
     }
 }
