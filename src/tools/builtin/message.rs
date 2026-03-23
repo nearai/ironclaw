@@ -233,9 +233,9 @@ impl Tool for MessageTool {
             .unwrap_or_else(|e| e.into_inner())
             .clone();
         let metadata_target = metadata_notify_user(&ctx.metadata);
-        let metadata_owner_id = metadata_owner_id(&ctx.metadata);
+        let owner_scope_target = metadata_owner_id(&ctx.metadata);
         let has_execution_routing_metadata =
-            metadata_channel.is_some() || metadata_target.is_some() || metadata_owner_id.is_some();
+            metadata_channel.is_some() || metadata_target.is_some() || owner_scope_target.is_some();
 
         // Job metadata is authoritative for autonomous executions. The shared
         // conversation defaults are only a legacy fallback when no execution-local
@@ -260,7 +260,7 @@ impl Tool for MessageTool {
             extension_manager: self.extension_manager.as_ref(),
             explicit_target,
             metadata_target,
-            owner_scope_target: metadata_owner_id,
+            owner_scope_target,
             default_target,
             channel: channel.as_deref(),
             metadata_channel: metadata_channel.as_deref(),

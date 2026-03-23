@@ -2238,7 +2238,10 @@ mod tests {
             make_worker_with_message_tool().await;
 
         message_tool
-            .set_context(Some("gateway".to_string()), Some("telegram".to_string()))
+            .set_context(
+                Some("gateway".to_string()),
+                Some("stale-gateway-target".to_string()),
+            )
             .await;
 
         worker
