@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::process::Stdio;
 use std::sync::LazyLock;
 use std::time::Duration;
@@ -183,26 +184,30 @@ async fn handle_request(request: JsonRpcRequest) -> Option<JsonRpcResponse> {
         ));
     }
 
+    let is_notification = request.id.is_none();
     let id = request.id.unwrap_or(serde_json::Value::Null);
 
     match request.method.as_str() {
-        "initialize" => Some(jsonrpc_ok(
-            id,
-            serde_json::to_value(InitializeResult {
-                protocol_version: PROTOCOL_VERSION,
-                capabilities: ServerCapabilities {
-                    tools: ToolsCapability {
-                        list_changed: false,
-                    },
+        "initialize" => match serde_json::to_value(InitializeResult {
+            protocol_version: PROTOCOL_VERSION,
+            capabilities: ServerCapabilities {
+                tools: ToolsCapability {
+                    list_changed: false,
                 },
-                server_info: ServerInfo {
-                    name: "gws-bridge",
-                    version: env!("CARGO_PKG_VERSION"),
-                },
-                instructions: "Standalone fallback bridge around a local gws binary. Enable with GWS_BRIDGE_ENABLED=true and configure GWS_BINARY_PATH if needed.",
-            })
-            .expect("initialize result serializes"),
-        )),
+            },
+            server_info: ServerInfo {
+                name: "gws-bridge",
+                version: env!("CARGO_PKG_VERSION"),
+            },
+            instructions: "Standalone fallback bridge around a local gws binary. Enable with GWS_BRIDGE_ENABLED=true and configure GWS_BINARY_PATH if needed.",
+        }) {
+            Ok(result) => Some(jsonrpc_ok(id, result)),
+            Err(e) => Some(jsonrpc_error(
+                id,
+                -32603,
+                format!("Failed to serialize initialize result: {}", e),
+            )),
+        },
         "notifications/initialized" => None,
         "tools/list" => Some(jsonrpc_ok(
             id,
@@ -220,6 +225,7 @@ async fn handle_request(request: JsonRpcRequest) -> Option<JsonRpcResponse> {
                 )),
             }
         }
+        _ if is_notification => None,
         _ => Some(jsonrpc_error(
             id,
             -32601,
@@ -260,6 +266,21 @@ async fn call_tool_response(id: serde_json::Value, request: ToolCallRequest) -> 
     }
 
     let mut command = Command::new(&bin_path);
+    command.env_clear();
+    if let Some(path) = std::env::var_os("PATH") {
+        command.env("PATH", path);
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        command.env("HOME", home);
+    }
+    for (key, value) in std::env::vars_os() {
+        if key.to_string_lossy().starts_with("GWS_")
+            && key != "GWS_BRIDGE_ENABLED"
+            && key != "GWS_BINARY_PATH"
+        {
+            command.env(key, value);
+        }
+    }
     command
         .args(&args.args)
         .stdin(Stdio::null())
@@ -280,10 +301,13 @@ async fn call_tool_response(id: serde_json::Value, request: ToolCallRequest) -> 
         let stdout_fut = async {
             if let Some(mut out) = stdout_handle {
                 let mut buf = Vec::new();
-                let _ = (&mut out)
+                if let Err(e) = (&mut out)
                     .take(MAX_OUTPUT_SIZE as u64)
                     .read_to_end(&mut buf)
-                    .await;
+                    .await
+                {
+                    eprintln!("Failed to read stdout from gws bridge child: {}", e);
+                }
                 String::from_utf8_lossy(&buf).to_string()
             } else {
                 String::new()
@@ -293,10 +317,13 @@ async fn call_tool_response(id: serde_json::Value, request: ToolCallRequest) -> 
         let stderr_fut = async {
             if let Some(mut err) = stderr_handle {
                 let mut buf = Vec::new();
-                let _ = (&mut err)
+                if let Err(e) = (&mut err)
                     .take(MAX_OUTPUT_SIZE as u64)
                     .read_to_end(&mut buf)
-                    .await;
+                    .await
+                {
+                    eprintln!("Failed to read stderr from gws bridge child: {}", e);
+                }
                 String::from_utf8_lossy(&buf).to_string()
             } else {
                 String::new()
@@ -396,14 +423,17 @@ fn jsonrpc_error(id: serde_json::Value, code: i32, message: String) -> JsonRpcRe
 }
 
 fn tool_error(id: serde_json::Value, message: String) -> JsonRpcResponse {
-    jsonrpc_ok(
-        id,
-        serde_json::to_value(CallToolResult {
-            content: vec![ContentBlock::Text { text: message }],
-            is_error: true,
-        })
-        .expect("tool error result serializes"),
-    )
+    match serde_json::to_value(CallToolResult {
+        content: vec![ContentBlock::Text { text: message }],
+        is_error: true,
+    }) {
+        Ok(result) => jsonrpc_ok(id, result),
+        Err(e) => jsonrpc_error(
+            id,
+            -32603,
+            format!("Failed to serialize tool error response: {}", e),
+        ),
+    }
 }
 
 fn compile_regex(pattern: &str) -> Option<Regex> {
@@ -472,25 +502,26 @@ fn matches_exact_any_command(args: &[String], allowed: &[&[&str]]) -> bool {
 }
 
 fn redact_secrets(input: &str) -> String {
-    let mut result = input.to_string();
-    if let Some(re) = BEARER_RE.as_ref() {
-        result = re.replace_all(&result, "${1}[REDACTED]").to_string();
+    let mut result: Cow<'_, str> = Cow::Borrowed(input);
+    result = redact_secret_pattern(result, BEARER_RE.as_ref(), "${1}[REDACTED]");
+    result = redact_secret_pattern(result, OAUTH_RE.as_ref(), "${1}[REDACTED]");
+    result = redact_secret_pattern(result, YA29_RE.as_ref(), "[REDACTED_OAUTH_TOKEN]");
+    result = redact_secret_pattern(result, AKIA_RE.as_ref(), "[REDACTED_AWS_KEY]");
+    result = redact_secret_pattern(result, SK_RE.as_ref(), "[REDACTED_SECRET_KEY]");
+    result.into_owned()
+}
+
+fn redact_secret_pattern<'a>(
+    input: Cow<'a, str>,
+    re: Option<&Regex>,
+    replacement: &str,
+) -> Cow<'a, str> {
+    match re {
+        Some(re) if re.is_match(input.as_ref()) => {
+            Cow::Owned(re.replace_all(input.as_ref(), replacement).into_owned())
+        }
+        _ => input,
     }
-    if let Some(re) = OAUTH_RE.as_ref() {
-        result = re.replace_all(&result, "${1}[REDACTED]").to_string();
-    }
-    if let Some(re) = YA29_RE.as_ref() {
-        result = re
-            .replace_all(&result, "[REDACTED_OAUTH_TOKEN]")
-            .to_string();
-    }
-    if let Some(re) = AKIA_RE.as_ref() {
-        result = re.replace_all(&result, "[REDACTED_AWS_KEY]").to_string();
-    }
-    if let Some(re) = SK_RE.as_ref() {
-        result = re.replace_all(&result, "[REDACTED_SECRET_KEY]").to_string();
-    }
-    result
 }
 
 fn floor_char_boundary(s: &str, idx: usize) -> usize {
@@ -504,6 +535,21 @@ fn floor_char_boundary(s: &str, idx: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn unique_temp_dir() -> PathBuf {
+        let mut path = std::env::temp_dir();
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default();
+        path.push(format!("gws-bridge-test-{}-{}", std::process::id(), stamp));
+        path
+    }
 
     #[test]
     fn allowlist_accepts_read_only_tuples() {
@@ -543,5 +589,59 @@ mod tests {
         let s = "héllo";
         let idx = floor_char_boundary(s, 2);
         assert!(s.is_char_boundary(idx));
+    }
+
+    #[tokio::test]
+    async fn unknown_notification_is_ignored() {
+        let response = handle_line(r#"{"jsonrpc":"2.0","method":"something/unknown"}"#).await;
+        assert!(response.is_none());
+    }
+
+    #[tokio::test]
+    async fn child_process_environment_is_explicitly_scoped() {
+        let temp_dir = unique_temp_dir();
+        fs::create_dir_all(&temp_dir).expect("create temp dir");
+        let script_path = temp_dir.join("dump_env.sh");
+        let env_dump_path = temp_dir.join("env.txt");
+
+        let mut script = fs::File::create(&script_path).expect("create script");
+        writeln!(
+            script,
+            "#!/bin/sh\nprintenv | sort > \"{}\"\n",
+            env_dump_path.display()
+        )
+        .expect("write script");
+        let mut perms = fs::metadata(&script_path)
+            .expect("stat script")
+            .permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script_path, perms).expect("chmod script");
+
+        std::env::set_var("GWS_BRIDGE_ENABLED", "true");
+        std::env::set_var("GWS_BINARY_PATH", &script_path);
+        std::env::set_var("GWS_CUSTOM_TEST_VAR", "kept");
+        std::env::set_var("SECRET_TOKEN_TEST_VAR", "should_not_leak");
+
+        let response = call_tool_response(
+            serde_json::Value::Null,
+            ToolCallRequest {
+                name: "gws_bridge".to_string(),
+                arguments: serde_json::json!({
+                    "args": ["auth", "status"]
+                }),
+            },
+        )
+        .await;
+
+        let response_text = serde_json::to_string(&response).expect("serialize response");
+        assert!(response_text.contains("\"success\":true"));
+
+        let env_dump = fs::read_to_string(&env_dump_path).expect("read env dump");
+        assert!(env_dump.contains("HOME="));
+        assert!(env_dump.contains("PATH="));
+        assert!(env_dump.contains("GWS_CUSTOM_TEST_VAR=kept"));
+        assert!(!env_dump.contains("GWS_BRIDGE_ENABLED="));
+        assert!(!env_dump.contains("GWS_BINARY_PATH="));
+        assert!(!env_dump.contains("SECRET_TOKEN_TEST_VAR=should_not_leak"));
     }
 }
