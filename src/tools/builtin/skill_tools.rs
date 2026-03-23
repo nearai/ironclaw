@@ -574,13 +574,13 @@ impl Tool for SkillSearchTool {
 
 pub struct SkillInstallTool {
     registry: Arc<std::sync::RwLock<SkillRegistry>>,
-    catalog: Arc<SkillCatalog>,
+    catalog: Option<Arc<SkillCatalog>>,
 }
 
 impl SkillInstallTool {
     pub fn new(
         registry: Arc<std::sync::RwLock<SkillRegistry>>,
-        catalog: Arc<SkillCatalog>,
+        catalog: Option<Arc<SkillCatalog>>,
     ) -> Self {
         Self { registry, catalog }
     }
@@ -700,7 +700,6 @@ impl Tool for SkillInstallTool {
         }
 
         let content = if let Some(raw) = params.get("content").and_then(|v| v.as_str()) {
-            // Direct content provided
             raw.to_string()
         } else if let Some(url) = params
             .get("url")
@@ -709,22 +708,26 @@ impl Tool for SkillInstallTool {
         {
             // Fetch from explicit URL
             fetch_skill_content(url).await.map_err(ToolError::from)?
-        } else {
+        } else if let Some(ref catalog) = self.catalog {
             // Look up in catalog and fetch
             let download_key = resolve_catalog_download_key(
-                self.catalog.as_ref(),
+                catalog.as_ref(),
                 name,
                 requested_identifier.as_deref(),
             )
             .await?;
             requested_identifier = Some(download_key.clone());
             let download_url = ironclaw_skills::catalog::skill_download_url(
-                self.catalog.registry_url(),
+                catalog.registry_url(),
                 &download_key,
             );
             fetch_skill_content(&download_url)
                 .await
                 .map_err(ToolError::from)?
+        } else {
+            return Err(ToolError::ExecutionFailed(
+                "ClawHub registry is disabled. Provide a 'url' or 'content' parameter.".into(),
+            ));
         };
 
         let normalized = ironclaw_skills::normalize_line_endings(&content);
@@ -1342,7 +1345,7 @@ mod tests {
     #[test]
     fn test_skill_install_schema() {
         use crate::tools::tool::ApprovalRequirement;
-        let tool = SkillInstallTool::new(test_registry(), test_catalog());
+        let tool = SkillInstallTool::new(test_registry(), Some(test_catalog()));
         assert_eq!(tool.name(), "skill_install");
         assert_eq!(
             tool.requires_approval(&serde_json::json!({})),
@@ -1414,6 +1417,32 @@ mod tests {
         ];
 
         assert!(resolve_catalog_slug_for_name("Mortgage Calculator", &entries).is_err());
+    }
+
+    #[test]
+    fn test_skill_install_schema_without_catalog() {
+        use crate::tools::tool::ApprovalRequirement;
+        let tool = SkillInstallTool::new(test_registry(), None);
+        assert_eq!(tool.name(), "skill_install");
+        assert_eq!(
+            tool.requires_approval(&serde_json::json!({})),
+            ApprovalRequirement::UnlessAutoApproved
+        );
+    }
+
+    #[tokio::test]
+    async fn test_skill_install_without_catalog_rejects_name_only() {
+        let tool = SkillInstallTool::new(test_registry(), None);
+        let ctx = crate::context::JobContext::default();
+        let result = tool
+            .execute(serde_json::json!({"name": "some-skill"}), &ctx)
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("ClawHub") || err.contains("disabled"),
+            "Expected ClawHub disabled error, got: {err}"
+        );
     }
 
     #[test]

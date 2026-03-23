@@ -1052,7 +1052,7 @@ impl TestRigBuilder {
                 let catalog = ironclaw_skills::catalog::shared_catalog();
                 components
                     .tools
-                    .register_skill_tools(Arc::clone(&registry), Arc::clone(&catalog));
+                    .register_skill_tools(Arc::clone(&registry), Some(Arc::clone(&catalog)));
                 components.skill_registry = Some(registry);
                 components.skill_catalog = Some(catalog);
             }

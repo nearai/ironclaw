@@ -3782,6 +3782,8 @@ async fn gateway_status_handler(
         .map(|v| v.to_lowercase() == "true")
         .unwrap_or(false);
 
+    let clawhub_enabled = state.skill_catalog.is_some();
+
     Json(GatewayStatusResponse {
         version: env!("CARGO_PKG_VERSION").to_string(),
         sse_connections,
@@ -3795,6 +3797,7 @@ async fn gateway_status_handler(
         llm_backend: state.active_config.llm_backend.clone(),
         llm_model: state.active_config.llm_model.clone(),
         enabled_channels: state.active_config.enabled_channels.clone(),
+        clawhub_enabled,
     })
 }
 
@@ -3823,6 +3826,7 @@ struct GatewayStatusResponse {
     llm_backend: String,
     llm_model: String,
     enabled_channels: Vec<String>,
+    clawhub_enabled: bool,
 }
 
 #[cfg(test)]
@@ -6564,5 +6568,33 @@ mod tests {
     fn test_is_local_origin_rejects_garbage() {
         assert!(!is_local_origin("not-a-url"));
         assert!(!is_local_origin(""));
+    }
+
+    #[test]
+    fn gateway_status_response_serializes_clawhub_enabled() {
+        let resp = GatewayStatusResponse {
+            version: "0.0.0".to_string(),
+            sse_connections: 0,
+            ws_connections: 0,
+            total_connections: 0,
+            uptime_secs: 0,
+            restart_enabled: false,
+            daily_cost: None,
+            actions_this_hour: None,
+            model_usage: None,
+            llm_backend: "test".to_string(),
+            llm_model: "test".to_string(),
+            enabled_channels: vec![],
+            clawhub_enabled: false,
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["clawhub_enabled"], false);
+
+        let resp_enabled = GatewayStatusResponse {
+            clawhub_enabled: true,
+            ..resp
+        };
+        let json = serde_json::to_value(&resp_enabled).unwrap();
+        assert_eq!(json["clawhub_enabled"], true);
     }
 }
