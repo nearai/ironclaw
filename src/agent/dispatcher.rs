@@ -161,6 +161,9 @@ impl Agent {
         let force_text_at = max_tool_iterations;
         let nudge_at = max_tool_iterations.saturating_sub(1);
 
+        let cognitive =
+            crate::agent::cognitive::CognitiveGuardian::new(self.config.cognitive.clone());
+
         let delegate = ChatDelegate {
             agent: self,
             session: session.clone(),
@@ -173,6 +176,7 @@ impl Agent {
             nudge_at,
             force_text_at,
             user_tz,
+            cognitive: tokio::sync::Mutex::new(cognitive),
         };
 
         let mut reason_ctx = ReasoningContext::new()
@@ -245,6 +249,8 @@ struct ChatDelegate<'a> {
     nudge_at: usize,
     force_text_at: usize,
     user_tz: chrono_tz::Tz,
+    /// Cognitive Guardian for proactive memory discipline.
+    cognitive: tokio::sync::Mutex<crate::agent::cognitive::CognitiveGuardian>,
 }
 
 #[async_trait]
@@ -273,6 +279,20 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                  using the information you have gathered so far. \
                  Do not call any more tools.",
             ));
+        }
+
+        // Cognitive Guardian: inject memory discipline nudges.
+        {
+            let mut guardian = self.cognitive.lock().await;
+            if iteration == 0 {
+                guardian.on_new_turn();
+            }
+            if let Some(nudge) = guardian.get_nudge() {
+                tracing::debug!("Cognitive Guardian nudge: {}", nudge);
+                reason_ctx
+                    .messages
+                    .push(ChatMessage::system(nudge.to_string()));
+            }
         }
 
         let force_text = iteration >= self.force_text_at;
@@ -458,6 +478,20 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                 for (tc, safe_args) in tool_calls.iter().zip(redacted_args) {
                     turn.record_tool_call(&tc.name, safe_args);
                 }
+            }
+        }
+
+        // Cognitive Guardian: track tool calls and write auto-breadcrumbs.
+        {
+            let mut guardian = self.cognitive.lock().await;
+            for tc in &tool_calls {
+                guardian.on_tool_call(&tc.name);
+            }
+            if guardian.should_auto_breadcrumb()
+                && let Some(ws) = self.agent.workspace()
+            {
+                let label = self.message.channel.clone();
+                guardian.write_auto_breadcrumb(ws.as_ref(), &label).await;
             }
         }
 
@@ -1244,6 +1278,7 @@ mod tests {
                 auto_approve_tools: false,
                 default_timezone: "UTC".to_string(),
                 max_tokens_per_job: 0,
+                cognitive: crate::agent::cognitive::CognitiveConfig::default(),
             },
             deps,
             Arc::new(ChannelManager::new()),
@@ -2111,6 +2146,7 @@ mod tests {
                 auto_approve_tools: true,
                 default_timezone: "UTC".to_string(),
                 max_tokens_per_job: 0,
+                cognitive: crate::agent::cognitive::CognitiveConfig::default(),
             },
             deps,
             Arc::new(ChannelManager::new()),
@@ -2231,6 +2267,7 @@ mod tests {
                     auto_approve_tools: true,
                     default_timezone: "UTC".to_string(),
                     max_tokens_per_job: 0,
+                    cognitive: crate::agent::cognitive::CognitiveConfig::default(),
                 },
                 deps,
                 Arc::new(ChannelManager::new()),
