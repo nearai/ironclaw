@@ -191,6 +191,7 @@ When modifying a module with a spec, read the spec first. Code follows spec; spe
 | `src/setup/` | `src/setup/README.md` |
 | `src/tools/` | `src/tools/README.md` |
 | `src/workspace/` | `src/workspace/README.md` |
+| `crates/ironclaw_engine/` | `crates/ironclaw_engine/CLAUDE.md` |
 | `tests/e2e/` | `tests/e2e/CLAUDE.md` |
 
 ## Job State Machine

@@ -1,0 +1,29 @@
+[package]
+name = "ironclaw_engine"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+description = "Unified thread-capability-CodeAct execution engine for IronClaw"
+authors = ["NEAR AI <support@near.ai>"]
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/nearai/ironclaw"
+repository = "https://github.com/nearai/ironclaw"
+publish = false
+
+[package.metadata.dist]
+dist = false
+
+[dependencies]
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+monty = { git = "https://github.com/pydantic/monty.git", branch = "main" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["sync", "time", "macros", "rt"] }
+tracing = "0.1"
+uuid = { version = "1", features = ["v4", "serde"] }
+
+[dev-dependencies]
+pretty_assertions = "1"
+tokio = { version = "1", features = ["full", "test-util"] }

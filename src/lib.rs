@@ -42,6 +42,7 @@ pub mod agent;
 pub mod app;
 pub mod boot_screen;
 pub mod bootstrap;
+pub mod bridge;
 pub mod channels;
 pub mod cli;
 pub mod config;
