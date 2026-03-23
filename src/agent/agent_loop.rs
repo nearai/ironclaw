@@ -1144,15 +1144,6 @@ impl Agent {
             std::any::type_name_of_val(&submission)
         );
 
-        if let Submission::UserInput { ref content } = submission
-            && let Some(credential) = detect_sensitive_chat_credential(content)
-        {
-            return Ok(Some(
-                self.intercept_sensitive_chat_credential(message, credential)
-                    .await,
-            ));
-        }
-
         // Hook: BeforeInbound — allow hooks to modify or reject user input
         if let Submission::UserInput { ref content } = submission {
             let event = crate::hooks::HookEvent::Inbound {
@@ -1299,6 +1290,15 @@ impl Agent {
                         // Fall through to normal handling
                     }
                 }
+            }
+        }
+
+        if let Submission::UserInput { ref content } = submission {
+            if let Some(credential) = detect_sensitive_chat_credential(content) {
+                return Ok(Some(
+                    self.intercept_sensitive_chat_credential(message, credential)
+                        .await,
+                ));
             }
         }
 
@@ -1595,6 +1595,7 @@ mod tests {
         resolve_routine_notification_user, should_fallback_routine_notification,
         truncate_for_preview,
     };
+    use crate::agent::session::Thread;
     use crate::channels::IncomingMessage;
     use crate::error::ChannelError;
     use crate::testing::{StubChannel, StubLlm};
@@ -1609,18 +1610,7 @@ mod tests {
     };
     use std::sync::Arc;
     use std::time::Duration;
-    use crate::testing::{StubChannel, StubLlm};
-    use crate::{
-        agent::cost_guard::{CostGuard, CostGuardConfig},
-        channels::{ChannelManager, StatusUpdate},
-        config::{AgentConfig, SafetyConfig, SkillsConfig},
-        context::ContextManager,
-        hooks::HookRegistry,
-        safety::SafetyLayer,
-        tools::ToolRegistry,
-    };
-    use std::sync::Arc;
-    use std::time::Duration;
+    use uuid::Uuid;
 
     #[test]
     fn test_truncate_short_input() {
@@ -1909,5 +1899,65 @@ mod tests {
                         "Telegram bot tokens can't be accepted in normal chat. Use the secure Telegram setup flow instead."
                     )
         ));
+    }
+
+    #[tokio::test]
+    async fn telegram_bot_token_messages_still_flow_through_pending_auth_mode() {
+        let llm = Arc::new(StubLlm::new("this should never be used"));
+        let llm_handle = Arc::clone(&llm);
+        let (agent, statuses) = make_gateway_test_agent(llm).await;
+        let thread_id = Uuid::new_v4();
+        let session = agent
+            .session_manager
+            .get_or_create_session("test-user")
+            .await;
+
+        {
+            let mut sess = session.lock().await;
+            let mut thread = Thread::with_id(thread_id, sess.id);
+            thread.enter_auth_mode("telegram".to_string());
+            sess.threads.insert(thread_id, thread);
+            sess.active_thread = Some(thread_id);
+        }
+
+        agent
+            .session_manager
+            .register_thread("test-user", "gateway", thread_id, Arc::clone(&session))
+            .await;
+
+        let message = IncomingMessage::new(
+            "gateway",
+            "test-user",
+            "123456789:AABBccDDeeFFgg_Test-Token",
+        )
+        .with_thread(thread_id.to_string());
+
+        let response = agent
+            .handle_message(&message)
+            .await
+            .expect("handle_message");
+
+        assert_eq!(
+            response.as_deref(),
+            Some("Extension manager not available."),
+            "pending auth should consume the token instead of treating it as normal chat"
+        );
+        assert_eq!(llm_handle.calls(), 0, "LLM should not see auth-mode tokens");
+
+        let statuses = statuses.lock().expect("poisoned");
+        assert!(
+            statuses.is_empty(),
+            "no redirect status should be emitted when auth mode consumes the token"
+        );
+
+        let sess = session.lock().await;
+        let pending_auth = sess
+            .threads
+            .get(&thread_id)
+            .and_then(|thread| thread.pending_auth.as_ref());
+        assert!(
+            pending_auth.is_none(),
+            "auth mode should be cleared after the token is processed"
+        );
     }
 }
