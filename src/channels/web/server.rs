@@ -2014,7 +2014,7 @@ async fn chat_new_thread_handler(
     let session = session_manager.get_or_create_session(&user.user_id).await;
     let (thread_id, info) = {
         let mut sess = session.lock().await;
-        let thread = sess.create_thread();
+        let thread = sess.create_thread(Some("gateway"));
         let id = thread.id;
         let info = ThreadInfo {
             id: thread.id,

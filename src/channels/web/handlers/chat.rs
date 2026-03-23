@@ -574,7 +574,7 @@ pub async fn chat_new_thread_handler(
         .await;
     let (thread_id, info) = {
         let mut sess = session.lock().await;
-        let thread = sess.create_thread();
+        let thread = sess.create_thread(Some("web"));
         let id = thread.id;
         let info = ThreadInfo {
             id: thread.id,
