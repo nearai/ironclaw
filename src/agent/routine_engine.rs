@@ -1440,6 +1440,7 @@ fn handle_text_response(
 /// This is a simplified version of the full dispatcher loop:
 /// - Max 3-5 iterations (configurable)
 /// - Sequential tool execution (not parallel)
+/// - Uses the owner's live autonomous tool scope when lightweight tools are enabled
 /// - Auto-approval of non-Always tools
 /// - No hooks or approval dialogs
 async fn execute_lightweight_with_tools(
