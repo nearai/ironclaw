@@ -31,6 +31,13 @@ use crate::skills::SkillRegistry;
 use crate::tools::ToolRegistry;
 use crate::workspace::Workspace;
 
+/// Static greeting persisted to DB and broadcast on first launch.
+///
+/// Sent before the LLM is involved so the user sees something immediately.
+/// The conversational onboarding (profile building, channel setup) happens
+/// organically in the subsequent turns driven by BOOTSTRAP.md.
+const BOOTSTRAP_GREETING: &str = include_str!("../workspace/seeds/GREETING.md");
+
 /// Collapse a tool output string into a single-line preview for display.
 pub(crate) fn truncate_for_preview(output: &str, max_chars: usize) -> String {
     let collapsed: String = output
@@ -111,6 +118,17 @@ async fn resolve_routine_notification_target(
         metadata.get("owner_id").and_then(|value| value.as_str()),
     )
     .await
+}
+
+pub(crate) fn chat_tool_execution_metadata(message: &IncomingMessage) -> serde_json::Value {
+    serde_json::json!({
+        "notify_channel": message.channel,
+        "notify_user": message
+            .routing_target()
+            .unwrap_or_else(|| message.user_id.clone()),
+        "notify_thread_id": message.thread_id,
+        "notify_metadata": message.metadata,
+    })
 }
 
 fn should_fallback_routine_notification(error: &ChannelError) -> bool {
@@ -340,6 +358,32 @@ impl Agent {
 
     /// Run the agent main loop.
     pub async fn run(self) -> Result<(), Error> {
+        // Proactive bootstrap: persist the static greeting to DB *before*
+        // starting channels so the first web client sees it via history.
+        let bootstrap_thread_id = if self
+            .workspace()
+            .is_some_and(|ws| ws.take_bootstrap_pending())
+        {
+            tracing::debug!(
+                "Fresh workspace detected — persisting static bootstrap greeting to DB"
+            );
+            if let Some(store) = self.store() {
+                let thread_id = store
+                    .get_or_create_assistant_conversation("default", "gateway")
+                    .await
+                    .ok();
+                if let Some(id) = thread_id {
+                    self.persist_assistant_response(id, "gateway", "default", BOOTSTRAP_GREETING)
+                        .await;
+                }
+                thread_id
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         // Start channels
         let mut message_stream = self.channels.start_all().await?;
 
@@ -671,6 +715,30 @@ impl Agent {
             None
         };
 
+        // Bootstrap phase 2: register the thread in session manager and
+        // broadcast the greeting via SSE for any clients already connected.
+        // The greeting was already persisted to DB before start_all(), so
+        // clients that connect after this point will see it via history.
+        if let Some(id) = bootstrap_thread_id {
+            // Use get_or_create_session (not resolve_thread) to avoid creating
+            // an orphan thread. Then insert the DB-sourced thread directly.
+            let session = self.session_manager.get_or_create_session("default").await;
+            {
+                use crate::agent::session::Thread;
+                let mut sess = session.lock().await;
+                let thread = Thread::with_id(id, sess.id);
+                sess.active_thread = Some(id);
+                sess.threads.entry(id).or_insert(thread);
+            }
+            self.session_manager
+                .register_thread("default", "gateway", id, session)
+                .await;
+
+            let mut out = OutgoingResponse::text(BOOTSTRAP_GREETING.to_string());
+            out.thread_id = Some(id.to_string());
+            let _ = self.channels.broadcast("gateway", "default", out).await;
+        }
+
         // Main message loop
         tracing::debug!("Agent {} ready and listening", self.config.name);
 
@@ -864,9 +932,6 @@ impl Agent {
     }
 
     async fn handle_message(&self, message: &IncomingMessage) -> Result<Option<String>, Error> {
-        // Log at info level only for tracking without exposing PII (user_id can be a phone number)
-        tracing::info!(message_id = %message.id, "Processing message");
-
         // Log sensitive details at debug level for troubleshooting
         tracing::debug!(
             message_id = %message.id,
@@ -946,10 +1011,6 @@ impl Agent {
         }
 
         // Resolve session and thread
-        tracing::debug!(
-            message_id = %message.id,
-            "Resolving session and thread"
-        );
         let (session, thread_id) = self
             .session_manager
             .resolve_thread(
@@ -1127,9 +1188,10 @@ impl Agent {
 #[cfg(test)]
 mod tests {
     use super::{
-        resolve_routine_notification_user, should_fallback_routine_notification,
-        truncate_for_preview,
+        chat_tool_execution_metadata, resolve_routine_notification_user,
+        should_fallback_routine_notification, truncate_for_preview,
     };
+    use crate::channels::IncomingMessage;
     use crate::error::ChannelError;
 
     #[test]
@@ -1223,6 +1285,50 @@ mod tests {
         });
 
         assert_eq!(resolve_routine_notification_user(&metadata), None); // safety: test-only assertion
+    }
+
+    #[test]
+    fn chat_tool_execution_metadata_prefers_message_routing_target() {
+        let message = IncomingMessage::new("telegram", "owner-scope", "hello")
+            .with_sender_id("telegram-user")
+            .with_thread("thread-7")
+            .with_metadata(serde_json::json!({
+                "chat_id": 424242,
+                "chat_type": "private",
+            }));
+
+        let metadata = chat_tool_execution_metadata(&message);
+        assert_eq!(
+            metadata.get("notify_channel").and_then(|v| v.as_str()),
+            Some("telegram")
+        ); // safety: test-only assertion
+        assert_eq!(
+            metadata.get("notify_user").and_then(|v| v.as_str()),
+            Some("424242")
+        ); // safety: test-only assertion
+        assert_eq!(
+            metadata.get("notify_thread_id").and_then(|v| v.as_str()),
+            Some("thread-7")
+        ); // safety: test-only assertion
+    }
+
+    #[test]
+    fn chat_tool_execution_metadata_falls_back_to_user_scope_without_route() {
+        let message = IncomingMessage::new("gateway", "owner-scope", "hello").with_sender_id("");
+
+        let metadata = chat_tool_execution_metadata(&message);
+        assert_eq!(
+            metadata.get("notify_channel").and_then(|v| v.as_str()),
+            Some("gateway")
+        ); // safety: test-only assertion
+        assert_eq!(
+            metadata.get("notify_user").and_then(|v| v.as_str()),
+            Some("owner-scope")
+        ); // safety: test-only assertion
+        assert_eq!(
+            metadata.get("notify_thread_id"),
+            Some(&serde_json::Value::Null)
+        ); // safety: test-only assertion
     }
 
     #[test]

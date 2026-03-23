@@ -688,16 +688,36 @@ pub fn content_hash(content: &str) -> u64 {
     hasher.finish()
 }
 
+/// Normalize a cron expression to the 7-field format expected by the `cron` crate.
+///
+/// The `cron` crate requires: `sec min hour day-of-month month day-of-week year`.
+/// Standard cron uses 5 fields: `min hour day-of-month month day-of-week`.
+/// This function auto-expands:
+/// - 5-field → prepend `0` (seconds) and append `*` (year)
+/// - 6-field → append `*` (year)
+/// - 7-field → pass through unchanged
+pub fn normalize_cron_expression(schedule: &str) -> String {
+    let trimmed = schedule.trim();
+    let fields: Vec<&str> = trimmed.split_whitespace().collect();
+    match fields.len() {
+        5 => format!("0 {} *", trimmed),
+        6 => format!("{} *", trimmed),
+        _ => trimmed.to_string(),
+    }
+}
+
 /// Parse a cron expression and compute the next fire time from now.
 ///
+/// Accepts standard 5-field, 6-field, or 7-field cron expressions (auto-normalized).
 /// When `timezone` is provided and valid, the schedule is evaluated in that
 /// timezone and the result is converted back to UTC. Otherwise UTC is used.
 pub fn next_cron_fire(
     schedule: &str,
     timezone: Option<&str>,
 ) -> Result<Option<DateTime<Utc>>, RoutineError> {
+    let normalized = normalize_cron_expression(schedule);
     let cron_schedule =
-        cron::Schedule::from_str(schedule).map_err(|e| RoutineError::InvalidCron {
+        cron::Schedule::from_str(&normalized).map_err(|e| RoutineError::InvalidCron {
             reason: e.to_string(),
         })?;
     if let Some(tz) = timezone.and_then(crate::timezone::parse_timezone) {
@@ -878,6 +898,7 @@ mod tests {
     use crate::agent::routine::{
         FullJobPermissionMode, MAX_TOOL_ROUNDS_LIMIT, RoutineAction, RoutineGuardrails, RunStatus,
         Trigger, content_hash, describe_cron, effective_full_job_tool_permissions, next_cron_fire,
+        normalize_cron_expression,
     };
 
     #[test]
@@ -1155,6 +1176,55 @@ mod tests {
             "system_event"
         );
         assert_eq!(Trigger::Manual.type_tag(), "manual");
+    }
+
+    #[test]
+    fn test_normalize_cron_5_field() {
+        // Standard cron: min hour dom month dow
+        assert_eq!(normalize_cron_expression("0 9 * * 1"), "0 0 9 * * 1 *");
+        assert_eq!(
+            normalize_cron_expression("0 9 * * MON-FRI"),
+            "0 0 9 * * MON-FRI *"
+        );
+    }
+
+    #[test]
+    fn test_normalize_cron_6_field() {
+        // 6-field: sec min hour dom month dow
+        assert_eq!(
+            normalize_cron_expression("0 0 9 * * MON-FRI"),
+            "0 0 9 * * MON-FRI *"
+        );
+    }
+
+    #[test]
+    fn test_normalize_cron_7_field_passthrough() {
+        // Already 7-field: no change
+        assert_eq!(
+            normalize_cron_expression("0 0 9 * * MON-FRI *"),
+            "0 0 9 * * MON-FRI *"
+        );
+    }
+
+    #[test]
+    fn test_next_cron_fire_5_field_accepted() {
+        // Standard 5-field cron should now work through normalization
+        let result = next_cron_fire("0 9 * * 1", None);
+        assert!(
+            result.is_ok(),
+            "5-field cron should be accepted: {result:?}"
+        );
+        assert!(result.unwrap().is_some());
+    }
+
+    #[test]
+    fn test_next_cron_fire_5_field_with_timezone() {
+        let result = next_cron_fire("0 9 * * MON-FRI", Some("America/New_York"));
+        assert!(
+            result.is_ok(),
+            "5-field cron with timezone should be accepted: {result:?}"
+        );
+        assert!(result.unwrap().is_some());
     }
 
     #[test]

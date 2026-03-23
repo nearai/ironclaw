@@ -694,7 +694,11 @@ impl AppBuilder {
         // Post-init validation: if a non-nearai backend was selected but
         // credentials were never resolved (deferred resolution found no keys),
         // fail early with a clear error instead of a confusing runtime failure.
-        if self.config.llm.backend != "nearai" && self.config.llm.provider.is_none() {
+        if self.config.llm.backend != "nearai"
+            && self.config.llm.backend != "bedrock"
+            && self.config.llm.backend != "openai_codex"
+            && self.config.llm.provider.is_none()
+        {
             let backend = &self.config.llm.backend;
             anyhow::bail!(
                 "LLM_BACKEND={backend} is configured but no credentials were found. \
@@ -722,6 +726,17 @@ impl AppBuilder {
             catalog_entries,
             dev_loaded_tool_names,
         ) = self.init_extensions(&tools, &hooks).await?;
+
+        // Load bootstrap-completed flag from settings so that existing users
+        // who already completed onboarding don't re-get bootstrap injection.
+        if let Some(ref ws) = workspace {
+            let toml_path = crate::settings::Settings::default_toml_path();
+            if let Ok(Some(settings)) = crate::settings::Settings::load_toml(&toml_path)
+                && settings.profile_onboarding_completed
+            {
+                ws.mark_bootstrap_completed();
+            }
+        }
 
         // Seed workspace and backfill embeddings
         if let Some(ref ws) = workspace {
