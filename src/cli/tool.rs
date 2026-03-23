@@ -588,14 +588,15 @@ async fn print_capabilities_detail(
         }
     }
 
-    // Only show secrets that aren't already covered by the auth section (e.g. wildcards).
+    // Only filter secrets already in auth when we will actually render the Auth section.
+    let will_render_auth = secrets_store.is_some() && !auth_secrets.is_empty();
     if let Some(ref secrets) = caps.secrets
         && !secrets.allowed_names.is_empty()
     {
         let extra: Vec<_> = secrets
             .allowed_names
             .iter()
-            .filter(|name| !seen.contains_key(name.as_str()))
+            .filter(|name| !will_render_auth || !seen.contains_key(name.as_str()))
             .collect();
         if !extra.is_empty() {
             println!("  Secrets (existence check only):");
@@ -1247,6 +1248,8 @@ async fn setup_tool(name: String, dir: Option<PathBuf>, user_id: String) -> anyh
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::secrets::{CreateSecretParams, SecretsStore};
+    use crate::testing::credentials::test_secrets_store;
 
     #[test]
     fn test_format_size() {
@@ -1262,5 +1265,127 @@ mod tests {
         let dir = default_tools_dir();
         assert!(dir.to_string_lossy().contains(".ironclaw"));
         assert!(dir.to_string_lossy().contains("tools"));
+    }
+
+    /// Verify that auth secrets are deduplicated across auth, setup, and http.credentials,
+    /// and that credential status is checked against the secrets store.
+    #[tokio::test]
+    async fn test_auth_secret_dedup_and_status() {
+        let caps = CapabilitiesFile::from_json(
+            r#"{
+                "auth": {
+                    "secret_name": "gh_token",
+                    "display_name": "GitHub"
+                },
+                "setup": {
+                    "required_secrets": [
+                        { "name": "gh_token", "prompt": "GitHub PAT" },
+                        { "name": "extra_key", "prompt": "Extra API Key" }
+                    ]
+                },
+                "http": {
+                    "allowlist": [{ "host": "api.github.com" }],
+                    "credentials": {
+                        "github": {
+                            "secret_name": "gh_token",
+                            "location": "AuthorizationBearer",
+                            "host_patterns": ["api.github.com"]
+                        }
+                    }
+                },
+                "secrets": {
+                    "allowed_names": ["gh_token", "gh_*"]
+                }
+            }"#,
+        )
+        .unwrap();
+
+        // Build auth_secrets the same way print_capabilities_detail does.
+        let mut auth_secrets: Vec<AuthSecretInfo> = Vec::new();
+        let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+
+        if let Some(ref auth) = caps.auth {
+            let index = auth_secrets.len();
+            seen.insert(auth.secret_name.clone(), index);
+            auth_secrets.push(AuthSecretInfo {
+                secret_name: auth.secret_name.clone(),
+                description: auth.display_name.clone(),
+                location: None,
+            });
+        }
+        if let Some(ref setup) = caps.setup {
+            for secret in &setup.required_secrets {
+                if !seen.contains_key(&secret.name) {
+                    let index = auth_secrets.len();
+                    seen.insert(secret.name.clone(), index);
+                    auth_secrets.push(AuthSecretInfo {
+                        secret_name: secret.name.clone(),
+                        description: Some(secret.prompt.clone()),
+                        location: None,
+                    });
+                }
+            }
+        }
+        if let Some(ref http) = caps.http {
+            for cred in http.credentials.values() {
+                let loc = format!("{:?}", cred.location);
+                if let Some(&index) = seen.get(&cred.secret_name) {
+                    auth_secrets[index].location = Some(loc);
+                } else {
+                    let index = auth_secrets.len();
+                    seen.insert(cred.secret_name.clone(), index);
+                    auth_secrets.push(AuthSecretInfo {
+                        secret_name: cred.secret_name.clone(),
+                        description: None,
+                        location: Some(loc),
+                    });
+                }
+            }
+        }
+
+        // gh_token should appear once (from auth), with location merged from credentials.
+        // extra_key should appear once (from setup).
+        assert_eq!(auth_secrets.len(), 2);
+        let gh = auth_secrets
+            .iter()
+            .find(|s| s.secret_name == "gh_token")
+            .unwrap();
+        assert_eq!(gh.description.as_deref(), Some("GitHub"));
+        assert!(
+            gh.location.is_some(),
+            "location should be merged from http.credentials"
+        );
+
+        let extra = auth_secrets
+            .iter()
+            .find(|s| s.secret_name == "extra_key")
+            .unwrap();
+        assert_eq!(extra.description.as_deref(), Some("Extra API Key"));
+        assert!(extra.location.is_none());
+
+        // Secrets section should filter gh_token (in seen) but keep gh_* (wildcard).
+        let secrets = caps.secrets.as_ref().unwrap();
+        let extra_secrets: Vec<_> = secrets
+            .allowed_names
+            .iter()
+            .filter(|name| !seen.contains_key(name.as_str()))
+            .collect();
+        assert_eq!(extra_secrets, vec!["gh_*"]);
+
+        // Verify store check: missing secret -> exists returns false.
+        let store = test_secrets_store();
+        assert!(!store.exists("default", "gh_token").await.unwrap());
+
+        // Store gh_token and verify it's found.
+        store
+            .create(
+                "default",
+                CreateSecretParams::new("gh_token", "ghp_test123"),
+            )
+            .await
+            .unwrap();
+        assert!(store.exists("default", "gh_token").await.unwrap());
+        // extra_key still missing.
+        assert!(!store.exists("default", "extra_key").await.unwrap());
     }
 }
