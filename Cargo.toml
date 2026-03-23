@@ -171,6 +171,8 @@ base64 = "0.22.1"
 mime_guess = "2.0.5"
 clap_complete = "4.5.0"
 lru = "0.16.3"
+bs58 = "0.5"
+zeroize = "1"
 
 # HTML to Markdown conversion (feature gated)
 html-to-markdown-rs = { version = "2.3", optional = true }
