@@ -1340,6 +1340,7 @@ fn recover_tool_calls_from_content(
                     id: format!("recovered_{}", calls.len()),
                     name: name.to_string(),
                     arguments,
+                    extra: Default::default(),
                 });
                 continue;
             }
@@ -1351,6 +1352,7 @@ fn recover_tool_calls_from_content(
                     id: format!("recovered_{}", calls.len()),
                     name: name.to_string(),
                     arguments: serde_json::Value::Object(Default::default()),
+                    extra: Default::default(),
                 });
             }
         }
@@ -1385,6 +1387,7 @@ fn recover_tool_calls_from_content(
                         id: format!("recovered_{}", calls.len()),
                         name: name.to_string(),
                         arguments,
+                        extra: Default::default(),
                     });
                     remaining = &args_start[bracket_end + 1..];
                     continue;
@@ -1396,6 +1399,7 @@ fn recover_tool_calls_from_content(
                 id: format!("recovered_{}", calls.len()),
                 name: name.to_string(),
                 arguments: serde_json::Value::Object(Default::default()),
+                extra: Default::default(),
             });
             remaining = after_name;
         }

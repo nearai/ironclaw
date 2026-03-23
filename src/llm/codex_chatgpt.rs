@@ -732,6 +732,7 @@ impl LlmProvider for CodexChatGptProvider {
                     id: tc.call_id,
                     name: tc.name,
                     arguments: args,
+                    extra: Default::default(),
                 }
             })
             .collect();
@@ -825,6 +826,7 @@ mod tests {
             id: "call_1".to_string(),
             name: "search".to_string(),
             arguments: json!({"query": "rust"}),
+            extra: Default::default(),
         };
         let msg = ChatMessage::assistant_with_tool_calls(Some("thinking...".into()), vec![tc]);
         let items = CodexChatGptProvider::message_to_input_items(&msg);

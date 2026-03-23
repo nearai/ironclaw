@@ -140,6 +140,14 @@ pub fn create_llm_provider_with_config(
 /// Dispatches on `RegistryProviderConfig::protocol` to build the appropriate
 /// rig-core client. This single function replaces what used to be 5 separate
 /// `create_*_provider` functions.
+/// Providers that need direct Chat Completions handling instead of rig-core.
+///
+/// rig-core's OpenAI adapter strips provider-specific fields from tool call
+/// objects (e.g. Gemini's `thought_signature`). These providers are routed
+/// through `NearAiChatProvider` which preserves such fields through the
+/// response→request round-trip.
+const DIRECT_CHAT_COMPLETIONS_PROVIDERS: &[&str] = &["gemini", "google_gemini", "google"];
+
 fn create_registry_provider(
     config: &RegistryProviderConfig,
     request_timeout_secs: u64,
@@ -149,11 +157,71 @@ fn create_registry_provider(
         return create_codex_chatgpt_from_registry(config, request_timeout_secs);
     }
 
+    // Providers that require direct Chat Completions handling (bypass rig-core)
+    // to preserve provider-specific fields like Gemini's thought_signature.
+    if DIRECT_CHAT_COMPLETIONS_PROVIDERS
+        .iter()
+        .any(|&id| config.provider_id.eq_ignore_ascii_case(id))
+    {
+        return create_direct_chat_completions_provider(config, request_timeout_secs);
+    }
+
     match config.protocol {
         ProviderProtocol::OpenAiCompletions => create_openai_compat_from_registry(config),
         ProviderProtocol::Anthropic => create_anthropic_from_registry(config),
         ProviderProtocol::Ollama => create_ollama_from_registry(config),
     }
+}
+
+/// Create a provider that talks directly to an OpenAI-compatible Chat
+/// Completions endpoint without going through rig-core.
+///
+/// This uses `NearAiChatProvider` with API-key auth and tool-message
+/// flattening disabled, so provider-specific fields on tool calls
+/// (e.g. Gemini's `thought_signature`) survive the round-trip.
+fn create_direct_chat_completions_provider(
+    config: &RegistryProviderConfig,
+    request_timeout_secs: u64,
+) -> Result<Arc<dyn LlmProvider>, LlmError> {
+    let api_key = config
+        .api_key
+        .as_ref()
+        .map(|k| k.expose_secret().to_string())
+        .ok_or_else(|| LlmError::AuthFailed {
+            provider: config.provider_id.clone(),
+        })?;
+
+    tracing::debug!(
+        provider = %config.provider_id,
+        model = %config.model,
+        base_url = %config.base_url,
+        "Using direct Chat Completions provider (bypassing rig-core)"
+    );
+
+    let session = Arc::new(SessionManager::new(SessionConfig::default()));
+    let nearai_config = NearAiConfig {
+        model: config.model.clone(),
+        cheap_model: None,
+        base_url: config.base_url.clone(),
+        api_key: Some(secrecy::SecretString::from(api_key)),
+        fallback_model: None,
+        max_retries: 0,
+        circuit_breaker_threshold: None,
+        circuit_breaker_recovery_secs: 30,
+        response_cache_enabled: false,
+        response_cache_ttl_secs: 3600,
+        response_cache_max_entries: 1000,
+        failover_cooldown_secs: 300,
+        failover_cooldown_threshold: 3,
+        smart_routing_cascade: true,
+    };
+
+    Ok(Arc::new(NearAiChatProvider::new_with_options(
+        nearai_config,
+        session,
+        false, // Don't flatten tool messages — Google's endpoint supports them
+        request_timeout_secs,
+    )?))
 }
 
 fn create_codex_chatgpt_from_registry(
