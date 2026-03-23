@@ -45,11 +45,11 @@ impl Agent {
         &self,
         message: &IncomingMessage,
         external_thread_id: &str,
-    ) -> Option<String> {
+    ) -> Result<Option<Uuid>, String> {
         // Only hydrate UUID-shaped thread IDs (web gateway uses UUIDs)
         let thread_uuid = match Uuid::parse_str(external_thread_id) {
             Ok(id) => id,
-            Err(_) => return None,
+            Err(_) => return Ok(None),
         };
 
         // Check if already in memory
@@ -60,7 +60,7 @@ impl Agent {
         {
             let sess = session.lock().await;
             if sess.threads.contains_key(&thread_uuid) {
-                return None;
+                return Ok(Some(thread_uuid));
             }
         }
 
@@ -83,9 +83,9 @@ impl Agent {
                         e
                     );
                     if requires_preexisting_uuid_thread(&message.channel) {
-                        return Some(FORGED_THREAD_ID_ERROR.to_string());
+                        return Err(FORGED_THREAD_ID_ERROR.to_string());
                     }
-                    return None;
+                    return Ok(Some(thread_uuid));
                 }
             };
             if !owned {
@@ -99,9 +99,9 @@ impl Agent {
                             e
                         );
                         if requires_preexisting_uuid_thread(&message.channel) {
-                            return Some(FORGED_THREAD_ID_ERROR.to_string());
+                            return Err(FORGED_THREAD_ID_ERROR.to_string());
                         }
-                        return None;
+                        return Ok(Some(thread_uuid));
                     }
                 };
 
@@ -113,7 +113,7 @@ impl Agent {
                         exists,
                         "Rejected message for unavailable thread id"
                     );
-                    return Some(FORGED_THREAD_ID_ERROR.to_string());
+                    return Err(FORGED_THREAD_ID_ERROR.to_string());
                 }
 
                 tracing::warn!(
@@ -122,7 +122,7 @@ impl Agent {
                     exists,
                     "Skipped hydration for thread id not owned by sender"
                 );
-                return None;
+                return Ok(Some(thread_uuid));
             }
 
             let db_messages = store
@@ -169,7 +169,7 @@ impl Agent {
             msg_count
         );
 
-        None
+        Ok(Some(thread_uuid))
     }
 
     pub(super) async fn process_user_input(

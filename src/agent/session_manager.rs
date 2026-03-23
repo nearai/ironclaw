@@ -108,81 +108,81 @@ impl SessionManager {
         channel: &str,
         external_thread_id: Option<&str>,
     ) -> (Arc<Mutex<Session>>, Uuid) {
-        let session = self.get_or_create_session(user_id).await;
+        let parsed_uuid = external_thread_id.and_then(|tid| Uuid::parse_str(tid).ok());
+        self.resolve_thread_inner(user_id, channel, external_thread_id, parsed_uuid)
+            .await
+    }
 
+    /// Resolve an external thread ID to an internal thread, accepting a
+    /// pre-parsed UUID to avoid redundant parsing in hot paths.
+    pub async fn resolve_thread_with_parsed_uuid(
+        &self,
+        user_id: &str,
+        channel: &str,
+        external_thread_id: Option<&str>,
+        parsed_uuid: Option<Uuid>,
+    ) -> (Arc<Mutex<Session>>, Uuid) {
+        self.resolve_thread_inner(user_id, channel, external_thread_id, parsed_uuid)
+            .await
+    }
+
+    /// Inner implementation for thread resolution.
+    async fn resolve_thread_inner(
+        &self,
+        user_id: &str,
+        channel: &str,
+        external_thread_id: Option<&str>,
+        parsed_uuid: Option<Uuid>,
+    ) -> (Arc<Mutex<Session>>, Uuid) {
+        let session = self.get_or_create_session(user_id).await;
         let key = ThreadKey {
             user_id: user_id.to_string(),
             channel: channel.to_string(),
             external_thread_id: external_thread_id.map(String::from),
         };
-
-        // Check if we have a mapping
         {
             let thread_map = self.thread_map.read().await;
             if let Some(&thread_id) = thread_map.get(&key) {
-                // Verify thread still exists in session
                 let sess = session.lock().await;
                 if sess.threads.contains_key(&thread_id) {
                     return (Arc::clone(&session), thread_id);
                 }
             }
         }
-
-        // Check if external_thread_id is itself a known thread UUID that
-        // exists in the session but was never registered in the thread_map
-        // (e.g. created by chat_new_thread_handler or hydrated from DB).
-        // We only adopt it if no thread_map entry maps to this UUID —
-        // otherwise it belongs to a different channel scope.
-        if let Some(ext_tid) = external_thread_id
-            && let Ok(ext_uuid) = Uuid::parse_str(ext_tid)
-        {
+        if let Some(ext_uuid) = parsed_uuid {
             let thread_map = self.thread_map.read().await;
             let mapped_elsewhere = thread_map.values().any(|&v| v == ext_uuid);
             drop(thread_map);
-
             if !mapped_elsewhere {
                 let sess = session.lock().await;
                 if sess.threads.contains_key(&ext_uuid) {
                     drop(sess);
-
                     let mut thread_map = self.thread_map.write().await;
-                    // Re-check after acquiring write lock to prevent race condition
-                    // where another task mapped this UUID between our read and write.
                     if !thread_map.values().any(|&v| v == ext_uuid) {
                         thread_map.insert(key, ext_uuid);
                         drop(thread_map);
-                        // Ensure undo manager exists
                         let mut undo_managers = self.undo_managers.write().await;
                         undo_managers
                             .entry(ext_uuid)
                             .or_insert_with(|| Arc::new(Mutex::new(UndoManager::new())));
                         return (session, ext_uuid);
                     }
-                    // If it was mapped elsewhere while we were unlocked, fall through
-                    // to create a new thread, preserving channel isolation.
                 }
             }
         }
-
-        // Create new thread (always create a new one for a new key)
         let thread_id = {
             let mut sess = session.lock().await;
             let thread = sess.create_thread();
             thread.id
         };
-
-        // Store mapping
         {
             let mut thread_map = self.thread_map.write().await;
             thread_map.insert(key, thread_id);
         }
-
-        // Create undo manager for thread
         {
             let mut undo_managers = self.undo_managers.write().await;
             undo_managers.insert(thread_id, Arc::new(Mutex::new(UndoManager::new())));
         }
-
         (session, thread_id)
     }
 
@@ -946,5 +946,34 @@ mod tests {
             1,
             "should have exactly 1 thread, not a duplicate"
         );
+    }
+
+    #[tokio::test]
+    async fn test_resolve_thread_with_parsed_uuid_matches_resolve_thread() {
+        use crate::agent::session::{Session, Thread};
+        let manager = SessionManager::new();
+        let tid = Uuid::new_v4();
+        let session = Arc::new(Mutex::new(Session::new("user-parsed")));
+        {
+            let mut sess = session.lock().await;
+            let thread = Thread::with_id(tid, sess.id);
+            sess.threads.insert(tid, thread);
+        }
+        {
+            let mut sessions = manager.sessions.write().await;
+            sessions.insert("user-parsed".to_string(), Arc::clone(&session));
+        }
+        let tid_str = tid.to_string();
+        let (_, resolved_normal) = manager
+            .resolve_thread("user-parsed", "gateway", Some(&tid_str))
+            .await;
+        let (_, resolved_parsed) = manager
+            .resolve_thread_with_parsed_uuid("user-parsed", "gateway", Some(&tid_str), Some(tid))
+            .await;
+        assert_eq!(
+            resolved_normal, resolved_parsed,
+            "resolve_thread and resolve_thread_with_parsed_uuid must return the same thread"
+        );
+        assert_eq!(resolved_normal, tid);
     }
 }
