@@ -356,7 +356,7 @@ impl AppBuilder {
             if is_multi_tenant {
                 let resolver = Arc::new(
                     crate::tools::builtin::memory::PerUserWorkspaceResolver::new(
-                        self.db.as_ref().unwrap().clone(),
+                        Arc::clone(db),
                         embeddings.clone(),
                         emb_cache_config,
                         self.config.search.clone(),
@@ -364,7 +364,9 @@ impl AppBuilder {
                     ),
                 );
                 tools.register_memory_tools_with_resolver(resolver);
-                tracing::info!("Memory tools configured with per-user workspace resolver (multi-tenant mode)");
+                tracing::info!(
+                    "Memory tools configured with per-user workspace resolver (multi-tenant mode)"
+                );
             } else {
                 tools.register_memory_tools(Arc::clone(&ws));
             }

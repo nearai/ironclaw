@@ -12,6 +12,7 @@ use axum::{
     middleware::Next,
     response::{IntoResponse, Response},
 };
+use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
 /// Identity resolved from a bearer token.
@@ -22,63 +23,88 @@ pub struct UserIdentity {
     pub workspace_read_scopes: Vec<String>,
 }
 
-/// Multi-user auth state: maps tokens to user identities.
+/// Hash a token with SHA-256 for constant-size, timing-safe storage.
+fn hash_token(token: &str) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(token.as_bytes());
+    hasher.finalize().into()
+}
+
+/// Multi-user auth state: maps token hashes to user identities.
+///
+/// Tokens are SHA-256 hashed on construction so they are never stored in
+/// plaintext. Authentication compares fixed-size (32-byte) digests using
+/// constant-time comparison, eliminating both length-oracle timing leaks
+/// and accidental token exposure in memory dumps.
 ///
 /// In single-user mode (the default), contains exactly one entry.
 #[derive(Clone)]
 pub struct MultiAuthState {
-    tokens: HashMap<String, UserIdentity>,
+    /// Maps SHA-256(token) → identity. Tokens are never stored in cleartext.
+    hashed_tokens: Vec<([u8; 32], UserIdentity)>,
+    /// Original first token kept only for single-user startup printing.
+    /// Not used for authentication.
+    display_token: Option<String>,
 }
 
 impl MultiAuthState {
     /// Create a single-user auth state (backwards compatible).
     pub fn single(token: String, user_id: String) -> Self {
-        let mut tokens = HashMap::new();
-        tokens.insert(
-            token,
-            UserIdentity {
-                user_id,
-                workspace_read_scopes: Vec::new(),
-            },
-        );
-        Self { tokens }
+        let hash = hash_token(&token);
+        Self {
+            hashed_tokens: vec![(
+                hash,
+                UserIdentity {
+                    user_id,
+                    workspace_read_scopes: Vec::new(),
+                },
+            )],
+            display_token: Some(token),
+        }
     }
 
     /// Create a multi-user auth state from a map of tokens to identities.
     pub fn multi(tokens: HashMap<String, UserIdentity>) -> Self {
-        Self { tokens }
+        let hashed_tokens: Vec<([u8; 32], UserIdentity)> = tokens
+            .into_iter()
+            .map(|(tok, identity)| (hash_token(&tok), identity))
+            .collect();
+        Self {
+            hashed_tokens,
+            display_token: None,
+        }
     }
 
     /// Authenticate a token, returning the associated identity if valid.
     ///
-    /// Uses constant-time comparison (`subtle::ConstantTimeEq`) to prevent
-    /// timing side-channels that could leak token information. Iterates all
+    /// Uses SHA-256 hashing + constant-time comparison (`subtle::ConstantTimeEq`)
+    /// to prevent timing side-channels. Both the candidate and stored tokens are
+    /// hashed to 32-byte digests, eliminating length-oracle leaks. Iterates all
     /// entries regardless of match to avoid early-exit timing differences.
     /// O(n) in the number of configured users — negligible for typical
     /// deployments (< 10 users).
     pub fn authenticate(&self, candidate: &str) -> Option<&UserIdentity> {
-        let candidate_bytes = candidate.as_bytes();
+        let candidate_hash = hash_token(candidate);
         let mut matched: Option<&UserIdentity> = None;
-        for (token, identity) in &self.tokens {
-            let token_bytes = token.as_bytes();
-            // ct_eq requires equal lengths; pad comparison to avoid length leak
-            if candidate_bytes.len() == token_bytes.len()
-                && bool::from(candidate_bytes.ct_eq(token_bytes))
-            {
+        for (stored_hash, identity) in &self.hashed_tokens {
+            if bool::from(candidate_hash.ct_eq(stored_hash)) {
                 matched = Some(identity);
             }
         }
         matched
     }
 
-    /// Get the first token (for backwards-compatible printing at startup).
+    /// Get the first token for backwards-compatible printing at startup.
+    ///
+    /// Only available in single-user mode; returns `None` in multi-user mode
+    /// to avoid exposing tokens.
     pub fn first_token(&self) -> Option<&str> {
-        self.tokens.keys().next().map(|s| s.as_str())
+        self.display_token.as_deref()
     }
 
     /// Get the first user identity (for single-user fallback).
     pub fn first_identity(&self) -> Option<&UserIdentity> {
-        self.tokens.values().next()
+        self.hashed_tokens.first().map(|(_, id)| id)
     }
 }
 
@@ -174,9 +200,6 @@ pub async fn auth_middleware(
 
     (StatusCode::UNAUTHORIZED, "Invalid or missing auth token").into_response()
 }
-
-// Keep the old type as an alias for any external references during migration.
-pub type AuthState = MultiAuthState;
 
 #[cfg(test)]
 mod tests {

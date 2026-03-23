@@ -375,152 +375,166 @@ pub async fn jobs_restart_handler(
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid job ID".to_string()))?;
 
     // Try sandbox job restart first.
-    if let Ok(Some(old_job)) = store.get_sandbox_job(old_job_id).await {
-        if old_job.user_id != user.user_id {
-            return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
+    match store.get_sandbox_job(old_job_id).await {
+        Ok(Some(old_job)) => {
+            if old_job.user_id != user.user_id {
+                return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
+            }
+            if old_job.status != "interrupted" && old_job.status != "failed" {
+                return Err((
+                    StatusCode::CONFLICT,
+                    format!("Cannot restart job in state '{}'", old_job.status),
+                ));
+            }
+
+            let jm = state.job_manager.as_ref().ok_or((
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Sandbox not enabled".to_string(),
+            ))?;
+
+            // Enrich the task with failure context.
+            let task = if let Some(ref reason) = old_job.failure_reason {
+                format!(
+                    "Previous attempt failed: {}. Retry: {}",
+                    reason, old_job.task
+                )
+            } else {
+                old_job.task.clone()
+            };
+
+            let new_job_id = Uuid::new_v4();
+            let now = chrono::Utc::now();
+
+            let record = crate::history::SandboxJobRecord {
+                id: new_job_id,
+                task: task.clone(),
+                status: "creating".to_string(),
+                user_id: old_job.user_id.clone(),
+                project_dir: old_job.project_dir.clone(),
+                success: None,
+                failure_reason: None,
+                created_at: now,
+                started_at: None,
+                completed_at: None,
+                credential_grants_json: old_job.credential_grants_json.clone(),
+            };
+            store
+                .save_sandbox_job(&record)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+            let mode = match store.get_sandbox_job_mode(old_job_id).await {
+                Ok(Some(m)) if m == "claude_code" => {
+                    crate::orchestrator::job_manager::JobMode::ClaudeCode
+                }
+                _ => crate::orchestrator::job_manager::JobMode::Worker,
+            };
+
+            let credential_grants: Vec<crate::orchestrator::auth::CredentialGrant> =
+                serde_json::from_str(&old_job.credential_grants_json).unwrap_or_else(|e| {
+                    tracing::warn!(
+                        job_id = %old_job.id,
+                        "Failed to deserialize credential grants from stored job: {}. \
+                         Restarted job will have no credentials.",
+                        e
+                    );
+                    vec![]
+                });
+
+            let project_dir = std::path::PathBuf::from(&old_job.project_dir);
+            let _token = jm
+                .create_job(
+                    new_job_id,
+                    &task,
+                    Some(project_dir),
+                    mode,
+                    credential_grants,
+                )
+                .await
+                .map_err(|e| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("Failed to create container: {}", e),
+                    )
+                })?;
+
+            store
+                .update_sandbox_job_status(new_job_id, "running", None, None, Some(now), None)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+            return Ok(Json(serde_json::json!({
+                "status": "restarted",
+                "old_job_id": old_job_id,
+                "new_job_id": new_job_id,
+            })));
         }
-        if old_job.status != "interrupted" && old_job.status != "failed" {
+        Ok(None) => {}
+        Err(e) => {
             return Err((
-                StatusCode::CONFLICT,
-                format!("Cannot restart job in state '{}'", old_job.status),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Database error: {}", e),
             ));
         }
-
-        let jm = state.job_manager.as_ref().ok_or((
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Sandbox not enabled".to_string(),
-        ))?;
-
-        // Enrich the task with failure context.
-        let task = if let Some(ref reason) = old_job.failure_reason {
-            format!(
-                "Previous attempt failed: {}. Retry: {}",
-                reason, old_job.task
-            )
-        } else {
-            old_job.task.clone()
-        };
-
-        let new_job_id = Uuid::new_v4();
-        let now = chrono::Utc::now();
-
-        let record = crate::history::SandboxJobRecord {
-            id: new_job_id,
-            task: task.clone(),
-            status: "creating".to_string(),
-            user_id: old_job.user_id.clone(),
-            project_dir: old_job.project_dir.clone(),
-            success: None,
-            failure_reason: None,
-            created_at: now,
-            started_at: None,
-            completed_at: None,
-            credential_grants_json: old_job.credential_grants_json.clone(),
-        };
-        store
-            .save_sandbox_job(&record)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-        let mode = match store.get_sandbox_job_mode(old_job_id).await {
-            Ok(Some(m)) if m == "claude_code" => {
-                crate::orchestrator::job_manager::JobMode::ClaudeCode
-            }
-            _ => crate::orchestrator::job_manager::JobMode::Worker,
-        };
-
-        let credential_grants: Vec<crate::orchestrator::auth::CredentialGrant> =
-            serde_json::from_str(&old_job.credential_grants_json).unwrap_or_else(|e| {
-                tracing::warn!(
-                    job_id = %old_job.id,
-                    "Failed to deserialize credential grants from stored job: {}. \
-                     Restarted job will have no credentials.",
-                    e
-                );
-                vec![]
-            });
-
-        let project_dir = std::path::PathBuf::from(&old_job.project_dir);
-        let _token = jm
-            .create_job(
-                new_job_id,
-                &task,
-                Some(project_dir),
-                mode,
-                credential_grants,
-            )
-            .await
-            .map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("Failed to create container: {}", e),
-                )
-            })?;
-
-        store
-            .update_sandbox_job_status(new_job_id, "running", None, None, Some(now), None)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-        return Ok(Json(serde_json::json!({
-            "status": "restarted",
-            "old_job_id": old_job_id,
-            "new_job_id": new_job_id,
-        })));
     }
 
     // Try agent job restart: dispatch a new job via the scheduler.
-    if let Ok(Some(old_job)) = store.get_job(old_job_id).await {
-        if old_job.user_id != user.user_id {
-            return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
+    match store.get_job(old_job_id).await {
+        Ok(Some(old_job)) => {
+            if old_job.user_id != user.user_id {
+                return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
+            }
+            if old_job.state.is_active() {
+                return Err((
+                    StatusCode::CONFLICT,
+                    format!("Cannot restart job in state '{}'", old_job.state),
+                ));
+            }
+
+            let slot = state.scheduler.as_ref().ok_or((
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Scheduler not available".to_string(),
+            ))?;
+            let scheduler_guard = slot.read().await;
+            let scheduler = scheduler_guard.as_ref().ok_or((
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Agent not started yet".to_string(),
+            ))?;
+
+            // Look up failure reason (O(1) point lookup).
+            let failure_reason = store
+                .get_agent_job_failure_reason(old_job_id)
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or_default();
+
+            let title = if !failure_reason.is_empty() {
+                format!(
+                    "Previous attempt failed: {}. Retry: {}",
+                    failure_reason, old_job.title
+                )
+            } else {
+                old_job.title.clone()
+            };
+
+            let new_job_id = scheduler
+                .dispatch_job(&old_job.user_id, &title, &old_job.description, None)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+            Ok(Json(serde_json::json!({
+                "status": "restarted",
+                "old_job_id": old_job_id,
+                "new_job_id": new_job_id,
+            })))
         }
-        if old_job.state.is_active() {
-            return Err((
-                StatusCode::CONFLICT,
-                format!("Cannot restart job in state '{}'", old_job.state),
-            ));
-        }
-
-        let slot = state.scheduler.as_ref().ok_or((
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Scheduler not available".to_string(),
-        ))?;
-        let scheduler_guard = slot.read().await;
-        let scheduler = scheduler_guard.as_ref().ok_or((
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Agent not started yet".to_string(),
-        ))?;
-
-        // Look up failure reason (O(1) point lookup).
-        let failure_reason = store
-            .get_agent_job_failure_reason(old_job_id)
-            .await
-            .ok()
-            .flatten()
-            .unwrap_or_default();
-
-        let title = if !failure_reason.is_empty() {
-            format!(
-                "Previous attempt failed: {}. Retry: {}",
-                failure_reason, old_job.title
-            )
-        } else {
-            old_job.title.clone()
-        };
-
-        let new_job_id = scheduler
-            .dispatch_job(&old_job.user_id, &title, &old_job.description, None)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-        return Ok(Json(serde_json::json!({
-            "status": "restarted",
-            "old_job_id": old_job_id,
-            "new_job_id": new_job_id,
-        })));
+        Ok(None) => Err((StatusCode::NOT_FOUND, "Job not found".to_string())),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Database error: {}", e),
+        )),
     }
-
-    Err((StatusCode::NOT_FOUND, "Job not found".to_string()))
 }
 
 /// Submit a follow-up prompt to a running job.
@@ -584,11 +598,23 @@ pub async fn jobs_prompt_handler(
     }
 
     // Try agent job path: verify ownership, then send via scheduler.
-    if let Some(ref store) = state.store
-        && let Ok(Some(agent_job)) = store.get_job(job_id).await
-        && agent_job.user_id != user.user_id
-    {
-        return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
+    if let Some(ref store) = state.store {
+        match store.get_job(job_id).await {
+            Ok(Some(agent_job)) => {
+                if agent_job.user_id != user.user_id {
+                    return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
+                }
+            }
+            Ok(None) => {
+                return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
+            }
+            Err(e) => {
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Database error: {}", e),
+                ));
+            }
+        }
     }
 
     let slot = state.scheduler.as_ref().ok_or((

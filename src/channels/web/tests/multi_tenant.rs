@@ -8,18 +8,19 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::Router;
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use axum::middleware;
 use axum::routing::{delete, get, post};
-use axum::Router;
 use tower::ServiceExt;
 use uuid::Uuid;
 
-use crate::channels::web::auth::{auth_middleware, AuthenticatedUser, MultiAuthState, UserIdentity};
+use crate::channels::web::auth::{
+    AuthenticatedUser, MultiAuthState, UserIdentity, auth_middleware,
+};
 use crate::channels::web::server::{
-    ActiveConfigSnapshot, GatewayState, PerUserRateLimiter, PromptQueue, RateLimiter,
-    WorkspacePool,
+    ActiveConfigSnapshot, GatewayState, PerUserRateLimiter, PromptQueue, RateLimiter, WorkspacePool,
 };
 use crate::channels::web::sse::SseManager;
 
@@ -88,19 +89,16 @@ fn build_state(
 #[cfg(feature = "libsql")]
 async fn test_db() -> (Arc<dyn crate::db::Database>, tempfile::TempDir) {
     use crate::db::Database;
-    let dir = tempfile::tempdir().expect("failed to create temp dir");
+    let dir = tempfile::tempdir().expect("failed to create temp dir"); // safety: test-only
     let path = dir.path().join("test.db");
     let backend = crate::db::libsql::LibSqlBackend::new_local(&path)
         .await
-        .expect("failed to create test LibSqlBackend");
+        .expect("failed to create test LibSqlBackend"); // safety: test-only
     backend
         .run_migrations()
         .await
-        .expect("failed to run migrations");
-    (
-        Arc::new(backend) as Arc<dyn crate::db::Database>,
-        dir,
-    )
+        .expect("failed to run migrations"); // safety: test-only
+    (Arc::new(backend) as Arc<dyn crate::db::Database>, dir)
 }
 
 /// Build a minimal Routine for testing.

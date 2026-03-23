@@ -722,9 +722,7 @@ async fn test_no_llm_provider_returns_503() {
         "test-user".to_string(),
     );
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-    let bound_addr = start_server(addr, state, auth)
-        .await
-        .unwrap();
+    let bound_addr = start_server(addr, state, auth).await.unwrap();
 
     let url = format!("http://{}/v1/chat/completions", bound_addr);
     let resp = client()

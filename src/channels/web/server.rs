@@ -30,7 +30,9 @@ use crate::agent::SessionManager;
 use crate::bootstrap::ironclaw_base_dir;
 use crate::channels::IncomingMessage;
 use crate::channels::relay::DEFAULT_RELAY_NAME;
-use crate::channels::web::auth::{AuthenticatedUser, MultiAuthState, UserIdentity, auth_middleware};
+use crate::channels::web::auth::{
+    AuthenticatedUser, MultiAuthState, UserIdentity, auth_middleware,
+};
 use crate::channels::web::handlers::jobs::{
     job_files_list_handler, job_files_read_handler, jobs_cancel_handler, jobs_detail_handler,
     jobs_events_handler, jobs_list_handler, jobs_prompt_handler, jobs_restart_handler,
@@ -770,11 +772,14 @@ async fn oauth_callback_handler(
         );
         // Notify UI so auth card can show error instead of staying stuck
         if let Some(ref sse) = flow.sse_manager {
-            sse.broadcast_for_user(&flow.user_id, SseEvent::AuthCompleted {
-                extension_name: flow.extension_name.clone(),
-                success: false,
-                message: "OAuth flow expired. Please try again.".to_string(),
-            });
+            sse.broadcast_for_user(
+                &flow.user_id,
+                SseEvent::AuthCompleted {
+                    extension_name: flow.extension_name.clone(),
+                    success: false,
+                    message: "OAuth flow expired. Please try again.".to_string(),
+                },
+            );
         }
         clear_auth_mode(&state, &flow.user_id).await;
         return oauth_error_page(&flow.display_name);
@@ -909,11 +914,14 @@ async fn oauth_callback_handler(
 
     // Broadcast SSE event to notify the web UI
     if let Some(ref sse) = flow.sse_manager {
-        sse.broadcast_for_user(&flow.user_id, SseEvent::AuthCompleted {
-            extension_name: flow.extension_name,
-            success,
-            message: final_message.clone(),
-        });
+        sse.broadcast_for_user(
+            &flow.user_id,
+            SseEvent::AuthCompleted {
+                extension_name: flow.extension_name,
+                success,
+                message: final_message.clone(),
+            },
+        );
     }
 
     let html = oauth_defaults::landing_html(&flow.display_name, success);
@@ -1115,7 +1123,10 @@ async fn slack_relay_oauth_callback_handler(
     }
 
     // Delete the nonce (one-time use)
-    let _ = ext_mgr.secrets().delete(&state.default_user_id, &state_key).await;
+    let _ = ext_mgr
+        .secrets()
+        .delete(&state.default_user_id, &state_key)
+        .await;
 
     let result: Result<(), String> = async {
         let store = state.store.as_ref().ok_or_else(|| {
@@ -1126,7 +1137,11 @@ async fn slack_relay_oauth_callback_handler(
         // Store team_id in settings
         let team_id_key = format!("relay:{}:team_id", DEFAULT_RELAY_NAME);
         let _ = store
-            .set_setting(&state.default_user_id, &team_id_key, &serde_json::json!(team_id))
+            .set_setting(
+                &state.default_user_id,
+                &team_id_key,
+                &serde_json::json!(team_id),
+            )
             .await;
 
         // Activate the relay channel
@@ -1750,52 +1765,52 @@ async fn chat_threads_handler(
             .list_conversations_all_channels(&user.user_id, 50)
             .await
         {
-        Ok(summaries) => {
-            let mut assistant_thread = None;
-            let mut threads = Vec::new();
+            Ok(summaries) => {
+                let mut assistant_thread = None;
+                let mut threads = Vec::new();
 
-            for s in &summaries {
-                let info = ThreadInfo {
-                    id: s.id,
-                    state: "Idle".to_string(),
-                    turn_count: s.message_count.max(0) as usize,
-                    created_at: s.started_at.to_rfc3339(),
-                    updated_at: s.last_activity.to_rfc3339(),
-                    title: s.title.clone(),
-                    thread_type: s.thread_type.clone(),
-                    channel: Some(s.channel.clone()),
-                };
+                for s in &summaries {
+                    let info = ThreadInfo {
+                        id: s.id,
+                        state: "Idle".to_string(),
+                        turn_count: s.message_count.max(0) as usize,
+                        created_at: s.started_at.to_rfc3339(),
+                        updated_at: s.last_activity.to_rfc3339(),
+                        title: s.title.clone(),
+                        thread_type: s.thread_type.clone(),
+                        channel: Some(s.channel.clone()),
+                    };
 
-                if s.id == assistant_id {
-                    assistant_thread = Some(info);
-                } else {
-                    threads.push(info);
+                    if s.id == assistant_id {
+                        assistant_thread = Some(info);
+                    } else {
+                        threads.push(info);
+                    }
                 }
-            }
 
-            // If assistant wasn't in the list (0 messages), synthesize it
-            if assistant_thread.is_none() {
-                assistant_thread = Some(ThreadInfo {
-                    id: assistant_id,
-                    state: "Idle".to_string(),
-                    turn_count: 0,
-                    created_at: chrono::Utc::now().to_rfc3339(),
-                    updated_at: chrono::Utc::now().to_rfc3339(),
-                    title: None,
-                    thread_type: Some("assistant".to_string()),
-                    channel: Some("gateway".to_string()),
-                });
-            }
+                // If assistant wasn't in the list (0 messages), synthesize it
+                if assistant_thread.is_none() {
+                    assistant_thread = Some(ThreadInfo {
+                        id: assistant_id,
+                        state: "Idle".to_string(),
+                        turn_count: 0,
+                        created_at: chrono::Utc::now().to_rfc3339(),
+                        updated_at: chrono::Utc::now().to_rfc3339(),
+                        title: None,
+                        thread_type: Some("assistant".to_string()),
+                        channel: Some("gateway".to_string()),
+                    });
+                }
 
-            return Ok(Json(ThreadListResponse {
-                assistant_thread,
-                threads,
-                active_thread: sess.active_thread,
-            }));
-        }
-        Err(e) => {
-            tracing::error!(user_id = %user.user_id, error = %e, "DB error listing threads; falling back to in-memory");
-        }
+                return Ok(Json(ThreadListResponse {
+                    assistant_thread,
+                    threads,
+                    active_thread: sess.active_thread,
+                }));
+            }
+            Err(e) => {
+                tracing::error!(user_id = %user.user_id, error = %e, "DB error listing threads; falling back to in-memory");
+            }
         }
     }
 
@@ -1890,14 +1905,10 @@ async fn resolve_workspace(
     if let Some(ref pool) = state.workspace_pool {
         return Ok(pool.get_or_create(user).await);
     }
-    state
-        .workspace
-        .as_ref()
-        .cloned()
-        .ok_or((
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Workspace not available".to_string(),
-        ))
+    state.workspace.as_ref().cloned().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Workspace not available".to_string(),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -2618,7 +2629,10 @@ async fn extensions_setup_submit_handler(
     // through to the LLM instead of being intercepted as a token.
     clear_auth_mode(&state, &user.user_id).await;
 
-    match ext_mgr.configure(&name, &req.secrets, &req.fields, &user.user_id).await {
+    match ext_mgr
+        .configure(&name, &req.secrets, &req.fields, &user.user_id)
+        .await
+    {
         Ok(result) => {
             let mut resp = if result.verification.is_some() || result.activated {
                 ActionResponse::ok(result.message)
@@ -2635,11 +2649,14 @@ async fn extensions_setup_submit_handler(
             if result.verification.is_none() {
                 // Broadcast auth_completed so the chat UI can dismiss any in-progress
                 // auth card or setup modal that was triggered by tool_auth/tool_activate.
-                state.sse.broadcast_for_user(&user.user_id, SseEvent::AuthCompleted {
-                    extension_name: name.clone(),
-                    success: result.activated,
-                    message: resp.message.clone(),
-                });
+                state.sse.broadcast_for_user(
+                    &user.user_id,
+                    SseEvent::AuthCompleted {
+                        extension_name: name.clone(),
+                        success: result.activated,
+                        message: resp.message.clone(),
+                    },
+                );
             }
             Ok(Json(resp))
         }
@@ -3289,12 +3306,18 @@ mod tests {
                 "telegram_bot_token": "123456789:ABCdefGhI"
             }
         });
-        let req = axum::http::Request::builder()
+        let mut req = axum::http::Request::builder()
             .method("POST")
             .uri("/api/extensions/telegram/setup")
             .header("content-type", "application/json")
             .body(Body::from(req_body.to_string()))
             .expect("request");
+        // Inject AuthenticatedUser so the handler's extractor succeeds
+        // without needing the full auth middleware layer.
+        req.extensions_mut().insert(UserIdentity {
+            user_id: "test".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
 
         let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
             .await
@@ -3316,7 +3339,12 @@ mod tests {
                 break;
             }
             match timeout(remaining, receiver.recv()).await {
-                Ok(Ok(scoped)) if matches!(scoped.event, crate::channels::web::types::SseEvent::AuthRequired { .. }) => {
+                Ok(Ok(scoped))
+                    if matches!(
+                        scoped.event,
+                        crate::channels::web::types::SseEvent::AuthRequired { .. }
+                    ) =>
+                {
                     panic!("verification responses should not emit auth_required SSE events")
                 }
                 Ok(Ok(_)) => continue,

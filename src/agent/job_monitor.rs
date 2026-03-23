@@ -170,7 +170,9 @@ pub fn spawn_completion_watcher(
     tokio::spawn(async move {
         loop {
             match event_rx.recv().await {
-                Ok((ev_job_id, _user_id, SseEvent::JobResult { status, .. })) if ev_job_id == job_id => {
+                Ok((ev_job_id, _user_id, SseEvent::JobResult { status, .. }))
+                    if ev_job_id == job_id =>
+                {
                     let target = if status == "completed" {
                         JobState::Completed
                     } else {

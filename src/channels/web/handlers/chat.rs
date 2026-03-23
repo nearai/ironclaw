@@ -173,20 +173,26 @@ pub async fn chat_auth_token_handler(
             resp.instructions = result.verification.as_ref().map(|v| v.instructions.clone());
 
             if result.verification.is_some() {
-                state.sse.broadcast(SseEvent::AuthRequired {
-                    extension_name: req.extension_name.clone(),
-                    instructions: Some(result.message),
-                    auth_url: None,
-                    setup_url: None,
-                });
+                state.sse.broadcast_for_user(
+                    &user.user_id,
+                    SseEvent::AuthRequired {
+                        extension_name: req.extension_name.clone(),
+                        instructions: Some(result.message),
+                        auth_url: None,
+                        setup_url: None,
+                    },
+                );
             } else {
                 clear_auth_mode(&state, &user.user_id).await;
 
-                state.sse.broadcast(SseEvent::AuthCompleted {
-                    extension_name: req.extension_name.clone(),
-                    success: true,
-                    message: result.message,
-                });
+                state.sse.broadcast_for_user(
+                    &user.user_id,
+                    SseEvent::AuthCompleted {
+                        extension_name: req.extension_name.clone(),
+                        success: true,
+                        message: result.message,
+                    },
+                );
             }
 
             Ok(Json(resp))
@@ -194,12 +200,15 @@ pub async fn chat_auth_token_handler(
         Err(e) => {
             let msg = e.to_string();
             if matches!(e, crate::extensions::ExtensionError::ValidationFailed(_)) {
-                state.sse.broadcast(SseEvent::AuthRequired {
-                    extension_name: req.extension_name.clone(),
-                    instructions: Some(msg.clone()),
-                    auth_url: None,
-                    setup_url: None,
-                });
+                state.sse.broadcast_for_user(
+                    &user.user_id,
+                    SseEvent::AuthRequired {
+                        extension_name: req.extension_name.clone(),
+                        instructions: Some(msg.clone()),
+                        auth_url: None,
+                        setup_url: None,
+                    },
+                );
             }
             Ok(Json(ActionResponse::fail(msg)))
         }
@@ -291,7 +300,9 @@ pub async fn chat_history_handler(
         "Session manager not available".to_string(),
     ))?;
 
-    let session = session_manager.get_or_create_session(&identity.user_id).await;
+    let session = session_manager
+        .get_or_create_session(&identity.user_id)
+        .await;
 
     let limit = query.limit.unwrap_or(50);
     let before_cursor = query
@@ -451,7 +462,9 @@ pub async fn chat_threads_handler(
         "Session manager not available".to_string(),
     ))?;
 
-    let session = session_manager.get_or_create_session(&identity.user_id).await;
+    let session = session_manager
+        .get_or_create_session(&identity.user_id)
+        .await;
 
     // Try DB first for persistent thread list
     if let Some(ref store) = state.store {
@@ -552,7 +565,9 @@ pub async fn chat_new_thread_handler(
         "Session manager not available".to_string(),
     ))?;
 
-    let session = session_manager.get_or_create_session(&identity.user_id).await;
+    let session = session_manager
+        .get_or_create_session(&identity.user_id)
+        .await;
     let (thread_id, info) = {
         let mut sess = session.lock().await;
         let thread = sess.create_thread();
