@@ -731,7 +731,7 @@ impl Agent {
             {
                 use crate::agent::session::Thread;
                 let mut sess = session.lock().await;
-                let thread = Thread::with_id(id, sess.id);
+                let thread = Thread::with_id(id, sess.id, Some("gateway"));
                 sess.active_thread = Some(id);
                 sess.threads.entry(id).or_insert(thread);
             }

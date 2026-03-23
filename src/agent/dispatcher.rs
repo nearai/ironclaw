@@ -2140,7 +2140,7 @@ mod tests {
         // Initialize a thread in the session so the loop can record tool calls.
         let thread_id = {
             let mut sess = session.lock().await;
-            sess.create_thread().id
+            sess.create_thread("test").id
         };
 
         let message = IncomingMessage::new("test", "test-user", "do something");
@@ -2245,7 +2245,7 @@ mod tests {
         let session = Arc::new(Mutex::new(Session::new("test-user")));
         let thread_id = {
             let mut sess = session.lock().await;
-            sess.create_thread().id
+            sess.create_thread("test").id
         };
 
         let message = IncomingMessage::new("test", "test-user", "keep calling tools");
