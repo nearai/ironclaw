@@ -12,6 +12,7 @@ exclude = [
     "tools-src/google-drive",
     "tools-src/google-sheets",
     "tools-src/google-slides",
+    "tools-src/composio",
     "tools-src/slack",
     "tools-src/telegram",
     "fuzz",
