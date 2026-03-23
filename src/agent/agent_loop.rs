@@ -1133,12 +1133,10 @@ impl Agent {
         );
 
         if !message.is_internal
-            && let Submission::UserInput { ref content } = submission
+            && let Submission::UserInput { content: _ } = submission
             && let Some(engine) = self.routine_engine().await
         {
-            let fired = engine
-                .check_event_triggers(&message.user_id, &message.channel, content)
-                .await;
+            let fired = engine.check_event_triggers(message).await;
             if fired > 0 {
                 tracing::debug!(
                     channel = %message.channel,
