@@ -696,6 +696,7 @@ impl AppBuilder {
         // fail early with a clear error instead of a confusing runtime failure.
         if self.config.llm.backend != "nearai"
             && self.config.llm.backend != "bedrock"
+            && self.config.llm.backend != "openai_codex"
             && self.config.llm.provider.is_none()
         {
             let backend = &self.config.llm.backend;
