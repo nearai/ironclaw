@@ -362,6 +362,15 @@ impl LlmConfig {
         }
 
         // Resolve base URL: codex override > env var > settings (backward compat) > registry default
+        // `LLM_USE_RESPONSES_API=true` switches registry-backed OpenAI traffic to the
+        // generic Responses API protocol. This is useful for OpenAI-compatible proxies
+        // that expose `/v1/responses` but fail on rig-core's Chat Completions path.
+        let forced_responses_api = parse_optional_env("LLM_USE_RESPONSES_API", false)?;
+        let protocol = if forced_responses_api && codex_base_url_override.is_none() {
+            ProviderProtocol::OpenAiResponses
+        } else {
+            protocol
+        };
         let is_codex_chatgpt = codex_base_url_override.is_some();
         let base_url = codex_base_url_override
             .or_else(|| {
@@ -1249,7 +1258,37 @@ mod tests {
             std::env::remove_var("LLM_BACKEND");
             std::env::remove_var("OPENAI_CODEX_MODEL");
             std::env::remove_var("OPENAI_MODEL");
+            std::env::remove_var("OPENAI_BASE_URL");
+            std::env::remove_var("OPENAI_API_KEY");
+            std::env::remove_var("LLM_USE_RESPONSES_API");
         }
+    }
+
+    #[test]
+    fn openai_registry_can_force_responses_protocol() {
+        let _guard = lock_env();
+        clear_openai_codex_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::set_var("LLM_BACKEND", "openai");
+            std::env::set_var("OPENAI_MODEL", "gpt-5.4");
+            std::env::set_var("OPENAI_BASE_URL", "https://example.com/v1");
+            std::env::set_var("OPENAI_API_KEY", "test-key");
+            std::env::set_var("LLM_USE_RESPONSES_API", "true");
+        }
+
+        let cfg = LlmConfig::resolve(&Settings::default()).expect("resolve should succeed");
+        let provider = cfg.provider.expect("registry provider should be present");
+        assert_eq!(cfg.backend, "openai");
+        assert_eq!(provider.protocol, ProviderProtocol::OpenAiResponses);
+        assert!(
+            !provider.is_codex_chatgpt,
+            "generic responses mode should not masquerade as codex chatgpt"
+        );
+        assert_eq!(provider.base_url, "https://example.com/v1");
+        assert_eq!(provider.model, "gpt-5.4");
+
+        clear_openai_codex_env();
     }
 
     #[test]

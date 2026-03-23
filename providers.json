@@ -78,6 +78,28 @@
     }
   },
   {
+    "id": "openai_responses",
+    "aliases": [
+      "openai-responses",
+      "responses"
+    ],
+    "protocol": "open_ai_responses",
+    "base_url_env": "LLM_BASE_URL",
+    "base_url_required": true,
+    "api_key_env": "LLM_API_KEY",
+    "api_key_required": false,
+    "model_env": "LLM_MODEL",
+    "default_model": "default",
+    "extra_headers_env": "LLM_EXTRA_HEADERS",
+    "description": "Custom OpenAI-compatible Responses endpoint",
+    "setup": {
+      "kind": "open_ai_compatible",
+      "secret_name": "llm_compatible_api_key",
+      "display_name": "OpenAI Responses-compatible",
+      "can_list_models": false
+    }
+  },
+  {
     "id": "github_copilot",
     "aliases": [
       "github-copilot",

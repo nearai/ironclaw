@@ -11,6 +11,7 @@ the most common configurations.
 | NEAR AI | `nearai` | OAuth (browser) | Default; multi-model |
 | Anthropic | `anthropic` | `ANTHROPIC_API_KEY` | Claude models |
 | OpenAI | `openai` | `OPENAI_API_KEY` | GPT models |
+| OpenAI Responses-compatible | `openai_responses` | `LLM_API_KEY` | Generic `/responses` endpoint |
 | Google Gemini | `gemini_oauth` | OAuth (browser) | Gemini models; function calling |
 | io.net | `ionet` | `IONET_API_KEY` | Intelligence API |
 | Mistral | `mistral` | `MISTRAL_API_KEY` | Mistral models |
@@ -59,6 +60,32 @@ OPENAI_API_KEY=sk-...
 ```
 
 Popular models: `gpt-4o`, `gpt-4o-mini`, `o3-mini`
+
+### OpenAI-compatible proxies that require `/v1/responses`
+
+Some private gateways expose the OpenAI `Responses` API but do not behave like
+classic Chat Completions implementations. For those endpoints, keep the OpenAI
+backend and force the public `/responses` wire protocol:
+
+```env
+LLM_BACKEND=openai
+OPENAI_MODEL=gpt-5.4
+OPENAI_BASE_URL=https://your-gateway.example/v1
+OPENAI_API_KEY=sk-...
+LLM_USE_RESPONSES_API=true
+```
+
+If you already keep the key in Codex CLI credentials, you can reuse it:
+
+```env
+LLM_USE_CODEX_AUTH=true
+CODEX_AUTH_PATH=~/.codex/auth.json
+```
+
+`LLM_USE_RESPONSES_API=true` only changes the transport for registry-backed
+OpenAI traffic. It does not turn the provider into ChatGPT OAuth mode. The
+`openai_codex` backend remains the correct choice for the private
+`chatgpt.com/backend-api/codex` flow.
 
 ---
 
@@ -221,6 +248,24 @@ Set `BEDROCK_CROSS_REGION` to route requests across AWS regions for capacity:
 
 All providers below use `LLM_BACKEND=openai_compatible`. Set `LLM_BASE_URL` to the
 provider's OpenAI-compatible endpoint and `LLM_API_KEY` to your API key.
+
+### When to use `openai_compatible` vs `openai_responses`
+
+- Use `openai_compatible` for endpoints that implement the Chat Completions API.
+- Use `openai_responses` for endpoints that expose `/v1/responses` directly.
+- If you already use `openai` or `openai_compatible`, `LLM_USE_RESPONSES_API=true`
+  switches that backend to the generic Responses transport without changing the
+  rest of your configuration.
+
+Example for a private Codex-style or gateway deployment that expects
+`POST /v1/responses`:
+
+```env
+LLM_BACKEND=openai_responses
+LLM_BASE_URL=https://your-gateway.example/v1
+LLM_API_KEY=sk-...
+LLM_MODEL=gpt-5.4
+```
 
 ### OpenRouter
 
