@@ -38,6 +38,7 @@ use exports::near::agent::channel::{
     AgentResponse, ChannelConfig, Guest, HttpEndpointConfig, IncomingHttpRequest,
     OutgoingHttpResponse, StatusUpdate,
 };
+use exports::near::agent::channel_persistence;
 use near::agent::channel_host::{self, EmittedMessage};
 
 // ============================================================================
@@ -277,6 +278,16 @@ fn default_api_base() -> String {
 // ============================================================================
 
 struct FeishuChannel;
+
+// ============================================================================
+// Channel Persistence
+// ============================================================================
+
+impl channel_persistence::Guest for FeishuChannel {
+    fn on_message_persisted(_metadata_json: String) -> Result<(), String> {
+        Ok(()) // No-op: Feishu does not require post-persistence actions
+    }
+}
 
 export!(FeishuChannel);
 

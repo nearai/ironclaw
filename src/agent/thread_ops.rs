@@ -441,6 +441,8 @@ impl Agent {
             &message.channel,
             &message.user_id,
             effective_content,
+            message.id,
+            &message.metadata,
         )
         .await;
 
@@ -662,12 +664,18 @@ impl Agent {
     ///
     /// This ensures the user message is durable even if the process crashes
     /// mid-response. Call this right after `thread.start_turn()`.
+    ///
+    /// After persistence, signals ACK to the WASM channel router so that
+    /// webhook handlers can return 200 OK and `on_message_persisted` callbacks
+    /// can fire (e.g., for mark_as_read in WhatsApp).
     pub(super) async fn persist_user_message(
         &self,
         thread_id: Uuid,
         channel: &str,
         user_id: &str,
         user_input: &str,
+        message_id: Uuid,
+        metadata: &serde_json::Value,
     ) {
         let store = match self.store() {
             Some(s) => Arc::clone(s),
@@ -686,6 +694,20 @@ impl Agent {
             .await
         {
             tracing::warn!("Failed to persist user message: {}", e);
+            return;
+        }
+
+        // Signal ACK to WASM channels via hook after successful persistence
+        use crate::hooks::hook::HookEvent;
+        let hooks = self.hooks();
+        let event = HookEvent::MessagePersisted {
+            user_id: user_id.to_string(),
+            channel: channel.to_string(),
+            message_id: message_id.to_string(),
+            metadata: metadata.clone(),
+        };
+        if let Err(e) = hooks.run(&event).await {
+            tracing::warn!("MessagePersisted hook failed: {}", e);
         }
     }
 

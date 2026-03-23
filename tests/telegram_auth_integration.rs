@@ -187,7 +187,7 @@ async fn test_group_message_unauthorized_user_blocked_with_allowlist() {
         "Hey @test_bot hello world",
     );
 
-    let response = channel
+    let (response, _emitted_info) = channel
         .call_on_http_request(
             "POST",
             "/webhook/telegram",
@@ -239,7 +239,7 @@ async fn test_group_message_authorized_user_allowed() {
         "Hey @test_bot hello world",
     );
 
-    let response = channel
+    let (response, _emitted_info) = channel
         .call_on_http_request(
             "POST",
             "/webhook/telegram",
@@ -286,7 +286,7 @@ async fn test_private_message_with_owner_id_set_uses_guest_pairing_flow() {
         "Other", "hello",
     );
 
-    let response = channel
+    let (response, _emitted_info) = channel
         .call_on_http_request(
             "POST",
             "/webhook/telegram",
@@ -339,7 +339,7 @@ async fn test_private_messages_use_chat_id_as_thread_scope() {
             text,
         );
 
-        let response = channel
+        let (response, _emitted_info) = channel
             .call_on_http_request(
                 "POST",
                 "/webhook/telegram",
@@ -386,7 +386,7 @@ async fn test_private_message_without_owner_id_with_pairing_policy() {
         "private", 999, "NewUser", "/start",
     );
 
-    let response = channel
+    let (response, _emitted_info) = channel
         .call_on_http_request(
             "POST",
             "/webhook/telegram",
@@ -432,7 +432,7 @@ async fn test_open_dm_policy_allows_all_users() {
         "Hey @test_bot what's up",
     );
 
-    let response = channel
+    let (response, _emitted_info) = channel
         .call_on_http_request(
             "POST",
             "/webhook/telegram",
@@ -477,7 +477,7 @@ async fn test_bot_mention_detection_case_insensitive() {
         "Hey @mybot how are you", // lowercase mention
     );
 
-    let response = channel
+    let (response, _emitted_info) = channel
         .call_on_http_request(
             "POST",
             "/webhook/telegram",

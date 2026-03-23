@@ -32,6 +32,7 @@ use exports::near::agent::channel::{
     AgentResponse, ChannelConfig, Guest, HttpEndpointConfig, IncomingHttpRequest,
     OutgoingHttpResponse, StatusUpdate,
 };
+use exports::near::agent::channel_persistence;
 use near::agent::channel_host::{self, EmittedMessage, InboundAttachment};
 
 // ============================================================================
@@ -290,6 +291,14 @@ struct WhatsAppConfig {
 
     #[serde(default)]
     allow_from: Option<Vec<String>>,
+
+    /// Whether to mark incoming messages as read (default: true)
+    #[serde(default = "default_mark_as_read")]
+    mark_as_read: bool,
+}
+
+fn default_mark_as_read() -> bool {
+    true
 }
 
 fn default_api_version() -> String {
@@ -321,6 +330,7 @@ impl Guest for WhatsAppChannel {
                     owner_id: None,
                     dm_policy: None,
                     allow_from: None,
+                    mark_as_read: default_mark_as_read(),
                 }
             }
         };
@@ -353,6 +363,10 @@ impl Guest for WhatsAppChannel {
         let allow_from_json = serde_json::to_string(&config.allow_from.unwrap_or_default())
             .unwrap_or_else(|_| "[]".to_string());
         let _ = channel_host::workspace_write(ALLOW_FROM_PATH, &allow_from_json);
+
+        // Persist mark_as_read setting for on_message_persisted
+        let mark_as_read_str = if config.mark_as_read { "true" } else { "false" };
+        let _ = channel_host::workspace_write("channels/whatsapp/mark_as_read", mark_as_read_str);
 
         // WhatsApp Cloud API is webhook-only, no polling available
         Ok(ChannelConfig {
@@ -521,6 +535,73 @@ impl Guest for WhatsAppChannel {
             channel_host::LogLevel::Info,
             "WhatsApp channel shutting down",
         );
+    }
+}
+
+// ============================================================================
+// Persistence Callback Implementation
+// ============================================================================
+
+/// Metadata extracted from persisted message for mark_as_read callback.
+#[derive(Debug, Deserialize)]
+struct PersistedMessageMetadata {
+    phone_number_id: String,
+    message_id: String,
+}
+
+impl channel_persistence::Guest for WhatsAppChannel {
+    /// Called after a message has been persisted to the database.
+    ///
+    /// This callback is used to mark the message as read in WhatsApp,
+    /// removing the "typing..." indicator from the sender's view.
+    fn on_message_persisted(metadata_json: String) -> Result<(), String> {
+        // Check if mark_as_read is enabled
+        let mark_as_read_enabled = match channel_host::workspace_read("channels/whatsapp/mark_as_read") {
+            Some(s) => s == "true",
+            None => return Ok(()), // Default to disabled if not set
+        };
+
+        if !mark_as_read_enabled {
+            channel_host::log(
+                channel_host::LogLevel::Debug,
+                "mark_as_read disabled, skipping callback",
+            );
+            return Ok(());
+        }
+
+        // Parse metadata to extract phone_number_id and message_id
+        let metadata: PersistedMessageMetadata = match serde_json::from_str(&metadata_json) {
+            Ok(m) => m,
+            Err(e) => {
+                // Metadata parsing failed - log but don't fail the callback
+                // This can happen for messages without proper routing metadata
+                channel_host::log(
+                    channel_host::LogLevel::Debug,
+                    &format!("Failed to parse metadata for mark_as_read: {}", e),
+                );
+                return Ok(()); // Return Ok to not block ACK
+            }
+        };
+
+        // Mark the message as read via WhatsApp Cloud API
+        match mark_message_as_read(&metadata.phone_number_id, &metadata.message_id) {
+            Ok(()) => {
+                channel_host::log(
+                    channel_host::LogLevel::Debug,
+                    &format!("Marked message {} as read", metadata.message_id),
+                );
+                Ok(())
+            }
+            Err(e) => {
+                // Log error but return Ok to not block message ACK
+                // The message was already persisted, so we don't want to fail the callback
+                channel_host::log(
+                    channel_host::LogLevel::Warn,
+                    &format!("Failed to mark message as read: {}", e),
+                );
+                Ok(()) // Always return Ok - mark_as_read failure is non-blocking
+            }
+        }
     }
 }
 
@@ -945,6 +1026,53 @@ fn send_pairing_reply(
     }
 }
 
+/// Mark a WhatsApp message as read via the Cloud API.
+///
+/// https://developers.facebook.com/docs/whatsapp/cloud-api/guides/mark-message-as-read
+fn mark_message_as_read(phone_number_id: &str, message_id: &str) -> Result<(), String> {
+    // Read api_version from workspace (set during on_start), fallback to default
+    let api_version = channel_host::workspace_read("channels/whatsapp/api_version")
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "v18.0".to_string());
+
+    let url = format!(
+        "https://graph.facebook.com/{}/{}/messages",
+        api_version, phone_number_id
+    );
+
+    // Mark as read payload
+    let payload = serde_json::json!({
+        "messaging_product": "whatsapp",
+        "status": "read",
+        "message_id": message_id
+    });
+
+    let payload_bytes =
+        serde_json::to_vec(&payload).map_err(|e| format!("Failed to serialize: {}", e))?;
+
+    let headers = serde_json::json!({
+        "Content-Type": "application/json",
+        "Authorization": "Bearer {WHATSAPP_ACCESS_TOKEN}"
+    });
+
+    let result = channel_host::http_request(
+        "POST",
+        &url,
+        &headers.to_string(),
+        Some(&payload_bytes),
+        None,
+    );
+
+    match result {
+        Ok(response) if response.status >= 200 && response.status < 300 => Ok(()),
+        Ok(response) => {
+            let body_str = String::from_utf8_lossy(&response.body);
+            Err(format!("WhatsApp API error: {} - {}", response.status, body_str))
+        }
+        Err(e) => Err(format!("HTTP request failed: {}", e)),
+    }
+}
+
 /// Create a JSON HTTP response.
 fn json_response(status: u16, value: serde_json::Value) -> OutgoingHttpResponse {
     let body = serde_json::to_vec(&value).unwrap_or_default();
@@ -1197,5 +1325,61 @@ mod tests {
         let attachments = extract_whatsapp_attachments(&msg);
         assert_eq!(attachments.len(), 1);
         assert_eq!(attachments[0].id, "media_img_abc");
+    }
+
+    #[test]
+    fn test_persisted_message_metadata_parsing() {
+        let json = r#"{
+            "phone_number_id": "123456789",
+            "message_id": "wamid.abc123"
+        }"#;
+
+        let metadata: PersistedMessageMetadata = serde_json::from_str(json).unwrap();
+        assert_eq!(metadata.phone_number_id, "123456789");
+        assert_eq!(metadata.message_id, "wamid.abc123");
+    }
+
+    #[test]
+    fn test_persisted_message_metadata_missing_fields() {
+        let json = r#"{}"#;
+        let result: Result<PersistedMessageMetadata, _> = serde_json::from_str(json);
+        // Should fail because fields are required
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_mark_as_read_url_construction() {
+        let api_version = "v18.0";
+        let phone_number_id = "123456789";
+        let url = format!(
+            "https://graph.facebook.com/{}/{}/messages",
+            api_version, phone_number_id
+        );
+        assert_eq!(url, "https://graph.facebook.com/v18.0/123456789/messages");
+    }
+
+    #[test]
+    fn test_mark_as_read_payload_construction() {
+        let message_id = "wamid.abc123";
+        let payload = serde_json::json!({
+            "messaging_product": "whatsapp",
+            "status": "read",
+            "message_id": message_id
+        });
+
+        assert_eq!(payload["messaging_product"], "whatsapp");
+        assert_eq!(payload["status"], "read");
+        assert_eq!(payload["message_id"], "wamid.abc123");
+    }
+
+    #[test]
+    fn test_mark_as_read_headers_include_auth() {
+        let headers = serde_json::json!({
+            "Content-Type": "application/json",
+            "Authorization": "Bearer {WHATSAPP_ACCESS_TOKEN}"
+        });
+
+        assert_eq!(headers["Content-Type"], "application/json");
+        assert!(headers["Authorization"].as_str().unwrap().contains("WHATSAPP_ACCESS_TOKEN"));
     }
 }

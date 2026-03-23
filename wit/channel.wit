@@ -1,4 +1,4 @@
-package near:agent@0.3.0;
+package near:agent@0.4.0;
 
 // WASM Channel Sandbox Interface
 //
@@ -420,10 +420,38 @@ interface channel {
     on-shutdown: func();
 }
 
+/// Persistence callbacks for channels.
+///
+/// All channels must implement this interface. Channels that don't need
+/// post-persistence actions (e.g., Discord, Slack) can return Ok(()).
+/// Channels like WhatsApp use this to call mark_as_read after persistence.
+///
+/// Note: WIT does not support optional exports, so this interface is mandatory
+/// in the world definition. Channels implement no-op versions if unused.
+interface channel-persistence {
+    /// Called after a message has been persisted to the database.
+    ///
+    /// Channels can use this to perform follow-up actions like
+    /// calling external APIs (e.g., WhatsApp mark_as_read).
+    ///
+    /// Arguments:
+    /// - metadata-json: The metadata from the persisted message
+    ///
+    /// Returns:
+    /// - Ok: Post-persistence action completed successfully
+    /// - Err(string): Action failure message (does not block the ACK)
+    on-message-persisted: func(metadata-json: string) -> result<_, string>;
+}
+
 /// World definition for sandboxed channels.
 ///
 /// Channels import host capabilities and export the channel interface.
+///
+/// Note: WIT does not support optional exports. All channels must implement
+/// channel-persistence, even if just a no-op (return Ok(())). WhatsApp uses
+/// this for mark_as_read; other channels return Ok(()) immediately.
 world sandboxed-channel {
     import channel-host;
     export channel;
+    export channel-persistence;
 }

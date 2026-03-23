@@ -169,6 +169,10 @@ pub struct AgentDeps {
     pub sandbox_readiness: crate::agent::routine_engine::SandboxReadiness,
     /// Software builder for self-repair tool rebuilding.
     pub builder: Option<Arc<dyn crate::tools::SoftwareBuilder>>,
+    /// WASM channel router for webhook ACK signaling.
+    /// When set, the agent loop will signal ACK after persisting messages,
+    /// enabling reliable webhook processing for channels like WhatsApp.
+    pub wasm_router: Option<Arc<crate::channels::wasm::WasmChannelRouter>>,
 }
 
 /// The main agent that coordinates all components.

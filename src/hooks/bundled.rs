@@ -515,6 +515,10 @@ enum OutboundWebhookEventSummary {
     ResponseTransform {
         response_length: usize,
     },
+    MessagePersisted {
+        channel: String,
+        message_id: String,
+    },
 }
 
 #[async_trait]
@@ -634,6 +638,14 @@ fn summarize_webhook_event(event: &HookEvent) -> OutboundWebhookEventSummary {
                 response_length: response.len(),
             }
         }
+        HookEvent::MessagePersisted {
+            channel,
+            message_id,
+            ..
+        } => OutboundWebhookEventSummary::MessagePersisted {
+            channel: channel.clone(),
+            message_id: message_id.clone(),
+        },
     }
 }
 
@@ -879,7 +891,8 @@ fn event_user_id(event: &HookEvent) -> &str {
         | HookEvent::Outbound { user_id, .. }
         | HookEvent::SessionStart { user_id, .. }
         | HookEvent::SessionEnd { user_id, .. }
-        | HookEvent::ResponseTransform { user_id, .. } => user_id,
+        | HookEvent::ResponseTransform { user_id, .. }
+        | HookEvent::MessagePersisted { user_id, .. } => user_id,
     }
 }
 
@@ -893,6 +906,13 @@ fn extract_primary_content(event: &HookEvent) -> String {
             session_id.clone()
         }
         HookEvent::ResponseTransform { response, .. } => response.clone(),
+        HookEvent::MessagePersisted {
+            channel,
+            message_id,
+            ..
+        } => {
+            format!("{}:{}", channel, message_id)
+        }
     }
 }
 

@@ -220,7 +220,7 @@ mod channel_lifecycle_tests {
         let _stream = channel.start().await.expect("Failed to start channel");
 
         // Call HTTP callback (stub implementation returns 200 OK)
-        let response = channel
+        let (response, _emitted_info) = channel
             .call_on_http_request(
                 "POST",
                 "/webhook/http",

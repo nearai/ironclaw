@@ -179,6 +179,13 @@ fn extract_content(event: &HookEvent) -> String {
         HookEvent::SessionStart { session_id, .. } | HookEvent::SessionEnd { session_id, .. } => {
             session_id.clone()
         }
+        HookEvent::MessagePersisted {
+            channel,
+            message_id,
+            ..
+        } => {
+            format!("{}:{}", channel, message_id)
+        }
     }
 }
 

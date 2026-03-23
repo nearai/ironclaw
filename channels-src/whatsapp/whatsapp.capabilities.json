@@ -1,6 +1,6 @@
 {
   "version": "0.2.0",
-  "wit_version": "0.3.0",
+  "wit_version": "0.4.0",
   "type": "channel",
   "name": "whatsapp",
   "description": "WhatsApp Cloud API channel for receiving and responding to WhatsApp messages",

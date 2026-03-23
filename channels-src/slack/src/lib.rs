@@ -29,6 +29,7 @@ use exports::near::agent::channel::{
     AgentResponse, ChannelConfig, Guest, HttpEndpointConfig, IncomingHttpRequest,
     OutgoingHttpResponse, StatusUpdate,
 };
+use exports::near::agent::channel_persistence;
 use near::agent::channel_host::{self, EmittedMessage, InboundAttachment};
 
 /// Slack event wrapper.
@@ -708,6 +709,16 @@ fn json_response(status: u16, value: serde_json::Value) -> OutgoingHttpResponse 
         status,
         headers_json: headers.to_string(),
         body,
+    }
+}
+
+// ============================================================================
+// Channel Persistence
+// ============================================================================
+
+impl channel_persistence::Guest for SlackChannel {
+    fn on_message_persisted(_metadata_json: String) -> Result<(), String> {
+        Ok(()) // No-op: Slack does not require post-persistence actions
     }
 }
 

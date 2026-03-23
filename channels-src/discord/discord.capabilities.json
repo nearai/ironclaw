@@ -1,6 +1,6 @@
 {
   "version": "0.2.0",
-  "wit_version": "0.3.0",
+  "wit_version": "0.4.0",
   "type": "channel",
   "name": "discord",
   "description": "Discord webhook channel for slash commands, components, and optional mention polling",

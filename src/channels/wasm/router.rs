@@ -2,9 +2,34 @@
 //!
 //! Routes incoming HTTP requests to the appropriate WASM channel based on
 //! registered paths. Handles secret validation at the host level.
+//!
+//! # Webhook ACK Mechanism
+//!
+//! The router supports reliable message processing via an ACK mechanism:
+//! - `register_pending_ack()` creates a oneshot channel for a message
+//! - `ack_message()` signals the webhook to return 200 OK (called by agent loop)
+//! - `cleanup_pending_ack()` removes orphaned entries after timeout
+//!
+//! The webhook_handler waits for ACK before returning 200 OK, enabling the
+//! agent to persist messages before acknowledging to external services like
+//! WhatsApp (which require confirmation before marking messages as delivered).
 
 use std::collections::HashMap;
 use std::sync::Arc;
+
+/// Maximum time to wait for ACK from agent before returning HTTP response.
+/// If the agent doesn't persist the message within this time, the webhook
+/// returns 200 OK anyway (best-effort reliability).
+///
+/// WhatsApp Cloud API expects responses in 5-15 seconds, so we default to 10 seconds
+/// as a conservative value within that range. Can be overridden via WASM_ACK_TIMEOUT_SECS.
+fn ack_timeout_secs() -> u64 {
+    std::env::var("WASM_ACK_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(10)
+        .max(1) // Minimum 1 second
+}
 
 use axum::{
     Json, Router,
@@ -15,7 +40,7 @@ use axum::{
     routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, oneshot};
 
 use crate::channels::wasm::wrapper::WasmChannel;
 
@@ -46,6 +71,9 @@ pub struct WasmChannelRouter {
     signature_keys: RwLock<HashMap<String, String>>,
     /// HMAC-SHA256 signing secrets for signature verification by channel name (Slack-style).
     hmac_secrets: RwLock<HashMap<String, String>>,
+    /// Pending webhook ACKs - keyed by "channel:message_id", value is signaled when
+    /// ack_message() is called after message persistence.
+    pending_acks: RwLock<HashMap<String, oneshot::Sender<()>>>,
 }
 
 impl WasmChannelRouter {
@@ -58,6 +86,7 @@ impl WasmChannelRouter {
             secret_headers: RwLock::new(HashMap::new()),
             signature_keys: RwLock::new(HashMap::new()),
             hmac_secrets: RwLock::new(HashMap::new()),
+            pending_acks: RwLock::new(HashMap::new()),
         }
     }
 
@@ -92,6 +121,7 @@ impl WasmChannelRouter {
                 "Registered WASM channel HTTP endpoint"
             );
         }
+        drop(path_map); // Release lock before acquiring others
 
         // Store secret if provided
         if let Some(s) = secret {
@@ -100,7 +130,7 @@ impl WasmChannelRouter {
 
         // Store secret header if provided
         if let Some(h) = secret_header {
-            self.secret_headers.write().await.insert(name, h);
+            self.secret_headers.write().await.insert(name.clone(), h);
         }
     }
 
@@ -144,6 +174,12 @@ impl WasmChannelRouter {
             .write()
             .await
             .retain(|_, name| name != channel_name);
+
+        // Remove pending ACKs for this channel
+        self.pending_acks
+            .write()
+            .await
+            .retain(|key, _| !key.starts_with(&format!("{}:", channel_name)));
 
         tracing::info!(
             channel = %channel_name,
@@ -229,6 +265,98 @@ impl WasmChannelRouter {
     /// Returns `None` if no secret is registered (no HMAC check needed).
     pub async fn get_hmac_secret(&self, channel_name: &str) -> Option<String> {
         self.hmac_secrets.read().await.get(channel_name).cloned()
+    }
+
+    // ========================================================================
+    // Webhook Acknowledgment (reliable message processing)
+    // ========================================================================
+
+    /// Register a pending acknowledgment for a webhook message.
+    ///
+    /// Call this before processing a webhook message. The returned receiver
+    /// will be signaled when the message has been persisted to the database.
+    /// The webhook handler should wait on this receiver before returning 200 OK.
+    ///
+    /// # Arguments
+    /// * `key` - Unique identifier for the message, typically "channel:message_id"
+    ///
+    /// # Returns
+    /// A oneshot receiver that will be signaled when ack_message() is called.
+    pub async fn register_pending_ack(&self, key: String) -> oneshot::Receiver<()> {
+        let (tx, rx) = oneshot::channel();
+        self.pending_acks.write().await.insert(key.clone(), tx);
+        tracing::debug!(key = %key, "Registered pending webhook ACK");
+        rx
+    }
+
+    /// Signal that a message has been persisted and the webhook can return 200 OK.
+    ///
+    /// Called by the agent loop after persist_user_message() completes.
+    /// Also calls the optional `on_message_persisted` callback on the WASM channel.
+    ///
+    /// # Arguments
+    /// * `key` - The same key passed to register_pending_ack() (format: "channel:message_id")
+    /// * `message_metadata` - JSON metadata for channel-specific post-persistence actions
+    pub async fn ack_message(&self, key: &str, message_metadata: &str) {
+        if let Some(tx) = self.pending_acks.write().await.remove(key) {
+            // Signal the webhook handler to return 200 OK
+            let _ = tx.send(());
+            tracing::debug!(key = %key, "Webhook ACK signaled");
+
+            // Parse key to get channel name for callback
+            if let Some((channel_name, _)) = key.split_once(':')
+                && let Some(channel) = self.channels.read().await.get(channel_name)
+                && let Err(e) = channel.call_on_message_persisted(message_metadata).await
+            {
+                tracing::warn!(
+                    channel = %channel_name,
+                    error = %e,
+                    "on_message_persisted callback failed (best-effort)"
+                );
+            } else if !key.contains(':') {
+                tracing::warn!(key = %key, "Malformed ACK key, cannot call on_message_persisted");
+            }
+        } else {
+            tracing::debug!(key = %key, "No pending ACK found (may have timed out)");
+        }
+    }
+
+    /// Clean up an orphaned pending ACK entry after timeout.
+    ///
+    /// Called by the webhook handler when an ACK times out or the sender is dropped.
+    /// This prevents memory leaks from accumulating orphaned entries.
+    pub async fn cleanup_pending_ack(&self, key: &str) {
+        if self.pending_acks.write().await.remove(key).is_some() {
+            tracing::debug!(key = %key, "Cleaned up orphaned pending ACK");
+        }
+    }
+
+    /// Wait for an ACK with the configured timeout.
+    ///
+    /// Returns `true` if ACK was received, `false` if timed out.
+    /// If timed out, cleans up the orphaned pending ACK entry.
+    pub async fn wait_for_ack(&self, rx: oneshot::Receiver<()>, key: &str) -> bool {
+        match tokio::time::timeout(std::time::Duration::from_secs(ack_timeout_secs()), rx).await {
+            Ok(Ok(())) => {
+                tracing::debug!(key = %key, "Webhook ACK received");
+                true
+            }
+            Ok(Err(_)) => {
+                // Sender was dropped (channel unregistered)
+                tracing::debug!(key = %key, "Webhook ACK sender dropped");
+                false
+            }
+            Err(_) => {
+                // Timeout - clean up the orphaned entry
+                tracing::warn!(
+                    key = %key,
+                    timeout_secs = ack_timeout_secs(),
+                    "Webhook ACK timeout - returning 200 OK anyway"
+                );
+                self.cleanup_pending_ack(key).await;
+                false
+            }
+        }
     }
 }
 
@@ -449,17 +577,24 @@ async fn webhook_handler(
         }
     }
 
-    // HMAC-SHA256 signature verification (Slack-style)
+    // HMAC-SHA256 signature verification (Slack-style or WhatsApp-style)
     if let Some(hmac_secret) = state.router.get_hmac_secret(channel_name).await {
-        let timestamp = headers
+        // Try Slack-style headers first
+        let slack_timestamp = headers
             .get("x-slack-request-timestamp")
             .and_then(|v| v.to_str().ok());
-        let sig_header = headers
+        let slack_sig = headers
             .get("x-slack-signature")
             .and_then(|v| v.to_str().ok());
 
-        match (timestamp, sig_header) {
-            (Some(ts), Some(sig)) => {
+        // Try WhatsApp-style header
+        let whatsapp_sig = headers
+            .get("x-hub-signature-256")
+            .and_then(|v| v.to_str().ok());
+
+        match (slack_timestamp, slack_sig, whatsapp_sig) {
+            // Slack-style verification
+            (Some(ts), Some(sig), _) => {
                 let now_secs = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
@@ -474,7 +609,7 @@ async fn webhook_handler(
                 ) {
                     tracing::warn!(
                         channel = %channel_name,
-                        "HMAC-SHA256 signature verification failed"
+                        "HMAC-SHA256 signature verification failed (Slack-style)"
                     );
                     return (
                         StatusCode::UNAUTHORIZED,
@@ -483,17 +618,39 @@ async fn webhook_handler(
                         })),
                     );
                 }
-                tracing::debug!(channel = %channel_name, "HMAC-SHA256 signature verified");
+                tracing::debug!(channel = %channel_name, "HMAC-SHA256 signature verified (Slack-style)");
             }
+            // WhatsApp-style verification
+            (_, _, Some(sig)) => {
+                if !crate::channels::wasm::signature::verify_hmac_sha256_prefixed(
+                    &hmac_secret,
+                    &body,
+                    sig,
+                    "sha256=",
+                ) {
+                    tracing::warn!(
+                        channel = %channel_name,
+                        "HMAC-SHA256 signature verification failed (WhatsApp-style)"
+                    );
+                    return (
+                        StatusCode::UNAUTHORIZED,
+                        Json(serde_json::json!({
+                            "error": "Invalid signature"
+                        })),
+                    );
+                }
+                tracing::debug!(channel = %channel_name, "HMAC-SHA256 signature verified (WhatsApp-style)");
+            }
+            // No recognized signature headers
             _ => {
                 tracing::warn!(
                     channel = %channel_name,
-                    "Slack signature headers missing but secret is registered"
+                    "HMAC signature headers missing but secret is registered"
                 );
                 return (
                     StatusCode::UNAUTHORIZED,
                     Json(serde_json::json!({
-                        "error": "Missing Slack signature headers"
+                        "error": "Missing signature headers"
                     })),
                 );
             }
@@ -519,7 +676,7 @@ async fn webhook_handler(
         "Calling WASM channel on_http_request"
     );
 
-    match channel
+    let result = channel
         .call_on_http_request(
             method.as_str(),
             &full_path,
@@ -528,9 +685,26 @@ async fn webhook_handler(
             &body,
             secret_validated,
         )
-        .await
-    {
-        Ok(response) => {
+        .await;
+
+    match result {
+        Ok((response, emitted_info)) => {
+            // Register pending ACKs for emitted messages
+            let mut ack_receivers: Vec<tokio::sync::oneshot::Receiver<()>> = Vec::new();
+            for (message_id, _metadata) in &emitted_info {
+                let ack_key = format!("{}:{}", channel_name, message_id);
+                let rx = state.router.register_pending_ack(ack_key).await;
+                ack_receivers.push(rx);
+
+                // Metadata will be passed to ack_message() by the agent after persistence,
+                // which triggers on_message_persisted callback (e.g., for mark_as_read)
+                tracing::debug!(
+                    channel = %channel_name,
+                    message_id = %message_id,
+                    "Registered pending ACK for webhook message"
+                );
+            }
+
             let status =
                 StatusCode::from_u16(response.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
 
@@ -538,6 +712,7 @@ async fn webhook_handler(
                 channel = %channel_name,
                 status = %status,
                 body_len = response.body.len(),
+                emitted_count = emitted_info.len(),
                 "WASM channel on_http_request completed successfully"
             );
 
@@ -548,6 +723,43 @@ async fn webhook_handler(
                         "raw": String::from_utf8_lossy(&response.body).to_string()
                     })
                 });
+
+            // Wait for ACKs with timeout
+            // If no messages were emitted, return immediately
+            if !ack_receivers.is_empty() {
+                let ack_timeout = std::time::Duration::from_secs(ack_timeout_secs());
+                let ack_results: Vec<_> = futures::future::join_all(
+                    ack_receivers
+                        .into_iter()
+                        .map(|rx| tokio::time::timeout(ack_timeout, rx)),
+                )
+                .await;
+
+                let mut acked = 0;
+                let mut timed_out = 0;
+                for result in ack_results {
+                    match result {
+                        Ok(Ok(())) => acked += 1,
+                        Ok(Err(_)) => timed_out += 1, // Sender dropped
+                        Err(_) => timed_out += 1,     // Timeout
+                    }
+                }
+
+                if timed_out > 0 {
+                    tracing::warn!(
+                        channel = %channel_name,
+                        acked = acked,
+                        timed_out = timed_out,
+                        "Some webhook ACKs timed out"
+                    );
+                } else {
+                    tracing::debug!(
+                        channel = %channel_name,
+                        acked = acked,
+                        "All webhook ACKs received"
+                    );
+                }
+            }
 
             (status, Json(body_json))
         }
@@ -646,7 +858,7 @@ mod tests {
     use std::sync::Arc;
 
     use crate::channels::wasm::capabilities::ChannelCapabilities;
-    use crate::channels::wasm::router::{RegisteredEndpoint, WasmChannelRouter};
+    use crate::channels::wasm::router::{RegisteredEndpoint, WasmChannelRouter, ack_timeout_secs};
     use crate::channels::wasm::runtime::{
         PreparedChannelModule, WasmChannelRuntime, WasmChannelRuntimeConfig,
     };
@@ -1498,6 +1710,245 @@ mod tests {
             resp.status(),
             StatusCode::UNAUTHORIZED,
             "Signature with mismatched timestamp should return 401"
+        );
+    }
+
+    // ── Webhook ACK Mechanism Tests ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_register_and_ack_message() {
+        let router = WasmChannelRouter::new();
+        let channel = create_test_channel("test");
+
+        router.register(channel, vec![], None, None).await;
+
+        // Register pending ACK
+        let key = "test:message123".to_string();
+        let rx = router.register_pending_ack(key.clone()).await;
+
+        // ACK the message
+        router.ack_message(&key, "{}").await;
+
+        // Receiver should be signaled
+        let result = rx.await;
+        assert!(result.is_ok(), "ACK receiver should be signaled");
+    }
+
+    #[tokio::test]
+    async fn test_ack_nonexistent_key_is_safe() {
+        let router = WasmChannelRouter::new();
+
+        // ACK a key that was never registered (should not panic)
+        router.ack_message("nonexistent:key", "{}").await;
+    }
+
+    #[tokio::test]
+    async fn test_unregister_clears_pending_acks() {
+        let router = WasmChannelRouter::new();
+        let channel = create_test_channel("test");
+
+        router.register(channel, vec![], None, None).await;
+
+        // Register pending ACK
+        let key = "test:message123".to_string();
+        let rx = router.register_pending_ack(key.clone()).await;
+
+        // Unregister the channel
+        router.unregister("test").await;
+
+        // ACK the message (should be no-op since channel was unregistered)
+        router.ack_message(&key, "{}").await;
+
+        // Receiver should NOT be signaled (sender was dropped during retain)
+        let result = rx.await;
+        assert!(
+            result.is_err(),
+            "ACK receiver should not be signaled after unregister"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_ack_success() {
+        let router = WasmChannelRouter::new();
+
+        // Register pending ACK
+        let key = "test:message456".to_string();
+        let rx = router.register_pending_ack(key.clone()).await;
+
+        // ACK the message
+        router.ack_message(&key, "{}").await;
+
+        // Wait for ACK should succeed immediately
+        let received = router.wait_for_ack(rx, &key).await;
+        assert!(
+            received,
+            "wait_for_ack should return true when ACK is received"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_ack_timeout() {
+        let router = WasmChannelRouter::new();
+
+        // Register pending ACK but don't ACK it
+        let key = "test:timeout_msg".to_string();
+        let rx = router.register_pending_ack(key.clone()).await;
+
+        // Use a very short timeout for testing by calling wait_for_ack
+        // which will timeout since no ACK is sent
+        let start = std::time::Instant::now();
+        let received = router.wait_for_ack(rx, &key).await;
+        let elapsed = start.elapsed();
+
+        assert!(!received, "wait_for_ack should return false on timeout");
+        // Verify it actually waited for ack_timeout_secs()
+        assert!(
+            elapsed.as_secs() >= ack_timeout_secs(),
+            "Should have waited for ack_timeout_secs() before timing out"
+        );
+
+        // Entry should be cleaned up
+        assert!(
+            !router.pending_acks.read().await.contains_key(&key),
+            "Pending ACK should be cleaned up after timeout"
+        );
+    }
+
+    /// Regression test for ack_message with malformed key.
+    /// Verifies that ack_message handles keys without ':' separator gracefully.
+    #[tokio::test]
+    async fn test_ack_message_malformed_key_logs_warning() {
+        let router = WasmChannelRouter::new();
+        let channel = create_test_channel("test-channel");
+        let endpoints = vec![RegisteredEndpoint {
+            channel_name: "test-channel".to_string(),
+            path: "/webhook/test".to_string(),
+            methods: vec!["POST".to_string()],
+            require_secret: false,
+        }];
+
+        router.register(channel, endpoints, None, None).await;
+
+        // Call ack_message with a malformed key (no ':' separator)
+        // This should not panic and should log a warning
+        router
+            .ack_message("malformed_key_without_colon", r#"{"test": "metadata"}"#)
+            .await;
+
+        // Verify no callback was made (channel would have panicked if called with empty string)
+        // The test passes if we reaches this point without panic
+    }
+
+    // ── WhatsApp-style HMAC Verification Tests ───────────────────────────
+
+    /// Helper to create a router with WhatsApp-style HMAC configuration.
+    async fn setup_whatsapp_router() -> (Arc<WasmChannelRouter>, AxumRouter) {
+        let wasm_router = Arc::new(WasmChannelRouter::new());
+        let channel = create_test_channel("whatsapp");
+
+        let endpoints = vec![RegisteredEndpoint {
+            channel_name: "whatsapp".to_string(),
+            path: "/webhook/whatsapp".to_string(),
+            methods: vec!["GET".to_string(), "POST".to_string()],
+            require_secret: true,
+        }];
+
+        wasm_router
+            .register(
+                channel,
+                endpoints,
+                Some("verify_token_123".to_string()),
+                None,
+            )
+            .await;
+
+        let app = create_wasm_channel_router(wasm_router.clone(), None);
+        (wasm_router, app)
+    }
+
+    #[tokio::test]
+    async fn test_webhook_whatsapp_rejects_invalid_signature() {
+        let (wasm_router, app) = setup_whatsapp_router().await;
+
+        // Register HMAC secret for WhatsApp
+        wasm_router
+            .register_hmac_secret("whatsapp", "app_secret_123")
+            .await;
+
+        // Send request with invalid signature
+        let req = Request::builder()
+            .method("POST")
+            .uri("/webhook/whatsapp")
+            .header("content-type", "application/json")
+            .header("x-hub-signature-256", "sha256=invalid_signature")
+            .body(Body::from(r#"{"entry":[]}"#))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "Invalid WhatsApp signature should return 401"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_webhook_whatsapp_accepts_valid_signature() {
+        let (wasm_router, app) = setup_whatsapp_router().await;
+
+        let app_secret = "app_secret_123";
+        wasm_router
+            .register_hmac_secret("whatsapp", app_secret)
+            .await;
+
+        let body = br#"{"entry":[]}"#;
+
+        // Compute valid signature
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+        let mut mac = Hmac::<Sha256>::new_from_slice(app_secret.as_bytes()).unwrap();
+        mac.update(body);
+        let sig = format!("sha256={}", hex::encode(mac.finalize().into_bytes()));
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/webhook/whatsapp?secret=verify_token_123")
+            .header("content-type", "application/json")
+            .header("x-hub-signature-256", &sig)
+            .body(Body::from(&body[..]))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        // Should NOT be 401 - signature is valid (may be 500 since no WASM module)
+        assert_ne!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "Valid WhatsApp signature should not return 401"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_webhook_whatsapp_missing_signature_when_required() {
+        let (wasm_router, app) = setup_whatsapp_router().await;
+
+        // Register HMAC secret - this requires signature verification
+        wasm_router
+            .register_hmac_secret("whatsapp", "app_secret_123")
+            .await;
+
+        // Send request without signature header
+        let req = Request::builder()
+            .method("POST")
+            .uri("/webhook/whatsapp")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"entry":[]}"#))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "Missing WhatsApp signature should return 401 when HMAC secret is registered"
         );
     }
 }

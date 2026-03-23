@@ -33,6 +33,7 @@ use exports::near::agent::channel::{
     AgentResponse, Attachment, ChannelConfig, Guest, HttpEndpointConfig, IncomingHttpRequest,
     OutgoingHttpResponse, PollConfig, StatusType, StatusUpdate,
 };
+use exports::near::agent::channel_persistence;
 use near::agent::channel_host::{self, EmittedMessage, InboundAttachment};
 
 // ============================================================================
@@ -2136,6 +2137,16 @@ fn json_response(status: u16, value: serde_json::Value) -> OutgoingHttpResponse 
         status,
         headers_json: headers.to_string(),
         body,
+    }
+}
+
+// ============================================================================
+// Channel Persistence (Optional)
+// ============================================================================
+
+impl channel_persistence::Guest for TelegramChannel {
+    fn on_message_persisted(_metadata_json: String) -> Result<(), String> {
+        Ok(()) // No-op: Telegram does not require post-persistence actions
     }
 }
 
