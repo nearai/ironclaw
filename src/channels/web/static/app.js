@@ -5197,9 +5197,11 @@ function loadInferenceSettings() {
     }
     container.innerHTML = '';
     renderStructuredSettingsInto(container, INFERENCE_SETTINGS, settings, activeValues);
+    loadConfig();
   }).catch(function(err) {
     container.innerHTML = '<div class="empty-state">' + I18n.t('common.loadFailed') + ': '
       + escapeHtml(err.message) + '</div>';
+    loadConfig();
   });
 }
 
@@ -6029,6 +6031,18 @@ document.addEventListener('click', function(e) {
     case 'switch-language':
       if (typeof switchLanguage === 'function') switchLanguage(el.dataset.lang);
       break;
+    case 'set-active-provider':
+      setActiveProvider(el.dataset.id);
+      break;
+    case 'delete-custom-provider':
+      deleteCustomProvider(el.dataset.id);
+      break;
+    case 'edit-custom-provider':
+      editCustomProvider(el.dataset.id);
+      break;
+    case 'configure-builtin-provider':
+      configureBuiltinProvider(el.dataset.id);
+      break;
   }
 });
 
@@ -6069,6 +6083,9 @@ document.getElementById('confirm-modal').addEventListener('click', function(e) {
 document.addEventListener('keydown', function(e) {
   if (e.key === 'Escape' && document.getElementById('confirm-modal').style.display === 'flex') {
     closeConfirmModal();
+  }
+  if (e.key === 'Escape' && document.getElementById('provider-dialog').style.display === 'flex') {
+    resetProviderForm();
   }
 });
 
@@ -6156,4 +6173,534 @@ document.getElementById('settings-search-input').addEventListener('input', funct
     empty.textContent = I18n.t('settings.noMatchingSettings', { query: this.value });
     activePanel.appendChild(empty);
   }
+});
+
+
+// --- Config Tab ---
+
+// Like apiFetch but for endpoints that return 204 No Content
+function apiFetchVoid(path, options) {
+  const opts = options || {};
+  opts.headers = opts.headers || {};
+  opts.headers['Authorization'] = 'Bearer ' + token;
+  if (opts.body && typeof opts.body === 'object') {
+    opts.headers['Content-Type'] = 'application/json';
+    opts.body = JSON.stringify(opts.body);
+  }
+  return fetch(path, opts).then((res) => {
+    if (!res.ok) {
+      return res.text().then((body) => { throw new Error(body || (res.status + ' ' + res.statusText)); });
+    }
+  });
+}
+
+// Generated from providers.json + nearai/bedrock (handled separately in llm.rs)
+// Fields: id, name, adapter, base_url, builtin, default_model, api_key_required, can_list_models
+// nearai/bedrock use special auth flows — no Configure button (api_key_required=false, can_list_models=false)
+const BUILTIN_PROVIDERS = [
+  { id: 'nearai',            name: 'NEAR AI',           adapter: 'nearai',                base_url: 'https://cloud-api.near.ai',                                    builtin: true, default_model: 'zai-org/GLM-5-FP8',                                              api_key_required: true,  can_list_models: true  },
+  { id: 'openai',            name: 'OpenAI',            adapter: 'open_ai_completions',   base_url: 'https://api.openai.com/v1',                                builtin: true, default_model: 'gpt-4o-mini',                                   api_key_required: true,  can_list_models: true  },
+  { id: 'anthropic',         name: 'Anthropic',         adapter: 'anthropic',             base_url: 'https://api.anthropic.com',                                builtin: true, default_model: 'claude-sonnet-4-20250514',                       api_key_required: true,  can_list_models: true  },
+  { id: 'ollama',            name: 'Ollama',            adapter: 'ollama',                base_url: 'http://localhost:11434',                                    builtin: true, default_model: 'llama3',                                        api_key_required: false, can_list_models: true  },
+  { id: 'openai_compatible', name: 'OpenAI Compatible', adapter: 'open_ai_completions',   base_url: '',                                                         builtin: true, default_model: 'default',                                       api_key_required: false, can_list_models: false },
+  { id: 'gemini',            name: 'Google Gemini',     adapter: 'open_ai_completions',   base_url: 'https://generativelanguage.googleapis.com/v1beta/openai',   builtin: true, default_model: 'gemini-2.5-flash',                              api_key_required: true,  can_list_models: true  },
+  { id: 'groq',              name: 'Groq',              adapter: 'open_ai_completions',   base_url: 'https://api.groq.com/openai/v1',                           builtin: true, default_model: 'llama-3.3-70b-versatile',                       api_key_required: true,  can_list_models: true  },
+  { id: 'openrouter',        name: 'OpenRouter',        adapter: 'open_ai_completions',   base_url: 'https://openrouter.ai/api/v1',                             builtin: true, default_model: 'openai/gpt-4o',                                 api_key_required: true,  can_list_models: false },
+  { id: 'deepseek',          name: 'DeepSeek',          adapter: 'open_ai_completions',   base_url: 'https://api.deepseek.com/v1',                              builtin: true, default_model: 'deepseek-chat',                                 api_key_required: true,  can_list_models: false },
+  { id: 'mistral',           name: 'Mistral',           adapter: 'open_ai_completions',   base_url: 'https://api.mistral.ai/v1',                                builtin: true, default_model: 'mistral-large-latest',                          api_key_required: true,  can_list_models: true  },
+  { id: 'tinfoil',           name: 'Tinfoil',           adapter: 'open_ai_completions',   base_url: 'https://inference.tinfoil.sh/v1',                          builtin: true, default_model: 'kimi-k2-5',                                     api_key_required: true,  can_list_models: false },
+  { id: 'nvidia',            name: 'NVIDIA NIM',        adapter: 'open_ai_completions',   base_url: 'https://integrate.api.nvidia.com/v1',                      builtin: true, default_model: 'meta/llama-3.3-70b-instruct',                   api_key_required: true,  can_list_models: true  },
+  { id: 'together',          name: 'Together AI',       adapter: 'open_ai_completions',   base_url: 'https://api.together.xyz/v1',                              builtin: true, default_model: 'meta-llama/Llama-3-70b-chat-hf',                api_key_required: true,  can_list_models: false },
+  { id: 'fireworks',         name: 'Fireworks AI',      adapter: 'open_ai_completions',   base_url: 'https://api.fireworks.ai/inference/v1',                    builtin: true, default_model: 'accounts/fireworks/models/llama-v3p1-70b-instruct', api_key_required: true, can_list_models: false },
+  { id: 'cerebras',          name: 'Cerebras',          adapter: 'open_ai_completions',   base_url: 'https://api.cerebras.ai/v1',                               builtin: true, default_model: 'llama-3.3-70b',                                 api_key_required: true,  can_list_models: false },
+  { id: 'sambanova',         name: 'SambaNova',         adapter: 'open_ai_completions',   base_url: 'https://api.sambanova.ai/v1',                              builtin: true, default_model: 'Meta-Llama-3.1-70B-Instruct',                   api_key_required: true,  can_list_models: false },
+  { id: 'zai',               name: 'Z.AI',              adapter: 'open_ai_completions',   base_url: 'https://api.z.ai/api/paas/v4',                             builtin: true, default_model: 'glm-5',                                         api_key_required: true,  can_list_models: false },
+  { id: 'venice',            name: 'Venice.ai',         adapter: 'open_ai_completions',   base_url: 'https://api.venice.ai/api/v1',                             builtin: true, default_model: 'llama-3.3-70b',                                 api_key_required: true,  can_list_models: false },
+  { id: 'minimax',           name: 'MiniMax',           adapter: 'open_ai_completions',   base_url: 'https://api.minimax.io/v1',                                builtin: true, default_model: 'MiniMax-M2.5',                                  api_key_required: true,  can_list_models: false },
+  { id: 'ionet',             name: 'io.net',            adapter: 'open_ai_completions',   base_url: 'https://api.intelligence.io.solutions/api/v1',             builtin: true, default_model: 'deepseek-coder-v2-instruct',                    api_key_required: true,  can_list_models: true  },
+  { id: 'cloudflare',        name: 'Cloudflare AI',     adapter: 'open_ai_completions',   base_url: '',                                                         builtin: true, default_model: '@cf/meta/llama-3.3-70b-instruct-fp8-fast',      api_key_required: true,  can_list_models: false },
+  { id: 'yandex',            name: 'Yandex AI Studio',  adapter: 'open_ai_completions',   base_url: 'https://ai.api.cloud.yandex.net/v1',                       builtin: true, default_model: 'yandexgpt-lite',                                api_key_required: true,  can_list_models: true  },
+  { id: 'bedrock',           name: 'AWS Bedrock',       adapter: 'bedrock',               base_url: '',                                                         builtin: true, default_model: 'anthropic.claude-3-sonnet-20240229-v1:0',      api_key_required: false, can_list_models: false },
+];
+
+const ADAPTER_LABELS = {
+  open_ai_completions: 'OpenAI Compatible',
+  anthropic: 'Anthropic',
+  ollama: 'Ollama',
+  bedrock: 'AWS Bedrock',
+  nearai: 'NEAR AI',
+};
+
+let _customProviders = [];
+let _activeLlmBackend = '';
+let _selectedModel = '';
+let _builtinOverrides = {};
+let _editingProviderId = null;
+let _configuringBuiltinId = null;
+let _configLoaded = false;
+
+function loadConfig() {
+  const list = document.getElementById('providers-list');
+  list.innerHTML = '<div class="empty-state">' + I18n.t('common.loading') + '</div>';
+
+  apiFetch('/api/settings/export').then((d) => {
+    const s = (d && d.settings) ? d.settings : {};
+    _activeLlmBackend = s['llm_backend'] ? String(s['llm_backend']) : 'nearai';
+    _selectedModel = s['selected_model'] ? String(s['selected_model']) : '';
+    try {
+      const val = s['llm_custom_providers'];
+      _customProviders = Array.isArray(val) ? val : (val ? JSON.parse(val) : []);
+    } catch (e) {
+      _customProviders = [];
+    }
+    try {
+      const val = s['llm_builtin_overrides'];
+      _builtinOverrides = (val && typeof val === 'object' && !Array.isArray(val)) ? val : {};
+    } catch (e) {
+      _builtinOverrides = {};
+    }
+    _configLoaded = true;
+    renderProviders();
+  }).catch(() => {
+    _activeLlmBackend = 'nearai';
+    _selectedModel = '';
+    _customProviders = [];
+    _builtinOverrides = {};
+    _configLoaded = true;
+    renderProviders();
+  });
+}
+
+function scrollToProviders() {
+  const section = document.getElementById('providers-section');
+  if (section) section.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function renderProviders() {
+  const list = document.getElementById('providers-list');
+  const allProviders = [...BUILTIN_PROVIDERS, ..._customProviders].sort((a, b) => {
+    if (a.id === _activeLlmBackend) return -1;
+    if (b.id === _activeLlmBackend) return 1;
+    return 0;
+  });
+
+  if (allProviders.length === 0) {
+    list.innerHTML = '<div class="empty-state">No providers</div>';
+    return;
+  }
+
+  list.innerHTML = allProviders.map((p) => {
+    const isActive = p.id === _activeLlmBackend;
+    const adapterLabel = ADAPTER_LABELS[p.adapter] || p.adapter;
+    const activeBadge = isActive
+      ? '<span class="provider-badge provider-badge-active">' + I18n.t('status.active') + '</span>'
+      : '';
+    const builtinBadge = p.builtin
+      ? '<span class="provider-badge provider-badge-builtin">' + I18n.t('config.builtin') + '</span>'
+      : '';
+    const deleteBtn = !p.builtin && !isActive
+      ? '<button class="provider-action-btn provider-delete-btn" data-action="delete-custom-provider" data-id="' + escapeHtml(p.id) + '">' + I18n.t('common.delete') + '</button>'
+      : '';
+    const editBtn = !p.builtin
+      ? '<button class="provider-action-btn" data-action="edit-custom-provider" data-id="' + escapeHtml(p.id) + '">' + I18n.t('common.edit') + '</button>'
+      : '';
+    // Show Configure for built-in providers that support it (not bedrock — uses AWS credential chain)
+    const configureBtn = p.builtin && p.id !== 'bedrock'
+      ? '<button class="provider-action-btn" data-action="configure-builtin-provider" data-id="' + escapeHtml(p.id) + '">' + I18n.t('config.configureProvider') + '</button>'
+      : '';
+    const useBtn = !isActive
+      ? '<button class="provider-action-btn" data-action="set-active-provider" data-id="' + escapeHtml(p.id) + '">' + I18n.t('config.useProvider') + '</button>'
+      : '';
+    const baseUrlText = p.base_url
+      ? '<span class="provider-url">' + escapeHtml(p.base_url) + '</span>'
+      : '';
+    // Show configured model: for active provider use _selectedModel, for others check _builtinOverrides
+    const displayModel = isActive
+      ? _selectedModel
+      : (p.builtin && _builtinOverrides[p.id] ? (_builtinOverrides[p.id].model || '') : '');
+    const modelText = displayModel
+      ? '<span class="provider-current-model">' + escapeHtml(I18n.t('config.currentModel', { model: displayModel })) + '</span>'
+      : '';
+
+    return '<div class="provider-card' + (isActive ? ' provider-card-active' : '') + '">'
+      + '<div class="provider-card-header">'
+      +   '<span class="provider-name">' + escapeHtml(p.name || p.id) + '</span>'
+      +   '<span class="provider-id-label">' + escapeHtml(p.id) + '</span>'
+      +   activeBadge + builtinBadge
+      + '</div>'
+      + '<div class="provider-card-meta">'
+      +   '<span class="provider-adapter">' + escapeHtml(adapterLabel) + '</span>'
+      +   baseUrlText
+      +   modelText
+      + '</div>'
+      + '<div class="provider-card-actions">'
+      +   useBtn + configureBtn + editBtn + deleteBtn
+      + '</div>'
+      + '</div>';
+  }).join('');
+}
+
+function setActiveProvider(id) {
+  const provider = [...BUILTIN_PROVIDERS, ..._customProviders].find((p) => p.id === id);
+  // Restore the last-configured model for this provider, falling back to the provider's default
+  const restoredModel =
+    (_builtinOverrides[id] && _builtinOverrides[id].model) ||
+    (provider && provider.default_model) ||
+    null;
+  const defaultModel = restoredModel;
+  const modelUpdate = () => defaultModel
+    ? apiFetchVoid('/api/settings/selected_model', { method: 'PUT', body: { value: defaultModel } })
+    : apiFetchVoid('/api/settings/selected_model', { method: 'DELETE' });
+  apiFetchVoid('/api/settings/llm_backend', { method: 'PUT', body: { value: id } })
+    .then(() => modelUpdate())
+    .then(() => {
+      _activeLlmBackend = id;
+      _selectedModel = defaultModel || '';
+      renderProviders();
+      scrollToProviders();
+      document.getElementById('config-restart-notice').style.display = 'flex';
+      showToast(I18n.t('config.providerActivated', { name: id }));
+    })
+    .catch((e) => showToast(I18n.t('error.unknown') + ': ' + e.message, 'error'));
+}
+
+function deleteCustomProvider(id) {
+  if (id === _activeLlmBackend) {
+    showToast(I18n.t('config.cannotDeleteActiveProvider'), 'error');
+    return;
+  }
+  if (!confirm(I18n.t('config.confirmDeleteProvider', { id }))) return;
+  const originalProviders = _customProviders;
+  _customProviders = _customProviders.filter((p) => p.id !== id);
+  saveCustomProviders().then(() => {
+    renderProviders();
+    showToast(I18n.t('config.providerDeleted'));
+  }).catch((e) => {
+    _customProviders = originalProviders;
+    showToast(I18n.t('error.unknown') + ': ' + e.message, 'error');
+  });
+}
+
+function saveCustomProviders() {
+  return apiFetchVoid('/api/settings/llm_custom_providers', { method: 'PUT', body: { value: _customProviders } });
+}
+
+function editCustomProvider(id) {
+  const p = _customProviders.find((p) => p.id === id);
+  if (!p) return;
+  _editingProviderId = id;
+  const titleEl = document.getElementById('provider-form-title');
+  titleEl.textContent = I18n.t('config.editProvider');
+  titleEl.removeAttribute('data-i18n');
+  document.getElementById('provider-name').value = p.name || '';
+  const idField = document.getElementById('provider-id');
+  idField.value = p.id;
+  idField.readOnly = true;
+  idField.style.opacity = '0.6';
+  document.getElementById('provider-adapter').value = p.adapter || 'open_ai_completions';
+  document.getElementById('provider-base-url').value = p.base_url || '';
+  document.getElementById('provider-api-key').value = p.api_key || '';
+  document.getElementById('provider-model').value = p.default_model || '';
+  openProviderDialog(true);
+  document.getElementById('provider-name').focus();
+}
+
+function configureBuiltinProvider(id) {
+  const p = BUILTIN_PROVIDERS.find((p) => p.id === id);
+  if (!p) return;
+  _configuringBuiltinId = id;
+  const titleEl = document.getElementById('provider-form-title');
+  titleEl.textContent = I18n.t('config.configureProvider') + ': ' + (p.name || id);
+  titleEl.removeAttribute('data-i18n');
+  // Hide name/id/adapter rows; show base-url as read-only for reference
+  document.getElementById('provider-name-row').style.display = 'none';
+  document.getElementById('provider-id-row').style.display = 'none';
+  document.getElementById('provider-adapter-row').style.display = 'none';
+  const baseUrlInput = document.getElementById('provider-base-url');
+  if (p.base_url) {
+    document.getElementById('provider-base-url-row').style.display = '';
+    baseUrlInput.value = p.base_url;
+    baseUrlInput.readOnly = true;
+    baseUrlInput.style.opacity = '0.6';
+  } else {
+    document.getElementById('provider-base-url-row').style.display = 'none';
+  }
+  document.getElementById('provider-api-key-row').style.display = p.api_key_required !== false ? '' : 'none';
+  document.getElementById('fetch-models-btn').style.display = p.can_list_models ? '' : 'none';
+  const override = _builtinOverrides[id] || {};
+  document.getElementById('provider-api-key').value = override.api_key || '';
+  document.getElementById('provider-model').value = override.model || p.default_model || '';
+  openProviderDialog(true);
+  document.getElementById('provider-model').focus();
+}
+
+// Add provider form
+
+document.getElementById('add-provider-btn').addEventListener('click', () => {
+  openProviderDialog(false);
+});
+
+document.getElementById('cancel-provider-btn').addEventListener('click', () => {
+  resetProviderForm();
+});
+
+document.getElementById('cancel-provider-footer-btn').addEventListener('click', () => {
+  resetProviderForm();
+});
+
+document.getElementById('provider-dialog-overlay').addEventListener('click', () => {
+  resetProviderForm();
+});
+
+function openProviderDialog(isEdit) {
+  if (!isEdit) {
+    // Add mode: ensure all rows visible
+    ['provider-name-row', 'provider-id-row', 'provider-adapter-row',
+     'provider-base-url-row', 'provider-api-key-row'].forEach((id) => {
+      document.getElementById(id).style.display = '';
+    });
+    document.getElementById('fetch-models-btn').style.display = '';
+  }
+  document.getElementById('provider-dialog').style.display = 'flex';
+  if (!isEdit) {
+    document.getElementById('provider-name').focus();
+  }
+}
+
+document.getElementById('test-provider-btn').addEventListener('click', () => {
+  let adapter = document.getElementById('provider-adapter').value;
+  let baseUrl = document.getElementById('provider-base-url').value.trim();
+  const apiKey = document.getElementById('provider-api-key').value.trim();
+  const model = document.getElementById('provider-model').value.trim();
+
+  // For built-in providers, use the hardcoded adapter/base_url from BUILTIN_PROVIDERS
+  if (_configuringBuiltinId) {
+    const p = BUILTIN_PROVIDERS.find((x) => x.id === _configuringBuiltinId);
+    if (p) {
+      adapter = p.adapter;
+      baseUrl = p.base_url;
+    }
+  }
+
+  const btn = document.getElementById('test-provider-btn');
+  const result = document.getElementById('test-connection-result');
+
+  btn.disabled = true;
+  btn.textContent = I18n.t('config.testing');
+  result.style.display = 'none';
+  result.className = 'test-connection-result';
+
+  apiFetch('/api/llm/test_connection', {
+    method: 'POST',
+    body: { adapter, base_url: baseUrl, api_key: apiKey || undefined, model: model || undefined },
+  })
+    .then((data) => {
+      result.textContent = data.message;
+      result.className = 'test-connection-result ' + (data.ok ? 'test-ok' : 'test-fail');
+      result.style.display = '';
+    })
+    .catch((e) => {
+      result.textContent = e.message;
+      result.className = 'test-connection-result test-fail';
+      result.style.display = '';
+    })
+    .finally(() => {
+      btn.disabled = false;
+      btn.textContent = I18n.t('config.testConnection');
+    });
+});
+
+document.getElementById('save-provider-btn').addEventListener('click', () => {
+  // Built-in configure mode: save api_key + model to llm_builtin_overrides
+  if (_configuringBuiltinId) {
+    const apiKey = document.getElementById('provider-api-key').value.trim();
+    const model = document.getElementById('provider-model').value.trim();
+    const id = _configuringBuiltinId;
+    const override = {};
+    if (apiKey) override.api_key = apiKey;
+    if (model) override.model = model;
+    const prev = _builtinOverrides[id];
+    _builtinOverrides[id] = override;
+    const isActive = id === _activeLlmBackend;
+    const modelUpdate = () => {
+      if (!isActive) return Promise.resolve();
+      if (model) {
+        return apiFetchVoid('/api/settings/selected_model', { method: 'PUT', body: { value: model } });
+      }
+      return apiFetchVoid('/api/settings/selected_model', { method: 'DELETE' });
+    };
+    apiFetchVoid('/api/settings/llm_builtin_overrides', { method: 'PUT', body: { value: _builtinOverrides } })
+      .then(() => modelUpdate())
+      .then(() => {
+        if (isActive) _selectedModel = model;
+        renderProviders();
+        resetProviderForm();
+        scrollToProviders();
+        document.getElementById('config-restart-notice').style.display = 'flex';
+        showToast(I18n.t('config.providerConfigured', { name: id }));
+      })
+      .catch((e) => {
+        if (prev !== undefined) { _builtinOverrides[id] = prev; } else { delete _builtinOverrides[id]; }
+        showToast(I18n.t('error.unknown') + ': ' + e.message, 'error');
+      });
+    return;
+  }
+
+  const name = document.getElementById('provider-name').value.trim();
+  const id = document.getElementById('provider-id').value.trim();
+  const adapter = document.getElementById('provider-adapter').value;
+  const baseUrl = document.getElementById('provider-base-url').value.trim();
+  const apiKey = document.getElementById('provider-api-key').value.trim();
+  const model = document.getElementById('provider-model').value.trim();
+
+  if (!id || !name) {
+    showToast(I18n.t('config.providerFieldsRequired'), 'error');
+    return;
+  }
+
+  if (_editingProviderId) {
+    // Update existing provider
+    const idx = _customProviders.findIndex((p) => p.id === _editingProviderId);
+    if (idx === -1) return;
+    const original = _customProviders[idx];
+    _customProviders[idx] = { ...original, name, adapter, base_url: baseUrl, default_model: model || undefined, api_key: apiKey || undefined };
+    const isActive = _editingProviderId === _activeLlmBackend;
+    const modelUpdate = () => {
+      if (!isActive) return Promise.resolve();
+      if (model) {
+        return apiFetchVoid('/api/settings/selected_model', { method: 'PUT', body: { value: model } });
+      }
+      return apiFetchVoid('/api/settings/selected_model', { method: 'DELETE' });
+    };
+    saveCustomProviders().then(() => modelUpdate()).then(() => {
+      if (isActive) _selectedModel = model;
+      renderProviders();
+      resetProviderForm();
+      scrollToProviders();
+      document.getElementById('config-restart-notice').style.display = 'flex';
+      showToast(I18n.t('config.providerUpdated', { name }));
+    }).catch((e) => {
+      _customProviders[idx] = original;
+      showToast(I18n.t('error.unknown') + ': ' + e.message, 'error');
+    });
+    return;
+  }
+
+  if (!/^[a-z0-9_-]+$/.test(id)) {
+    showToast(I18n.t('config.providerIdInvalid'), 'error');
+    return;
+  }
+  const allIds = [...BUILTIN_PROVIDERS.map((p) => p.id), ..._customProviders.map((p) => p.id)];
+  if (allIds.includes(id)) {
+    showToast(I18n.t('config.providerIdTaken', { id }), 'error');
+    return;
+  }
+
+  const newProvider = { id, name, adapter, base_url: baseUrl, default_model: model, api_key: apiKey || undefined, builtin: false };
+  _customProviders.push(newProvider);
+
+  saveCustomProviders().then(() => {
+    renderProviders();
+    resetProviderForm();
+    scrollToProviders();
+    document.getElementById('config-restart-notice').style.display = 'flex';
+    showToast(I18n.t('config.providerAdded', { name }));
+  }).catch((e) => {
+    _customProviders.pop();
+    showToast(I18n.t('error.unknown') + ': ' + e.message, 'error');
+  });
+});
+
+function resetProviderForm() {
+  _editingProviderId = null;
+  _configuringBuiltinId = null;
+  document.getElementById('provider-dialog').style.display = 'none';
+  // Restore all hidden rows and buttons
+  ['provider-name-row', 'provider-id-row', 'provider-adapter-row',
+   'provider-base-url-row', 'provider-api-key-row'].forEach((id) => {
+    document.getElementById(id).style.display = '';
+  });
+  document.getElementById('fetch-models-btn').style.display = '';
+  const titleEl = document.getElementById('provider-form-title');
+  titleEl.setAttribute('data-i18n', 'config.newProvider');
+  titleEl.textContent = I18n.t('config.newProvider');
+  const idField = document.getElementById('provider-id');
+  idField.readOnly = false;
+  idField.style.opacity = '';
+  delete idField.dataset.edited;
+  const baseUrlField = document.getElementById('provider-base-url');
+  baseUrlField.readOnly = false;
+  baseUrlField.style.opacity = '';
+  ['provider-name', 'provider-id', 'provider-base-url', 'provider-api-key', 'provider-model'].forEach((id) => {
+    document.getElementById(id).value = '';
+  });
+  document.getElementById('provider-adapter').selectedIndex = 0;
+  const sel = document.getElementById('provider-model-select');
+  sel.innerHTML = '';
+  sel.style.display = 'none';
+  document.getElementById('test-connection-result').style.display = 'none';
+}
+
+document.getElementById('provider-model-select').addEventListener('change', (e) => {
+  document.getElementById('provider-model').value = e.target.value;
+});
+
+document.getElementById('fetch-models-btn').addEventListener('click', () => {
+  let adapter = document.getElementById('provider-adapter').value;
+  let baseUrl = document.getElementById('provider-base-url').value.trim();
+  const apiKey = document.getElementById('provider-api-key').value.trim();
+
+  // For built-in providers, use the hardcoded base_url and adapter from BUILTIN_PROVIDERS
+  if (_configuringBuiltinId) {
+    const p = BUILTIN_PROVIDERS.find((x) => x.id === _configuringBuiltinId);
+    if (p) {
+      adapter = p.adapter;
+      baseUrl = p.base_url;
+    }
+  }
+
+  if (!baseUrl) {
+    showToast(I18n.t('config.providerBaseUrlRequired'), 'error');
+    return;
+  }
+
+  const btn = document.getElementById('fetch-models-btn');
+  btn.disabled = true;
+  btn.textContent = 'Fetching…';
+
+  apiFetch('/api/llm/list_models', {
+    method: 'POST',
+    body: { adapter, base_url: baseUrl, api_key: apiKey || undefined },
+  })
+    .then((data) => {
+      const select = document.getElementById('provider-model-select');
+      if (data.ok && data.models && data.models.length > 0) {
+        const currentModel = document.getElementById('provider-model').value;
+        select.innerHTML = data.models
+          .map((m) => `<option value="${escapeHtml(m)}"${m === currentModel ? ' selected' : ''}>${escapeHtml(m)}</option>`)
+          .join('');
+        select.style.display = '';
+        btn.style.display = 'none';
+        showToast(I18n.t('config.modelsFetched', { count: data.models.length }));
+      } else {
+        showToast(data.message || I18n.t('config.modelsFetchFailed'), 'error');
+      }
+    })
+    .catch((e) => showToast(e.message, 'error'))
+    .finally(() => {
+      btn.disabled = false;
+      btn.textContent = '↻ Fetch available models';
+    });
+});
+
+// Auto-fill provider ID from name
+document.getElementById('provider-name').addEventListener('input', (e) => {
+  const idField = document.getElementById('provider-id');
+  if (!idField.dataset.edited) {
+    idField.value = e.target.value.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+  }
+});
+
+document.getElementById('provider-id').addEventListener('input', (e) => {
+  e.target.dataset.edited = e.target.value ? '1' : '';
 });

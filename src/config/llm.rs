@@ -60,14 +60,32 @@ impl LlmConfig {
     pub(crate) fn resolve(settings: &Settings) -> Result<Self, ConfigError> {
         let registry = ProviderRegistry::load();
 
-        // Determine backend: env var > settings > default ("nearai")
-        let backend = if let Some(b) = optional_env("LLM_BACKEND")? {
-            b
-        } else if let Some(ref b) = settings.llm_backend {
-            b.clone()
+        // Determine backend: db settings > env var > default ("nearai")
+        let (backend, backend_source) = if let Some(ref b) = settings.llm_backend {
+            (b.clone(), "db:llm_backend")
+        } else if let Some(b) = optional_env("LLM_BACKEND")? {
+            (b, "env:LLM_BACKEND")
         } else {
-            "nearai".to_string()
+            ("nearai".to_string(), "default")
         };
+        tracing::info!(
+            backend = %backend,
+            source = %backend_source,
+            db_llm_backend = ?settings.llm_backend,
+            custom_providers_count = settings.llm_custom_providers.len(),
+            "Resolving LLM backend"
+        );
+        // Warn operators when a DB-persisted value silently overrides LLM_BACKEND.
+        if backend_source == "db:llm_backend"
+            && let Ok(Some(env_val)) = optional_env("LLM_BACKEND")
+        {
+            tracing::warn!(
+                db_value = %backend,
+                env_value = %env_val,
+                "LLM_BACKEND env var is set but DB setting takes priority. \
+                 Unset llm_backend in the DB (via settings UI) to use the env var."
+            );
+        }
 
         // Validate the backend is known
         let backend_lower = backend.to_lowercase();
@@ -80,10 +98,17 @@ impl LlmConfig {
             || backend_lower == "openai-codex"
             || backend_lower == "codex";
 
+        // Check custom providers defined
+        let custom_provider = settings
+            .llm_custom_providers
+            .iter()
+            .find(|p| p.id.to_lowercase() == backend_lower);
+
         if !is_nearai
             && !is_bedrock
             && !is_gemini_oauth
             && !is_openai_codex
+            && custom_provider.is_none()
             && registry.find(&backend_lower).is_none()
         {
             tracing::warn!(
@@ -141,6 +166,8 @@ impl LlmConfig {
         // Resolve registry provider config (for non-NearAI, non-Bedrock, non-Gemini, non-Codex backends)
         let provider = if is_nearai || is_bedrock || is_gemini_oauth || is_openai_codex {
             None
+        } else if let Some(custom) = custom_provider {
+            Some(Self::resolve_custom_provider(custom, settings)?)
         } else {
             Some(Self::resolve_registry_provider(
                 &backend_lower,
@@ -267,6 +294,58 @@ impl LlmConfig {
         })
     }
 
+    /// Resolve a `RegistryProviderConfig` from a user-defined custom provider.
+    fn resolve_custom_provider(
+        custom: &crate::settings::CustomLlmProviderSettings,
+        settings: &Settings,
+    ) -> Result<RegistryProviderConfig, ConfigError> {
+        tracing::info!(
+            id = %custom.id,
+            adapter = %custom.adapter,
+            base_url = ?custom.base_url,
+            "Resolving custom LLM provider"
+        );
+        let protocol = match custom.adapter.as_str() {
+            "anthropic" => ProviderProtocol::Anthropic,
+            "ollama" => ProviderProtocol::Ollama,
+            _ => ProviderProtocol::OpenAiCompletions,
+        };
+
+        let api_key = custom
+            .api_key
+            .as_ref()
+            .filter(|k| !k.is_empty())
+            .map(|k| SecretString::from(k.clone()));
+
+        let base_url = custom.base_url.clone().unwrap_or_default();
+        if base_url.is_empty() {
+            tracing::warn!(id = %custom.id, "Custom provider has no base_url configured — requests will fail");
+        }
+
+        let model = optional_env("LLM_MODEL")?
+            .or_else(|| settings.selected_model.clone())
+            .or_else(|| custom.default_model.clone())
+            .unwrap_or_default();
+        if model.is_empty() {
+            tracing::warn!(id = %custom.id, "Custom provider has no model configured — requests may fail");
+        }
+
+        Ok(RegistryProviderConfig {
+            protocol,
+            provider_id: custom.id.clone(),
+            api_key,
+            base_url,
+            model,
+            extra_headers: Vec::new(),
+            oauth_token: None,
+            is_codex_chatgpt: false,
+            refresh_token: None,
+            auth_path: None,
+            cache_retention: CacheRetention::default(),
+            unsupported_params: Vec::new(),
+        })
+    }
+
     /// Resolve a `RegistryProviderConfig` from the registry and env vars.
     fn resolve_registry_provider(
         backend: &str,
@@ -344,8 +423,14 @@ impl LlmConfig {
             }
             Some(creds.token)
         } else if let Some(env_var) = api_key_env {
-            // Resolve API key from env (including secrets store overlay)
-            optional_env(env_var)?.map(SecretString::from)
+            // Resolve API key: env var (including secrets store overlay) > settings override
+            optional_env(env_var)?.map(SecretString::from).or_else(|| {
+                settings
+                    .llm_builtin_overrides
+                    .get(backend)
+                    .and_then(|o| o.api_key.as_ref())
+                    .map(|k| SecretString::from(k.clone()))
+            })
         } else {
             None
         };
@@ -400,8 +485,16 @@ impl LlmConfig {
             validate_base_url(&base_url, field)?;
         }
 
-        // Resolve model
-        let model = Self::resolve_model(model_env, settings, default_model)?;
+        // Resolve model: env var > selected_model (/model command) > per-provider override > registry default
+        let model = optional_env(model_env)?
+            .or_else(|| settings.selected_model.clone())
+            .or_else(|| {
+                settings
+                    .llm_builtin_overrides
+                    .get(backend)
+                    .and_then(|o| o.model.clone())
+            })
+            .unwrap_or_else(|| default_model.to_string());
 
         // Resolve extra headers
         let extra_headers = if let Some(env_var) = extra_headers_env {
@@ -532,7 +625,7 @@ pub fn default_session_path() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::helpers::lock_env;
+    use crate::config::helpers::{ENV_MUTEX, lock_env};
     use crate::settings::Settings;
     use crate::testing::credentials::*;
 
@@ -1232,6 +1325,81 @@ mod tests {
         }
     }
 
+    // ── Custom provider tests ───────────────────────────────────────
+
+    #[test]
+    fn custom_provider_resolves_when_backend_matches_id() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("LLM_BACKEND");
+            std::env::remove_var("LLM_MODEL");
+        }
+
+        let settings = Settings {
+            llm_backend: Some("myprovider".to_string()),
+            llm_custom_providers: vec![crate::settings::CustomLlmProviderSettings {
+                id: "myprovider".to_string(),
+                name: "My Provider".to_string(),
+                adapter: "open_ai_completions".to_string(),
+                base_url: Some("https://api.example.com/v1".to_string()),
+                default_model: Some("my-model".to_string()),
+                api_key: Some("sk-test".to_string()),
+                builtin: false,
+            }],
+            ..Default::default()
+        };
+
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
+        assert_eq!(cfg.backend, "myprovider");
+        let provider = cfg.provider.expect("provider config should be present");
+        assert_eq!(provider.provider_id, "myprovider");
+        assert_eq!(provider.base_url, "https://api.example.com/v1");
+        assert_eq!(provider.model, "my-model");
+        assert_eq!(
+            provider.protocol,
+            crate::llm::registry::ProviderProtocol::OpenAiCompletions
+        );
+    }
+
+    #[test]
+    fn db_llm_backend_takes_priority_over_env_var() {
+        let _guard = lock_env();
+        // SAFETY: Under ENV_MUTEX. RAII guard removes LLM_BACKEND on drop so
+        // a panicking assertion cannot leak the env var to other tests.
+        struct RemoveOnDrop(&'static str);
+        impl Drop for RemoveOnDrop {
+            fn drop(&mut self) {
+                unsafe { std::env::remove_var(self.0) };
+            }
+        }
+        let _cleanup = RemoveOnDrop("LLM_BACKEND");
+        unsafe {
+            std::env::set_var("LLM_BACKEND", "nearai");
+            std::env::remove_var("LLM_MODEL");
+        }
+
+        let settings = Settings {
+            llm_backend: Some("myprovider".to_string()),
+            llm_custom_providers: vec![crate::settings::CustomLlmProviderSettings {
+                id: "myprovider".to_string(),
+                name: "My Provider".to_string(),
+                adapter: "open_ai_completions".to_string(),
+                base_url: Some("https://api.example.com/v1".to_string()),
+                default_model: Some("my-model".to_string()),
+                api_key: None,
+                builtin: false,
+            }],
+            ..Default::default()
+        };
+
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
+        assert_eq!(
+            cfg.backend, "myprovider",
+            "DB setting should override LLM_BACKEND env var"
+        );
+    }
+
     // ── OpenAI Codex tests ──────────────────────────────────────────
 
     /// Clear all openai-codex-related env vars.
@@ -1242,6 +1410,37 @@ mod tests {
             std::env::remove_var("OPENAI_CODEX_MODEL");
             std::env::remove_var("OPENAI_MODEL");
         }
+    }
+
+    #[test]
+    fn builtin_override_model_used_when_no_selected_model() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("LLM_BACKEND");
+            std::env::remove_var("GROQ_MODEL");
+        }
+
+        let mut overrides = std::collections::HashMap::new();
+        overrides.insert(
+            "groq".to_string(),
+            crate::settings::LlmBuiltinOverride {
+                api_key: None,
+                model: Some("llama-3.1-8b-instant".to_string()),
+            },
+        );
+        let settings = Settings {
+            llm_backend: Some("groq".to_string()),
+            llm_builtin_overrides: overrides,
+            ..Default::default()
+        };
+
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
+        let provider = cfg.provider.expect("provider config should be present");
+        assert_eq!(
+            provider.model, "llama-3.1-8b-instant",
+            "builtin override model should be used when selected_model is unset"
+        );
     }
 
     #[test]
@@ -1261,6 +1460,38 @@ mod tests {
         assert!(
             cfg.provider.is_none(),
             "codex should not use registry provider"
+        );
+    }
+
+    #[test]
+    fn selected_model_takes_priority_over_builtin_override_model() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("LLM_BACKEND");
+            std::env::remove_var("GROQ_MODEL");
+        }
+
+        let mut overrides = std::collections::HashMap::new();
+        overrides.insert(
+            "groq".to_string(),
+            crate::settings::LlmBuiltinOverride {
+                api_key: None,
+                model: Some("llama-3.1-8b-instant".to_string()),
+            },
+        );
+        let settings = Settings {
+            llm_backend: Some("groq".to_string()),
+            selected_model: Some("llama-3.3-70b-versatile".to_string()),
+            llm_builtin_overrides: overrides,
+            ..Default::default()
+        };
+
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
+        let provider = cfg.provider.expect("provider config should be present");
+        assert_eq!(
+            provider.model, "llama-3.3-70b-versatile",
+            "selected_model (/model command) must take priority over builtin override"
         );
     }
 
@@ -1286,6 +1517,43 @@ mod tests {
         unsafe {
             std::env::remove_var("OPENAI_CODEX_MODEL");
         }
+    }
+
+    #[test]
+    fn builtin_override_api_key_used_when_no_env_var() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("LLM_BACKEND");
+            std::env::remove_var("GROQ_API_KEY");
+            std::env::remove_var("GROQ_MODEL");
+        }
+
+        let mut overrides = std::collections::HashMap::new();
+        overrides.insert(
+            "groq".to_string(),
+            crate::settings::LlmBuiltinOverride {
+                api_key: Some("gsk_test_key".to_string()),
+                model: Some("llama-3.3-70b-versatile".to_string()),
+            },
+        );
+        let settings = Settings {
+            llm_backend: Some("groq".to_string()),
+            llm_builtin_overrides: overrides,
+            ..Default::default()
+        };
+
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
+        let provider = cfg.provider.expect("provider config should be present");
+        use secrecy::ExposeSecret as _;
+        let key = provider
+            .api_key
+            .expect("api_key should be set from builtin override");
+        assert_eq!(
+            key.expose_secret(),
+            "gsk_test_key",
+            "builtin override api_key should be used when env var is absent"
+        );
     }
 
     #[test]

@@ -1,13 +1,57 @@
 //! User settings persistence.
 //!
-//! Stores user preferences in ~/.ironclaw/settings.json.
-//! Settings are loaded with env var > settings.json > default priority.
+//! Stores user preferences in `~/.ironclaw` (JSON/TOML) and, for some values,
+//! in the database. At runtime, settings are resolved using the following
+//! precedence: database > environment variables > on-disk config > built-in
+//! defaults. In particular, LLM backend and related settings prefer DB values
+//! over environment variables.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
 use crate::bootstrap::ironclaw_base_dir;
+
+/// A custom LLM provider defined by the user through the web UI.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CustomLlmProviderSettings {
+    /// Unique identifier (used as `llm_backend` value).
+    pub id: String,
+    /// Display name.
+    pub name: String,
+    /// Adapter protocol: "open_ai_completions", "anthropic", "ollama".
+    pub adapter: String,
+    /// Base URL for the API endpoint.
+    #[serde(default)]
+    pub base_url: Option<String>,
+    /// Default model identifier.
+    #[serde(default)]
+    pub default_model: Option<String>,
+    /// Optional API key stored inline.
+    #[serde(default)]
+    pub api_key: Option<String>,
+    /// Whether this is a built-in provider (should always be false for custom).
+    #[serde(default)]
+    pub builtin: bool,
+}
+
+/// Per-provider overrides for built-in LLM providers (API key and/or model).
+///
+/// Stored as `llm_builtin_overrides` in the settings store, keyed by provider ID
+/// (e.g. `"openai"`, `"gemini"`). Resolved at startup during `LlmConfig::resolve()`.
+///
+/// Note: Environment variables and the global `selected_model` (if set) take
+/// precedence over these per-provider overrides.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LlmBuiltinOverride {
+    /// API key override used when no API key is provided via environment variables.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+    /// Default model override used when no global `selected_model` is configured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+}
 
 /// User settings persisted to disk.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -58,6 +102,14 @@ pub struct Settings {
     /// LLM backend: "nearai", "anthropic", "openai", "github_copilot", "ollama", "openai_compatible", "tinfoil", "bedrock".
     #[serde(default)]
     pub llm_backend: Option<String>,
+
+    /// Custom LLM providers defined by the user through the web UI.
+    #[serde(default)]
+    pub llm_custom_providers: Vec<CustomLlmProviderSettings>,
+
+    /// Per-provider overrides for built-in providers (API key and/or model).
+    #[serde(default)]
+    pub llm_builtin_overrides: HashMap<String, LlmBuiltinOverride>,
 
     /// Ollama base URL (when llm_backend = "ollama").
     #[serde(default)]

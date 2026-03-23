@@ -68,6 +68,13 @@ pub async fn settings_set_handler(
         .store
         .as_ref()
         .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+
+    // Guard: cannot remove a custom provider that is currently active.
+    if key == "llm_custom_providers" {
+        guard_active_provider_not_removed(store, &state.user_id, &body.value).await?;
+        validate_custom_providers_adapters(&body.value)?;
+    }
+
     store
         .set_setting(&state.user_id, &key, &body.value)
         .await
@@ -79,6 +86,79 @@ pub async fn settings_set_handler(
     Ok(StatusCode::NO_CONTENT)
 }
 
+const VALID_ADAPTERS: &[&str] = &["open_ai_completions", "anthropic", "ollama"];
+
+/// Returns `Err(422)` if any provider in the incoming list has an unrecognised adapter.
+fn validate_custom_providers_adapters(value: &serde_json::Value) -> Result<(), StatusCode> {
+    let providers = match value.as_array() {
+        Some(arr) => arr,
+        None => return Ok(()),
+    };
+    for p in providers {
+        if let Some(adapter) = p.get("adapter").and_then(|v| v.as_str())
+            && !VALID_ADAPTERS.contains(&adapter)
+        {
+            tracing::warn!(adapter = %adapter, "Rejected unknown LLM adapter");
+            return Err(StatusCode::UNPROCESSABLE_ENTITY);
+        }
+    }
+    Ok(())
+}
+
+/// Returns `Err(409)` if the active `llm_backend` is a custom provider that
+/// would be removed by the incoming update to `llm_custom_providers`.
+async fn guard_active_provider_not_removed(
+    store: &Arc<dyn crate::db::Database>,
+    user_id: &str,
+    new_value: &serde_json::Value,
+) -> Result<(), StatusCode> {
+    // Get the currently active backend.
+    let active_backend = match store.get_setting(user_id, "llm_backend").await {
+        Ok(Some(v)) => match v.as_str() {
+            Some(s) if !s.is_empty() => s.to_string(),
+            _ => return Ok(()),
+        },
+        _ => return Ok(()),
+    };
+
+    // Parse the incoming provider list.
+    let new_providers: Vec<serde_json::Value> = match new_value.as_array() {
+        Some(arr) => arr.clone(),
+        None => return Ok(()),
+    };
+
+    // Check whether the active backend exists in the OLD custom providers list.
+    let old_providers_value = match store.get_setting(user_id, "llm_custom_providers").await {
+        Ok(Some(v)) => v,
+        _ => return Ok(()),
+    };
+    let old_providers: Vec<serde_json::Value> = match old_providers_value.as_array() {
+        Some(arr) => arr.clone(),
+        None => return Ok(()),
+    };
+
+    let active_was_custom = old_providers
+        .iter()
+        .any(|p| p.get("id").and_then(|v| v.as_str()) == Some(&active_backend));
+    if !active_was_custom {
+        return Ok(());
+    }
+
+    // Reject if the active provider is absent from the new list.
+    let still_present = new_providers
+        .iter()
+        .any(|p| p.get("id").and_then(|v| v.as_str()) == Some(&active_backend));
+    if !still_present {
+        tracing::warn!(
+            active_backend = %active_backend,
+            "Rejected attempt to delete the active custom LLM provider"
+        );
+        return Err(StatusCode::CONFLICT);
+    }
+
+    Ok(())
+}
+
 pub async fn settings_delete_handler(
     State(state): State<Arc<GatewayState>>,
     Path(key): Path<String>,
@@ -87,6 +167,14 @@ pub async fn settings_delete_handler(
         .store
         .as_ref()
         .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+
+    // Guard: deleting llm_custom_providers is equivalent to setting it to [].
+    // Reject if the active backend is a custom provider that would be removed.
+    if key == "llm_custom_providers" {
+        guard_active_provider_not_removed(store, &state.user_id, &serde_json::Value::Array(vec![]))
+            .await?;
+    }
+
     store
         .delete_setting(&state.user_id, &key)
         .await
@@ -105,10 +193,34 @@ pub async fn settings_export_handler(
         .store
         .as_ref()
         .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
-    let settings = store.get_all_settings(&state.user_id).await.map_err(|e| {
+    let mut settings = store.get_all_settings(&state.user_id).await.map_err(|e| {
         tracing::error!("Failed to export settings: {}", e);
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
+
+    // Redact API keys — never expose secrets over the export endpoint.
+    if let Some(val) = settings.get_mut("llm_custom_providers")
+        && let Some(providers) = val.as_array_mut()
+    {
+        for p in providers.iter_mut() {
+            if let Some(obj) = p.as_object_mut()
+                && obj.contains_key("api_key")
+            {
+                obj.insert("api_key".to_string(), serde_json::Value::Null);
+            }
+        }
+    }
+    if let Some(val) = settings.get_mut("llm_builtin_overrides")
+        && let Some(obj) = val.as_object_mut()
+    {
+        for override_val in obj.values_mut() {
+            if let Some(provider_obj) = override_val.as_object_mut()
+                && provider_obj.contains_key("api_key")
+            {
+                provider_obj.insert("api_key".to_string(), serde_json::Value::Null);
+            }
+        }
+    }
 
     Ok(Json(SettingsExportResponse { settings }))
 }
