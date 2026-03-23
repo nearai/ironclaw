@@ -1010,8 +1010,13 @@ impl Agent {
                 thread_id = %external_thread_id,
                 "Hydrating thread from DB"
             );
-            if let Some(rejection) = self.maybe_hydrate_thread(message, external_thread_id).await {
-                return Ok(Some(format!("Error: {}", rejection)));
+            match self.maybe_hydrate_thread(message, external_thread_id).await {
+                Err(rejection) => {
+                    return Ok(Some(format!("Error: {}", rejection)));
+                }
+                Ok(_) => {
+                    // Ready, Skipped, or NotFound — all proceed to resolve_thread
+                }
             }
         }
 
