@@ -954,7 +954,10 @@ impl Agent {
         approved: bool,
         always: bool,
     ) -> Result<SubmissionResult, Error> {
-        // Get pending approval for this thread
+        // Get pending approval for this thread.
+        // The take-verify sequence is atomic under a single lock acquisition
+        // to prevent a TOCTOU race where a concurrent operation could modify
+        // or delete the thread between take and restore (#1486).
         let pending = {
             let mut sess = session.lock().await;
             let thread = sess
@@ -972,33 +975,31 @@ impl Agent {
                 return Ok(SubmissionResult::ok_with_message(""));
             }
 
-            thread.take_pending_approval()
-        };
+            let taken = match thread.take_pending_approval() {
+                Some(p) => p,
+                None => {
+                    tracing::debug!(
+                        %thread_id,
+                        "Ignoring stale approval: no pending approval found"
+                    );
+                    return Ok(SubmissionResult::ok_with_message(""));
+                }
+            };
 
-        let pending = match pending {
-            Some(p) => p,
-            None => {
-                tracing::debug!(
-                    %thread_id,
-                    "Ignoring stale approval: no pending approval found"
-                );
-                return Ok(SubmissionResult::ok_with_message(""));
+            // Verify request ID while still holding the lock — atomic with take
+            if let Some(req_id) = request_id
+                && req_id != taken.request_id
+            {
+                // Restore atomically under same lock
+                thread.await_approval(taken);
+                return Ok(SubmissionResult::error(
+                    "Request ID mismatch. Use the correct request ID.",
+                ));
             }
-        };
 
-        // Verify request ID if provided
-        if let Some(req_id) = request_id
-            && req_id != pending.request_id
-        {
-            // Put it back and return error
-            let mut sess = session.lock().await;
-            if let Some(thread) = sess.threads.get_mut(&thread_id) {
-                thread.await_approval(pending);
-            }
-            return Ok(SubmissionResult::error(
-                "Request ID mismatch. Use the correct request ID.",
-            ));
-        }
+            taken
+            // Lock dropped here — pending approval validated
+        };
 
         if approved {
             // If always, add to auto-approved set
@@ -2202,6 +2203,47 @@ mod tests {
         assert_ne!(t.state, ThreadState::Processing);
         // Verify nothing was queued — the fall-through path doesn't touch the queue.
         assert!(t.pending_messages.is_empty());
+    }
+
+    #[test]
+    fn test_approval_request_id_mismatch_restores_pending() {
+        // Regression test for #1486: after a request_id mismatch, the pending
+        // approval must still be intact (take + verify + restore is atomic).
+        use crate::agent::session::{PendingApproval, Thread, ThreadState};
+        use uuid::Uuid;
+
+        let session_id = Uuid::new_v4();
+        let thread_id = Uuid::new_v4();
+        let mut thread = Thread::with_id(thread_id, session_id);
+
+        let correct_request_id = Uuid::new_v4();
+        let pending = PendingApproval {
+            request_id: correct_request_id,
+            tool_name: "shell".to_string(),
+            parameters: serde_json::json!({}),
+            display_parameters: serde_json::json!({}),
+            description: "test".to_string(),
+            tool_call_id: "call_0".to_string(),
+            context_messages: vec![],
+            deferred_tool_calls: vec![],
+            user_timezone: None,
+            allow_always: true,
+        };
+        thread.await_approval(pending);
+        assert_eq!(thread.state, ThreadState::AwaitingApproval);
+
+        // Simulate: take, verify mismatch, restore -- all must be atomic
+        let taken = thread.take_pending_approval().unwrap();
+        assert_eq!(taken.request_id, correct_request_id);
+        // On mismatch, restore
+        thread.await_approval(taken);
+        // Must still be in AwaitingApproval with pending intact
+        assert_eq!(thread.state, ThreadState::AwaitingApproval);
+        assert!(thread.pending_approval.is_some());
+        assert_eq!(
+            thread.pending_approval.as_ref().unwrap().request_id,
+            correct_request_id
+        );
     }
 
     // Helper function to extract the approval message without needing a full Agent instance
