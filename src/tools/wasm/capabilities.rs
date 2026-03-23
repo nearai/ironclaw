@@ -34,6 +34,8 @@ pub struct Capabilities {
     pub secrets: Option<SecretsCapability>,
     /// Webhook authentication and signature verification.
     pub webhook: Option<WebhookCapability>,
+    /// Arbitrary websocket configuration preserved from capabilities JSON.
+    pub websocket: Option<serde_json::Value>,
 }
 
 impl Capabilities {
@@ -341,6 +343,7 @@ mod tests {
         assert!(caps.tool_invoke.is_none());
         assert!(caps.secrets.is_none());
         assert!(caps.webhook.is_none());
+        assert!(caps.websocket.is_none());
     }
 
     #[test]

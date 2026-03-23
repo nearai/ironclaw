@@ -2004,27 +2004,11 @@ async fn extensions_list_handler(
     let extensions = installed
         .into_iter()
         .map(|ext| {
-            let activation_status = if ext.kind == crate::extensions::ExtensionKind::WasmChannel {
-                let has_paired = pairing_store
-                    .read_allow_from(&ext.name)
-                    .map(|list| !list.is_empty())
-                    .unwrap_or(false);
-                crate::channels::web::types::classify_wasm_channel_activation(
-                    &ext,
-                    has_paired,
-                    owner_bound_channels.contains(&ext.name),
-                )
-            } else if ext.kind == crate::extensions::ExtensionKind::ChannelRelay {
-                Some(if ext.active {
-                    ExtensionActivationStatus::Active
-                } else if ext.authenticated {
-                    ExtensionActivationStatus::Configured
-                } else {
-                    ExtensionActivationStatus::Installed
-                })
-            } else {
-                None
-            };
+            let activation_status = crate::channels::web::handlers::extensions::derive_activation_status(
+                &ext,
+                &pairing_store,
+                owner_bound_channels.contains(&ext.name),
+            );
             ExtensionInfo {
                 name: ext.name,
                 display_name: ext.display_name,
