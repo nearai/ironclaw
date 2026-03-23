@@ -1149,9 +1149,10 @@ impl Agent {
                 .await;
             let mut sess = session.lock().await;
             if let Some(thread) = sess.threads.get(&target_thread_id) {
-                let authorized = thread.source_channel.as_ref().is_none_or(|src| {
-                    src == &message.channel || message.channel == "web"
-                });
+                let authorized = thread
+                    .source_channel
+                    .as_ref()
+                    .is_none_or(|src| src == &message.channel || message.channel == "web");
                 if !authorized {
                     tracing::warn!(
                         %target_thread_id,
@@ -1160,7 +1161,9 @@ impl Agent {
                         "Blocked cross-channel approval attempt"
                     );
                     drop(sess);
-                    return Ok(Some("Error: approval not authorized for this channel".into()));
+                    return Ok(Some(
+                        "Error: approval not authorized for this channel".into(),
+                    ));
                 }
                 sess.active_thread = Some(target_thread_id);
                 sess.last_active_at = chrono::Utc::now();
