@@ -65,6 +65,9 @@ pub enum SetupError {
 
     #[error("User cancelled")]
     Cancelled,
+
+    #[error("Sandbox error: {0}")]
+    Sandbox(#[from] crate::sandbox::error::SandboxError),
 }
 
 impl From<crate::setup::channels::ChannelSetupError> for SetupError {
@@ -2859,6 +2862,9 @@ impl SetupWizard {
             crate::sandbox::detect::DockerStatus::Available => {
                 self.settings.sandbox.enabled = true;
                 print_success("Docker is installed and running. Sandbox enabled.");
+
+                // Check if the worker image exists
+                self.ensure_worker_image().await?;
             }
             crate::sandbox::detect::DockerStatus::NotInstalled
             | crate::sandbox::detect::DockerStatus::NotRunning => {
@@ -2888,6 +2894,8 @@ impl SetupWizard {
                         } else {
                             "Docker is now running. Sandbox enabled."
                         });
+                        // Check if the worker image exists
+                        self.ensure_worker_image().await?;
                     } else {
                         self.settings.sandbox.enabled = false;
                         print_info(if not_installed {
@@ -2968,6 +2976,81 @@ impl SetupWizard {
             } else {
                 self.settings.sandbox.claude_code_enabled = false;
                 print_info("Claude Code disabled. Enable with CLAUDE_CODE_ENABLED=true later.");
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Ensure the sandbox worker Docker image exists, building it if necessary.
+    async fn ensure_worker_image(&mut self) -> Result<(), SetupError> {
+        use crate::sandbox::container::{ContainerRunner, connect_docker};
+
+        let image_name = self.settings.sandbox.image.clone();
+        let docker = connect_docker()
+            .await
+            .map_err(|e| SetupError::Auth(e.to_string()))?;
+        let runner = ContainerRunner::new(docker, image_name.clone(), 0);
+
+        if runner.image_exists().await {
+            print_success(&format!("Worker image '{}' found.", image_name));
+            return Ok(());
+        }
+
+        println!();
+        print_info(&format!("Worker image '{}' not found.", image_name));
+        print_info("This image is required for sandboxed job execution.");
+        println!();
+
+        // Look for Dockerfile.worker in common locations
+        let dockerfile_candidates = [
+            std::path::PathBuf::from("Dockerfile.worker"),
+            std::path::PathBuf::from("docker/sandbox.Dockerfile"),
+        ];
+
+        let dockerfile_path = dockerfile_candidates.iter().find(|p| p.exists()).cloned();
+
+        match dockerfile_path {
+            Some(path) => {
+                print_info(&format!("Found Dockerfile at: {}", path.display()));
+                if confirm(
+                    "Build the worker image now? (this may take a few minutes)",
+                    true,
+                )
+                .map_err(SetupError::Io)?
+                {
+                    print_info("Building worker image... This may take a few minutes.");
+                    match runner.build_image(&path).await {
+                        Ok(()) => {
+                            print_success(&format!("Successfully built image '{}'.", image_name));
+                        }
+                        Err(e) => {
+                            print_error(&format!("Failed to build image: {}", e));
+                            print_info("You can build it manually later with:");
+                            print_info(&format!(
+                                "  docker build -f {} -t {} .",
+                                path.display(),
+                                image_name
+                            ));
+                        }
+                    }
+                } else {
+                    print_info("Skipped image build. Build it manually with:");
+                    print_info(&format!(
+                        "  docker build -f {} -t {} .",
+                        path.display(),
+                        image_name
+                    ));
+                }
+            }
+            None => {
+                print_info("No Dockerfile.worker found in current directory.");
+                print_info("To use Docker sandbox, build the worker image manually:");
+                print_info(&format!(
+                    "  docker build -f Dockerfile.worker -t {} .",
+                    image_name
+                ));
+                print_info("or clone the IronClaw repository and build from source.");
             }
         }
 
