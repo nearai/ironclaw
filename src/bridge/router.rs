@@ -222,6 +222,15 @@ pub async fn handle_with_engine(
         .record_thread_outcome(conv_id, thread_id, &outcome)
         .await;
 
+    // Trace recording + retrospective analysis
+    if ironclaw_engine::executor::trace::is_trace_enabled()
+        && let Ok(Some(thread)) = state.store.load_thread(thread_id).await
+    {
+        let trace = ironclaw_engine::executor::trace::build_trace(&thread);
+        ironclaw_engine::executor::trace::log_trace_summary(&trace);
+        ironclaw_engine::executor::trace::write_trace(&trace);
+    }
+
     // Convert outcome to response
     match outcome {
         ThreadOutcome::Completed { response } => {

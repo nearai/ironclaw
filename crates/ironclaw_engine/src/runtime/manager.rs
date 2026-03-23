@@ -155,10 +155,13 @@ impl ThreadManager {
             .with_event_tx(self.event_tx.clone());
 
         // Spawn background task
+        let store_for_task = Arc::clone(&self.store);
         let handle = tokio::spawn(async move {
             let mut exec = exec_loop;
             let result = exec.run().await;
             debug!(thread_id = %thread_id, "thread execution finished");
+            // Save final thread state to store (for trace recording)
+            let _ = store_for_task.save_thread(&exec.thread).await;
             result
         });
 

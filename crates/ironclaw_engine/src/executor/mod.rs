@@ -12,5 +12,6 @@ pub mod loop_engine;
 pub mod prompt;
 pub mod scripting;
 pub mod structured;
+pub mod trace;
 
 pub use loop_engine::ExecutionLoop;
