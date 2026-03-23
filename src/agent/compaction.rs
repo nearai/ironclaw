@@ -144,19 +144,12 @@ impl ContextCompactor {
     ) -> CompactionPartial {
         let turns_before = thread.turns.len();
         let turns_to_remove = turns_before.saturating_sub(keep_recent);
-
-        if let Some(ws) = workspace {
+        let memories_written = if let Some(ws) = workspace {
             let old_turns = &thread.turns[..turns_to_remove];
-            let memories_written = self.extract_structured_memories(ws, old_turns).await;
-            thread.truncate_turns(keep_recent);
-            let turns_removed = turns_before - thread.turns.len();
-            return CompactionPartial {
-                turns_removed,
-                summary_written: false,
-                memories_written,
-                summary: None,
-            };
-        }
+            self.extract_structured_memories(ws, old_turns).await
+        } else {
+            0
+        };
 
         thread.truncate_turns(keep_recent);
         let turns_removed = turns_before - thread.turns.len();
@@ -164,7 +157,7 @@ impl ContextCompactor {
         CompactionPartial {
             turns_removed,
             summary_written: false,
-            memories_written: 0,
+            memories_written,
             summary: None,
         }
     }
@@ -359,9 +352,15 @@ Rules:
             return 0;
         };
 
-        let Ok(parsed) = serde_json::from_str::<MemoryExtraction>(json) else {
-            tracing::warn!("Structured memory extraction failed: invalid JSON");
-            return 0;
+        let parsed = match serde_json::from_str::<MemoryExtraction>(json) {
+            Ok(parsed) => parsed,
+            Err(err) => {
+                tracing::warn!(
+                    "Structured memory extraction failed to parse JSON from LLM: {}",
+                    err
+                );
+                return 0;
+            }
         };
 
         let mut seen = HashSet::new();
@@ -424,10 +423,16 @@ Rules:
         };
 
         memory_doc.content.lines().any(|line| {
-            let normalized_line = normalize_memory_text(line);
-            normalized_line.starts_with("- **")
-                && (normalized_line.contains(&normalized_query)
-                    || normalized_query.contains(&normalized_line))
+            let normalized_existing = line
+                .trim()
+                .starts_with("- **")
+                .then(|| line.split_once("**: ").map(|(_, content)| content))
+                .flatten()
+                .map(normalize_memory_text);
+
+            normalized_existing.is_some_and(|existing| {
+                existing.contains(&normalized_query) || normalized_query.contains(&existing)
+            })
         })
     }
 }
@@ -571,32 +576,32 @@ mod tests {
     }
 
     #[cfg(feature = "libsql")]
-    async fn make_unmigrated_workspace() -> crate::workspace::Workspace {
+    async fn make_unmigrated_workspace() -> anyhow::Result<crate::workspace::Workspace> {
         use crate::db::Database;
         use crate::db::libsql::LibSqlBackend;
 
         // Intentionally skip migrations so workspace append operations fail.
-        let backend = LibSqlBackend::new_memory()
-            .await
-            .expect("should create in-memory libsql backend");
+        let backend = LibSqlBackend::new_memory().await?;
         let db: Arc<dyn Database> = Arc::new(backend);
-        crate::workspace::Workspace::new_with_db("compaction-test", db)
+        Ok(crate::workspace::Workspace::new_with_db(
+            "compaction-test",
+            db,
+        ))
     }
 
     #[cfg(feature = "libsql")]
-    async fn make_test_workspace() -> (crate::workspace::Workspace, tempfile::TempDir) {
+    async fn make_test_workspace()
+    -> anyhow::Result<(crate::workspace::Workspace, tempfile::TempDir)> {
         use crate::db::Database;
         use crate::db::libsql::LibSqlBackend;
 
-        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let temp_dir = tempfile::tempdir()?;
         let db_path = temp_dir.path().join("compaction_memory_test.db");
-        let backend = LibSqlBackend::new_local(&db_path)
-            .await
-            .expect("LibSqlBackend::new_local");
-        backend.run_migrations().await.expect("run_migrations");
+        let backend = LibSqlBackend::new_local(&db_path).await?;
+        backend.run_migrations().await?;
         let db: Arc<dyn Database> = Arc::new(backend);
         let ws = crate::workspace::Workspace::new_with_db("compaction-memory-test", db);
-        (ws, temp_dir)
+        Ok((ws, temp_dir))
     }
 
     // ------------------------------------------------------------------
@@ -604,7 +609,7 @@ mod tests {
     // ------------------------------------------------------------------
 
     #[tokio::test]
-    async fn test_compact_truncate_keeps_last_n() {
+    async fn test_compact_truncate_keeps_last_n() -> anyhow::Result<()> {
         let llm = Arc::new(StubLlm::new("unused"));
         let compactor = make_compactor(llm);
         let mut thread = make_thread(10);
@@ -616,8 +621,7 @@ mod tests {
                 CompactionStrategy::Truncate { keep_recent: 3 },
                 None,
             )
-            .await
-            .expect("compact should succeed");
+            .await?;
 
         // Only 3 turns remain
         assert_eq!(thread.turns.len(), 3);
@@ -641,6 +645,8 @@ mod tests {
         assert!(result.tokens_before > 0);
         assert!(result.tokens_after > 0);
         assert!(result.tokens_before > result.tokens_after);
+
+        Ok(())
     }
 
     // ------------------------------------------------------------------
@@ -648,7 +654,7 @@ mod tests {
     // ------------------------------------------------------------------
 
     #[tokio::test]
-    async fn test_compact_truncate_with_fewer_turns_than_limit() {
+    async fn test_compact_truncate_with_fewer_turns_than_limit() -> anyhow::Result<()> {
         let llm = Arc::new(StubLlm::new("unused"));
         let compactor = make_compactor(llm);
         let mut thread = make_thread(2);
@@ -662,8 +668,7 @@ mod tests {
                 CompactionStrategy::Truncate { keep_recent: 5 },
                 None,
             )
-            .await
-            .expect("compact should succeed");
+            .await?;
 
         // All turns preserved
         assert_eq!(thread.turns.len(), 2);
@@ -674,6 +679,8 @@ mod tests {
         assert_eq!(result.turns_removed, 0);
         assert!(!result.summary_written);
         assert!(result.summary.is_none());
+
+        Ok(())
     }
 
     // ------------------------------------------------------------------
@@ -681,7 +688,7 @@ mod tests {
     // ------------------------------------------------------------------
 
     #[tokio::test]
-    async fn test_compact_truncate_empty_turns() {
+    async fn test_compact_truncate_empty_turns() -> anyhow::Result<()> {
         let llm = Arc::new(StubLlm::new("unused"));
         let compactor = make_compactor(llm);
         let mut thread = Thread::new(Uuid::new_v4());
@@ -693,13 +700,14 @@ mod tests {
                 CompactionStrategy::Truncate { keep_recent: 3 },
                 None,
             )
-            .await
-            .expect("compact should succeed on empty turns");
+            .await?;
 
         assert!(thread.turns.is_empty());
         assert_eq!(result.turns_removed, 0);
         assert_eq!(result.tokens_before, 0);
         assert_eq!(result.tokens_after, 0);
+
+        Ok(())
     }
 
     // ------------------------------------------------------------------
@@ -707,7 +715,7 @@ mod tests {
     // ------------------------------------------------------------------
 
     #[tokio::test]
-    async fn test_compact_with_summary_produces_summary_turn() {
+    async fn test_compact_with_summary_produces_summary_turn() -> anyhow::Result<()> {
         let canned_summary =
             "- User greeted the agent\n- Agent responded warmly\n- Five exchanges completed";
         let llm = Arc::new(StubLlm::new(canned_summary));
@@ -720,8 +728,7 @@ mod tests {
                 CompactionStrategy::Summarize { keep_recent: 2 },
                 None,
             )
-            .await
-            .expect("compact with summary should succeed");
+            .await?;
 
         // Should keep only 2 recent turns
         assert_eq!(thread.turns.len(), 2);
@@ -733,7 +740,9 @@ mod tests {
         // Result should report the summary
         assert_eq!(result.turns_removed, 3);
         assert!(result.summary.is_some());
-        let summary = result.summary.unwrap();
+        let summary = result
+            .summary
+            .ok_or_else(|| anyhow::anyhow!("missing summary"))?;
         assert!(summary.contains("User greeted the agent"));
         assert!(summary.contains("Five exchanges completed"));
 
@@ -742,6 +751,8 @@ mod tests {
 
         // StubLlm should have been called exactly once for the summary
         assert_eq!(llm.calls(), 1);
+
+        Ok(())
     }
 
     // ------------------------------------------------------------------
@@ -749,7 +760,7 @@ mod tests {
     // ------------------------------------------------------------------
 
     #[tokio::test]
-    async fn test_compact_with_summary_llm_failure() {
+    async fn test_compact_with_summary_llm_failure() -> anyhow::Result<()> {
         let llm = Arc::new(StubLlm::failing("broken-llm"));
         let compactor = make_compactor(llm.clone());
         let mut thread = make_thread(8);
@@ -769,6 +780,8 @@ mod tests {
         // The thread should NOT have been modified (turns not truncated
         // on failure, since the error occurs before truncation)
         assert_eq!(thread.turns.len(), original_len);
+
+        Ok(())
     }
 
     // ------------------------------------------------------------------
@@ -776,7 +789,7 @@ mod tests {
     // ------------------------------------------------------------------
 
     #[tokio::test]
-    async fn test_compact_with_summary_fewer_turns_than_keep() {
+    async fn test_compact_with_summary_fewer_turns_than_keep() -> anyhow::Result<()> {
         let llm = Arc::new(StubLlm::new("should not be called"));
         let compactor = make_compactor(llm.clone());
         let mut thread = make_thread(3);
@@ -787,25 +800,27 @@ mod tests {
                 CompactionStrategy::Summarize { keep_recent: 5 },
                 None,
             )
-            .await
-            .expect("compact should succeed");
+            .await?;
 
         // No turns removed, LLM never called
         assert_eq!(thread.turns.len(), 3);
         assert_eq!(result.turns_removed, 0);
         assert!(result.summary.is_none());
         assert_eq!(llm.calls(), 0);
+
+        Ok(())
     }
 
     #[cfg(feature = "libsql")]
     #[tokio::test]
-    async fn test_compact_with_summary_preserves_turns_when_workspace_write_fails() {
+    async fn test_compact_with_summary_preserves_turns_when_workspace_write_fails()
+    -> anyhow::Result<()> {
         let llm = Arc::new(StubLlm::new("summary"));
         let compactor = make_compactor(llm.clone());
         let mut thread = make_thread(8);
         let original_inputs: Vec<String> =
             thread.turns.iter().map(|t| t.user_input.clone()).collect();
-        let workspace = make_unmigrated_workspace().await;
+        let workspace = make_unmigrated_workspace().await?;
 
         let result = compactor
             .compact(
@@ -813,8 +828,7 @@ mod tests {
                 CompactionStrategy::Summarize { keep_recent: 3 },
                 Some(&workspace),
             )
-            .await
-            .expect("compact should succeed even when workspace write fails");
+            .await?;
 
         // On archival failure, no turns should be removed.
         assert_eq!(thread.turns.len(), 8);
@@ -832,6 +846,8 @@ mod tests {
         assert_eq!(result.turns_removed, 0);
         assert!(!result.summary_written);
         assert_eq!(llm.calls(), 1);
+
+        Ok(())
     }
 
     // ------------------------------------------------------------------
@@ -839,15 +855,14 @@ mod tests {
     // ------------------------------------------------------------------
 
     #[tokio::test]
-    async fn test_compact_to_workspace_without_workspace_falls_back() {
+    async fn test_compact_to_workspace_without_workspace_falls_back() -> anyhow::Result<()> {
         let llm = Arc::new(StubLlm::new("unused"));
         let compactor = make_compactor(llm);
         let mut thread = make_thread(20);
 
         let result = compactor
             .compact(&mut thread, CompactionStrategy::MoveToWorkspace, None)
-            .await
-            .expect("compact should succeed");
+            .await?;
 
         // Without a workspace, compact_to_workspace falls back to truncation
         // keeping 5 turns (the hardcoded fallback in the code)
@@ -857,6 +872,8 @@ mod tests {
         // The remaining turns should be the last 5
         assert_eq!(thread.turns[0].user_input, "msg-15");
         assert_eq!(thread.turns[4].user_input, "msg-19");
+
+        Ok(())
     }
 
     // ------------------------------------------------------------------
@@ -864,7 +881,7 @@ mod tests {
     // ------------------------------------------------------------------
 
     #[tokio::test]
-    async fn test_compact_to_workspace_fewer_turns_noop() {
+    async fn test_compact_to_workspace_fewer_turns_noop() -> anyhow::Result<()> {
         let llm = Arc::new(StubLlm::new("unused"));
         let compactor = make_compactor(llm);
         // MoveToWorkspace keeps 10 turns when workspace is available.
@@ -874,23 +891,25 @@ mod tests {
 
         let result = compactor
             .compact(&mut thread, CompactionStrategy::MoveToWorkspace, None)
-            .await
-            .expect("compact should succeed");
+            .await?;
 
         // 4 turns < 5 (fallback keep_recent), so no truncation
         assert_eq!(thread.turns.len(), 4);
         assert_eq!(result.turns_removed, 0);
+
+        Ok(())
     }
 
     #[cfg(feature = "libsql")]
     #[tokio::test]
-    async fn test_compact_to_workspace_preserves_turns_when_workspace_write_fails() {
+    async fn test_compact_to_workspace_preserves_turns_when_workspace_write_fails()
+    -> anyhow::Result<()> {
         let llm = Arc::new(StubLlm::new("unused"));
         let compactor = make_compactor(llm.clone());
         let mut thread = make_thread(20);
         let original_inputs: Vec<String> =
             thread.turns.iter().map(|t| t.user_input.clone()).collect();
-        let workspace = make_unmigrated_workspace().await;
+        let workspace = make_unmigrated_workspace().await?;
 
         let result = compactor
             .compact(
@@ -898,8 +917,7 @@ mod tests {
                 CompactionStrategy::MoveToWorkspace,
                 Some(&workspace),
             )
-            .await
-            .expect("compact should succeed even when workspace write fails");
+            .await?;
 
         // On archival failure, no turns should be removed.
         assert_eq!(thread.turns.len(), 20);
@@ -917,11 +935,13 @@ mod tests {
         assert_eq!(result.turns_removed, 0);
         assert!(!result.summary_written);
         assert_eq!(llm.calls(), 0);
+
+        Ok(())
     }
 
     #[cfg(feature = "libsql")]
     #[tokio::test]
-    async fn test_move_to_workspace_extracts_structured_memories() {
+    async fn test_move_to_workspace_extracts_structured_memories() -> anyhow::Result<()> {
         let memory_json = r#"{
             "memories": [
                 {
@@ -935,7 +955,7 @@ mod tests {
         let llm = Arc::new(StubLlm::new(memory_json));
         let compactor = make_compactor(llm.clone());
         let mut thread = make_thread(12);
-        let (workspace, _tmp) = make_test_workspace().await;
+        let (workspace, _tmp) = make_test_workspace().await?;
 
         let result = compactor
             .compact(
@@ -943,23 +963,24 @@ mod tests {
                 CompactionStrategy::MoveToWorkspace,
                 Some(&workspace),
             )
-            .await
-            .expect("compact should succeed");
+            .await?;
 
         assert_eq!(result.turns_removed, 2);
         assert_eq!(result.memories_written, 1);
         assert_eq!(llm.calls(), 1);
         assert_eq!(thread.turns.len(), 10);
 
-        let memory_doc = workspace.read(paths::MEMORY).await.expect("read MEMORY.md");
+        let memory_doc = workspace.read(paths::MEMORY).await?;
         assert!(memory_doc.content.contains("Structured Memory Extraction"));
         assert!(memory_doc.content.contains("User prefers concise answers."));
         assert!(memory_doc.content.contains("preference"));
+
+        Ok(())
     }
 
     #[cfg(feature = "libsql")]
     #[tokio::test]
-    async fn test_move_to_workspace_skips_duplicate_structured_memories() {
+    async fn test_move_to_workspace_skips_duplicate_structured_memories() -> anyhow::Result<()> {
         let memory_json = r#"{
             "memories": [
                 {
@@ -973,14 +994,14 @@ mod tests {
         let llm = Arc::new(StubLlm::new(memory_json));
         let compactor = make_compactor(llm.clone());
         let mut thread = make_thread(12);
-        let (workspace, _tmp) = make_test_workspace().await;
+        let (workspace, _tmp) = make_test_workspace().await?;
 
         workspace
             .append_memory(
                 "## Structured Memory Extraction (2026-03-23 00:00 UTC)\n\n- **preference**: User prefers concise answers.\n  - Confidence: 0.96",
             )
             .await
-            .expect("seed existing MEMORY.md content");
+            ?;
 
         let result = compactor
             .compact(
@@ -988,15 +1009,14 @@ mod tests {
                 CompactionStrategy::MoveToWorkspace,
                 Some(&workspace),
             )
-            .await
-            .expect("compact should succeed");
+            .await?;
 
         assert_eq!(result.turns_removed, 2);
         assert_eq!(result.memories_written, 0);
         assert_eq!(llm.calls(), 1);
         assert_eq!(thread.turns.len(), 10);
 
-        let memory_doc = workspace.read(paths::MEMORY).await.expect("read MEMORY.md");
+        let memory_doc = workspace.read(paths::MEMORY).await?;
         assert_eq!(
             memory_doc
                 .content
@@ -1004,6 +1024,8 @@ mod tests {
                 .count(),
             1
         );
+
+        Ok(())
     }
 
     // ------------------------------------------------------------------
@@ -1059,7 +1081,7 @@ mod tests {
     // ------------------------------------------------------------------
 
     #[tokio::test]
-    async fn test_tokens_decrease_after_compaction() {
+    async fn test_tokens_decrease_after_compaction() -> anyhow::Result<()> {
         let llm = Arc::new(StubLlm::new("unused"));
         let compactor = make_compactor(llm);
         let mut thread = make_thread(20);
@@ -1070,8 +1092,7 @@ mod tests {
                 CompactionStrategy::Truncate { keep_recent: 5 },
                 None,
             )
-            .await
-            .expect("compact should succeed");
+            .await?;
 
         assert!(
             result.tokens_after < result.tokens_before,
@@ -1079,6 +1100,8 @@ mod tests {
             result.tokens_after,
             result.tokens_before
         );
+
+        Ok(())
     }
 
     // ------------------------------------------------------------------
@@ -1086,7 +1109,7 @@ mod tests {
     // ------------------------------------------------------------------
 
     #[tokio::test]
-    async fn test_compact_truncate_keep_zero() {
+    async fn test_compact_truncate_keep_zero() -> anyhow::Result<()> {
         let llm = Arc::new(StubLlm::new("unused"));
         let compactor = make_compactor(llm);
         let mut thread = make_thread(5);
@@ -1097,12 +1120,13 @@ mod tests {
                 CompactionStrategy::Truncate { keep_recent: 0 },
                 None,
             )
-            .await
-            .expect("compact should succeed");
+            .await?;
 
         assert!(thread.turns.is_empty());
         assert_eq!(result.turns_removed, 5);
         assert_eq!(result.tokens_after, 0);
+
+        Ok(())
     }
 
     // ------------------------------------------------------------------
@@ -1110,7 +1134,7 @@ mod tests {
     // ------------------------------------------------------------------
 
     #[tokio::test]
-    async fn test_compact_with_summary_keep_zero() {
+    async fn test_compact_with_summary_keep_zero() -> anyhow::Result<()> {
         let llm = Arc::new(StubLlm::new("Summary of all turns"));
         let compactor = make_compactor(llm.clone());
         let mut thread = make_thread(5);
@@ -1121,14 +1145,20 @@ mod tests {
                 CompactionStrategy::Summarize { keep_recent: 0 },
                 None,
             )
-            .await
-            .expect("compact should succeed");
+            .await?;
 
         assert!(thread.turns.is_empty());
         assert_eq!(result.turns_removed, 5);
         assert!(result.summary.is_some());
-        assert_eq!(result.summary.unwrap(), "Summary of all turns");
+        assert_eq!(
+            result
+                .summary
+                .ok_or_else(|| anyhow::anyhow!("missing summary"))?,
+            "Summary of all turns"
+        );
         assert_eq!(llm.calls(), 1);
+
+        Ok(())
     }
 
     // ------------------------------------------------------------------
@@ -1137,7 +1167,7 @@ mod tests {
     // ------------------------------------------------------------------
 
     #[tokio::test]
-    async fn test_messages_coherent_after_compaction() {
+    async fn test_messages_coherent_after_compaction() -> anyhow::Result<()> {
         let llm = Arc::new(StubLlm::new("unused"));
         let compactor = make_compactor(llm);
         let mut thread = make_thread(10);
@@ -1148,8 +1178,7 @@ mod tests {
                 CompactionStrategy::Truncate { keep_recent: 3 },
                 None,
             )
-            .await
-            .expect("compact should succeed");
+            .await?;
 
         let messages = thread.messages();
         // 3 turns * 2 messages each (user + assistant) = 6
@@ -1169,6 +1198,8 @@ mod tests {
         assert_eq!(messages[1].content, "resp-7");
         assert_eq!(messages[4].content, "msg-9");
         assert_eq!(messages[5].content, "resp-9");
+
+        Ok(())
     }
 
     // ------------------------------------------------------------------
@@ -1176,7 +1207,7 @@ mod tests {
     // ------------------------------------------------------------------
 
     #[tokio::test]
-    async fn test_sequential_compactions() {
+    async fn test_sequential_compactions() -> anyhow::Result<()> {
         let llm = Arc::new(StubLlm::new("unused"));
         let compactor = make_compactor(llm);
         let mut thread = make_thread(20);
@@ -1188,8 +1219,7 @@ mod tests {
                 CompactionStrategy::Truncate { keep_recent: 10 },
                 None,
             )
-            .await
-            .expect("first compact");
+            .await?;
         assert_eq!(thread.turns.len(), 10);
         assert_eq!(r1.turns_removed, 10);
 
@@ -1200,8 +1230,7 @@ mod tests {
                 CompactionStrategy::Truncate { keep_recent: 3 },
                 None,
             )
-            .await
-            .expect("second compact");
+            .await?;
         assert_eq!(thread.turns.len(), 3);
         assert_eq!(r2.turns_removed, 7);
 
@@ -1209,5 +1238,7 @@ mod tests {
         assert_eq!(thread.turns[0].user_input, "msg-17");
         assert_eq!(thread.turns[1].user_input, "msg-18");
         assert_eq!(thread.turns[2].user_input, "msg-19");
+
+        Ok(())
     }
 }
