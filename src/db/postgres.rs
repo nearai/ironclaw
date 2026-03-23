@@ -16,9 +16,11 @@ use crate::agent::routine::{Routine, RoutineRun, RunStatus};
 use crate::config::DatabaseConfig;
 use crate::context::{ActionRecord, JobContext, JobState};
 use crate::db::{
-    ConversationStore, Database, JobStore, RoutineStore, SandboxStore, SettingsStore,
-    ToolFailureStore, WorkspaceStore,
+    ConversationStore, Database, JobStore, LearningStore, RoutineStore, SandboxStore,
+    SessionSearchStore, SettingsStore, SkillStatus, ToolFailureStore, UserProfileStore,
+    WorkspaceStore,
 };
+use crate::db::{ProfileFactRow, SessionSummaryRow, SynthesizedSkillRow};
 use crate::error::{DatabaseError, WorkspaceError};
 use crate::history::{
     AgentJobRecord, AgentJobSummary, ConversationMessage, ConversationSummary, JobEventRecord,
@@ -709,5 +711,624 @@ impl WorkspaceStore for PgBackend {
         self.repo
             .hybrid_search(user_id, agent_id, query, embedding, config)
             .await
+    }
+}
+
+// ==================== SessionSearchStore ====================
+
+#[async_trait]
+impl SessionSearchStore for PgBackend {
+    async fn upsert_session_summary(
+        &self,
+        conversation_id: Uuid,
+        user_id: &str,
+        agent_id: &str,
+        summary: &str,
+        topics: &[String],
+        tool_names: &[String],
+        message_count: i32,
+        embedding: Option<&[f32]>,
+    ) -> Result<Uuid, DatabaseError> {
+        let conn = self
+            .store
+            .pool()
+            .get()
+            .await
+            .map_err(|e| DatabaseError::Pool(format!("Failed to get connection: {e}")))?;
+
+        let embedding_vec: Option<pgvector::Vector> =
+            embedding.map(|e| pgvector::Vector::from(e.to_vec()));
+
+        let row = conn
+            .query_one(
+                r#"
+                INSERT INTO session_summaries
+                    (conversation_id, user_id, agent_id, summary, topics, tool_names,
+                     message_count, embedding)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                ON CONFLICT (conversation_id) DO UPDATE SET
+                    summary = EXCLUDED.summary,
+                    topics = EXCLUDED.topics,
+                    tool_names = EXCLUDED.tool_names,
+                    message_count = EXCLUDED.message_count,
+                    embedding = EXCLUDED.embedding,
+                    updated_at = NOW()
+                RETURNING id
+                "#,
+                &[
+                    &conversation_id,
+                    &user_id,
+                    &agent_id,
+                    &summary,
+                    &topics,
+                    &tool_names,
+                    &message_count,
+                    &embedding_vec,
+                ],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        Ok(row.get("id"))
+    }
+
+    async fn search_sessions_fts(
+        &self,
+        user_id: &str,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<SessionSummaryRow>, DatabaseError> {
+        let trimmed = query.trim();
+        if trimmed.is_empty() {
+            return Err(DatabaseError::Query(
+                "search query must not be empty".to_string(),
+            ));
+        }
+        if trimmed.len() > 512 {
+            return Err(DatabaseError::Query(
+                "search query too long (max 512 chars)".to_string(),
+            ));
+        }
+
+        let conn = self
+            .store
+            .pool()
+            .get()
+            .await
+            .map_err(|e| DatabaseError::Pool(format!("Failed to get connection: {e}")))?;
+
+        let rows = conn
+            .query(
+                r#"
+                SELECT id, conversation_id, user_id, agent_id, summary, topics, tool_names,
+                       message_count, created_at,
+                       ts_rank_cd(search_vector, plainto_tsquery('english', $2)) AS score
+                FROM session_summaries
+                WHERE user_id = $1
+                  AND search_vector @@ plainto_tsquery('english', $2)
+                ORDER BY score DESC
+                LIMIT $3
+                "#,
+                &[&user_id, &trimmed, &(limit as i64)],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        Ok(rows
+            .iter()
+            .map(|r| SessionSummaryRow {
+                id: r.get("id"),
+                conversation_id: r.get("conversation_id"),
+                user_id: r.get("user_id"),
+                agent_id: r.get("agent_id"),
+                summary: r.get("summary"),
+                topics: r.get("topics"),
+                tool_names: r.get("tool_names"),
+                message_count: r.get("message_count"),
+                created_at: r.get("created_at"),
+                score: r.get("score"),
+            })
+            .collect())
+    }
+
+    async fn search_sessions_vector(
+        &self,
+        user_id: &str,
+        embedding: &[f32],
+        limit: usize,
+    ) -> Result<Vec<SessionSummaryRow>, DatabaseError> {
+        let conn = self
+            .store
+            .pool()
+            .get()
+            .await
+            .map_err(|e| DatabaseError::Pool(format!("Failed to get connection: {e}")))?;
+
+        let query_vec = pgvector::Vector::from(embedding.to_vec());
+
+        let rows = conn
+            .query(
+                r#"
+                SELECT id, conversation_id, user_id, agent_id, summary, topics, tool_names,
+                       message_count, created_at,
+                       1.0 - (embedding <=> $2::vector) AS score
+                FROM session_summaries
+                WHERE user_id = $1 AND embedding IS NOT NULL
+                ORDER BY embedding <=> $2::vector
+                LIMIT $3
+                "#,
+                &[&user_id, &query_vec, &(limit as i64)],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        Ok(rows
+            .iter()
+            .map(|r| SessionSummaryRow {
+                id: r.get("id"),
+                conversation_id: r.get("conversation_id"),
+                user_id: r.get("user_id"),
+                agent_id: r.get("agent_id"),
+                summary: r.get("summary"),
+                topics: r.get("topics"),
+                tool_names: r.get("tool_names"),
+                message_count: r.get("message_count"),
+                created_at: r.get("created_at"),
+                score: r.get("score"),
+            })
+            .collect())
+    }
+
+    async fn get_session_summary(
+        &self,
+        conversation_id: Uuid,
+    ) -> Result<Option<SessionSummaryRow>, DatabaseError> {
+        let conn = self
+            .store
+            .pool()
+            .get()
+            .await
+            .map_err(|e| DatabaseError::Pool(format!("Failed to get connection: {e}")))?;
+
+        let row = conn
+            .query_opt(
+                r#"
+                SELECT id, conversation_id, user_id, agent_id, summary, topics, tool_names,
+                       message_count, created_at
+                FROM session_summaries
+                WHERE conversation_id = $1
+                "#,
+                &[&conversation_id],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        Ok(row.map(|r| SessionSummaryRow {
+            id: r.get("id"),
+            conversation_id: r.get("conversation_id"),
+            user_id: r.get("user_id"),
+            agent_id: r.get("agent_id"),
+            summary: r.get("summary"),
+            topics: r.get("topics"),
+            tool_names: r.get("tool_names"),
+            message_count: r.get("message_count"),
+            created_at: r.get("created_at"),
+            score: 1.0,
+        }))
+    }
+}
+
+// ==================== UserProfileStore ====================
+
+#[async_trait]
+impl UserProfileStore for PgBackend {
+    async fn upsert_profile_fact(
+        &self,
+        user_id: &str,
+        agent_id: &str,
+        category: &str,
+        fact_key: &str,
+        fact_value_encrypted: &[u8],
+        key_salt: &[u8],
+        confidence: f32,
+        source: &str,
+    ) -> Result<Uuid, DatabaseError> {
+        let conn = self
+            .store
+            .pool()
+            .get()
+            .await
+            .map_err(|e| DatabaseError::Pool(format!("Failed to get connection: {e}")))?;
+
+        let row = conn
+            .query_one(
+                r#"
+                INSERT INTO user_profile_facts
+                    (user_id, agent_id, category, fact_key, fact_value_encrypted,
+                     key_salt, confidence, source)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                ON CONFLICT (user_id, agent_id, category, fact_key) DO UPDATE SET
+                    fact_value_encrypted = EXCLUDED.fact_value_encrypted,
+                    key_salt = EXCLUDED.key_salt,
+                    confidence = EXCLUDED.confidence,
+                    source = EXCLUDED.source,
+                    updated_at = NOW()
+                RETURNING id
+                "#,
+                &[
+                    &user_id,
+                    &agent_id,
+                    &category,
+                    &fact_key,
+                    &fact_value_encrypted,
+                    &key_salt,
+                    &confidence,
+                    &source,
+                ],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        Ok(row.get("id"))
+    }
+
+    async fn get_profile_facts(
+        &self,
+        user_id: &str,
+        agent_id: &str,
+    ) -> Result<Vec<ProfileFactRow>, DatabaseError> {
+        let conn = self
+            .store
+            .pool()
+            .get()
+            .await
+            .map_err(|e| DatabaseError::Pool(format!("Failed to get connection: {e}")))?;
+
+        let rows = conn
+            .query(
+                r#"
+                SELECT id, user_id, agent_id, category, fact_key, fact_value_encrypted,
+                       key_salt, confidence, source, created_at, updated_at
+                FROM user_profile_facts
+                WHERE user_id = $1 AND agent_id = $2
+                ORDER BY category, fact_key
+                "#,
+                &[&user_id, &agent_id],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        Ok(rows
+            .iter()
+            .map(|r| ProfileFactRow {
+                id: r.get("id"),
+                user_id: r.get("user_id"),
+                agent_id: r.get("agent_id"),
+                category: r.get("category"),
+                fact_key: r.get("fact_key"),
+                fact_value_encrypted: r.get("fact_value_encrypted"),
+                key_salt: r.get("key_salt"),
+                confidence: r.get("confidence"),
+                source: r.get("source"),
+                created_at: r.get("created_at"),
+                updated_at: r.get("updated_at"),
+            })
+            .collect())
+    }
+
+    async fn get_profile_facts_by_category(
+        &self,
+        user_id: &str,
+        agent_id: &str,
+        category: &str,
+    ) -> Result<Vec<ProfileFactRow>, DatabaseError> {
+        let conn = self
+            .store
+            .pool()
+            .get()
+            .await
+            .map_err(|e| DatabaseError::Pool(format!("Failed to get connection: {e}")))?;
+
+        let rows = conn
+            .query(
+                r#"
+                SELECT id, user_id, agent_id, category, fact_key, fact_value_encrypted,
+                       key_salt, confidence, source, created_at, updated_at
+                FROM user_profile_facts
+                WHERE user_id = $1 AND agent_id = $2 AND category = $3
+                ORDER BY fact_key
+                "#,
+                &[&user_id, &agent_id, &category],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        Ok(rows
+            .iter()
+            .map(|r| ProfileFactRow {
+                id: r.get("id"),
+                user_id: r.get("user_id"),
+                agent_id: r.get("agent_id"),
+                category: r.get("category"),
+                fact_key: r.get("fact_key"),
+                fact_value_encrypted: r.get("fact_value_encrypted"),
+                key_salt: r.get("key_salt"),
+                confidence: r.get("confidence"),
+                source: r.get("source"),
+                created_at: r.get("created_at"),
+                updated_at: r.get("updated_at"),
+            })
+            .collect())
+    }
+
+    async fn delete_profile_fact(
+        &self,
+        user_id: &str,
+        agent_id: &str,
+        category: &str,
+        fact_key: &str,
+    ) -> Result<bool, DatabaseError> {
+        let conn = self
+            .store
+            .pool()
+            .get()
+            .await
+            .map_err(|e| DatabaseError::Pool(format!("Failed to get connection: {e}")))?;
+
+        let n = conn
+            .execute(
+                r#"
+                DELETE FROM user_profile_facts
+                WHERE user_id = $1 AND agent_id = $2 AND category = $3 AND fact_key = $4
+                "#,
+                &[&user_id, &agent_id, &category, &fact_key],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        Ok(n > 0)
+    }
+
+    async fn delete_profile_facts_by_category(
+        &self,
+        user_id: &str,
+        agent_id: &str,
+        category: &str,
+    ) -> Result<u64, DatabaseError> {
+        let conn = self
+            .store
+            .pool()
+            .get()
+            .await
+            .map_err(|e| DatabaseError::Pool(format!("Failed to get connection: {e}")))?;
+
+        let n = conn
+            .execute(
+                r#"
+                DELETE FROM user_profile_facts
+                WHERE user_id = $1 AND agent_id = $2 AND category = $3
+                "#,
+                &[&user_id, &agent_id, &category],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        Ok(n)
+    }
+
+    async fn clear_profile(&self, user_id: &str, agent_id: &str) -> Result<u64, DatabaseError> {
+        let conn = self
+            .store
+            .pool()
+            .get()
+            .await
+            .map_err(|e| DatabaseError::Pool(format!("Failed to get connection: {e}")))?;
+
+        let n = conn
+            .execute(
+                r#"
+                DELETE FROM user_profile_facts
+                WHERE user_id = $1 AND agent_id = $2
+                "#,
+                &[&user_id, &agent_id],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        Ok(n)
+    }
+}
+
+// ==================== LearningStore ====================
+
+#[async_trait]
+impl LearningStore for PgBackend {
+    async fn record_synthesized_skill(
+        &self,
+        user_id: &str,
+        agent_id: &str,
+        skill_name: &str,
+        skill_content: Option<&str>,
+        content_hash: &str,
+        source_conversation_id: Option<Uuid>,
+        status: SkillStatus,
+        safety_scan_passed: bool,
+        quality_score: i32,
+    ) -> Result<Uuid, DatabaseError> {
+        let conn = self
+            .store
+            .pool()
+            .get()
+            .await
+            .map_err(|e| DatabaseError::Pool(format!("Failed to get connection: {e}")))?;
+
+        let row = conn
+            .query_one(
+                r#"
+                INSERT INTO synthesized_skills
+                    (user_id, agent_id, skill_name, skill_content, skill_content_hash,
+                     source_conversation_id, status, safety_scan_passed, quality_score)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                RETURNING id
+                "#,
+                &[
+                    &user_id,
+                    &agent_id,
+                    &skill_name,
+                    &skill_content,
+                    &content_hash,
+                    &source_conversation_id,
+                    &status.as_str(),
+                    &safety_scan_passed,
+                    &quality_score,
+                ],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        Ok(row.get("id"))
+    }
+
+    async fn update_synthesized_skill_status(
+        &self,
+        id: Uuid,
+        user_id: &str,
+        status: SkillStatus,
+    ) -> Result<bool, DatabaseError> {
+        let conn = self
+            .store
+            .pool()
+            .get()
+            .await
+            .map_err(|e| DatabaseError::Pool(format!("Failed to get connection: {e}")))?;
+
+        let n = conn
+            .execute(
+                r#"
+                UPDATE synthesized_skills
+                SET status = $3, reviewed_at = NOW()
+                WHERE id = $1 AND user_id = $2 AND status = 'pending'
+                "#,
+                &[&id, &user_id, &status.as_str()],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        Ok(n > 0)
+    }
+
+    async fn list_synthesized_skills(
+        &self,
+        user_id: &str,
+        agent_id: &str,
+        status: Option<SkillStatus>,
+    ) -> Result<Vec<SynthesizedSkillRow>, DatabaseError> {
+        let conn = self
+            .store
+            .pool()
+            .get()
+            .await
+            .map_err(|e| DatabaseError::Pool(format!("Failed to get connection: {e}")))?;
+
+        let rows = if let Some(status) = status {
+            conn.query(
+                r#"
+                SELECT id, user_id, agent_id, skill_name, skill_content,
+                       skill_content_hash, source_conversation_id, status,
+                       safety_scan_passed, quality_score, created_at, reviewed_at
+                FROM synthesized_skills
+                WHERE user_id = $1 AND agent_id = $2 AND status = $3
+                ORDER BY created_at DESC
+                "#,
+                &[&user_id, &agent_id, &status.as_str()],
+            )
+            .await
+        } else {
+            conn.query(
+                r#"
+                SELECT id, user_id, agent_id, skill_name, skill_content,
+                       skill_content_hash, source_conversation_id, status,
+                       safety_scan_passed, quality_score, created_at, reviewed_at
+                FROM synthesized_skills
+                WHERE user_id = $1 AND agent_id = $2
+                ORDER BY created_at DESC
+                "#,
+                &[&user_id, &agent_id],
+            )
+            .await
+        }
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        Ok(rows
+            .iter()
+            .map(|r| SynthesizedSkillRow {
+                id: r.get("id"),
+                user_id: r.get("user_id"),
+                agent_id: r.get("agent_id"),
+                skill_name: r.get("skill_name"),
+                skill_content: r.get("skill_content"),
+                skill_content_hash: r.get("skill_content_hash"),
+                source_conversation_id: r.get("source_conversation_id"),
+                status: {
+                    let s: String = r.get("status");
+                    SkillStatus::from_str_opt(&s).unwrap_or_else(|| {
+                        tracing::warn!("Unknown skill status in DB, defaulting to Pending");
+                        SkillStatus::Pending
+                    })
+                },
+                safety_scan_passed: r.get("safety_scan_passed"),
+                quality_score: r.get("quality_score"),
+                created_at: r.get("created_at"),
+                reviewed_at: r.get("reviewed_at"),
+            })
+            .collect())
+    }
+
+    async fn get_synthesized_skill(
+        &self,
+        id: Uuid,
+        user_id: &str,
+    ) -> Result<Option<SynthesizedSkillRow>, DatabaseError> {
+        let conn = self
+            .store
+            .pool()
+            .get()
+            .await
+            .map_err(|e| DatabaseError::Pool(format!("Failed to get connection: {e}")))?;
+
+        let row = conn
+            .query_opt(
+                r#"
+                SELECT id, user_id, agent_id, skill_name, skill_content,
+                       skill_content_hash, source_conversation_id, status,
+                       safety_scan_passed, quality_score, created_at, reviewed_at
+                FROM synthesized_skills
+                WHERE id = $1 AND user_id = $2
+                "#,
+                &[&id, &user_id],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        Ok(row.map(|r| SynthesizedSkillRow {
+            id: r.get("id"),
+            user_id: r.get("user_id"),
+            agent_id: r.get("agent_id"),
+            skill_name: r.get("skill_name"),
+            skill_content: r.get("skill_content"),
+            skill_content_hash: r.get("skill_content_hash"),
+            source_conversation_id: r.get("source_conversation_id"),
+            status: {
+                let s: String = r.get("status");
+                SkillStatus::from_str_opt(&s).unwrap_or_else(|| {
+                    tracing::warn!("Unknown skill status in DB, defaulting to Pending");
+                    SkillStatus::Pending
+                })
+            },
+            safety_scan_passed: r.get("safety_scan_passed"),
+            quality_score: r.get("quality_score"),
+            created_at: r.get("created_at"),
+            reviewed_at: r.get("reviewed_at"),
+        }))
     }
 }

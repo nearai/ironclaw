@@ -59,12 +59,20 @@ pub async fn connect_from_config(
 ///
 /// These are needed by satellite stores (e.g., `SecretsStore`) that require
 /// a backend-specific handle rather than the generic `Arc<dyn Database>`.
+/// Also holds standalone learning-system store trait objects, created from
+/// the concrete backend type before type erasure.
 #[derive(Default)]
 pub struct DatabaseHandles {
     #[cfg(feature = "postgres")]
     pub pg_pool: Option<deadpool_postgres::Pool>,
     #[cfg(feature = "libsql")]
     pub libsql_db: Option<Arc<::libsql::Database>>,
+    /// Session search store (learning system).
+    pub session_search_store: Option<Arc<dyn SessionSearchStore>>,
+    /// User profile store (learning system).
+    pub user_profile_store: Option<Arc<dyn UserProfileStore>>,
+    /// Learning audit log store (learning system).
+    pub learning_store: Option<Arc<dyn LearningStore>>,
 }
 
 /// Connect to the database, run migrations, and return both the generic
@@ -101,7 +109,13 @@ pub async fn connect_with_handles(
 
             handles.libsql_db = Some(backend.shared_db());
 
-            Ok((Arc::new(backend) as Arc<dyn Database>, handles))
+            // Create standalone store trait objects before type erasure.
+            let backend = Arc::new(backend);
+            handles.session_search_store = Some(backend.clone() as Arc<dyn SessionSearchStore>);
+            handles.user_profile_store = Some(backend.clone() as Arc<dyn UserProfileStore>);
+            handles.learning_store = Some(backend.clone() as Arc<dyn LearningStore>);
+
+            Ok((backend as Arc<dyn Database>, handles))
         }
         #[cfg(feature = "postgres")]
         crate::config::DatabaseBackend::Postgres => {
@@ -113,7 +127,13 @@ pub async fn connect_with_handles(
 
             handles.pg_pool = Some(pg.pool());
 
-            Ok((Arc::new(pg) as Arc<dyn Database>, handles))
+            // Create standalone store trait objects before type erasure.
+            let pg = Arc::new(pg);
+            handles.session_search_store = Some(pg.clone() as Arc<dyn SessionSearchStore>);
+            handles.user_profile_store = Some(pg.clone() as Arc<dyn UserProfileStore>);
+            handles.learning_store = Some(pg.clone() as Arc<dyn LearningStore>);
+
+            Ok((pg as Arc<dyn Database>, handles))
         }
         #[allow(unreachable_patterns)]
         _ => Err(DatabaseError::Pool(format!(
@@ -639,6 +659,232 @@ pub trait WorkspaceStore: Send + Sync {
         embedding: Option<&[f32]>,
         config: &SearchConfig,
     ) -> Result<Vec<SearchResult>, WorkspaceError>;
+}
+
+// ==================== Learning system standalone traits ====================
+//
+// These are NOT added to the `Database` supertrait to avoid breaking existing
+// implementations and test stubs. They are injected separately via `Arc<dyn T>`
+// where needed, and created from the concrete backend type before type erasure
+// in `connect_with_handles()`.
+
+/// Persistence for session summaries used by the learning system's session search.
+#[async_trait]
+#[allow(clippy::too_many_arguments)]
+pub trait SessionSearchStore: Send + Sync {
+    /// Upsert a session summary (insert or update if conversation_id exists).
+    async fn upsert_session_summary(
+        &self,
+        conversation_id: Uuid,
+        user_id: &str,
+        agent_id: &str,
+        summary: &str,
+        topics: &[String],
+        tool_names: &[String],
+        message_count: i32,
+        embedding: Option<&[f32]>,
+    ) -> Result<Uuid, DatabaseError>;
+
+    /// Full-text search over session summaries.
+    async fn search_sessions_fts(
+        &self,
+        user_id: &str,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<SessionSummaryRow>, DatabaseError>;
+
+    /// Vector search over session summary embeddings.
+    async fn search_sessions_vector(
+        &self,
+        user_id: &str,
+        embedding: &[f32],
+        limit: usize,
+    ) -> Result<Vec<SessionSummaryRow>, DatabaseError>;
+
+    /// Get a session summary by conversation ID.
+    async fn get_session_summary(
+        &self,
+        conversation_id: Uuid,
+    ) -> Result<Option<SessionSummaryRow>, DatabaseError>;
+}
+
+/// Row type for session summary search results.
+#[derive(Debug, Clone)]
+pub struct SessionSummaryRow {
+    pub id: Uuid,
+    pub conversation_id: Uuid,
+    pub user_id: String,
+    pub agent_id: String,
+    pub summary: String,
+    pub topics: Vec<String>,
+    pub tool_names: Vec<String>,
+    pub message_count: i32,
+    pub created_at: DateTime<Utc>,
+    /// Relevance score (FTS rank or cosine similarity).
+    pub score: f32,
+}
+
+/// Persistence for encrypted user profile facts.
+#[async_trait]
+#[allow(clippy::too_many_arguments)]
+pub trait UserProfileStore: Send + Sync {
+    /// Upsert a profile fact (insert or update on conflict).
+    async fn upsert_profile_fact(
+        &self,
+        user_id: &str,
+        agent_id: &str,
+        category: &str,
+        fact_key: &str,
+        fact_value_encrypted: &[u8],
+        key_salt: &[u8],
+        confidence: f32,
+        source: &str,
+    ) -> Result<Uuid, DatabaseError>;
+
+    /// Get all profile facts for a user.
+    async fn get_profile_facts(
+        &self,
+        user_id: &str,
+        agent_id: &str,
+    ) -> Result<Vec<ProfileFactRow>, DatabaseError>;
+
+    /// Get profile facts by category.
+    async fn get_profile_facts_by_category(
+        &self,
+        user_id: &str,
+        agent_id: &str,
+        category: &str,
+    ) -> Result<Vec<ProfileFactRow>, DatabaseError>;
+
+    /// Delete a profile fact by key.
+    async fn delete_profile_fact(
+        &self,
+        user_id: &str,
+        agent_id: &str,
+        category: &str,
+        fact_key: &str,
+    ) -> Result<bool, DatabaseError>;
+
+    /// Delete all profile facts in a category (batch operation).
+    async fn delete_profile_facts_by_category(
+        &self,
+        user_id: &str,
+        agent_id: &str,
+        category: &str,
+    ) -> Result<u64, DatabaseError>;
+
+    /// Delete all profile facts for a user+agent (GDPR "forget me").
+    async fn clear_profile(&self, user_id: &str, agent_id: &str) -> Result<u64, DatabaseError>;
+}
+
+/// Row type for encrypted profile facts.
+#[derive(Debug, Clone)]
+pub struct ProfileFactRow {
+    pub id: Uuid,
+    pub user_id: String,
+    pub agent_id: String,
+    pub category: String,
+    pub fact_key: String,
+    pub fact_value_encrypted: Vec<u8>,
+    pub key_salt: Vec<u8>,
+    pub confidence: f32,
+    pub source: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Status of a synthesized skill in the approval workflow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkillStatus {
+    Pending,
+    Accepted,
+    Rejected,
+}
+
+impl SkillStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Accepted => "accepted",
+            Self::Rejected => "rejected",
+        }
+    }
+
+    pub fn from_str_opt(s: &str) -> Option<Self> {
+        match s {
+            "pending" => Some(Self::Pending),
+            "accepted" => Some(Self::Accepted),
+            "rejected" => Some(Self::Rejected),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for SkillStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Persistence for the synthesized skill audit log.
+#[async_trait]
+#[allow(clippy::too_many_arguments)]
+pub trait LearningStore: Send + Sync {
+    /// Record a synthesized skill in the audit log.
+    async fn record_synthesized_skill(
+        &self,
+        user_id: &str,
+        agent_id: &str,
+        skill_name: &str,
+        skill_content: Option<&str>,
+        content_hash: &str,
+        source_conversation_id: Option<Uuid>,
+        status: SkillStatus,
+        safety_scan_passed: bool,
+        quality_score: i32,
+    ) -> Result<Uuid, DatabaseError>;
+
+    /// Update the status of a synthesized skill (for approval workflow).
+    /// Requires `user_id` to prevent IDOR — only the owner can change status.
+    async fn update_synthesized_skill_status(
+        &self,
+        id: Uuid,
+        user_id: &str,
+        status: SkillStatus,
+    ) -> Result<bool, DatabaseError>;
+
+    /// List synthesized skills by status.
+    async fn list_synthesized_skills(
+        &self,
+        user_id: &str,
+        agent_id: &str,
+        status: Option<SkillStatus>,
+    ) -> Result<Vec<SynthesizedSkillRow>, DatabaseError>;
+
+    /// Get a single synthesized skill by ID.
+    /// Requires `user_id` to prevent IDOR — only the owner can read their skills.
+    async fn get_synthesized_skill(
+        &self,
+        id: Uuid,
+        user_id: &str,
+    ) -> Result<Option<SynthesizedSkillRow>, DatabaseError>;
+}
+
+/// Row type for synthesized skill records.
+#[derive(Debug, Clone)]
+pub struct SynthesizedSkillRow {
+    pub id: Uuid,
+    pub user_id: String,
+    pub agent_id: String,
+    pub skill_name: String,
+    pub skill_content: Option<String>,
+    pub skill_content_hash: String,
+    pub source_conversation_id: Option<Uuid>,
+    pub status: SkillStatus,
+    pub safety_scan_passed: bool,
+    pub quality_score: i32,
+    pub created_at: DateTime<Utc>,
+    pub reviewed_at: Option<DateTime<Utc>>,
 }
 
 /// Backend-agnostic database supertrait.

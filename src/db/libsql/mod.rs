@@ -8,10 +8,13 @@
 
 mod conversations;
 mod jobs;
+mod learning;
 mod routines;
 mod sandbox;
+mod session_search;
 mod settings;
 mod tool_failures;
+mod user_profile;
 mod workspace;
 
 use std::path::Path;

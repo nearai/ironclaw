@@ -125,15 +125,82 @@ impl SecretsCrypto {
         DecryptedSecret::from_bytes(plaintext)
     }
 
+    /// Encrypt with domain-specific HKDF info for key domain separation.
+    ///
+    /// Unlike `encrypt()` which uses a fixed info string, this allows callers
+    /// to bind the derived key to a specific context (e.g. user_id, agent_id)
+    /// so that identical salts for different contexts produce different keys.
+    pub fn encrypt_with_info(
+        &self,
+        plaintext: &[u8],
+        info: &[u8],
+    ) -> Result<(Vec<u8>, Vec<u8>), SecretError> {
+        let salt = Self::generate_salt();
+        let derived_key = self.derive_key_with_info(&salt, info)?;
+
+        let cipher = Aes256Gcm::new_from_slice(&derived_key).map_err(|e| {
+            SecretError::EncryptionFailed(format!("Failed to create cipher: {}", e))
+        })?;
+
+        let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+
+        let ciphertext = cipher
+            .encrypt(&nonce, plaintext)
+            .map_err(|e| SecretError::EncryptionFailed(format!("Encryption failed: {}", e)))?;
+
+        let mut encrypted = Vec::with_capacity(NONCE_SIZE + ciphertext.len());
+        encrypted.extend_from_slice(&nonce);
+        encrypted.extend_from_slice(&ciphertext);
+
+        Ok((encrypted, salt))
+    }
+
+    /// Decrypt with domain-specific HKDF info (must match the info used during encryption).
+    pub fn decrypt_with_info(
+        &self,
+        encrypted_value: &[u8],
+        salt: &[u8],
+        info: &[u8],
+    ) -> Result<DecryptedSecret, SecretError> {
+        if encrypted_value.len() < NONCE_SIZE + TAG_SIZE {
+            return Err(SecretError::DecryptionFailed(
+                "Encrypted value too short".to_string(),
+            ));
+        }
+
+        let derived_key = self.derive_key_with_info(salt, info)?;
+
+        let cipher = Aes256Gcm::new_from_slice(&derived_key).map_err(|e| {
+            SecretError::DecryptionFailed(format!("Failed to create cipher: {}", e))
+        })?;
+
+        let (nonce_bytes, ciphertext) = encrypted_value.split_at(NONCE_SIZE);
+        let nonce = Nonce::from_slice(nonce_bytes);
+
+        let plaintext = cipher
+            .decrypt(nonce, ciphertext)
+            .map_err(|e| SecretError::DecryptionFailed(format!("Decryption failed: {}", e)))?;
+
+        DecryptedSecret::from_bytes(plaintext)
+    }
+
     /// Derive a per-secret key using HKDF-SHA256.
     fn derive_key(&self, salt: &[u8]) -> Result<[u8; KEY_SIZE], SecretError> {
+        self.derive_key_with_info(salt, b"near-agent-secrets-v1")
+    }
+
+    /// Derive a key with caller-specified HKDF info for domain separation.
+    fn derive_key_with_info(
+        &self,
+        salt: &[u8],
+        info: &[u8],
+    ) -> Result<[u8; KEY_SIZE], SecretError> {
         let master_bytes = self.master_key.expose_secret().as_bytes();
 
-        // HKDF extract + expand
         let hk = Hkdf::<Sha256>::new(Some(salt), master_bytes);
 
         let mut derived = [0u8; KEY_SIZE];
-        hk.expand(b"near-agent-secrets-v1", &mut derived)
+        hk.expand(info, &mut derived)
             .map_err(|_| SecretError::EncryptionFailed("HKDF expansion failed".to_string()))?;
 
         Ok(derived)
@@ -369,5 +436,52 @@ mod tests {
         let (encrypted, salt) = crypto.encrypt(plaintext).unwrap();
         let decrypted = crypto.decrypt(&encrypted, &salt).unwrap();
         assert_eq!(decrypted.expose(), "password: p@$$w0rd! 你好 🔑");
+    }
+
+    #[test]
+    fn test_encrypt_with_info_roundtrip() {
+        let crypto = test_crypto();
+        let plaintext = b"user profile fact";
+        let info = b"ironclaw-profile-v1:user123:default";
+
+        let (encrypted, salt) = crypto.encrypt_with_info(plaintext, info).unwrap();
+        let decrypted = crypto.decrypt_with_info(&encrypted, &salt, info).unwrap();
+        assert_eq!(decrypted.expose(), "user profile fact");
+    }
+
+    #[test]
+    fn test_encrypt_with_info_domain_isolation() {
+        let crypto = test_crypto();
+        let plaintext = b"shared value";
+        let info_a = b"ironclaw-profile-v1:alice:default";
+        let info_b = b"ironclaw-profile-v1:bob:default";
+
+        let (encrypted, salt) = crypto.encrypt_with_info(plaintext, info_a).unwrap();
+
+        // Decrypting with different info must fail (domain isolation)
+        assert!(crypto.decrypt_with_info(&encrypted, &salt, info_b).is_err());
+
+        // Decrypting with original info succeeds
+        let decrypted = crypto.decrypt_with_info(&encrypted, &salt, info_a).unwrap();
+        assert_eq!(decrypted.expose(), "shared value");
+    }
+
+    #[test]
+    fn test_encrypt_with_info_vs_plain_encrypt_isolated() {
+        let crypto = test_crypto();
+        let plaintext = b"same data";
+
+        let (enc_plain, salt_plain) = crypto.encrypt(plaintext).unwrap();
+        let (enc_info, salt_info) = crypto
+            .encrypt_with_info(plaintext, b"custom-domain")
+            .unwrap();
+
+        // Cross-decryption must fail: plain encrypt uses fixed info, with_info uses custom
+        assert!(
+            crypto
+                .decrypt_with_info(&enc_plain, &salt_plain, b"custom-domain")
+                .is_err()
+        );
+        assert!(crypto.decrypt(&enc_info, &salt_info).is_err());
     }
 }
