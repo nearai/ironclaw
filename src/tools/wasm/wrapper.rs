@@ -19,7 +19,7 @@ use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiView};
 use crate::context::JobContext;
 use crate::llm::recording::{HttpExchangeRequest, HttpExchangeResponse, HttpInterceptor};
 use crate::safety::LeakDetector;
-use crate::secrets::SecretsStore;
+use crate::secrets::{SecretsStore, get_decrypted_with_default};
 use crate::tools::tool::{Tool, ToolError, ToolOutput};
 use crate::tools::wasm::capabilities::Capabilities;
 use crate::tools::wasm::credential_injector::{
@@ -1300,43 +1300,13 @@ async fn resolve_host_credentials(
             continue;
         }
 
-        // Try to get credential under the provided user_id first.
-        // If not found and user_id != "default", fallback to "default" (global credentials).
-        // This handles OAuth tokens stored globally under "default" but accessed from routine contexts.
-        let secret = match store.get_decrypted(user_id, &mapping.secret_name).await {
-            Ok(s) => Some(s),
+        let secret = match get_decrypted_with_default(store, user_id, &mapping.secret_name).await {
+            Ok(secret) => secret,
             Err(e) => {
-                tracing::trace!(
-                    user_id = %user_id,
-                    secret_name = %mapping.secret_name,
-                    error = %e,
-                    "No matching host credential resolved for WASM tool in the requested scope"
-                );
-
-                // If lookup fails and we're not already looking up "default", try "default" as fallback
-                if user_id != "default" {
-                    tracing::debug!(
-                        secret_name = %mapping.secret_name,
-                        user_id = %user_id,
-                        error = %e,
-                        "Credential not found for user, trying default global credentials"
-                    );
-                    store
-                        .get_decrypted("default", &mapping.secret_name)
-                        .await
-                        .ok()
-                } else {
-                    None
-                }
-            }
-        };
-
-        let secret = match secret {
-            Some(s) => s,
-            None => {
                 tracing::warn!(
                     secret_name = %mapping.secret_name,
                     user_id = %user_id,
+                    error = %e,
                     "Could not resolve credential for WASM tool (not found in user context or default)"
                 );
                 continue;
