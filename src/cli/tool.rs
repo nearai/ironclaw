@@ -436,12 +436,26 @@ async fn show_tool_info(
         let content = fs::read_to_string(&caps_path).await?;
         match CapabilitiesFile::from_json(&content) {
             Ok(caps) => {
-                let secrets_store = match init_secrets_store().await {
-                    Ok(store) => Some(store),
-                    Err(e) => {
-                        eprintln!("  Warning: could not init secrets store: {}", e);
-                        None
+                // Lazily init secrets store only when auth secrets need checking.
+                let has_auth = caps.auth.is_some()
+                    || caps
+                        .setup
+                        .as_ref()
+                        .is_some_and(|s| !s.required_secrets.is_empty())
+                    || caps
+                        .http
+                        .as_ref()
+                        .is_some_and(|h| !h.credentials.is_empty());
+                let secrets_store = if has_auth {
+                    match init_secrets_store().await {
+                        Ok(store) => Some(store),
+                        Err(e) => {
+                            eprintln!("  Warning: could not init secrets store: {}", e);
+                            None
+                        }
                     }
+                } else {
+                    None
                 };
                 print_capabilities_detail(
                     &caps,
@@ -513,22 +527,26 @@ struct AuthSecretInfo {
     location: Option<String>,
 }
 
-/// Print detailed capabilities.
-async fn print_capabilities_detail(
-    caps: &CapabilitiesFile,
-    secrets_store: Option<&(dyn SecretsStore + Send + Sync)>,
-    user_id: &str,
-) {
-    // Collect auth secrets from all sections, deduplicating by secret_name.
-    // Maps secret_name -> index in auth_secrets for O(1) lookup.
-    let mut auth_secrets: Vec<AuthSecretInfo> = Vec::new();
+/// Collected auth secrets and the set of secret names they cover.
+struct CollectedAuthSecrets {
+    secrets: Vec<AuthSecretInfo>,
+    /// Secret names present in `secrets`, for filtering the Secrets capability section.
+    seen_names: std::collections::HashSet<String>,
+}
+
+/// Collect and deduplicate auth secrets from all auth-related capability sections.
+///
+/// Priority for the description label: auth.display_name > setup.required_secrets.prompt.
+/// Injection location is merged from http.credentials.
+fn collect_auth_secrets(caps: &CapabilitiesFile) -> CollectedAuthSecrets {
+    let mut secrets: Vec<AuthSecretInfo> = Vec::new();
     let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
 
     // auth.display_name is the best label — seed first.
     if let Some(ref auth) = caps.auth {
-        let index = auth_secrets.len();
+        let index = secrets.len();
         seen.insert(auth.secret_name.clone(), index);
-        auth_secrets.push(AuthSecretInfo {
+        secrets.push(AuthSecretInfo {
             secret_name: auth.secret_name.clone(),
             description: auth.display_name.clone(),
             location: None,
@@ -539,9 +557,9 @@ async fn print_capabilities_detail(
     if let Some(ref setup) = caps.setup {
         for secret in &setup.required_secrets {
             if !seen.contains_key(&secret.name) {
-                let index = auth_secrets.len();
+                let index = secrets.len();
                 seen.insert(secret.name.clone(), index);
-                auth_secrets.push(AuthSecretInfo {
+                secrets.push(AuthSecretInfo {
                     secret_name: secret.name.clone(),
                     description: Some(secret.prompt.clone()),
                     location: None,
@@ -555,11 +573,11 @@ async fn print_capabilities_detail(
         for cred in http.credentials.values() {
             let loc = format!("{:?}", cred.location);
             if let Some(&index) = seen.get(&cred.secret_name) {
-                auth_secrets[index].location = Some(loc);
+                secrets[index].location = Some(loc);
             } else {
-                let index = auth_secrets.len();
+                let index = secrets.len();
                 seen.insert(cred.secret_name.clone(), index);
-                auth_secrets.push(AuthSecretInfo {
+                secrets.push(AuthSecretInfo {
                     secret_name: cred.secret_name.clone(),
                     description: None,
                     location: Some(loc),
@@ -567,6 +585,21 @@ async fn print_capabilities_detail(
             }
         }
     }
+
+    let seen_names = seen.into_keys().collect();
+    CollectedAuthSecrets {
+        secrets,
+        seen_names,
+    }
+}
+
+/// Print detailed capabilities.
+async fn print_capabilities_detail(
+    caps: &CapabilitiesFile,
+    secrets_store: Option<&(dyn SecretsStore + Send + Sync)>,
+    user_id: &str,
+) {
+    let mut collected = collect_auth_secrets(caps);
 
     if let Some(ref http) = caps.http {
         println!("  HTTP:");
@@ -588,16 +621,19 @@ async fn print_capabilities_detail(
         }
     }
 
-    // Only filter secrets already in auth when we will actually render the Auth section.
-    let will_render_auth = secrets_store.is_some() && !auth_secrets.is_empty();
+    // Filter secrets already covered by the auth section (always rendered when non-empty).
     if let Some(ref secrets) = caps.secrets
         && !secrets.allowed_names.is_empty()
     {
-        let extra: Vec<_> = secrets
-            .allowed_names
-            .iter()
-            .filter(|name| !will_render_auth || !seen.contains_key(name.as_str()))
-            .collect();
+        let extra: Vec<_> = if collected.secrets.is_empty() {
+            secrets.allowed_names.iter().collect()
+        } else {
+            secrets
+                .allowed_names
+                .iter()
+                .filter(|name| !collected.seen_names.contains(name.as_str()))
+                .collect()
+        };
         if !extra.is_empty() {
             println!("  Secrets (existence check only):");
             for name in extra {
@@ -625,22 +661,25 @@ async fn print_capabilities_detail(
     }
 
     // Consolidated auth status — sorted by secret name for deterministic output.
-    if let Some(store) = secrets_store
-        && !auth_secrets.is_empty()
-    {
-        auth_secrets.sort_by(|a, b| a.secret_name.cmp(&b.secret_name));
+    if !collected.secrets.is_empty() {
+        collected
+            .secrets
+            .sort_by(|a, b| a.secret_name.cmp(&b.secret_name));
         println!("  Auth:");
-        for info in &auth_secrets {
-            let (icon, label) = match store.exists(user_id, &info.secret_name).await {
-                Ok(true) => ("\u{2713}", "configured"),
-                Ok(false) => ("\u{2717}", "missing"),
-                Err(e) => {
-                    eprintln!(
-                        "  Warning: failed to check secret `{}`: {}",
-                        info.secret_name, e
-                    );
-                    ("?", "unknown")
-                }
+        for info in &collected.secrets {
+            let (icon, label) = match secrets_store {
+                Some(store) => match store.exists(user_id, &info.secret_name).await {
+                    Ok(true) => ("\u{2713}", "configured"),
+                    Ok(false) => ("\u{2717}", "missing"),
+                    Err(e) => {
+                        eprintln!(
+                            "  Warning: failed to check secret `{}`: {}",
+                            info.secret_name, e
+                        );
+                        ("?", "unknown")
+                    }
+                },
+                None => ("?", "unknown"),
             };
             let mut parts = info.secret_name.clone();
             if let Some(ref desc) = info.description {
@@ -1300,53 +1339,13 @@ mod tests {
         )
         .unwrap();
 
-        // Build auth_secrets the same way print_capabilities_detail does.
-        let mut auth_secrets: Vec<AuthSecretInfo> = Vec::new();
-        let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-
-        if let Some(ref auth) = caps.auth {
-            let index = auth_secrets.len();
-            seen.insert(auth.secret_name.clone(), index);
-            auth_secrets.push(AuthSecretInfo {
-                secret_name: auth.secret_name.clone(),
-                description: auth.display_name.clone(),
-                location: None,
-            });
-        }
-        if let Some(ref setup) = caps.setup {
-            for secret in &setup.required_secrets {
-                if !seen.contains_key(&secret.name) {
-                    let index = auth_secrets.len();
-                    seen.insert(secret.name.clone(), index);
-                    auth_secrets.push(AuthSecretInfo {
-                        secret_name: secret.name.clone(),
-                        description: Some(secret.prompt.clone()),
-                        location: None,
-                    });
-                }
-            }
-        }
-        if let Some(ref http) = caps.http {
-            for cred in http.credentials.values() {
-                let loc = format!("{:?}", cred.location);
-                if let Some(&index) = seen.get(&cred.secret_name) {
-                    auth_secrets[index].location = Some(loc);
-                } else {
-                    let index = auth_secrets.len();
-                    seen.insert(cred.secret_name.clone(), index);
-                    auth_secrets.push(AuthSecretInfo {
-                        secret_name: cred.secret_name.clone(),
-                        description: None,
-                        location: Some(loc),
-                    });
-                }
-            }
-        }
+        let collected = collect_auth_secrets(&caps);
 
         // gh_token should appear once (from auth), with location merged from credentials.
         // extra_key should appear once (from setup).
-        assert_eq!(auth_secrets.len(), 2);
-        let gh = auth_secrets
+        assert_eq!(collected.secrets.len(), 2);
+        let gh = collected
+            .secrets
             .iter()
             .find(|s| s.secret_name == "gh_token")
             .unwrap();
@@ -1356,19 +1355,20 @@ mod tests {
             "location should be merged from http.credentials"
         );
 
-        let extra = auth_secrets
+        let extra = collected
+            .secrets
             .iter()
             .find(|s| s.secret_name == "extra_key")
             .unwrap();
         assert_eq!(extra.description.as_deref(), Some("Extra API Key"));
         assert!(extra.location.is_none());
 
-        // Secrets section should filter gh_token (in seen) but keep gh_* (wildcard).
+        // Secrets section should filter gh_token (in seen_names) but keep gh_* (wildcard).
         let secrets = caps.secrets.as_ref().unwrap();
         let extra_secrets: Vec<_> = secrets
             .allowed_names
             .iter()
-            .filter(|name| !seen.contains_key(name.as_str()))
+            .filter(|name| !collected.seen_names.contains(name.as_str()))
             .collect();
         assert_eq!(extra_secrets, vec!["gh_*"]);
 
@@ -1387,5 +1387,14 @@ mod tests {
         assert!(store.exists("default", "gh_token").await.unwrap());
         // extra_key still missing.
         assert!(!store.exists("default", "extra_key").await.unwrap());
+    }
+
+    /// No auth sections → collect_auth_secrets returns empty.
+    #[test]
+    fn test_collect_auth_secrets_empty_caps() {
+        let caps = CapabilitiesFile::default();
+        let collected = collect_auth_secrets(&caps);
+        assert!(collected.secrets.is_empty());
+        assert!(collected.seen_names.is_empty());
     }
 }
