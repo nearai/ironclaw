@@ -10,7 +10,7 @@ use clap::Subcommand;
 use uuid::Uuid;
 
 use crate::agent::routine::{
-    NotifyConfig, Routine, RoutineAction, RoutineGuardrails, Trigger, next_cron_fire,
+    NotifyConfig, Routine, RoutineAction, RoutineGuardrails, RunStatus, Trigger, next_cron_fire,
 };
 use crate::db::Database;
 
@@ -251,15 +251,38 @@ async fn list(
     );
     println!("{}", "-".repeat(130));
 
+    // Fetch last-run status for all routines in parallel to avoid N+1 queries
+    let last_run_futures: Vec<_> = filtered
+        .iter()
+        .map(|r| async {
+            let status = db
+                .list_routine_runs(r.id, 1)
+                .await
+                .ok()
+                .and_then(|runs| runs.into_iter().next())
+                .map(|run| run.status);
+            (r.id, status)
+        })
+        .collect();
+    let last_run_results: std::collections::HashMap<Uuid, Option<RunStatus>> =
+        futures::future::join_all(last_run_futures)
+            .await
+            .into_iter()
+            .collect();
+
     for r in &filtered {
-        let status = if r.enabled {
-            if r.consecutive_failures > 0 {
-                format!("err({})", r.consecutive_failures)
-            } else {
-                "active".to_string()
-            }
-        } else {
+        let last_run_status = last_run_results.get(&r.id).cloned().flatten();
+
+        let status = if !r.enabled {
             "disabled".to_string()
+        } else if last_run_status == Some(RunStatus::Running) {
+            "running".to_string()
+        } else if r.consecutive_failures > 0 {
+            format!("err({})", r.consecutive_failures)
+        } else if last_run_status == Some(RunStatus::Attention) {
+            "attention".to_string()
+        } else {
+            "active".to_string()
         };
 
         let next_fire = r
