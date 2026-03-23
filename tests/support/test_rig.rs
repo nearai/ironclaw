@@ -53,6 +53,9 @@ pub struct TestRig {
     /// Extension manager for direct extension operations in tests.
     #[cfg(feature = "libsql")]
     extension_manager: Option<Arc<ironclaw::extensions::ExtensionManager>>,
+    /// Session manager for direct session/thread access in tests.
+    #[cfg(feature = "libsql")]
+    session_manager: Arc<ironclaw::agent::SessionManager>,
     /// Temp directory guard -- keeps the libSQL database file alive.
     #[cfg(feature = "libsql")]
     _temp_dir: tempfile::TempDir,
@@ -82,6 +85,12 @@ impl TestRig {
     /// Return the extension manager for direct extension operations in tests.
     pub fn extension_manager(&self) -> Option<&Arc<ironclaw::extensions::ExtensionManager>> {
         self.extension_manager.as_ref()
+    }
+
+    /// Return the session manager for direct session/thread access in tests.
+    #[cfg(feature = "libsql")]
+    pub fn session_manager(&self) -> &Arc<ironclaw::agent::SessionManager> {
+        &self.session_manager
     }
 
     /// Wait until at least `n` responses have been captured, or `timeout` elapses.
@@ -736,6 +745,7 @@ impl TestRigBuilder {
         let db_ref = components.db.clone().expect("test rig requires a database");
         let workspace_ref = components.workspace.clone();
         let ext_mgr_ref = components.extension_manager.clone();
+        let session_manager_ref = Arc::new(ironclaw::agent::SessionManager::new());
 
         // 7. Construct AgentDeps from AppComponents (mirrors main.rs).
         let deps = AgentDeps {
@@ -763,7 +773,7 @@ impl TestRigBuilder {
         // 7. Create TestChannel and ChannelManager.
         // When testing bootstrap, the channel must be named "gateway" because
         // the bootstrap greeting targets only the gateway channel.
-        let test_channel = if keep_bootstrap {
+        let test_channel = if self.keep_bootstrap {
             Arc::new(TestChannel::new().with_name("gateway"))
         } else {
             Arc::new(TestChannel::new())
@@ -800,7 +810,7 @@ impl TestRigBuilder {
             None, // hygiene_config
             routine_config,
             Some(Arc::clone(&components.context_manager)),
-            None, // session_manager
+            Some(Arc::clone(&session_manager_ref)),
         );
 
         // Match main.rs: fill the scheduler slot once Agent::new has created it.
@@ -828,6 +838,7 @@ impl TestRigBuilder {
             workspace: workspace_ref,
             trace_llm: trace_llm_ref,
             extension_manager: ext_mgr_ref,
+            session_manager: session_manager_ref,
             _temp_dir: temp_dir,
         }
     }

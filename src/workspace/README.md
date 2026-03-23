@@ -91,6 +91,27 @@ Default k=60. Results from both methods are combined, with documents appearing i
 - **PostgreSQL:** `ts_rank_cd` for FTS, pgvector cosine distance for vectors, full RRF
 - **libSQL:** FTS5 for keyword search + vector search via `libsql_vector_idx` (dimension set dynamically by `ensure_vector_index()` during startup)
 
+## Multi-Scope Reads & Identity Isolation
+
+When a workspace has additional read scopes (via `with_additional_read_scopes`), read operations can span multiple user scopes — a user with scopes `["alice", "shared"]` can read documents from both.
+
+**Identity files are exempt from multi-scope reads.** The system prompt reads identity and configuration files from the **primary scope only** (`read_primary()`), never from secondary scopes:
+
+| File | Read method | Rationale |
+|------|------------|-----------|
+| AGENTS.md | `read_primary()` | Agent instructions are per-user |
+| SOUL.md | `read_primary()` | Core values are per-user |
+| USER.md | `read_primary()` | User context is per-user |
+| IDENTITY.md | `read_primary()` | Identity is per-user |
+| TOOLS.md | `read_primary()` | Tool config is per-user |
+| BOOTSTRAP.md | `read_primary()` | Onboarding is per-user |
+| MEMORY.md | `read()` | Shared memory is a feature |
+| daily/*.md | `read()` | Shared daily logs are a feature |
+
+**Why:** Without this, a user with read access to another scope could silently inherit that scope's identity if their own copy is missing. The agent would present itself as the wrong user — a correctness and security issue.
+
+**Design rule:** If you want shared identity across users, seed the same content into each user's scope at setup time. Don't rely on multi-scope fallback for identity files.
+
 ## Heartbeat System
 
 Proactive periodic execution (default: 30 minutes):

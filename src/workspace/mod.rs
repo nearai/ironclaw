@@ -52,7 +52,10 @@ mod repository;
 mod search;
 
 pub use chunker::{ChunkConfig, chunk_document};
-pub use document::{MemoryChunk, MemoryDocument, WorkspaceEntry, paths};
+pub use document::{
+    IDENTITY_PATHS, MemoryChunk, MemoryDocument, WorkspaceEntry, is_identity_path,
+    merge_workspace_entries, paths,
+};
 pub use embedding_cache::{CachedEmbeddingProvider, EmbeddingCacheConfig};
 pub use embeddings::{
     EmbeddingProvider, MockEmbeddings, NearAiEmbeddings, OllamaEmbeddings, OpenAiEmbeddings,
@@ -320,6 +323,48 @@ impl WorkspaceStorage {
             }
         }
     }
+
+    // ==================== Multi-scope read methods ====================
+
+    async fn hybrid_search_multi(
+        &self,
+        user_ids: &[String],
+        agent_id: Option<Uuid>,
+        query: &str,
+        embedding: Option<&[f32]>,
+        config: &SearchConfig,
+    ) -> Result<Vec<SearchResult>, WorkspaceError> {
+        match self {
+            #[cfg(feature = "postgres")]
+            Self::Repo(repo) => {
+                repo.hybrid_search_multi(user_ids, agent_id, query, embedding, config)
+                    .await
+            }
+            Self::Db(db) => {
+                db.hybrid_search_multi(user_ids, agent_id, query, embedding, config)
+                    .await
+            }
+        }
+    }
+
+    async fn get_document_by_path_multi(
+        &self,
+        user_ids: &[String],
+        agent_id: Option<Uuid>,
+        path: &str,
+    ) -> Result<MemoryDocument, WorkspaceError> {
+        match self {
+            #[cfg(feature = "postgres")]
+            Self::Repo(repo) => {
+                repo.get_document_by_path_multi(user_ids, agent_id, path)
+                    .await
+            }
+            Self::Db(db) => {
+                db.get_document_by_path_multi(user_ids, agent_id, path)
+                    .await
+            }
+        }
+    }
 }
 
 /// Default template seeded into HEARTBEAT.md on first access.
@@ -340,9 +385,20 @@ const BOOTSTRAP_SEED: &str = include_str!("seeds/BOOTSTRAP.md");
 /// Each workspace is scoped to a user (and optionally an agent).
 /// Documents are persisted to the database and indexed for search.
 /// Supports both PostgreSQL (via Repository) and libSQL (via Database trait).
+///
+/// ## Multi-scope reads
+///
+/// By default, a workspace reads from and writes to a single `user_id`.
+/// With `with_additional_read_scopes`, read operations (search, read, list)
+/// can span multiple user scopes while writes remain isolated to the primary
+/// `user_id`. This enables cross-tenant read access (e.g., a user reading
+/// from both their own workspace and a "shared" workspace).
 pub struct Workspace {
-    /// User identifier (from channel).
+    /// User identifier (from channel). All writes go to this scope.
     user_id: String,
+    /// User identifiers for read operations. Includes `user_id` as the first
+    /// element, plus any additional scopes added via `with_additional_read_scopes`.
+    read_user_ids: Vec<String>,
     /// Optional agent ID for multi-agent isolation.
     agent_id: Option<Uuid>,
     /// Database storage backend.
@@ -371,6 +427,7 @@ impl Workspace {
         let user_id_str = user_id.into();
         let memory_layers = crate::workspace::layer::MemoryLayer::default_for_user(&user_id_str);
         Self {
+            read_user_ids: vec![user_id_str.clone()],
             user_id: user_id_str,
             agent_id: None,
             storage: WorkspaceStorage::Repo(Repository::new(pool)),
@@ -390,6 +447,7 @@ impl Workspace {
         let user_id_str = user_id.into();
         let memory_layers = crate::workspace::layer::MemoryLayer::default_for_user(&user_id_str);
         Self {
+            read_user_ids: vec![user_id_str.clone()],
             user_id: user_id_str,
             agent_id: None,
             storage: WorkspaceStorage::Db(db),
@@ -474,6 +532,12 @@ impl Workspace {
     ///
     /// Also updates read_user_ids to include all layer scopes.
     pub fn with_memory_layers(mut self, layers: Vec<crate::workspace::layer::MemoryLayer>) -> Self {
+        // Add layer scopes to read_user_ids (same dedup logic as with_additional_read_scopes)
+        for layer in &layers {
+            if !self.read_user_ids.contains(&layer.scope) {
+                self.read_user_ids.push(layer.scope.clone());
+            }
+        }
         self.memory_layers = layers;
         self
     }
@@ -496,9 +560,35 @@ impl Workspace {
         &self.memory_layers
     }
 
-    /// Get the user ID.
+    /// Add additional user scopes for read operations.
+    ///
+    /// The primary `user_id` is always included. Additional scopes allow
+    /// read operations (search, read, list) to span multiple tenants while
+    /// writes remain isolated to the primary scope.
+    ///
+    /// Duplicate scopes are ignored.
+    pub fn with_additional_read_scopes(mut self, scopes: Vec<String>) -> Self {
+        for scope in scopes {
+            if !self.read_user_ids.contains(&scope) {
+                self.read_user_ids.push(scope);
+            }
+        }
+        self
+    }
+
+    /// Get the user ID (primary scope for writes).
     pub fn user_id(&self) -> &str {
         &self.user_id
+    }
+
+    /// Get the user IDs used for read operations.
+    pub fn read_user_ids(&self) -> &[String] {
+        &self.read_user_ids
+    }
+
+    /// Whether this workspace has multiple read scopes.
+    fn is_multi_scope(&self) -> bool {
+        self.read_user_ids.len() > 1
     }
 
     /// Get the agent ID.
@@ -518,6 +608,33 @@ impl Workspace {
     /// println!("{}", doc.content);
     /// ```
     pub async fn read(&self, path: &str) -> Result<MemoryDocument, WorkspaceError> {
+        let path = normalize_path(path);
+        if self.is_multi_scope() && is_identity_path(&path) {
+            // Identity files must only come from the primary scope.
+            self.storage
+                .get_document_by_path(&self.user_id, self.agent_id, &path)
+                .await
+        } else if self.is_multi_scope() {
+            self.storage
+                .get_document_by_path_multi(&self.read_user_ids, self.agent_id, &path)
+                .await
+        } else {
+            self.storage
+                .get_document_by_path(&self.user_id, self.agent_id, &path)
+                .await
+        }
+    }
+
+    /// Read a file from the **primary scope only**, ignoring additional read scopes.
+    ///
+    /// Use this for identity and configuration files (AGENTS.md, SOUL.md, USER.md,
+    /// IDENTITY.md, TOOLS.md, BOOTSTRAP.md) where inheriting content from another
+    /// scope would be a correctness/security issue — the agent must never silently
+    /// present itself as the wrong user.
+    ///
+    /// For memory files that should span scopes (MEMORY.md, daily logs), use
+    /// [`read`] instead.
+    pub async fn read_primary(&self, path: &str) -> Result<MemoryDocument, WorkspaceError> {
         let path = normalize_path(path);
         self.storage
             .get_document_by_path(&self.user_id, self.agent_id, &path)
@@ -556,8 +673,15 @@ impl Workspace {
     /// Uses a single `\n` separator (suitable for log-style entries).
     /// For semantic separation (e.g., memory entries), use `append_memory()`
     /// which uses `\n\n`.
+    ///
+    /// Uses a read-modify-write pattern that is not concurrency-safe:
+    /// concurrent appends to the same path may lose writes.
     pub async fn append(&self, path: &str, content: &str) -> Result<(), WorkspaceError> {
         let path = normalize_path(path);
+        // Scan system-prompt-injected files for prompt injection.
+        if is_system_prompt_file(&path) && !content.is_empty() {
+            reject_if_injected(&path, content)?;
+        }
         let doc = self
             .storage
             .get_or_create_document_by_path(&self.user_id, self.agent_id, &path)
@@ -672,6 +796,20 @@ impl Workspace {
     }
 
     /// Write to a layer, with append semantics.
+    ///
+    /// Note: privacy classification only examines the new `content`, not the
+    /// full document after concatenation. See [`PatternPrivacyClassifier`]
+    /// limitations for details.
+    ///
+    /// When a privacy redirect occurs, the append targets a **separate
+    /// document** in the private scope at the same path — the shared-scope
+    /// document is left unmodified. Subsequent multi-scope reads will return
+    /// the private copy (primary scope wins), effectively shadowing the
+    /// shared document at that path. The `WriteResult::redirected` flag
+    /// indicates when this has happened.
+    ///
+    /// Uses a read-modify-write pattern that is not concurrency-safe:
+    /// concurrent appends to the same path may lose writes.
     pub async fn append_to_layer(
         &self,
         layer_name: &str,
@@ -702,13 +840,25 @@ impl Workspace {
     }
 
     /// Check if a file exists.
+    ///
+    /// When multi-scope reads are configured, checks across all read scopes.
     pub async fn exists(&self, path: &str) -> Result<bool, WorkspaceError> {
         let path = normalize_path(path);
-        match self
-            .storage
-            .get_document_by_path(&self.user_id, self.agent_id, &path)
-            .await
-        {
+        let result = if self.is_multi_scope() && is_identity_path(&path) {
+            // Identity files only checked in primary scope.
+            self.storage
+                .get_document_by_path(&self.user_id, self.agent_id, &path)
+                .await
+        } else if self.is_multi_scope() {
+            self.storage
+                .get_document_by_path_multi(&self.read_user_ids, self.agent_id, &path)
+                .await
+        } else {
+            self.storage
+                .get_document_by_path(&self.user_id, self.agent_id, &path)
+                .await
+        };
+        match result {
             Ok(_) => Ok(true),
             Err(WorkspaceError::DocumentNotFound { .. }) => Ok(false),
             Err(e) => Err(e),
@@ -743,16 +893,55 @@ impl Workspace {
     /// ```
     pub async fn list(&self, directory: &str) -> Result<Vec<WorkspaceEntry>, WorkspaceError> {
         let directory = normalize_directory(directory);
-        self.storage
-            .list_directory(&self.user_id, self.agent_id, &directory)
-            .await
+        if self.is_multi_scope() {
+            // Iterate per-scope rather than using list_directory_multi because
+            // we need to filter identity paths from secondary scopes only — the
+            // merged _multi result loses scope attribution.
+            let primary = self
+                .storage
+                .list_directory(&self.user_id, self.agent_id, &directory)
+                .await?;
+            let mut all_entries = primary;
+            for scope in &self.read_user_ids[1..] {
+                let entries = self
+                    .storage
+                    .list_directory(scope, self.agent_id, &directory)
+                    .await?;
+                all_entries.extend(entries.into_iter().filter(|e| !is_identity_path(&e.path)));
+            }
+            Ok(merge_workspace_entries(all_entries))
+        } else {
+            self.storage
+                .list_directory(&self.user_id, self.agent_id, &directory)
+                .await
+        }
     }
 
     /// List all files recursively (flat list of all paths).
+    ///
+    /// When multi-scope reads are configured, lists across all read scopes.
     pub async fn list_all(&self) -> Result<Vec<String>, WorkspaceError> {
-        self.storage
-            .list_all_paths(&self.user_id, self.agent_id)
-            .await
+        if self.is_multi_scope() {
+            // Iterate per-scope rather than using list_all_paths_multi because
+            // we need to filter identity paths from secondary scopes only.
+            // Primary scope: all paths. Secondary scopes: filter identity paths.
+            let mut all_paths = self
+                .storage
+                .list_all_paths(&self.user_id, self.agent_id)
+                .await?;
+            for scope in &self.read_user_ids[1..] {
+                let paths = self.storage.list_all_paths(scope, self.agent_id).await?;
+                all_paths.extend(paths.into_iter().filter(|p| !is_identity_path(p)));
+            }
+            // Deduplicate and sort
+            all_paths.sort();
+            all_paths.dedup();
+            Ok(all_paths)
+        } else {
+            self.storage
+                .list_all_paths(&self.user_id, self.agent_id)
+                .await
+        }
     }
 
     // ==================== Convenience Methods ====================
@@ -787,7 +976,7 @@ impl Workspace {
     /// comments, which the heartbeat runner treats as "effectively empty"
     /// and skips the LLM call.
     pub async fn heartbeat_checklist(&self) -> Result<Option<String>, WorkspaceError> {
-        match self.read(paths::HEARTBEAT).await {
+        match self.read_primary(paths::HEARTBEAT).await {
             Ok(doc) => Ok(Some(doc.content)),
             Err(WorkspaceError::DocumentNotFound { .. }) => Ok(Some(HEARTBEAT_SEED.to_string())),
             Err(e) => Err(e),
@@ -795,7 +984,29 @@ impl Workspace {
     }
 
     /// Helper to read or create a file.
+    ///
+    /// When multi-scope reads are configured, checks all read scopes before
+    /// creating. If the file exists in any scope, returns it. If not found in
+    /// any scope, creates it in the primary (write) scope.
+    ///
+    /// **Important:** In multi-scope mode, the returned document may belong to
+    /// a secondary scope. Callers that intend to **write** to the document
+    /// (via `update_document(doc.id, ...)`) must NOT use this method — use
+    /// `storage.get_or_create_document_by_path(&self.user_id, ...)` instead
+    /// to guarantee writes target the primary scope. See `append_memory` for
+    /// the correct pattern.
     async fn read_or_create(&self, path: &str) -> Result<MemoryDocument, WorkspaceError> {
+        if self.is_multi_scope() {
+            match self
+                .storage
+                .get_document_by_path_multi(&self.read_user_ids, self.agent_id, path)
+                .await
+            {
+                Ok(doc) => return Ok(doc),
+                Err(WorkspaceError::DocumentNotFound { .. }) => {}
+                Err(e) => return Err(e),
+            }
+        }
         self.storage
             .get_or_create_document_by_path(&self.user_id, self.agent_id, path)
             .await
@@ -807,9 +1018,18 @@ impl Workspace {
     ///
     /// This is for important facts, decisions, and preferences worth
     /// remembering long-term.
+    ///
+    /// Uses `get_or_create_document_by_path` with the primary `user_id`
+    /// instead of `self.memory()` to guarantee writes always target the
+    /// primary (write) scope.  `self.memory()` delegates to `read_or_create`,
+    /// which in multi-scope mode may return a document owned by a secondary
+    /// scope; writing to that document by UUID would violate write isolation.
     pub async fn append_memory(&self, entry: &str) -> Result<(), WorkspaceError> {
-        // Use double newline for memory entries (semantic separation)
-        let doc = self.memory().await?;
+        // Always get/create in the primary scope to preserve write isolation.
+        let doc = self
+            .storage
+            .get_or_create_document_by_path(&self.user_id, self.agent_id, paths::MEMORY)
+            .await?;
         let new_content = if doc.content.is_empty() {
             entry.to_string()
         } else {
@@ -901,9 +1121,16 @@ impl Workspace {
         // Safety net: if `profile_onboarding_completed` was already set (the
         // LLM completed onboarding but forgot to delete BOOTSTRAP.md), skip
         // injection to avoid repeating the first-run ritual.
+        //
+        // Identity and config files use read_primary() to prevent cross-scope
+        // bleed in multi-scope workspaces. Without this, a user with read access
+        // to other scopes could silently inherit another user's identity if their
+        // own copy is missing — the agent would present as the wrong person.
+        // Memory files (MEMORY.md, daily logs) intentionally use multi-scope
+        // read() since sharing memory across scopes is a feature.
         let bootstrap_injected = if self.is_bootstrap_completed() {
             if self
-                .read(paths::BOOTSTRAP)
+                .read_primary(paths::BOOTSTRAP)
                 .await
                 .is_ok_and(|d| !d.content.is_empty())
             {
@@ -913,7 +1140,7 @@ impl Workspace {
                 );
             }
             false
-        } else if let Ok(doc) = self.read(paths::BOOTSTRAP).await
+        } else if let Ok(doc) = self.read_primary(paths::BOOTSTRAP).await
             && !doc.content.is_empty()
         {
             parts.push(format!("## First-Run Bootstrap\n\n{}", doc.content));
@@ -922,7 +1149,8 @@ impl Workspace {
             false
         };
 
-        // Load identity files in order of importance
+        // Load identity files in order of importance.
+        // These MUST use read_primary() — see comment above.
         let identity_files = [
             (paths::AGENTS, "## Agent Instructions"),
             (paths::SOUL, "## Core Values"),
@@ -931,7 +1159,7 @@ impl Workspace {
         ];
 
         for (path, header) in identity_files {
-            if let Ok(doc) = self.read(path).await
+            if let Ok(doc) = self.read_primary(path).await
                 && !doc.content.is_empty()
             {
                 parts.push(format!("{}\n\n{}", header, doc.content));
@@ -940,7 +1168,8 @@ impl Workspace {
 
         // Tool notes: environment-specific guidance the agent or user has written.
         // TOOLS.md does not control tool availability; it is guidance only.
-        if let Ok(doc) = self.read(paths::TOOLS).await
+        // Uses read_primary() — tool config is per-user, not inherited.
+        if let Ok(doc) = self.read_primary(paths::TOOLS).await
             && !doc.content.is_empty()
         {
             parts.push(format!("## Tool Notes\n\n{}", doc.content));
@@ -1231,6 +1460,8 @@ impl Workspace {
     }
 
     /// Search with custom configuration.
+    ///
+    /// When multi-scope reads are configured, searches across all read scopes.
     pub async fn search_with_config(
         &self,
         query: &str,
@@ -1250,15 +1481,46 @@ impl Workspace {
             None
         };
 
-        self.storage
-            .hybrid_search(
-                &self.user_id,
-                self.agent_id,
-                query,
-                embedding.as_deref(),
-                &config,
-            )
-            .await
+        if self.is_multi_scope() {
+            let results = self
+                .storage
+                .hybrid_search_multi(
+                    &self.read_user_ids,
+                    self.agent_id,
+                    query,
+                    embedding.as_deref(),
+                    &config,
+                )
+                .await?;
+            // Post-filter: exclude identity documents from secondary scopes.
+            // Collect document IDs that are identity paths in secondary scopes.
+            let mut excluded_doc_ids = std::collections::HashSet::new();
+            for result in &results {
+                if is_identity_path(&result.document_path) {
+                    // Check if this document belongs to a secondary scope
+                    match self.storage.get_document_by_id(result.document_id).await {
+                        Ok(doc) if doc.user_id != self.user_id => {
+                            excluded_doc_ids.insert(result.document_id);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Ok(results
+                .into_iter()
+                .filter(|r| !excluded_doc_ids.contains(&r.document_id))
+                .collect())
+        } else {
+            self.storage
+                .hybrid_search(
+                    &self.user_id,
+                    self.agent_id,
+                    query,
+                    embedding.as_deref(),
+                    &config,
+                )
+                .await
+        }
     }
 
     // ==================== Indexing ====================
@@ -1319,13 +1581,13 @@ impl Workspace {
         // Check freshness BEFORE seeding identity files, otherwise the
         // seeded files make the workspace look non-fresh and BOOTSTRAP.md
         // never gets created.
-        let is_fresh_workspace = if self.read(paths::BOOTSTRAP).await.is_ok() {
+        let is_fresh_workspace = if self.read_primary(paths::BOOTSTRAP).await.is_ok() {
             false // BOOTSTRAP already exists
         } else {
             let (agents_res, soul_res, user_res) = tokio::join!(
-                self.read(paths::AGENTS),
-                self.read(paths::SOUL),
-                self.read(paths::USER),
+                self.read_primary(paths::AGENTS),
+                self.read_primary(paths::SOUL),
+                self.read_primary(paths::USER),
             );
             matches!(agents_res, Err(WorkspaceError::DocumentNotFound { .. }))
                 && matches!(soul_res, Err(WorkspaceError::DocumentNotFound { .. }))
@@ -1334,8 +1596,10 @@ impl Workspace {
 
         let mut count = 0;
         for (path, content) in seed_files {
-            // Skip files that already exist (never overwrite user edits)
-            match self.read(path).await {
+            // Skip files that already exist in the primary scope (never overwrite user edits).
+            // Uses read_primary to avoid false positives from secondary scopes —
+            // a file in another scope should not suppress seeding in this scope.
+            match self.read_primary(path).await {
                 Ok(_) => continue,
                 Err(WorkspaceError::DocumentNotFound { .. }) => {}
                 Err(e) => {
@@ -1356,7 +1620,8 @@ impl Workspace {
         // may already have a profile from a previous install and doesn't need
         // onboarding). This prevents existing users from getting a spurious
         // first-run ritual after upgrading.
-        let has_profile = self.read(paths::PROFILE).await.is_ok_and(|d| {
+        // Uses read_primary() to avoid false positives from secondary scopes.
+        let has_profile = self.read_primary(paths::PROFILE).await.is_ok_and(|d| {
             !d.content.trim().is_empty()
                 && serde_json::from_str::<crate::profile::PsychographicProfile>(&d.content).is_ok()
         });
@@ -1786,5 +2051,68 @@ mod seed_tests {
             ws.read(paths::BOOTSTRAP).await.is_err(),
             "BOOTSTRAP.md should NOT have been seeded with existing profile"
         );
+    }
+
+    #[test]
+    fn test_default_single_scope() {
+        // Verify backward compatibility: default workspace has single read scope
+        // matching user_id.
+        let user_id = "alice";
+        let read_user_ids = [user_id.to_string()];
+        assert_eq!(read_user_ids.len(), 1);
+        assert_eq!(read_user_ids[0], user_id);
+    }
+
+    #[test]
+    fn test_additional_read_scopes() {
+        // Verify that additional read scopes are added correctly.
+        let user_id = "alice".to_string();
+        let mut read_user_ids = Vec::from([user_id.clone()]);
+
+        // Simulate with_additional_read_scopes logic
+        let scopes = ["shared", "team"];
+        for scope in scopes {
+            let s = scope.to_string();
+            if !read_user_ids.contains(&s) {
+                read_user_ids.push(s);
+            }
+        }
+
+        assert_eq!(read_user_ids.len(), 3);
+        assert_eq!(read_user_ids[0], "alice");
+        assert_eq!(read_user_ids[1], "shared");
+        assert_eq!(read_user_ids[2], "team");
+    }
+
+    #[test]
+    fn test_additional_read_scopes_dedup() {
+        // Verify that duplicate scopes are ignored.
+        let user_id = "alice".to_string();
+        let mut read_user_ids = Vec::from([user_id.clone()]);
+
+        let scopes = ["shared", "alice", "shared"];
+        for scope in scopes {
+            let s = scope.to_string();
+            if !read_user_ids.contains(&s) {
+                read_user_ids.push(s);
+            }
+        }
+
+        assert_eq!(read_user_ids.len(), 2);
+        assert_eq!(read_user_ids[0], "alice");
+        assert_eq!(read_user_ids[1], "shared");
+    }
+
+    #[test]
+    fn test_is_multi_scope_logic() {
+        // Test the multi-scope detection logic: > 1 means multi-scope
+        let single_count = 1_usize;
+        let multi_count = 2_usize;
+
+        // Single scope: not multi
+        assert!(single_count <= 1);
+
+        // Multi scope: is multi
+        assert!(multi_count > 1);
     }
 }

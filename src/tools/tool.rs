@@ -1,5 +1,6 @@
 //! Tool trait and types.
 
+use std::fmt;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -108,6 +109,33 @@ impl Default for ToolRateLimitConfig {
         Self {
             requests_per_minute: 60,
             requests_per_hour: 1000,
+        }
+    }
+}
+
+/// Risk level of a tool invocation.
+///
+/// Used by the shell tool to classify commands and by the worker to drive
+/// approval decisions and observability logging. Implements `Ord` so callers
+/// can compare levels (e.g. `risk >= RiskLevel::High`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum RiskLevel {
+    /// Read-only, safe, reversible (e.g. `ls`, `cat`, `grep`).
+    Low,
+    /// Creates or modifies state, but generally reversible
+    /// (e.g. `mkdir`, `git commit`, `cargo build`).
+    Medium,
+    /// Destructive, irreversible, or security-sensitive
+    /// (e.g. `rm -rf`, `git push --force`, `kill -9`).
+    High,
+}
+
+impl fmt::Display for RiskLevel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Low => f.write_str("low"),
+            Self::Medium => f.write_str("medium"),
+            Self::High => f.write_str("high"),
         }
     }
 }
@@ -274,6 +302,18 @@ pub trait Tool: Send + Sync {
     /// where the output might contain malicious content.
     fn requires_sanitization(&self) -> bool {
         true
+    }
+
+    /// Risk level for a specific invocation of this tool.
+    ///
+    /// Defaults to `Low` (read-only, safe). Override for tools whose risk
+    /// depends on the parameters — the shell tool classifies commands into
+    /// `Low` / `Medium` / `High` based on the command string.
+    ///
+    /// The worker logs this value with every tool call so operators can audit
+    /// the risk level at which each execution was classified.
+    fn risk_level_for(&self, _params: &serde_json::Value) -> RiskLevel {
+        RiskLevel::Low
     }
 
     /// Whether this tool invocation requires user approval.

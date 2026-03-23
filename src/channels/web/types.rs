@@ -254,6 +254,16 @@ pub enum SseEvent {
         thread_id: Option<String>,
     },
 
+    /// Per-turn token usage and cost summary.
+    #[serde(rename = "turn_cost")]
+    TurnCost {
+        input_tokens: u64,
+        output_tokens: u64,
+        cost_usd: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
+    },
+
     /// Extension activation status change (WASM channels).
     #[serde(rename = "extension_status")]
     ExtensionStatus {
@@ -797,6 +807,7 @@ impl WsServerMessage {
             SseEvent::JobResult { .. } => "job_result",
             SseEvent::ImageGenerated { .. } => "image_generated",
             SseEvent::Suggestions { .. } => "suggestions",
+            SseEvent::TurnCost { .. } => "turn_cost",
             SseEvent::ExtensionStatus { .. } => "extension_status",
         };
         let data = serde_json::to_value(event).unwrap_or(serde_json::Value::Null);
