@@ -304,9 +304,6 @@ pub enum WorkspaceError {
     #[error("I/O error: {reason}")]
     IoError { reason: String },
 
-    #[error("Not found: {path}")]
-    NotFound { path: String },
-
     #[error("Layer not found: {name}")]
     LayerNotFound { name: String },
 
