@@ -4549,6 +4549,11 @@ function fetchGatewayStatus() {
     restartEnabled = data.restart_enabled || false;
     updateRestartButtonVisibility();
 
+    var clawHubEl = document.querySelector('.skill-search-section');
+    if (clawHubEl) {
+      clawHubEl.style.display = data.clawhub_enabled === false ? 'none' : '';
+    }
+
     var popover = document.getElementById('gateway-popover');
     var html = '';
 
