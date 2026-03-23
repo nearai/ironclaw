@@ -1,0 +1,14 @@
+{
+  "hookSpecificOutput": {
+    "hookEventName": "SessionStart",
+    "additionalContext": "I'm working on the following GitHub issue(s):\n\n## Issue #1510: BUG: Gemini: function call is missing a thought_signature in functionCall parts.\n* Backend: gemini\n* Model: gemini-3.1-flash-lite-preview\n* ironclaw 0.21.0\n\nWhen the agent uses a tool, it fails with the following error:\n\n\"\"\"\nError: LLM error: Provider gemini-3.1-flash-lite-preview request failed: HttpError: Invalid status code 400 Bad Request with message: [{ \"error\": { \"code\": 400, \"message\": \"Function call is missing a thought_signature in functionCall parts. This is required for tools to work correctly, and missing thought_signature may lead to degraded model performance. Additional data, function call default_api:memory_write , position 16. Please refer to https://ai.google.dev/gemini-api/docs/thought-signatures for more details.\", \"status\": \"INVALID_ARGUMENT\" } } ]\n\"\"\"\n\nLogs: \n``` bash\n\n2026-03-21T00:47:12.623948Z  INFO Processing message message_id=69e1050e-7d08-407b-b70d-8db97206a07a\n\n[...]\n\n2026-03-21T00:47:19.349824Z  WARN Retrying after transient error (tools) provider=gemini-3.1-flash-lite-preview attempt=3 max_retries=3 delay_ms=4816 error=Provider gemini-3.1-flash-lite-preview request failed: HttpError: Invalid status code 400 Bad Request with message: [{\n  \"error\": {\n    \"code\": 400,\n    \"message\": \"Function call is missing a thought_signature in functionCall parts. This is requir...[809B total]\n```\n\nhttps://ai.google.dev/gemini-api/docs/thought-signatures\n\nPlease help me implement a solution for this."
+  },
+  "meta": {
+    "githubIssues": [
+      {
+        "id": 1510,
+        "url": "https://github.com/nearai/ironclaw/issues/1510"
+      }
+    ]
+  }
+}

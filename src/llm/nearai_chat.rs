@@ -562,11 +562,8 @@ impl LlmProvider for NearAiChatProvider {
                 let arguments = serde_json::from_str(&tc.function.arguments)
                     .unwrap_or(serde_json::Value::Object(Default::default()));
                 let mut extra = serde_json::Map::new();
-                if let Some(sig) = tc.thought_signature {
-                    extra.insert(
-                        "thought_signature".to_string(),
-                        serde_json::Value::String(sig),
-                    );
+                if let Some(ec) = tc.extra_content {
+                    extra.insert("extra_content".to_string(), ec);
                 }
                 ToolCall {
                     id: tc.id,
@@ -959,11 +956,7 @@ impl From<ChatMessage> for ChatCompletionMessage {
             calls
                 .into_iter()
                 .map(|tc| {
-                    let thought_signature = tc
-                        .extra
-                        .get("thought_signature")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string());
+                    let extra_content = tc.extra.get("extra_content").cloned();
                     ChatCompletionToolCall {
                         id: tc.id,
                         call_type: "function".to_string(),
@@ -971,7 +964,7 @@ impl From<ChatMessage> for ChatCompletionMessage {
                             name: tc.name,
                             arguments: tc.arguments.to_string(),
                         },
-                        thought_signature,
+                        extra_content,
                     }
                 })
                 .collect()
@@ -1049,10 +1042,11 @@ struct ChatCompletionToolCall {
     #[allow(dead_code)]
     call_type: String,
     function: ChatCompletionToolCallFunction,
-    /// Gemini thinking models attach a signature to function calls that must
-    /// be echoed back in subsequent requests.
+    /// Provider-specific extra content (e.g. Gemini's `thought_signature`
+    /// nested under `extra_content.google.thought_signature`). Must be
+    /// echoed back verbatim in subsequent requests.
     #[serde(skip_serializing_if = "Option::is_none")]
-    thought_signature: Option<String>,
+    extra_content: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1275,7 +1269,7 @@ mod tests {
                         name: "echo".to_string(),
                         arguments: r#"{"message":"hi"}"#.to_string(),
                     },
-                    thought_signature: None,
+                    extra_content: None,
                 }]),
             },
             ChatCompletionMessage {
@@ -1330,7 +1324,7 @@ mod tests {
                         name: "search".to_string(),
                         arguments: r#"{"q":"test"}"#.to_string(),
                     },
-                    thought_signature: None,
+                    extra_content: None,
                 }]),
             },
             ChatCompletionMessage {
@@ -1746,7 +1740,7 @@ mod tests {
                     name: "echo".to_string(),
                     arguments: "{}".to_string(),
                 },
-                thought_signature: None,
+                extra_content: None,
             }]),
         };
         let json = serde_json::to_value(&msg).unwrap();
@@ -2087,7 +2081,7 @@ mod tests {
                             name: "search".to_string(),
                             arguments: r#"{"q":"a"}"#.to_string(),
                         },
-                        thought_signature: None,
+                        extra_content: None,
                     },
                     ChatCompletionToolCall {
                         id: "call_2".to_string(),
@@ -2096,7 +2090,7 @@ mod tests {
                             name: "fetch".to_string(),
                             arguments: r#"{"url":"http://x"}"#.to_string(),
                         },
-                        thought_signature: None,
+                        extra_content: None,
                     },
                 ]),
             },
@@ -2194,7 +2188,7 @@ mod tests {
                 name: "get_weather".to_string(),
                 arguments: r#"{"city":"London"}"#.to_string(),
             },
-            thought_signature: None,
+            extra_content: None,
         };
         let json = serde_json::to_value(&tc).unwrap();
         // "type" not "call_type" in serialized form
@@ -2211,8 +2205,8 @@ mod tests {
     }
 
     #[test]
-    fn test_thought_signature_preserved_through_round_trip() {
-        // Simulate a Gemini response with thought_signature on tool calls
+    fn test_extra_content_preserved_through_round_trip() {
+        // Simulate a Gemini response with extra_content containing thought_signature
         let response_json = serde_json::json!({
             "id": "resp_1",
             "object": "chat.completion",
@@ -2228,7 +2222,11 @@ mod tests {
                             "name": "memory_write",
                             "arguments": "{\"key\":\"test\"}"
                         },
-                        "thought_signature": "abc123sig"
+                        "extra_content": {
+                            "google": {
+                                "thought_signature": "abc123sig"
+                            }
+                        }
                     }]
                 },
                 "finish_reason": "tool_calls"
@@ -2245,17 +2243,18 @@ mod tests {
             .into_iter()
             .next()
             .unwrap();
-        assert_eq!(tc.thought_signature.as_deref(), Some("abc123sig"));
+        assert!(tc.extra_content.is_some());
+        assert_eq!(
+            tc.extra_content.as_ref().unwrap()["google"]["thought_signature"],
+            "abc123sig"
+        );
 
         // Step 2: Convert to internal ToolCall (as complete_with_tools does)
         let arguments = serde_json::from_str(&tc.function.arguments)
             .unwrap_or(serde_json::Value::Object(Default::default()));
         let mut extra = serde_json::Map::new();
-        if let Some(sig) = tc.thought_signature {
-            extra.insert(
-                "thought_signature".to_string(),
-                serde_json::Value::String(sig),
-            );
+        if let Some(ec) = tc.extra_content {
+            extra.insert("extra_content".to_string(), ec);
         }
         let tool_call = ToolCall {
             id: tc.id,
@@ -2263,24 +2262,21 @@ mod tests {
             arguments,
             extra,
         };
-        assert_eq!(
-            tool_call
-                .extra
-                .get("thought_signature")
-                .and_then(|v| v.as_str()),
-            Some("abc123sig")
-        );
+        assert!(tool_call.extra.contains_key("extra_content"));
 
         // Step 3: Store in ChatMessage and convert back to ChatCompletionMessage
         let msg = ChatMessage::assistant_with_tool_calls(None, vec![tool_call]);
         let chat_msg: ChatCompletionMessage = msg.into();
         let replayed = chat_msg.tool_calls.unwrap();
         assert_eq!(replayed.len(), 1);
-        assert_eq!(replayed[0].thought_signature.as_deref(), Some("abc123sig"));
+        assert!(replayed[0].extra_content.is_some());
 
-        // Step 4: Verify serialized JSON includes thought_signature
+        // Step 4: Verify serialized JSON includes extra_content with thought_signature
         let serialized = serde_json::to_value(&replayed[0]).unwrap();
-        assert_eq!(serialized["thought_signature"], "abc123sig");
+        assert_eq!(
+            serialized["extra_content"]["google"]["thought_signature"],
+            "abc123sig"
+        );
     }
 
     // -- api_url edge cases ---------------------------------------------------
