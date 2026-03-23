@@ -24,6 +24,12 @@ I18n.register('zh-CN', {
   'restart.progressSubtitle': '请等待进程重启...',
   'restart.checkLogs': '重启完成后，请查看日志标签页了解详情。',
   
+  // 主题
+  'theme.tooltipDark': '主题：深色（点击切换浅色）',
+  'theme.tooltipLight': '主题：浅色（点击切换跟随系统）',
+  'theme.tooltipSystem': '主题：跟随系统（点击切换深色）',
+  'theme.announce': '主题：{mode}',
+
   // 标签页
   'tab.chat': '聊天',
   'tab.memory': '记忆',
@@ -514,4 +520,29 @@ I18n.register('zh-CN', {
   'channels.replDesc': '用于测试的简单读取-求值-打印循环',
   'channels.configureVia': '通过 {env} 配置',
   'channels.runWith': '运行命令: {cmd}',
+
+  // Welcome Card
+  'welcome.heading': '有什么可以帮助您的？',
+  'welcome.description': 'IronClaw 是您的安全 AI 助手。选择下方的建议或输入您自己的消息。',
+  'welcome.runTool': '运行工具',
+  'welcome.checkJobs': '查看任务状态',
+  'welcome.searchMemory': '搜索记忆',
+  'welcome.manageRoutines': '管理例程',
+  'welcome.systemStatus': '系统状态',
+  'welcome.writeCode': '编写代码',
+
+  // Connection
+  'connection.disconnected': '已断开连接 — 正在尝试重新连接',
+  'connection.reconnecting': '正在重新连接（第 {count} 次尝试）...',
+  'connection.reconnected': '已重新连接',
+
+  // Messages
+  'message.you': '你',
+  'message.assistant': 'IronClaw',
+  'message.system': '系统',
+  'message.copy': '复制',
+  'message.copied': '已复制！',
+
+  // Approval
+  'approval.pressY': '按 Y 批准，N 拒绝',
 });

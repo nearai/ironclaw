@@ -98,6 +98,7 @@ impl GatewayChannel {
             skill_catalog: None,
             chat_rate_limiter: server::RateLimiter::new(30, 60),
             oauth_rate_limiter: server::RateLimiter::new(10, 60),
+            webhook_rate_limiter: server::RateLimiter::new(10, 60),
             registry_entries: Vec::new(),
             cost_guard: None,
             routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
@@ -136,6 +137,7 @@ impl GatewayChannel {
             skill_catalog: self.state.skill_catalog.clone(),
             chat_rate_limiter: server::RateLimiter::new(30, 60),
             oauth_rate_limiter: server::RateLimiter::new(10, 60),
+            webhook_rate_limiter: server::RateLimiter::new(10, 60),
             registry_entries: self.state.registry_entries.clone(),
             cost_guard: self.state.cost_guard.clone(),
             routine_engine: Arc::clone(&self.state.routine_engine),
@@ -411,6 +413,16 @@ impl Channel for GatewayChannel {
             },
             StatusUpdate::Suggestions { suggestions } => SseEvent::Suggestions {
                 suggestions,
+                thread_id,
+            },
+            StatusUpdate::TurnCost {
+                input_tokens,
+                output_tokens,
+                cost_usd,
+            } => SseEvent::TurnCost {
+                input_tokens,
+                output_tokens,
+                cost_usd,
                 thread_id,
             },
         };

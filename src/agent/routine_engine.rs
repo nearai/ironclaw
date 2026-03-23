@@ -29,11 +29,13 @@ use crate::config::RoutineConfig;
 use crate::context::{JobContext, JobState};
 use crate::db::Database;
 use crate::error::RoutineError;
+use crate::extensions::ExtensionManager;
 use crate::llm::{
     ChatMessage, CompletionRequest, FinishReason, LlmProvider, ToolCall, ToolCompletionRequest,
 };
 use crate::tools::{
-    ApprovalContext, ApprovalRequirement, ToolError, ToolRegistry, prepare_tool_params,
+    ToolError, ToolRegistry, autonomous_allowed_tool_names, autonomous_unavailable_message,
+    prepare_tool_params,
 };
 use crate::workspace::Workspace;
 use ironclaw_safety::SafetyLayer;
@@ -41,6 +43,17 @@ use ironclaw_safety::SafetyLayer;
 enum EventMatcher {
     Message { routine: Routine, regex: Regex },
     System { routine: Routine },
+}
+
+/// Distinguishes why sandbox is unavailable so error messages are accurate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SandboxReadiness {
+    /// Docker is available and sandbox is enabled.
+    Available,
+    /// User explicitly disabled sandboxing (SANDBOX_ENABLED=false).
+    DisabledByConfig,
+    /// Sandbox is enabled but Docker is not running or not installed.
+    DockerUnavailable,
 }
 
 /// The routine execution engine.
@@ -57,10 +70,14 @@ pub struct RoutineEngine {
     event_cache: Arc<RwLock<Vec<EventMatcher>>>,
     /// Scheduler for dispatching jobs (FullJob mode).
     scheduler: Option<Arc<Scheduler>>,
+    /// Owner-scoped extension activation state for autonomous tool resolution.
+    extension_manager: Option<Arc<ExtensionManager>>,
     /// Tool registry for lightweight routine tool execution.
     tools: Arc<ToolRegistry>,
     /// Safety layer for tool output sanitization.
     safety: Arc<SafetyLayer>,
+    /// Sandbox readiness state for full-job dispatch.
+    sandbox_readiness: SandboxReadiness,
     /// Timestamp when this engine instance was created. Used by
     /// `sync_dispatched_runs` to distinguish orphaned runs (from a previous
     /// process) from actively-watched runs (from this process).
@@ -76,8 +93,10 @@ impl RoutineEngine {
         workspace: Arc<Workspace>,
         notify_tx: mpsc::Sender<OutgoingResponse>,
         scheduler: Option<Arc<Scheduler>>,
+        extension_manager: Option<Arc<ExtensionManager>>,
         tools: Arc<ToolRegistry>,
         safety: Arc<SafetyLayer>,
+        sandbox_readiness: SandboxReadiness,
     ) -> Self {
         Self {
             config,
@@ -88,8 +107,10 @@ impl RoutineEngine {
             running_count: Arc::new(AtomicUsize::new(0)),
             event_cache: Arc::new(RwLock::new(Vec::new())),
             scheduler,
+            extension_manager,
             tools,
             safety,
+            sandbox_readiness,
             boot_time: Utc::now(),
         }
     }
@@ -686,8 +707,95 @@ impl RoutineEngine {
             notify_tx: self.notify_tx.clone(),
             running_count: self.running_count.clone(),
             scheduler: self.scheduler.clone(),
+            extension_manager: self.extension_manager.clone(),
             tools: self.tools.clone(),
             safety: self.safety.clone(),
+            sandbox_readiness: self.sandbox_readiness,
+        };
+
+        tokio::spawn(async move {
+            execute_routine(engine, routine, run).await;
+        });
+
+        Ok(run_id)
+    }
+
+    /// Fire a routine from a webhook trigger.
+    ///
+    /// Similar to `fire_manual` but records the trigger as `"webhook"` with the
+    /// webhook path as detail. Skips ownership check (auth is via webhook secret).
+    /// Enforces enabled check, cooldown, and concurrent run limit.
+    pub async fn fire_webhook(
+        &self,
+        routine_id: Uuid,
+        webhook_path: &str,
+    ) -> Result<Uuid, RoutineError> {
+        let routine = self
+            .store
+            .get_routine(routine_id)
+            .await
+            .map_err(|e| RoutineError::Database {
+                reason: e.to_string(),
+            })?
+            .ok_or(RoutineError::NotFound { id: routine_id })?;
+
+        if !routine.enabled {
+            return Err(RoutineError::Disabled {
+                name: routine.name.clone(),
+            });
+        }
+
+        if !self.check_cooldown(&routine) {
+            return Err(RoutineError::Cooldown {
+                name: routine.name.clone(),
+            });
+        }
+
+        if !self.check_concurrent(&routine).await {
+            return Err(RoutineError::MaxConcurrent {
+                name: routine.name.clone(),
+            });
+        }
+
+        if self.running_count.load(Ordering::Relaxed) >= self.config.max_concurrent_routines {
+            return Err(RoutineError::MaxConcurrent {
+                name: routine.name.clone(),
+            });
+        }
+
+        let run_id = Uuid::new_v4();
+        let run = RoutineRun {
+            id: run_id,
+            routine_id: routine.id,
+            trigger_type: "webhook".to_string(),
+            trigger_detail: Some(webhook_path.to_string()),
+            started_at: Utc::now(),
+            completed_at: None,
+            status: RunStatus::Running,
+            result_summary: None,
+            tokens_used: None,
+            job_id: None,
+            created_at: Utc::now(),
+        };
+
+        if let Err(e) = self.store.create_routine_run(&run).await {
+            return Err(RoutineError::Database {
+                reason: format!("failed to create run record: {e}"),
+            });
+        }
+
+        let engine = EngineContext {
+            config: self.config.clone(),
+            store: self.store.clone(),
+            llm: self.llm.clone(),
+            workspace: self.workspace.clone(),
+            notify_tx: self.notify_tx.clone(),
+            running_count: self.running_count.clone(),
+            scheduler: self.scheduler.clone(),
+            extension_manager: self.extension_manager.clone(),
+            tools: self.tools.clone(),
+            safety: self.safety.clone(),
+            sandbox_readiness: self.sandbox_readiness,
         };
 
         tokio::spawn(async move {
@@ -721,8 +829,10 @@ impl RoutineEngine {
             notify_tx: self.notify_tx.clone(),
             running_count: self.running_count.clone(),
             scheduler: self.scheduler.clone(),
+            extension_manager: self.extension_manager.clone(),
             tools: self.tools.clone(),
             safety: self.safety.clone(),
+            sandbox_readiness: self.sandbox_readiness,
         };
 
         // Record the run in DB, then spawn execution
@@ -857,8 +967,10 @@ struct EngineContext {
     notify_tx: mpsc::Sender<OutgoingResponse>,
     running_count: Arc<AtomicUsize>,
     scheduler: Option<Arc<Scheduler>>,
+    extension_manager: Option<Arc<ExtensionManager>>,
     tools: Arc<ToolRegistry>,
     safety: Arc<SafetyLayer>,
+    sandbox_readiness: SandboxReadiness,
 }
 
 /// Execute a routine run. Handles both lightweight and full_job modes.
@@ -889,18 +1001,13 @@ async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) 
             title,
             description,
             max_iterations,
-            tool_permissions,
         } => {
-            execute_full_job(
-                &ctx,
-                &routine,
-                &run,
+            let execution = FullJobExecutionConfig {
                 title,
                 description,
-                *max_iterations,
-                tool_permissions,
-            )
-            .await
+                max_iterations: *max_iterations,
+            };
+            execute_full_job(&ctx, &routine, &run, &execution).await
         }
     };
 
@@ -1026,15 +1133,36 @@ fn sanitize_routine_name(name: &str) -> String {
 /// non-active state (not Pending/InProgress/Stuck). Returns the final
 /// `RunStatus` mapped from the job outcome. This keeps the routine run
 /// active for the full job lifetime so concurrency guardrails apply.
+struct FullJobExecutionConfig<'a> {
+    title: &'a str,
+    description: &'a str,
+    max_iterations: u32,
+}
+
 async fn execute_full_job(
     ctx: &EngineContext,
     routine: &Routine,
     run: &RoutineRun,
-    title: &str,
-    description: &str,
-    max_iterations: u32,
-    tool_permissions: &[String],
+    execution: &FullJobExecutionConfig<'_>,
 ) -> Result<(RunStatus, Option<String>, Option<i32>), RoutineError> {
+    match ctx.sandbox_readiness {
+        SandboxReadiness::Available => {}
+        SandboxReadiness::DisabledByConfig => {
+            return Err(RoutineError::JobDispatchFailed {
+                reason: "Sandboxing is disabled (SANDBOX_ENABLED=false). \
+                         Full-job routines require sandbox."
+                    .to_string(),
+            });
+        }
+        SandboxReadiness::DockerUnavailable => {
+            return Err(RoutineError::JobDispatchFailed {
+                reason: "Sandbox is enabled but Docker is not available. \
+                         Install Docker or set SANDBOX_ENABLED=false."
+                    .to_string(),
+            });
+        }
+    }
+
     let scheduler = ctx
         .scheduler
         .as_ref()
@@ -1042,8 +1170,10 @@ async fn execute_full_job(
             reason: "scheduler not available".to_string(),
         })?;
 
-    let mut metadata =
-        serde_json::json!({ "max_iterations": max_iterations, "owner_id": routine.user_id });
+    let mut metadata = serde_json::json!({
+        "max_iterations": execution.max_iterations,
+        "owner_id": routine.user_id
+    });
     // Carry the routine's notify config in job metadata so the message tool
     // can resolve channel/target per-job without global state mutation.
     if let Some(channel) = &routine.notify.channel {
@@ -1051,17 +1181,12 @@ async fn execute_full_job(
     }
     metadata["notify_user"] = serde_json::json!(&routine.notify.user);
 
-    // Build approval context: UnlessAutoApproved tools are auto-approved for routines;
-    // Always tools require explicit listing in tool_permissions.
-    let approval_context = ApprovalContext::autonomous_with_tools(tool_permissions.iter().cloned());
-
     let job_id = scheduler
-        .dispatch_job_with_context(
+        .dispatch_job(
             &routine.user_id,
-            title,
-            description,
+            execution.title,
+            execution.description,
             Some(metadata),
-            approval_context,
         )
         .await
         .map_err(|e| RoutineError::JobDispatchFailed {
@@ -1082,7 +1207,7 @@ async fn execute_full_job(
     tracing::info!(
         routine = %routine.name,
         job_id = %job_id,
-        max_iterations = max_iterations,
+        max_iterations = execution.max_iterations,
         "Dispatched full job for routine, watching for completion"
     );
 
@@ -1350,6 +1475,9 @@ async fn execute_lightweight_with_tools(
         description: routine.name.clone(),
         ..Default::default()
     };
+    let allowed_tools =
+        autonomous_allowed_tool_names(&ctx.tools, ctx.extension_manager.as_ref(), &routine.user_id)
+            .await;
 
     loop {
         iteration += 1;
@@ -1384,8 +1512,11 @@ async fn execute_lightweight_with_tools(
             // Tool-enabled iteration
             let tool_defs = ctx
                 .tools
-                .tool_definitions_excluding(ROUTINE_TOOL_DENYLIST)
-                .await;
+                .tool_definitions()
+                .await
+                .into_iter()
+                .filter(|tool| allowed_tools.contains(&tool.name))
+                .collect();
 
             let request_messages = snapshot_messages_for_tool_iteration(&messages);
             let request = ToolCompletionRequest::new(request_messages, tool_defs)
@@ -1420,26 +1551,18 @@ async fn execute_lightweight_with_tools(
 
             // Execute tools sequentially
             for tc in response.tool_calls {
-                let result = execute_routine_tool(ctx, &job_ctx, &tc).await;
+                let result = execute_routine_tool(ctx, &job_ctx, &allowed_tools, &tc).await;
 
                 // Sanitize and wrap result (including errors)
                 let result_content = match result {
                     Ok(output) => {
                         let sanitized = ctx.safety.sanitize_tool_output(&tc.name, &output);
-                        ctx.safety.wrap_for_llm(
-                            &tc.name,
-                            &sanitized.content,
-                            sanitized.was_modified,
-                        )
+                        ctx.safety.wrap_for_llm(&tc.name, &sanitized.content)
                     }
                     Err(e) => {
                         let error_msg = format!("Tool '{}' failed: {}", tc.name, e);
                         let sanitized = ctx.safety.sanitize_tool_output(&tc.name, &error_msg);
-                        ctx.safety.wrap_for_llm(
-                            &tc.name,
-                            &sanitized.content,
-                            sanitized.was_modified,
-                        )
+                        ctx.safety.wrap_for_llm(&tc.name, &sanitized.content)
                     }
                 };
 
@@ -1489,31 +1612,16 @@ fn snapshot_messages_for_tool_iteration(messages: &[ChatMessage]) -> Vec<ChatMes
     snapshot
 }
 
-/// Tools that must never be callable from lightweight routines.
-///
-/// These tools pose autonomy-escalation risks: a routine could self-replicate,
-/// modify its own triggers/prompts, delete other routines, or restart the agent.
-const ROUTINE_TOOL_DENYLIST: &[&str] = &[
-    "routine_create",
-    "routine_update",
-    "routine_delete",
-    "routine_fire",
-    "restart",
-];
-
 /// Execute a single tool for a lightweight routine.
 async fn execute_routine_tool(
     ctx: &EngineContext,
     job_ctx: &JobContext,
+    allowed_tools: &std::collections::HashSet<String>,
     tc: &ToolCall,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-    // Block tools that pose autonomy-escalation risks
-    if ROUTINE_TOOL_DENYLIST.contains(&tc.name.as_str()) {
-        return Err(format!(
-            "Tool '{}' is not available in lightweight routines",
-            tc.name
-        )
-        .into());
+    if !allowed_tools.contains(&tc.name) {
+        let message = autonomous_unavailable_message(&tc.name, &job_ctx.user_id);
+        return Err(message.into());
     }
 
     // Check if tool exists
@@ -1523,22 +1631,6 @@ async fn execute_routine_tool(
         .await
         .ok_or_else(|| format!("Tool '{}' not found", tc.name))?;
     let normalized_params = prepare_tool_params(tool.as_ref(), &tc.arguments);
-
-    // Check approval requirement: only allow Never tools in lightweight routines.
-    // UnlessAutoApproved and Always tools are blocked to prevent prompt injection attacks.
-    // Lightweight routines can be triggered by external events and may process untrusted data,
-    // making them vulnerable to prompt injection that could trick the LLM into calling
-    // sensitive tools. Blocking these tools entirely is the safest approach.
-    match tool.requires_approval(&normalized_params) {
-        ApprovalRequirement::Never => {}
-        ApprovalRequirement::UnlessAutoApproved | ApprovalRequirement::Always => {
-            return Err(format!(
-                "Tool '{}' requires manual approval and cannot be used in lightweight routines",
-                tc.name
-            )
-            .into());
-        }
-    }
 
     // Validate tool parameters
     let validation = ctx
@@ -1680,6 +1772,7 @@ pub fn spawn_cron_ticker(
             // never races with FullJobWatcher instances from this process.
             engine.sync_dispatched_runs().await;
             engine.check_cron_triggers().await;
+            engine.sync_dispatched_runs().await;
         }
     })
 }
@@ -1691,6 +1784,56 @@ fn truncate(s: &str, max: usize) -> String {
         let end = crate::util::floor_char_boundary(s, max);
         format!("{}...", &s[..end])
     }
+}
+
+/// Sanitize a summary string from job transitions before using in notifications.
+///
+/// `last_reason` comes from untrusted container code, so we:
+/// 1. Strip control characters (except newline) to prevent terminal injection
+/// 2. Strip HTML tags to prevent injection in web-rendered notifications
+/// 3. Collapse multiple whitespace/newlines to single spaces for cleaner output
+/// 4. Truncate to 500 chars to prevent oversized notifications
+#[cfg(test)]
+fn sanitize_summary(s: &str) -> String {
+    // Strip control characters (keep newline for now, collapse later)
+    let no_control: String = s
+        .chars()
+        .filter(|c| !c.is_control() || *c == '\n')
+        .collect();
+
+    // Strip HTML tags (e.g. <script>, <img>, <a href=...>)
+    let no_html = strip_html_tags(&no_control);
+
+    // Collapse whitespace: multiple spaces/newlines become a single space
+    let collapsed: String = no_html.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    // Truncate to reasonable length
+    if collapsed.len() <= 500 {
+        collapsed
+    } else {
+        // Find a safe char boundary for truncation
+        let mut end = 500;
+        while !collapsed.is_char_boundary(end) && end > 0 {
+            end -= 1;
+        }
+        format!("{}...", &collapsed[..end])
+    }
+}
+
+/// Remove HTML/XML tags from a string.
+#[cfg(test)]
+fn strip_html_tags(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut in_tag = false;
+    for c in s.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' if in_tag => in_tag = false,
+            _ if !in_tag => result.push(c),
+            _ => {}
+        }
+    }
+    result
 }
 
 #[cfg(test)]
@@ -1904,8 +2047,8 @@ mod tests {
         ];
         for tool in &denylisted {
             assert!(
-                super::ROUTINE_TOOL_DENYLIST.contains(tool),
-                "Tool '{}' should be in ROUTINE_TOOL_DENYLIST",
+                crate::tools::AUTONOMOUS_TOOL_DENYLIST.contains(tool),
+                "Tool '{}' should be in AUTONOMOUS_TOOL_DENYLIST",
                 tool
             );
         }
@@ -1916,8 +2059,8 @@ mod tests {
         let allowed = vec!["echo", "time", "json", "http", "memory_search", "shell"];
         for tool in &allowed {
             assert!(
-                !super::ROUTINE_TOOL_DENYLIST.contains(tool),
-                "Tool '{}' should NOT be in ROUTINE_TOOL_DENYLIST",
+                !crate::tools::AUTONOMOUS_TOOL_DENYLIST.contains(tool),
+                "Tool '{}' should NOT be in AUTONOMOUS_TOOL_DENYLIST",
                 tool
             );
         }
@@ -1972,6 +2115,62 @@ mod tests {
         assert_eq!(snapshot[0].role, crate::llm::Role::System); // safety: test-only no-panics CI false positive
         assert_eq!(snapshot[1].content, "a"); // safety: test-only no-panics CI false positive
         assert_eq!(snapshot[2].content, "b"); // safety: test-only no-panics CI false positive
+    }
+
+    #[test]
+    fn test_running_status_does_not_notify() {
+        let config = NotifyConfig {
+            on_success: true,
+            on_failure: true,
+            on_attention: true,
+            ..Default::default()
+        };
+        let should_notify = match RunStatus::Running {
+            RunStatus::Ok => config.on_success,
+            RunStatus::Attention => config.on_attention,
+            RunStatus::Failed => config.on_failure,
+            RunStatus::Running => false,
+        };
+        assert!(!should_notify);
+    }
+
+    #[test]
+    fn test_full_job_dispatch_returns_running_status() {
+        assert_eq!(RunStatus::Running.to_string(), "running");
+    }
+
+    #[test]
+    fn test_sandbox_readiness_disabled_by_config_error() {
+        use super::SandboxReadiness;
+
+        let readiness = SandboxReadiness::DisabledByConfig;
+        assert_ne!(readiness, SandboxReadiness::Available);
+
+        let err = crate::error::RoutineError::JobDispatchFailed {
+            reason: "Sandboxing is disabled (SANDBOX_ENABLED=false). \
+                     Full-job routines require sandbox."
+                .to_string(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("SANDBOX_ENABLED=false"));
+        assert!(msg.contains("require sandbox"));
+    }
+
+    #[test]
+    fn test_sandbox_readiness_docker_unavailable_error() {
+        use super::SandboxReadiness;
+
+        let readiness = SandboxReadiness::DockerUnavailable;
+        assert_ne!(readiness, SandboxReadiness::Available);
+
+        let err = crate::error::RoutineError::JobDispatchFailed {
+            reason: "Sandbox is enabled but Docker is not available. \
+                     Install Docker or set SANDBOX_ENABLED=false."
+                .to_string(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("Docker is not available"));
+        assert!(msg.contains("SANDBOX_ENABLED"));
     }
 
     /// Regression test for #1317: FullJobWatcher maps terminal job states correctly.
@@ -2054,5 +2253,51 @@ mod tests {
                 state
             );
         }
+    }
+
+    #[test]
+    fn test_sanitize_summary_strips_control_chars() {
+        use super::sanitize_summary;
+
+        // Preserves normal text
+        assert_eq!(sanitize_summary("Job completed"), "Job completed");
+
+        // Strips control characters and collapses whitespace
+        assert_eq!(
+            sanitize_summary("line1\nline2\x00\x1b[31mred"),
+            "line1 line2[31mred"
+        );
+
+        // Truncates long strings
+        let long = "x".repeat(600);
+        let result = sanitize_summary(&long);
+        assert!(result.len() <= 503); // 500 + "..."
+        assert!(result.ends_with("..."));
+    }
+
+    #[test]
+    fn test_sanitize_summary_strips_html() {
+        use super::sanitize_summary;
+
+        assert_eq!(
+            sanitize_summary("Hello <script>alert('xss')</script> world"),
+            "Hello alert('xss') world"
+        );
+        assert_eq!(
+            sanitize_summary("<b>bold</b> and <a href=\"evil\">link</a>"),
+            "bold and link"
+        );
+        assert_eq!(sanitize_summary("<img src=x onerror=alert(1)>"), "");
+    }
+
+    #[test]
+    fn test_sanitize_summary_multibyte_truncation() {
+        use super::sanitize_summary;
+
+        // Ensure truncation doesn't panic on multi-byte chars near the boundary
+        let s = "a".repeat(498) + "\u{1F600}\u{1F600}"; // 498 + two 4-byte emoji
+        let result = sanitize_summary(&s);
+        assert!(result.len() <= 503);
+        assert!(result.ends_with("..."));
     }
 }

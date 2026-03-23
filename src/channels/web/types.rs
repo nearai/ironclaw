@@ -254,6 +254,16 @@ pub enum SseEvent {
         thread_id: Option<String>,
     },
 
+    /// Per-turn token usage and cost summary.
+    #[serde(rename = "turn_cost")]
+    TurnCost {
+        input_tokens: u64,
+        output_tokens: u64,
+        cost_usd: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
+    },
+
     /// Extension activation status change (WASM channels).
     #[serde(rename = "extension_status")]
     ExtensionStatus {
@@ -302,12 +312,30 @@ pub struct MemoryReadResponse {
 pub struct MemoryWriteRequest {
     pub path: String,
     pub content: String,
+    /// Optional layer to write to. When present, uses `write_to_layer()`
+    /// which enables privacy classification and redirect.
+    pub layer: Option<String>,
+    /// When true and a layer is specified, appends to existing content
+    /// instead of replacing it.
+    #[serde(default)]
+    pub append: bool,
+    /// Skip privacy classification and write directly to the specified layer.
+    #[serde(default)]
+    pub force: bool,
 }
 
 #[derive(Debug, Serialize)]
 pub struct MemoryWriteResponse {
     pub path: String,
     pub status: &'static str,
+    /// Whether the write was redirected to a different layer (e.g., sensitive
+    /// content redirected from shared to private).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub redirected: Option<bool>,
+    /// The layer the content was actually written to (may differ from requested
+    /// layer if privacy redirect occurred).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actual_layer: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -507,6 +535,7 @@ pub struct ExtensionSetupResponse {
     pub name: String,
     pub kind: String,
     pub secrets: Vec<SecretFieldInfo>,
+    pub fields: Vec<SetupFieldInfo>,
 }
 
 #[derive(Debug, Serialize)]
@@ -520,9 +549,23 @@ pub struct SecretFieldInfo {
     pub auto_generate: bool,
 }
 
+#[derive(Debug, Serialize)]
+pub struct SetupFieldInfo {
+    pub name: String,
+    pub prompt: String,
+    pub optional: bool,
+    /// Whether this field already has a stored value.
+    pub provided: bool,
+    /// Input type for web UI rendering.
+    pub input_type: crate::tools::wasm::ToolSetupFieldInputType,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct ExtensionSetupRequest {
+    #[serde(default)]
     pub secrets: std::collections::HashMap<String, String>,
+    #[serde(default)]
+    pub fields: std::collections::HashMap<String, String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -541,6 +584,9 @@ pub struct ActionResponse {
     /// Whether the channel was successfully activated after setup.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub activated: Option<bool>,
+    /// Whether a restart is required for the new configuration to take effect.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub needs_restart: Option<bool>,
     /// Pending manual verification challenge (for Telegram owner binding, etc.).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub verification: Option<crate::extensions::VerificationChallenge>,
@@ -555,6 +601,7 @@ impl ActionResponse {
             awaiting_token: None,
             instructions: None,
             activated: None,
+            needs_restart: None,
             verification: None,
         }
     }
@@ -567,6 +614,7 @@ impl ActionResponse {
             awaiting_token: None,
             instructions: None,
             activated: None,
+            needs_restart: None,
             verification: None,
         }
     }
@@ -759,6 +807,7 @@ impl WsServerMessage {
             SseEvent::JobResult { .. } => "job_result",
             SseEvent::ImageGenerated { .. } => "image_generated",
             SseEvent::Suggestions { .. } => "suggestions",
+            SseEvent::TurnCost { .. } => "turn_cost",
             SseEvent::ExtensionStatus { .. } => "extension_status",
         };
         let data = serde_json::to_value(event).unwrap_or(serde_json::Value::Null);
@@ -814,6 +863,14 @@ impl RoutineInfo {
                 String::new(),
                 format!("event: {}.{}", source, event_type),
             ),
+            crate::agent::routine::Trigger::Webhook { path, .. } => {
+                let p = path.as_deref().unwrap_or("default");
+                (
+                    "webhook".to_string(),
+                    String::new(),
+                    format!("webhook: /api/webhooks/{}", p),
+                )
+            }
             crate::agent::routine::Trigger::Manual => (
                 "manual".to_string(),
                 String::new(),
@@ -1218,6 +1275,40 @@ mod tests {
         let json = r#"{"extension_name":"telegram"}"#;
         let req: AuthCancelRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.extension_name, "telegram");
+    }
+
+    #[test]
+    fn test_extension_setup_request_defaults() {
+        let json = r#"{}"#;
+        let req: ExtensionSetupRequest = serde_json::from_str(json).unwrap();
+        assert!(req.secrets.is_empty());
+        assert!(req.fields.is_empty());
+    }
+
+    #[test]
+    fn test_extension_setup_request_deserialize_with_fields() {
+        let json = r#"{
+            "secrets": { "api_key": "sk-123" },
+            "fields": { "llm_backend": "openai", "selected_model": "gpt-4o" }
+        }"#;
+        let req: ExtensionSetupRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.secrets.get("api_key").unwrap(), "sk-123");
+        assert_eq!(req.fields.get("llm_backend").unwrap(), "openai");
+        assert_eq!(req.fields.get("selected_model").unwrap(), "gpt-4o");
+    }
+
+    #[test]
+    fn test_setup_field_info_serializes_input_type_as_enum_string() {
+        let field = SetupFieldInfo {
+            name: "selected_model".to_string(),
+            prompt: "Model".to_string(),
+            optional: false,
+            provided: true,
+            input_type: crate::tools::wasm::ToolSetupFieldInputType::Password,
+        };
+
+        let json = serde_json::to_value(field).unwrap();
+        assert_eq!(json["input_type"], "password");
     }
 
     // ---- ThreadInfo channel field tests ----

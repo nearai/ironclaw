@@ -39,9 +39,7 @@ pub enum OAuthCallbackError {
 /// deployments where `127.0.0.1` is unreachable from the user's browser),
 /// then falls back to `http://{callback_host()}:{OAUTH_CALLBACK_PORT}`.
 pub fn callback_url() -> String {
-    std::env::var("IRONCLAW_OAUTH_CALLBACK_URL")
-        .ok()
-        .filter(|v| !v.is_empty())
+    crate::config::helpers::env_or_override("IRONCLAW_OAUTH_CALLBACK_URL")
         .unwrap_or_else(|| format!("http://{}:{}", callback_host(), OAUTH_CALLBACK_PORT))
 }
 
@@ -57,7 +55,8 @@ pub fn callback_url() -> String {
 /// Note: this transmits the session token over plain HTTP — prefer SSH port
 /// forwarding (`ssh -L 9876:127.0.0.1:9876 user@host`) when possible.
 pub fn callback_host() -> String {
-    std::env::var("OAUTH_CALLBACK_HOST").unwrap_or_else(|_| "127.0.0.1".to_string())
+    crate::config::helpers::env_or_override("OAUTH_CALLBACK_HOST")
+        .unwrap_or_else(|| "127.0.0.1".to_string())
 }
 
 /// Returns `true` if `host` is a loopback address that only accepts local connections.
@@ -362,6 +361,7 @@ pub fn landing_html(provider_name: &str, success: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::helpers::lock_env;
 
     #[test]
     fn loopback_detection() {
@@ -386,12 +386,22 @@ mod tests {
         assert!(!is_wildcard_host("localhost"));
     }
 
+    // Lock held across await to serialize env-var mutation; the awaited op is a quick local TCP bind.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn bind_rejects_wildcard_ipv4() {
-        // SAFETY: test is single-threaded; env var is restored immediately after.
+        let _guard = lock_env();
+        let original = std::env::var("OAUTH_CALLBACK_HOST").ok();
+        // SAFETY: Under ENV_MUTEX, no concurrent env access.
         unsafe { std::env::set_var("OAUTH_CALLBACK_HOST", "0.0.0.0") };
         let result = bind_callback_listener().await;
-        unsafe { std::env::remove_var("OAUTH_CALLBACK_HOST") };
+        // SAFETY: Under ENV_MUTEX, no concurrent env access.
+        unsafe {
+            match &original {
+                Some(v) => std::env::set_var("OAUTH_CALLBACK_HOST", v),
+                None => std::env::remove_var("OAUTH_CALLBACK_HOST"),
+            }
+        }
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
@@ -400,12 +410,22 @@ mod tests {
         );
     }
 
+    // Lock held across await to serialize env-var mutation; the awaited op is a quick local TCP bind.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn bind_rejects_wildcard_ipv6() {
-        // SAFETY: test is single-threaded; env var is restored immediately after.
+        let _guard = lock_env();
+        let original = std::env::var("OAUTH_CALLBACK_HOST").ok();
+        // SAFETY: Under ENV_MUTEX, no concurrent env access.
         unsafe { std::env::set_var("OAUTH_CALLBACK_HOST", "::") };
         let result = bind_callback_listener().await;
-        unsafe { std::env::remove_var("OAUTH_CALLBACK_HOST") };
+        // SAFETY: Under ENV_MUTEX, no concurrent env access.
+        unsafe {
+            match &original {
+                Some(v) => std::env::set_var("OAUTH_CALLBACK_HOST", v),
+                None => std::env::remove_var("OAUTH_CALLBACK_HOST"),
+            }
+        }
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(

@@ -8,39 +8,117 @@ mod support;
 
 #[cfg(feature = "libsql")]
 mod tests {
+    use std::path::Path;
     use std::sync::Arc;
     use std::time::Duration;
 
     use chrono::Utc;
+    use libsql::params;
+    use secrecy::SecretString;
     use uuid::Uuid;
 
     use ironclaw::agent::routine::{
-        NotifyConfig, Routine, RoutineAction, RoutineGuardrails, Trigger,
+        NotifyConfig, Routine, RoutineAction, RoutineGuardrails, RoutineRun, RunStatus, Trigger,
     };
     use ironclaw::agent::routine_engine::RoutineEngine;
-    use ironclaw::agent::{HeartbeatConfig, HeartbeatRunner};
+    use ironclaw::agent::{
+        HeartbeatConfig, HeartbeatRunner, SandboxReadiness, Scheduler, SchedulerDeps,
+    };
     use ironclaw::channels::IncomingMessage;
-    use ironclaw::config::{RoutineConfig, SafetyConfig};
-    use ironclaw::db::Database;
+    use ironclaw::config::{AgentConfig, RoutineConfig, SafetyConfig};
+    use ironclaw::context::{ContextManager, JobContext};
+    use ironclaw::db::{Database, libsql::LibSqlBackend};
+    use ironclaw::extensions::ExtensionManager;
+    use ironclaw::hooks::HookRegistry;
+    use ironclaw::llm::LlmProvider;
     use ironclaw::safety::SafetyLayer;
-    use ironclaw::tools::ToolRegistry;
+    use ironclaw::secrets::{InMemorySecretsStore, SecretsCrypto, SecretsStore};
+    use ironclaw::tools::builtin::routine::RoutineUpdateTool;
+    use ironclaw::tools::mcp::{McpProcessManager, McpSessionManager};
+    use ironclaw::tools::{ApprovalRequirement, Tool, ToolError, ToolOutput, ToolRegistry};
     use ironclaw::workspace::Workspace;
     use ironclaw::workspace::hygiene::HygieneConfig;
 
-    use crate::support::trace_llm::{LlmTrace, TraceLlm, TraceResponse, TraceStep};
+    use crate::support::trace_llm::{LlmTrace, TraceLlm, TraceResponse, TraceStep, TraceToolCall};
+
+    const OWNER_GATE_COUNT_SETTING_KEY: &str = "tests.owner_gate_count";
+
+    struct OwnerGateTool {
+        store: Arc<dyn Database>,
+    }
+
+    #[async_trait::async_trait]
+    impl Tool for OwnerGateTool {
+        fn name(&self) -> &str {
+            "owner_gate"
+        }
+
+        fn description(&self) -> &str {
+            "Test-only tool gated by owner full_job permissions"
+        }
+
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({
+                "type": "object",
+                "properties": {}
+            })
+        }
+
+        async fn execute(
+            &self,
+            _params: serde_json::Value,
+            ctx: &JobContext,
+        ) -> Result<ToolOutput, ToolError> {
+            let start = std::time::Instant::now();
+            let current = self
+                .store
+                .get_setting(&ctx.user_id, OWNER_GATE_COUNT_SETTING_KEY)
+                .await
+                .map_err(|e| {
+                    ToolError::ExecutionFailed(format!("failed to read owner gate count: {e}"))
+                })?
+                .and_then(|value| value.as_i64())
+                .unwrap_or(0);
+            self.store
+                .set_setting(
+                    &ctx.user_id,
+                    OWNER_GATE_COUNT_SETTING_KEY,
+                    &serde_json::json!(current + 1),
+                )
+                .await
+                .map_err(|e| {
+                    ToolError::ExecutionFailed(format!("failed to persist owner gate count: {e}"))
+                })?;
+
+            Ok(ToolOutput::text("owner gate executed", start.elapsed()))
+        }
+
+        fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+            ApprovalRequirement::Always
+        }
+
+        fn requires_sanitization(&self) -> bool {
+            false
+        }
+    }
 
     /// Create a temp libSQL database with migrations applied.
     async fn create_test_db() -> (Arc<dyn Database>, tempfile::TempDir) {
-        use ironclaw::db::libsql::LibSqlBackend;
+        let (backend, temp_dir) = create_test_backend().await;
+        let db: Arc<dyn Database> = backend;
+        (db, temp_dir)
+    }
 
+    async fn create_test_backend() -> (Arc<LibSqlBackend>, tempfile::TempDir) {
         let temp_dir = tempfile::tempdir().expect("tempdir");
         let db_path = temp_dir.path().join("test.db");
-        let backend = LibSqlBackend::new_local(&db_path)
-            .await
-            .expect("LibSqlBackend");
+        let backend = Arc::new(
+            LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("LibSqlBackend"),
+        );
         backend.run_migrations().await.expect("migrations");
-        let db: Arc<dyn Database> = Arc::new(backend);
-        (db, temp_dir)
+        (backend, temp_dir)
     }
 
     /// Create a workspace backed by the test database.
@@ -93,6 +171,246 @@ mod tests {
         }
     }
 
+    fn make_full_job_routine(name: &str) -> Routine {
+        Routine {
+            id: Uuid::new_v4(),
+            name: name.to_string(),
+            description: format!("Full-job test routine: {name}"),
+            user_id: "default".to_string(),
+            enabled: true,
+            trigger: Trigger::Manual,
+            action: RoutineAction::FullJob {
+                title: name.to_string(),
+                description: "Use the owner-gated tool when permitted.".to_string(),
+                max_iterations: 3,
+            },
+            guardrails: RoutineGuardrails {
+                cooldown: Duration::from_secs(0),
+                max_concurrent: 1,
+                dedup_window: None,
+            },
+            notify: NotifyConfig::default(),
+            last_run_at: None,
+            next_fire_at: None,
+            run_count: 0,
+            consecutive_failures: 0,
+            state: serde_json::json!({}),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    fn owner_gate_trace(include_completion: bool) -> LlmTrace {
+        let mut steps = vec![TraceStep {
+            request_hint: None,
+            response: TraceResponse::ToolCalls {
+                tool_calls: vec![TraceToolCall {
+                    id: "call_owner_gate".to_string(),
+                    name: "owner_gate".to_string(),
+                    arguments: serde_json::json!({}),
+                }],
+                input_tokens: 40,
+                output_tokens: 10,
+            },
+            expected_tool_results: vec![],
+        }];
+        if include_completion {
+            // The worker first calls `select_tools()`, then falls back to
+            // `respond_with_tools()` when no tool calls are returned. Both
+            // methods consume a trace step, so the successful completion path
+            // needs two text responses after the tool call.
+            for _ in 0..2 {
+                steps.push(TraceStep {
+                    request_hint: None,
+                    response: TraceResponse::Text {
+                        content: "I have completed the task.".to_string(),
+                        input_tokens: 20,
+                        output_tokens: 5,
+                    },
+                    expected_tool_results: vec![],
+                });
+            }
+        }
+        LlmTrace::single_turn("test-owner-gate", "run owner gate", steps)
+    }
+
+    fn owner_gate_lightweight_trace() -> LlmTrace {
+        LlmTrace::single_turn(
+            "test-owner-gate-lightweight",
+            "run owner gate",
+            vec![
+                TraceStep {
+                    request_hint: None,
+                    response: TraceResponse::ToolCalls {
+                        tool_calls: vec![TraceToolCall {
+                            id: "call_owner_gate".to_string(),
+                            name: "owner_gate".to_string(),
+                            arguments: serde_json::json!({}),
+                        }],
+                        input_tokens: 40,
+                        output_tokens: 10,
+                    },
+                    expected_tool_results: vec![],
+                },
+                TraceStep {
+                    request_hint: None,
+                    response: TraceResponse::Text {
+                        content: "ROUTINE_OK".to_string(),
+                        input_tokens: 20,
+                        output_tokens: 5,
+                    },
+                    expected_tool_results: vec![],
+                },
+            ],
+        )
+    }
+
+    async fn write_test_extension_wasm(tools_dir: &Path, name: &str) {
+        tokio::fs::create_dir_all(tools_dir)
+            .await
+            .expect("create test wasm tools dir");
+        tokio::fs::write(tools_dir.join(format!("{name}.wasm")), b"\0asm")
+            .await
+            .expect("write test wasm tool marker");
+    }
+
+    fn make_test_extension_manager(
+        tools: Arc<ToolRegistry>,
+        tools_dir: &Path,
+        owner_id: &str,
+    ) -> Arc<ExtensionManager> {
+        let crypto = Arc::new(
+            SecretsCrypto::new(SecretString::from(
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            ))
+            .expect("test crypto"),
+        );
+        let secrets: Arc<dyn SecretsStore + Send + Sync> =
+            Arc::new(InMemorySecretsStore::new(crypto));
+        Arc::new(ExtensionManager::new(
+            Arc::new(McpSessionManager::new()),
+            Arc::new(McpProcessManager::new()),
+            secrets,
+            tools,
+            None,
+            None,
+            tools_dir.to_path_buf(),
+            tools_dir.join("channels"),
+            None,
+            owner_id.to_string(),
+            None,
+            Vec::new(),
+        ))
+    }
+
+    async fn setup_owner_gate_engine(
+        db: Arc<dyn Database>,
+        trace: LlmTrace,
+        tools_dir: &Path,
+        extension_owner_id: Option<&str>,
+        activate_owner_gate: bool,
+    ) -> Arc<RoutineEngine> {
+        let ws = create_workspace(&db);
+        let (notify_tx, _rx) = tokio::sync::mpsc::channel(16);
+        let registry = Arc::new(ToolRegistry::new());
+        if extension_owner_id.is_some() {
+            registry
+                .register(Arc::new(OwnerGateTool { store: db.clone() }))
+                .await;
+        }
+        if activate_owner_gate {
+            write_test_extension_wasm(tools_dir, "owner_gate").await;
+        }
+
+        let safety = Arc::new(SafetyLayer::new(&SafetyConfig {
+            max_output_length: 100_000,
+            injection_check_enabled: false,
+        }));
+        let llm: Arc<dyn LlmProvider> = Arc::new(TraceLlm::from_trace(trace));
+        let extension_manager = extension_owner_id
+            .map(|owner_id| make_test_extension_manager(registry.clone(), tools_dir, owner_id));
+        let scheduler = Arc::new(Scheduler::new(
+            AgentConfig::for_testing(),
+            Arc::new(ContextManager::new(5)),
+            llm.clone(),
+            safety.clone(),
+            SchedulerDeps {
+                tools: registry.clone(),
+                extension_manager: extension_manager.clone(),
+                store: Some(db.clone()),
+                hooks: Arc::new(HookRegistry::new()),
+            },
+        ));
+
+        Arc::new(RoutineEngine::new(
+            RoutineConfig::default(),
+            db,
+            llm,
+            ws,
+            notify_tx,
+            Some(scheduler),
+            extension_manager,
+            registry,
+            safety,
+            SandboxReadiness::Available,
+        ))
+    }
+
+    async fn owner_gate_count(db: &Arc<dyn Database>) -> i64 {
+        db.get_setting("default", OWNER_GATE_COUNT_SETTING_KEY)
+            .await
+            .expect("get owner gate count")
+            .and_then(|value| value.as_i64())
+            .unwrap_or(0)
+    }
+
+    async fn wait_for_run_completion(
+        db: &Arc<dyn Database>,
+        routine_id: Uuid,
+        run_id: Uuid,
+    ) -> RoutineRun {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let runs = db
+                .list_routine_runs(routine_id, 10)
+                .await
+                .expect("list_routine_runs");
+            if let Some(run) = runs.into_iter().find(|run| run.id == run_id)
+                && run.status != RunStatus::Running
+            {
+                return run;
+            }
+
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for routine run {run_id} to complete"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    async fn wait_for_any_run_completion(db: &Arc<dyn Database>, routine_id: Uuid) -> RoutineRun {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let runs = db
+                .list_routine_runs(routine_id, 10)
+                .await
+                .expect("list_routine_runs");
+            if let Some(run) = runs
+                .into_iter()
+                .find(|run| run.status != RunStatus::Running)
+            {
+                return run;
+            }
+
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for any routine run for {routine_id} to complete"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Test 1: cron_routine_fires
     // -----------------------------------------------------------------------
@@ -135,8 +453,10 @@ mod tests {
             ws,
             notify_tx,
             None,
+            None,
             tools,
             safety,
+            SandboxReadiness::DisabledByConfig,
         ));
 
         // Insert a cron routine with next_fire_at in the past.
@@ -212,8 +532,10 @@ mod tests {
             ws,
             notify_tx,
             None,
+            None,
             tools,
             safety,
+            SandboxReadiness::DisabledByConfig,
         ));
 
         // Insert an event routine matching "deploy.*production".
@@ -305,8 +627,10 @@ mod tests {
             ws,
             notify_tx,
             None,
+            None,
             tools,
             safety,
+            SandboxReadiness::DisabledByConfig,
         ));
 
         let routine = make_routine(
@@ -412,8 +736,10 @@ mod tests {
             ws,
             notify_tx,
             None,
+            None,
             tools,
             safety,
+            SandboxReadiness::DisabledByConfig,
         ));
 
         let mut filters = std::collections::HashMap::new();
@@ -553,8 +879,10 @@ mod tests {
             ws,
             notify_tx,
             None,
+            None,
             tools,
             safety,
+            SandboxReadiness::DisabledByConfig,
         ));
 
         // Insert an event routine with 1-hour cooldown.
@@ -738,8 +1066,10 @@ mod tests {
             ws,
             notify_tx,
             None,
+            None,
             tools,
             safety,
+            SandboxReadiness::DisabledByConfig,
         ));
 
         (engine, db, dir)
@@ -867,8 +1197,10 @@ mod tests {
             ws,
             notify_tx,
             None, // no scheduler — rejected before dispatch
+            None,
             tools,
             safety,
+            SandboxReadiness::DisabledByConfig,
         ));
 
         // Create a full_job routine with max_concurrent = 1
@@ -883,7 +1215,6 @@ mod tests {
                 title: "t".to_string(),
                 description: "d".to_string(),
                 max_iterations: 3,
-                tool_permissions: vec![],
             },
             guardrails: RoutineGuardrails {
                 cooldown: Duration::from_secs(0),
@@ -974,8 +1305,10 @@ mod tests {
             ws,
             notify_tx,
             None,
+            None,
             tools,
             safety,
+            SandboxReadiness::DisabledByConfig,
         ));
 
         // Insert a due cron routine
@@ -1027,6 +1360,333 @@ mod tests {
         assert!(
             !runs_after.is_empty(),
             "cron routine should fire after global slot is released"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: lightweight manual routines use the owner's active extension tools
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn lightweight_manual_routine_uses_active_owner_extension_tool() {
+        let (backend, tmp) = create_test_backend().await;
+        let db: Arc<dyn Database> = backend;
+        let tools_dir = tmp.path().join("wasm-tools");
+        let engine = setup_owner_gate_engine(
+            db.clone(),
+            owner_gate_lightweight_trace(),
+            tools_dir.as_path(),
+            Some("default"),
+            true,
+        )
+        .await;
+
+        let mut routine = make_routine("manual-owner-gate", Trigger::Manual, "Use owner_gate.");
+        if let RoutineAction::Lightweight { use_tools, .. } = &mut routine.action {
+            *use_tools = true;
+        }
+        db.create_routine(&routine).await.expect("create_routine");
+
+        let run_id = engine
+            .fire_manual(routine.id, None)
+            .await
+            .expect("fire manual");
+        let run = wait_for_run_completion(&db, routine.id, run_id).await;
+
+        assert_eq!(run.status, RunStatus::Ok);
+        assert_eq!(owner_gate_count(&db).await, 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: full_job cron routines use the owner's active extension tools
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn full_job_cron_routine_uses_active_owner_extension_tool() {
+        let (backend, tmp) = create_test_backend().await;
+        let db: Arc<dyn Database> = backend;
+        let tools_dir = tmp.path().join("wasm-tools");
+        let engine = setup_owner_gate_engine(
+            db.clone(),
+            owner_gate_trace(true),
+            tools_dir.as_path(),
+            Some("default"),
+            true,
+        )
+        .await;
+
+        let mut routine = make_full_job_routine("cron-owner-gate");
+        routine.trigger = Trigger::Cron {
+            schedule: "* * * * *".to_string(),
+            timezone: None,
+        };
+        routine.next_fire_at = Some(Utc::now() - chrono::Duration::minutes(1));
+        db.create_routine(&routine).await.expect("create_routine");
+
+        engine.check_cron_triggers().await;
+        let run = wait_for_any_run_completion(&db, routine.id).await;
+
+        assert_eq!(run.status, RunStatus::Ok);
+        assert_eq!(owner_gate_count(&db).await, 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: lightweight event routines use the owner's active extension tools
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn lightweight_event_routine_uses_active_owner_extension_tool() {
+        let (backend, tmp) = create_test_backend().await;
+        let db: Arc<dyn Database> = backend;
+        let tools_dir = tmp.path().join("wasm-tools");
+        let engine = setup_owner_gate_engine(
+            db.clone(),
+            owner_gate_lightweight_trace(),
+            tools_dir.as_path(),
+            Some("default"),
+            true,
+        )
+        .await;
+
+        let mut routine = make_routine(
+            "event-owner-gate",
+            Trigger::Event {
+                channel: None,
+                pattern: "owner-gate".to_string(),
+            },
+            "Use owner_gate.",
+        );
+        if let RoutineAction::Lightweight { use_tools, .. } = &mut routine.action {
+            *use_tools = true;
+        }
+        db.create_routine(&routine).await.expect("create_routine");
+        engine.refresh_event_cache().await;
+
+        let fired = engine
+            .check_event_triggers("default", "test", "owner-gate")
+            .await;
+        assert_eq!(fired, 1, "expected one matching event routine");
+
+        let run = wait_for_any_run_completion(&db, routine.id).await;
+        assert_eq!(run.status, RunStatus::Ok);
+        assert_eq!(owner_gate_count(&db).await, 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: full_job system-event routines use the owner's active extension tools
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn full_job_system_event_routine_uses_active_owner_extension_tool() {
+        let (backend, tmp) = create_test_backend().await;
+        let db: Arc<dyn Database> = backend;
+        let tools_dir = tmp.path().join("wasm-tools");
+        let engine = setup_owner_gate_engine(
+            db.clone(),
+            owner_gate_trace(true),
+            tools_dir.as_path(),
+            Some("default"),
+            true,
+        )
+        .await;
+
+        let mut routine = make_full_job_routine("system-owner-gate");
+        routine.trigger = Trigger::SystemEvent {
+            source: "github".to_string(),
+            event_type: "issue.opened".to_string(),
+            filters: std::collections::HashMap::new(),
+        };
+        db.create_routine(&routine).await.expect("create_routine");
+        engine.refresh_event_cache().await;
+
+        let fired = engine
+            .emit_system_event(
+                "github",
+                "issue.opened",
+                &serde_json::json!({"issue_number": 7}),
+                Some("default"),
+            )
+            .await;
+        assert_eq!(fired, 1, "expected one matching system_event routine");
+
+        let run = wait_for_any_run_completion(&db, routine.id).await;
+        assert_eq!(run.status, RunStatus::Ok);
+        assert_eq!(owner_gate_count(&db).await, 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: autonomous runs fail loudly when an extension tool is inactive
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn full_job_blocks_without_active_owner_extension_tool() {
+        let (backend, tmp) = create_test_backend().await;
+        let db: Arc<dyn Database> = backend;
+        let tools_dir = tmp.path().join("wasm-tools");
+        let engine = setup_owner_gate_engine(
+            db.clone(),
+            owner_gate_trace(false),
+            tools_dir.as_path(),
+            Some("default"),
+            false,
+        )
+        .await;
+
+        let routine = make_full_job_routine("inactive-owner-gate");
+        db.create_routine(&routine).await.expect("create_routine");
+
+        let run_id = engine
+            .fire_manual(routine.id, None)
+            .await
+            .expect("fire manual");
+        let run = wait_for_run_completion(&db, routine.id, run_id).await;
+
+        assert_eq!(run.status, RunStatus::Failed);
+        assert_eq!(owner_gate_count(&db).await, 0);
+        let failure_reason = db
+            .get_agent_job_failure_reason(run.job_id.expect("linked job id"))
+            .await
+            .expect("load job failure reason")
+            .expect("missing job failure reason");
+        assert!(
+            failure_reason.contains("owner_gate"),
+            "expected missing-tool failure reason, got {failure_reason}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: extension tools activated for another owner are not inherited
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn full_job_blocks_when_extension_belongs_to_another_owner() {
+        let (backend, tmp) = create_test_backend().await;
+        let db: Arc<dyn Database> = backend;
+        let tools_dir = tmp.path().join("wasm-tools");
+        let engine = setup_owner_gate_engine(
+            db.clone(),
+            owner_gate_trace(false),
+            tools_dir.as_path(),
+            Some("someone-else"),
+            true,
+        )
+        .await;
+
+        let routine = make_full_job_routine("other-owner-gate");
+        db.create_routine(&routine).await.expect("create_routine");
+
+        let run_id = engine
+            .fire_manual(routine.id, None)
+            .await
+            .expect("fire manual");
+        let run = wait_for_run_completion(&db, routine.id, run_id).await;
+
+        assert_eq!(run.status, RunStatus::Failed);
+        assert_eq!(owner_gate_count(&db).await, 0);
+        let failure_reason = db
+            .get_agent_job_failure_reason(run.job_id.expect("linked job id"))
+            .await
+            .expect("load job failure reason")
+            .expect("missing job failure reason");
+        assert!(
+            failure_reason.contains("owner_gate"),
+            "expected owner-mismatch failure reason, got {failure_reason}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: legacy permission fields are ignored on read and removed on rewrite
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn legacy_full_job_permission_fields_are_ignored_and_removed_on_update() {
+        let (backend, tmp) = create_test_backend().await;
+        let db: Arc<dyn Database> = backend.clone();
+
+        let legacy_routine = make_full_job_routine("legacy-full-job");
+        db.create_routine(&legacy_routine)
+            .await
+            .expect("create_routine");
+
+        let conn = backend.connect().await.expect("connect");
+        conn.execute(
+            "UPDATE routines SET action_config = ?1 WHERE id = ?2",
+            params![
+                serde_json::json!({
+                    "title": legacy_routine.name,
+                    "description": "Use the owner-gated tool when permitted.",
+                    "max_iterations": 3,
+                    "tool_permissions": ["owner_gate"],
+                    "permission_mode": "inherit_owner",
+                })
+                .to_string(),
+                legacy_routine.id.to_string(),
+            ],
+        )
+        .await
+        .expect("inject legacy permission fields into action_config");
+
+        let loaded = db
+            .get_routine(legacy_routine.id)
+            .await
+            .expect("get_routine")
+            .expect("routine should still exist");
+        assert!(matches!(
+            loaded.action,
+            RoutineAction::FullJob {
+                ref title,
+                ref description,
+                max_iterations,
+            } if title == "legacy-full-job"
+                && description == "Use the owner-gated tool when permitted."
+                && max_iterations == 3
+        ));
+
+        let tools_dir = tmp.path().join("wasm-tools");
+        let engine = setup_owner_gate_engine(
+            db.clone(),
+            owner_gate_trace(false),
+            tools_dir.as_path(),
+            None,
+            false,
+        )
+        .await;
+        let update_tool = RoutineUpdateTool::new(db.clone(), engine);
+        let update_ctx = JobContext::with_user("default", "update", "update legacy routine");
+        update_tool
+            .execute(
+                serde_json::json!({
+                    "name": legacy_routine.name,
+                    "prompt": "Updated legacy description",
+                }),
+                &update_ctx,
+            )
+            .await
+            .expect("routine_update should succeed");
+
+        let mut rows = conn
+            .query(
+                "SELECT action_config FROM routines WHERE id = ?1",
+                params![legacy_routine.id.to_string()],
+            )
+            .await
+            .expect("select updated action_config");
+        let row = rows
+            .next()
+            .await
+            .expect("next row")
+            .expect("updated routine row");
+        let action_config_raw: String = row.get(0).expect("action_config text");
+        let action_config: serde_json::Value =
+            serde_json::from_str(&action_config_raw).expect("parse updated action_config");
+
+        assert_eq!(
+            action_config,
+            serde_json::json!({
+                "title": "legacy-full-job",
+                "description": "Updated legacy description",
+                "max_iterations": 3,
+            })
         );
     }
 }

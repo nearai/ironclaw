@@ -19,9 +19,15 @@ pub async fn execute_tool_with_safety(
     tools: &ToolRegistry,
     safety: &SafetyLayer,
     tool_name: &str,
-    params: &serde_json::Value,
+    params: serde_json::Value,
     job_ctx: &JobContext,
 ) -> Result<String, Error> {
+    if tool_name.is_empty() {
+        return Err(crate::error::ToolError::NotFound {
+            name: tool_name.to_string(),
+        }
+        .into());
+    }
     let tool = tools
         .get(tool_name)
         .await
@@ -29,7 +35,7 @@ pub async fn execute_tool_with_safety(
             name: tool_name.to_string(),
         })?;
 
-    let normalized_params = prepare_tool_params(tool.as_ref(), params);
+    let normalized_params = prepare_tool_params(tool.as_ref(), &params);
 
     // Validate tool parameters
     let validation = safety.validator().validate_tool_params(&normalized_params);
@@ -57,10 +63,7 @@ pub async fn execute_tool_with_safety(
     // Execute with per-tool timeout
     let timeout = tool.execution_timeout();
     let start = std::time::Instant::now();
-    let result = tokio::time::timeout(timeout, async {
-        tool.execute(normalized_params.clone(), job_ctx).await
-    })
-    .await;
+    let result = tokio::time::timeout(timeout, tool.execute(normalized_params, job_ctx)).await;
     let elapsed = start.elapsed();
 
     match &result {
@@ -127,7 +130,7 @@ pub fn process_tool_result(
     let content = match result {
         Ok(output) => {
             let sanitized = safety.sanitize_tool_output(tool_name, output);
-            safety.wrap_for_llm(tool_name, &sanitized.content, sanitized.was_modified)
+            safety.wrap_for_llm(tool_name, &sanitized.content)
         }
         Err(e) => format!("Error: {}", e),
     };
@@ -143,7 +146,7 @@ pub async fn execute_tool_simple(
     tools: &ToolRegistry,
     safety: &SafetyLayer,
     tool_name: &str,
-    params: &serde_json::Value,
+    params: serde_json::Value,
     job_ctx: &JobContext,
 ) -> Result<String, String> {
     execute_tool_with_safety(tools, safety, tool_name, params, job_ctx)
@@ -302,7 +305,7 @@ mod tests {
             &registry,
             &safety,
             "",
-            &serde_json::json!({}),
+            serde_json::json!({}),
             &test_job_ctx(),
         )
         .await;
@@ -325,7 +328,7 @@ mod tests {
         let params = serde_json::json!({"message": "hello"});
 
         let result =
-            execute_tool_with_safety(&registry, &safety, "echo", &params, &test_job_ctx()).await;
+            execute_tool_with_safety(&registry, &safety, "echo", params, &test_job_ctx()).await;
 
         assert!(result.is_ok(), "Echo tool should succeed");
         let output = result.unwrap();
@@ -344,7 +347,7 @@ mod tests {
             &registry,
             &safety,
             "nonexistent",
-            &serde_json::json!({}),
+            serde_json::json!({}),
             &test_job_ctx(),
         )
         .await;
@@ -367,7 +370,7 @@ mod tests {
             &registry,
             &safety,
             "fail_tool",
-            &serde_json::json!({}),
+            serde_json::json!({}),
             &test_job_ctx(),
         )
         .await;
@@ -391,7 +394,7 @@ mod tests {
             &registry,
             &safety,
             "slow_tool",
-            &serde_json::json!({}),
+            serde_json::json!({}),
             &test_job_ctx(),
         )
         .await;
@@ -419,7 +422,7 @@ mod tests {
             &registry,
             &safety,
             "array_echo",
-            &serde_json::json!({"values": "[\"1\", \"2\", 3]"}),
+            serde_json::json!({"values": "[\"1\", \"2\", 3]"}),
             &test_job_ctx(),
         )
         .await

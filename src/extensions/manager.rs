@@ -45,6 +45,56 @@ struct PendingAuth {
     task_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
+struct HostedOAuthFlowStart {
+    name: String,
+    kind: ExtensionKind,
+    auth_url: String,
+    expected_state: String,
+    flow: crate::cli::oauth_defaults::PendingOAuthFlow,
+}
+
+fn hosted_proxy_client_secret(
+    client_secret: &Option<String>,
+    builtin: Option<&crate::cli::oauth_defaults::OAuthCredentials>,
+    exchange_proxy_configured: bool,
+) -> Option<String> {
+    if !exchange_proxy_configured {
+        return client_secret.clone();
+    }
+
+    let builtin_secret = builtin.map(|credentials| credentials.client_secret);
+    match (client_secret, builtin_secret) {
+        (Some(resolved), Some(baked_in)) if resolved == baked_in => None,
+        _ => client_secret.clone(),
+    }
+}
+
+fn normalize_oauth_callback_path(path: &str) -> String {
+    let trimmed_path = path.trim_end_matches('/');
+    if trimmed_path.is_empty() {
+        "/oauth/callback".to_string()
+    } else if trimmed_path.ends_with("/oauth/callback") {
+        trimmed_path.to_string()
+    } else {
+        format!("{trimmed_path}/oauth/callback")
+    }
+}
+
+fn normalize_hosted_callback_url(callback_url: &str) -> String {
+    if let Ok(mut parsed) = url::Url::parse(callback_url) {
+        let normalized_path = normalize_oauth_callback_path(parsed.path());
+        parsed.set_path(&normalized_path);
+        return parsed.to_string();
+    }
+
+    let normalized_callback_url = callback_url.trim_end_matches('/');
+    if normalized_callback_url.ends_with("/oauth/callback") {
+        normalized_callback_url.to_string()
+    } else {
+        format!("{normalized_callback_url}/oauth/callback")
+    }
+}
+
 /// Runtime infrastructure needed for hot-activating WASM channels.
 ///
 /// Set after construction via [`ExtensionManager::set_channel_runtime`] once the
@@ -56,6 +106,21 @@ struct ChannelRuntimeState {
     wasm_channel_router: Arc<WasmChannelRouter>,
     wasm_channel_owner_ids: std::collections::HashMap<String, i64>,
 }
+
+/// Setup schema returned to web UI for extension configuration.
+pub struct ExtensionSetupSchema {
+    pub secrets: Vec<crate::channels::web::types::SecretFieldInfo>,
+    pub fields: Vec<crate::channels::web::types::SetupFieldInfo>,
+}
+
+/// Only these global (non-namespaced) setting paths may be written by extension
+/// setup fields. Everything else must be under `extensions.<name>.*`.
+const ALLOWED_GLOBAL_SETUP_SETTING_PATHS: &[&str] = &[
+    "llm_backend",
+    "selected_model",
+    "ollama_base_url",
+    "openai_compatible_base_url",
+];
 
 #[cfg(test)]
 type TestWasmChannelLoader =
@@ -413,6 +478,37 @@ fn sanitize_url_for_logging(url: &str) -> String {
 }
 
 impl ExtensionManager {
+    pub fn owner_id(&self) -> &str {
+        &self.user_id
+    }
+
+    pub async fn active_tool_names(&self) -> HashSet<String> {
+        let mut names = HashSet::new();
+        match self.list(None, false).await {
+            Ok(extensions) => {
+                for extension in extensions {
+                    match extension.kind {
+                        ExtensionKind::WasmTool if extension.active => {
+                            names.insert(extension.name);
+                        }
+                        ExtensionKind::McpServer if extension.active => {
+                            names.extend(extension.tools);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Err(err) => {
+                tracing::warn!(
+                    owner_id = %self.user_id,
+                    "Failed to list active extensions while resolving autonomous tool scope: {}",
+                    err
+                );
+            }
+        }
+        names
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         mcp_session_manager: Arc<McpSessionManager>,
@@ -547,7 +643,9 @@ impl ExtensionManager {
     async fn gateway_callback_redirect_uri(&self) -> Option<String> {
         use crate::cli::oauth_defaults;
         if oauth_defaults::use_gateway_callback() {
-            return Some(format!("{}/oauth/callback", oauth_defaults::callback_url()));
+            return Some(normalize_hosted_callback_url(
+                &oauth_defaults::callback_url(),
+            ));
         }
         // Use gateway_base_url from enable_gateway_mode()
         if let Some(ref base) = *self.gateway_base_url.read().await {
@@ -854,6 +952,31 @@ impl ExtensionManager {
         &self.secrets
     }
 
+    /// Inject a pre-created MCP client (from startup loading) into the manager.
+    ///
+    /// Startup-loaded MCP clients register their tools in `ToolRegistry` but are
+    /// otherwise dropped. This method stores the client so that `list()` reports
+    /// accurate "connected" status and reconnection/session management works.
+    pub(crate) async fn inject_mcp_client(
+        &self,
+        name: String,
+        client: Arc<crate::tools::mcp::McpClient>,
+    ) {
+        if name.is_empty() {
+            tracing::warn!("inject_mcp_client called with empty name; ignoring");
+            return;
+        }
+        if let Err(e) = Self::validate_extension_name(&name) {
+            tracing::warn!(
+                error = %e,
+                name = %name,
+                "inject_mcp_client called with invalid name; ignoring"
+            );
+            return;
+        }
+        self.mcp_clients.write().await.insert(name, client);
+    }
+
     /// Register channel names that were loaded at startup.
     /// Called after WASM channels are loaded so `list()` reports accurate active status.
     pub async fn set_active_channels(&self, names: Vec<String>) {
@@ -922,6 +1045,98 @@ impl ExtensionManager {
     /// by CSRF `state` parameter and complete the token exchange.
     pub fn pending_oauth_flows(&self) -> &crate::cli::oauth_defaults::PendingOAuthRegistry {
         &self.pending_oauth_flows
+    }
+
+    async fn clear_pending_extension_auth(&self, name: &str) {
+        {
+            let mut pending = self.pending_auth.write().await;
+            if let Some(old) = pending.remove(name)
+                && let Some(handle) = old.task_handle
+            {
+                handle.abort();
+            }
+        }
+
+        let mut flows = self.pending_oauth_flows.write().await;
+        flows.retain(|_, flow| flow.extension_name != name);
+    }
+
+    fn rewrite_oauth_state_param(
+        auth_url: String,
+        expected_state: &str,
+        hosted_state: &str,
+    ) -> String {
+        if hosted_state == expected_state {
+            return auth_url;
+        }
+
+        let Ok(mut parsed) = url::Url::parse(&auth_url) else {
+            return auth_url.replace(
+                &format!("state={}", urlencoding::encode(expected_state)),
+                &format!("state={}", urlencoding::encode(hosted_state)),
+            );
+        };
+
+        let mut replaced = false;
+        let pairs: Vec<(String, String)> = parsed
+            .query_pairs()
+            .map(|(key, value)| {
+                if key == "state" {
+                    replaced = true;
+                    (key.into_owned(), hosted_state.to_string())
+                } else {
+                    (key.into_owned(), value.into_owned())
+                }
+            })
+            .collect();
+
+        {
+            let mut query_pairs = parsed.query_pairs_mut();
+            query_pairs.clear();
+            for (key, value) in pairs {
+                query_pairs.append_pair(&key, &value);
+            }
+            if !replaced {
+                query_pairs.append_pair("state", hosted_state);
+            }
+        }
+
+        parsed.to_string()
+    }
+
+    async fn start_gateway_oauth_flow(&self, request: HostedOAuthFlowStart) -> AuthResult {
+        use crate::cli::oauth_defaults;
+
+        oauth_defaults::sweep_expired_flows(&self.pending_oauth_flows).await;
+
+        let hosted_state = oauth_defaults::build_platform_state(&request.expected_state);
+        let auth_url = Self::rewrite_oauth_state_param(
+            request.auth_url,
+            &request.expected_state,
+            &hosted_state,
+        );
+
+        self.pending_oauth_flows
+            .write()
+            .await
+            .insert(request.expected_state, request.flow);
+
+        self.pending_auth.write().await.insert(
+            request.name.clone(),
+            PendingAuth {
+                _name: request.name.clone(),
+                _kind: request.kind,
+                created_at: std::time::Instant::now(),
+                task_handle: None,
+            },
+        );
+
+        AuthResult::awaiting_authorization(
+            request.name,
+            request.kind,
+            auth_url,
+            "gateway".to_string(),
+        )
     }
 
     /// Broadcast an extension status change to the web UI via SSE.
@@ -2383,6 +2598,7 @@ impl ExtensionManager {
         use crate::cli::oauth_defaults;
 
         let is_gateway = self.should_use_gateway_mode();
+        self.clear_pending_extension_auth(name).await;
 
         // Build redirect URI: gateway uses the public callback URL,
         // local mode binds a random port.
@@ -2440,19 +2656,8 @@ impl ExtensionManager {
         let code_verifier = oauth_result.code_verifier;
 
         if is_gateway {
-            // Gateway mode: store pending flow for the /oauth/callback handler.
-            oauth_defaults::sweep_expired_flows(&self.pending_oauth_flows).await;
-
-            // Platform routing: prepend instance name to state
-            let platform_state = oauth_defaults::build_platform_state(&expected_state);
-            let auth_url = if platform_state != expected_state {
-                oauth_result.url.replace(
-                    &format!("state={}", urlencoding::encode(&expected_state)),
-                    &format!("state={}", urlencoding::encode(&platform_state)),
-                )
-            } else {
-                oauth_result.url
-            };
+            let mut token_exchange_extra_params = HashMap::new();
+            token_exchange_extra_params.insert("resource".to_string(), resource.clone());
 
             let flow = oauth_defaults::PendingOAuthFlow {
                 extension_name: name.to_string(),
@@ -2471,7 +2676,7 @@ impl ExtensionManager {
                 secrets: Arc::clone(&self.secrets),
                 sse_sender: self.sse_sender.read().await.clone(),
                 gateway_token: self.gateway_token.clone(),
-                resource: Some(resource),
+                token_exchange_extra_params,
                 client_id_secret_name: if server.oauth.is_none() {
                     Some(server.client_id_secret_name())
                 } else {
@@ -2480,27 +2685,15 @@ impl ExtensionManager {
                 created_at: std::time::Instant::now(),
             };
 
-            self.pending_oauth_flows
-                .write()
-                .await
-                .insert(expected_state, flow);
-
-            self.pending_auth.write().await.insert(
-                name.to_string(),
-                PendingAuth {
-                    _name: name.to_string(),
-                    _kind: ExtensionKind::McpServer,
-                    created_at: std::time::Instant::now(),
-                    task_handle: None,
-                },
-            );
-
-            Ok(AuthResult::awaiting_authorization(
-                name,
-                ExtensionKind::McpServer,
-                auth_url,
-                "gateway".to_string(),
-            ))
+            Ok(self
+                .start_gateway_oauth_flow(HostedOAuthFlowStart {
+                    name: name.to_string(),
+                    kind: ExtensionKind::McpServer,
+                    auth_url: oauth_result.url,
+                    expected_state,
+                    flow,
+                })
+                .await)
         } else {
             // Local mode: return URL for manual opening
             self.pending_auth.write().await.insert(
@@ -2901,9 +3094,10 @@ impl ExtensionManager {
                      Enter it in the Setup tab or set {} env var",
                     name, env_name
                 );
-                // Only mention the Google-specific build flag for Google providers
-                if auth.secret_name.to_lowercase().contains("google") {
-                    msg.push_str(", or build with IRONCLAW_GOOGLE_CLIENT_ID");
+                if let Some(override_env) =
+                    crate::cli::oauth_defaults::builtin_client_id_override_env(&auth.secret_name)
+                {
+                    msg.push_str(&format!(", or build with {override_env}"));
                 }
                 msg.push('.');
                 msg
@@ -2919,20 +3113,7 @@ impl ExtensionManager {
             )
             .await;
 
-        // Cancel any existing pending auth for this tool (frees port 9876 in TCP mode)
-        {
-            let mut pending = self.pending_auth.write().await;
-            if let Some(old) = pending.remove(name)
-                && let Some(handle) = old.task_handle
-            {
-                handle.abort();
-            }
-        }
-        // Also clean up any gateway-mode pending flows for this tool
-        {
-            let mut flows = self.pending_oauth_flows.write().await;
-            flows.retain(|_, flow| flow.extension_name != name);
-        }
+        self.clear_pending_extension_auth(name).await;
 
         let redirect_uri = self
             .gateway_callback_redirect_uri()
@@ -2963,30 +3144,24 @@ impl ExtensionManager {
             .unwrap_or_else(|| name.to_string());
 
         if self.should_use_gateway_mode() {
-            // Gateway mode: store pending flow state for the web gateway's
-            // `/oauth/callback` handler to complete the exchange. No TCP listener
-            // needed — the OAuth provider redirects to the gateway URL.
-            oauth_defaults::sweep_expired_flows(&self.pending_oauth_flows).await;
-
-            // Wrap the CSRF nonce with instance name for platform routing.
-            // Nginx at auth.DOMAIN parses `instance:nonce` to route the callback
-            // to the correct container. The flow is keyed by the raw nonce.
-            let platform_state = oauth_defaults::build_platform_state(&expected_state);
-            let auth_url = if platform_state != expected_state {
-                auth_url.replace(
-                    &format!("state={}", urlencoding::encode(&expected_state)),
-                    &format!("state={}", urlencoding::encode(&platform_state)),
-                )
-            } else {
-                auth_url
-            };
+            // When an exchange proxy is configured, omit the client_secret if it
+            // was resolved from built-in defaults (desktop app credentials). The
+            // proxy holds the correct web-app secret for platform-registered OAuth
+            // apps. Sending the desktop secret would cause a client_id/secret
+            // mismatch because the container's GOOGLE_OAUTH_CLIENT_ID is the web
+            // app, not the desktop app.
+            let proxy_client_secret = hosted_proxy_client_secret(
+                &client_secret,
+                builtin.as_ref(),
+                oauth_defaults::exchange_proxy_url().is_some(),
+            );
 
             let flow = oauth_defaults::PendingOAuthFlow {
                 extension_name: name.to_string(),
                 display_name: display_name.clone(),
                 token_url: oauth.token_url.clone(),
                 client_id: client_id.clone(),
-                client_secret: client_secret.clone(),
+                client_secret: proxy_client_secret,
                 redirect_uri: redirect_uri.clone(),
                 code_verifier,
                 access_token_field: oauth.access_token_field.clone(),
@@ -2998,35 +3173,20 @@ impl ExtensionManager {
                 secrets: Arc::clone(&self.secrets),
                 sse_sender: self.sse_sender.read().await.clone(),
                 gateway_token: self.gateway_token.clone(),
-                resource: None,
+                token_exchange_extra_params: std::collections::HashMap::new(),
                 client_id_secret_name: None,
                 created_at: std::time::Instant::now(),
             };
 
-            // Key by raw nonce (without instance prefix) — the callback handler
-            // strips the prefix before lookup.
-            self.pending_oauth_flows
-                .write()
-                .await
-                .insert(expected_state, flow);
-
-            // Register pending auth without a task handle (gateway handles completion)
-            self.pending_auth.write().await.insert(
-                name.to_string(),
-                PendingAuth {
-                    _name: name.to_string(),
-                    _kind: ExtensionKind::WasmTool,
-                    created_at: std::time::Instant::now(),
-                    task_handle: None,
-                },
-            );
-
-            Ok(AuthResult::awaiting_authorization(
-                name,
-                ExtensionKind::WasmTool,
-                auth_url,
-                "gateway".to_string(),
-            ))
+            Ok(self
+                .start_gateway_oauth_flow(HostedOAuthFlowStart {
+                    name: name.to_string(),
+                    kind: ExtensionKind::WasmTool,
+                    auth_url,
+                    expected_state,
+                    flow,
+                })
+                .await)
         } else {
             // TCP listener mode: bind port 9876 and spawn a background task
             // to wait for the callback. This is the original flow for local/desktop use.
@@ -3196,6 +3356,46 @@ impl ExtensionManager {
             return ToolAuthState::NoAuth;
         };
 
+        let saved_fields = self.load_tool_setup_fields(name).await.unwrap_or_default();
+        let setup_is_complete = if let Some(setup) = &cap_file.setup {
+            let secrets_ready = futures::future::join_all(
+                setup
+                    .required_secrets
+                    .iter()
+                    .filter(|s| !s.optional)
+                    .filter(|s| !Self::is_auto_resolved_oauth_field(&s.name, &cap_file))
+                    .map(|s| self.secrets.exists(&self.user_id, &s.name)),
+            )
+            .await
+            .into_iter()
+            .all(|r| r.unwrap_or(false));
+
+            if !secrets_ready {
+                false
+            } else {
+                let mut fields_ready = true;
+                for field in &setup.required_fields {
+                    if field.optional {
+                        continue;
+                    }
+                    if !self
+                        .is_tool_setup_field_provided(name, field, &saved_fields)
+                        .await
+                    {
+                        fields_ready = false;
+                        break;
+                    }
+                }
+                fields_ready
+            }
+        } else {
+            true
+        };
+
+        if !setup_is_complete {
+            return ToolAuthState::NeedsSetup;
+        }
+
         // If the tool declares an auth section, the access token is the
         // authoritative signal — setup secrets (client_id/secret) are
         // intermediate and may be auto-resolved via builtins.
@@ -3218,31 +3418,13 @@ impl ExtensionManager {
             };
         }
 
-        // No auth section — fall back to checking setup.required_secrets.
-        let Some(setup) = &cap_file.setup else {
-            return ToolAuthState::NoAuth;
-        };
-        if setup.required_secrets.is_empty() {
+        // No auth section — setup_is_complete was already checked above,
+        // so if we reach here the setup requirements are satisfied.
+        if cap_file.setup.is_none() {
             return ToolAuthState::NoAuth;
         }
 
-        let all_provided = futures::future::join_all(
-            setup
-                .required_secrets
-                .iter()
-                .filter(|s| !s.optional)
-                .filter(|s| !Self::is_auto_resolved_oauth_field(&s.name, &cap_file))
-                .map(|s| self.secrets.exists(&self.user_id, &s.name)),
-        )
-        .await
-        .into_iter()
-        .all(|r| r.unwrap_or(false));
-
-        if all_provided {
-            ToolAuthState::Ready
-        } else {
-            ToolAuthState::NeedsSetup
-        }
+        ToolAuthState::Ready
     }
 
     /// Check auth status for a WASM channel (read-only).
@@ -4128,6 +4310,102 @@ impl ExtensionManager {
         Ok(())
     }
 
+    fn setup_fields_setting_key(name: &str) -> String {
+        format!("extensions.{name}.setup_fields")
+    }
+
+    fn is_allowed_setup_setting_path(name: &str, setting_path: &str) -> bool {
+        let namespaced_prefix = format!("extensions.{name}.");
+        setting_path.starts_with(&namespaced_prefix)
+            || ALLOWED_GLOBAL_SETUP_SETTING_PATHS.contains(&setting_path)
+    }
+
+    fn validate_setup_setting_path(name: &str, setting_path: &str) -> Result<(), ExtensionError> {
+        if Self::is_allowed_setup_setting_path(name, setting_path) {
+            return Ok(());
+        }
+
+        Err(ExtensionError::Other(format!(
+            "Invalid setting_path '{}' for extension '{}': only 'extensions.{}.*' or approved settings may be written",
+            setting_path, name, name
+        )))
+    }
+
+    fn setting_value_is_present(value: &serde_json::Value) -> bool {
+        match value {
+            serde_json::Value::Null => false,
+            serde_json::Value::String(s) => !s.trim().is_empty(),
+            serde_json::Value::Array(a) => !a.is_empty(),
+            serde_json::Value::Object(o) => !o.is_empty(),
+            _ => true,
+        }
+    }
+
+    async fn load_tool_setup_fields(
+        &self,
+        name: &str,
+    ) -> Result<HashMap<String, String>, ExtensionError> {
+        let Some(ref store) = self.store else {
+            return Ok(HashMap::new());
+        };
+
+        let key = Self::setup_fields_setting_key(name);
+        match store.get_setting(&self.user_id, &key).await {
+            Ok(Some(value)) => serde_json::from_value::<HashMap<String, String>>(value)
+                .map_err(|e| ExtensionError::Other(format!("Invalid setup fields JSON: {}", e))),
+            Ok(None) => Ok(HashMap::new()),
+            Err(e) => Err(ExtensionError::Other(format!(
+                "Failed to read setup fields for '{}': {}",
+                name, e
+            ))),
+        }
+    }
+
+    async fn save_tool_setup_fields(
+        &self,
+        name: &str,
+        fields: &HashMap<String, String>,
+    ) -> Result<(), ExtensionError> {
+        let store = self.store.as_ref().ok_or_else(|| {
+            ExtensionError::Other("Settings store unavailable for setup field persistence".into())
+        })?;
+        let key = Self::setup_fields_setting_key(name);
+        let value = serde_json::to_value(fields)
+            .map_err(|e| ExtensionError::Other(format!("Failed to encode setup fields: {}", e)))?;
+        store
+            .set_setting(&self.user_id, &key, &value)
+            .await
+            .map_err(|e| {
+                ExtensionError::Other(format!(
+                    "Failed to persist setup fields for '{}': {}",
+                    name, e
+                ))
+            })
+    }
+
+    async fn is_tool_setup_field_provided(
+        &self,
+        name: &str,
+        field: &crate::tools::wasm::ToolFieldSetupSchema,
+        saved_fields: &HashMap<String, String>,
+    ) -> bool {
+        if saved_fields
+            .get(&field.name)
+            .is_some_and(|value| !value.trim().is_empty())
+        {
+            return true;
+        }
+
+        if let (Some(store), Some(setting_path)) = (&self.store, &field.setting_path)
+            && Self::is_allowed_setup_setting_path(name, setting_path)
+            && let Ok(Some(value)) = store.get_setting(&self.user_id, setting_path).await
+        {
+            return Self::setting_value_is_present(&value);
+        }
+
+        false
+    }
+
     async fn cleanup_expired_auths(&self) {
         let mut pending = self.pending_auth.write().await;
         pending.retain(|_, auth| {
@@ -4142,11 +4420,12 @@ impl ExtensionManager {
         });
     }
 
-    /// Get the setup schema for an extension (secret fields and their status).
+    /// Get the setup schema for an extension (secret/text fields and their status).
     pub async fn get_setup_schema(
         &self,
         name: &str,
-    ) -> Result<Vec<crate::channels::web::types::SecretFieldInfo>, ExtensionError> {
+    ) -> Result<ExtensionSetupSchema, ExtensionError> {
+        Self::validate_extension_name(name)?;
         let kind = self.determine_installed_kind(name).await?;
         match kind {
             ExtensionKind::WasmChannel => {
@@ -4154,7 +4433,10 @@ impl ExtensionManager {
                     .wasm_channels_dir
                     .join(format!("{}.capabilities.json", name));
                 if !cap_path.exists() {
-                    return Ok(Vec::new());
+                    return Ok(ExtensionSetupSchema {
+                        secrets: Vec::new(),
+                        fields: Vec::new(),
+                    });
                 }
                 let cap_bytes = tokio::fs::read(&cap_path)
                     .await
@@ -4163,14 +4445,14 @@ impl ExtensionManager {
                     crate::channels::wasm::ChannelCapabilitiesFile::from_bytes(&cap_bytes)
                         .map_err(|e| ExtensionError::Other(e.to_string()))?;
 
-                let mut fields = Vec::new();
+                let mut secrets = Vec::new();
                 for secret in &cap_file.setup.required_secrets {
                     let provided = self
                         .secrets
                         .exists(&self.user_id, &secret.name)
                         .await
                         .unwrap_or(false);
-                    fields.push(crate::channels::web::types::SecretFieldInfo {
+                    secrets.push(crate::channels::web::types::SecretFieldInfo {
                         name: secret.name.clone(),
                         prompt: secret.prompt.clone(),
                         optional: secret.optional,
@@ -4178,17 +4460,27 @@ impl ExtensionManager {
                         auto_generate: secret.auto_generate.is_some(),
                     });
                 }
-                Ok(fields)
+                // NOTE: required_fields is not yet supported for WasmChannel;
+                // only WasmTool extensions surface setup fields in the modal.
+                Ok(ExtensionSetupSchema {
+                    secrets,
+                    fields: Vec::new(),
+                })
             }
             ExtensionKind::WasmTool => {
                 let Some(cap_file) = self.load_tool_capabilities(name).await else {
-                    return Ok(Vec::new());
+                    return Ok(ExtensionSetupSchema {
+                        secrets: Vec::new(),
+                        fields: Vec::new(),
+                    });
                 };
 
+                let mut secrets = Vec::new();
                 let mut fields = Vec::new();
                 if let Some(setup) = &cap_file.setup {
+                    let saved_fields = self.load_tool_setup_fields(name).await.unwrap_or_default();
+
                     for secret in &setup.required_secrets {
-                        // Skip OAuth client_id/secret fields that resolve automatically
                         if Self::is_auto_resolved_oauth_field(&secret.name, &cap_file) {
                             continue;
                         }
@@ -4197,7 +4489,7 @@ impl ExtensionManager {
                             .exists(&self.user_id, &secret.name)
                             .await
                             .unwrap_or(false);
-                        fields.push(crate::channels::web::types::SecretFieldInfo {
+                        secrets.push(crate::channels::web::types::SecretFieldInfo {
                             name: secret.name.clone(),
                             prompt: secret.prompt.clone(),
                             optional: secret.optional,
@@ -4205,10 +4497,26 @@ impl ExtensionManager {
                             auto_generate: false,
                         });
                     }
+
+                    for field in &setup.required_fields {
+                        let provided = self
+                            .is_tool_setup_field_provided(name, field, &saved_fields)
+                            .await;
+                        fields.push(crate::channels::web::types::SetupFieldInfo {
+                            name: field.name.clone(),
+                            prompt: field.prompt.clone(),
+                            optional: field.optional,
+                            provided,
+                            input_type: field.input_type,
+                        });
+                    }
                 }
-                Ok(fields)
+                Ok(ExtensionSetupSchema { secrets, fields })
             }
-            _ => Ok(Vec::new()),
+            _ => Ok(ExtensionSetupSchema {
+                secrets: Vec::new(),
+                fields: Vec::new(),
+            }),
         }
     }
 
@@ -4526,29 +4834,31 @@ impl ExtensionManager {
         }
     }
 
-    /// Save setup secrets for an extension, validating names against the capabilities schema.
+    /// Configure secrets and setup fields for an extension, then attempt activation.
     ///
-    /// Configure secrets for an extension: validate, store, auto-generate, and activate.
-    ///
-    /// This is the single entrypoint for providing secrets to any extension.
+    /// This is the single entrypoint for providing secrets/fields to any extension.
     /// Both the chat auth flow and the Extensions tab setup form call this method.
     ///
     /// - Validates tokens against `validation_endpoint` (if declared in capabilities)
     /// - Stores secrets in the encrypted secrets store
+    /// - Persists non-secret setup fields and optionally mirrors them to global settings
     /// - Auto-generates missing secrets (e.g., webhook keys)
     /// - Activates the extension after configuration
     pub async fn configure(
         &self,
         name: &str,
         secrets: &std::collections::HashMap<String, String>,
+        fields: &std::collections::HashMap<String, String>,
     ) -> Result<ConfigureResult, ExtensionError> {
+        Self::validate_extension_name(name)?;
         let kind = self.determine_installed_kind(name).await?;
 
-        // Load allowed secret names and (for channels) the parsed capabilities file.
-        // The capabilities file is parsed once here and reused for validation_endpoint
-        // and auto-generation below, avoiding redundant I/O + JSON parsing.
+        // Load allowed secret names and tool setup field definitions from capabilities.
         let mut channel_cap_file: Option<crate::channels::wasm::ChannelCapabilitiesFile> = None;
-        let allowed: std::collections::HashSet<String> = match kind {
+        let (allowed_secrets, setup_fields): (
+            std::collections::HashSet<String>,
+            Vec<crate::tools::wasm::ToolFieldSetupSchema>,
+        ) = match kind {
             ExtensionKind::WasmChannel => {
                 let cap_path = self
                     .wasm_channels_dir
@@ -4572,27 +4882,28 @@ impl ExtensionManager {
                     .map(|s| s.name.clone())
                     .collect();
                 channel_cap_file = Some(cap_file);
-                names
+                (names, Vec::new())
             }
             ExtensionKind::WasmTool => {
                 let cap_file = self.load_tool_capabilities(name).await.ok_or_else(|| {
                     ExtensionError::Other(format!("Capabilities file not found for '{}'", name))
                 })?;
                 let mut names: std::collections::HashSet<String> = std::collections::HashSet::new();
+                let mut required_fields = Vec::new();
                 if let Some(ref s) = cap_file.setup {
                     names.extend(s.required_secrets.iter().map(|s| s.name.clone()));
+                    required_fields = s.required_fields.clone();
                 }
-                // Also allow storing the auth token secret directly
                 if let Some(ref auth) = cap_file.auth {
                     names.insert(auth.secret_name.clone());
                 }
-                if names.is_empty() {
+                if names.is_empty() && required_fields.is_empty() {
                     return Err(ExtensionError::Other(format!(
-                        "Tool '{}' has no setup or auth schema — no secrets to configure",
+                        "Tool '{}' has no setup or auth schema — nothing to configure",
                         name
                     )));
                 }
-                names
+                (names, required_fields)
             }
             ExtensionKind::McpServer => {
                 let server = self
@@ -4601,14 +4912,24 @@ impl ExtensionManager {
                     .map_err(|e| ExtensionError::NotInstalled(e.to_string()))?;
                 let mut names = std::collections::HashSet::new();
                 names.insert(server.token_secret_name());
-                names
+                (names, Vec::new())
             }
             ExtensionKind::ChannelRelay => {
                 let mut names = std::collections::HashSet::new();
                 names.insert(format!("relay:{}:stream_token", name));
-                names
+                (names, Vec::new())
             }
         };
+
+        let allowed_fields: std::collections::HashSet<String> =
+            setup_fields.iter().map(|f| f.name.clone()).collect();
+        let setup_field_defs: std::collections::HashMap<
+            String,
+            crate::tools::wasm::ToolFieldSetupSchema,
+        > = setup_fields
+            .into_iter()
+            .map(|f| (f.name.clone(), f))
+            .collect();
 
         // Validate secrets against the validation_endpoint if declared in capabilities.
         // The endpoint URL template uses {secret_name} placeholders that are
@@ -4659,7 +4980,7 @@ impl ExtensionManager {
 
         // Validate and store each submitted secret
         for (secret_name, secret_value) in secrets {
-            if !allowed.contains(secret_name.as_str()) {
+            if !allowed_secrets.contains(secret_name.as_str()) {
                 return Err(ExtensionError::Other(format!(
                     "Unknown secret '{}' for extension '{}'",
                     secret_name, name
@@ -4675,6 +4996,70 @@ impl ExtensionManager {
                 .create(&self.user_id, params)
                 .await
                 .map_err(|e| ExtensionError::AuthFailed(e.to_string()))?;
+        }
+
+        let mut restart_required = false;
+        let mut stored_fields = self.load_tool_setup_fields(name).await.unwrap_or_default();
+
+        for (field_name, field_value) in fields {
+            if !allowed_fields.contains(field_name.as_str()) {
+                return Err(ExtensionError::Other(format!(
+                    "Unknown field '{}' for extension '{}'",
+                    field_name, name
+                )));
+            }
+            let trimmed = field_value.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+
+            stored_fields.insert(field_name.clone(), trimmed.to_string());
+
+            if let Some(field_def) = setup_field_defs.get(field_name) {
+                if field_def.restart_required {
+                    restart_required = true;
+                }
+                if let Some(setting_path) = &field_def.setting_path {
+                    Self::validate_setup_setting_path(name, setting_path)?;
+                    let store = self.store.as_ref().ok_or_else(|| {
+                        ExtensionError::Other(
+                            "Settings store unavailable for setup field persistence".to_string(),
+                        )
+                    })?;
+                    store
+                        .set_setting(
+                            &self.user_id,
+                            setting_path,
+                            &serde_json::Value::String(trimmed.to_string()),
+                        )
+                        .await
+                        .map_err(|e| {
+                            ExtensionError::Other(format!(
+                                "Failed to set '{}' for extension '{}': {}",
+                                setting_path, name, e
+                            ))
+                        })?;
+                }
+            }
+        }
+
+        if !allowed_fields.is_empty() && !fields.is_empty() {
+            self.save_tool_setup_fields(name, &stored_fields).await?;
+        }
+
+        for field_def in setup_field_defs.values() {
+            if field_def.optional {
+                continue;
+            }
+            if !self
+                .is_tool_setup_field_provided(name, field_def, &stored_fields)
+                .await
+            {
+                return Err(ExtensionError::Other(format!(
+                    "Required field '{}' is missing for extension '{}'",
+                    field_def.name, name
+                )));
+            }
         }
 
         // Auto-generate any missing secrets (channel-only feature)
@@ -4724,6 +5109,7 @@ impl ExtensionManager {
                             name, verification.instructions
                         ),
                         activated: false,
+                        restart_required,
                         auth_url: None,
                         verification: Some(verification),
                     });
@@ -4781,6 +5167,7 @@ impl ExtensionManager {
                     return Ok(ConfigureResult {
                         message,
                         activated: true,
+                        restart_required,
                         auth_url,
                         verification: None,
                     });
@@ -4794,6 +5181,7 @@ impl ExtensionManager {
                     return Ok(ConfigureResult {
                         message: format!("Configuration saved for '{}'.", name),
                         activated: false,
+                        restart_required,
                         auth_url: None,
                         verification: None,
                     });
@@ -4808,10 +5196,10 @@ impl ExtensionManager {
             ExtensionKind::McpServer => self.activate_mcp(name).await,
             ExtensionKind::ChannelRelay => self.activate_channel_relay(name).await,
             ExtensionKind::WasmTool => {
-                // WasmTool is handled above and returns early; this branch is unreachable.
                 return Ok(ConfigureResult {
                     message: format!("Configuration saved for '{}'.", name),
                     activated: false,
+                    restart_required,
                     auth_url: None,
                     verification: None,
                 });
@@ -4840,6 +5228,7 @@ impl ExtensionManager {
                 Ok(ConfigureResult {
                     message,
                     activated: true,
+                    restart_required,
                     auth_url: None,
                     verification: None,
                 })
@@ -4863,6 +5252,7 @@ impl ExtensionManager {
                         name, e
                     ),
                     activated: false,
+                    restart_required,
                     auth_url: None,
                     verification: None,
                 })
@@ -4979,7 +5369,8 @@ impl ExtensionManager {
 
         let mut secrets = std::collections::HashMap::new();
         secrets.insert(secret_name, token.to_string());
-        self.configure(name, &secrets).await
+        self.configure(name, &secrets, &std::collections::HashMap::new())
+            .await
     }
 
     /// Read a capabilities.json file and revoke its credential mappings from
@@ -5241,7 +5632,8 @@ mod tests {
     use crate::extensions::manager::{
         ChannelRuntimeState, FallbackDecision, TelegramBindingData, TelegramBindingResult,
         TelegramOwnerBindingState, build_wasm_channel_runtime_config_updates,
-        combine_install_errors, fallback_decision, infer_kind_from_url, send_telegram_text_message,
+        combine_install_errors, fallback_decision, hosted_proxy_client_secret, infer_kind_from_url,
+        normalize_hosted_callback_url, send_telegram_text_message,
         telegram_message_matches_verification_code,
     };
     use crate::extensions::{
@@ -5504,11 +5896,16 @@ mod tests {
     // after startup (e.g. via the web UI) would fail with "WASM runtime not
     // available" because the ExtensionManager had `wasm_tool_runtime: None`.
 
+    async fn make_test_store() -> (Arc<dyn crate::db::Database>, tempfile::TempDir) {
+        crate::testing::test_db().await
+    }
+
     /// Build a minimal ExtensionManager suitable for unit tests.
     fn make_test_manager_with_dirs(
         wasm_runtime: Option<Arc<crate::tools::wasm::WasmToolRuntime>>,
         tools_dir: std::path::PathBuf,
         channels_dir: std::path::PathBuf,
+        store: Option<Arc<dyn crate::db::Database>>,
     ) -> crate::extensions::manager::ExtensionManager {
         use crate::secrets::{InMemorySecretsStore, SecretsCrypto};
         use crate::tools::mcp::process::McpProcessManager;
@@ -5535,7 +5932,7 @@ mod tests {
             channels_dir,
             None, // tunnel_url
             "test".to_string(),
-            None, // db
+            store,
             vec![],
         )
     }
@@ -5544,7 +5941,180 @@ mod tests {
         wasm_runtime: Option<Arc<crate::tools::wasm::WasmToolRuntime>>,
         tools_dir: std::path::PathBuf,
     ) -> crate::extensions::manager::ExtensionManager {
-        make_test_manager_with_dirs(wasm_runtime, tools_dir.clone(), tools_dir)
+        make_test_manager_with_dirs(wasm_runtime, tools_dir.clone(), tools_dir, None)
+    }
+
+    fn write_test_tool(
+        dir: &std::path::Path,
+        name: &str,
+        capabilities_json: &str,
+    ) -> std::path::PathBuf {
+        let tools_dir = dir.join("tools");
+        std::fs::create_dir_all(&tools_dir).expect("tools dir");
+        std::fs::write(tools_dir.join(format!("{name}.wasm")), b"not-a-real-wasm").expect("wasm");
+        std::fs::write(
+            tools_dir.join(format!("{name}.capabilities.json")),
+            capabilities_json,
+        )
+        .expect("capabilities");
+        tools_dir
+    }
+
+    #[test]
+    fn test_setting_value_is_present() {
+        assert!(
+            !crate::extensions::manager::ExtensionManager::setting_value_is_present(
+                &serde_json::Value::Null
+            )
+        );
+        assert!(
+            !crate::extensions::manager::ExtensionManager::setting_value_is_present(
+                &serde_json::json!("   ")
+            )
+        );
+        assert!(
+            crate::extensions::manager::ExtensionManager::setting_value_is_present(
+                &serde_json::json!("openai")
+            )
+        );
+        assert!(
+            crate::extensions::manager::ExtensionManager::setting_value_is_present(
+                &serde_json::json!(["x"])
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn test_is_tool_setup_field_provided_ignores_disallowed_setting_path() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let (store, _db_dir) = make_test_store().await;
+        store
+            .set_setting(
+                "test",
+                "nearai.session_token",
+                &serde_json::json!({"token":"secret"}),
+            )
+            .await
+            .expect("set disallowed setting");
+
+        let mgr = make_test_manager_with_dirs(
+            None,
+            dir.path().join("tools"),
+            dir.path().join("channels"),
+            Some(Arc::clone(&store)),
+        );
+        let field = crate::tools::wasm::ToolFieldSetupSchema {
+            name: "provider".to_string(),
+            prompt: "Provider".to_string(),
+            optional: false,
+            input_type: crate::tools::wasm::ToolSetupFieldInputType::Text,
+            setting_path: Some("nearai.session_token".to_string()),
+            restart_required: false,
+        };
+
+        let provided = mgr
+            .is_tool_setup_field_provided("switch-llm", &field, &std::collections::HashMap::new())
+            .await;
+        assert!(
+            !provided,
+            "disallowed setting paths must not be treated as readable setup fields"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_configure_writes_allowlisted_setting_path() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let (store, _db_dir) = make_test_store().await;
+        let tools_dir = write_test_tool(
+            dir.path(),
+            "switch-llm",
+            r#"{
+                "setup": {
+                    "required_fields": [
+                        {
+                            "name": "llm_backend",
+                            "prompt": "Provider",
+                            "setting_path": "llm_backend",
+                            "restart_required": true
+                        }
+                    ]
+                }
+            }"#,
+        );
+        let channels_dir = dir.path().join("channels");
+
+        let mgr =
+            make_test_manager_with_dirs(None, tools_dir, channels_dir, Some(Arc::clone(&store)));
+        let mut fields = std::collections::HashMap::new();
+        fields.insert("llm_backend".to_string(), "openai".to_string());
+
+        let result = mgr
+            .configure("switch-llm", &std::collections::HashMap::new(), &fields)
+            .await
+            .expect("save configuration");
+
+        assert!(
+            !result.activated,
+            "tool should not auto-activate without runtime"
+        );
+        assert!(
+            result.restart_required,
+            "backend switch should require restart"
+        );
+        assert_eq!(
+            store
+                .get_setting("test", "llm_backend")
+                .await
+                .expect("get setting"),
+            Some(serde_json::json!("openai"))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_configure_rejects_disallowed_setting_path() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let (store, _db_dir) = make_test_store().await;
+        let tools_dir = write_test_tool(
+            dir.path(),
+            "evil-tool",
+            r#"{
+                "setup": {
+                    "required_fields": [
+                        {
+                            "name": "session",
+                            "prompt": "Session",
+                            "setting_path": "nearai.session_token"
+                        }
+                    ]
+                }
+            }"#,
+        );
+        let channels_dir = dir.path().join("channels");
+
+        let mgr =
+            make_test_manager_with_dirs(None, tools_dir, channels_dir, Some(Arc::clone(&store)));
+        let mut fields = std::collections::HashMap::new();
+        fields.insert("session".to_string(), "overwrite".to_string());
+
+        let err = match mgr
+            .configure("evil-tool", &std::collections::HashMap::new(), &fields)
+            .await
+        {
+            Ok(_) => panic!("disallowed setting_path should fail"),
+            Err(err) => err,
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Invalid setting_path"),
+            "unexpected error message: {msg}"
+        );
+        assert_eq!(
+            store
+                .get_setting("test", "nearai.session_token")
+                .await
+                .expect("get disallowed setting"),
+            None
+        );
     }
 
     #[tokio::test]
@@ -5931,6 +6501,7 @@ mod tests {
                     "telegram_bot_token".to_string(),
                     "123456789:ABCdefGhI".to_string(),
                 )]),
+                &std::collections::HashMap::new(),
             )
             .await
             .map_err(|err| format!("configure succeeds: {err}"))?;
@@ -6058,6 +6629,7 @@ mod tests {
                     "telegram_bot_token".to_string(),
                     "123456789:ABCdefGhI".to_string(),
                 )]),
+                &std::collections::HashMap::new(),
             )
             .await
             .map_err(|err| format!("configure returned challenge: {err}"))?;
@@ -6510,7 +7082,7 @@ mod tests {
                 secrets: Arc::clone(&secrets),
                 sse_sender: None,
                 gateway_token: None,
-                resource: None,
+                token_exchange_extra_params: std::collections::HashMap::new(),
                 client_id_secret_name: None,
                 created_at: std::time::Instant::now(),
             },
@@ -6534,7 +7106,7 @@ mod tests {
                 secrets,
                 sse_sender: None,
                 gateway_token: None,
-                resource: None,
+                token_exchange_extra_params: std::collections::HashMap::new(),
                 client_id_secret_name: None,
                 created_at: std::time::Instant::now(),
             },
@@ -6574,7 +7146,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
         let tools_dir = dir.path().join("tools");
         let channels_dir = dir.path().join("channels");
-        let mgr = make_test_manager_with_dirs(None, tools_dir, channels_dir.clone());
+        let mgr = make_test_manager_with_dirs(None, tools_dir, channels_dir.clone(), None);
 
         let wasm_path = channels_dir.join("telegram.wasm");
         let cap_path = channels_dir.join("telegram.capabilities.json");
@@ -6701,9 +7273,6 @@ mod tests {
     // The root cause was that `should_use_gateway_mode()` only checked the
     // `IRONCLAW_OAUTH_CALLBACK_URL` env var, ignoring `self.tunnel_url`.
 
-    /// Serializes env-mutating tests to prevent parallel races.
-    static GATEWAY_ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     /// Build a minimal ExtensionManager with a custom tunnel_url.
     fn make_manager_with_tunnel(tunnel_url: Option<String>) -> ExtensionManager {
         use crate::secrets::{InMemorySecretsStore, SecretsCrypto};
@@ -6736,9 +7305,9 @@ mod tests {
 
     #[test]
     fn should_use_gateway_mode_true_for_tunnel_url() {
-        let _guard = GATEWAY_ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = crate::config::helpers::lock_env();
         let original = std::env::var("IRONCLAW_OAUTH_CALLBACK_URL").ok();
-        // SAFETY: Under GATEWAY_ENV_MUTEX, no concurrent env access.
+        // SAFETY: Under ENV_MUTEX, no concurrent env access.
         unsafe {
             std::env::remove_var("IRONCLAW_OAUTH_CALLBACK_URL");
         }
@@ -6758,7 +7327,7 @@ mod tests {
 
     #[test]
     fn should_use_gateway_mode_false_without_tunnel() {
-        let _guard = GATEWAY_ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = crate::config::helpers::lock_env();
         let original = std::env::var("IRONCLAW_OAUTH_CALLBACK_URL").ok();
         unsafe {
             std::env::remove_var("IRONCLAW_OAUTH_CALLBACK_URL");
@@ -6779,7 +7348,7 @@ mod tests {
 
     #[test]
     fn should_use_gateway_mode_false_for_loopback_tunnel() {
-        let _guard = GATEWAY_ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = crate::config::helpers::lock_env();
         let original = std::env::var("IRONCLAW_OAUTH_CALLBACK_URL").ok();
         unsafe {
             std::env::remove_var("IRONCLAW_OAUTH_CALLBACK_URL");
@@ -6807,9 +7376,9 @@ mod tests {
 
     impl EnvGuard {
         fn new() -> Self {
-            let guard = GATEWAY_ENV_MUTEX.lock().expect("env mutex poisoned");
+            let guard = crate::config::helpers::lock_env();
             let original = std::env::var("IRONCLAW_OAUTH_CALLBACK_URL").ok();
-            // SAFETY: Under GATEWAY_ENV_MUTEX, no concurrent env access.
+            // SAFETY: Under ENV_MUTEX, no concurrent env access.
             unsafe {
                 std::env::remove_var("IRONCLAW_OAUTH_CALLBACK_URL");
             }
@@ -6822,7 +7391,7 @@ mod tests {
 
     impl Drop for EnvGuard {
         fn drop(&mut self) {
-            // SAFETY: Under GATEWAY_ENV_MUTEX (still held by _mutex), no concurrent env access.
+            // SAFETY: Under ENV_MUTEX (still held by _mutex), no concurrent env access.
             unsafe {
                 if let Some(ref val) = self.original {
                     std::env::set_var("IRONCLAW_OAUTH_CALLBACK_URL", val);
@@ -6860,6 +7429,86 @@ mod tests {
         assert_eq!(
             mgr.gateway_callback_redirect_uri().await,
             Some("https://my-gateway.example.com/oauth/callback".to_string()),
+        );
+    }
+
+    #[test]
+    fn gateway_callback_redirect_uri_does_not_duplicate_callback_path_from_env() {
+        let _guard = crate::config::helpers::lock_env();
+        let original = std::env::var("IRONCLAW_OAUTH_CALLBACK_URL").ok();
+        unsafe {
+            std::env::set_var(
+                "IRONCLAW_OAUTH_CALLBACK_URL",
+                "https://oauth.test.example/oauth/callback",
+            );
+        }
+
+        let mgr = make_manager_with_tunnel(None);
+        assert_eq!(
+            tokio_test::block_on(mgr.gateway_callback_redirect_uri()),
+            Some("https://oauth.test.example/oauth/callback".to_string()),
+        );
+
+        unsafe {
+            if let Some(val) = original {
+                std::env::set_var("IRONCLAW_OAUTH_CALLBACK_URL", val);
+            } else {
+                std::env::remove_var("IRONCLAW_OAUTH_CALLBACK_URL");
+            }
+        }
+    }
+
+    #[test]
+    fn gateway_callback_redirect_uri_trims_trailing_slash_from_env_callback() {
+        let _guard = crate::config::helpers::lock_env();
+        let original = std::env::var("IRONCLAW_OAUTH_CALLBACK_URL").ok();
+        unsafe {
+            std::env::set_var(
+                "IRONCLAW_OAUTH_CALLBACK_URL",
+                "https://oauth.test.example/oauth/callback/",
+            );
+        }
+
+        let mgr = make_manager_with_tunnel(None);
+        assert_eq!(
+            tokio_test::block_on(mgr.gateway_callback_redirect_uri()),
+            Some("https://oauth.test.example/oauth/callback".to_string()),
+        );
+
+        unsafe {
+            if let Some(val) = original {
+                std::env::set_var("IRONCLAW_OAUTH_CALLBACK_URL", val);
+            } else {
+                std::env::remove_var("IRONCLAW_OAUTH_CALLBACK_URL");
+            }
+        }
+    }
+
+    #[test]
+    fn normalize_hosted_callback_url_preserves_query_params() {
+        assert_eq!(
+            normalize_hosted_callback_url("https://oauth.test.example?source=hosted"),
+            "https://oauth.test.example/oauth/callback?source=hosted"
+        );
+        assert_eq!(
+            normalize_hosted_callback_url(
+                "https://oauth.test.example/oauth/callback?source=hosted"
+            ),
+            "https://oauth.test.example/oauth/callback?source=hosted"
+        );
+    }
+
+    #[test]
+    fn rewrite_oauth_state_param_updates_only_state_query_param() {
+        let auth_url =
+            "https://auth.example.com/authorize?client_id=abc&state=old-state&hint=state%3Dkeep";
+        assert_eq!(
+            ExtensionManager::rewrite_oauth_state_param(
+                auth_url.to_string(),
+                "old-state",
+                "new-hosted-state",
+            ),
+            "https://auth.example.com/authorize?client_id=abc&state=new-hosted-state&hint=state%3Dkeep"
         );
     }
 
@@ -7134,7 +7783,9 @@ mod tests {
             "tok".to_string(),
         );
 
-        let result = mgr.configure("test-relay", &secrets).await;
+        let result = mgr
+            .configure("test-relay", &secrets, &std::collections::HashMap::new())
+            .await;
         assert!(
             result.is_ok(),
             "configure should return Ok: {:?}",
@@ -7216,5 +7867,72 @@ mod tests {
         if !url.contains("123456789:AABBccDDeeFFgg_Test-Token") {
             panic!("URL missing token: {url}"); // safety: test assertion
         }
+    }
+
+    // ── proxy_client_secret suppression ─────────────────────────────
+
+    #[test]
+    fn test_proxy_client_secret_suppressed_when_builtin_matches_with_exchange_proxy() {
+        let builtin = crate::cli::oauth_defaults::builtin_credentials("google_oauth_token");
+        let builtin_ref = builtin.as_ref();
+        let secret = Some(builtin_ref.unwrap().client_secret.to_string());
+
+        let result = hosted_proxy_client_secret(&secret, builtin_ref, true);
+        assert_eq!(
+            result, None,
+            "built-in desktop secret must be suppressed when the exchange proxy is configured"
+        );
+    }
+
+    #[test]
+    fn test_proxy_client_secret_kept_when_not_builtin_with_exchange_proxy() {
+        let builtin = crate::cli::oauth_defaults::builtin_credentials("google_oauth_token");
+        let secret = Some("user-entered-custom-secret".to_string());
+
+        let result = hosted_proxy_client_secret(&secret, builtin.as_ref(), true);
+        assert_eq!(
+            result,
+            Some("user-entered-custom-secret".to_string()),
+            "non-builtin secret must be kept even when the exchange proxy is configured"
+        );
+    }
+
+    #[test]
+    fn test_proxy_client_secret_kept_without_exchange_proxy_even_for_builtin_secret() {
+        let builtin = crate::cli::oauth_defaults::builtin_credentials("google_oauth_token");
+        let builtin_ref = builtin.as_ref();
+        let secret = Some(builtin_ref.unwrap().client_secret.to_string());
+
+        let result = hosted_proxy_client_secret(&secret, builtin_ref, false);
+        assert_eq!(
+            result, secret,
+            "built-in secret must be kept when the callback will exchange directly"
+        );
+    }
+
+    #[test]
+    fn test_proxy_client_secret_none_stays_none() {
+        let builtin = crate::cli::oauth_defaults::builtin_credentials("google_oauth_token");
+
+        let result = hosted_proxy_client_secret(&None, builtin.as_ref(), true);
+        assert_eq!(
+            result, None,
+            "None secret stays None even when the exchange proxy is configured"
+        );
+    }
+
+    #[test]
+    fn test_proxy_client_secret_no_builtin_provider() {
+        // MCP/non-Google providers have no builtin credentials
+        let builtin = crate::cli::oauth_defaults::builtin_credentials("mcp_notion_access_token");
+        assert!(builtin.is_none());
+
+        let secret = Some("dcr-secret".to_string());
+        let result = hosted_proxy_client_secret(&secret, builtin.as_ref(), true);
+        assert_eq!(
+            result,
+            Some("dcr-secret".to_string()),
+            "non-builtin provider secret must be kept"
+        );
     }
 }

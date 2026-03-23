@@ -594,9 +594,7 @@ mod tests {
 
     #[test]
     fn sandbox_resolve_falls_back_to_settings() {
-        let _guard = crate::config::helpers::ENV_MUTEX
-            .lock()
-            .expect("env mutex poisoned");
+        let _guard = crate::config::helpers::lock_env();
         let mut settings = crate::settings::Settings::default();
         settings.sandbox.cpu_shares = 99;
         settings.sandbox.auto_pull_image = false;
@@ -610,9 +608,7 @@ mod tests {
 
     #[test]
     fn sandbox_env_overrides_settings() {
-        let _guard = crate::config::helpers::ENV_MUTEX
-            .lock()
-            .expect("env mutex poisoned");
+        let _guard = crate::config::helpers::lock_env();
         let mut settings = crate::settings::Settings::default();
         settings.sandbox.timeout_secs = 999;
 
@@ -628,9 +624,7 @@ mod tests {
 
     #[test]
     fn claude_code_resolve_uses_settings_enabled() {
-        let _guard = crate::config::helpers::ENV_MUTEX
-            .lock()
-            .expect("env mutex poisoned");
+        let _guard = crate::config::helpers::lock_env();
         let mut settings = crate::settings::Settings::default();
         settings.sandbox.claude_code_enabled = true;
 
@@ -640,9 +634,7 @@ mod tests {
 
     #[test]
     fn claude_code_resolve_defaults_disabled() {
-        let _guard = crate::config::helpers::ENV_MUTEX
-            .lock()
-            .expect("env mutex poisoned");
+        let _guard = crate::config::helpers::lock_env();
         let settings = crate::settings::Settings::default();
         let cfg = ClaudeCodeConfig::resolve(&settings).expect("resolve");
         assert!(!cfg.enabled);
@@ -650,9 +642,7 @@ mod tests {
 
     #[test]
     fn claude_code_env_overrides_settings() {
-        let _guard = crate::config::helpers::ENV_MUTEX
-            .lock()
-            .expect("env mutex poisoned");
+        let _guard = crate::config::helpers::lock_env();
         let mut settings = crate::settings::Settings::default();
         settings.sandbox.claude_code_enabled = true;
 
