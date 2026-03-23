@@ -520,6 +520,15 @@ pub trait RoutineStore: Send + Sync {
         &self,
         routine_ids: &[Uuid],
     ) -> Result<HashMap<Uuid, i64>, DatabaseError>;
+
+    /// Fetch the last run status for multiple routines in a single query.
+    /// Returns a map from routine_id to its most recent RunStatus.
+    /// Routines with no runs are omitted from the result.
+    async fn batch_get_last_run_status(
+        &self,
+        routine_ids: &[Uuid],
+    ) -> Result<HashMap<Uuid, RunStatus>, DatabaseError>;
+
     async fn link_routine_run_to_job(
         &self,
         run_id: Uuid,

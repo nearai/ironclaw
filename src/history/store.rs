@@ -1334,6 +1334,40 @@ impl Store {
         Ok(counts)
     }
 
+    /// Batch-load the most recent run status for multiple routines in a single query.
+    /// Uses a window function to pick only the latest run per routine.
+    #[cfg(feature = "postgres")]
+    pub async fn batch_get_last_run_status(
+        &self,
+        routine_ids: &[Uuid],
+    ) -> Result<HashMap<Uuid, RunStatus>, DatabaseError> {
+        if routine_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let conn = self.conn().await?;
+        let rows = conn
+            .query(
+                "SELECT DISTINCT ON (routine_id) routine_id, status
+                 FROM routine_runs
+                 WHERE routine_id = ANY($1)
+                 ORDER BY routine_id, started_at DESC",
+                &[&routine_ids],
+            )
+            .await?;
+
+        let mut statuses = HashMap::new();
+        for row in rows {
+            let id: Uuid = row.get("routine_id");
+            let status_str: String = row.get("status");
+            if let std::result::Result::Ok(status) = status_str.parse::<RunStatus>() {
+                statuses.insert(id, status);
+            }
+        }
+
+        Ok(statuses)
+    }
+
     /// Link a routine run to a dispatched job.
     pub async fn link_routine_run_to_job(
         &self,

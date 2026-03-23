@@ -462,6 +462,56 @@ impl RoutineStore for LibSqlBackend {
         Ok(counts)
     }
 
+    async fn batch_get_last_run_status(
+        &self,
+        routine_ids: &[Uuid],
+    ) -> Result<HashMap<Uuid, RunStatus>, DatabaseError> {
+        if routine_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let conn = self.connect().await?;
+
+        // SQLite doesn't support ANY($1), so we query all latest runs and filter in memory.
+        // Uses a subquery to pick only the most recent run per routine.
+        let mut rows = conn
+            .query(
+                "SELECT routine_id, status FROM routine_runs r1
+                 WHERE started_at = (
+                     SELECT MAX(started_at) FROM routine_runs r2
+                     WHERE r2.routine_id = r1.routine_id
+                 )
+                 GROUP BY routine_id",
+                params![],
+            )
+            .await
+            .map_err(|e| {
+                DatabaseError::Query(format!("Failed to batch get last run status: {}", e))
+            })?;
+
+        let routine_id_set: HashSet<Uuid> = routine_ids.iter().copied().collect();
+        let mut statuses = HashMap::new();
+
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        {
+            let id_str: String = get_text(&row, 0);
+            let id = Uuid::parse_str(&id_str)
+                .map_err(|e| DatabaseError::Query(format!("Invalid routine UUID: {}", e)))?;
+
+            if routine_id_set.contains(&id) {
+                let status_str: String = get_text(&row, 1);
+                if let std::result::Result::Ok(status) = status_str.parse::<RunStatus>() {
+                    statuses.insert(id, status);
+                }
+            }
+        }
+
+        Ok(statuses)
+    }
+
     async fn link_routine_run_to_job(
         &self,
         run_id: Uuid,

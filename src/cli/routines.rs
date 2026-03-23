@@ -251,27 +251,15 @@ async fn list(
     );
     println!("{}", "-".repeat(130));
 
-    // Fetch last-run status for all routines in parallel to avoid N+1 queries
-    let last_run_futures: Vec<_> = filtered
-        .iter()
-        .map(|r| async {
-            let status = db
-                .list_routine_runs(r.id, 1)
-                .await
-                .ok()
-                .and_then(|runs| runs.into_iter().next())
-                .map(|run| run.status);
-            (r.id, status)
-        })
-        .collect();
-    let last_run_results: std::collections::HashMap<Uuid, Option<RunStatus>> =
-        futures::future::join_all(last_run_futures)
-            .await
-            .into_iter()
-            .collect();
+    // Fetch last-run status for all routines in a single batch query
+    let routine_ids: Vec<Uuid> = filtered.iter().map(|r| r.id).collect();
+    let last_run_results = db
+        .batch_get_last_run_status(&routine_ids)
+        .await
+        .unwrap_or_default();
 
     for r in &filtered {
-        let last_run_status = last_run_results.get(&r.id).cloned().flatten();
+        let last_run_status = last_run_results.get(&r.id).copied();
 
         let status = if !r.enabled {
             "disabled".to_string()
