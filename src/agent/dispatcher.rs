@@ -915,7 +915,14 @@ pub(super) async fn execute_chat_tool_standalone(
     params: &serde_json::Value,
     job_ctx: &crate::context::JobContext,
 ) -> Result<String, Error> {
-    crate::tools::execute::execute_tool_with_safety(tools, safety, tool_name, params, job_ctx).await
+    crate::tools::execute::execute_tool_with_safety(
+        tools,
+        safety,
+        tool_name,
+        params.clone(),
+        job_ctx,
+    )
+    .await
 }
 
 /// Parsed auth result fields for emitting StatusUpdate::AuthRequired.
@@ -1893,7 +1900,7 @@ mod tests {
             Ok(ToolCompletionResponse {
                 content: None,
                 tool_calls: vec![ToolCall {
-                    id: format!("call_{}", uuid::Uuid::new_v4()),
+                    id: crate::llm::generate_tool_call_id(0, 0),
                     name: "echo".to_string(),
                     arguments: serde_json::json!({"message": "looping"}),
                 }],
@@ -2046,7 +2053,7 @@ mod tests {
             Ok(ToolCompletionResponse {
                 content: None,
                 tool_calls: vec![ToolCall {
-                    id: format!("call_{}", uuid::Uuid::new_v4()),
+                    id: crate::llm::generate_tool_call_id(0, 0),
                     name: "nonexistent_tool".to_string(),
                     arguments: serde_json::json!({}),
                 }],

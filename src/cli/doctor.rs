@@ -692,7 +692,7 @@ mod tests {
             }
         }
 
-        let _mutex = crate::config::helpers::ENV_MUTEX.lock().expect("env mutex");
+        let _mutex = crate::config::helpers::lock_env();
         let prev = std::env::var("LLM_BACKEND").ok();
         // SAFETY: Under ENV_MUTEX, no concurrent env access.
         unsafe {
@@ -812,7 +812,7 @@ mod tests {
 
     #[test]
     fn check_llm_config_shows_nearai_model_for_nearai_backend() {
-        let _guard = crate::config::helpers::ENV_MUTEX.lock().expect("env mutex");
+        let _guard = crate::config::helpers::lock_env();
         // SAFETY: Under ENV_MUTEX, no concurrent env access.
         unsafe {
             std::env::remove_var("LLM_BACKEND");
@@ -839,7 +839,7 @@ mod tests {
 
     #[test]
     fn check_embeddings_disabled_by_default_returns_skip() {
-        let _guard = crate::config::helpers::ENV_MUTEX.lock().expect("env mutex");
+        let _guard = crate::config::helpers::lock_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("EMBEDDING_ENABLED");
@@ -861,7 +861,7 @@ mod tests {
 
     #[test]
     fn check_routines_enabled_by_default() {
-        let _guard = crate::config::helpers::ENV_MUTEX.lock().expect("env mutex");
+        let _guard = crate::config::helpers::lock_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("ROUTINES_ENABLED");

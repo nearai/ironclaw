@@ -164,19 +164,15 @@ pub async fn setup_orchestrator(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
-
     use super::*;
-
-    /// Serialize access to `ORCHESTRATOR_PORT` env var across test threads.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    use crate::config::helpers::lock_env;
 
     #[test]
     fn resolve_orchestrator_port_from_env() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = lock_env();
 
         // Safety: env-var mutation requires unsafe in edition 2024;
-        // ENV_LOCK serializes concurrent access from other test threads.
+        // lock_env() serializes concurrent access from other test threads.
 
         // Absent env var → default 50051
         unsafe { std::env::remove_var("ORCHESTRATOR_PORT") };
