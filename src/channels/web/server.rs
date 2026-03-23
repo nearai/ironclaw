@@ -36,7 +36,10 @@ use crate::channels::web::handlers::jobs::{
     jobs_events_handler, jobs_list_handler, jobs_prompt_handler, jobs_restart_handler,
     jobs_summary_handler,
 };
-use crate::channels::web::handlers::routines::{routines_delete_handler, routines_toggle_handler};
+use crate::channels::web::handlers::routines::{
+    routines_delete_handler, routines_detail_handler, routines_list_handler,
+    routines_summary_handler, routines_toggle_handler, routines_trigger_handler,
+};
 use crate::channels::web::handlers::skills::{
     skills_install_handler, skills_list_handler, skills_remove_handler, skills_search_handler,
 };
@@ -187,6 +190,8 @@ pub struct GatewayState {
     pub chat_rate_limiter: RateLimiter,
     /// Rate limiter for OAuth callback endpoints (10 requests per 60 seconds).
     pub oauth_rate_limiter: RateLimiter,
+    /// Rate limiter for webhook trigger endpoints (10 requests per 60 seconds).
+    pub webhook_rate_limiter: RateLimiter,
     /// Registry catalog entries for the available extensions API.
     /// Populated at startup from `registry/` manifests, independent of extension manager.
     pub registry_entries: Vec<crate::extensions::RegistryEntry>,
@@ -230,7 +235,11 @@ pub async fn start_server(
             "/oauth/slack/callback",
             get(slack_relay_oauth_callback_handler),
         )
-        .route("/relay/events", post(relay_events_handler));
+        .route("/relay/events", post(relay_events_handler))
+        .route(
+            "/api/webhooks/{path}",
+            post(crate::channels::web::handlers::webhooks::webhook_trigger_handler),
+        );
 
     // Protected routes (require auth)
     let auth_state = AuthState { token: auth_token };
@@ -341,6 +350,7 @@ pub async fn start_server(
         .route("/", get(index_handler))
         .route("/style.css", get(css_handler))
         .route("/app.js", get(js_handler))
+        .route("/theme-init.js", get(theme_init_handler))
         .route("/favicon.ico", get(favicon_handler))
         .route("/i18n/index.js", get(i18n_index_handler))
         .route("/i18n/en.js", get(i18n_en_handler))
@@ -459,6 +469,16 @@ async fn js_handler() -> impl IntoResponse {
             (header::CACHE_CONTROL, "no-cache"),
         ],
         include_str!("static/app.js"),
+    )
+}
+
+async fn theme_init_handler() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "application/javascript"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        include_str!("static/theme-init.js"),
     )
 }
 
@@ -1802,14 +1822,59 @@ async fn memory_write_handler(
         "Workspace not available".to_string(),
     ))?;
 
-    workspace
-        .write(&req.path, &req.content)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    // Route through layer-aware methods when a layer is specified.
+    //
+    // Note: unlike MemoryWriteTool, this endpoint does NOT block writes to
+    // identity files (IDENTITY.md, SOUL.md, etc.). The HTTP API is an
+    // authenticated admin interface; the supervisor uses it to seed identity
+    // files at startup. Identity-file protection is enforced at the tool
+    // layer (LLM-facing) where the write originates from an untrusted agent.
+    if let Some(ref layer_name) = req.layer {
+        let result = if req.append {
+            workspace
+                .append_to_layer(layer_name, &req.path, &req.content, req.force)
+                .await
+        } else {
+            workspace
+                .write_to_layer(layer_name, &req.path, &req.content, req.force)
+                .await
+        }
+        .map_err(|e| {
+            use crate::error::WorkspaceError;
+            let status = match &e {
+                WorkspaceError::LayerNotFound { .. } => StatusCode::BAD_REQUEST,
+                WorkspaceError::LayerReadOnly { .. } => StatusCode::FORBIDDEN,
+                WorkspaceError::PrivacyRedirectFailed => StatusCode::UNPROCESSABLE_ENTITY,
+                _ => StatusCode::INTERNAL_SERVER_ERROR,
+            };
+            (status, e.to_string())
+        })?;
+        return Ok(Json(MemoryWriteResponse {
+            path: req.path,
+            status: "written",
+            redirected: Some(result.redirected),
+            actual_layer: Some(result.actual_layer),
+        }));
+    }
+
+    // Non-layer path: honor the append field
+    if req.append {
+        workspace
+            .append(&req.path, &req.content)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    } else {
+        workspace
+            .write(&req.path, &req.content)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    }
 
     Ok(Json(MemoryWriteResponse {
         path: req.path,
         status: "written",
+        redirected: None,
+        actual_layer: None,
     }))
 }
 
@@ -2284,7 +2349,7 @@ async fn extensions_setup_handler(
         "Extension manager not available (secrets store required)".to_string(),
     ))?;
 
-    let secrets = ext_mgr
+    let setup = ext_mgr
         .get_setup_schema(&name)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -2300,7 +2365,8 @@ async fn extensions_setup_handler(
     Ok(Json(ExtensionSetupResponse {
         name,
         kind,
-        secrets,
+        secrets: setup.secrets,
+        fields: setup.fields,
     }))
 }
 
@@ -2318,7 +2384,7 @@ async fn extensions_setup_submit_handler(
     // through to the LLM instead of being intercepted as a token.
     clear_auth_mode(&state).await;
 
-    match ext_mgr.configure(&name, &req.secrets).await {
+    match ext_mgr.configure(&name, &req.secrets, &req.fields).await {
         Ok(result) => {
             let mut resp = if result.verification.is_some() || result.activated {
                 ActionResponse::ok(result.message)
@@ -2326,6 +2392,9 @@ async fn extensions_setup_submit_handler(
                 ActionResponse::fail(result.message)
             };
             resp.activated = Some(result.activated);
+            if result.restart_required || !result.activated {
+                resp.needs_restart = Some(true);
+            }
             resp.auth_url = result.auth_url.clone();
             resp.verification = result.verification.clone();
             resp.instructions = result.verification.as_ref().map(|v| v.instructions.clone());
@@ -2389,164 +2458,6 @@ async fn pairing_approve_handler(
         )),
         Err(e) => Ok(Json(ActionResponse::fail(e.to_string()))),
     }
-}
-
-// --- Routines handlers ---
-
-async fn routines_list_handler(
-    State(state): State<Arc<GatewayState>>,
-) -> Result<Json<RoutineListResponse>, (StatusCode, String)> {
-    let store = state.store.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Database not available".to_string(),
-    ))?;
-
-    let routines = store
-        .list_all_routines()
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    let items: Vec<RoutineInfo> = routines.iter().map(RoutineInfo::from_routine).collect();
-
-    Ok(Json(RoutineListResponse { routines: items }))
-}
-
-async fn routines_summary_handler(
-    State(state): State<Arc<GatewayState>>,
-) -> Result<Json<RoutineSummaryResponse>, (StatusCode, String)> {
-    let store = state.store.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Database not available".to_string(),
-    ))?;
-
-    let routines = store
-        .list_all_routines()
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    let total = routines.len() as u64;
-    let enabled = routines.iter().filter(|r| r.enabled).count() as u64;
-    let disabled = total - enabled;
-    let failing = routines
-        .iter()
-        .filter(|r| r.consecutive_failures > 0)
-        .count() as u64;
-
-    let today_start = chrono::Utc::now()
-        .date_naive()
-        .and_hms_opt(0, 0, 0)
-        .map(|dt| dt.and_utc());
-    let runs_today = if let Some(start) = today_start {
-        routines
-            .iter()
-            .filter(|r| r.last_run_at.is_some_and(|ts| ts >= start))
-            .count() as u64
-    } else {
-        0
-    };
-
-    Ok(Json(RoutineSummaryResponse {
-        total,
-        enabled,
-        disabled,
-        failing,
-        runs_today,
-    }))
-}
-
-async fn routines_detail_handler(
-    State(state): State<Arc<GatewayState>>,
-    Path(id): Path<String>,
-) -> Result<Json<RoutineDetailResponse>, (StatusCode, String)> {
-    let store = state.store.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Database not available".to_string(),
-    ))?;
-
-    let routine_id = Uuid::parse_str(&id)
-        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid routine ID".to_string()))?;
-
-    let routine = store
-        .get_routine(routine_id)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .ok_or((StatusCode::NOT_FOUND, "Routine not found".to_string()))?;
-
-    let runs = store
-        .list_routine_runs(routine_id, 20)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    let recent_runs: Vec<RoutineRunInfo> = runs
-        .iter()
-        .map(|run| RoutineRunInfo {
-            id: run.id,
-            trigger_type: run.trigger_type.clone(),
-            started_at: run.started_at.to_rfc3339(),
-            completed_at: run.completed_at.map(|dt| dt.to_rfc3339()),
-            status: format!("{:?}", run.status),
-            result_summary: run.result_summary.clone(),
-            tokens_used: run.tokens_used,
-            job_id: run.job_id,
-        })
-        .collect();
-    let routine_info = RoutineInfo::from_routine(&routine);
-
-    Ok(Json(RoutineDetailResponse {
-        id: routine.id,
-        name: routine.name.clone(),
-        description: routine.description.clone(),
-        enabled: routine.enabled,
-        trigger_type: routine_info.trigger_type,
-        trigger_raw: routine_info.trigger_raw,
-        trigger_summary: routine_info.trigger_summary,
-        trigger: serde_json::to_value(&routine.trigger).unwrap_or_default(),
-        action: serde_json::to_value(&routine.action).unwrap_or_default(),
-        guardrails: serde_json::to_value(&routine.guardrails).unwrap_or_default(),
-        notify: serde_json::to_value(&routine.notify).unwrap_or_default(),
-        last_run_at: routine.last_run_at.map(|dt| dt.to_rfc3339()),
-        next_fire_at: routine.next_fire_at.map(|dt| dt.to_rfc3339()),
-        run_count: routine.run_count,
-        consecutive_failures: routine.consecutive_failures,
-        created_at: routine.created_at.to_rfc3339(),
-        recent_runs,
-    }))
-}
-
-async fn routines_trigger_handler(
-    State(state): State<Arc<GatewayState>>,
-    Path(id): Path<String>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let engine = {
-        let guard = state.routine_engine.read().await;
-        guard.as_ref().cloned().ok_or((
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Routine engine not available".to_string(),
-        ))?
-    };
-
-    let routine_id = Uuid::parse_str(&id)
-        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid routine ID".to_string()))?;
-
-    let run_id = engine
-        .fire_manual(routine_id, Some(&state.user_id))
-        .await
-        .map_err(|e| {
-            let status = match &e {
-                crate::error::RoutineError::NotFound { .. } => StatusCode::NOT_FOUND,
-                crate::error::RoutineError::NotAuthorized { .. } => StatusCode::FORBIDDEN,
-                crate::error::RoutineError::Disabled { .. }
-                | crate::error::RoutineError::MaxConcurrent { .. } => StatusCode::CONFLICT,
-                _ => StatusCode::INTERNAL_SERVER_ERROR,
-            };
-            (status, e.to_string())
-        })?;
-
-    Ok(Json(serde_json::json!({
-        "status": "triggered",
-        "routine_id": routine_id,
-        "run_id": run_id,
-    })))
 }
 
 async fn routines_runs_handler(
@@ -2978,6 +2889,7 @@ mod tests {
             scheduler: None,
             chat_rate_limiter: RateLimiter::new(30, 60),
             oauth_rate_limiter: RateLimiter::new(10, 60),
+            webhook_rate_limiter: RateLimiter::new(10, 60),
             registry_entries: vec![],
             cost_guard: None,
             routine_engine: Arc::new(tokio::sync::RwLock::new(None)),

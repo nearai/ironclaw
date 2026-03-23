@@ -144,6 +144,7 @@ impl SseManager {
                     SseEvent::Heartbeat => "heartbeat",
                     SseEvent::ImageGenerated { .. } => "image_generated",
                     SseEvent::Suggestions { .. } => "suggestions",
+                    SseEvent::TurnCost { .. } => "turn_cost",
                     SseEvent::ExtensionStatus { .. } => "extension_status",
                 };
                 Ok(Event::default().event(event_type).data(data))

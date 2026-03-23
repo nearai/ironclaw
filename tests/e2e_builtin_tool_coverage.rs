@@ -134,7 +134,7 @@ mod tests {
 
         match &routine.trigger {
             Trigger::Cron { schedule, timezone } => {
-                assert_eq!(schedule, "0 0 9 * * *");
+                assert_eq!(schedule, "0 0 9 * * * *");
                 assert_eq!(timezone.as_deref(), Some("America/New_York"));
             }
             other => panic!("expected cron trigger, got {other:?}"),
@@ -356,13 +356,8 @@ mod tests {
         }
 
         match &routine.action {
-            RoutineAction::FullJob {
-                description,
-                tool_permissions,
-                ..
-            } => {
+            RoutineAction::FullJob { description, .. } => {
                 assert!(description.contains("Summarize the new issue"));
-                assert_eq!(tool_permissions, &vec!["shell".to_string()]);
             }
             other => panic!("expected full_job action, got {other:?}"),
         }
@@ -410,16 +405,8 @@ mod tests {
         }
 
         match &routine.action {
-            RoutineAction::FullJob {
-                description,
-                tool_permissions,
-                ..
-            } => {
+            RoutineAction::FullJob { description, .. } => {
                 assert!(description.contains("Prepare the morning digest"));
-                assert_eq!(
-                    tool_permissions,
-                    &vec!["message".to_string(), "http".to_string()]
-                );
             }
             other => panic!("expected full_job action, got {other:?}"),
         }

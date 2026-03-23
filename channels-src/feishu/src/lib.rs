@@ -5,7 +5,9 @@
 //!
 //! This WASM component implements the channel interface for handling Feishu
 //! webhooks (Event Subscription v2.0) and sending messages back via the
-//! Feishu/Lark Bot API.
+//! Feishu/Lark Bot API. IronClaw currently does not connect to Feishu's
+//! long-connection websocket subscription mode; use Event Subscription
+//! webhooks for this channel.
 //!
 //! # Features
 //!

@@ -25,6 +25,7 @@
     integrity="sha384-pN9zSKOnTZwXRtYZAu0PBPEgR2B7DOC1aeLxQ33oJ0oy5iN1we6gm57xldM2irDG"
     crossorigin="anonymous"
   ></script>
+  <script src="/theme-init.js"></script>
 </head>
 <body>
   <!-- Auth Screen -->
@@ -91,6 +92,7 @@
   <div id="app">
     <!-- Tab Bar -->
     <div class="tab-bar">
+      <div class="tab-indicator" id="tab-indicator"></div>
       <button class="active" data-tab="chat" data-i18n="tab.chat">Chat</button>
       <button data-tab="memory" data-i18n="tab.memory">Memory</button>
       <button data-tab="jobs" data-i18n="tab.jobs">Jobs</button>
@@ -109,6 +111,18 @@
       </div>
 
       <button class="status-logs-btn" data-tab="logs" data-i18n="tab.logs" title="Logs">Logs</button>
+      <button class="theme-toggle-btn" id="theme-toggle" title="Toggle theme" aria-label="Toggle theme">
+        <svg class="theme-icon icon-dark" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+        </svg>
+        <svg class="theme-icon icon-light" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
+        </svg>
+        <svg class="theme-icon icon-system" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/>
+        </svg>
+      </button>
+      <span id="theme-announce" class="sr-only" aria-live="polite"></span>
       <div class="tee-shield" id="tee-shield" style="display:none" title="Running in a Trusted Execution Environment">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
@@ -135,19 +149,17 @@
     <!-- Chat Tab -->
     <div class="tab-panel active" id="tab-chat">
       <div class="thread-sidebar" id="thread-sidebar">
-        <div class="thread-sidebar-header">
-          <button class="thread-new-btn" id="thread-new-btn" data-i18n="chat.newThread" data-i18n-attr="title"
-            title="New thread (Ctrl/Cmd+N)">+</button>
-          <div class="spacer"></div>
-          <button class="thread-toggle-btn" id="thread-toggle-btn" data-i18n="chat.toggleSidebar"
-            data-i18n-attr="title" title="Toggle sidebar">&laquo;</button>
-        </div>
         <div class="assistant-item" id="assistant-thread">
           <span class="assistant-label" id="assistant-label" data-i18n="chat.assistant">Assistant</span>
           <span class="assistant-meta" id="assistant-meta"></span>
         </div>
         <div class="threads-section-header">
           <span data-i18n="chat.conversations">Conversations</span>
+          <div class="spacer"></div>
+          <button class="thread-new-btn" id="thread-new-btn" data-i18n="chat.newThread" data-i18n-attr="title"
+            title="New thread (Ctrl/Cmd+N)">+</button>
+          <button class="thread-toggle-btn" id="thread-toggle-btn" data-i18n="chat.toggleSidebar"
+            data-i18n-attr="title" title="Toggle sidebar">&laquo;</button>
         </div>
         <div class="thread-list" id="thread-list"></div>
       </div>
@@ -281,9 +293,11 @@
           <button class="settings-subtab" data-settings-subtab="extensions" data-i18n="tab.extensions">Extensions</button>
           <button class="settings-subtab" data-settings-subtab="mcp" data-i18n="settings.mcp">MCP</button>
           <button class="settings-subtab" data-settings-subtab="skills" data-i18n="tab.skills">Skills</button>
+          <button class="settings-theme-toggle" id="settings-theme-toggle" data-i18n="theme.tooltipSystem" title="Toggle theme">Theme</button>
         </div>
         <div class="settings-content">
           <div class="settings-toolbar">
+            <button id="settings-back-btn" class="settings-back-btn">&larr; Back</button>
             <div class="settings-search">
               <input type="text" id="settings-search-input" data-i18n-placeholder="settings.searchPlaceholder" placeholder="Search settings..." data-i18n-attr="aria-label" data-i18n="settings.searchPlaceholder" aria-label="Search settings...">
             </div>
