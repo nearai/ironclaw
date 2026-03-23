@@ -23,6 +23,7 @@ use ironclaw::{
     llm::create_session_manager,
     orchestrator::{ReaperConfig, SandboxReaper},
     pairing::PairingStore,
+    tools::Tool,
     tracing_fmt::{init_cli_tracing, init_worker_tracing},
     webhooks::{self, ToolWebhookState},
 };
@@ -580,6 +581,34 @@ async fn async_main() -> anyhow::Result<()> {
         },
         components.secrets_store.clone(),
     );
+
+    // ── A2A bridge tool ────────────────────────────────────────────────
+    if let Some(ref a2a_config) = config.a2a {
+        if let Some(ref ss) = components.secrets_store {
+            match ironclaw::tools::builtin::A2aBridgeTool::new(
+                a2a_config.clone(),
+                Arc::clone(ss),
+                channels.inject_sender(),
+            )
+            .await
+            {
+                Ok(tool) => {
+                    let tool_name = tool.name().to_string();
+                    components.tools.register_sync(Arc::new(tool));
+                    tracing::info!(
+                        tool = %tool_name,
+                        url = %a2a_config.agent_url,
+                        "A2A bridge enabled"
+                    );
+                }
+                Err(e) => {
+                    tracing::error!("A2A bridge initialization failed: {}", e);
+                }
+            }
+        } else {
+            tracing::warn!("A2A bridge enabled but no secrets store available — skipping");
+        }
+    }
 
     // ── Gateway channel ────────────────────────────────────────────────
 
