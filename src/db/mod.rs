@@ -548,6 +548,22 @@ pub trait ToolFailureStore: Send + Sync {
 }
 
 #[async_trait]
+pub trait JudgeVerdictStore: Send + Sync {
+    /// Persist a judge verdict for audit purposes. Fire-and-forget — callers
+    /// should log on error but not propagate: a failed write must not block
+    /// the agent or change the verdict already returned to the hook.
+    async fn record_judge_verdict(
+        &self,
+        tool_name: &str,
+        verdict: &str,
+        attack_type: Option<&str>,
+        confidence: f64,
+        reasoning: &str,
+        latency_ms: u64,
+    ) -> Result<(), DatabaseError>;
+}
+
+#[async_trait]
 pub trait SettingsStore: Send + Sync {
     async fn get_setting(
         &self,
@@ -756,6 +772,7 @@ pub trait Database:
     + ToolFailureStore
     + SettingsStore
     + WorkspaceStore
+    + JudgeVerdictStore
     + Send
     + Sync
 {

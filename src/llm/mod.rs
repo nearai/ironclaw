@@ -162,6 +162,15 @@ pub fn create_llm_provider_with_config(
     )?))
 }
 
+/// Public wrapper for [`create_registry_provider`] used by call sites outside
+/// this module (e.g. the judge adapter in `app.rs`).
+pub fn create_registry_provider_pub(
+    config: &RegistryProviderConfig,
+    request_timeout_secs: u64,
+) -> Result<Arc<dyn LlmProvider>, LlmError> {
+    create_registry_provider(config, request_timeout_secs)
+}
+
 /// Create a provider from a registry-resolved config.
 ///
 /// Dispatches on `RegistryProviderConfig::protocol` to build the appropriate
