@@ -810,6 +810,7 @@ pub async fn refresh_token_via_proxy(
     let refresh_url = format!("{}/oauth/refresh", request.proxy_url.trim_end_matches('/'));
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|e| OAuthCallbackError::Io(format!("Failed to build HTTP client: {}", e)))?;
 
@@ -860,6 +861,7 @@ mod tests {
 
     use axum::extract::{Form, State};
     use axum::http::HeaderMap;
+    use axum::response::Redirect;
     use axum::routing::post;
     use axum::{Json, Router};
     use serde_json::json;
@@ -878,6 +880,12 @@ mod tests {
         form: HashMap<String, String>,
     }
 
+    #[derive(Clone)]
+    struct MockProxyState {
+        requests: Arc<Mutex<Vec<RecordedProxyRequest>>>,
+        redirect_target: String,
+    }
+
     struct MockProxyServer {
         addr: SocketAddr,
         requests: Arc<Mutex<Vec<RecordedProxyRequest>>>,
@@ -888,11 +896,11 @@ mod tests {
     impl MockProxyServer {
         async fn start() -> Self {
             async fn refresh_handler(
-                State(requests): State<Arc<Mutex<Vec<RecordedProxyRequest>>>>,
+                State(state): State<MockProxyState>,
                 headers: HeaderMap,
                 Form(form): Form<HashMap<String, String>>,
             ) -> Json<serde_json::Value> {
-                requests.lock().await.push(RecordedProxyRequest {
+                state.requests.lock().await.push(RecordedProxyRequest {
                     authorization: headers
                         .get(axum::http::header::AUTHORIZATION)
                         .and_then(|value| value.to_str().ok())
@@ -906,15 +914,23 @@ mod tests {
                 }))
             }
 
-            let requests = Arc::new(Mutex::new(Vec::new()));
-            let app = Router::new()
-                .route("/oauth/refresh", post(refresh_handler))
-                .with_state(Arc::clone(&requests));
+            async fn redirect_handler(State(state): State<MockProxyState>) -> Redirect {
+                Redirect::temporary(&state.redirect_target)
+            }
 
+            let requests = Arc::new(Mutex::new(Vec::new()));
             let listener = TcpListener::bind("127.0.0.1:0")
                 .await
                 .expect("bind mock proxy");
             let addr = listener.local_addr().expect("read mock proxy addr");
+            let redirect_target = format!("http://{addr}/oauth/refresh");
+            let app = Router::new()
+                .route("/oauth/refresh", post(refresh_handler))
+                .route("/redirect/oauth/refresh", post(redirect_handler))
+                .with_state(MockProxyState {
+                    requests: Arc::clone(&requests),
+                    redirect_target,
+                });
             let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
             let server_task = tokio::spawn(async move {
                 let _ = axum::serve(listener, app)
@@ -934,6 +950,10 @@ mod tests {
 
         fn base_url(&self) -> String {
             format!("http://{}", self.addr)
+        }
+
+        fn redirecting_base_url(&self) -> String {
+            format!("{}/redirect", self.base_url())
         }
 
         async fn requests(&self) -> Vec<RecordedProxyRequest> {
@@ -1030,6 +1050,31 @@ mod tests {
             requests[0].form.get("provider").map(String::as_str),
             Some("google")
         );
+
+        server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn test_refresh_token_via_proxy_does_not_follow_redirects() {
+        let server = MockProxyServer::start().await;
+
+        let error = match super::refresh_token_via_proxy(super::ProxyRefreshTokenRequest {
+            proxy_url: &server.redirecting_base_url(),
+            gateway_token: "gateway-test-token",
+            token_url: "https://oauth2.googleapis.com/token",
+            client_id: TEST_OAUTH_CLIENT_ID,
+            client_secret: Some(TEST_OAUTH_CLIENT_SECRET),
+            refresh_token: "refresh-token-123",
+            provider: Some("google"),
+        })
+        .await
+        {
+            Ok(_) => panic!("redirected proxy refresh should fail"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("307"));
+        assert!(server.requests().await.is_empty());
 
         server.shutdown().await;
     }

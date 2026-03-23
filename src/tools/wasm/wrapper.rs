@@ -19,7 +19,7 @@ use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiView};
 use crate::context::JobContext;
 use crate::llm::recording::{HttpExchangeRequest, HttpExchangeResponse, HttpInterceptor};
 use crate::safety::LeakDetector;
-use crate::secrets::SecretsStore;
+use crate::secrets::{DecryptedSecret, SecretsStore};
 use crate::tools::tool::{Tool, ToolError, ToolOutput};
 use crate::tools::wasm::capabilities::Capabilities;
 use crate::tools::wasm::credential_injector::{
@@ -1103,17 +1103,6 @@ async fn refresh_oauth_token(
     config: &OAuthRefreshConfig,
 ) -> bool {
     let refresh_name = format!("{}_refresh_token", config.secret_name);
-    let refresh_secret = match store.get_decrypted(user_id, &refresh_name).await {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::debug!(
-                secret_name = %refresh_name,
-                error = %e,
-                "No refresh token available, skipping token refresh"
-            );
-            return false;
-        }
-    };
 
     if let Some(proxy_url) = config.exchange_proxy_url.as_deref() {
         let Some(gateway_token) = config.gateway_token.as_deref() else {
@@ -1126,6 +1115,10 @@ async fn refresh_oauth_token(
         // In hosted mode, the configured exchange proxy owns the outbound token
         // refresh and validation policy for the provider token_url. Direct-mode
         // HTTPS/private-IP checks remain in place for self-hosted refreshes below.
+        let refresh_secret = match load_oauth_refresh_secret(store, user_id, &refresh_name).await {
+            Some(secret) => secret,
+            None => return false,
+        };
         let token_response = match oauth_defaults::refresh_token_via_proxy(
             oauth_defaults::ProxyRefreshTokenRequest {
                 proxy_url,
@@ -1185,6 +1178,10 @@ async fn refresh_oauth_token(
         }
     };
 
+    let refresh_secret = match load_oauth_refresh_secret(store, user_id, &refresh_name).await {
+        Some(secret) => secret,
+        None => return false,
+    };
     let mut params = vec![
         ("grant_type", "refresh_token".to_string()),
         ("refresh_token", refresh_secret.expose().to_string()),
@@ -1236,6 +1233,24 @@ async fn refresh_oauth_token(
     };
 
     persist_refreshed_oauth_tokens(store, user_id, config, &refresh_name, token_response).await
+}
+
+async fn load_oauth_refresh_secret(
+    store: &(dyn SecretsStore + Send + Sync),
+    user_id: &str,
+    refresh_name: &str,
+) -> Option<DecryptedSecret> {
+    match store.get_decrypted(user_id, refresh_name).await {
+        Ok(secret) => Some(secret),
+        Err(error) => {
+            tracing::debug!(
+                secret_name = %refresh_name,
+                error = %error,
+                "No refresh token available, skipping token refresh"
+            );
+            None
+        }
+    }
 }
 
 async fn persist_refreshed_oauth_tokens(
@@ -2485,6 +2500,139 @@ mod tests {
         assert!(!requests[0].form.contains_key("client_secret"));
 
         proxy.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn test_resolve_host_credentials_skips_refresh_token_lookup_without_gateway_token() {
+        use crate::secrets::{
+            CreateSecretParams, CredentialLocation, CredentialMapping, SecretsStore,
+        };
+        use crate::tools::wasm::capabilities::HttpCapability;
+        use crate::tools::wasm::wrapper::{OAuthRefreshConfig, resolve_host_credentials};
+
+        let store = RecordingSecretsStore::new();
+
+        store
+            .create(
+                "user1",
+                CreateSecretParams::new("google_oauth_token", "expired-access-token")
+                    .with_expiry(chrono::Utc::now() - chrono::Duration::hours(1)),
+            )
+            .await
+            .unwrap();
+        store
+            .create(
+                "user1",
+                CreateSecretParams::new("google_oauth_token_refresh_token", "stored-refresh-token"),
+            )
+            .await
+            .unwrap();
+
+        let mut credentials = HashMap::new();
+        credentials.insert(
+            "google_oauth_token".to_string(),
+            CredentialMapping {
+                secret_name: "google_oauth_token".to_string(),
+                location: CredentialLocation::AuthorizationBearer,
+                host_patterns: vec!["www.googleapis.com".to_string()],
+            },
+        );
+
+        let caps = Capabilities {
+            http: Some(HttpCapability {
+                credentials,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let oauth_config = OAuthRefreshConfig {
+            token_url: "https://oauth2.googleapis.com/token".to_string(),
+            client_id: "hosted-google-client-id".to_string(),
+            client_secret: None,
+            exchange_proxy_url: Some("https://compose-api.example.com".to_string()),
+            gateway_token: None,
+            secret_name: "google_oauth_token".to_string(),
+            provider: Some("google".to_string()),
+        };
+
+        let resolved =
+            resolve_host_credentials(&caps, Some(&store), "user1", Some(&oauth_config)).await;
+        assert!(resolved.is_empty());
+
+        let lookups = store.decrypted_lookups();
+        assert!(lookups.contains(&("user1".to_string(), "google_oauth_token".to_string())));
+        assert!(!lookups.contains(&(
+            "user1".to_string(),
+            "google_oauth_token_refresh_token".to_string(),
+        )));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_host_credentials_skips_refresh_token_lookup_for_invalid_direct_token_url()
+    {
+        use crate::secrets::{
+            CreateSecretParams, CredentialLocation, CredentialMapping, SecretsStore,
+        };
+        use crate::tools::wasm::capabilities::HttpCapability;
+        use crate::tools::wasm::wrapper::{OAuthRefreshConfig, resolve_host_credentials};
+
+        let store = RecordingSecretsStore::new();
+
+        store
+            .create(
+                "user1",
+                CreateSecretParams::new("google_oauth_token", "expired-access-token")
+                    .with_expiry(chrono::Utc::now() - chrono::Duration::hours(1)),
+            )
+            .await
+            .unwrap();
+        store
+            .create(
+                "user1",
+                CreateSecretParams::new("google_oauth_token_refresh_token", "stored-refresh-token"),
+            )
+            .await
+            .unwrap();
+
+        let mut credentials = HashMap::new();
+        credentials.insert(
+            "google_oauth_token".to_string(),
+            CredentialMapping {
+                secret_name: "google_oauth_token".to_string(),
+                location: CredentialLocation::AuthorizationBearer,
+                host_patterns: vec!["www.googleapis.com".to_string()],
+            },
+        );
+
+        let caps = Capabilities {
+            http: Some(HttpCapability {
+                credentials,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let oauth_config = OAuthRefreshConfig {
+            token_url: "http://127.0.0.1:9/provider-token-endpoint".to_string(),
+            client_id: TEST_OAUTH_CLIENT_ID.to_string(),
+            client_secret: Some(TEST_OAUTH_CLIENT_SECRET.to_string()),
+            exchange_proxy_url: None,
+            gateway_token: None,
+            secret_name: "google_oauth_token".to_string(),
+            provider: Some("google".to_string()),
+        };
+
+        let resolved =
+            resolve_host_credentials(&caps, Some(&store), "user1", Some(&oauth_config)).await;
+        assert!(resolved.is_empty());
+
+        let lookups = store.decrypted_lookups();
+        assert!(lookups.contains(&("user1".to_string(), "google_oauth_token".to_string())));
+        assert!(!lookups.contains(&(
+            "user1".to_string(),
+            "google_oauth_token_refresh_token".to_string(),
+        )));
     }
 
     #[test]
