@@ -605,7 +605,8 @@ fn routine_create_schema(include_compatibility_aliases: bool) -> Value {
 }
 
 pub(crate) fn routine_create_parameters_schema() -> Value {
-    routine_create_schema(false)
+    static CACHE: OnceLock<Value> = OnceLock::new();
+    CACHE.get_or_init(|| routine_create_schema(false)).clone()
 }
 
 fn routine_create_discovery_schema() -> Value {
@@ -1007,7 +1008,8 @@ fn event_emit_schema(include_source_alias: bool) -> Value {
 }
 
 pub(crate) fn event_emit_parameters_schema() -> Value {
-    event_emit_schema(false)
+    static CACHE: OnceLock<Value> = OnceLock::new();
+    CACHE.get_or_init(|| event_emit_schema(false)).clone()
 }
 
 fn event_emit_discovery_schema() -> Value {
