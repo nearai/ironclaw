@@ -59,7 +59,7 @@ pub use openai_codex_session::{OpenAiCodexSession, OpenAiCodexSessionManager};
 pub use provider::{
     ChatMessage, CompletionRequest, CompletionResponse, ContentPart, FinishReason, ImageUrl,
     LlmProvider, ModelMetadata, Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse,
-    ToolDefinition, ToolResult,
+    ToolDefinition, ToolResult, generate_tool_call_id,
 };
 pub use reasoning::{
     ActionPlan, Reasoning, ReasoningContext, RespondOutput, RespondResult, SILENT_REPLY_TOKEN,

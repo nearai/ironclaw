@@ -7305,9 +7305,7 @@ mod tests {
 
     #[test]
     fn should_use_gateway_mode_true_for_tunnel_url() {
-        let _guard = crate::config::helpers::ENV_MUTEX
-            .lock()
-            .expect("env mutex poisoned");
+        let _guard = crate::config::helpers::lock_env();
         let original = std::env::var("IRONCLAW_OAUTH_CALLBACK_URL").ok();
         // SAFETY: Under ENV_MUTEX, no concurrent env access.
         unsafe {
@@ -7329,9 +7327,7 @@ mod tests {
 
     #[test]
     fn should_use_gateway_mode_false_without_tunnel() {
-        let _guard = crate::config::helpers::ENV_MUTEX
-            .lock()
-            .expect("env mutex poisoned");
+        let _guard = crate::config::helpers::lock_env();
         let original = std::env::var("IRONCLAW_OAUTH_CALLBACK_URL").ok();
         unsafe {
             std::env::remove_var("IRONCLAW_OAUTH_CALLBACK_URL");
@@ -7352,9 +7348,7 @@ mod tests {
 
     #[test]
     fn should_use_gateway_mode_false_for_loopback_tunnel() {
-        let _guard = crate::config::helpers::ENV_MUTEX
-            .lock()
-            .expect("env mutex poisoned");
+        let _guard = crate::config::helpers::lock_env();
         let original = std::env::var("IRONCLAW_OAUTH_CALLBACK_URL").ok();
         unsafe {
             std::env::remove_var("IRONCLAW_OAUTH_CALLBACK_URL");
@@ -7382,9 +7376,7 @@ mod tests {
 
     impl EnvGuard {
         fn new() -> Self {
-            let guard = crate::config::helpers::ENV_MUTEX
-                .lock()
-                .expect("env mutex poisoned");
+            let guard = crate::config::helpers::lock_env();
             let original = std::env::var("IRONCLAW_OAUTH_CALLBACK_URL").ok();
             // SAFETY: Under ENV_MUTEX, no concurrent env access.
             unsafe {
@@ -7442,9 +7434,7 @@ mod tests {
 
     #[test]
     fn gateway_callback_redirect_uri_does_not_duplicate_callback_path_from_env() {
-        let _guard = crate::config::helpers::ENV_MUTEX
-            .lock()
-            .expect("env mutex poisoned");
+        let _guard = crate::config::helpers::lock_env();
         let original = std::env::var("IRONCLAW_OAUTH_CALLBACK_URL").ok();
         unsafe {
             std::env::set_var(
@@ -7470,9 +7460,7 @@ mod tests {
 
     #[test]
     fn gateway_callback_redirect_uri_trims_trailing_slash_from_env_callback() {
-        let _guard = crate::config::helpers::ENV_MUTEX
-            .lock()
-            .expect("env mutex poisoned");
+        let _guard = crate::config::helpers::lock_env();
         let original = std::env::var("IRONCLAW_OAUTH_CALLBACK_URL").ok();
         unsafe {
             std::env::set_var(

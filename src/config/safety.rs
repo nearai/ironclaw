@@ -19,12 +19,12 @@ pub(crate) fn resolve_safety_config(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::helpers::ENV_MUTEX;
+    use crate::config::helpers::lock_env;
     use crate::settings::Settings;
 
     #[test]
     fn resolve_falls_back_to_settings() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = lock_env();
         let mut settings = Settings::default();
         settings.safety.max_output_length = 42;
         settings.safety.injection_check_enabled = false;
@@ -36,7 +36,7 @@ mod tests {
 
     #[test]
     fn env_overrides_settings() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = lock_env();
         let mut settings = Settings::default();
         settings.safety.max_output_length = 42;
 
