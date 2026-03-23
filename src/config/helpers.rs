@@ -186,6 +186,28 @@ pub(crate) fn parse_string_env(
     Ok(optional_env(key)?.unwrap_or_else(|| default.into()))
 }
 
+/// Redact userinfo (username:password) from a parsed URL for safe inclusion in error messages.
+fn redact_parsed_url(parsed: &reqwest::Url) -> String {
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        let mut redacted = parsed.clone();
+        let _ = redacted.set_username("");
+        let _ = redacted.set_password(None);
+        format!("{} (credentials redacted)", redacted)
+    } else {
+        parsed.to_string()
+    }
+}
+
+/// Redact userinfo (username:password) from a URL string for safe inclusion in error messages.
+///
+/// Use this when you only have the raw string and no parsed URL (e.g., on a parse-error path).
+fn redact_url(url: &str) -> String {
+    match reqwest::Url::parse(url) {
+        Ok(parsed) => redact_parsed_url(&parsed),
+        Err(_) => "<invalid URL>".to_string(),
+    }
+}
+
 /// Validate a user-configurable base URL to prevent SSRF attacks (#1103).
 ///
 /// Rejects:
@@ -198,9 +220,10 @@ pub(crate) fn parse_string_env(
 pub(crate) fn validate_base_url(url: &str, field_name: &str) -> Result<(), ConfigError> {
     use std::net::{IpAddr, Ipv4Addr};
 
+    // Parse once and reuse — on parse failure, fall back to `redact_url()` for the error message.
     let parsed = reqwest::Url::parse(url).map_err(|e| ConfigError::InvalidValue {
         key: field_name.to_string(),
-        message: format!("invalid URL '{}': {}", url, e),
+        message: format!("invalid URL '{}': {}", redact_url(url), e),
     })?;
 
     let scheme = parsed.scheme();
@@ -518,5 +541,53 @@ mod tests {
             err.contains("failed to resolve"),
             "Expected DNS resolution failure, got: {err}"
         );
+    }
+
+    #[test]
+    fn validate_base_url_credentials_redacted_in_errors() {
+        // Verify that error messages do not leak credentials from URLs
+        let err = validate_base_url("ftp://user:secret@evil.com", "TEST")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            !err.contains("secret"),
+            "error message should not contain the password: {err}"
+        );
+    }
+
+    #[test]
+    fn redact_url_strips_credentials() {
+        let result = redact_url("https://user:pass@example.com/v1");
+        assert!(
+            !result.contains("user:pass"),
+            "credentials should be redacted: {result}"
+        );
+        assert!(
+            result.contains("example.com"),
+            "host should be preserved: {result}"
+        );
+        assert!(
+            result.contains("redacted"),
+            "should indicate redaction: {result}"
+        );
+    }
+
+    #[test]
+    fn redact_url_no_credentials_unchanged() {
+        let result = redact_url("https://example.com/v1");
+        assert!(
+            !result.contains("redacted"),
+            "no-credential URL should not mention redaction: {result}"
+        );
+        assert!(
+            result.contains("example.com"),
+            "host should be preserved: {result}"
+        );
+    }
+
+    #[test]
+    fn redact_url_invalid_url_returns_placeholder() {
+        let result = redact_url("not-a-url");
+        assert_eq!(result, "<invalid URL>");
     }
 }
