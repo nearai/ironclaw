@@ -102,6 +102,9 @@ impl SessionManager {
     /// Resolve an external thread ID to an internal thread.
     ///
     /// Returns the session and thread ID. Creates both if they don't exist.
+    ///
+    /// Uses a single read-lock acquisition for both the key lookup and the UUID
+    /// adoption check to reduce contention under concurrent approval load.
     pub async fn resolve_thread(
         &self,
         user_id: &str,
@@ -130,54 +133,59 @@ impl SessionManager {
             external_thread_id: external_thread_id.map(String::from),
         };
 
-        // Check if we have a mapping
-        {
-            let thread_map = self.thread_map.read().await;
-            if let Some(&thread_id) = thread_map.get(&key) {
-                // Verify thread still exists in session
-                let sess = session.lock().await;
-                if sess.threads.contains_key(&thread_id) {
-                    return (Arc::clone(&session), thread_id);
-                }
-            }
-        }
-
-        // Check if external_thread_id is itself a known thread UUID that
-        // exists in the session but was never registered in the thread_map
-        // (e.g. created by chat_new_thread_handler or hydrated from DB).
-        // We only adopt it if no thread_map entry maps to this UUID —
-        // otherwise it belongs to a different channel scope.
         // Use pre-parsed UUID if available, otherwise parse from string.
         let ext_uuid = parsed_uuid.or_else(|| {
             external_thread_id.and_then(|ext_tid| Uuid::parse_str(ext_tid).ok())
         });
 
-        if let Some(ext_uuid) = ext_uuid {
+        // Single read lock for both the key lookup and UUID adoption check
+        let adoptable_uuid = {
             let thread_map = self.thread_map.read().await;
-            let mapped_elsewhere = thread_map.values().any(|&v| v == ext_uuid);
-            drop(thread_map);
 
-            if !mapped_elsewhere {
+            // Fast path: exact key match
+            if let Some(&thread_id) = thread_map.get(&key) {
                 let sess = session.lock().await;
-                if sess.threads.contains_key(&ext_uuid) {
-                    drop(sess);
-
-                    let mut thread_map = self.thread_map.write().await;
-                    // Re-check after acquiring write lock to prevent race condition
-                    // where another task mapped this UUID between our read and write.
-                    if !thread_map.values().any(|&v| v == ext_uuid) {
-                        thread_map.insert(key, ext_uuid);
-                        drop(thread_map);
-                        // Ensure undo manager exists
-                        let mut undo_managers = self.undo_managers.write().await;
-                        undo_managers
-                            .entry(ext_uuid)
-                            .or_insert_with(|| Arc::new(Mutex::new(UndoManager::new())));
-                        return (session, ext_uuid);
-                    }
-                    // If it was mapped elsewhere while we were unlocked, fall through
-                    // to create a new thread, preserving channel isolation.
+                if sess.threads.contains_key(&thread_id) {
+                    return (Arc::clone(&session), thread_id);
                 }
+            }
+
+            // UUID adoption check (still under the same read lock).
+            // If external_thread_id is a valid UUID not mapped elsewhere,
+            // it may be a thread created by chat_new_thread_handler or
+            // hydrated from DB that we can adopt.
+            if let Some(ext_uuid) = ext_uuid {
+                let mapped_elsewhere = thread_map.values().any(|&v| v == ext_uuid);
+                if !mapped_elsewhere {
+                    Some(ext_uuid)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        }; // Single read lock dropped here
+
+        // If we found an adoptable UUID, verify it exists in session and acquire write lock
+        if let Some(ext_uuid) = adoptable_uuid {
+            let sess = session.lock().await;
+            if sess.threads.contains_key(&ext_uuid) {
+                drop(sess);
+
+                let mut thread_map = self.thread_map.write().await;
+                // Re-check after acquiring write lock to prevent race condition
+                // where another task mapped this UUID between our read and write.
+                if !thread_map.values().any(|&v| v == ext_uuid) {
+                    thread_map.insert(key, ext_uuid);
+                    drop(thread_map);
+                    // Ensure undo manager exists
+                    let mut undo_managers = self.undo_managers.write().await;
+                    undo_managers
+                        .entry(ext_uuid)
+                        .or_insert_with(|| Arc::new(Mutex::new(UndoManager::new())));
+                    return (session, ext_uuid);
+                }
+                // If mapped elsewhere while unlocked, fall through to create new thread
             }
         }
 
@@ -924,6 +932,40 @@ mod tests {
         for m in &managers {
             assert!(Arc::ptr_eq(&managers[0], m));
         }
+    }
+
+    #[tokio::test]
+    async fn test_resolve_thread_consolidates_read_path() {
+        // Verify that resolve_thread still correctly handles:
+        // 1. Fast path: key exists in thread_map
+        // 2. UUID adoption: external_thread_id is a UUID in session but not in map
+        // 3. New thread: neither path matches
+        use crate::agent::session::Thread;
+
+        let manager = SessionManager::new();
+
+        // Case 1: Normal resolution creates thread and maps it
+        let (session1, tid1) = manager.resolve_thread("user1", "chan1", Some("ext-1")).await;
+        // Resolving again with same key should return same thread (fast path)
+        let (_, tid1_again) = manager.resolve_thread("user1", "chan1", Some("ext-1")).await;
+        assert_eq!(tid1, tid1_again);
+
+        // Case 2: UUID adoption - insert a thread directly into session
+        let adopted_id = Uuid::new_v4();
+        {
+            let mut sess = session1.lock().await;
+            let thread = Thread::with_id(adopted_id, sess.id);
+            sess.threads.insert(adopted_id, thread);
+        }
+        // Resolve with the UUID as external_thread_id -- should adopt it
+        let (_, resolved) = manager
+            .resolve_thread("user1", "chan1", Some(&adopted_id.to_string()))
+            .await;
+        assert_eq!(resolved, adopted_id);
+
+        // Case 3: Different channel gets different thread
+        let (_, tid2) = manager.resolve_thread("user1", "chan2", None).await;
+        assert_ne!(tid1, tid2);
     }
 
     #[tokio::test]
