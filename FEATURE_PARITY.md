@@ -65,7 +65,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Channel | OpenClaw | IronClaw | Priority | Notes |
 |---------|----------|----------|----------|-------|
 | CLI/TUI | ✅ | ✅ | - | Ratatui-based TUI |
-| HTTP webhook | ✅ | ✅ | - | axum with secret validation |
+| HTTP webhook | ✅ | ✅ | - | axum with HMAC signature validation + legacy secret fallback |
 | REPL (simple) | ✅ | ✅ | - | For testing |
 | WASM channels | ❌ | ✅ | - | IronClaw innovation; host resolves owner scope vs sender identity |
 | WhatsApp | ✅ | ❌ | P1 | Baileys (Web), same-phone mode with echo detection |
