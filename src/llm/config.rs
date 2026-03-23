@@ -165,6 +165,7 @@ pub struct LlmConfig {
     pub provider: Option<RegistryProviderConfig>,
     /// AWS Bedrock config (populated when backend=bedrock, requires --features bedrock).
     pub bedrock: Option<BedrockConfig>,
+    pub aliyun: Option<AliyunConfig>,
     /// Gemini OAuth config (populated when backend=gemini_oauth).
     pub gemini_oauth: Option<GeminiOauthConfig>,
     /// OpenAI Codex config (populated when backend=openai_codex).
@@ -299,4 +300,13 @@ impl GeminiOauthConfig {
             .join(".gemini")
             .join("oauth_creds.json")
     }
+}
+
+/// Aliyun Coding Plan configuration.
+#[derive(Debug, Clone)]
+pub struct AliyunConfig {
+    pub model: String,
+    pub base_url: String,
+    pub api_key: Option<SecretString>,
+    pub timeout_secs: u64,
 }

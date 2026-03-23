@@ -745,7 +745,7 @@ impl AppBuilder {
         // backends, fail early if no provider config was resolved.
         if !matches!(
             self.config.llm.backend.as_str(),
-            "nearai" | "gemini_oauth" | "bedrock" | "openai_codex"
+            "nearai" | "gemini_oauth" | "bedrock" | "openai_codex" | "aliyun" | "coding_plan"
         ) && self.config.llm.provider.is_none()
         {
             let backend = &self.config.llm.backend;

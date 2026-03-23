@@ -8,6 +8,7 @@
 //! - **OpenAI-compatible**: Any endpoint that speaks the OpenAI API
 //! - **AWS Bedrock**: Native Converse API via aws-sdk-bedrockruntime
 
+mod aliyun;
 mod anthropic_oauth;
 #[cfg(feature = "bedrock")]
 mod bedrock;
@@ -45,10 +46,11 @@ pub mod models;
 pub mod reasoning_models;
 pub mod vision_models;
 
+pub use aliyun::AliyunProvider;
 pub use circuit_breaker::{CircuitBreakerConfig, CircuitBreakerProvider};
 pub use config::{
-    BedrockConfig, CacheRetention, LlmConfig, NearAiConfig, OAUTH_PLACEHOLDER, OpenAiCodexConfig,
-    RegistryProviderConfig,
+    AliyunConfig, BedrockConfig, CacheRetention, LlmConfig, NearAiConfig, OAUTH_PLACEHOLDER,
+    OpenAiCodexConfig, RegistryProviderConfig,
 };
 pub use error::LlmError;
 pub use failover::{CooldownConfig, FailoverProvider};
@@ -124,6 +126,14 @@ pub async fn create_llm_provider(
         });
     }
 
+    // Aliyun Coding Plan
+    if config.backend == "aliyun" || config.backend == "coding_plan" {
+        let cfg = config.aliyun.as_ref().ok_or_else(|| LlmError::AuthFailed {
+            provider: "aliyun".to_string(),
+        })?;
+        tracing::debug!(model = %cfg.model, base_url = %cfg.base_url, "Using Aliyun Coding Plan provider");
+        return Ok(Arc::new(AliyunProvider::new(cfg.clone())?));
+    }
     let reg_config = config
         .provider
         .as_ref()
@@ -736,6 +746,7 @@ mod tests {
             nearai: test_nearai_config(),
             provider: None,
             bedrock: None,
+            aliyun: None,
             gemini_oauth: None,
             request_timeout_secs: 120,
             cheap_model: None,
