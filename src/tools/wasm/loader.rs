@@ -440,6 +440,7 @@ fn resolve_oauth_refresh_config(cap_file: &CapabilitiesFile) -> Option<OAuthRefr
     let oauth = auth.oauth.as_ref()?;
 
     let builtin = crate::cli::oauth_defaults::builtin_credentials(&auth.secret_name);
+    let exchange_proxy_url = crate::cli::oauth_defaults::exchange_proxy_url();
 
     let client_id = oauth
         .client_id
@@ -462,11 +463,22 @@ fn resolve_oauth_refresh_config(cap_file: &CapabilitiesFile) -> Option<OAuthRefr
                 .and_then(|env| std::env::var(env).ok())
         })
         .or_else(|| builtin.as_ref().map(|c| c.client_secret.to_string()));
+    let client_secret = crate::cli::oauth_defaults::hosted_proxy_client_secret(
+        &client_secret,
+        builtin.as_ref(),
+        exchange_proxy_url.is_some(),
+    );
+    let gateway_token = std::env::var("GATEWAY_AUTH_TOKEN")
+        .ok()
+        .map(|token| token.trim().to_string())
+        .filter(|token| !token.is_empty());
 
     Some(OAuthRefreshConfig {
         token_url: oauth.token_url.clone(),
         client_id,
         client_secret,
+        exchange_proxy_url,
+        gateway_token,
         secret_name: auth.secret_name.clone(),
         provider: auth.provider.clone(),
     })
@@ -733,8 +745,32 @@ mod tests {
 
     use tempfile::TempDir;
 
+    use crate::config::helpers::lock_env;
     use crate::testing::credentials::{TEST_OAUTH_CLIENT_ID, TEST_OAUTH_CLIENT_SECRET};
     use crate::tools::wasm::loader::{WasmLoadError, check_wit_version_compat, discover_tools};
+
+    fn set_env_var(key: &str, value: Option<&str>) -> Option<String> {
+        let original = std::env::var(key).ok();
+        // SAFETY: Tests use lock_env() to serialize environment access.
+        unsafe {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+        original
+    }
+
+    fn restore_env_var(key: &str, value: Option<String>) {
+        // SAFETY: Tests use lock_env() to serialize environment access.
+        unsafe {
+            if let Some(value) = value {
+                std::env::set_var(key, value);
+            } else {
+                std::env::remove_var(key);
+            }
+        }
+    }
 
     #[test]
     fn wit_version_compat_none_is_ok() {
@@ -893,6 +929,8 @@ mod tests {
             config.client_secret,
             Some(TEST_OAUTH_CLIENT_SECRET.to_string())
         );
+        assert_eq!(config.exchange_proxy_url, None);
+        assert_eq!(config.gateway_token, None);
         assert_eq!(config.secret_name, "google_oauth_token");
         assert_eq!(config.provider, Some("google".to_string()));
     }
@@ -953,6 +991,10 @@ mod tests {
             AuthCapabilitySchema, CapabilitiesFile, OAuthConfigSchema,
         };
 
+        let _guard = lock_env();
+        let original_proxy = set_env_var("IRONCLAW_OAUTH_EXCHANGE_URL", None);
+        let original_gateway_token = set_env_var("GATEWAY_AUTH_TOKEN", None);
+
         // google_oauth_token should fall back to built-in credentials
         let caps = CapabilitiesFile {
             auth: Some(AuthCapabilitySchema {
@@ -974,6 +1016,107 @@ mod tests {
         let config = config.unwrap();
         assert!(!config.client_id.is_empty());
         assert!(config.client_secret.is_some());
+        assert_eq!(config.exchange_proxy_url, None);
+        assert_eq!(config.gateway_token, None);
+
+        restore_env_var("IRONCLAW_OAUTH_EXCHANGE_URL", original_proxy);
+        restore_env_var("GATEWAY_AUTH_TOKEN", original_gateway_token);
+    }
+
+    #[test]
+    fn test_resolve_oauth_refresh_config_hosted_proxy_populates_env_and_suppresses_builtin_secret()
+    {
+        use crate::tools::wasm::capabilities_schema::{
+            AuthCapabilitySchema, CapabilitiesFile, OAuthConfigSchema,
+        };
+
+        let _guard = lock_env();
+        let original_proxy = set_env_var(
+            "IRONCLAW_OAUTH_EXCHANGE_URL",
+            Some("https://compose-api.example.com"),
+        );
+        let original_gateway_token = set_env_var("GATEWAY_AUTH_TOKEN", Some("gateway-test-token"));
+        let original_client_id =
+            set_env_var("GOOGLE_OAUTH_CLIENT_ID", Some("hosted-google-client-id"));
+
+        let caps = CapabilitiesFile {
+            auth: Some(AuthCapabilitySchema {
+                secret_name: "google_oauth_token".to_string(),
+                provider: Some("google".to_string()),
+                oauth: Some(OAuthConfigSchema {
+                    authorization_url: "https://accounts.google.com/o/oauth2/v2/auth".to_string(),
+                    token_url: "https://oauth2.googleapis.com/token".to_string(),
+                    client_id_env: Some("GOOGLE_OAUTH_CLIENT_ID".to_string()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let config = super::resolve_oauth_refresh_config(&caps).expect("hosted oauth config");
+        assert_eq!(config.client_id, "hosted-google-client-id");
+        assert_eq!(config.client_secret, None);
+        assert_eq!(
+            config.exchange_proxy_url.as_deref(),
+            Some("https://compose-api.example.com")
+        );
+        assert_eq!(config.gateway_token.as_deref(), Some("gateway-test-token"));
+
+        restore_env_var("IRONCLAW_OAUTH_EXCHANGE_URL", original_proxy);
+        restore_env_var("GATEWAY_AUTH_TOKEN", original_gateway_token);
+        restore_env_var("GOOGLE_OAUTH_CLIENT_ID", original_client_id);
+    }
+
+    #[test]
+    fn test_resolve_oauth_refresh_config_hosted_proxy_preserves_explicit_secret() {
+        use crate::tools::wasm::capabilities_schema::{
+            AuthCapabilitySchema, CapabilitiesFile, OAuthConfigSchema,
+        };
+
+        let _guard = lock_env();
+        let original_proxy = set_env_var(
+            "IRONCLAW_OAUTH_EXCHANGE_URL",
+            Some("https://compose-api.example.com"),
+        );
+        let original_gateway_token = set_env_var("GATEWAY_AUTH_TOKEN", Some("gateway-test-token"));
+        let original_client_id =
+            set_env_var("GOOGLE_OAUTH_CLIENT_ID", Some("hosted-google-client-id"));
+        let original_client_secret =
+            set_env_var("GOOGLE_OAUTH_CLIENT_SECRET", Some("hosted-server-secret"));
+
+        let caps = CapabilitiesFile {
+            auth: Some(AuthCapabilitySchema {
+                secret_name: "google_oauth_token".to_string(),
+                provider: Some("google".to_string()),
+                oauth: Some(OAuthConfigSchema {
+                    authorization_url: "https://accounts.google.com/o/oauth2/v2/auth".to_string(),
+                    token_url: "https://oauth2.googleapis.com/token".to_string(),
+                    client_id_env: Some("GOOGLE_OAUTH_CLIENT_ID".to_string()),
+                    client_secret_env: Some("GOOGLE_OAUTH_CLIENT_SECRET".to_string()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let config = super::resolve_oauth_refresh_config(&caps).expect("hosted oauth config");
+        assert_eq!(config.client_id, "hosted-google-client-id");
+        assert_eq!(
+            config.client_secret.as_deref(),
+            Some("hosted-server-secret")
+        );
+        assert_eq!(
+            config.exchange_proxy_url.as_deref(),
+            Some("https://compose-api.example.com")
+        );
+        assert_eq!(config.gateway_token.as_deref(), Some("gateway-test-token"));
+
+        restore_env_var("IRONCLAW_OAUTH_EXCHANGE_URL", original_proxy);
+        restore_env_var("GATEWAY_AUTH_TOKEN", original_gateway_token);
+        restore_env_var("GOOGLE_OAUTH_CLIENT_ID", original_client_id);
+        restore_env_var("GOOGLE_OAUTH_CLIENT_SECRET", original_client_secret);
     }
 
     // ---------------------------------------------------------------

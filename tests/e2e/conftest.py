@@ -113,6 +113,15 @@ def _reserve_loopback_sockets(count: int) -> list[socket.socket]:
         raise
 
 
+def _forward_coverage_env(env: dict[str, str]) -> None:
+    """Forward cargo-llvm-cov env vars into child processes when present."""
+    cov_env_prefixes = ("CARGO_LLVM_COV", "LLVM_")
+    cov_env_extras = ("CARGO_ENCODED_RUSTFLAGS", "CARGO_INCREMENTAL")
+    for key, val in os.environ.items():
+        if key.startswith(cov_env_prefixes) or key in cov_env_extras:
+            env[key] = val
+
+
 @pytest.fixture(scope="session")
 def ironclaw_binary():
     """Ensure ironclaw binary is built. Returns the binary path."""
@@ -264,14 +273,7 @@ async def ironclaw_server(
         "IRONCLAW_OAUTH_CALLBACK_URL": "https://oauth.test.example/oauth/callback",
         "IRONCLAW_OAUTH_EXCHANGE_URL": mock_llm_server,
     }
-    # Forward LLVM coverage instrumentation env vars when present
-    # (allows cargo-llvm-cov to collect profraw data from E2E runs).
-    # Use prefix matching to stay resilient to cargo-llvm-cov changes.
-    COV_ENV_PREFIXES = ("CARGO_LLVM_COV", "LLVM_")
-    COV_ENV_EXTRAS = ("CARGO_ENCODED_RUSTFLAGS", "CARGO_INCREMENTAL")
-    for key, val in os.environ.items():
-        if key.startswith(COV_ENV_PREFIXES) or key in COV_ENV_EXTRAS:
-            env[key] = val
+    _forward_coverage_env(env)
     proc = await asyncio.create_subprocess_exec(
         ironclaw_binary, "--no-onboard",
         stdin=asyncio.subprocess.DEVNULL,
@@ -308,6 +310,109 @@ async def ironclaw_server(
                 await asyncio.wait_for(proc.wait(), timeout=10)
             except asyncio.TimeoutError:
                 proc.kill()
+
+
+@pytest.fixture(scope="session")
+async def hosted_oauth_refresh_server(
+    ironclaw_binary,
+    mock_llm_server,
+    wasm_tools_dir,
+):
+    """Start a hosted-mode ironclaw instance for OAuth refresh regression tests."""
+    reserved = _reserve_loopback_sockets(2)
+    db_tmpdir = tempfile.TemporaryDirectory(prefix="ironclaw-e2e-hosted-oauth-db-")
+    home_tmpdir = tempfile.TemporaryDirectory(prefix="ironclaw-e2e-hosted-oauth-home-")
+
+    try:
+        gateway_port = reserved[0].getsockname()[1]
+        http_port = reserved[1].getsockname()[1]
+        for sock in reserved:
+            if sock.fileno() != -1:
+                sock.close()
+
+        db_path = os.path.join(db_tmpdir.name, "hosted-oauth-refresh.db")
+        home_dir = home_tmpdir.name
+        env = {
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "HOME": home_dir,
+            "IRONCLAW_BASE_DIR": os.path.join(home_dir, ".ironclaw"),
+            "RUST_LOG": "ironclaw=info",
+            "RUST_BACKTRACE": "1",
+            "IRONCLAW_OWNER_ID": OWNER_SCOPE_ID,
+            "GATEWAY_ENABLED": "true",
+            "GATEWAY_HOST": "127.0.0.1",
+            "GATEWAY_PORT": str(gateway_port),
+            "GATEWAY_AUTH_TOKEN": AUTH_TOKEN,
+            "GATEWAY_USER_ID": OWNER_SCOPE_ID,
+            "HTTP_HOST": "127.0.0.1",
+            "HTTP_PORT": str(http_port),
+            "HTTP_WEBHOOK_SECRET": HTTP_WEBHOOK_SECRET,
+            "CLI_ENABLED": "false",
+            "LLM_BACKEND": "openai_compatible",
+            "LLM_BASE_URL": mock_llm_server,
+            "LLM_MODEL": "mock-model",
+            "DATABASE_BACKEND": "libsql",
+            "LIBSQL_PATH": db_path,
+            "SECRETS_MASTER_KEY": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "SANDBOX_ENABLED": "false",
+            "SKILLS_ENABLED": "true",
+            "ROUTINES_ENABLED": "true",
+            "HEARTBEAT_ENABLED": "false",
+            "EMBEDDING_ENABLED": "false",
+            "WASM_ENABLED": "true",
+            "WASM_TOOLS_DIR": wasm_tools_dir,
+            "WASM_CHANNELS_DIR": _WASM_CHANNELS_TMPDIR.name,
+            "ONBOARD_COMPLETED": "true",
+            "IRONCLAW_OAUTH_CALLBACK_URL": "https://oauth.test.example/oauth/callback",
+            "IRONCLAW_OAUTH_EXCHANGE_URL": mock_llm_server,
+            "GOOGLE_OAUTH_CLIENT_ID": "hosted-google-client-id",
+        }
+        _forward_coverage_env(env)
+
+        proc = await asyncio.create_subprocess_exec(
+            ironclaw_binary, "--no-onboard",
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )
+        base_url = f"http://127.0.0.1:{gateway_port}"
+        try:
+            await wait_for_ready(f"{base_url}/api/health", timeout=60)
+            yield {
+                "base_url": base_url,
+                "db_path": db_path,
+                "gateway_user_id": OWNER_SCOPE_ID,
+                "mock_llm_url": mock_llm_server,
+            }
+        except TimeoutError:
+            returncode = proc.returncode
+            stderr_bytes = b""
+            if proc.stderr:
+                try:
+                    stderr_bytes = await asyncio.wait_for(proc.stderr.read(8192), timeout=2)
+                except (asyncio.TimeoutError, Exception):
+                    pass
+            stderr_text = stderr_bytes.decode("utf-8", errors="replace")
+            if proc.returncode is None:
+                proc.kill()
+            pytest.fail(
+                f"hosted oauth refresh server failed to start on port {gateway_port} "
+                f"(returncode={returncode}).\nstderr:\n{stderr_text}"
+            )
+        finally:
+            if proc.returncode is None:
+                proc.send_signal(signal.SIGINT)
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=10)
+                except asyncio.TimeoutError:
+                    proc.kill()
+    finally:
+        for sock in reserved:
+            if sock.fileno() != -1:
+                sock.close()
+        db_tmpdir.cleanup()
+        home_tmpdir.cleanup()
 
 
 @pytest.fixture(scope="session")
@@ -362,12 +467,7 @@ async def http_channel_server_without_secret(
         "IRONCLAW_OAUTH_CALLBACK_URL": "https://oauth.test.example/oauth/callback",
         "IRONCLAW_OAUTH_EXCHANGE_URL": mock_llm_server,
     }
-    # Forward LLVM coverage instrumentation env vars when present
-    COV_ENV_PREFIXES = ("CARGO_LLVM_COV", "LLVM_")
-    COV_ENV_EXTRAS = ("CARGO_ENCODED_RUSTFLAGS", "CARGO_INCREMENTAL")
-    for key, val in os.environ.items():
-        if key.startswith(COV_ENV_PREFIXES) or key in COV_ENV_EXTRAS:
-            env[key] = val
+    _forward_coverage_env(env)
     proc = await asyncio.create_subprocess_exec(
         ironclaw_binary, "--no-onboard",
         stdin=asyncio.subprocess.DEVNULL,

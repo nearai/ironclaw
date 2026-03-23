@@ -44,6 +44,7 @@ wasmtime::component::bindgen!({
 });
 
 // Alias the export interface types for convenience.
+use crate::cli::oauth_defaults;
 use exports::near::agent::tool as wit_tool;
 
 /// Configuration needed to refresh an expired OAuth access token.
@@ -59,6 +60,10 @@ pub struct OAuthRefreshConfig {
     pub client_id: String,
     /// OAuth client_secret (optional, some providers use PKCE without a secret).
     pub client_secret: Option<String>,
+    /// Hosted OAuth proxy base URL (e.g., "http://host.docker.internal:8080").
+    pub exchange_proxy_url: Option<String>,
+    /// Gateway auth token for authenticating with the hosted OAuth proxy.
+    pub gateway_token: Option<String>,
     /// Secret name of the access token (e.g., "google_oauth_token").
     /// The refresh token lives at `{secret_name}_refresh_token`.
     pub secret_name: String,
@@ -1097,6 +1102,50 @@ async fn refresh_oauth_token(
     user_id: &str,
     config: &OAuthRefreshConfig,
 ) -> bool {
+    let refresh_name = format!("{}_refresh_token", config.secret_name);
+    let refresh_secret = match store.get_decrypted(user_id, &refresh_name).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::debug!(
+                secret_name = %refresh_name,
+                error = %e,
+                "No refresh token available, skipping token refresh"
+            );
+            return false;
+        }
+    };
+
+    if let Some(proxy_url) = config.exchange_proxy_url.as_deref() {
+        let token_response = match oauth_defaults::refresh_token_via_proxy(
+            oauth_defaults::ProxyRefreshTokenRequest {
+                proxy_url,
+                gateway_token: config.gateway_token.as_deref().unwrap_or_default(),
+                token_url: &config.token_url,
+                client_id: &config.client_id,
+                client_secret: config.client_secret.as_deref(),
+                refresh_token: refresh_secret.expose(),
+                provider: config.provider.as_deref(),
+            },
+        )
+        .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                tracing::warn!(error = %error, "OAuth token refresh via proxy failed");
+                return false;
+            }
+        };
+
+        return persist_refreshed_oauth_tokens(
+            store,
+            user_id,
+            config,
+            &refresh_name,
+            token_response,
+        )
+        .await;
+    }
+
     // SSRF defense: token_url comes from the tool's capabilities file.
     if !config.token_url.starts_with("https://") {
         tracing::warn!(
@@ -1113,19 +1162,6 @@ async fn refresh_oauth_token(
         );
         return false;
     }
-
-    let refresh_name = format!("{}_refresh_token", config.secret_name);
-    let refresh_secret = match store.get_decrypted(user_id, &refresh_name).await {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::debug!(
-                secret_name = %refresh_name,
-                error = %e,
-                "No refresh token available, skipping token refresh"
-            );
-            return false;
-        }
-    };
 
     let client = match reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
@@ -1174,22 +1210,37 @@ async fn refresh_oauth_token(
             return false;
         }
     };
-
-    let new_access_token = match token_data.get("access_token").and_then(|v| v.as_str()) {
-        Some(t) => t,
+    let token_response = match token_data.get("access_token").and_then(|v| v.as_str()) {
+        Some(access_token) => oauth_defaults::OAuthTokenResponse {
+            access_token: access_token.to_string(),
+            refresh_token: token_data
+                .get("refresh_token")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+            expires_in: token_data.get("expires_in").and_then(|v| v.as_u64()),
+        },
         None => {
             tracing::warn!("Token refresh response missing access_token field");
             return false;
         }
     };
 
-    // Store the new access token with expiry
+    persist_refreshed_oauth_tokens(store, user_id, config, &refresh_name, token_response).await
+}
+
+async fn persist_refreshed_oauth_tokens(
+    store: &(dyn SecretsStore + Send + Sync),
+    user_id: &str,
+    config: &OAuthRefreshConfig,
+    refresh_name: &str,
+    token_response: oauth_defaults::OAuthTokenResponse,
+) -> bool {
     let mut access_params =
-        crate::secrets::CreateSecretParams::new(&config.secret_name, new_access_token);
+        crate::secrets::CreateSecretParams::new(&config.secret_name, &token_response.access_token);
     if let Some(ref provider) = config.provider {
         access_params = access_params.with_provider(provider);
     }
-    if let Some(expires_in) = token_data.get("expires_in").and_then(|v| v.as_u64()) {
+    if let Some(expires_in) = token_response.expires_in {
         let expires_at = chrono::Utc::now() + chrono::Duration::seconds(expires_in as i64);
         access_params = access_params.with_expiry(expires_at);
     }
@@ -1199,10 +1250,8 @@ async fn refresh_oauth_token(
         return false;
     }
 
-    // Store rotated refresh token if the provider sent a new one
-    if let Some(new_refresh) = token_data.get("refresh_token").and_then(|v| v.as_str()) {
-        let mut refresh_params =
-            crate::secrets::CreateSecretParams::new(&refresh_name, new_refresh);
+    if let Some(new_refresh) = token_response.refresh_token.as_deref() {
+        let mut refresh_params = crate::secrets::CreateSecretParams::new(refresh_name, new_refresh);
         if let Some(ref provider) = config.provider {
             refresh_params = refresh_params.with_provider(provider);
         }
@@ -1551,9 +1600,18 @@ fn build_tool_usage_hint(tool_name: &str, schema: &serde_json::Value) -> String 
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+    use std::net::SocketAddr;
     use std::sync::{Arc, Mutex};
 
     use async_trait::async_trait;
+    use axum::extract::{Form, State};
+    use axum::http::HeaderMap;
+    use axum::routing::post;
+    use axum::{Json, Router};
+    use serde_json::json;
+    use tokio::net::TcpListener;
+    use tokio::sync::{Mutex as AsyncMutex, oneshot};
     use uuid::Uuid;
 
     use crate::context::JobContext;
@@ -1640,6 +1698,95 @@ mod tests {
             self.inner
                 .is_accessible(user_id, secret_name, allowed_secrets)
                 .await
+        }
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct RecordedProxyRequest {
+        authorization: Option<String>,
+        form: HashMap<String, String>,
+    }
+
+    struct MockProxyServer {
+        addr: SocketAddr,
+        requests: Arc<AsyncMutex<Vec<RecordedProxyRequest>>>,
+        shutdown_tx: Option<oneshot::Sender<()>>,
+        server_task: Option<tokio::task::JoinHandle<()>>,
+    }
+
+    impl MockProxyServer {
+        async fn start() -> Self {
+            async fn refresh_handler(
+                State(requests): State<Arc<AsyncMutex<Vec<RecordedProxyRequest>>>>,
+                headers: HeaderMap,
+                Form(form): Form<HashMap<String, String>>,
+            ) -> Json<serde_json::Value> {
+                requests.lock().await.push(RecordedProxyRequest {
+                    authorization: headers
+                        .get(axum::http::header::AUTHORIZATION)
+                        .and_then(|value| value.to_str().ok())
+                        .map(str::to_string),
+                    form,
+                });
+                Json(json!({
+                    "access_token": "mock-refreshed-access-token",
+                    "refresh_token": "mock-rotated-refresh-token",
+                    "expires_in": 3600
+                }))
+            }
+
+            let requests = Arc::new(AsyncMutex::new(Vec::new()));
+            let app = Router::new()
+                .route("/oauth/refresh", post(refresh_handler))
+                .with_state(Arc::clone(&requests));
+
+            let listener = TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind mock proxy");
+            let addr = listener.local_addr().expect("read mock proxy addr");
+            let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+            let server_task = tokio::spawn(async move {
+                let _ = axum::serve(listener, app)
+                    .with_graceful_shutdown(async {
+                        let _ = shutdown_rx.await;
+                    })
+                    .await;
+            });
+
+            Self {
+                addr,
+                requests,
+                shutdown_tx: Some(shutdown_tx),
+                server_task: Some(server_task),
+            }
+        }
+
+        fn base_url(&self) -> String {
+            format!("http://{}", self.addr)
+        }
+
+        async fn requests(&self) -> Vec<RecordedProxyRequest> {
+            self.requests.lock().await.clone()
+        }
+
+        async fn shutdown(mut self) {
+            if let Some(tx) = self.shutdown_tx.take() {
+                let _ = tx.send(());
+            }
+            if let Some(task) = self.server_task.take() {
+                let _ = task.await;
+            }
+        }
+    }
+
+    impl Drop for MockProxyServer {
+        fn drop(&mut self) {
+            if let Some(tx) = self.shutdown_tx.take() {
+                let _ = tx.send(());
+            }
+            if let Some(task) = self.server_task.take() {
+                task.abort();
+            }
         }
     }
 
@@ -1893,8 +2040,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_resolve_host_credentials_bearer() {
-        use std::collections::HashMap;
-
         use crate::secrets::{
             CreateSecretParams, CredentialLocation, CredentialMapping, SecretsStore,
         };
@@ -1940,8 +2085,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_resolve_host_credentials_owner_scope_bearer() {
-        use std::collections::HashMap;
-
         use crate::secrets::{
             CreateSecretParams, CredentialLocation, CredentialMapping, SecretsStore,
         };
@@ -1987,8 +2130,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_resolves_host_credentials_from_owner_scope_context() {
-        use std::collections::HashMap;
-
         use crate::secrets::{CredentialLocation, CredentialMapping};
         use crate::tools::wasm::capabilities::HttpCapability;
 
@@ -2038,8 +2179,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_resolve_host_credentials_missing_secret() {
-        use std::collections::HashMap;
-
         use crate::secrets::{CredentialLocation, CredentialMapping};
         use crate::tools::wasm::capabilities::HttpCapability;
         use crate::tools::wasm::wrapper::resolve_host_credentials;
@@ -2071,8 +2210,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_resolve_host_credentials_skips_refresh_when_not_expired() {
-        use std::collections::HashMap;
-
         use crate::secrets::{
             CreateSecretParams, CredentialLocation, CredentialMapping, SecretsStore,
         };
@@ -2114,6 +2251,8 @@ mod tests {
             token_url: "https://oauth2.googleapis.com/token".to_string(),
             client_id: TEST_OAUTH_CLIENT_ID.to_string(),
             client_secret: Some(TEST_OAUTH_CLIENT_SECRET.to_string()),
+            exchange_proxy_url: None,
+            gateway_token: None,
             secret_name: "google_oauth_token".to_string(),
             provider: Some("google".to_string()),
         };
@@ -2130,8 +2269,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_resolve_host_credentials_skips_refresh_no_config() {
-        use std::collections::HashMap;
-
         use crate::secrets::{
             CreateSecretParams, CredentialLocation, CredentialMapping, SecretsStore,
         };
@@ -2175,8 +2312,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_resolve_host_credentials_skips_refresh_no_expires_at() {
-        use std::collections::HashMap;
-
         use crate::secrets::{
             CreateSecretParams, CredentialLocation, CredentialMapping, SecretsStore,
         };
@@ -2216,6 +2351,8 @@ mod tests {
             token_url: "https://oauth2.googleapis.com/token".to_string(),
             client_id: TEST_OAUTH_CLIENT_ID.to_string(),
             client_secret: Some(TEST_OAUTH_CLIENT_SECRET.to_string()),
+            exchange_proxy_url: None,
+            gateway_token: None,
             secret_name: "google_oauth_token".to_string(),
             provider: Some("google".to_string()),
         };
@@ -2228,6 +2365,116 @@ mod tests {
             result[0].headers.get("Authorization"),
             Some(&format!("Bearer {TEST_GOOGLE_OAUTH_LEGACY}"))
         );
+    }
+
+    #[tokio::test]
+    async fn test_resolve_host_credentials_refreshes_via_proxy_without_direct_token_url_validation()
+    {
+        use crate::secrets::{
+            CreateSecretParams, CredentialLocation, CredentialMapping, SecretsStore,
+        };
+        use crate::tools::wasm::capabilities::HttpCapability;
+        use crate::tools::wasm::wrapper::{OAuthRefreshConfig, resolve_host_credentials};
+
+        let proxy = MockProxyServer::start().await;
+        let store = test_secrets_store();
+
+        store
+            .create(
+                "user1",
+                CreateSecretParams::new("google_oauth_token", "expired-access-token")
+                    .with_expiry(chrono::Utc::now() - chrono::Duration::hours(1)),
+            )
+            .await
+            .unwrap();
+        store
+            .create(
+                "user1",
+                CreateSecretParams::new("google_oauth_token_refresh_token", "stored-refresh-token"),
+            )
+            .await
+            .unwrap();
+
+        let mut credentials = HashMap::new();
+        credentials.insert(
+            "google_oauth_token".to_string(),
+            CredentialMapping {
+                secret_name: "google_oauth_token".to_string(),
+                location: CredentialLocation::AuthorizationBearer,
+                host_patterns: vec!["www.googleapis.com".to_string()],
+            },
+        );
+
+        let caps = Capabilities {
+            http: Some(HttpCapability {
+                credentials,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let oauth_config = OAuthRefreshConfig {
+            token_url: "http://127.0.0.1:9/provider-token-endpoint".to_string(),
+            client_id: "hosted-google-client-id".to_string(),
+            client_secret: None,
+            exchange_proxy_url: Some(proxy.base_url()),
+            gateway_token: Some("gateway-test-token".to_string()),
+            secret_name: "google_oauth_token".to_string(),
+            provider: Some("google".to_string()),
+        };
+
+        let resolved =
+            resolve_host_credentials(&caps, Some(&store), "user1", Some(&oauth_config)).await;
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(
+            resolved[0].headers.get("Authorization"),
+            Some(&"Bearer mock-refreshed-access-token".to_string())
+        );
+
+        let access_secret = store.get("user1", "google_oauth_token").await.unwrap();
+        assert!(
+            access_secret
+                .expires_at
+                .expect("refreshed access token expiry")
+                > chrono::Utc::now()
+        );
+        let access_value = store
+            .get_decrypted("user1", "google_oauth_token")
+            .await
+            .unwrap();
+        assert_eq!(access_value.expose(), "mock-refreshed-access-token");
+
+        let refresh_value = store
+            .get_decrypted("user1", "google_oauth_token_refresh_token")
+            .await
+            .unwrap();
+        assert_eq!(refresh_value.expose(), "mock-rotated-refresh-token");
+
+        let requests = proxy.requests().await;
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0].authorization.as_deref(),
+            Some("Bearer gateway-test-token")
+        );
+        assert_eq!(
+            requests[0].form.get("client_id").map(String::as_str),
+            Some("hosted-google-client-id")
+        );
+        assert_eq!(
+            requests[0].form.get("token_url").map(String::as_str),
+            Some("http://127.0.0.1:9/provider-token-endpoint")
+        );
+        assert_eq!(
+            requests[0].form.get("refresh_token").map(String::as_str),
+            Some("stored-refresh-token")
+        );
+        assert_eq!(
+            requests[0].form.get("provider").map(String::as_str),
+            Some("google")
+        );
+        assert!(!requests[0].form.contains_key("client_secret"));
+
+        proxy.shutdown().await;
     }
 
     #[test]
