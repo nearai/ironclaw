@@ -136,6 +136,7 @@ fn execution_properties() -> Value {
         },
         "use_tools": {
             "type": "boolean",
+            "default": true,
             "description": "Only applies to lightweight mode. New lightweight routines default this to true; when enabled, the routine can use the owner's live autonomous tool scope."
         },
         "max_tool_rounds": {
@@ -300,6 +301,7 @@ fn lightweight_execution_variant() -> Value {
             },
             "use_tools": {
                 "type": "boolean",
+                "default": true,
                 "description": "Defaults to true for new lightweight routines. When enabled, the routine can use the owner's live autonomous tool scope."
             },
             "max_tool_rounds": {

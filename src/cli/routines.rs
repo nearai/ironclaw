@@ -340,8 +340,8 @@ async fn create(
             prompt: prompt.to_string(),
             context_paths: Vec::new(),
             max_tokens: 4096,
-            use_tools: false,
-            max_tool_rounds: 0,
+            use_tools: true,
+            max_tool_rounds: 3,
         },
         guardrails: RoutineGuardrails {
             cooldown: std::time::Duration::from_secs(cooldown_secs),
@@ -685,6 +685,7 @@ fn truncate(s: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::routine::RoutineAction;
 
     #[test]
     fn format_relative_future() {
@@ -742,5 +743,49 @@ mod tests {
         assert!(notify.on_attention); // safety: test-only assertion
         assert!(notify.on_failure); // safety: test-only assertion
         assert!(!notify.on_success); // safety: test-only assertion
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn cli_create_defaults_lightweight_routines_to_tools_enabled() {
+        let harness = crate::testing::TestHarnessBuilder::new().build().await;
+        let db = harness.db.clone();
+
+        run_routines_command(
+            RoutinesCommand::Create {
+                name: "cli-digest".to_string(),
+                schedule: "0 0 9 * * *".to_string(),
+                prompt: "Prepare the morning digest.".to_string(),
+                description: "CLI created routine".to_string(),
+                timezone: Some("UTC".to_string()),
+                cooldown: 300,
+                notify_channel: None,
+            },
+            db.clone(),
+            "user1",
+        )
+        .await
+        .expect("create routine");
+
+        let routine = db
+            .get_routine_by_name("user1", "cli-digest")
+            .await
+            .expect("get routine by name")
+            .expect("cli-digest should exist");
+
+        match routine.action {
+            RoutineAction::Lightweight {
+                use_tools,
+                max_tool_rounds,
+                ..
+            } => {
+                assert!(
+                    use_tools,
+                    "CLI-created lightweight routines should default to tools"
+                );
+                assert_eq!(max_tool_rounds, 3);
+            }
+            other => panic!("expected lightweight action, got {other:?}"),
+        }
     }
 }
