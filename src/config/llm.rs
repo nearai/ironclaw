@@ -614,7 +614,7 @@ pub fn default_session_path() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::helpers::lock_env;
+    use crate::config::helpers::{ENV_MUTEX, lock_env};
     use crate::settings::Settings;
     use crate::testing::credentials::*;
 
