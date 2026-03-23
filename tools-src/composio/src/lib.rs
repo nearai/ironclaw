@@ -385,7 +385,9 @@ const SCHEMA: &str = r#"{
             "description": "Tool action slug for execute (e.g., \"GMAIL_SEND_EMAIL\")"
         },
         "params": {
-            "description": "Parameters for the tool action (JSON object)"
+            "type": "object",
+            "description": "Parameters for the tool action (JSON object)",
+            "additionalProperties": true
         },
         "connected_account_id": {
             "type": "string",
@@ -398,15 +400,14 @@ const SCHEMA: &str = r#"{
 
 /// Extract an entity identifier from context JSON.
 ///
-/// Checks `entity_id`, then `user_id` (from JobContext), then `requester_id`,
-/// falling back to "default" if none are present.
+/// Checks `entity_id` first (explicit override), then `user_id` (from
+/// JobContext — always present in production), falling back to "default".
 fn extract_entity_id(context: Option<&str>) -> String {
     context
         .and_then(|ctx| serde_json::from_str::<serde_json::Value>(ctx).ok())
         .and_then(|v| {
             v.get("entity_id")
                 .or_else(|| v.get("user_id"))
-                .or_else(|| v.get("requester_id"))
                 .and_then(|e| e.as_str())
                 .map(String::from)
         })
@@ -459,14 +460,8 @@ mod tests {
 
     #[test]
     fn test_extract_entity_id_falls_back_to_user_id() {
-        let ctx = r#"{"user_id": "user-1", "requester_id": "req-1"}"#;
+        let ctx = r#"{"user_id": "user-1"}"#;
         assert_eq!(extract_entity_id(Some(ctx)), "user-1");
-    }
-
-    #[test]
-    fn test_extract_entity_id_falls_back_to_requester_id() {
-        let ctx = r#"{"requester_id": "req-1"}"#;
-        assert_eq!(extract_entity_id(Some(ctx)), "req-1");
     }
 
     #[test]

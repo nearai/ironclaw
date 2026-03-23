@@ -19,7 +19,9 @@
         "description": "Tool action slug for execute (e.g., \"GMAIL_SEND_EMAIL\")"
       },
       "params": {
-        "description": "Parameters for the tool action (JSON object)"
+        "type": "object",
+        "description": "Parameters for the tool action (JSON object)",
+        "additionalProperties": true
       },
       "connected_account_id": {
         "type": "string",
