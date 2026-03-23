@@ -1097,6 +1097,15 @@ async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) 
 
     let result = {
         let mut attempt = 0u32;
+        let mut accumulated_tokens: i32 = 0;
+        let uses_tools = matches!(
+            routine.action,
+            RoutineAction::Lightweight {
+                use_tools: true,
+                ..
+            }
+        ) && ctx.config.lightweight_tools_enabled;
+
         loop {
             let execution_result = match &routine.action {
                 RoutineAction::Lightweight {
@@ -1132,9 +1141,39 @@ async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) 
             };
 
             match execution_result {
-                Ok(outcome) => break Ok(outcome),
+                Ok((status, summary, tokens)) => {
+                    // Accumulate tokens from this attempt with any previous attempts
+                    let total = Some(accumulated_tokens + tokens.unwrap_or(0));
+                    break Ok((status, summary, total));
+                }
                 Err(ref e) if is_lightweight && e.is_retryable() && attempt < MAX_RETRIES => {
+                    // Accumulate any partial tokens from the failed attempt
+                    if let RoutineError::LlmFailed {
+                        partial_tokens: Some(t),
+                        ..
+                    } = e
+                    {
+                        accumulated_tokens += t;
+                    }
+
                     attempt += 1;
+
+                    // NOTE: When retrying a tools-enabled routine, the entire
+                    // execute_lightweight() call is re-run, which means
+                    // already-executed tool calls will be repeated. This is a
+                    // known limitation — restructuring the retry to wrap only
+                    // the LLM call would require splitting the tool loop from
+                    // the LLM call, which is too invasive for the current
+                    // architecture.
+                    if uses_tools {
+                        tracing::warn!(
+                            routine = %routine.name,
+                            attempt = attempt,
+                            "Retrying tools-enabled routine; previously executed tool calls \
+                             may be repeated causing duplicate side effects"
+                        );
+                    }
+
                     let delay = Duration::from_millis(
                         BASE_DELAY_MS.saturating_mul(2u64.saturating_pow(attempt - 1)),
                     );
@@ -1547,6 +1586,7 @@ async fn execute_lightweight_no_tools(
         .await
         .map_err(|e| RoutineError::LlmFailed {
             reason: e.to_string(),
+            partial_tokens: None,
         })?;
 
     handle_text_response(
@@ -1651,13 +1691,13 @@ async fn execute_lightweight_with_tools(
                 .with_max_tokens(effective_max_tokens)
                 .with_temperature(0.3);
 
-            let response =
-                ctx.llm
-                    .complete(request)
-                    .await
-                    .map_err(|e| RoutineError::LlmFailed {
-                        reason: e.to_string(),
-                    })?;
+            let response = ctx.llm.complete(request).await.map_err(|e| {
+                let partial = (total_input_tokens + total_output_tokens) as i32;
+                RoutineError::LlmFailed {
+                    reason: e.to_string(),
+                    partial_tokens: if partial > 0 { Some(partial) } else { None },
+                }
+            })?;
 
             total_input_tokens += response.input_tokens;
             total_output_tokens += response.output_tokens;
@@ -1684,8 +1724,10 @@ async fn execute_lightweight_with_tools(
                 .with_temperature(0.3);
 
             let response = ctx.llm.complete_with_tools(request).await.map_err(|e| {
+                let partial = (total_input_tokens + total_output_tokens) as i32;
                 RoutineError::LlmFailed {
                     reason: e.to_string(),
+                    partial_tokens: if partial > 0 { Some(partial) } else { None },
                 }
             })?;
 
@@ -2554,12 +2596,52 @@ mod tests {
         let transient_errors: Vec<RoutineError> = vec![
             RoutineError::LlmFailed {
                 reason: "rate limit".into(),
+                partial_tokens: None,
+            },
+            RoutineError::LlmFailed {
+                reason: "network timeout".into(),
+                partial_tokens: Some(42),
             },
             RoutineError::EmptyResponse,
             RoutineError::TruncatedResponse,
         ];
         for err in &transient_errors {
             assert!(err.is_retryable(), "{} should be retryable", err);
+        }
+
+        // Permanent LLM failures that should NOT be retried
+        let permanent_llm_errors: Vec<RoutineError> = vec![
+            RoutineError::LlmFailed {
+                reason: "Authentication failed for provider openai".into(),
+                partial_tokens: None,
+            },
+            RoutineError::LlmFailed {
+                reason: "invalid_api_key: bad key".into(),
+                partial_tokens: None,
+            },
+            RoutineError::LlmFailed {
+                reason: "content policy violation".into(),
+                partial_tokens: None,
+            },
+            RoutineError::LlmFailed {
+                reason: "content_filter triggered".into(),
+                partial_tokens: None,
+            },
+            RoutineError::LlmFailed {
+                reason: "context length exceeded: 150000 tokens used, 128000 allowed".into(),
+                partial_tokens: Some(100),
+            },
+            RoutineError::LlmFailed {
+                reason: "model not available on provider anthropic".into(),
+                partial_tokens: None,
+            },
+            RoutineError::LlmFailed {
+                reason: "content moderation flagged".into(),
+                partial_tokens: None,
+            },
+        ];
+        for err in &permanent_llm_errors {
+            assert!(!err.is_retryable(), "{} should NOT be retryable", err);
         }
 
         // Hard failures (never retried)
