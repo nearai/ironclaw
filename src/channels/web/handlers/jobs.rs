@@ -396,6 +396,8 @@ pub async fn jobs_restart_handler(
                 Some(project_dir),
                 mode,
                 credential_grants,
+                None, // mcp_servers: restarted jobs use full config
+                None, // max_iterations: use default
             )
             .await
             .map_err(|e| {

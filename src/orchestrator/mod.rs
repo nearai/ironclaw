@@ -122,6 +122,9 @@ pub async fn setup_orchestrator(
             claude_code_max_turns: config.claude_code.max_turns,
             claude_code_memory_limit_mb: config.claude_code.memory_limit_mb,
             claude_code_allowed_tools: config.claude_code.allowed_tools.clone(),
+            mcp_per_job_enabled: std::env::var("MCP_PER_JOB_ENABLED")
+                .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
+                .unwrap_or(false),
         };
         let jm = Arc::new(ContainerJobManager::new(job_config, token_store.clone()));
 
