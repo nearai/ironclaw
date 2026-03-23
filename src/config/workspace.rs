@@ -68,6 +68,20 @@ impl WorkspaceConfig {
                     message: format!("layer '{}' has an empty scope", layer.name),
                 });
             }
+            if !layer
+                .scope
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+            {
+                return Err(ConfigError::InvalidValue {
+                    key: "MEMORY_LAYERS".to_string(),
+                    message: format!(
+                        "layer '{}' scope '{}' contains invalid characters \
+                         (allowed: a-z, A-Z, 0-9, _, -)",
+                        layer.name, layer.scope
+                    ),
+                });
+            }
         }
 
         // Check for duplicate layer names
@@ -95,11 +109,22 @@ impl WorkspaceConfig {
 
         for scope in &read_scopes {
             if scope.len() > 128 {
+                let prefix: String = scope.chars().take(32).collect();
+                return Err(ConfigError::InvalidValue {
+                    key: "WORKSPACE_READ_SCOPES".to_string(),
+                    message: format!("scope '{prefix}...' exceeds 128 characters"),
+                });
+            }
+            if !scope
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+            {
                 return Err(ConfigError::InvalidValue {
                     key: "WORKSPACE_READ_SCOPES".to_string(),
                     message: format!(
-                        "scope '{}...' exceeds 128 characters",
-                        &scope[..32]
+                        "scope '{}' contains invalid characters \
+                         (allowed: a-z, A-Z, 0-9, _, -)",
+                        scope
                     ),
                 });
             }

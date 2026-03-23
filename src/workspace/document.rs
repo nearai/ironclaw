@@ -157,8 +157,7 @@ pub fn merge_workspace_entries(
         seen.entry(entry.path.clone())
             .and_modify(|existing: &mut WorkspaceEntry| {
                 // Keep the most recent updated_at (and its content_preview)
-                if let (Some(existing_ts), Some(new_ts)) =
-                    (&existing.updated_at, &entry.updated_at)
+                if let (Some(existing_ts), Some(new_ts)) = (&existing.updated_at, &entry.updated_at)
                 {
                     if new_ts > existing_ts {
                         existing.updated_at = Some(*new_ts);

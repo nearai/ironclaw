@@ -18,9 +18,9 @@
 
 use std::sync::Arc;
 
-use ironclaw::db::libsql::LibSqlBackend;
 use ironclaw::db::Database;
-use ironclaw::workspace::{paths, Workspace};
+use ironclaw::db::libsql::LibSqlBackend;
+use ironclaw::workspace::{Workspace, paths};
 
 async fn setup() -> (Arc<dyn Database>, tempfile::TempDir) {
     let dir = tempfile::tempdir().expect("create temp dir");
@@ -34,9 +34,9 @@ async fn setup() -> (Arc<dyn Database>, tempfile::TempDir) {
 /// Seed a document into a specific user's workspace scope.
 async fn seed(db: &Arc<dyn Database>, user_id: &str, path: &str, content: &str) {
     let ws = Workspace::new_with_db(user_id, db.clone());
-    ws.write(path, content).await.unwrap_or_else(|e| {
-        panic!("Failed to seed {path} for {user_id}: {e}")
-    });
+    ws.write(path, content)
+        .await
+        .unwrap_or_else(|e| panic!("Failed to seed {path} for {user_id}: {e}"));
 }
 
 // ─── Test 1: Primary scope identity appears in system prompt ───────────
@@ -47,11 +47,23 @@ async fn system_prompt_uses_primary_scope_identity() {
 
     // Seed Alice's identity files in her own scope
     seed(&db, "alice", paths::SOUL, "Alice is kind and curious.").await;
-    seed(&db, "alice", paths::USER, "You are talking to Alice, a software engineer.").await;
+    seed(
+        &db,
+        "alice",
+        paths::USER,
+        "You are talking to Alice, a software engineer.",
+    )
+    .await;
 
     // Seed Bob's identity files in his scope
     seed(&db, "bob", paths::SOUL, "Bob is analytical and precise.").await;
-    seed(&db, "bob", paths::USER, "You are talking to Bob, a marine biologist.").await;
+    seed(
+        &db,
+        "bob",
+        paths::USER,
+        "You are talking to Bob, a marine biologist.",
+    )
+    .await;
 
     // Create Alice's workspace WITH multi-scope reads including Bob
     let ws = Workspace::new_with_db("alice", db.clone())
@@ -91,7 +103,13 @@ async fn missing_primary_identity_does_not_fallback_to_other_scope() {
 
     // Only seed Bob's identity — Alice has no identity files
     seed(&db, "bob", paths::SOUL, "Bob is analytical and precise.").await;
-    seed(&db, "bob", paths::USER, "You are talking to Bob, a marine biologist.").await;
+    seed(
+        &db,
+        "bob",
+        paths::USER,
+        "You are talking to Bob, a marine biologist.",
+    )
+    .await;
 
     // Create Alice's workspace with multi-scope reads including Bob
     let ws = Workspace::new_with_db("alice", db.clone())
@@ -118,7 +136,13 @@ async fn memory_files_still_use_multi_scope_reads() {
     let (db, _dir) = setup().await;
 
     // Seed shared memory in the "shared" scope (not Alice's primary)
-    seed(&db, "shared", paths::MEMORY, "Shared grocery list: milk, eggs, bread.").await;
+    seed(
+        &db,
+        "shared",
+        paths::MEMORY,
+        "Shared grocery list: milk, eggs, bread.",
+    )
+    .await;
 
     // Create Alice's workspace with read access to shared scope
     let ws = Workspace::new_with_db("alice", db.clone())

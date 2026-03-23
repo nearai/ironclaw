@@ -365,7 +365,6 @@ impl WorkspaceStorage {
             }
         }
     }
-
 }
 
 /// Default template seeded into HEARTBEAT.md on first access.
@@ -906,11 +905,7 @@ impl Workspace {
                     .storage
                     .list_directory(scope, self.agent_id, &directory)
                     .await?;
-                all_entries.extend(
-                    entries
-                        .into_iter()
-                        .filter(|e| !is_identity_path(&e.path)),
-                );
+                all_entries.extend(entries.into_iter().filter(|e| !is_identity_path(&e.path)));
             }
             Ok(merge_workspace_entries(all_entries))
         } else {
@@ -931,15 +926,8 @@ impl Workspace {
                 .list_all_paths(&self.user_id, self.agent_id)
                 .await?;
             for scope in &self.read_user_ids[1..] {
-                let paths = self
-                    .storage
-                    .list_all_paths(scope, self.agent_id)
-                    .await?;
-                all_paths.extend(
-                    paths
-                        .into_iter()
-                        .filter(|p| !is_identity_path(p)),
-                );
+                let paths = self.storage.list_all_paths(scope, self.agent_id).await?;
+                all_paths.extend(paths.into_iter().filter(|p| !is_identity_path(p)));
             }
             // Deduplicate and sort
             all_paths.sort();

@@ -675,13 +675,13 @@ async fn test_multi_scope_search_spans_scopes() {
 
     // Search for content in the shared scope
     let results = ws_alice
-        .search_with_config("microservice gRPC architecture", SearchConfig::default().fts_only())
+        .search_with_config(
+            "microservice gRPC architecture",
+            SearchConfig::default().fts_only(),
+        )
         .await
         .expect("search failed");
-    assert!(
-        !results.is_empty(),
-        "Should find results from shared scope"
-    );
+    assert!(!results.is_empty(), "Should find results from shared scope");
 
     cleanup_user(&pool, shared_id).await;
     cleanup_user(&pool, alice_id).await;

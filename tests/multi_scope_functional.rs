@@ -163,10 +163,7 @@ async fn search_spans_scopes() {
         .search("microservice architecture gRPC", 10)
         .await
         .expect("search failed");
-    assert!(
-        !results.is_empty(),
-        "Should find results from shared scope"
-    );
+    assert!(!results.is_empty(), "Should find results from shared scope");
 }
 
 #[tokio::test]
@@ -358,10 +355,7 @@ async fn identity_files_not_in_search_from_secondary_scope() {
 
     let ws_other = Workspace::new_with_db("other-user", Arc::clone(&db));
     ws_other
-        .write(
-            "SOUL.md",
-            "Other user loves xylophone music passionately",
-        )
+        .write("SOUL.md", "Other user loves xylophone music passionately")
         .await
         .expect("write failed");
     ws_other
@@ -429,8 +423,8 @@ async fn empty_read_scopes_reads_primary_only() {
         .await
         .expect("write failed");
 
-    let ws_primary = Workspace::new_with_db("primary", Arc::clone(&db))
-        .with_additional_read_scopes(vec![]);
+    let ws_primary =
+        Workspace::new_with_db("primary", Arc::clone(&db)).with_additional_read_scopes(vec![]);
 
     let result = ws_primary.read("docs/note.md").await;
     assert!(
@@ -452,9 +446,6 @@ async fn duplicate_read_scopes_handled() {
     let ws_primary = Workspace::new_with_db("primary", Arc::clone(&db))
         .with_additional_read_scopes(vec!["shared".to_string(), "shared".to_string()]);
 
-    let doc = ws_primary
-        .read("docs/note.md")
-        .await
-        .expect("read failed");
+    let doc = ws_primary.read("docs/note.md").await.expect("read failed");
     assert_eq!(doc.content, "One note");
 }
