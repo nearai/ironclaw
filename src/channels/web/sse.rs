@@ -186,30 +186,7 @@ impl SseManager {
                         return None;
                     }
                 };
-                let event_type = match &event {
-                    AppEvent::Response { .. } => "response",
-                    AppEvent::Thinking { .. } => "thinking",
-                    AppEvent::ToolStarted { .. } => "tool_started",
-                    AppEvent::ToolCompleted { .. } => "tool_completed",
-                    AppEvent::ToolResult { .. } => "tool_result",
-                    AppEvent::StreamChunk { .. } => "stream_chunk",
-                    AppEvent::Status { .. } => "status",
-                    AppEvent::ApprovalNeeded { .. } => "approval_needed",
-                    AppEvent::AuthRequired { .. } => "auth_required",
-                    AppEvent::AuthCompleted { .. } => "auth_completed",
-                    AppEvent::Error { .. } => "error",
-                    AppEvent::JobStarted { .. } => "job_started",
-                    AppEvent::JobMessage { .. } => "job_message",
-                    AppEvent::JobToolUse { .. } => "job_tool_use",
-                    AppEvent::JobToolResult { .. } => "job_tool_result",
-                    AppEvent::JobStatus { .. } => "job_status",
-                    AppEvent::JobResult { .. } => "job_result",
-                    AppEvent::Heartbeat => "heartbeat",
-                    AppEvent::ImageGenerated { .. } => "image_generated",
-                    AppEvent::Suggestions { .. } => "suggestions",
-                    AppEvent::TurnCost { .. } => "turn_cost",
-                    AppEvent::ExtensionStatus { .. } => "extension_status",
-                };
+                let event_type = event.event_type();
                 Some(Ok(Event::default().event(event_type).data(data)))
             });
 

@@ -164,3 +164,33 @@ pub enum AppEvent {
         message: Option<String>,
     },
 }
+
+impl AppEvent {
+    /// The wire-format event type string (matches the `#[serde(rename)]` value).
+    pub fn event_type(&self) -> &'static str {
+        match self {
+            Self::Response { .. } => "response",
+            Self::Thinking { .. } => "thinking",
+            Self::ToolStarted { .. } => "tool_started",
+            Self::ToolCompleted { .. } => "tool_completed",
+            Self::ToolResult { .. } => "tool_result",
+            Self::StreamChunk { .. } => "stream_chunk",
+            Self::Status { .. } => "status",
+            Self::JobStarted { .. } => "job_started",
+            Self::ApprovalNeeded { .. } => "approval_needed",
+            Self::AuthRequired { .. } => "auth_required",
+            Self::AuthCompleted { .. } => "auth_completed",
+            Self::Error { .. } => "error",
+            Self::Heartbeat => "heartbeat",
+            Self::JobMessage { .. } => "job_message",
+            Self::JobToolUse { .. } => "job_tool_use",
+            Self::JobToolResult { .. } => "job_tool_result",
+            Self::JobStatus { .. } => "job_status",
+            Self::JobResult { .. } => "job_result",
+            Self::ImageGenerated { .. } => "image_generated",
+            Self::Suggestions { .. } => "suggestions",
+            Self::TurnCost { .. } => "turn_cost",
+            Self::ExtensionStatus { .. } => "extension_status",
+        }
+    }
+}

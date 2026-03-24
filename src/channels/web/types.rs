@@ -630,30 +630,7 @@ pub enum WsServerMessage {
 impl WsServerMessage {
     /// Create a WsServerMessage from an AppEvent.
     pub fn from_app_event(event: &AppEvent) -> Self {
-        let event_type = match event {
-            AppEvent::Response { .. } => "response",
-            AppEvent::Thinking { .. } => "thinking",
-            AppEvent::ToolStarted { .. } => "tool_started",
-            AppEvent::ToolCompleted { .. } => "tool_completed",
-            AppEvent::ToolResult { .. } => "tool_result",
-            AppEvent::StreamChunk { .. } => "stream_chunk",
-            AppEvent::Status { .. } => "status",
-            AppEvent::JobStarted { .. } => "job_started",
-            AppEvent::ApprovalNeeded { .. } => "approval_needed",
-            AppEvent::AuthRequired { .. } => "auth_required",
-            AppEvent::AuthCompleted { .. } => "auth_completed",
-            AppEvent::Error { .. } => "error",
-            AppEvent::Heartbeat => "heartbeat",
-            AppEvent::JobMessage { .. } => "job_message",
-            AppEvent::JobToolUse { .. } => "job_tool_use",
-            AppEvent::JobToolResult { .. } => "job_tool_result",
-            AppEvent::JobStatus { .. } => "job_status",
-            AppEvent::JobResult { .. } => "job_result",
-            AppEvent::ImageGenerated { .. } => "image_generated",
-            AppEvent::Suggestions { .. } => "suggestions",
-            AppEvent::TurnCost { .. } => "turn_cost",
-            AppEvent::ExtensionStatus { .. } => "extension_status",
-        };
+        let event_type = event.event_type();
         let data = serde_json::to_value(event).unwrap_or(serde_json::Value::Null);
         WsServerMessage::Event {
             event_type: event_type.to_string(),
