@@ -726,7 +726,9 @@ impl Agent {
     ///
     /// Stored between the user and assistant messages so that
     /// `build_turns_from_db_messages` can reconstruct the tool call history.
-    /// Content is a JSON array of tool call summaries.
+    /// Content is a JSON object: `{ "calls": [...], "narrative": "..." }`.
+    /// The `calls` array contains tool call summaries with optional `rationale`
+    /// and `tool_call_id` fields. Legacy rows may be plain JSON arrays.
     pub(super) async fn persist_tool_calls(
         &self,
         thread_id: Uuid,
@@ -1844,7 +1846,20 @@ fn rebuild_chat_messages_from_db(
             "assistant" => result.push(ChatMessage::assistant(&msg.content)),
             "tool_calls" => {
                 // Try to parse the enriched JSON and rebuild tool messages.
-                if let Ok(calls) = serde_json::from_str::<Vec<serde_json::Value>>(&msg.content) {
+                // Supports two formats:
+                // - Old: plain JSON array of tool call summaries
+                // - New: wrapped object { "calls": [...], "narrative": "..." }
+                let calls: Vec<serde_json::Value> =
+                    match serde_json::from_str::<serde_json::Value>(&msg.content) {
+                        Ok(serde_json::Value::Array(arr)) => arr,
+                        Ok(serde_json::Value::Object(obj)) => obj
+                            .get("calls")
+                            .and_then(|v| v.as_array())
+                            .cloned()
+                            .unwrap_or_default(),
+                        _ => Vec::new(),
+                    };
+                {
                     if calls.is_empty() {
                         continue;
                     }
@@ -1867,7 +1882,10 @@ fn rebuild_chat_messages_from_db(
                                     .get("parameters")
                                     .cloned()
                                     .unwrap_or(serde_json::json!({})),
-                                reasoning: None,
+                                reasoning: c
+                                    .get("rationale")
+                                    .and_then(|v| v.as_str())
+                                    .map(String::from),
                             })
                             .collect();
 

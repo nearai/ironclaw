@@ -694,6 +694,16 @@ Respond in JSON format:
                     .map(|mut tc| {
                         if tc.reasoning.as_ref().is_none_or(|r| r.trim().is_empty()) {
                             tc.reasoning = narrative.as_ref().filter(|n| !n.is_empty()).cloned();
+                        } else {
+                            // Clean provider-supplied per-tool reasoning the same way
+                            // we clean the shared narrative (strip thinking/tool tags).
+                            tc.reasoning = tc
+                                .reasoning
+                                .map(|r| {
+                                    let pre_truncated = truncate_at_tool_tags(&r);
+                                    clean_response(&pre_truncated)
+                                })
+                                .filter(|r| !r.trim().is_empty());
                         }
                         tc
                     })

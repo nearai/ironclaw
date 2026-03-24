@@ -454,15 +454,21 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
             .await;
 
         // Build per-tool decisions for the reasoning update.
+        // Sanitize each rationale through SafetyLayer (parity with JobDelegate).
         let decisions: Vec<crate::channels::ToolDecision> = tool_calls
             .iter()
             .filter_map(|tc| {
-                tc.reasoning
-                    .as_ref()
-                    .map(|r| crate::channels::ToolDecision {
+                tc.reasoning.as_ref().map(|r| {
+                    let sanitized = self
+                        .agent
+                        .safety()
+                        .sanitize_tool_output("tool_rationale", r)
+                        .content;
+                    crate::channels::ToolDecision {
                         tool_name: tc.name.clone(),
-                        rationale: r.clone(),
-                    })
+                        rationale: sanitized,
+                    }
+                })
             })
             .collect();
 
@@ -502,10 +508,16 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                     turn.narrative = narrative;
                 }
                 for (tc, safe_args) in tool_calls.iter().zip(redacted_args) {
+                    let sanitized_rationale = tc.reasoning.as_ref().map(|r| {
+                        self.agent
+                            .safety()
+                            .sanitize_tool_output("tool_rationale", r)
+                            .content
+                    });
                     turn.record_tool_call_with_reasoning(
                         &tc.name,
                         safe_args,
-                        tc.reasoning.clone(),
+                        sanitized_rationale,
                         Some(tc.id.clone()),
                     );
                 }
