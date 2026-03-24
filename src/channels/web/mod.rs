@@ -98,7 +98,8 @@ impl GatewayChannel {
             job_manager: None,
             prompt_queue: None,
             scheduler: None,
-            default_user_id: config.user_id.clone(),
+            owner_id: config.user_id.clone(),
+            default_sender_id: config.user_id.clone(),
             shutdown_tx: tokio::sync::RwLock::new(None),
             ws_tracker: Some(Arc::new(ws::WsConnectionTracker::new())),
             llm_provider: None,
@@ -130,6 +131,12 @@ impl GatewayChannel {
         {
             self.auth = MultiAuthState::single(token, owner_id);
         }
+        let owner_id = self
+            .auth
+            .first_identity()
+            .map(|identity| identity.user_id.clone())
+            .unwrap_or_else(|| self.config.user_id.clone());
+        self.rebuild_state(|s| s.owner_id = owner_id);
         self
     }
 
@@ -149,7 +156,8 @@ impl GatewayChannel {
             job_manager: None,
             prompt_queue: None,
             scheduler: None,
-            default_user_id: config.user_id.clone(),
+            owner_id: config.user_id.clone(),
+            default_sender_id: config.user_id.clone(),
             shutdown_tx: tokio::sync::RwLock::new(None),
             ws_tracker: Some(Arc::new(ws::WsConnectionTracker::new())),
             llm_provider: None,
@@ -189,7 +197,8 @@ impl GatewayChannel {
             job_manager: self.state.job_manager.clone(),
             prompt_queue: self.state.prompt_queue.clone(),
             scheduler: self.state.scheduler.clone(),
-            default_user_id: self.state.default_user_id.clone(),
+            owner_id: self.state.owner_id.clone(),
+            default_sender_id: self.state.default_sender_id.clone(),
             shutdown_tx: tokio::sync::RwLock::new(None),
             ws_tracker: self.state.ws_tracker.clone(),
             llm_provider: self.state.llm_provider.clone(),

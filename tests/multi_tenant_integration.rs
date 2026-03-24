@@ -537,7 +537,8 @@ fn gateway_state_has_multi_tenant_fields() {
         job_manager: None,
         prompt_queue: None,
         scheduler: None,
-        default_user_id: "fallback".to_string(), // Multi-tenant: renamed from user_id
+        owner_id: "fallback".to_string(),
+        default_sender_id: "fallback".to_string(),
         shutdown_tx: tokio::sync::RwLock::new(None),
         ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
         llm_provider: None,
@@ -553,7 +554,8 @@ fn gateway_state_has_multi_tenant_fields() {
         active_config: Default::default(),
     };
 
-    assert_eq!(state.default_user_id, "fallback");
+    assert_eq!(state.owner_id, "fallback");
+    assert_eq!(state.default_sender_id, "fallback");
     assert!(state.workspace_pool.is_none());
 }
 
@@ -888,7 +890,8 @@ async fn start_multi_user_server_with_db() -> (
         job_manager: None,
         prompt_queue: None,
         scheduler: None,
-        default_user_id: ALICE_USER_ID.to_string(),
+        owner_id: ALICE_USER_ID.to_string(),
+        default_sender_id: ALICE_USER_ID.to_string(),
         shutdown_tx: tokio::sync::RwLock::new(None),
         ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
         llm_provider: None,

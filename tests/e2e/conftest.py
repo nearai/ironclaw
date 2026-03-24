@@ -286,7 +286,10 @@ async def ironclaw_server(
     except TimeoutError:
         # Dump stderr so CI logs show why the server failed to start
         if proc.returncode is None:
-            proc.kill()
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
             try:
                 await asyncio.wait_for(proc.wait(), timeout=2)
             except (asyncio.TimeoutError, Exception):
@@ -389,7 +392,10 @@ async def http_channel_server_without_secret(
     except TimeoutError:
         # Dump stderr so CI logs show why the server failed to start
         if proc.returncode is None:
-            proc.kill()
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
             try:
                 await asyncio.wait_for(proc.wait(), timeout=2)
             except (asyncio.TimeoutError, Exception):
