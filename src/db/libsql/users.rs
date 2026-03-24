@@ -1022,3 +1022,265 @@ mod tests {
         assert_eq!(gpt35.call_count, 1);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::libsql::LibSqlBackend;
+    use crate::db::{Database, UserStore};
+    use sha2::{Digest, Sha256};
+
+    fn hash(s: &str) -> [u8; 32] {
+        let mut h = Sha256::new();
+        h.update(s.as_bytes());
+        h.finalize().into()
+    }
+
+    async fn setup() -> (LibSqlBackend, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test_users.db");
+        let db = LibSqlBackend::new_local(&db_path).await.unwrap();
+        db.run_migrations().await.unwrap();
+        (db, dir) // keep dir alive so the DB file isn't deleted
+    }
+
+    fn test_user(id: &str) -> UserRecord {
+        UserRecord {
+            id: id.to_string(),
+            email: Some(format!("{}@test.com", id)),
+            display_name: id.to_string(),
+            status: "active".to_string(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            last_login_at: None,
+            created_by: None,
+            metadata: serde_json::json!({}),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_has_any_users_empty() {
+        let (db, _dir) = setup().await;
+        assert!(!db.has_any_users().await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_create_and_get_user() {
+        let (db, _dir) = setup().await;
+        let user = test_user("alice");
+        db.create_user(&user).await.unwrap();
+
+        assert!(db.has_any_users().await.unwrap());
+
+        let found = db.get_user("alice").await.unwrap().unwrap();
+        assert_eq!(found.id, "alice");
+        assert_eq!(found.email, Some("alice@test.com".to_string()));
+        assert_eq!(found.status, "active");
+    }
+
+    #[tokio::test]
+    async fn test_get_user_by_email() {
+        let (db, _dir) = setup().await;
+        db.create_user(&test_user("bob")).await.unwrap();
+
+        let found = db.get_user_by_email("bob@test.com").await.unwrap();
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().id, "bob");
+
+        assert!(
+            db.get_user_by_email("nobody@test.com")
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_list_users_with_status_filter() {
+        let (db, _dir) = setup().await;
+        db.create_user(&test_user("alice")).await.unwrap();
+        db.create_user(&test_user("bob")).await.unwrap();
+        db.update_user_status("bob", "suspended").await.unwrap();
+
+        let all = db.list_users(None).await.unwrap();
+        assert_eq!(all.len(), 2);
+
+        let active = db.list_users(Some("active")).await.unwrap();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].id, "alice");
+
+        let suspended = db.list_users(Some("suspended")).await.unwrap();
+        assert_eq!(suspended.len(), 1);
+        assert_eq!(suspended[0].id, "bob");
+    }
+
+    #[tokio::test]
+    async fn test_update_user_profile() {
+        let (db, _dir) = setup().await;
+        db.create_user(&test_user("alice")).await.unwrap();
+
+        let meta = serde_json::json!({"role": "admin"});
+        db.update_user_profile("alice", "Alice Smith", &meta)
+            .await
+            .unwrap();
+
+        let user = db.get_user("alice").await.unwrap().unwrap();
+        assert_eq!(user.display_name, "Alice Smith");
+        assert_eq!(user.metadata["role"], "admin");
+    }
+
+    #[tokio::test]
+    async fn test_token_lifecycle_create_authenticate_revoke() {
+        let (db, _dir) = setup().await;
+        db.create_user(&test_user("alice")).await.unwrap();
+
+        // Create token
+        let token_hash = hash("secret-token-123");
+        let record = db
+            .create_api_token("alice", "laptop", &token_hash, "secret-t", None)
+            .await
+            .unwrap();
+        assert_eq!(record.user_id, "alice");
+        assert_eq!(record.name, "laptop");
+        assert_eq!(record.token_prefix, "secret-t");
+
+        // Authenticate
+        let (tok, user) = db.authenticate_token(&token_hash).await.unwrap().unwrap();
+        assert_eq!(tok.id, record.id);
+        assert_eq!(user.id, "alice");
+
+        // List tokens
+        let tokens = db.list_api_tokens("alice").await.unwrap();
+        assert_eq!(tokens.len(), 1);
+
+        // Revoke
+        assert!(db.revoke_api_token(record.id, "alice").await.unwrap());
+
+        // Auth should fail after revoke
+        assert!(db.authenticate_token(&token_hash).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_token_auth_fails_for_suspended_user() {
+        let (db, _dir) = setup().await;
+        db.create_user(&test_user("alice")).await.unwrap();
+
+        let token_hash = hash("token-abc");
+        db.create_api_token("alice", "test", &token_hash, "token-ab", None)
+            .await
+            .unwrap();
+
+        // Auth works while active
+        assert!(db.authenticate_token(&token_hash).await.unwrap().is_some());
+
+        // Suspend user
+        db.update_user_status("alice", "suspended").await.unwrap();
+
+        // Auth should fail
+        assert!(db.authenticate_token(&token_hash).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_token_revoke_wrong_user_returns_false() {
+        let (db, _dir) = setup().await;
+        db.create_user(&test_user("alice")).await.unwrap();
+        db.create_user(&test_user("bob")).await.unwrap();
+
+        let token_hash = hash("alice-token");
+        let record = db
+            .create_api_token("alice", "test", &token_hash, "alice-to", None)
+            .await
+            .unwrap();
+
+        // Bob can't revoke Alice's token
+        assert!(!db.revoke_api_token(record.id, "bob").await.unwrap());
+
+        // Alice can
+        assert!(db.revoke_api_token(record.id, "alice").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_invitation_lifecycle() {
+        let (db, _dir) = setup().await;
+        db.create_user(&test_user("alice")).await.unwrap();
+
+        // Create invitation
+        let invite_hash = hash("invite-token-xyz");
+        let invitation = InvitationRecord {
+            id: Uuid::new_v4(),
+            email: Some("newuser@test.com".to_string()),
+            invited_by: "alice".to_string(),
+            status: "pending".to_string(),
+            expires_at: Utc::now() + chrono::Duration::days(7),
+            accepted_at: None,
+            accepted_by: None,
+            created_at: Utc::now(),
+        };
+        db.create_invitation(&invitation, &invite_hash)
+            .await
+            .unwrap();
+
+        // Look up by hash
+        let found = db
+            .get_invitation_by_hash(&invite_hash)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.id, invitation.id);
+        assert_eq!(found.status, "pending");
+
+        // List invitations
+        let list = db.list_invitations(Some("alice")).await.unwrap();
+        assert_eq!(list.len(), 1);
+
+        // Accept
+        db.create_user(&UserRecord {
+            id: "newuser".to_string(),
+            email: Some("newuser@test.com".to_string()),
+            display_name: "New User".to_string(),
+            status: "active".to_string(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            last_login_at: None,
+            created_by: Some("alice".to_string()),
+            metadata: serde_json::json!({}),
+        })
+        .await
+        .unwrap();
+        db.accept_invitation(invitation.id, "newuser")
+            .await
+            .unwrap();
+
+        // Verify accepted
+        let accepted = db
+            .get_invitation_by_hash(&invite_hash)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(accepted.status, "accepted");
+        assert_eq!(accepted.accepted_by, Some("newuser".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_record_login_and_token_usage() {
+        let (db, _dir) = setup().await;
+        db.create_user(&test_user("alice")).await.unwrap();
+
+        let token_hash = hash("tok");
+        let record = db
+            .create_api_token("alice", "test", &token_hash, "tok", None)
+            .await
+            .unwrap();
+
+        // Record usage
+        db.record_token_usage(record.id).await.unwrap();
+        db.record_login("alice").await.unwrap();
+
+        // Verify timestamps updated
+        let user = db.get_user("alice").await.unwrap().unwrap();
+        assert!(user.last_login_at.is_some());
+
+        let tokens = db.list_api_tokens("alice").await.unwrap();
+        assert!(tokens[0].last_used_at.is_some());
+    }
+}
