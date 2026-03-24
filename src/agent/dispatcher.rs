@@ -1233,6 +1233,7 @@ mod tests {
             document_extraction: None,
             sandbox_readiness: crate::agent::routine_engine::SandboxReadiness::DisabledByConfig,
             builder: None,
+            llm_backend: "nearai".to_string(),
         };
 
         Agent::new(
@@ -2100,6 +2101,7 @@ mod tests {
             document_extraction: None,
             sandbox_readiness: crate::agent::routine_engine::SandboxReadiness::DisabledByConfig,
             builder: None,
+            llm_backend: "nearai".to_string(),
         };
 
         Agent::new(
@@ -2220,6 +2222,7 @@ mod tests {
                 document_extraction: None,
                 sandbox_readiness: crate::agent::routine_engine::SandboxReadiness::DisabledByConfig,
                 builder: None,
+                llm_backend: "nearai".to_string(),
             };
 
             Agent::new(
