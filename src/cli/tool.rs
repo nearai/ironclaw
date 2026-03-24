@@ -2,6 +2,7 @@
 //!
 //! Commands for installing, listing, removing, and authenticating WASM tools.
 
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -531,7 +532,7 @@ struct AuthSecretInfo {
 struct CollectedAuthSecrets {
     secrets: Vec<AuthSecretInfo>,
     /// Secret names present in `secrets`, for filtering the Secrets capability section.
-    seen_names: std::collections::HashSet<String>,
+    seen_names: HashSet<String>,
 }
 
 /// Collect and deduplicate auth secrets from all auth-related capability sections.
@@ -540,7 +541,7 @@ struct CollectedAuthSecrets {
 /// Injection location is merged from http.credentials.
 fn collect_auth_secrets(caps: &CapabilitiesFile) -> CollectedAuthSecrets {
     let mut secrets: Vec<AuthSecretInfo> = Vec::new();
-    let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut seen: HashMap<String, usize> = HashMap::new();
 
     // auth.display_name is the best label — seed first.
     if let Some(ref auth) = caps.auth {
@@ -837,8 +838,7 @@ async fn combine_provider_scopes(
     secret_name: &str,
     base_oauth: &crate::tools::wasm::OAuthConfigSchema,
 ) -> crate::tools::wasm::OAuthConfigSchema {
-    let mut all_scopes: std::collections::HashSet<String> =
-        base_oauth.scopes.iter().cloned().collect();
+    let mut all_scopes: HashSet<String> = base_oauth.scopes.iter().cloned().collect();
 
     if let Ok(mut entries) = tokio::fs::read_dir(tools_dir).await {
         while let Ok(Some(entry)) = entries.next_entry().await {
