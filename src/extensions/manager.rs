@@ -25,6 +25,7 @@ use crate::extensions::{
 use crate::hooks::HookRegistry;
 use crate::pairing::PairingStore;
 use crate::secrets::{CreateSecretParams, SecretsStore};
+use crate::security::outbound_trust::OutboundTrustConfig;
 use crate::tools::ToolRegistry;
 use crate::tools::mcp::McpClient;
 use crate::tools::mcp::auth::{
@@ -399,6 +400,7 @@ pub struct ExtensionManager {
     secrets: Arc<dyn SecretsStore + Send + Sync>,
     tool_registry: Arc<ToolRegistry>,
     hooks: Option<Arc<HookRegistry>>,
+    outbound_trust_config: OutboundTrustConfig,
     pending_auth: RwLock<HashMap<String, PendingAuth>>,
     /// Tunnel URL for webhook configuration and remote OAuth callbacks.
     tunnel_url: Option<String>,
@@ -542,6 +544,7 @@ impl ExtensionManager {
             secrets,
             tool_registry,
             hooks,
+            outbound_trust_config: OutboundTrustConfig::default(),
             pending_auth: RwLock::new(HashMap::new()),
             tunnel_url,
             user_id,
@@ -563,6 +566,12 @@ impl ExtensionManager {
             #[cfg(test)]
             test_telegram_binding_resolver: RwLock::new(None),
         }
+    }
+
+    /// Set the global outbound trust config used for extension activation flows.
+    pub fn with_outbound_trust_config(mut self, config: OutboundTrustConfig) -> Self {
+        self.outbound_trust_config = config;
+        self
     }
 
     #[cfg(test)]
@@ -2545,7 +2554,9 @@ impl ExtensionManager {
         }
 
         // CLI/local mode: run the full blocking OAuth flow (opens browser, waits for callback)
-        match authorize_mcp_server(&server, &self.secrets, user_id).await {
+        match authorize_mcp_server(&server, &self.secrets, user_id, &self.outbound_trust_config)
+            .await
+        {
             Ok(_token) => {
                 tracing::info!("MCP server '{}' authenticated via OAuth", name);
                 Ok(AuthResult::authenticated(name, ExtensionKind::McpServer))
@@ -2595,7 +2606,7 @@ impl ExtensionManager {
         user_id: &str,
     ) -> Result<AuthResult, ExtensionError> {
         // Try to discover OAuth metadata and build a URL the user can open manually
-        let metadata = discover_full_oauth_metadata(&server.url)
+        let metadata = discover_full_oauth_metadata(server, &self.outbound_trust_config)
             .await
             .map_err(|e| match e {
                 crate::tools::mcp::auth::AuthError::NotSupported => {
@@ -2624,9 +2635,14 @@ impl ExtensionManager {
         let (client_id, client_secret) = if let Some(ref oauth) = server.oauth {
             (oauth.client_id.clone(), None)
         } else if let Some(ref reg_endpoint) = metadata.registration_endpoint {
-            let registration = register_client(reg_endpoint, &redirect_uri)
-                .await
-                .map_err(|e| ExtensionError::AuthFailed(e.to_string()))?;
+            let registration = register_client(
+                server,
+                &self.outbound_trust_config,
+                reg_endpoint,
+                &redirect_uri,
+            )
+            .await
+            .map_err(|e| ExtensionError::AuthFailed(e.to_string()))?;
 
             (registration.client_id, None)
         } else {
@@ -3573,6 +3589,7 @@ impl ExtensionManager {
             &self.mcp_process_manager,
             Some(Arc::clone(&self.secrets)),
             user_id,
+            &self.outbound_trust_config,
         )
         .await
         .map_err(|e| ExtensionError::ActivationFailed(e.to_string()))?;
@@ -3679,6 +3696,7 @@ impl ExtensionManager {
         };
 
         let loader = WasmToolLoader::new(Arc::clone(runtime), Arc::clone(&self.tool_registry))
+            .with_outbound_trust_config(self.outbound_trust_config.clone())
             .with_secrets_store(Arc::clone(&self.secrets));
         loader
             .load_from_files(name, &wasm_path, cap_path_option)
@@ -3797,6 +3815,7 @@ impl ExtensionManager {
                 settings_store,
                 self.user_id.clone(),
             )
+            .with_outbound_trust_config(self.outbound_trust_config.clone())
             .with_secrets_store(Arc::clone(&self.secrets));
             loader
                 .load_from_files(name, &wasm_path, cap_path_option)
@@ -3814,6 +3833,7 @@ impl ExtensionManager {
                 settings_store,
                 self.user_id.clone(),
             )
+            .with_outbound_trust_config(self.outbound_trust_config.clone())
             .with_secrets_store(Arc::clone(&self.secrets));
             loader
                 .load_from_files(name, &wasm_path, cap_path_option)

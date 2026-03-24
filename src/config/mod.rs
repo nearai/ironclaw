@@ -20,6 +20,7 @@ mod safety;
 mod sandbox;
 mod search;
 mod secrets;
+mod security;
 mod skills;
 mod transcription;
 mod tunnel;
@@ -50,6 +51,8 @@ use self::safety::resolve_safety_config;
 pub use self::sandbox::{ClaudeCodeConfig, SandboxModeConfig};
 pub use self::search::WorkspaceSearchConfig;
 pub use self::secrets::SecretsConfig;
+pub use self::security::SecurityConfig;
+use self::security::resolve_security_config;
 pub use self::skills::SkillsConfig;
 pub use self::transcription::TranscriptionConfig;
 pub use self::tunnel::TunnelConfig;
@@ -89,6 +92,7 @@ pub struct Config {
     pub channels: ChannelsConfig,
     pub agent: AgentConfig,
     pub safety: SafetyConfig,
+    pub security: SecurityConfig,
     pub wasm: WasmConfig,
     pub secrets: SecretsConfig,
     pub builder: BuilderModeConfig,
@@ -150,6 +154,7 @@ impl Config {
                 max_output_length: 100_000,
                 injection_check_enabled: false,
             },
+            security: SecurityConfig::default(),
             wasm: WasmConfig {
                 enabled: false,
                 ..WasmConfig::default()
@@ -329,6 +334,7 @@ impl Config {
             channels,
             agent: AgentConfig::resolve(settings)?,
             safety: resolve_safety_config(settings)?,
+            security: resolve_security_config(settings)?,
             wasm: WasmConfig::resolve(settings)?,
             secrets: SecretsConfig::resolve().await?,
             builder: BuilderModeConfig::resolve(settings)?,

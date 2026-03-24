@@ -40,6 +40,7 @@ use std::sync::Arc;
 use tokio::fs;
 
 use crate::secrets::SecretsStore;
+use crate::security::outbound_trust::OutboundTrustConfig;
 use crate::tools::registry::{ToolRegistry, WasmRegistrationError, WasmToolRegistration};
 use crate::tools::wasm::capabilities_schema::CapabilitiesFile;
 use crate::tools::wasm::{
@@ -82,6 +83,7 @@ pub struct WasmToolLoader {
     runtime: Arc<WasmToolRuntime>,
     registry: Arc<ToolRegistry>,
     secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
+    outbound_trust_config: OutboundTrustConfig,
 }
 
 impl WasmToolLoader {
@@ -91,12 +93,19 @@ impl WasmToolLoader {
             runtime,
             registry,
             secrets_store: None,
+            outbound_trust_config: OutboundTrustConfig::default(),
         }
     }
 
     /// Set the secrets store for credential injection in WASM tools.
     pub fn with_secrets_store(mut self, store: Arc<dyn SecretsStore + Send + Sync>) -> Self {
         self.secrets_store = Some(store);
+        self
+    }
+
+    /// Set the outbound trust policy config for WASM tool execution.
+    pub fn with_outbound_trust_config(mut self, config: OutboundTrustConfig) -> Self {
+        self.outbound_trust_config = config;
         self
     }
 
@@ -181,6 +190,7 @@ impl WasmToolLoader {
                 schema: None,
                 secrets_store: self.secrets_store.clone(),
                 oauth_refresh,
+                outbound_trust_config: self.outbound_trust_config.clone(),
             })
             .await?;
 
@@ -304,7 +314,13 @@ impl WasmToolLoader {
         tool_name: &str,
     ) -> Result<(), WasmLoadError> {
         self.registry
-            .register_wasm_from_storage(store, &self.runtime, user_id, tool_name)
+            .register_wasm_from_storage(
+                store,
+                &self.runtime,
+                user_id,
+                tool_name,
+                self.outbound_trust_config.clone(),
+            )
             .await?;
 
         tracing::info!(

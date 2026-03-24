@@ -34,6 +34,8 @@ pub struct Capabilities {
     pub secrets: Option<SecretsCapability>,
     /// Webhook authentication and signature verification.
     pub webhook: Option<WebhookCapability>,
+    /// Operator-managed outbound trust policy IDs this extension may request.
+    pub outbound_trust_policy_ids: Vec<String>,
 }
 
 impl Capabilities {
@@ -72,6 +74,17 @@ impl Capabilities {
             allowed_names: allowed,
         });
         self
+    }
+
+    /// Declare outbound trust policy IDs this tool is allowed to reference.
+    pub fn with_outbound_trust_policy_ids(mut self, policy_ids: Vec<String>) -> Self {
+        self.outbound_trust_policy_ids = policy_ids;
+        self
+    }
+
+    /// Get the declared outbound trust policy IDs for this extension.
+    pub fn declared_outbound_trust_policy_ids(&self) -> &[String] {
+        &self.outbound_trust_policy_ids
     }
 }
 

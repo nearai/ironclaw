@@ -20,6 +20,7 @@ use crate::channels::wasm::wrapper::WasmChannel;
 use crate::db::SettingsStore;
 use crate::pairing::PairingStore;
 use crate::secrets::SecretsStore;
+use crate::security::outbound_trust::OutboundTrustConfig;
 
 /// Loads WASM channels from the filesystem.
 pub struct WasmChannelLoader {
@@ -27,6 +28,7 @@ pub struct WasmChannelLoader {
     pairing_store: Arc<PairingStore>,
     settings_store: Option<Arc<dyn SettingsStore>>,
     secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
+    outbound_trust_config: OutboundTrustConfig,
     owner_scope_id: String,
 }
 
@@ -43,6 +45,7 @@ impl WasmChannelLoader {
             pairing_store,
             settings_store,
             secrets_store: None,
+            outbound_trust_config: OutboundTrustConfig::default(),
             owner_scope_id: owner_scope_id.into(),
         }
     }
@@ -50,6 +53,12 @@ impl WasmChannelLoader {
     /// Set the secrets store for host-based credential injection in WASM channels.
     pub fn with_secrets_store(mut self, store: Arc<dyn SecretsStore + Send + Sync>) -> Self {
         self.secrets_store = Some(store);
+        self
+    }
+
+    /// Set the outbound trust policy config for WASM channel execution.
+    pub fn with_outbound_trust_config(mut self, config: OutboundTrustConfig) -> Self {
+        self.outbound_trust_config = config;
         self
     }
 
@@ -160,6 +169,7 @@ impl WasmChannelLoader {
         if let Some(ref secrets) = self.secrets_store {
             channel = channel.with_secrets_store(Arc::clone(secrets));
         }
+        channel = channel.with_outbound_trust_config(self.outbound_trust_config.clone());
 
         tracing::info!(
             name = name,

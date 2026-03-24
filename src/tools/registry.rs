@@ -11,6 +11,7 @@ use crate::extensions::ExtensionManager;
 use crate::llm::{LlmProvider, ToolDefinition};
 use crate::orchestrator::job_manager::ContainerJobManager;
 use crate::secrets::SecretsStore;
+use crate::security::outbound_trust::OutboundTrustConfig;
 use crate::skills::catalog::SkillCatalog;
 use crate::skills::registry::SkillRegistry;
 use crate::tools::builder::{
@@ -684,6 +685,7 @@ impl ToolRegistry {
         if let Some(oauth) = reg.oauth_refresh {
             wrapper = wrapper.with_oauth_refresh(oauth);
         }
+        wrapper = wrapper.with_outbound_trust_config(reg.outbound_trust_config);
 
         // Register the tool
         self.register(Arc::new(wrapper)).await;
@@ -728,6 +730,7 @@ impl ToolRegistry {
         runtime: &Arc<WasmToolRuntime>,
         user_id: &str,
         name: &str,
+        outbound_trust_config: OutboundTrustConfig,
     ) -> Result<(), WasmRegistrationError> {
         // Load tool with integrity verification
         let tool_with_binary = store
@@ -754,6 +757,7 @@ impl ToolRegistry {
             schema: Some(tool_with_binary.tool.parameters_schema.clone()),
             secrets_store: self.secrets_store.clone(),
             oauth_refresh: None,
+            outbound_trust_config,
         })
         .await
         .map_err(WasmRegistrationError::Wasm)?;
@@ -799,6 +803,8 @@ pub struct WasmToolRegistration<'a> {
     pub secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
     /// OAuth refresh configuration for auto-refreshing expired tokens.
     pub oauth_refresh: Option<OAuthRefreshConfig>,
+    /// Global outbound trust policy config for the wasm_tool surface.
+    pub outbound_trust_config: OutboundTrustConfig,
 }
 
 impl Default for ToolRegistry {

@@ -8,6 +8,10 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::bootstrap::ironclaw_base_dir;
+use crate::security::outbound_trust::{
+    OutboundTrustConfig, OutboundTrustPolicy, OutboundTrustRisk, OutboundTrustSurface,
+    OutboundTrustTarget,
+};
 
 /// User settings persisted to disk.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -130,6 +134,10 @@ pub struct Settings {
     /// Safety configuration.
     #[serde(default)]
     pub safety: SafetySettings,
+
+    /// Security configuration.
+    #[serde(default)]
+    pub security: SecuritySettings,
 
     /// Builder configuration.
     #[serde(default)]
@@ -682,6 +690,113 @@ impl Default for SafetySettings {
         Self {
             max_output_length: default_max_output_length(),
             injection_check_enabled: true,
+        }
+    }
+}
+
+/// Security configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SecuritySettings {
+    /// Operator-managed outbound trust policy configuration.
+    #[serde(default)]
+    pub outbound_trust: OutboundTrustSettings,
+}
+
+/// Outbound trust policy settings.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct OutboundTrustSettings {
+    /// Global kill switch for outbound trust policy evaluation.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Configured outbound trust policies.
+    #[serde(default)]
+    pub policies: Vec<OutboundTrustPolicySettings>,
+}
+
+impl OutboundTrustSettings {
+    /// Convert persisted settings into runtime resolver config.
+    pub fn to_runtime_config(&self) -> OutboundTrustConfig {
+        OutboundTrustConfig {
+            enabled: self.enabled,
+            policies: self
+                .policies
+                .iter()
+                .map(OutboundTrustPolicySettings::to_runtime_policy)
+                .collect(),
+        }
+    }
+}
+
+/// Persisted operator-managed outbound trust policy.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OutboundTrustPolicySettings {
+    /// Stable policy identifier referenced by extensions.
+    pub id: String,
+
+    /// Human-friendly name for review and admin UX.
+    pub display_name: String,
+
+    /// Optional operator note describing the trust exception.
+    #[serde(default)]
+    pub description: Option<String>,
+
+    /// Whether this policy is active.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// Surfaces allowed to consume this policy.
+    #[serde(default)]
+    pub allowed_surfaces: Vec<OutboundTrustSurface>,
+
+    /// Explicit risk exceptions granted by this policy.
+    #[serde(default)]
+    pub allowed_risks: Vec<OutboundTrustRisk>,
+
+    /// Target tuples the policy may match.
+    #[serde(default)]
+    pub targets: Vec<OutboundTrustTargetSettings>,
+}
+
+impl OutboundTrustPolicySettings {
+    fn to_runtime_policy(&self) -> OutboundTrustPolicy {
+        OutboundTrustPolicy {
+            id: self.id.clone(),
+            display_name: self.display_name.clone(),
+            description: self.description.clone(),
+            enabled: self.enabled,
+            allowed_surfaces: self.allowed_surfaces.clone(),
+            allowed_risks: self.allowed_risks.clone(),
+            targets: self
+                .targets
+                .iter()
+                .map(OutboundTrustTargetSettings::to_runtime_target)
+                .collect(),
+        }
+    }
+}
+
+/// Persisted outbound trust target tuple.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OutboundTrustTargetSettings {
+    /// Exact hostname or IP literal.
+    pub host: String,
+
+    /// Optional port restriction.
+    #[serde(default)]
+    pub port: Option<u16>,
+
+    /// Optional path prefix restriction.
+    #[serde(default)]
+    pub path_prefix: Option<String>,
+}
+
+impl OutboundTrustTargetSettings {
+    fn to_runtime_target(&self) -> OutboundTrustTarget {
+        OutboundTrustTarget {
+            host: self.host.clone(),
+            port: self.port,
+            path_prefix: self.path_prefix.clone(),
         }
     }
 }

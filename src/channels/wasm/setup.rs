@@ -51,7 +51,8 @@ pub async fn setup_wasm_channels(
         Arc::clone(&pairing_store),
         settings_store.clone(),
         config.owner_id.clone(),
-    );
+    )
+    .with_outbound_trust_config(config.security.outbound_trust.clone());
     if let Some(secrets) = secrets_store {
         loader = loader.with_secrets_store(Arc::clone(secrets));
     }

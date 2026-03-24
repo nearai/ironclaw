@@ -514,6 +514,41 @@ mod tests {
     }
 
     #[test]
+    fn test_channel_capabilities_parse_outbound_trust_allowed_policy_ids() {
+        let json = r#"{
+            "name": "internal-webhook",
+            "capabilities": {
+                "outbound_trust": {
+                    "allowed_policy_ids": ["corp-slack-internal"]
+                },
+                "channel": {
+                    "allowed_paths": ["/webhook/internal"]
+                }
+            }
+        }"#;
+
+        let file = ChannelCapabilitiesFile::from_json(json).unwrap();
+        let caps = file.to_capabilities();
+
+        assert_eq!(
+            caps.declared_outbound_trust_policy_ids(),
+            ["corp-slack-internal"]
+        );
+    }
+
+    #[test]
+    fn test_channel_capabilities_outbound_trust_defaults_to_empty() {
+        let json = r#"{
+            "name": "internal-webhook"
+        }"#;
+
+        let file = ChannelCapabilitiesFile::from_json(json).unwrap();
+        let caps = file.to_capabilities();
+
+        assert!(caps.declared_outbound_trust_policy_ids().is_empty());
+    }
+
+    #[test]
     fn test_parse_with_polling() {
         let json = r#"{
             "name": "telegram",

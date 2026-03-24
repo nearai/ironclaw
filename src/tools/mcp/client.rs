@@ -12,9 +12,11 @@ use tokio::sync::RwLock;
 
 use crate::context::JobContext;
 use crate::secrets::SecretsStore;
+use crate::security::outbound_trust::{OutboundTrustConfig, OutboundTrustResolver};
 use crate::tools::mcp::auth::refresh_access_token;
 use crate::tools::mcp::config::McpServerConfig;
 use crate::tools::mcp::http_transport::HttpMcpTransport;
+use crate::tools::mcp::network::resolve_mcp_outbound_trust_decision;
 use crate::tools::mcp::protocol::{
     CallToolResult, InitializeResult, ListToolsResult, McpRequest, McpResponse, McpTool,
 };
@@ -58,6 +60,9 @@ pub struct McpClient {
     /// Custom headers to include in every request.
     custom_headers: HashMap<String, String>,
 
+    /// Global outbound trust policy config used for token refresh / OAuth retries.
+    outbound_trust_config: OutboundTrustConfig,
+
     /// Ensures the MCP initialize handshake runs exactly once.
     /// Uses `OnceCell` to serialize concurrent callers so only one
     /// actually sends the request; subsequent calls return immediately.
@@ -84,6 +89,7 @@ impl McpClient {
             user_id: "default".to_string(),
             server_config: None,
             custom_headers: HashMap::new(),
+            outbound_trust_config: OutboundTrustConfig::default(),
             initialized: tokio::sync::OnceCell::new(),
         }
     }
@@ -107,6 +113,7 @@ impl McpClient {
             user_id: "default".to_string(),
             server_config: None,
             custom_headers: HashMap::new(),
+            outbound_trust_config: OutboundTrustConfig::default(),
             initialized: tokio::sync::OnceCell::new(),
         }
     }
@@ -117,7 +124,10 @@ impl McpClient {
     /// The config must use HTTP transport (the default); for stdio/UDS use `new_with_transport`.
     ///
     /// Returns an error if the config uses a non-HTTP transport.
-    pub fn new_with_config(config: McpServerConfig) -> Result<Self, ToolError> {
+    pub fn new_with_config(
+        config: McpServerConfig,
+        outbound_trust_config: OutboundTrustConfig,
+    ) -> Result<Self, ToolError> {
         if !matches!(
             config.effective_transport(),
             crate::tools::mcp::config::EffectiveTransport::Http
@@ -127,9 +137,13 @@ impl McpClient {
                     .to_string(),
             ));
         }
-        let transport = Arc::new(HttpMcpTransport::new(
+        let resolver = OutboundTrustResolver::new(outbound_trust_config.clone());
+        let outbound_trust = resolve_mcp_outbound_trust_decision(&resolver, &config, &config.url);
+        let transport = Arc::new(HttpMcpTransport::new_with_network_policy(
             config.url.clone(),
             config.name.clone(),
+            outbound_trust.allow_invalid_tls,
+            outbound_trust.allow_private_network,
         ));
 
         Ok(Self {
@@ -142,6 +156,7 @@ impl McpClient {
             secrets: None,
             user_id: "default".to_string(),
             custom_headers: config.headers.clone(),
+            outbound_trust_config,
             initialized: tokio::sync::OnceCell::new(),
             server_config: Some(config),
         })
@@ -155,10 +170,18 @@ impl McpClient {
         session_manager: Arc<McpSessionManager>,
         secrets: Arc<dyn SecretsStore + Send + Sync>,
         user_id: impl Into<String>,
+        outbound_trust_config: OutboundTrustConfig,
     ) -> Self {
+        let resolver = OutboundTrustResolver::new(outbound_trust_config.clone());
+        let outbound_trust = resolve_mcp_outbound_trust_decision(&resolver, &config, &config.url);
         let transport = Arc::new(
-            HttpMcpTransport::new(config.url.clone(), config.name.clone())
-                .with_session_manager(session_manager.clone()),
+            HttpMcpTransport::new_with_network_policy(
+                config.url.clone(),
+                config.name.clone(),
+                outbound_trust.allow_invalid_tls,
+                outbound_trust.allow_private_network,
+            )
+            .with_session_manager(session_manager.clone()),
         );
 
         let custom_headers = config.headers.clone();
@@ -174,6 +197,7 @@ impl McpClient {
             user_id: user_id.into(),
             server_config: Some(config),
             custom_headers,
+            outbound_trust_config,
             initialized: tokio::sync::OnceCell::new(),
         }
     }
@@ -210,6 +234,7 @@ impl McpClient {
             user_id: user_id.into(),
             server_config,
             custom_headers,
+            outbound_trust_config: OutboundTrustConfig::default(),
             initialized: tokio::sync::OnceCell::new(),
         }
     }
@@ -398,7 +423,14 @@ impl McpClient {
                             "MCP token expired, attempting refresh for '{}'",
                             self.server_name
                         );
-                        match refresh_access_token(config, secrets, &self.user_id).await {
+                        match refresh_access_token(
+                            config,
+                            secrets,
+                            &self.user_id,
+                            &self.outbound_trust_config,
+                        )
+                        .await
+                        {
                             Ok(_) => {
                                 tracing::info!("MCP token refreshed for '{}'", self.server_name);
                                 continue;
@@ -551,6 +583,7 @@ impl Clone for McpClient {
             user_id: self.user_id.clone(),
             server_config: self.server_config.clone(),
             custom_headers: self.custom_headers.clone(),
+            outbound_trust_config: self.outbound_trust_config.clone(),
             initialized: tokio::sync::OnceCell::new(),
         }
     }
@@ -774,7 +807,8 @@ mod tests {
         headers.insert("X-Custom".to_string(), "value".to_string());
 
         let config = McpServerConfig::new("test", "http://localhost:8080").with_headers(headers);
-        let client = McpClient::new_with_config(config.clone()).expect("HTTP config should work");
+        let client = McpClient::new_with_config(config.clone(), OutboundTrustConfig::default())
+            .expect("HTTP config should work");
 
         assert_eq!(client.server_name(), "test");
         assert_eq!(client.server_url(), "http://localhost:8080");
@@ -786,7 +820,8 @@ mod tests {
     #[test]
     fn test_new_with_config_no_headers() {
         let config = McpServerConfig::new("bare", "http://localhost:9090");
-        let client = McpClient::new_with_config(config).expect("HTTP config should work");
+        let client = McpClient::new_with_config(config, OutboundTrustConfig::default())
+            .expect("HTTP config should work");
 
         assert_eq!(client.server_name(), "bare");
         assert!(client.custom_headers.is_empty());
@@ -1174,7 +1209,7 @@ mod tests {
             vec!["hello".to_string()],
             HashMap::new(),
         );
-        let result = McpClient::new_with_config(config);
+        let result = McpClient::new_with_config(config, OutboundTrustConfig::default());
         let err = result
             .err()
             .expect("stdio config must be rejected")
@@ -1341,7 +1376,13 @@ mod tests {
         let secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> =
             Arc::new(EmptyTokenStore);
 
-        let client = McpClient::new_authenticated(config, session_manager, secrets, "test-user");
+        let client = McpClient::new_authenticated(
+            config,
+            session_manager,
+            secrets,
+            "test-user",
+            OutboundTrustConfig::default(),
+        );
 
         let headers = client.build_request_headers().await.unwrap(); // safety: test
         assert!(
@@ -1406,7 +1447,13 @@ mod tests {
         let secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> =
             Arc::new(PaddedTokenStore);
 
-        let client = McpClient::new_authenticated(config, session_manager, secrets, "test-user");
+        let client = McpClient::new_authenticated(
+            config,
+            session_manager,
+            secrets,
+            "test-user",
+            OutboundTrustConfig::default(),
+        );
 
         let headers = client.build_request_headers().await.unwrap(); // safety: test
         assert_eq!(

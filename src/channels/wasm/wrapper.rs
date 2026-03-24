@@ -53,6 +53,10 @@ use crate::error::ChannelError;
 use crate::pairing::PairingStore;
 use crate::safety::LeakDetector;
 use crate::secrets::SecretsStore;
+use crate::security::outbound_trust::{
+    OutboundTrustConfig, OutboundTrustDecision, OutboundTrustRequestContext, OutboundTrustResolver,
+    OutboundTrustSurface,
+};
 use crate::tools::wasm::LogLevel;
 use crate::tools::wasm::WasmResourceLimiter;
 use crate::tools::wasm::credential_injector::{
@@ -92,6 +96,7 @@ struct ResolvedHostCredential {
 struct ChannelStoreData {
     limiter: WasmResourceLimiter,
     host_state: ChannelHostState,
+    outbound_trust_resolver: Arc<OutboundTrustResolver>,
     wasi: WasiCtx,
     table: ResourceTable,
     /// Injected credentials for URL substitution (e.g., bot tokens).
@@ -112,6 +117,7 @@ impl ChannelStoreData {
         memory_limit: u64,
         channel_name: &str,
         capabilities: ChannelCapabilities,
+        outbound_trust_resolver: Arc<OutboundTrustResolver>,
         credentials: HashMap<String, String>,
         host_credentials: Vec<ResolvedHostCredential>,
         pairing_store: Arc<PairingStore>,
@@ -122,6 +128,7 @@ impl ChannelStoreData {
         Self {
             limiter: WasmResourceLimiter::new(memory_limit),
             host_state: ChannelHostState::new(channel_name, capabilities),
+            outbound_trust_resolver,
             wasi,
             table: ResourceTable::new(),
             credentials,
@@ -385,6 +392,15 @@ impl near::agent::channel_host::Host for ChannelStoreData {
             .map(|h| h.max_response_bytes)
             .unwrap_or(10 * 1024 * 1024);
 
+        let outbound_trust = resolve_channel_http_outbound_trust_decision(
+            &self.outbound_trust_resolver,
+            self.host_state.capabilities(),
+            self.host_state.channel_name(),
+            &url,
+        );
+
+        enforce_channel_private_network_policy(&url, outbound_trust.allow_private_network)?;
+
         // Make the HTTP request using a dedicated single-threaded runtime.
         // We're inside spawn_blocking, so we can't rely on the main runtime's
         // I/O driver (it may be busy with WASM compilation or other startup work).
@@ -400,10 +416,7 @@ impl near::agent::channel_host::Host for ChannelStoreData {
         }
         let rt = self.http_runtime.as_ref().expect("just initialized");
         let result = rt.block_on(async {
-            let client = reqwest::Client::builder()
-                .connect_timeout(std::time::Duration::from_secs(10))
-                .build()
-                .map_err(|e| format!("Failed to build HTTP client: {e}"))?;
+            let client = build_channel_http_client(outbound_trust.allow_invalid_tls)?;
 
             let mut request = match method.to_uppercase().as_str() {
                 "GET" => client.get(&url),
@@ -726,6 +739,9 @@ pub struct WasmChannel {
     /// Secrets store for host-based credential injection.
     /// Used to pre-resolve credentials before each WASM callback.
     secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
+
+    /// Shared outbound trust policy resolver for this channel surface.
+    outbound_trust_resolver: Arc<OutboundTrustResolver>,
 }
 
 /// Update broadcast metadata in memory and persist to the settings store when
@@ -849,6 +865,7 @@ impl WasmChannel {
             owner_scope_id: owner_scope_id.into(),
             owner_actor_id: None,
             secrets_store: None,
+            outbound_trust_resolver: Arc::new(OutboundTrustResolver::default()),
         }
     }
 
@@ -865,6 +882,12 @@ impl WasmChannel {
     /// Bind this channel to the external actor that maps to the configured owner.
     pub fn with_owner_actor_id(mut self, owner_actor_id: Option<String>) -> Self {
         self.owner_actor_id = owner_actor_id;
+        self
+    }
+
+    /// Set the outbound trust policy config for this channel surface.
+    pub fn with_outbound_trust_config(mut self, config: OutboundTrustConfig) -> Self {
+        self.outbound_trust_resolver = Arc::new(OutboundTrustResolver::new(config));
         self
     }
 
@@ -1075,6 +1098,7 @@ impl WasmChannel {
         runtime: &WasmChannelRuntime,
         prepared: &PreparedChannelModule,
         capabilities: &ChannelCapabilities,
+        outbound_trust_resolver: Arc<OutboundTrustResolver>,
         credentials: HashMap<String, String>,
         host_credentials: Vec<ResolvedHostCredential>,
         pairing_store: Arc<PairingStore>,
@@ -1087,6 +1111,7 @@ impl WasmChannel {
             limits.memory_bytes,
             &prepared.name,
             capabilities.clone(),
+            outbound_trust_resolver,
             credentials,
             host_credentials,
             pairing_store,
@@ -1215,6 +1240,7 @@ impl WasmChannel {
         .await;
         let pairing_store = self.pairing_store.clone();
         let workspace_store = self.workspace_store.clone();
+        let outbound_trust_resolver = Arc::clone(&self.outbound_trust_resolver);
 
         tokio::time::timeout(timeout, async move {
             tokio::task::spawn_blocking(move || {
@@ -1222,6 +1248,7 @@ impl WasmChannel {
                     &runtime,
                     &prepared,
                     &capabilities,
+                    outbound_trust_resolver,
                     credentials,
                     host_credentials,
                     pairing_store,
@@ -1367,6 +1394,7 @@ impl WasmChannel {
         let body = body.to_vec();
 
         let channel_name = self.name.clone();
+        let outbound_trust_resolver = Arc::clone(&self.outbound_trust_resolver);
 
         // Execute in blocking task with timeout
         let result = tokio::time::timeout(timeout, async move {
@@ -1375,6 +1403,7 @@ impl WasmChannel {
                     &runtime,
                     &prepared,
                     &capabilities,
+                    outbound_trust_resolver,
                     credentials,
                     host_credentials,
                     pairing_store,
@@ -1464,6 +1493,7 @@ impl WasmChannel {
         .await;
         let pairing_store = self.pairing_store.clone();
         let workspace_store = self.workspace_store.clone();
+        let outbound_trust_resolver = Arc::clone(&self.outbound_trust_resolver);
 
         // Execute in blocking task with timeout
         let result = tokio::time::timeout(timeout, async move {
@@ -1472,6 +1502,7 @@ impl WasmChannel {
                     &runtime,
                     &prepared,
                     &capabilities,
+                    outbound_trust_resolver,
                     credentials,
                     host_credentials,
                     pairing_store,
@@ -1580,6 +1611,7 @@ impl WasmChannel {
         let thread_id = thread_id.map(|s| s.to_string());
         let metadata_json = metadata_json.to_string();
         let attachments = attachments.to_vec();
+        let outbound_trust_resolver = Arc::clone(&self.outbound_trust_resolver);
 
         // Execute in blocking task with timeout
         tracing::info!(channel = %channel_name, "Starting on_respond WASM execution");
@@ -1599,6 +1631,7 @@ impl WasmChannel {
                     &runtime,
                     &prepared,
                     &capabilities,
+                    outbound_trust_resolver,
                     credentials,
                     host_credentials,
                     pairing_store,
@@ -1722,6 +1755,7 @@ impl WasmChannel {
         let content = content.to_string();
         let thread_id = thread_id.map(|s| s.to_string());
         let attachments = attachments.to_vec();
+        let outbound_trust_resolver = Arc::clone(&self.outbound_trust_resolver);
 
         let result = tokio::time::timeout(timeout, async move {
             tokio::task::spawn_blocking(move || {
@@ -1737,6 +1771,7 @@ impl WasmChannel {
                     &runtime,
                     &prepared,
                     &capabilities,
+                    outbound_trust_resolver,
                     credentials,
                     host_credentials,
                     pairing_store,
@@ -1828,6 +1863,7 @@ impl WasmChannel {
         let Some(wit_update) = status_to_wit(status, metadata) else {
             return Ok(());
         };
+        let outbound_trust_resolver = Arc::clone(&self.outbound_trust_resolver);
 
         let result = tokio::time::timeout(timeout, async move {
             tokio::task::spawn_blocking(move || {
@@ -1835,6 +1871,7 @@ impl WasmChannel {
                     &runtime,
                     &prepared,
                     &capabilities,
+                    outbound_trust_resolver,
                     credentials,
                     host_credentials,
                     pairing_store,
@@ -1882,6 +1919,7 @@ impl WasmChannel {
         runtime: &Arc<WasmChannelRuntime>,
         prepared: &Arc<PreparedChannelModule>,
         capabilities: &ChannelCapabilities,
+        outbound_trust_resolver: Arc<OutboundTrustResolver>,
         credentials: &RwLock<HashMap<String, String>>,
         host_credentials: Vec<ResolvedHostCredential>,
         pairing_store: Arc<PairingStore>,
@@ -1904,6 +1942,7 @@ impl WasmChannel {
                     &runtime,
                     &prepared,
                     &capabilities,
+                    Arc::clone(&outbound_trust_resolver),
                     credentials_snapshot,
                     host_credentials,
                     pairing_store,
@@ -1997,6 +2036,7 @@ impl WasmChannel {
                 .await;
                 let pairing_store = self.pairing_store.clone();
                 let callback_timeout = self.runtime.config().callback_timeout;
+                let outbound_trust_resolver = Arc::clone(&self.outbound_trust_resolver);
                 let Some(wit_update) = status_to_wit(&status, metadata) else {
                     return Ok(());
                 };
@@ -2017,6 +2057,7 @@ impl WasmChannel {
                             &runtime,
                             &prepared,
                             &capabilities,
+                            Arc::clone(&outbound_trust_resolver),
                             &credentials,
                             hc,
                             pairing_store.clone(),
@@ -2290,6 +2331,7 @@ impl WasmChannel {
         let poll_secrets_store = self.secrets_store.clone();
         let owner_scope_id = self.owner_scope_id.clone();
         let owner_actor_id = self.owner_actor_id.clone();
+        let outbound_trust_resolver = Arc::clone(&self.outbound_trust_resolver);
 
         tokio::spawn(async move {
             let mut interval_timer = tokio::time::interval(interval);
@@ -2317,6 +2359,7 @@ impl WasmChannel {
                             &runtime,
                             &prepared,
                             &capabilities,
+                            Arc::clone(&outbound_trust_resolver),
                             &credentials,
                             host_credentials,
                             pairing_store.clone(),
@@ -2379,6 +2422,7 @@ impl WasmChannel {
         runtime: &Arc<WasmChannelRuntime>,
         prepared: &Arc<PreparedChannelModule>,
         capabilities: &ChannelCapabilities,
+        outbound_trust_resolver: Arc<OutboundTrustResolver>,
         credentials: &RwLock<HashMap<String, String>>,
         host_credentials: Vec<ResolvedHostCredential>,
         pairing_store: Arc<PairingStore>,
@@ -2408,6 +2452,7 @@ impl WasmChannel {
                     &runtime,
                     &prepared,
                     &capabilities,
+                    Arc::clone(&outbound_trust_resolver),
                     credentials_snapshot,
                     host_credentials,
                     pairing_store,
@@ -3144,6 +3189,45 @@ fn extract_host_from_url(url: &str) -> Option<String> {
     })
 }
 
+fn resolve_channel_http_outbound_trust_decision(
+    resolver: &OutboundTrustResolver,
+    capabilities: &ChannelCapabilities,
+    channel_name: &str,
+    url: &str,
+) -> OutboundTrustDecision {
+    resolver.resolve(&OutboundTrustRequestContext {
+        surface: OutboundTrustSurface::WasmChannel,
+        extension_name: channel_name,
+        url,
+        declared_policy_ids: capabilities.declared_outbound_trust_policy_ids(),
+    })
+}
+
+fn enforce_channel_private_network_policy(
+    url: &str,
+    allow_private_network: bool,
+) -> Result<(), String> {
+    if allow_private_network {
+        Ok(())
+    } else {
+        reject_private_ip(url)
+    }
+}
+
+fn build_channel_http_client(allow_invalid_tls: bool) -> Result<reqwest::Client, String> {
+    let mut builder = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::none());
+
+    if allow_invalid_tls {
+        builder = builder.danger_accept_invalid_certs(true);
+    }
+
+    builder
+        .build()
+        .map_err(|e| format!("Failed to build HTTP client: {e}"))
+}
+
 fn should_skip_response_leak_scan(url: &str) -> bool {
     url::Url::parse(url).is_ok_and(|parsed| {
         matches!(parsed.scheme(), "http" | "https")
@@ -3155,6 +3239,77 @@ fn should_skip_response_leak_scan(url: &str) -> bool {
                 .and_then(|segments| segments.rev().find(|segment| !segment.is_empty()))
                 .is_some_and(|segment| segment == "getUpdates")
     })
+}
+
+/// Resolve the URL's hostname and reject connections to private/internal IPs.
+fn reject_private_ip(url: &str) -> Result<(), String> {
+    let parsed = url::Url::parse(url).map_err(|e| format!("Failed to parse URL: {e}"))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(format!("Unsupported URL scheme: {}", parsed.scheme()));
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err("URL contains userinfo (@) which is not allowed".to_string());
+    }
+
+    let host = parsed
+        .host_str()
+        .map(|h| {
+            h.strip_prefix('[')
+                .and_then(|v| v.strip_suffix(']'))
+                .unwrap_or(h)
+        })
+        .ok_or_else(|| "Failed to parse host from URL".to_string())?;
+
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        return if is_private_ip(ip) {
+            Err(format!(
+                "HTTP request to private/internal IP {} is not allowed",
+                ip
+            ))
+        } else {
+            Ok(())
+        };
+    }
+
+    use std::net::ToSocketAddrs;
+    let addrs: Vec<_> = format!("{}:0", host)
+        .to_socket_addrs()
+        .map_err(|e| format!("DNS resolution failed for {}: {}", host, e))?
+        .collect();
+
+    if addrs.is_empty() {
+        return Err(format!("DNS resolution returned no addresses for {}", host));
+    }
+
+    for addr in &addrs {
+        if is_private_ip(addr.ip()) {
+            return Err(format!(
+                "DNS rebinding detected: {} resolved to private IP {}",
+                host,
+                addr.ip()
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn is_private_ip(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.octets()[0] == 100 && (v4.octets()[1] & 0xC0) == 64
+        }
+        std::net::IpAddr::V6(v6) => {
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || (v6.segments()[0] & 0xFE00) == 0xFC00
+                || (v6.segments()[0] & 0xFFC0) == 0xFE80
+        }
+    }
 }
 
 /// Pre-resolve host credentials for all HTTP capability mappings.
@@ -3384,6 +3539,208 @@ mod tests {
         assert_eq!(response.body, b"Bad request");
     }
 
+    #[test]
+    fn test_resolve_channel_http_outbound_trust_default_denies_exceptions() {
+        use crate::security::outbound_trust::OutboundTrustResolver;
+
+        let decision = super::resolve_channel_http_outbound_trust_decision(
+            &OutboundTrustResolver::default(),
+            &ChannelCapabilities::for_channel("test"),
+            "test",
+            "https://10.42.0.15/api/status",
+        );
+
+        assert_eq!(decision.matched_policy_id, None);
+        assert!(!decision.allow_invalid_tls);
+        assert!(!decision.allow_private_network);
+    }
+
+    #[test]
+    fn test_resolve_channel_http_outbound_trust_policy_can_enable_private_network() {
+        use crate::security::outbound_trust::{
+            OutboundTrustConfig, OutboundTrustPolicy, OutboundTrustResolver, OutboundTrustRisk,
+            OutboundTrustSurface, OutboundTrustTarget,
+        };
+        use crate::tools::wasm::Capabilities as ToolCapabilities;
+
+        let resolver = OutboundTrustResolver::new(OutboundTrustConfig {
+            enabled: true,
+            policies: vec![OutboundTrustPolicy {
+                id: "corp-channel".to_string(),
+                display_name: "corp-channel".to_string(),
+                description: None,
+                enabled: true,
+                allowed_surfaces: vec![OutboundTrustSurface::WasmChannel],
+                allowed_risks: vec![OutboundTrustRisk::AllowPrivateNetwork],
+                targets: vec![OutboundTrustTarget {
+                    host: "10.42.0.15".to_string(),
+                    port: Some(443),
+                    path_prefix: Some("/api".to_string()),
+                }],
+            }],
+        });
+        let capabilities = ChannelCapabilities::for_channel("test").with_tool_capabilities(
+            ToolCapabilities::default()
+                .with_outbound_trust_policy_ids(vec!["corp-channel".to_string()]),
+        );
+
+        let decision = super::resolve_channel_http_outbound_trust_decision(
+            &resolver,
+            &capabilities,
+            "test",
+            "https://10.42.0.15/api/status",
+        );
+
+        assert_eq!(decision.matched_policy_id.as_deref(), Some("corp-channel"));
+        assert!(!decision.allow_invalid_tls);
+        assert!(decision.allow_private_network);
+    }
+
+    #[test]
+    fn test_resolve_channel_http_outbound_trust_policy_can_enable_invalid_tls() {
+        use crate::security::outbound_trust::{
+            OutboundTrustConfig, OutboundTrustPolicy, OutboundTrustResolver, OutboundTrustRisk,
+            OutboundTrustSurface, OutboundTrustTarget,
+        };
+        use crate::tools::wasm::Capabilities as ToolCapabilities;
+
+        let resolver = OutboundTrustResolver::new(OutboundTrustConfig {
+            enabled: true,
+            policies: vec![OutboundTrustPolicy {
+                id: "corp-channel".to_string(),
+                display_name: "corp-channel".to_string(),
+                description: None,
+                enabled: true,
+                allowed_surfaces: vec![OutboundTrustSurface::WasmChannel],
+                allowed_risks: vec![OutboundTrustRisk::AllowInvalidTls],
+                targets: vec![OutboundTrustTarget {
+                    host: "internal.example".to_string(),
+                    port: Some(443),
+                    path_prefix: Some("/hooks".to_string()),
+                }],
+            }],
+        });
+        let capabilities = ChannelCapabilities::for_channel("test").with_tool_capabilities(
+            ToolCapabilities::default()
+                .with_outbound_trust_policy_ids(vec!["corp-channel".to_string()]),
+        );
+
+        let decision = super::resolve_channel_http_outbound_trust_decision(
+            &resolver,
+            &capabilities,
+            "test",
+            "https://internal.example/hooks/poll",
+        );
+
+        assert_eq!(decision.matched_policy_id.as_deref(), Some("corp-channel"));
+        assert!(decision.allow_invalid_tls);
+        assert!(!decision.allow_private_network);
+    }
+
+    #[test]
+    fn test_channel_private_network_policy_respects_outbound_trust() {
+        let denied =
+            super::enforce_channel_private_network_policy("https://127.0.0.1:8443/api", false);
+        assert!(denied.is_err());
+
+        let allowed =
+            super::enforce_channel_private_network_policy("https://127.0.0.1:8443/api", true);
+        assert!(allowed.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_outbound_trust_allows_private_self_signed_https_for_wasm_channels() {
+        use crate::security::outbound_trust::{
+            OutboundTrustConfig, OutboundTrustPolicy, OutboundTrustResolver, OutboundTrustRisk,
+            OutboundTrustSurface, OutboundTrustTarget,
+        };
+        use crate::testing::tls::SelfSignedHttpsServer;
+        use crate::tools::wasm::Capabilities as ToolCapabilities;
+
+        let server = SelfSignedHttpsServer::start(r#"{"ok":true}"#).await;
+        let url = server.url("/api/status");
+
+        let tls_err = super::build_channel_http_client(false)
+            .expect("client")
+            .get(&url)
+            .send()
+            .await
+            .expect_err("self-signed endpoint should fail without invalid-tls trust");
+        assert!(
+            tls_err.is_request() || tls_err.is_connect() || tls_err.is_body(),
+            "expected request failure for untrusted TLS, got: {tls_err}"
+        );
+
+        let denied = super::enforce_channel_private_network_policy(&url, false);
+        assert!(denied.is_err(), "expected private-network denial");
+
+        let resolver = OutboundTrustResolver::new(OutboundTrustConfig {
+            enabled: true,
+            policies: vec![OutboundTrustPolicy {
+                id: "corp-channel".to_string(),
+                display_name: "corp-channel".to_string(),
+                description: None,
+                enabled: true,
+                allowed_surfaces: vec![OutboundTrustSurface::WasmChannel],
+                allowed_risks: vec![
+                    OutboundTrustRisk::AllowInvalidTls,
+                    OutboundTrustRisk::AllowPrivateNetwork,
+                ],
+                targets: vec![OutboundTrustTarget {
+                    host: "127.0.0.1".to_string(),
+                    port: Some(server.port()),
+                    path_prefix: Some("/api".to_string()),
+                }],
+            }],
+        });
+        let capabilities = ChannelCapabilities::default().with_tool_capabilities(
+            ToolCapabilities::default()
+                .with_outbound_trust_policy_ids(vec!["corp-channel".to_string()]),
+        );
+
+        let decision = super::resolve_channel_http_outbound_trust_decision(
+            &resolver,
+            &capabilities,
+            "test-channel",
+            &url,
+        );
+        assert!(decision.allow_invalid_tls);
+        assert!(decision.allow_private_network);
+
+        super::enforce_channel_private_network_policy(&url, decision.allow_private_network)
+            .expect("private-network trust should allow request");
+
+        let response = super::build_channel_http_client(decision.allow_invalid_tls)
+            .expect("trusted client")
+            .get(&url)
+            .send()
+            .await
+            .expect("trusted request should succeed");
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+    }
+
+    #[test]
+    fn test_channel_outbound_trust_does_not_expand_http_allowlist() {
+        use crate::channels::wasm::host::ChannelHostState;
+        use crate::tools::wasm::{
+            Capabilities as ToolCapabilities, EndpointPattern, HttpCapability,
+        };
+
+        let capabilities =
+            ChannelCapabilities::for_channel("test").with_tool_capabilities(ToolCapabilities {
+                http: Some(HttpCapability {
+                    allowlist: vec![EndpointPattern::host("api.example.com")],
+                    ..Default::default()
+                }),
+                outbound_trust_policy_ids: vec!["corp-channel".to_string()],
+                ..Default::default()
+            });
+        let host_state = ChannelHostState::new("test", capabilities);
+
+        let result = host_state.check_http_allowed("https://10.42.0.15/api/status", "GET");
+        assert!(result.is_err());
+    }
+
     #[tokio::test]
     async fn test_channel_start_and_shutdown() {
         let channel = create_test_channel();
@@ -3437,6 +3794,7 @@ mod tests {
             &runtime,
             &prepared,
             &capabilities,
+            Arc::new(crate::security::outbound_trust::OutboundTrustResolver::default()),
             &credentials,
             Vec::new(), // no host credentials in test
             Arc::new(PairingStore::new()),
@@ -4328,6 +4686,7 @@ mod tests {
             1024 * 1024,
             "test",
             ChannelCapabilities::default(),
+            Arc::new(crate::security::outbound_trust::OutboundTrustResolver::default()),
             creds,
             Vec::new(),
             Arc::new(PairingStore::new()),
@@ -4362,6 +4721,7 @@ mod tests {
             1024 * 1024,
             "test",
             ChannelCapabilities::default(),
+            Arc::new(crate::security::outbound_trust::OutboundTrustResolver::default()),
             std::collections::HashMap::new(),
             Vec::new(),
             Arc::new(PairingStore::new()),
@@ -4393,6 +4753,7 @@ mod tests {
             1024 * 1024,
             "test",
             ChannelCapabilities::default(),
+            Arc::new(crate::security::outbound_trust::OutboundTrustResolver::default()),
             creds,
             host_creds,
             Arc::new(PairingStore::new()),
@@ -4426,6 +4787,7 @@ mod tests {
             1024 * 1024,
             "test",
             ChannelCapabilities::default(),
+            Arc::new(crate::security::outbound_trust::OutboundTrustResolver::default()),
             creds,
             Vec::new(),
             Arc::new(PairingStore::new()),

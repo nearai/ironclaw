@@ -6,6 +6,7 @@
 use std::sync::Arc;
 
 use crate::secrets::SecretsStore;
+use crate::security::outbound_trust::OutboundTrustConfig;
 use crate::tools::mcp::config::{EffectiveTransport, McpServerConfig};
 use crate::tools::mcp::{McpClient, McpProcessManager, McpSessionManager, McpTransport};
 
@@ -30,6 +31,7 @@ pub async fn create_client_from_config(
     process_manager: &Arc<McpProcessManager>,
     secrets: Option<Arc<dyn SecretsStore + Send + Sync>>,
     user_id: &str,
+    outbound_trust_config: &OutboundTrustConfig,
 ) -> Result<McpClient, McpFactoryError> {
     let server_name = server.name.clone();
 
@@ -88,22 +90,27 @@ pub async fn create_client_from_config(
                         Arc::clone(session_manager),
                         Arc::clone(secrets),
                         user_id,
+                        outbound_trust_config.clone(),
                     ))
                 } else {
-                    Ok(McpClient::new_with_config(server)
-                        .map_err(|e| McpFactoryError::InvalidConfig {
-                            name: server_name.clone(),
-                            reason: e.to_string(),
-                        })?
-                        .with_session_manager(Arc::clone(session_manager)))
+                    Ok(
+                        McpClient::new_with_config(server, outbound_trust_config.clone())
+                            .map_err(|e| McpFactoryError::InvalidConfig {
+                                name: server_name.clone(),
+                                reason: e.to_string(),
+                            })?
+                            .with_session_manager(Arc::clone(session_manager)),
+                    )
                 }
             } else {
-                Ok(McpClient::new_with_config(server)
-                    .map_err(|e| McpFactoryError::InvalidConfig {
-                        name: server_name,
-                        reason: e.to_string(),
-                    })?
-                    .with_session_manager(Arc::clone(session_manager)))
+                Ok(
+                    McpClient::new_with_config(server, outbound_trust_config.clone())
+                        .map_err(|e| McpFactoryError::InvalidConfig {
+                            name: server_name,
+                            reason: e.to_string(),
+                        })?
+                        .with_session_manager(Arc::clone(session_manager)),
+                )
             }
         }
     }
@@ -125,6 +132,7 @@ mod tests {
             &process_manager,
             None,
             "test-user",
+            &OutboundTrustConfig::default(),
         )
         .await
         .expect("factory should succeed for HTTP config");

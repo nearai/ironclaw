@@ -51,6 +51,10 @@ pub struct McpServerConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub oauth: Option<OAuthConfig>,
 
+    /// Optional outbound trust policy opt-in for this MCP server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outbound_trust: Option<McpOutboundTrustConfig>,
+
     /// Whether this server is enabled.
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -64,6 +68,13 @@ fn default_true() -> bool {
     true
 }
 
+/// MCP server declaration of allowed operator-managed outbound trust policies.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct McpOutboundTrustConfig {
+    #[serde(default)]
+    pub allowed_policy_ids: Vec<String>,
+}
+
 impl McpServerConfig {
     /// Create a new MCP server configuration.
     pub fn new(name: impl Into<String>, url: impl Into<String>) -> Self {
@@ -73,6 +84,7 @@ impl McpServerConfig {
             transport: None,
             headers: HashMap::new(),
             oauth: None,
+            outbound_trust: None,
             enabled: true,
             description: None,
         }
@@ -95,6 +107,7 @@ impl McpServerConfig {
             }),
             headers: HashMap::new(),
             oauth: None,
+            outbound_trust: None,
             enabled: true,
             description: None,
         }
@@ -110,6 +123,7 @@ impl McpServerConfig {
             }),
             headers: HashMap::new(),
             oauth: None,
+            outbound_trust: None,
             enabled: true,
             description: None,
         }
@@ -130,6 +144,12 @@ impl McpServerConfig {
     /// Set custom headers.
     pub fn with_headers(mut self, headers: HashMap<String, String>) -> Self {
         self.headers = headers;
+        self
+    }
+
+    /// Declare which operator-managed outbound trust policies this server may use.
+    pub fn with_outbound_trust_policy_ids(mut self, allowed_policy_ids: Vec<String>) -> Self {
+        self.outbound_trust = Some(McpOutboundTrustConfig { allowed_policy_ids });
         self
     }
 
@@ -220,6 +240,14 @@ impl McpServerConfig {
         self.headers
             .keys()
             .any(|k| k.eq_ignore_ascii_case("authorization"))
+    }
+
+    /// Declared operator-managed outbound trust policy IDs for this server.
+    pub fn declared_outbound_trust_policy_ids(&self) -> &[String] {
+        self.outbound_trust
+            .as_ref()
+            .map(|config| config.allowed_policy_ids.as_slice())
+            .unwrap_or(&[])
     }
 
     /// Check if this server requires authentication.
@@ -1127,6 +1155,28 @@ mod tests {
         assert_eq!(parsed.name, "http-server");
         assert!(parsed.transport.is_none());
         assert_eq!(parsed.headers.get("X-Custom").unwrap(), "value");
+    }
+
+    #[test]
+    fn test_config_roundtrip_with_outbound_trust() {
+        let mut config = McpServerConfig::new("corp-mcp", "https://mcp.internal.example/api");
+        config.outbound_trust = Some(McpOutboundTrustConfig {
+            allowed_policy_ids: vec!["corp-mcp".to_string(), "corp-auth".to_string()],
+        });
+
+        let json = serde_json::to_string_pretty(&config).unwrap();
+        let parsed: McpServerConfig = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(
+            parsed.declared_outbound_trust_policy_ids(),
+            &["corp-mcp".to_string(), "corp-auth".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_config_defaults_without_outbound_trust() {
+        let config = McpServerConfig::new("notion", "https://mcp.notion.com");
+        assert!(config.declared_outbound_trust_policy_ids().is_empty());
     }
 
     // --- Issue 3 regression: is_localhost_url rejects attacker subdomains ---

@@ -75,6 +75,10 @@ pub struct CapabilitiesFile {
     #[serde(default)]
     pub webhook: Option<WebhookCapabilitySchema>,
 
+    /// Outbound trust policy opt-in declaration.
+    #[serde(default)]
+    pub outbound_trust: Option<OutboundTrustCapabilitySchema>,
+
     /// Authentication setup instructions.
     /// Used by `ironclaw config` to guide users through auth setup.
     #[serde(default)]
@@ -155,6 +159,7 @@ impl CapabilitiesFile {
             self.tool_invoke = self.tool_invoke.or(inner.tool_invoke);
             self.workspace = self.workspace.or(inner.workspace);
             self.webhook = self.webhook.or(inner.webhook);
+            self.outbound_trust = self.outbound_trust.or(inner.outbound_trust);
             self.auth = self.auth.or(inner.auth);
             self.setup = self.setup.or(inner.setup);
         }
@@ -250,8 +255,20 @@ impl CapabilitiesFile {
             caps.webhook = Some(webhook.to_webhook_capability());
         }
 
+        if let Some(outbound_trust) = &self.outbound_trust {
+            caps.outbound_trust_policy_ids = outbound_trust.allowed_policy_ids.clone();
+        }
+
         caps
     }
+}
+
+/// Outbound trust policy opt-in schema.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct OutboundTrustCapabilitySchema {
+    /// Operator-managed policy IDs this extension may reference.
+    #[serde(default)]
+    pub allowed_policy_ids: Vec<String>,
 }
 
 /// HTTP capability schema.
@@ -774,6 +791,23 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_outbound_trust_allowed_policy_ids() {
+        let json = r#"{
+            "outbound_trust": {
+                "allowed_policy_ids": ["corp-internal-api", "corp-shared-gateway"]
+            }
+        }"#;
+
+        let file = CapabilitiesFile::from_json(json).unwrap();
+        let caps = file.to_capabilities();
+
+        assert_eq!(
+            caps.declared_outbound_trust_policy_ids(),
+            ["corp-internal-api", "corp-shared-gateway"]
+        );
+    }
+
+    #[test]
     fn test_parse_credentials() {
         let json = r#"{
             "http": {
@@ -949,6 +983,14 @@ mod tests {
         assert!(caps.secrets.is_some());
         let secrets = caps.secrets.unwrap();
         assert!(secrets.is_allowed("slack_token"));
+    }
+
+    #[test]
+    fn test_outbound_trust_defaults_to_empty_policy_ids() {
+        let file = CapabilitiesFile::from_json("{}").unwrap();
+        let caps = file.to_capabilities();
+
+        assert!(caps.declared_outbound_trust_policy_ids().is_empty());
     }
 
     #[test]
