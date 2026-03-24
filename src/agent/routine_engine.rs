@@ -1177,13 +1177,7 @@ async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) 
                     let delay = Duration::from_millis(
                         BASE_DELAY_MS.saturating_mul(2u64.saturating_pow(attempt - 1)),
                     );
-                    tracing::warn!(
-                        routine = %routine.name,
-                        attempt = attempt,
-                        max_retries = MAX_RETRIES,
-                        delay_ms = delay.as_millis() as u64,
-                        "Transient routine error, retrying: {}", e
-                    );
+                    tracing::event!(target: "transient_routine_errors", tracing::Level::WARN, routine = %routine.name, attempt = attempt, max_retries = MAX_RETRIES, delay_ms = delay.as_millis() as u64, "Transient routine error, retrying: {}", e);
                     tokio::time::sleep(delay).await;
                 }
                 Err(e) => break Err(e),
