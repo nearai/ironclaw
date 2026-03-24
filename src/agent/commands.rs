@@ -121,6 +121,10 @@ impl Agent {
                 if let Some(store) = tenant.store()
                     && let Ok(Some(ctx)) = store.get_job(uuid).await
                 {
+                    // Ownership check: ensure the job belongs to the requesting user.
+                    if ctx.user_id != user_id {
+                        return Err(crate::error::JobError::NotFound { id: uuid }.into());
+                    }
                     return Ok(format!(
                         "Job: {}\nStatus: {:?}\nCreated: {}\nStarted: {}\nActual cost: {}",
                         ctx.title,
