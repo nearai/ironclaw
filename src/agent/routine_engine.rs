@@ -1323,6 +1323,9 @@ async fn execute_full_job(
             reason: format!("failed to link run to job: {e}"),
         })?;
 
+    // Keep the in-memory struct in sync so send_notification can read run.job_id.
+    run.job_id = Some(job_id);
+
     tracing::info!(
         routine = %routine.name,
         job_id = %job_id,
