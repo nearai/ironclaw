@@ -378,10 +378,38 @@ Engine broadcasts `ThreadEvent`s via `tokio::broadcast`. Router subscribes and f
 
 **v1 reference:** `ChatDelegate.execute_tool_calls()` returns `LoopOutcome::NeedApproval(PendingApproval)`. Stored in session thread state. Web gateway sends `approval_needed` SSE event. User response parsed by `SubmissionParser`. `thread_ops.rs` resumes loop with deferred tool calls.
 
-#### Database persistence (NOT YET IMPLEMENTED)
-- Currently using `InMemoryStore` — state lost on restart
-- Need migration V14+ with `engine_*` tables for both PostgreSQL and libSQL
-- `StoreBridgeAdapter` wrapping `Arc<dyn Database>`
+#### Database persistence (PARTIAL)
+- `HybridStore`: ephemeral data (threads, steps, events) in-memory; MemoryDocs (reflection output) persisted to workspace at `engine/docs/{type}/{id}.json`
+- Loaded on startup via `load_docs_from_workspace()`
+- Full DB persistence (engine_* tables) deferred — workspace persistence is sufficient for learning across sessions
+
+#### Web gateway integration (NOT YET IMPLEMENTED)
+
+The web gateway is completely disconnected from engine v2. Three gaps:
+
+**1. No SSE event streaming**
+- Gateway expects `SseEvent` variants via `SseManager.broadcast()`
+- Engine v2 emits `ThreadEvent` via `tokio::broadcast` (forwarded to channel as `StatusUpdate` — works for REPL but not web)
+- **Fix**: Bridge `ThreadEvent` → `SseEvent` (or common `AppEvent` type) and broadcast to `SseManager`
+- **Prerequisite**: SseEvent extraction to common AppEvent type (separate PR in progress)
+- Events to bridge: `StepStarted` → `Thinking`, `ActionExecuted` → `ToolCompleted`, `ActionFailed` → `ToolCompleted(error)`, thread completion → `Response`
+
+**2. No conversation persistence for gateway**
+- Gateway reads chat history from v1 `ConversationStore` DB tables
+- Engine v2 writes to `HybridStore` (in-memory + workspace) which gateway doesn't query
+- **Fix**: After engine thread completes, write user message + response to v1 conversation tables via `ConversationStore::add_conversation_message()`
+- This gives the gateway history without changing any gateway code
+
+**3. No cross-channel message visibility**
+- REPL messages processed by engine v2 don't appear in web gateway
+- Web gateway messages processed by engine v2 don't appear in REPL history
+- **Fix**: Same as #2 — writing to v1 conversation tables makes messages visible everywhere
+
+**Implementation approach** (minimal, after AppEvent PR):
+1. Router accepts `sse_tx: Option<Arc<SseManager>>` from `Agent.deps`
+2. Forward `ThreadEvent` → `SseEvent` during the event polling loop (alongside channel `StatusUpdate`)
+3. After thread completion, write user message + response to v1 DB via `store.add_conversation_message()`
+4. Gateway reads from DB as usual — no gateway code changes needed
 
 #### Acceptance testing (NOT YET IMPLEMENTED)
 - Drive engine via TestRig + TraceLlm fixtures
