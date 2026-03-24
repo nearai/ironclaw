@@ -1631,15 +1631,25 @@ impl ExtensionManager {
                 self.persist_active_channels(user_id).await;
                 self.activation_errors.write().await.remove(name);
 
-                // Remove stored team_id setting and clean up OAuth state
-                if let Some(ref store) = self.store {
-                    let _ = store
+                // Remove stored team_id setting and clean up secrets
+                if let Some(ref store) = self.store
+                    && let Err(e) = store
                         .delete_setting(user_id, &format!("relay:{}:team_id", name))
-                        .await;
+                        .await
+                {
+                    tracing::warn!(error = %e, name, "Failed to delete relay team_id setting on removal");
                 }
-                let _ = self
+                if let Err(e) = self
                     .secrets
                     .delete(user_id, &format!("relay:{}:oauth_state", name))
+                    .await
+                {
+                    tracing::warn!(error = %e, name, "Failed to delete relay oauth_state secret on removal");
+                }
+                // Clean up legacy stream_token secret from pre-webhook installs
+                let _ = self
+                    .secrets
+                    .delete(user_id, &format!("relay:{}:stream_token", name))
                     .await;
 
                 // Stop webhook traffic before removing the channel from the managers.
