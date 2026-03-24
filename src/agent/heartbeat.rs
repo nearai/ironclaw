@@ -627,7 +627,14 @@ pub fn spawn_multi_user_heartbeat(
             }
 
             // Collect results and update failure counts
-            while let Some(Ok((uid, result))) = join_set.join_next().await {
+            while let Some(join_result) = join_set.join_next().await {
+                let (uid, result) = match join_result {
+                    Ok(pair) => pair,
+                    Err(e) => {
+                        tracing::error!("Multi-user heartbeat task panicked: {}", e);
+                        continue;
+                    }
+                };
                 match result {
                     HeartbeatResult::Ok => {
                         tracing::trace!(user_id = uid, "Multi-user heartbeat OK");

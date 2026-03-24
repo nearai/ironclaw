@@ -538,30 +538,50 @@ impl Agent {
                     .await;
                     let notify_user = heartbeat_notify_user;
                     let channels = self.channels.clone();
+                    let is_multi_tenant = hb_config.multi_tenant;
                     tokio::spawn(async move {
                         while let Some(response) = notify_rx.recv().await {
+                            // In multi-tenant mode, extract the owning user_id from
+                            // the response metadata so notifications reach the
+                            // correct user rather than the agent's owner.
+                            let effective_user = if is_multi_tenant {
+                                response
+                                    .metadata
+                                    .get("owner_id")
+                                    .and_then(|v| v.as_str())
+                                    .map(String::from)
+                            } else {
+                                None
+                            };
+
                             // Try the configured channel first, fall back to
                             // broadcasting on all channels.
-                            let targeted_ok = if let Some(ref channel) = notify_channel
-                                && let Some(ref user) = notify_target
-                            {
-                                channels
-                                    .broadcast(channel, user, response.clone())
-                                    .await
-                                    .is_ok()
+                            let targeted_ok = if let Some(ref channel) = notify_channel {
+                                let target = effective_user.as_deref().or(notify_target.as_deref());
+                                if let Some(user) = target {
+                                    channels
+                                        .broadcast(channel, user, response.clone())
+                                        .await
+                                        .is_ok()
+                                } else {
+                                    false
+                                }
                             } else {
                                 false
                             };
 
-                            if !targeted_ok && let Some(ref user) = notify_user {
-                                let results = channels.broadcast_all(user, response).await;
-                                for (ch, result) in results {
-                                    if let Err(e) = result {
-                                        tracing::warn!(
-                                            "Failed to broadcast heartbeat to {}: {}",
-                                            ch,
-                                            e
-                                        );
+                            if !targeted_ok {
+                                let fallback = effective_user.as_deref().or(notify_user.as_deref());
+                                if let Some(user) = fallback {
+                                    let results = channels.broadcast_all(user, response).await;
+                                    for (ch, result) in results {
+                                        if let Err(e) = result {
+                                            tracing::warn!(
+                                                "Failed to broadcast heartbeat to {}: {}",
+                                                ch,
+                                                e
+                                            );
+                                        }
                                     }
                                 }
                             }
@@ -1266,7 +1286,7 @@ impl Agent {
                     message.channel
                 );
                 // Authorization checks (including restart channel check) are enforced in handle_system_command
-                self.handle_system_command(&command, &args, &message.channel)
+                self.handle_system_command(&command, &args, &message.channel, &message.user_id)
                     .await
             }
             Submission::Undo => self.process_undo(session, thread_id).await,

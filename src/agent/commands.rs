@@ -69,7 +69,7 @@ impl Agent {
             }
             MessageIntent::Command { command, args } => {
                 match self
-                    .handle_command(&command, &args, &message.channel)
+                    .handle_command(&command, &args, &message.channel, &message.user_id)
                     .await?
                 {
                     Some(s) => s,
@@ -125,6 +125,10 @@ impl Agent {
                 if let Some(store) = self.store()
                     && let Ok(Some(ctx)) = store.get_job(uuid).await
                 {
+                    // Ownership check: ensure the job belongs to the requesting user.
+                    if ctx.user_id != user_id {
+                        return Err(crate::error::JobError::NotFound { id: uuid }.into());
+                    }
                     return Ok(format!(
                         "Job: {}\nStatus: {:?}\nCreated: {}\nStarted: {}\nActual cost: {}",
                         ctx.title,
@@ -471,6 +475,7 @@ impl Agent {
         command: &str,
         args: &[String],
         channel: &str,
+        user_id: &str,
     ) -> Result<SubmissionResult, Error> {
         match command {
             "help" => Ok(SubmissionResult::response(concat!(
@@ -664,12 +669,12 @@ impl Agent {
                     }
 
                     if self.config.multi_tenant {
-                        // Multi-tenant: only persist to per-user settings.
+                        // Multi-tenant: only persist to per-user DB settings.
                         // Do NOT call set_model() on the shared provider — that
                         // would change the default for all users. The per-request
                         // model_override in the dispatcher reads from the same
                         // "selected_model" setting and applies it per-user.
-                        self.persist_selected_model(requested).await;
+                        self.persist_selected_model(user_id, requested).await;
                         Ok(SubmissionResult::response(format!(
                             "Model preference set to: {} (per-user)",
                             requested
@@ -678,7 +683,7 @@ impl Agent {
                         match self.llm().set_model(requested) {
                             Ok(()) => {
                                 // Persist the model choice so it survives restarts.
-                                self.persist_selected_model(requested).await;
+                                self.persist_selected_model(user_id, requested).await;
                                 Ok(SubmissionResult::response(format!(
                                     "Switched model to: {}",
                                     requested
@@ -830,10 +835,14 @@ impl Agent {
         command: &str,
         args: &[String],
         channel: &str,
+        user_id: &str,
     ) -> Result<Option<String>, Error> {
         // System commands are now handled directly via Submission::SystemCommand,
         // but the router may still send us unknown /commands.
-        match self.handle_system_command(command, args, channel).await? {
+        match self
+            .handle_system_command(command, args, channel, user_id)
+            .await?
+        {
             SubmissionResult::Response { content } => Ok(Some(content)),
             SubmissionResult::Ok { message } => Ok(message),
             SubmissionResult::Error { message } => Ok(Some(format!("Error: {}", message))),
@@ -845,23 +854,29 @@ impl Agent {
     ///
     /// Best-effort: logs warnings on failure but does not propagate errors,
     /// since the in-memory model switch already succeeded.
-    async fn persist_selected_model(&self, model: &str) {
-        // 1. Persist to DB if available.
+    ///
+    /// In multi-tenant mode, only the per-user DB setting is written — global
+    /// .env and TOML files are shared across users and must not be mutated.
+    async fn persist_selected_model(&self, user_id: &str, model: &str) {
+        // 1. Persist to DB if available (per-user scoped).
         if let Some(store) = self.store() {
             let value = serde_json::Value::String(model.to_string());
-            if let Err(e) = store
-                .set_setting(self.owner_id(), "selected_model", &value)
-                .await
-            {
+            if let Err(e) = store.set_setting(user_id, "selected_model", &value).await {
                 tracing::warn!("Failed to persist model to DB: {}", e);
             } else {
-                tracing::debug!("Persisted selected_model to DB: {}", model);
+                tracing::debug!(user_id, "Persisted selected_model to DB: {}", model);
             }
         } else {
             tracing::warn!("No database store available — model choice will not persist to DB");
         }
 
-        // 2. Update .env and TOML config file (sync I/O in spawn_blocking).
+        // 2. In multi-tenant mode, skip .env/TOML writes — these are global
+        // files shared by all users. The per-user DB setting is sufficient.
+        if self.config.multi_tenant {
+            return;
+        }
+
+        // 3. Update .env and TOML config file (sync I/O in spawn_blocking).
         let model_owned = model.to_string();
         let backend = self.deps.llm_backend.clone();
         if let Err(e) = tokio::task::spawn_blocking(move || {
