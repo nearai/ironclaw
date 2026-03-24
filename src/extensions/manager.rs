@@ -891,24 +891,27 @@ impl ExtensionManager {
         *self.relay_channel_manager.write().await = Some(channel_manager);
     }
 
-    /// Check if a channel name corresponds to a relay extension (has stored stream token
+    /// Check if a channel name corresponds to a relay extension (has stored team_id
     /// or is tracked in the installed relay extensions set).
     pub async fn is_relay_channel(&self, name: &str, user_id: &str) -> bool {
         // Check in-memory installed set first (supports no-store mode)
         if self.installed_relay_extensions.read().await.contains(name) {
             return true;
         }
-        // Then check for stored stream token
-        self.secrets
-            .exists(user_id, &format!("relay:{}:stream_token", name))
-            .await
-            .unwrap_or(false)
+        // Check for stored team_id (persisted across restarts by the OAuth callback)
+        if let Some(ref store) = self.store {
+            let key = format!("relay:{}:team_id", name);
+            if let Ok(Some(v)) = store.get_setting(user_id, &key).await {
+                return v.as_str().is_some_and(|s| !s.is_empty());
+            }
+        }
+        false
     }
 
     /// Restore persisted relay channels after startup.
     ///
     /// Loads the persisted active channel list, filters to relay types (those with
-    /// a stored stream token), and activates each via `activate_stored_relay()`.
+    /// a stored team_id setting), and activates each via `activate_stored_relay()`.
     /// Skips channels that are already active.
     ///
     /// Call this only after `set_relay_channel_manager()` or `set_channel_runtime()`.
@@ -1428,9 +1431,11 @@ impl ExtensionManager {
         if kind_filter.is_none() || kind_filter == Some(ExtensionKind::ChannelRelay) {
             let installed = self.installed_relay_extensions.read().await;
             let active_names = self.active_channel_names.read().await;
+            let errors = self.activation_errors.read().await;
             for name in installed.iter() {
                 let active = active_names.contains(name);
-                let has_token = self.is_relay_channel(name, user_id).await;
+                let authenticated = self.is_relay_channel(name, user_id).await;
+                let activation_error = errors.get(name).cloned();
                 let registry_entry = self
                     .registry
                     .get_with_kind(name, Some(ExtensionKind::ChannelRelay))
@@ -1443,13 +1448,13 @@ impl ExtensionManager {
                     display_name,
                     description,
                     url: None,
-                    authenticated: has_token,
+                    authenticated,
                     active,
                     tools: Vec::new(),
                     needs_setup: false,
                     has_auth: true,
                     installed: true,
-                    activation_error: None,
+                    activation_error,
                     version: None,
                 });
             }
@@ -1626,10 +1631,15 @@ impl ExtensionManager {
                 self.persist_active_channels(user_id).await;
                 self.activation_errors.write().await.remove(name);
 
-                // Remove stored stream token
+                // Remove stored team_id setting and clean up OAuth state
+                if let Some(ref store) = self.store {
+                    let _ = store
+                        .delete_setting(user_id, &format!("relay:{}:team_id", name))
+                        .await;
+                }
                 let _ = self
                     .secrets
-                    .delete(user_id, &format!("relay:{}:stream_token", name))
+                    .delete(user_id, &format!("relay:{}:oauth_state", name))
                     .await;
 
                 // Stop webhook traffic before removing the channel from the managers.
@@ -4181,13 +4191,13 @@ impl ExtensionManager {
     ///
     /// For Slack: initiates OAuth flow (redirect-based).
     /// For Telegram: accepts a bot token, registers it with channel-relay,
-    /// and stores the returned stream token.
+    /// and stores the team_id setting.
     async fn auth_channel_relay(
         &self,
         name: &str,
         user_id: &str,
     ) -> Result<AuthResult, ExtensionError> {
-        // Check if already authenticated (stream token exists)
+        // Check if already authenticated (team_id setting exists)
         if self.is_relay_channel(name, user_id).await {
             return Ok(AuthResult::authenticated(name, ExtensionKind::ChannelRelay));
         }
@@ -4233,19 +4243,9 @@ impl ExtensionManager {
         name: &str,
         user_id: &str,
     ) -> Result<ActivateResult, ExtensionError> {
-        let token_key = format!("relay:{}:stream_token", name);
         let team_id_key = format!("relay:{}:team_id", name);
 
-        // Check if we have a stream token
-        // Verify auth: stream token must exist (even though we don't use it in this constructor path)
-        let _stream_token = match self.secrets.get_decrypted(user_id, &token_key).await {
-            Ok(secret) => secret.expose().to_string(),
-            Err(_) => {
-                return Err(ExtensionError::AuthRequired);
-            }
-        };
-
-        // Get team_id from settings
+        // Get team_id from settings (stored by the OAuth callback)
         let team_id = if let Some(ref store) = self.store {
             store
                 .get_setting(user_id, &team_id_key)
@@ -4257,6 +4257,10 @@ impl ExtensionManager {
         } else {
             String::new()
         };
+
+        if team_id.is_empty() {
+            return Err(ExtensionError::AuthRequired);
+        }
 
         // Use relay config captured at startup
         let relay_config = self.relay_config()?;
@@ -4367,11 +4371,11 @@ impl ExtensionManager {
             return Ok(ExtensionKind::WasmChannel);
         }
 
-        // Check channel-relay extensions (installed in memory or has stored token)
+        // Check channel-relay extensions (installed in memory or has stored team_id)
         if self.installed_relay_extensions.read().await.contains(name) {
             return Ok(ExtensionKind::ChannelRelay);
         }
-        // Also check if there's a stored stream token (persisted across restarts)
+        // Also check if there's a stored team_id setting (persisted across restarts)
         if self.is_relay_channel(name, user_id).await {
             return Ok(ExtensionKind::ChannelRelay);
         }
@@ -4999,11 +5003,7 @@ impl ExtensionManager {
                 names.insert(server.token_secret_name());
                 (names, Vec::new())
             }
-            ExtensionKind::ChannelRelay => {
-                let mut names = std::collections::HashSet::new();
-                names.insert(format!("relay:{}:stream_token", name));
-                (names, Vec::new())
-            }
+            ExtensionKind::ChannelRelay => (std::collections::HashSet::new(), Vec::new()),
         };
 
         let allowed_fields: std::collections::HashSet<String> =
@@ -5434,7 +5434,9 @@ impl ExtensionManager {
                     .map_err(|e| ExtensionError::NotInstalled(e.to_string()))?;
                 server.token_secret_name()
             }
-            ExtensionKind::ChannelRelay => format!("relay:{}:stream_token", name),
+            ExtensionKind::ChannelRelay => {
+                return Err(ExtensionError::AuthRequired);
+            }
         };
 
         let mut secrets = std::collections::HashMap::new();
@@ -7043,7 +7045,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
         let mgr = make_test_manager(None, dir.path().to_path_buf());
 
-        // No token stored → not a relay channel
+        // No store configured, no team_id → not a relay channel
         assert!(!mgr.is_relay_channel("slack-relay", "test").await);
     }
 
@@ -7862,19 +7864,13 @@ mod tests {
             .await
             .insert("test-relay".to_string());
 
-        // configure() should dispatch to activate_channel_relay(), not
-        // activate_wasm_channel(). Both will fail (no runtime configured),
-        // but the error should be about relay config, not WASM channels.
-        let mut secrets = std::collections::HashMap::new();
-        secrets.insert(
-            "relay:test-relay:stream_token".to_string(),
-            "tok".to_string(),
-        );
-
+        // configure() with empty secrets should dispatch to
+        // activate_channel_relay(), not activate_wasm_channel(). Relay auth
+        // is OAuth-only so there are no manual secrets to pass.
         let result = mgr
             .configure(
                 "test-relay",
-                &secrets,
+                &std::collections::HashMap::new(),
                 &std::collections::HashMap::new(),
                 "test",
             )
@@ -7886,7 +7882,6 @@ mod tests {
         );
 
         let result = result.unwrap();
-        // Activation will fail (no relay config), but secrets should still be stored
         assert!(
             !result.activated,
             "activation should fail without relay config"
@@ -7895,15 +7890,6 @@ mod tests {
             !result.message.contains("WASM"),
             "error should not mention WASM — got: {}",
             result.message
-        );
-
-        // Verify the secret was stored
-        assert!(
-            mgr.secrets
-                .exists("test", "relay:test-relay:stream_token")
-                .await
-                .unwrap_or(false),
-            "configure should have stored the relay stream token"
         );
     }
     #[test]
