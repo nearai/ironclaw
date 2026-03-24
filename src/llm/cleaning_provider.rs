@@ -101,10 +101,7 @@ mod tests {
             (Decimal::ZERO, Decimal::ZERO)
         }
 
-        async fn complete(
-            &self,
-            _req: CompletionRequest,
-        ) -> Result<CompletionResponse, LlmError> {
+        async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
             Ok(CompletionResponse {
                 content: "<think>internal reasoning</think>The actual answer".to_string(),
                 input_tokens: 10,
@@ -151,6 +148,280 @@ mod tests {
     async fn delegates_model_name() {
         let provider = CleaningProvider::new(Arc::new(FakeProvider));
         assert_eq!(provider.model_name(), "fake");
+    }
+
+    #[tokio::test]
+    async fn propagates_error_from_inner_complete() {
+        struct FailProvider;
+
+        #[async_trait]
+        impl LlmProvider for FailProvider {
+            fn model_name(&self) -> &str {
+                "fail"
+            }
+            fn cost_per_token(&self) -> (Decimal, Decimal) {
+                (Decimal::ZERO, Decimal::ZERO)
+            }
+            async fn complete(
+                &self,
+                _req: CompletionRequest,
+            ) -> Result<CompletionResponse, LlmError> {
+                Err(LlmError::RequestFailed {
+                    provider: "fail".to_string(),
+                    reason: "simulated failure".to_string(),
+                })
+            }
+            async fn complete_with_tools(
+                &self,
+                _req: ToolCompletionRequest,
+            ) -> Result<ToolCompletionResponse, LlmError> {
+                Err(LlmError::RequestFailed {
+                    provider: "fail".to_string(),
+                    reason: "simulated tool failure".to_string(),
+                })
+            }
+        }
+
+        let provider = CleaningProvider::new(Arc::new(FailProvider));
+
+        let req = CompletionRequest::new(vec![ChatMessage::user("test")]);
+        let err = provider.complete(req).await.unwrap_err();
+        assert!(
+            matches!(err, LlmError::RequestFailed { ref reason, .. } if reason == "simulated failure"),
+            "expected RequestFailed, got: {err:?}"
+        );
+
+        let tool_req = ToolCompletionRequest::new(vec![ChatMessage::user("test")], vec![]);
+        let tool_err = provider.complete_with_tools(tool_req).await.unwrap_err();
+        assert!(
+            matches!(tool_err, LlmError::RequestFailed { ref reason, .. } if reason == "simulated tool failure"),
+            "expected RequestFailed, got: {tool_err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn preserves_token_counts_after_cleaning() {
+        let provider = CleaningProvider::new(Arc::new(FakeProvider));
+
+        let req = CompletionRequest::new(vec![ChatMessage::user("test")]);
+        let resp = provider.complete(req).await.unwrap();
+        assert_eq!(resp.input_tokens, 10);
+        assert_eq!(resp.output_tokens, 5);
+        assert_eq!(resp.cache_read_input_tokens, 0);
+        assert_eq!(resp.cache_creation_input_tokens, 0);
+        assert_eq!(resp.finish_reason, FinishReason::Stop);
+    }
+
+    #[tokio::test]
+    async fn passes_through_content_without_tags() {
+        struct CleanProvider;
+
+        #[async_trait]
+        impl LlmProvider for CleanProvider {
+            fn model_name(&self) -> &str {
+                "clean"
+            }
+            fn cost_per_token(&self) -> (Decimal, Decimal) {
+                (Decimal::ZERO, Decimal::ZERO)
+            }
+            async fn complete(
+                &self,
+                _req: CompletionRequest,
+            ) -> Result<CompletionResponse, LlmError> {
+                Ok(CompletionResponse {
+                    content: "Just a normal response with no tags".to_string(),
+                    input_tokens: 1,
+                    output_tokens: 1,
+                    finish_reason: FinishReason::Stop,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                })
+            }
+            async fn complete_with_tools(
+                &self,
+                _req: ToolCompletionRequest,
+            ) -> Result<ToolCompletionResponse, LlmError> {
+                unreachable!()
+            }
+        }
+
+        let provider = CleaningProvider::new(Arc::new(CleanProvider));
+        let req = CompletionRequest::new(vec![ChatMessage::user("test")]);
+        let resp = provider.complete(req).await.unwrap();
+        assert_eq!(resp.content, "Just a normal response with no tags");
+    }
+
+    #[tokio::test]
+    async fn preserves_tool_calls_alongside_cleaned_content() {
+        struct ToolAndContentProvider;
+
+        #[async_trait]
+        impl LlmProvider for ToolAndContentProvider {
+            fn model_name(&self) -> &str {
+                "tool-content"
+            }
+            fn cost_per_token(&self) -> (Decimal, Decimal) {
+                (Decimal::ZERO, Decimal::ZERO)
+            }
+            async fn complete(
+                &self,
+                _req: CompletionRequest,
+            ) -> Result<CompletionResponse, LlmError> {
+                unreachable!()
+            }
+            async fn complete_with_tools(
+                &self,
+                _req: ToolCompletionRequest,
+            ) -> Result<ToolCompletionResponse, LlmError> {
+                use crate::llm::provider::ToolCall;
+                Ok(ToolCompletionResponse {
+                    content: Some("<think>planning</think>I'll search for that".to_string()),
+                    tool_calls: vec![ToolCall {
+                        id: "call_123".to_string(),
+                        name: "web_search".to_string(),
+                        arguments: serde_json::json!({"query": "test"}),
+                        reasoning: None,
+                    }],
+                    input_tokens: 20,
+                    output_tokens: 15,
+                    finish_reason: FinishReason::ToolUse,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                })
+            }
+        }
+
+        let provider = CleaningProvider::new(Arc::new(ToolAndContentProvider));
+        let req = ToolCompletionRequest::new(vec![ChatMessage::user("test")], vec![]);
+        let resp = provider.complete_with_tools(req).await.unwrap();
+        assert_eq!(resp.content.as_deref(), Some("I'll search for that"));
+        assert_eq!(resp.tool_calls.len(), 1);
+        assert_eq!(resp.tool_calls[0].name, "web_search");
+        assert_eq!(resp.finish_reason, FinishReason::ToolUse);
+    }
+
+    #[tokio::test]
+    async fn handles_empty_string_content() {
+        struct EmptyProvider;
+
+        #[async_trait]
+        impl LlmProvider for EmptyProvider {
+            fn model_name(&self) -> &str {
+                "empty"
+            }
+            fn cost_per_token(&self) -> (Decimal, Decimal) {
+                (Decimal::ZERO, Decimal::ZERO)
+            }
+            async fn complete(
+                &self,
+                _req: CompletionRequest,
+            ) -> Result<CompletionResponse, LlmError> {
+                Ok(CompletionResponse {
+                    content: String::new(),
+                    input_tokens: 5,
+                    output_tokens: 0,
+                    finish_reason: FinishReason::Stop,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                })
+            }
+            async fn complete_with_tools(
+                &self,
+                _req: ToolCompletionRequest,
+            ) -> Result<ToolCompletionResponse, LlmError> {
+                unreachable!()
+            }
+        }
+
+        let provider = CleaningProvider::new(Arc::new(EmptyProvider));
+        let req = CompletionRequest::new(vec![ChatMessage::user("test")]);
+        let resp = provider.complete(req).await.unwrap();
+        assert_eq!(resp.content, "");
+    }
+
+    #[tokio::test]
+    async fn strips_multiple_think_blocks() {
+        struct MultiThinkProvider;
+
+        #[async_trait]
+        impl LlmProvider for MultiThinkProvider {
+            fn model_name(&self) -> &str {
+                "multi"
+            }
+            fn cost_per_token(&self) -> (Decimal, Decimal) {
+                (Decimal::ZERO, Decimal::ZERO)
+            }
+            async fn complete(
+                &self,
+                _req: CompletionRequest,
+            ) -> Result<CompletionResponse, LlmError> {
+                Ok(CompletionResponse {
+                    content: "<think>first thought</think>Hello <think>second thought</think>world"
+                        .to_string(),
+                    input_tokens: 10,
+                    output_tokens: 10,
+                    finish_reason: FinishReason::Stop,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                })
+            }
+            async fn complete_with_tools(
+                &self,
+                _req: ToolCompletionRequest,
+            ) -> Result<ToolCompletionResponse, LlmError> {
+                unreachable!()
+            }
+        }
+
+        let provider = CleaningProvider::new(Arc::new(MultiThinkProvider));
+        let req = CompletionRequest::new(vec![ChatMessage::user("test")]);
+        let resp = provider.complete(req).await.unwrap();
+        assert_eq!(resp.content, "Hello world");
+    }
+
+    #[tokio::test]
+    async fn delegates_cost_and_cache_methods() {
+        struct CostProvider;
+
+        #[async_trait]
+        impl LlmProvider for CostProvider {
+            fn model_name(&self) -> &str {
+                "cost"
+            }
+            fn cost_per_token(&self) -> (Decimal, Decimal) {
+                (Decimal::new(3, 6), Decimal::new(15, 6))
+            }
+            fn cache_write_multiplier(&self) -> Decimal {
+                Decimal::new(125, 2)
+            }
+            fn cache_read_discount(&self) -> Decimal {
+                Decimal::new(10, 0)
+            }
+            async fn complete(
+                &self,
+                _req: CompletionRequest,
+            ) -> Result<CompletionResponse, LlmError> {
+                unreachable!()
+            }
+            async fn complete_with_tools(
+                &self,
+                _req: ToolCompletionRequest,
+            ) -> Result<ToolCompletionResponse, LlmError> {
+                unreachable!()
+            }
+        }
+
+        let provider = CleaningProvider::new(Arc::new(CostProvider));
+        let (input, output) = provider.cost_per_token();
+        assert_eq!(input, Decimal::new(3, 6));
+        assert_eq!(output, Decimal::new(15, 6));
+        assert_eq!(provider.cache_write_multiplier(), Decimal::new(125, 2));
+        assert_eq!(provider.cache_read_discount(), Decimal::new(10, 0));
+        let cost = provider.calculate_cost(1000, 500);
+        assert_eq!(
+            cost,
+            Decimal::new(3, 6) * Decimal::from(1000) + Decimal::new(15, 6) * Decimal::from(500)
+        );
     }
 
     #[tokio::test]
