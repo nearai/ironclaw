@@ -301,7 +301,7 @@ impl McpServerConfig {
     }
 }
 
-/// Reserved name used for the companion chat-api MCP server derived from NEAR AI config.
+/// Reserved name used for the companion MCP server derived from active NEAR AI config.
 pub const NEARAI_COMPANION_MCP_NAME: &str = "_nearai_companion_mcp";
 
 pub fn is_nearai_companion_server_name(name: &str) -> bool {
@@ -326,7 +326,7 @@ fn strip_reserved_nearai_companion_servers(config: &mut McpServersFile, source: 
     removed
 }
 
-/// Build the companion chat-api MCP server from the active NearAI config.
+/// Build the companion MCP server from the active NEAR AI config.
 ///
 /// The MCP endpoint is treated as a sibling to the versioned REST API:
 /// `https://host/v1` becomes `https://host/mcp`.
@@ -336,7 +336,7 @@ pub fn derive_nearai_companion_mcp_server(
     derive_nearai_companion_mcp_server_from_llm(&config.llm)
 }
 
-/// Build the companion chat-api MCP server from an LLM config.
+/// Build the companion MCP server from an LLM config.
 ///
 /// This lighter-weight helper is used by CLI code paths that should not need
 /// to resolve the full application config (and therefore should not require

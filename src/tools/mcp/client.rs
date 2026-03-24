@@ -130,6 +130,9 @@ impl McpClient {
     ///
     /// Returns an error if the config uses a non-HTTP transport.
     pub fn new_with_config(config: McpServerConfig) -> Result<Self, ToolError> {
+        config
+            .validate()
+            .map_err(|e| ToolError::InvalidParameters(e.to_string()))?;
         if !matches!(
             config.effective_transport(),
             crate::tools::mcp::config::EffectiveTransport::Http
@@ -281,6 +284,9 @@ impl McpClient {
         let Some(ref config) = self.server_config else {
             return Ok(None);
         };
+        if config.uses_runtime_auth_source() {
+            return Ok(None);
+        }
         match secrets
             .get_decrypted(&self.user_id, &config.token_secret_name())
             .await
@@ -904,7 +910,10 @@ mod tests {
         };
         use secrecy::SecretString;
 
-        let config = McpServerConfig::new("chat_api", "http://localhost:3000/mcp")
+        let config = McpServerConfig::new(
+            crate::tools::mcp::config::NEARAI_COMPANION_MCP_NAME,
+            "http://localhost:3000/mcp",
+        )
             .with_auth_source(crate::tools::mcp::config::McpAuthSource::NearAi);
         let nearai_session = Arc::new(NearAiSessionManager::new(NearAiSessionConfig::default()));
         nearai_session
@@ -928,7 +937,10 @@ mod tests {
             SessionConfig as NearAiSessionConfig, SessionManager as NearAiSessionManager,
         };
 
-        let config = McpServerConfig::new("chat_api", "http://localhost:3000/mcp")
+        let config = McpServerConfig::new(
+            crate::tools::mcp::config::NEARAI_COMPANION_MCP_NAME,
+            "http://localhost:3000/mcp",
+        )
             .with_auth_source(crate::tools::mcp::config::McpAuthSource::NearAi);
         let nearai_session = Arc::new(NearAiSessionManager::new(NearAiSessionConfig::default()));
 
@@ -940,6 +952,86 @@ mod tests {
         assert!(
             !headers.contains_key("Authorization"),
             "runtime auth should stay absent when no token is available"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_build_request_headers_runtime_auth_ignores_persisted_mcp_token() {
+        use crate::llm::{
+            SessionConfig as NearAiSessionConfig, SessionManager as NearAiSessionManager,
+        };
+        use crate::secrets::{CreateSecretParams, DecryptedSecret, Secret, SecretError, SecretRef};
+        use secrecy::SecretString;
+        use uuid::Uuid;
+
+        struct PersistedTokenStore;
+
+        #[async_trait]
+        impl crate::secrets::SecretsStore for PersistedTokenStore {
+            async fn create(
+                &self,
+                _user_id: &str,
+                _params: CreateSecretParams,
+            ) -> Result<Secret, SecretError> {
+                unimplemented!()
+            }
+            async fn get(&self, _user_id: &str, _name: &str) -> Result<Secret, SecretError> {
+                unimplemented!()
+            }
+            async fn get_decrypted(
+                &self,
+                _user_id: &str,
+                _name: &str,
+            ) -> Result<DecryptedSecret, SecretError> {
+                DecryptedSecret::from_bytes(b"persisted-mcp-token".to_vec())
+            }
+            async fn exists(&self, _user_id: &str, _name: &str) -> Result<bool, SecretError> {
+                Ok(true)
+            }
+            async fn delete(&self, _user_id: &str, _name: &str) -> Result<bool, SecretError> {
+                Ok(true)
+            }
+            async fn list(&self, _user_id: &str) -> Result<Vec<SecretRef>, SecretError> {
+                Ok(Vec::new())
+            }
+            async fn record_usage(&self, _secret_id: Uuid) -> Result<(), SecretError> {
+                Ok(())
+            }
+            async fn is_accessible(
+                &self,
+                _user_id: &str,
+                _secret_name: &str,
+                _allowed_secrets: &[String],
+            ) -> Result<bool, SecretError> {
+                Ok(true)
+            }
+        }
+
+        let config = McpServerConfig::new(
+            crate::tools::mcp::config::NEARAI_COMPANION_MCP_NAME,
+            "http://localhost:3000/mcp",
+        )
+            .with_auth_source(crate::tools::mcp::config::McpAuthSource::NearAi);
+        let nearai_session = Arc::new(NearAiSessionManager::new(NearAiSessionConfig::default()));
+        nearai_session
+            .set_token(SecretString::from("sess_runtime_token"))
+            .await;
+
+        let secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> =
+            Arc::new(PersistedTokenStore);
+        let client = McpClient::new_authenticated(
+            config,
+            Arc::new(McpSessionManager::new()),
+            secrets,
+            "test-user",
+        )
+        .with_nearai_session_manager(nearai_session);
+        let headers = client.build_request_headers().await.expect("headers");
+
+        assert_eq!(
+            headers.get("Authorization").map(String::as_str),
+            Some("Bearer sess_runtime_token"),
+            "runtime auth must win even if a persisted MCP token exists"
         );
     }
 
@@ -1321,6 +1413,20 @@ mod tests {
             err.contains("new_with_config only supports HTTP"),
             "error should explain the restriction: {}",
             err
+        );
+    }
+
+    #[test]
+    fn test_new_with_config_rejects_invalid_runtime_auth_name() {
+        let config = McpServerConfig::new("chat_api", "http://localhost:3000/mcp")
+            .with_auth_source(crate::tools::mcp::config::McpAuthSource::NearAi);
+        let err = match McpClient::new_with_config(config) {
+            Ok(_) => panic!("invalid runtime-auth config must be rejected"),
+            Err(err) => err.to_string(),
+        };
+        assert!(
+            err.contains(crate::tools::mcp::config::NEARAI_COMPANION_MCP_NAME),
+            "error should mention reserved companion requirement: {err}"
         );
     }
 

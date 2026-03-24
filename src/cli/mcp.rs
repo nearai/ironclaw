@@ -515,7 +515,7 @@ async fn test_server(name: String, user_id: String) -> anyhow::Result<()> {
     let session_manager = Arc::new(McpSessionManager::new());
     let (client, has_tokens) = if server.uses_runtime_auth_source() {
         let process_manager = Arc::new(McpProcessManager::new());
-        let llm = resolve_llm_from_env()?;
+        let llm = resolve_llm_for_cli(as_settings_store(db.as_deref())).await?;
         let nearai_session = crate::llm::create_session_manager(llm.session.clone()).await;
         (
             create_client_from_config(
@@ -695,7 +695,7 @@ async fn load_servers_with_derived(
 ) -> Result<McpServersFile, config::ConfigError> {
     let mut servers = load_persisted_servers(db).await?;
 
-    if let Ok(llm) = resolve_llm_from_env()
+    if let Ok(llm) = resolve_llm_for_cli(as_settings_store(db)).await
         && let Some(companion) = config::derive_nearai_companion_mcp_server_from_llm(&llm)
     {
         servers.insert_if_absent(companion);
@@ -726,14 +726,85 @@ async fn get_secrets_store() -> anyhow::Result<Arc<dyn SecretsStore + Send + Syn
     crate::cli::init_secrets_store().await
 }
 
-fn resolve_llm_from_env() -> Result<LlmConfig, crate::error::ConfigError> {
-    let settings = crate::config::load_bootstrap_settings(None)?;
+fn as_settings_store(
+    db: Option<&dyn Database>,
+) -> Option<&(dyn crate::db::SettingsStore + Sync)> {
+    db.map(|db| db as &(dyn crate::db::SettingsStore + Sync))
+}
+
+async fn resolve_llm_for_cli(
+    store: Option<&(dyn crate::db::SettingsStore + Sync)>,
+) -> Result<LlmConfig, crate::error::ConfigError> {
+    resolve_llm_for_cli_with_toml(store, None).await
+}
+
+async fn resolve_llm_for_cli_with_toml(
+    store: Option<&(dyn crate::db::SettingsStore + Sync)>,
+    toml_path: Option<&std::path::Path>,
+) -> Result<LlmConfig, crate::error::ConfigError> {
+    if let Some(store) = store {
+        let _ = dotenvy::dotenv();
+        crate::bootstrap::load_ironclaw_env();
+
+        let mut settings = match store.get_all_settings(DEFAULT_USER_ID).await {
+            Ok(map) => crate::settings::Settings::from_db_map(&map),
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to load CLI settings from DB, falling back to defaults before env/TOML resolution: {}",
+                    e
+                );
+                crate::settings::Settings::default()
+            }
+        };
+
+        apply_cli_toml_overlay(&mut settings, toml_path)?;
+        return LlmConfig::resolve(&settings);
+    }
+
+    let settings = crate::config::load_bootstrap_settings(toml_path)?;
     LlmConfig::resolve(&settings)
+}
+
+fn apply_cli_toml_overlay(
+    settings: &mut crate::settings::Settings,
+    explicit_path: Option<&std::path::Path>,
+) -> Result<(), crate::error::ConfigError> {
+    let path = explicit_path
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(crate::settings::Settings::default_toml_path);
+
+    match crate::settings::Settings::load_toml(&path) {
+        Ok(Some(toml_settings)) => {
+            settings.merge_from(&toml_settings);
+        }
+        Ok(None) => {
+            if explicit_path.is_some() {
+                return Err(crate::error::ConfigError::ParseError(format!(
+                    "Config file not found: {}",
+                    path.display()
+                )));
+            }
+        }
+        Err(e) => {
+            return Err(crate::error::ConfigError::ParseError(e));
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use std::collections::HashMap;
+
+    use async_trait::async_trait;
+
+    use crate::error::DatabaseError;
+    use crate::history::SettingRow;
+    #[cfg(feature = "libsql")]
+    use tempfile::NamedTempFile;
 
     #[test]
     fn test_mcp_command_parsing() {
@@ -790,5 +861,126 @@ mod tests {
         let result = parse_env_var("no-equals-here");
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("invalid env var format"));
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_resolve_llm_for_cli_uses_db_backed_selected_model() {
+        struct MockSettingsStore {
+            settings: HashMap<String, serde_json::Value>,
+        }
+
+        #[async_trait]
+        impl crate::db::SettingsStore for MockSettingsStore {
+            async fn get_setting(
+                &self,
+                _user_id: &str,
+                key: &str,
+            ) -> Result<Option<serde_json::Value>, DatabaseError> {
+                Ok(self.settings.get(key).cloned())
+            }
+
+            async fn get_setting_full(
+                &self,
+                _user_id: &str,
+                _key: &str,
+            ) -> Result<Option<SettingRow>, DatabaseError> {
+                Ok(None)
+            }
+
+            async fn set_setting(
+                &self,
+                _user_id: &str,
+                _key: &str,
+                _value: &serde_json::Value,
+            ) -> Result<(), DatabaseError> {
+                Err(DatabaseError::Query("unused in test".to_string()))
+            }
+
+            async fn delete_setting(
+                &self,
+                _user_id: &str,
+                _key: &str,
+            ) -> Result<bool, DatabaseError> {
+                Err(DatabaseError::Query("unused in test".to_string()))
+            }
+
+            async fn list_settings(&self, _user_id: &str) -> Result<Vec<SettingRow>, DatabaseError> {
+                Ok(Vec::new())
+            }
+
+            async fn get_all_settings(
+                &self,
+                _user_id: &str,
+            ) -> Result<HashMap<String, serde_json::Value>, DatabaseError> {
+                Ok(self.settings.clone())
+            }
+
+            async fn set_all_settings(
+                &self,
+                _user_id: &str,
+                _settings: &HashMap<String, serde_json::Value>,
+            ) -> Result<(), DatabaseError> {
+                Err(DatabaseError::Query("unused in test".to_string()))
+            }
+
+            async fn has_settings(&self, _user_id: &str) -> Result<bool, DatabaseError> {
+                Ok(!self.settings.is_empty())
+            }
+        }
+
+        struct EnvGuard(&'static str, Option<String>);
+
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                // SAFETY: Protected by ENV_MUTEX for the duration of the test.
+                unsafe {
+                    match &self.1 {
+                        Some(value) => std::env::set_var(self.0, value),
+                        None => std::env::remove_var(self.0),
+                    }
+                }
+            }
+        }
+
+        let _mutex = crate::config::helpers::ENV_MUTEX.lock().expect("env mutex");
+        let prev_backend = std::env::var("LLM_BACKEND").ok();
+        let prev_base_url = std::env::var("NEARAI_BASE_URL").ok();
+        let prev_auth_url = std::env::var("NEARAI_AUTH_URL").ok();
+        let prev_model = std::env::var("NEARAI_MODEL").ok();
+
+        // SAFETY: Protected by ENV_MUTEX for the duration of the test.
+        unsafe {
+            std::env::set_var("LLM_BACKEND", "");
+            std::env::set_var("NEARAI_BASE_URL", "http://127.0.0.1:11434/v1");
+            std::env::set_var("NEARAI_AUTH_URL", "http://127.0.0.1:11435");
+            std::env::set_var("NEARAI_MODEL", "");
+        }
+
+        let _backend_guard = EnvGuard("LLM_BACKEND", prev_backend);
+        let _base_url_guard = EnvGuard("NEARAI_BASE_URL", prev_base_url);
+        let _auth_url_guard = EnvGuard("NEARAI_AUTH_URL", prev_auth_url);
+        let _model_guard = EnvGuard("NEARAI_MODEL", prev_model);
+
+        let empty_toml = NamedTempFile::new().expect("temp toml");
+        let store = MockSettingsStore {
+            settings: HashMap::from([
+                ("llm_backend".to_string(), serde_json::json!("nearai")),
+                (
+                    "selected_model".to_string(),
+                    serde_json::json!("db-backed-nearai-model"),
+                ),
+            ]),
+        };
+
+        let llm = resolve_llm_for_cli_with_toml(Some(&store), Some(empty_toml.path()))
+            .await
+            .expect("resolve llm");
+        assert_eq!(llm.backend, "nearai");
+        assert_eq!(llm.nearai.model, "db-backed-nearai-model");
+
+        let companion = config::derive_nearai_companion_mcp_server_from_llm(&llm)
+            .expect("derived companion");
+        assert_eq!(companion.url, "http://127.0.0.1:11434/mcp");
     }
 }

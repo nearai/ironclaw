@@ -1960,7 +1960,7 @@ impl ExtensionManager {
                     return true;
                 }
 
-                if let Ok(key) = std::env::var("NEARAI_API_KEY")
+                if let Some(key) = crate::config::helpers::env_or_override("NEARAI_API_KEY")
                     && !key.trim().is_empty()
                 {
                     return true;
@@ -4792,6 +4792,12 @@ impl ExtensionManager {
                     .get_mcp_server(name)
                     .await
                     .map_err(|e| ExtensionError::NotInstalled(e.to_string()))?;
+                if server.uses_runtime_auth_source() {
+                    return Err(ExtensionError::Other(format!(
+                        "Server '{}' reuses your active NEAR AI authentication and does not accept manually configured MCP tokens",
+                        name
+                    )));
+                }
                 let mut names = std::collections::HashSet::new();
                 names.insert(server.token_secret_name());
                 names
@@ -5841,6 +5847,51 @@ mod tests {
                 .read()
                 .await
                 .contains_key(crate::tools::mcp::config::NEARAI_COMPANION_MCP_NAME)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_runtime_auth_detects_runtime_nearai_api_key_override() {
+        struct EnvGuard(&'static str, Option<String>);
+
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                // SAFETY: Protected by ENV_MUTEX for the duration of the test.
+                unsafe {
+                    match &self.1 {
+                        Some(value) => std::env::set_var(self.0, value),
+                        None => std::env::remove_var(self.0),
+                    }
+                }
+                crate::config::helpers::set_runtime_env(self.0, "");
+            }
+        }
+
+        let _mutex = crate::config::helpers::ENV_MUTEX.lock().expect("env mutex");
+        let prev = std::env::var("NEARAI_API_KEY").ok();
+        // SAFETY: Protected by ENV_MUTEX for the duration of the test.
+        unsafe { std::env::remove_var("NEARAI_API_KEY") };
+        let _env_guard = EnvGuard("NEARAI_API_KEY", prev);
+
+        crate::config::helpers::set_runtime_env("NEARAI_API_KEY", "runtime-overlay-key");
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let companion = crate::tools::mcp::config::McpServerConfig::new(
+            crate::tools::mcp::config::NEARAI_COMPANION_MCP_NAME,
+            "https://private.near.ai/mcp",
+        )
+        .with_auth_source(crate::tools::mcp::config::McpAuthSource::NearAi);
+        let manager = make_test_manager_with_dirs(
+            None,
+            dir.path().join("tools"),
+            dir.path().join("channels"),
+            Some(companion.clone()),
+            None,
+        );
+
+        assert!(
+            manager.is_runtime_authenticated(&companion).await,
+            "runtime NEARAI_API_KEY override should count as authenticated"
         );
     }
 
@@ -7445,6 +7496,44 @@ mod tests {
                 .await
                 .unwrap_or(false),
             "configure_token should have stored SECRET_B (the first missing secret)"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_configure_token_rejects_runtime_auth_companion() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let companion = crate::tools::mcp::config::McpServerConfig::new(
+            crate::tools::mcp::config::NEARAI_COMPANION_MCP_NAME,
+            "https://private.near.ai/mcp",
+        )
+        .with_auth_source(crate::tools::mcp::config::McpAuthSource::NearAi);
+        let token_secret_name = companion.token_secret_name();
+        let mgr = make_test_manager_with_dirs(
+            None,
+            dir.path().join("tools"),
+            dir.path().join("channels"),
+            Some(companion),
+            None,
+        );
+
+        let err = mgr
+            .configure_token(
+                crate::tools::mcp::config::NEARAI_COMPANION_MCP_NAME,
+                "manual-token",
+            )
+            .await
+            .expect_err("runtime-auth companion should reject manual token configuration");
+
+        assert!(
+            err.to_string().contains("active NEAR AI authentication"),
+            "expected runtime-auth rejection message, got: {err}"
+        );
+        assert!(
+            !mgr.secrets
+                .exists("test", &token_secret_name)
+                .await
+                .unwrap_or(false),
+            "configure_token must not persist a manual MCP token for the runtime-auth companion"
         );
     }
 

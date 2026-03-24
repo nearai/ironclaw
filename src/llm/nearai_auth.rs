@@ -20,9 +20,7 @@ pub async fn resolve_nearai_bearer_token_if_available(
         return Ok(Some(token.expose_secret().to_string()));
     }
 
-    if let Ok(key) = std::env::var("NEARAI_API_KEY")
-        && !key.is_empty()
-    {
+    if let Some(key) = crate::config::helpers::env_or_override("NEARAI_API_KEY") {
         return Ok(Some(key));
     }
 
@@ -53,4 +51,44 @@ pub async fn resolve_nearai_bearer_token(
     Err(LlmError::AuthFailed {
         provider: "nearai".to_string(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::helpers::{ENV_MUTEX, set_runtime_env};
+    use crate::llm::session::SessionConfig;
+
+    struct EnvGuard(&'static str, Option<String>);
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            // SAFETY: tests hold ENV_MUTEX while mutating the process environment.
+            unsafe {
+                match &self.1 {
+                    Some(value) => std::env::set_var(self.0, value),
+                    None => std::env::remove_var(self.0),
+                }
+            }
+            set_runtime_env(self.0, "");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_resolve_bearer_token_if_available_uses_runtime_env_override() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex");
+        let prev = std::env::var("NEARAI_API_KEY").ok();
+        // SAFETY: tests hold ENV_MUTEX while mutating the process environment.
+        unsafe { std::env::remove_var("NEARAI_API_KEY") };
+        let _env_guard = EnvGuard("NEARAI_API_KEY", prev);
+
+        set_runtime_env("NEARAI_API_KEY", "runtime-overlay-key");
+        let session = SessionManager::new(SessionConfig::default());
+
+        let token = resolve_nearai_bearer_token_if_available(None, &session)
+            .await
+            .expect("resolve token");
+
+        assert_eq!(token.as_deref(), Some("runtime-overlay-key"));
+    }
 }
