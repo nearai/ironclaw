@@ -157,8 +157,8 @@ pub struct AgentDeps {
     pub hooks: Arc<HookRegistry>,
     /// Cost enforcement guardrails (daily budget, hourly rate limits).
     pub cost_guard: Arc<crate::agent::cost_guard::CostGuard>,
-    /// SSE broadcast sender for live job event streaming to the web gateway.
-    pub sse_tx: Option<tokio::sync::broadcast::Sender<crate::channels::web::types::SseEvent>>,
+    /// SSE manager for live job event streaming to the web gateway.
+    pub sse_tx: Option<Arc<crate::channels::web::sse::SseManager>>,
     /// HTTP interceptor for trace recording/replay.
     pub http_interceptor: Option<Arc<dyn crate::llm::recording::HttpInterceptor>>,
     /// Audio transcription middleware for voice messages.
@@ -235,8 +235,8 @@ impl Agent {
                 hooks: deps.hooks.clone(),
             },
         );
-        if let Some(ref tx) = deps.sse_tx {
-            scheduler.set_sse_sender(tx.clone());
+        if let Some(ref sse) = deps.sse_tx {
+            scheduler.set_sse_sender(Arc::clone(sse));
         }
         if let Some(ref interceptor) = deps.http_interceptor {
             scheduler.set_http_interceptor(Arc::clone(interceptor));

@@ -462,11 +462,10 @@ fn multi_auth_state_empty_token_not_valid() {
 }
 
 #[test]
-fn multi_auth_state_first_token_returns_any_token() {
+fn multi_auth_state_first_token_is_none_in_multi_user_mode() {
     let auth = two_user_auth();
-    let first = auth.first_token().unwrap();
-    // Should be one of the two tokens (HashMap ordering is non-deterministic)
-    assert!(first == ALICE_TOKEN || first == BOB_TOKEN);
+    // first_token() returns None in multi-user mode to avoid exposing tokens.
+    assert!(auth.first_token().is_none());
 }
 
 #[test]

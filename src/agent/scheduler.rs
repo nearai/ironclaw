@@ -9,7 +9,6 @@ use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 use crate::agent::task::{Task, TaskContext, TaskOutput};
-use crate::channels::web::types::SseEvent;
 use crate::config::AgentConfig;
 use crate::context::{ContextManager, JobContext, JobState};
 use crate::db::Database;
@@ -67,8 +66,8 @@ pub struct Scheduler {
     extension_manager: Option<Arc<ExtensionManager>>,
     store: Option<Arc<dyn Database>>,
     hooks: Arc<HookRegistry>,
-    /// SSE broadcast sender for live job event streaming.
-    sse_tx: Option<tokio::sync::broadcast::Sender<SseEvent>>,
+    /// SSE manager for live job event streaming.
+    sse_tx: Option<Arc<crate::channels::web::sse::SseManager>>,
     /// HTTP interceptor for trace recording/replay (propagated to workers).
     http_interceptor: Option<Arc<dyn crate::llm::recording::HttpInterceptor>>,
     /// Running jobs (main LLM-driven jobs).
@@ -102,9 +101,9 @@ impl Scheduler {
         }
     }
 
-    /// Set the SSE broadcast sender for live job event streaming.
-    pub fn set_sse_sender(&mut self, tx: tokio::sync::broadcast::Sender<SseEvent>) {
-        self.sse_tx = Some(tx);
+    /// Set the SSE manager for live job event streaming.
+    pub fn set_sse_sender(&mut self, sse: Arc<crate::channels::web::sse::SseManager>) {
+        self.sse_tx = Some(sse);
     }
 
     /// Set the HTTP interceptor for trace recording/replay.

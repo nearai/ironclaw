@@ -344,8 +344,9 @@ impl AppBuilder {
 
             // Detect multi-tenant mode: when GATEWAY_USER_TOKENS is configured,
             // each authenticated user needs their own workspace scope. Use
-            // PerUserWorkspaceResolver to create per-user workspaces on demand
-            // instead of sharing the startup workspace across all users.
+            // WorkspacePool (which implements WorkspaceResolver) to create
+            // per-user workspaces on demand instead of sharing the startup
+            // workspace across all users.
             let is_multi_tenant = self
                 .config
                 .channels
@@ -354,8 +355,8 @@ impl AppBuilder {
                 .is_some_and(|gw| gw.user_tokens.is_some());
 
             if is_multi_tenant {
-                let resolver = Arc::new(
-                    crate::tools::builtin::memory::PerUserWorkspaceResolver::new(
+                let pool = Arc::new(
+                    crate::channels::web::server::WorkspacePool::new(
                         Arc::clone(db),
                         embeddings.clone(),
                         emb_cache_config,
@@ -363,7 +364,7 @@ impl AppBuilder {
                         self.config.workspace.clone(),
                     ),
                 );
-                tools.register_memory_tools_with_resolver(resolver);
+                tools.register_memory_tools_with_resolver(pool);
                 tracing::info!(
                     "Memory tools configured with per-user workspace resolver (multi-tenant mode)"
                 );

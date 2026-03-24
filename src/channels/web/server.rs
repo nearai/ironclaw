@@ -210,6 +210,9 @@ impl PerUserRateLimiter {
 /// In single-user mode, exactly one workspace is cached. In multi-user mode,
 /// each authenticated user gets their own workspace with appropriate scopes,
 /// search config, memory layers, and embedding cache settings.
+///
+/// Also implements [`WorkspaceResolver`] so it can be shared with memory tools,
+/// avoiding a separate `PerUserWorkspaceResolver` with duplicated logic.
 pub struct WorkspacePool {
     db: Arc<dyn Database>,
     embeddings: Option<Arc<dyn crate::workspace::EmbeddingProvider>>,
@@ -237,6 +240,24 @@ impl WorkspacePool {
         }
     }
 
+    /// Build a workspace for a user, applying search config, embeddings,
+    /// global read scopes, and memory layers.
+    fn build_workspace(&self, user_id: &str) -> Workspace {
+        let mut ws = Workspace::new_with_db(user_id, Arc::clone(&self.db))
+            .with_search_config(&self.search_config);
+
+        if let Some(ref emb) = self.embeddings {
+            ws = ws.with_embeddings_cached(Arc::clone(emb), self.embedding_cache_config.clone());
+        }
+
+        if !self.workspace_config.read_scopes.is_empty() {
+            ws = ws.with_additional_read_scopes(self.workspace_config.read_scopes.clone());
+        }
+
+        ws = ws.with_memory_layers(self.workspace_config.memory_layers.clone());
+        ws
+    }
+
     /// Get or create a workspace for the given user identity.
     ///
     /// Applies search config, memory layers, embedding cache, and read scopes
@@ -257,27 +278,39 @@ impl WorkspacePool {
             return Arc::clone(ws);
         }
 
-        let mut ws = Workspace::new_with_db(&identity.user_id, Arc::clone(&self.db))
-            .with_search_config(&self.search_config);
-
-        if let Some(ref emb) = self.embeddings {
-            ws = ws.with_embeddings_cached(Arc::clone(emb), self.embedding_cache_config.clone());
-        }
-
-        // Apply global read scopes from config.
-        if !self.workspace_config.read_scopes.is_empty() {
-            ws = ws.with_additional_read_scopes(self.workspace_config.read_scopes.clone());
-        }
+        let mut ws = self.build_workspace(&identity.user_id);
 
         // Apply per-token read scopes from identity.
         if !identity.workspace_read_scopes.is_empty() {
             ws = ws.with_additional_read_scopes(identity.workspace_read_scopes.clone());
         }
 
-        ws = ws.with_memory_layers(self.workspace_config.memory_layers.clone());
-
         let ws = Arc::new(ws);
         cache.insert(identity.user_id.clone(), Arc::clone(&ws));
+        ws
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::tools::builtin::memory::WorkspaceResolver for WorkspacePool {
+    async fn resolve(&self, user_id: &str) -> Arc<Workspace> {
+        // Fast path: check read lock
+        {
+            let cache = self.cache.read().await;
+            if let Some(ws) = cache.get(user_id) {
+                return Arc::clone(ws);
+            }
+        }
+
+        // Slow path: create workspace under write lock
+        let mut cache = self.cache.write().await;
+        if let Some(ws) = cache.get(user_id) {
+            return Arc::clone(ws);
+        }
+
+        let ws = Arc::new(self.build_workspace(user_id));
+        cache.insert(user_id.to_string(), Arc::clone(&ws));
+        tracing::debug!(user_id = user_id, "Created per-user workspace");
         ws
     }
 }

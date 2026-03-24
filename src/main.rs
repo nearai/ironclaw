@@ -590,8 +590,6 @@ async fn async_main() -> anyhow::Result<()> {
 
     let mut gateway_url: Option<String> = None;
     let mut sse_manager: Option<std::sync::Arc<ironclaw::channels::web::sse::SseManager>> = None;
-    let mut _gateway_state: Option<std::sync::Arc<ironclaw::channels::web::server::GatewayState>> =
-        None;
     if let Some(ref gw_config) = config.channels.gateway {
         // Build multi-user auth state if user_tokens is configured, else single-user.
         let mut gw = if let Some(ref user_tokens) = gw_config.user_tokens {
@@ -729,7 +727,6 @@ async fn async_main() -> anyhow::Result<()> {
         // IMPORTANT: This must come after all `with_*` calls since `rebuild_state`
         // creates a new SseManager, which would orphan this sender.
         sse_manager = Some(Arc::clone(&gw.state().sse));
-        _gateway_state = Some(Arc::clone(gw.state()));
         channel_names.push("gateway".to_string());
         channels.add(Box::new(gw)).await;
     }
@@ -792,6 +789,14 @@ async fn async_main() -> anyhow::Result<()> {
         .register_message_tools(Arc::clone(&channels), components.extension_manager.clone())
         .await;
 
+    // Default user ID for extension operations (single-user mode).
+    let ext_user_id = config
+        .channels
+        .gateway
+        .as_ref()
+        .map(|g| g.user_id.clone())
+        .unwrap_or_else(|| "default".to_string());
+
     // Wire up channel runtime for hot-activation of WASM channels.
     if let Some(ref ext_mgr) = components.extension_manager
         && let Some((rt, ps, router)) = wasm_channel_runtime_state.take()
@@ -812,12 +817,6 @@ async fn async_main() -> anyhow::Result<()> {
 
         // Auto-activate WASM channels that were active in a previous session.
         // Relay channels are handled separately below via restore_relay_channels().
-        let ext_user_id = config
-            .channels
-            .gateway
-            .as_ref()
-            .map(|g| g.user_id.clone())
-            .unwrap_or_else(|| "default".to_string());
         let persisted = ext_mgr.load_persisted_active_channels(&ext_user_id).await;
         for name in &persisted {
             if active_at_startup.contains(name)
@@ -850,20 +849,14 @@ async fn async_main() -> anyhow::Result<()> {
         ext_mgr
             .set_relay_channel_manager(Arc::clone(&channels))
             .await;
-        let ext_user_id = config
-            .channels
-            .gateway
-            .as_ref()
-            .map(|g| g.user_id.clone())
-            .unwrap_or_else(|| "default".to_string());
         ext_mgr.restore_relay_channels(&ext_user_id).await;
     }
 
     // Wire SSE sender into extension manager for broadcasting status events.
     if let Some(ref ext_mgr) = components.extension_manager
-        && let Some(sse) = sse_manager
+        && let Some(ref sse) = sse_manager
     {
-        ext_mgr.set_sse_sender(sse).await;
+        ext_mgr.set_sse_sender(Arc::clone(sse)).await;
     }
 
     // Snapshot memory for trace recording before the agent starts
@@ -901,7 +894,7 @@ async fn async_main() -> anyhow::Result<()> {
         skills_config: config.skills.clone(),
         hooks: components.hooks,
         cost_guard: components.cost_guard,
-        sse_tx: None, // TODO: wire SseManager into scheduler (needs Sender<SseEvent> → Arc<SseManager> refactor)
+        sse_tx: sse_manager,
         http_interceptor,
         transcription: config.transcription.create_provider().map(|p| {
             Arc::new(ironclaw::llm::transcription::TranscriptionMiddleware::new(

@@ -134,6 +134,7 @@ pub async fn setup_orchestrator(
             store: db.cloned(),
             secrets_store: secrets_store.cloned(),
             user_id: "default".to_string(),
+            job_owner_cache: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
         };
 
         tokio::spawn(async move {

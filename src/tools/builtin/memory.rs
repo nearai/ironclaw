@@ -12,12 +12,10 @@
 //! Use `memory_write` to persist important facts that should be remembered
 //! across sessions.
 
-use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use tokio::sync::RwLock;
 
 use crate::context::JobContext;
 use crate::tools::tool::{Tool, ToolError, ToolOutput, require_str};
@@ -49,79 +47,6 @@ impl FixedWorkspaceResolver {
 impl WorkspaceResolver for FixedWorkspaceResolver {
     async fn resolve(&self, _user_id: &str) -> Arc<Workspace> {
         Arc::clone(&self.workspace)
-    }
-}
-
-/// Creates per-user workspaces on demand, caching them for reuse.
-///
-/// Used in multi-tenant mode where each authenticated user gets their own
-/// workspace scope. The workspace is constructed with the same configuration
-/// (embeddings, search config, memory layers) as the startup workspace.
-pub struct PerUserWorkspaceResolver {
-    db: Arc<dyn crate::db::Database>,
-    embeddings: Option<Arc<dyn crate::workspace::EmbeddingProvider>>,
-    embedding_cache_config: crate::workspace::EmbeddingCacheConfig,
-    search_config: crate::config::WorkspaceSearchConfig,
-    workspace_config: crate::config::WorkspaceConfig,
-    cache: RwLock<HashMap<String, Arc<Workspace>>>,
-}
-
-impl PerUserWorkspaceResolver {
-    pub fn new(
-        db: Arc<dyn crate::db::Database>,
-        embeddings: Option<Arc<dyn crate::workspace::EmbeddingProvider>>,
-        embedding_cache_config: crate::workspace::EmbeddingCacheConfig,
-        search_config: crate::config::WorkspaceSearchConfig,
-        workspace_config: crate::config::WorkspaceConfig,
-    ) -> Self {
-        Self {
-            db,
-            embeddings,
-            embedding_cache_config,
-            search_config,
-            workspace_config,
-            cache: RwLock::new(HashMap::new()),
-        }
-    }
-
-    fn build_workspace(&self, user_id: &str) -> Arc<Workspace> {
-        let mut ws = Workspace::new_with_db(user_id, Arc::clone(&self.db))
-            .with_search_config(&self.search_config);
-
-        if let Some(ref emb) = self.embeddings {
-            ws = ws.with_embeddings_cached(Arc::clone(emb), self.embedding_cache_config.clone());
-        }
-
-        if !self.workspace_config.read_scopes.is_empty() {
-            ws = ws.with_additional_read_scopes(self.workspace_config.read_scopes.clone());
-        }
-        ws = ws.with_memory_layers(self.workspace_config.memory_layers.clone());
-
-        Arc::new(ws)
-    }
-}
-
-#[async_trait]
-impl WorkspaceResolver for PerUserWorkspaceResolver {
-    async fn resolve(&self, user_id: &str) -> Arc<Workspace> {
-        // Fast path: read lock
-        {
-            let cache = self.cache.read().await;
-            if let Some(ws) = cache.get(user_id) {
-                return Arc::clone(ws);
-            }
-        }
-
-        // Slow path: write lock, double-check
-        let mut cache = self.cache.write().await;
-        if let Some(ws) = cache.get(user_id) {
-            return Arc::clone(ws);
-        }
-
-        let ws = self.build_workspace(user_id);
-        cache.insert(user_id.to_string(), Arc::clone(&ws));
-        tracing::debug!(user_id = user_id, "Created per-user workspace");
-        ws
     }
 }
 
@@ -1007,10 +932,10 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn test_per_user_workspace_resolver_returns_different_workspaces() {
+        async fn test_workspace_pool_resolver_returns_different_workspaces() {
             let db = make_test_db().await;
 
-            let resolver = PerUserWorkspaceResolver::new(
+            let pool = crate::channels::web::server::WorkspacePool::new(
                 db,
                 None,
                 crate::workspace::EmbeddingCacheConfig::default(),
@@ -1018,8 +943,8 @@ mod tests {
                 crate::config::WorkspaceConfig::default(),
             );
 
-            let ws_alice = resolver.resolve("alice").await;
-            let ws_bob = resolver.resolve("bob").await;
+            let ws_alice = pool.resolve("alice").await;
+            let ws_bob = pool.resolve("bob").await;
 
             // Different user IDs should get different workspaces
             assert_eq!(ws_alice.user_id(), "alice");
@@ -1028,10 +953,10 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn test_per_user_workspace_resolver_caches_workspace() {
+        async fn test_workspace_pool_resolver_caches_workspace() {
             let db = make_test_db().await;
 
-            let resolver = PerUserWorkspaceResolver::new(
+            let pool = crate::channels::web::server::WorkspacePool::new(
                 db,
                 None,
                 crate::workspace::EmbeddingCacheConfig::default(),
@@ -1039,8 +964,8 @@ mod tests {
                 crate::config::WorkspaceConfig::default(),
             );
 
-            let ws1 = resolver.resolve("alice").await;
-            let ws2 = resolver.resolve("alice").await;
+            let ws1 = pool.resolve("alice").await;
+            let ws2 = pool.resolve("alice").await;
 
             // Same user_id should return the same cached Arc (pointer equality)
             assert!(Arc::ptr_eq(&ws1, &ws2));
