@@ -19,10 +19,13 @@ use axum::middleware;
 use axum::routing::{get, post};
 use tower::ServiceExt;
 
+use ironclaw::channels::IncomingMessage;
 use ironclaw::channels::web::auth::{
     AuthenticatedUser, MultiAuthState, UserIdentity, auth_middleware,
 };
-use ironclaw::channels::web::server::{GatewayState, PerUserRateLimiter, RateLimiter};
+use ironclaw::channels::web::server::{
+    GatewayState, PerUserRateLimiter, RateLimiter, start_server,
+};
 use ironclaw::channels::web::sse::SseManager;
 use ironclaw::channels::web::test_helpers::TestGatewayBuilder;
 use ironclaw::channels::web::ws::WsConnectionTracker;
@@ -37,6 +40,9 @@ const ALICE_TOKEN: &str = "tok-alice-secret";
 const BOB_TOKEN: &str = "tok-bob-secret";
 const ALICE_USER_ID: &str = "alice";
 const BOB_USER_ID: &str = "bob";
+const OWNER_TOKEN: &str = "tok-owner-secret";
+const OWNER_SCOPE_ID: &str = "owner-scope";
+const GATEWAY_SENDER_ID: &str = "gateway-sender";
 
 /// Build a MultiAuthState with two users.
 fn two_user_auth() -> MultiAuthState {
@@ -537,7 +543,8 @@ fn gateway_state_has_multi_tenant_fields() {
         job_manager: None,
         prompt_queue: None,
         scheduler: None,
-        default_user_id: "fallback".to_string(), // Multi-tenant: renamed from user_id
+        owner_id: "fallback".to_string(),
+        default_sender_id: "fallback".to_string(),
         shutdown_tx: tokio::sync::RwLock::new(None),
         ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
         llm_provider: None,
@@ -553,7 +560,8 @@ fn gateway_state_has_multi_tenant_fields() {
         active_config: Default::default(),
     };
 
-    assert_eq!(state.default_user_id, "fallback");
+    assert_eq!(state.owner_id, "fallback");
+    assert_eq!(state.default_sender_id, "fallback");
     assert!(state.workspace_pool.is_none());
 }
 
@@ -570,6 +578,69 @@ async fn start_multi_user_server() -> (SocketAddr, Arc<GatewayState>) {
         .start_multi(auth)
         .await
         .expect("Failed to start multi-user test server")
+}
+
+async fn start_owner_scoped_sender_server() -> (
+    SocketAddr,
+    Arc<GatewayState>,
+    tokio::sync::mpsc::Receiver<IncomingMessage>,
+) {
+    let (agent_tx, agent_rx) = tokio::sync::mpsc::channel(64);
+
+    let mut tokens = HashMap::new();
+    tokens.insert(
+        OWNER_TOKEN.to_string(),
+        UserIdentity {
+            user_id: OWNER_SCOPE_ID.to_string(),
+            workspace_read_scopes: Vec::new(),
+        },
+    );
+    tokens.insert(
+        BOB_TOKEN.to_string(),
+        UserIdentity {
+            user_id: BOB_USER_ID.to_string(),
+            workspace_read_scopes: Vec::new(),
+        },
+    );
+
+    let state = Arc::new(GatewayState {
+        msg_tx: tokio::sync::RwLock::new(Some(agent_tx)),
+        sse: Arc::new(SseManager::new()),
+        workspace: None,
+        workspace_pool: None,
+        session_manager: None,
+        log_broadcaster: None,
+        log_level_handle: None,
+        extension_manager: None,
+        tool_registry: None,
+        store: None,
+        job_manager: None,
+        prompt_queue: None,
+        scheduler: None,
+        owner_id: OWNER_SCOPE_ID.to_string(),
+        default_sender_id: GATEWAY_SENDER_ID.to_string(),
+        shutdown_tx: tokio::sync::RwLock::new(None),
+        ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
+        llm_provider: None,
+        skill_registry: None,
+        skill_catalog: None,
+        chat_rate_limiter: PerUserRateLimiter::new(30, 60),
+        oauth_rate_limiter: RateLimiter::new(10, 60),
+        webhook_rate_limiter: RateLimiter::new(10, 60),
+        registry_entries: Vec::new(),
+        cost_guard: None,
+        routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
+        startup_time: std::time::Instant::now(),
+        active_config: Default::default(),
+    });
+
+    let auth = MultiAuthState::multi(tokens);
+    let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+    let bound = start_server(addr, state.clone(), auth)
+        .await
+        .expect("Failed to start owner-scoped sender test server");
+
+    (bound, state, agent_rx)
 }
 
 #[tokio::test]
@@ -675,6 +746,49 @@ async fn full_server_chat_send_accepted_for_alice() {
 
     assert_eq!(msg.content, "hello from alice");
     assert_eq!(msg.channel, "gateway");
+}
+
+#[tokio::test]
+async fn full_server_chat_send_rewrites_sender_only_for_owner_scope_rebind() {
+    let (addr, _state, mut agent_rx) = start_owner_scoped_sender_server().await;
+
+    let client = reqwest::Client::new();
+
+    let owner_resp = client
+        .post(format!("http://{}/api/chat/send", addr))
+        .header("Authorization", format!("Bearer {}", OWNER_TOKEN))
+        .header("Content-Type", "application/json")
+        .body(r#"{"content":"hello from owner"}"#)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(owner_resp.status(), 202);
+
+    let owner_msg = tokio::time::timeout(Duration::from_secs(2), agent_rx.recv())
+        .await
+        .expect("Timed out waiting for owner message")
+        .expect("Agent channel closed");
+    assert_eq!(owner_msg.user_id, OWNER_SCOPE_ID);
+    assert_eq!(owner_msg.sender_id, GATEWAY_SENDER_ID);
+    assert_eq!(owner_msg.content, "hello from owner");
+
+    let other_resp = client
+        .post(format!("http://{}/api/chat/send", addr))
+        .header("Authorization", format!("Bearer {}", BOB_TOKEN))
+        .header("Content-Type", "application/json")
+        .body(r#"{"content":"hello from bob"}"#)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(other_resp.status(), 202);
+
+    let other_msg = tokio::time::timeout(Duration::from_secs(2), agent_rx.recv())
+        .await
+        .expect("Timed out waiting for non-owner message")
+        .expect("Agent channel closed");
+    assert_eq!(other_msg.user_id, BOB_USER_ID);
+    assert_eq!(other_msg.sender_id, BOB_USER_ID);
+    assert_eq!(other_msg.content, "hello from bob");
 }
 
 #[tokio::test]
@@ -888,7 +1002,8 @@ async fn start_multi_user_server_with_db() -> (
         job_manager: None,
         prompt_queue: None,
         scheduler: None,
-        default_user_id: ALICE_USER_ID.to_string(),
+        owner_id: ALICE_USER_ID.to_string(),
+        default_sender_id: ALICE_USER_ID.to_string(),
         shutdown_tx: tokio::sync::RwLock::new(None),
         ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
         llm_provider: None,

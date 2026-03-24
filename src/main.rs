@@ -611,6 +611,7 @@ async fn async_main() -> anyhow::Result<()> {
         } else {
             GatewayChannel::new(gw_config.clone())
         };
+        gw = gw.with_owner_scope(config.owner_id.clone());
         gw = gw.with_llm_provider(Arc::clone(&components.llm));
         if let Some(ref ws) = components.workspace {
             gw = gw.with_workspace(Arc::clone(ws));

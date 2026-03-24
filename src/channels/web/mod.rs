@@ -98,7 +98,8 @@ impl GatewayChannel {
             job_manager: None,
             prompt_queue: None,
             scheduler: None,
-            default_user_id: config.user_id.clone(),
+            owner_id: config.user_id.clone(),
+            default_sender_id: config.user_id.clone(),
             shutdown_tx: tokio::sync::RwLock::new(None),
             ws_tracker: Some(Arc::new(ws::WsConnectionTracker::new())),
             llm_provider: None,
@@ -121,6 +122,22 @@ impl GatewayChannel {
         }
     }
 
+    /// Rebind the single-user auth identity to the durable owner scope while
+    /// preserving the configured gateway sender/routing identity.
+    pub fn with_owner_scope(mut self, owner_id: impl Into<String>) -> Self {
+        let owner_id = owner_id.into();
+        let single_user_token = if self.config.user_tokens.is_none() {
+            self.auth.first_token().map(ToOwned::to_owned)
+        } else {
+            None
+        };
+        if let Some(token) = single_user_token {
+            self.auth = MultiAuthState::single(token, owner_id.clone());
+        }
+        self.rebuild_state(|s| s.owner_id = owner_id);
+        self
+    }
+
     /// Create a gateway channel with a pre-built multi-user auth state.
     pub fn new_multi_auth(config: GatewayConfig, auth: MultiAuthState) -> Self {
         let state = Arc::new(GatewayState {
@@ -137,7 +154,8 @@ impl GatewayChannel {
             job_manager: None,
             prompt_queue: None,
             scheduler: None,
-            default_user_id: config.user_id.clone(),
+            owner_id: config.user_id.clone(),
+            default_sender_id: config.user_id.clone(),
             shutdown_tx: tokio::sync::RwLock::new(None),
             ws_tracker: Some(Arc::new(ws::WsConnectionTracker::new())),
             llm_provider: None,
@@ -177,7 +195,8 @@ impl GatewayChannel {
             job_manager: self.state.job_manager.clone(),
             prompt_queue: self.state.prompt_queue.clone(),
             scheduler: self.state.scheduler.clone(),
-            default_user_id: self.state.default_user_id.clone(),
+            owner_id: self.state.owner_id.clone(),
+            default_sender_id: self.state.default_sender_id.clone(),
             shutdown_tx: tokio::sync::RwLock::new(None),
             ws_tracker: self.state.ws_tracker.clone(),
             llm_provider: self.state.llm_provider.clone(),

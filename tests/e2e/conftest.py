@@ -112,6 +112,30 @@ def _reserve_loopback_sockets(count: int) -> list[socket.socket]:
             sock.close()
         raise
 
+async def _stop_process(
+    proc: asyncio.subprocess.Process, *, sig: int | None = None, timeout: float
+) -> None:
+    """Signal a subprocess and wait briefly without masking exit races."""
+    if proc.returncode is not None:
+        return
+
+    try:
+        if sig is None:
+            proc.kill()
+        else:
+            proc.send_signal(sig)
+    except ProcessLookupError:
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            pass
+        return
+
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=timeout)
+    except asyncio.TimeoutError:
+        pass
+
 
 def _forward_coverage_env(env: dict[str, str]) -> None:
     """Forward cargo-llvm-cov env vars into child processes when present."""
@@ -281,35 +305,39 @@ async def ironclaw_server(
         stderr=asyncio.subprocess.PIPE,
         env=env,
     )
+    startup_kill_attempted = False
     base_url = f"http://127.0.0.1:{gateway_port}"
     try:
         await wait_for_ready(f"{base_url}/api/health", timeout=60)
         yield base_url
     except TimeoutError:
         # Dump stderr so CI logs show why the server failed to start
+        if proc.returncode is None:
+            startup_kill_attempted = True
+            await _stop_process(proc, timeout=2)
         returncode = proc.returncode
         stderr_bytes = b""
         if proc.stderr:
             try:
                 stderr_bytes = await asyncio.wait_for(proc.stderr.read(8192), timeout=2)
-            except (asyncio.TimeoutError, Exception):
+            except asyncio.TimeoutError:
                 pass
         stderr_text = stderr_bytes.decode("utf-8", errors="replace")
-        proc.kill()
         pytest.fail(
             f"ironclaw server failed to start on port {gateway_port} "
             f"(returncode={returncode}).\nstderr:\n{stderr_text}"
         )
     finally:
         if proc.returncode is None:
-            # Use SIGINT (not SIGTERM) so tokio's ctrl_c handler triggers a
-            # graceful shutdown.  This lets the LLVM coverage runtime run its
-            # atexit handler and flush .profraw files for cargo-llvm-cov.
-            proc.send_signal(signal.SIGINT)
-            try:
-                await asyncio.wait_for(proc.wait(), timeout=10)
-            except asyncio.TimeoutError:
-                proc.kill()
+            if startup_kill_attempted:
+                await _stop_process(proc, timeout=2)
+            else:
+                # Use SIGINT (not SIGTERM) so tokio's ctrl_c handler triggers a
+                # graceful shutdown.  This lets the LLVM coverage runtime run its
+                # atexit handler and flush .profraw files for cargo-llvm-cov.
+                await _stop_process(proc, sig=signal.SIGINT, timeout=10)
+                if proc.returncode is None:
+                    await _stop_process(proc, timeout=2)
 
 
 @pytest.fixture(scope="session")
@@ -376,6 +404,7 @@ async def hosted_oauth_refresh_server(
             stderr=asyncio.subprocess.PIPE,
             env=env,
         )
+        startup_kill_attempted = False
         base_url = f"http://127.0.0.1:{gateway_port}"
         try:
             await wait_for_ready(f"{base_url}/api/health", timeout=60)
@@ -386,27 +415,29 @@ async def hosted_oauth_refresh_server(
                 "mock_llm_url": mock_llm_server,
             }
         except TimeoutError:
+            if proc.returncode is None:
+                startup_kill_attempted = True
+                await _stop_process(proc, timeout=2)
             returncode = proc.returncode
             stderr_bytes = b""
             if proc.stderr:
                 try:
                     stderr_bytes = await asyncio.wait_for(proc.stderr.read(8192), timeout=2)
-                except (asyncio.TimeoutError, Exception):
+                except asyncio.TimeoutError:
                     pass
             stderr_text = stderr_bytes.decode("utf-8", errors="replace")
-            if proc.returncode is None:
-                proc.kill()
             pytest.fail(
                 f"hosted oauth refresh server failed to start on port {gateway_port} "
                 f"(returncode={returncode}).\nstderr:\n{stderr_text}"
             )
         finally:
             if proc.returncode is None:
-                proc.send_signal(signal.SIGINT)
-                try:
-                    await asyncio.wait_for(proc.wait(), timeout=10)
-                except asyncio.TimeoutError:
-                    proc.kill()
+                if startup_kill_attempted:
+                    await _stop_process(proc, timeout=2)
+                else:
+                    await _stop_process(proc, sig=signal.SIGINT, timeout=10)
+                    if proc.returncode is None:
+                        await _stop_process(proc, timeout=2)
     finally:
         for sock in reserved:
             if sock.fileno() != -1:
@@ -475,6 +506,7 @@ async def http_channel_server_without_secret(
         stderr=asyncio.subprocess.PIPE,
         env=env,
     )
+    startup_kill_attempted = False
     gateway_url = f"http://127.0.0.1:{gateway_port}"
     http_base_url = f"http://127.0.0.1:{http_port}"
     try:
@@ -483,15 +515,17 @@ async def http_channel_server_without_secret(
         yield http_base_url
     except TimeoutError:
         # Dump stderr so CI logs show why the server failed to start
+        if proc.returncode is None:
+            startup_kill_attempted = True
+            await _stop_process(proc, timeout=2)
         returncode = proc.returncode
         stderr_bytes = b""
         if proc.stderr:
             try:
                 stderr_bytes = await asyncio.wait_for(proc.stderr.read(8192), timeout=2)
-            except (asyncio.TimeoutError, Exception):
+            except asyncio.TimeoutError:
                 pass
         stderr_text = stderr_bytes.decode("utf-8", errors="replace")
-        proc.kill()
         pytest.fail(
             f"ironclaw server without webhook secret failed to start on ports "
             f"gateway={gateway_port}, http={http_port} "
@@ -499,14 +533,15 @@ async def http_channel_server_without_secret(
         )
     finally:
         if proc.returncode is None:
-            # Use SIGINT (not SIGTERM) so tokio's ctrl_c handler triggers a
-            # graceful shutdown.  This lets the LLVM coverage runtime run its
-            # atexit handler and flush .profraw files for cargo-llvm-cov.
-            proc.send_signal(signal.SIGINT)
-            try:
-                await asyncio.wait_for(proc.wait(), timeout=10)
-            except asyncio.TimeoutError:
-                proc.kill()
+            if startup_kill_attempted:
+                await _stop_process(proc, timeout=2)
+            else:
+                # Use SIGINT (not SIGTERM) so tokio's ctrl_c handler triggers a
+                # graceful shutdown.  This lets the LLVM coverage runtime run its
+                # atexit handler and flush .profraw files for cargo-llvm-cov.
+                await _stop_process(proc, sig=signal.SIGINT, timeout=10)
+                if proc.returncode is None:
+                    await _stop_process(proc, timeout=2)
 
 
 @pytest.fixture(scope="session")
