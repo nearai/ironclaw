@@ -718,6 +718,11 @@ impl Turn {
             .find(|c| c.result.is_none() && c.error.is_none())
         {
             call.result = Some(result);
+        } else {
+            tracing::warn!(
+                tool_call_id = %tool_call_id,
+                "Tool result dropped: no matching or pending tool call"
+            );
         }
     }
 
@@ -735,6 +740,11 @@ impl Turn {
             .find(|c| c.result.is_none() && c.error.is_none())
         {
             call.error = Some(error.into());
+        } else {
+            tracing::warn!(
+                tool_call_id = %tool_call_id,
+                "Tool error dropped: no matching or pending tool call"
+            );
         }
     }
 }

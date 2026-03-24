@@ -1370,14 +1370,34 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
             );
         }
 
-        // Emit reasoning event if any tool calls carry reasoning
+        // Emit reasoning event if any tool calls carry reasoning.
+        // Sanitize narrative and per-tool rationale through SafetyLayer
+        // (parity with ChatDelegate in dispatcher.rs).
+        let sanitized_narrative = content
+            .as_deref()
+            .filter(|c| !c.trim().is_empty())
+            .map(|c| {
+                self.worker
+                    .deps
+                    .safety
+                    .sanitize_tool_output("job_narrative", c)
+                    .content
+            })
+            .filter(|c| !c.trim().is_empty())
+            .unwrap_or_default();
         let decisions: Vec<serde_json::Value> = tool_calls
             .iter()
             .filter_map(|tc| {
                 tc.reasoning.as_ref().map(|r| {
+                    let sanitized = self
+                        .worker
+                        .deps
+                        .safety
+                        .sanitize_tool_output("tool_rationale", r)
+                        .content;
                     serde_json::json!({
                         "tool_name": tc.name,
-                        "rationale": r,
+                        "rationale": sanitized,
                     })
                 })
             })
@@ -1386,7 +1406,7 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
             self.worker.log_event(
                 "reasoning",
                 serde_json::json!({
-                    "narrative": content.as_deref().unwrap_or(""),
+                    "narrative": sanitized_narrative,
                     "decisions": decisions,
                 }),
             );

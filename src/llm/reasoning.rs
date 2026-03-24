@@ -3180,4 +3180,32 @@ That's my plan."#;
             "Text <function_call>{}</function_call> middle "
         );
     }
+
+    /// Verify that reasoning normalization strips thinking tags and tool tags
+    /// from per-tool reasoning, matching the cleaning applied to shared reasoning.
+    #[test]
+    fn test_reasoning_normalization_strips_thinking_tags() {
+        let raw = "<thinking>Let me consider...</thinking>Search memory for prior context";
+        let pre_truncated = truncate_at_tool_tags(raw);
+        let cleaned = clean_response(&pre_truncated);
+        assert!(!cleaned.contains("<thinking>"));
+        assert!(cleaned.contains("Search memory"));
+    }
+
+    #[test]
+    fn test_reasoning_normalization_strips_tool_tags() {
+        let raw = "Calling search <tool_call>{\"name\": \"search\"}";
+        let pre_truncated = truncate_at_tool_tags(raw);
+        let cleaned = clean_response(&pre_truncated);
+        assert!(!cleaned.contains("<tool_call>"));
+        assert!(cleaned.contains("Calling search"));
+    }
+
+    #[test]
+    fn test_reasoning_normalization_empty_after_cleaning() {
+        let raw = "<thinking>internal only</thinking>";
+        let pre_truncated = truncate_at_tool_tags(raw);
+        let cleaned = clean_response(&pre_truncated);
+        assert!(cleaned.trim().is_empty());
+    }
 }
