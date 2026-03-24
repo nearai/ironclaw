@@ -234,34 +234,83 @@ These docs get injected into future prompts via RetrievalEngine.
 
 ---
 
-## Implementation Priority
+## V1 Controls Already Available (use, don't reinvent)
 
-| Fix | Severity | Effort | Phase |
-|---|---|---|---|
-| Tool tier classification + default lease restriction | Critical | Medium | Next |
-| Per-step tool call limit in CodeAct | High | Small | Next |
-| Approval flow (pause/resume) | High | Medium | Next |
-| Wrap tool output in safety delimiters | High | Small | Next |
-| HTML stripping from web search results | Medium | Small | Next |
-| Self-improvement edit validation + limits | Medium | Medium | With self-improvement |
-| Reflection output scanning | Medium | Medium | With self-improvement |
-| Memory doc TTL + trust scoring | Low | Medium | Later |
-| Separate Monty process for isolation | Low | Large | Later |
+Cross-reference of v1 security controls the bridge should reuse:
+
+### Tool approval — already exists, not wired in bridge
+
+| v1 Control | Location | Bridge gap |
+|---|---|---|
+| `Tool::requires_approval(params) -> ApprovalRequirement` | `tool.rs:325` | Bridge doesn't call this — grants all leases unconditionally |
+| `ApprovalRequirement::Never/UnlessAutoApproved/Always` | `tool.rs:13-30` | Engine has `PolicyDecision` but doesn't map from tool's own declaration |
+| `Session::auto_approved_tools: HashSet<String>` | `session.rs:41` | Engine has no equivalent — leases are all-or-nothing |
+| `PendingApproval` struct with full context | `session.rs:166-200` | Engine produces `NeedApproval` but without `display_parameters`, `deferred_tool_calls` |
+| `ApprovalContext::Autonomous { allowed_tools }` | `tool.rs:32-81` | Not used — all tools available in v2 threads |
+
+**Fix:** `EffectBridgeAdapter.execute_action()` should call `tool.requires_approval(&params)` before execution. Map result to `PolicyDecision`. Track auto-approved tools on the conversation.
+
+### Tool output sanitization — partially wired
+
+| v1 Control | Location | Bridge gap |
+|---|---|---|
+| `safety.sanitize_tool_output(tool_name, output)` | `safety/lib.rs:53-135` | Bridge calls `execute_tool_with_safety` which does this ✅ |
+| `safety.wrap_for_llm(tool_name, content)` | `safety/lib.rs:169-175` | **NOT called** — tool results enter LLM context unwrapped |
+| `process_tool_result(safety, tool_name, call_id, result)` | `execute.rs:127-142` | **NOT called** — bridge does its own conversion |
+
+**Fix:** After `execute_tool_with_safety`, call `process_tool_result()` to get the properly sanitized + wrapped content. Use wrapped content in the `state` dict and output metadata, not raw JSON.
+
+### Rate limiting — not wired
+
+| v1 Control | Location | Bridge gap |
+|---|---|---|
+| `Tool::rate_limit_config() -> Option<ToolRateLimitConfig>` | `tool.rs:89-114` | Not checked in bridge |
+| `RateLimiter::check_and_record(user_id, tool_name, config)` | `rate_limiter.rs` | Not called |
+
+**Fix:** `EffectBridgeAdapter` should check rate limit before execution. Return error if limited.
+
+### Hook system — not wired
+
+| v1 Control | Location | Bridge gap |
+|---|---|---|
+| `hooks.run(HookEvent::ToolCall { ... })` | `hooks/hook.rs` | Bridge doesn't run BeforeToolCall hooks |
+| `HookOutcome::Reject { reason }` | `hooks/hook.rs` | Cannot reject tool calls in v2 |
+
+**Fix:** `EffectBridgeAdapter` should accept `Arc<HookRegistry>` and run `BeforeToolCall` hook before execution.
+
+### Sensitive params — not wired
+
+| v1 Control | Location | Bridge gap |
+|---|---|---|
+| `tool.sensitive_params() -> &[&str]` | `tool.rs:359` | Not checked — params go to LLM context unredacted |
+| `redact_params(params, sensitive)` | `tool.rs:459-475` | Not called before logging or context injection |
+
+**Fix:** Redact sensitive params before they appear in trace, events, or LLM context.
+
+### Shell risk classification — automatically inherited
+
+The `shell` tool's `requires_approval()` already classifies commands by risk level (Low/Medium/High) with 12 blocked patterns, 13 dangerous patterns, and 44 never-auto-approve patterns. Since the bridge calls `execute_tool_with_safety`, this is inherited — but the approval result is currently ignored.
+
+### Inbound secret scanning — already wired
+
+`safety.scan_inbound_for_secrets(content)` is called in v1's `process_user_input`. In v2, the routing check happens after hook processing in `handle_message`, so inbound scanning from v1 still runs before the engine sees the message. ✅
 
 ---
 
-## Relationship to Existing Safety
+## Implementation Priority (revised)
 
-The existing `ironclaw_safety` crate provides:
-- `SafetyLayer`: sanitizer, validator, policy, leak detector
-- `LeakDetector`: scans for secret patterns in output
-- `Sanitizer`: truncation, injection marker removal
-- `Validator`: input format validation
-- `Policy`: content policy rules
+Most "fixes" are just wiring existing v1 controls into the bridge adapter:
 
-Engine v2 uses `SafetyLayer` at the `EffectBridgeAdapter` boundary (tool execution goes through `execute_tool_with_safety`). But it does NOT currently:
-- Scan tool OUTPUT for injection before it enters the LLM context
-- Wrap external data in safety delimiters
-- Apply safety to the CodeAct code itself (only to tool calls)
+| Fix | Severity | Effort | What to do |
+|---|---|---|---|
+| **Wire `requires_approval()` + approval flow** | Critical | Medium | Call `tool.requires_approval()` in `EffectBridgeAdapter`, map to `PolicyDecision`, implement pause/resume |
+| **Wire `process_tool_result()` + `wrap_for_llm()`** | High | Small | Replace raw JSON conversion with `process_tool_result()` call in `EffectBridgeAdapter` |
+| **Wire rate limiting** | High | Small | Call `RateLimiter::check_and_record()` before tool execution |
+| **Wire `BeforeToolCall` hooks** | High | Small | Accept `HookRegistry` in adapter, run hook before execution |
+| **Wire `redact_params()`** | Medium | Small | Redact before logging/trace/events |
+| **Per-step tool call limit** | Medium | Small | Counter in `execute_code()`, cap at 50 |
+| **Self-improvement edit validation** | Medium | Medium | With self-improvement implementation |
+| **Reflection output scanning** | Medium | Medium | With self-improvement implementation |
+| **Memory doc TTL** | Low | Medium | Later |
 
-These gaps should be closed by piping tool results through `safety.wrap_for_llm()` before they enter the state dict and context messages.
+**Key principle:** The bridge adapter is the security boundary. V1 has all the controls. The bridge just needs to call them.
