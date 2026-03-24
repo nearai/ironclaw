@@ -1143,36 +1143,20 @@ async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) 
             match execution_result {
                 Ok((status, summary, tokens)) => {
                     // Accumulate tokens from this attempt with any previous attempts
-                    let total = Some(accumulated_tokens + tokens.unwrap_or(0));
+                    let total = Some(accumulated_tokens.saturating_add(tokens.unwrap_or(0)));
                     break Ok((status, summary, total));
                 }
-                Err(ref e) if is_lightweight && e.is_retryable() && attempt < MAX_RETRIES => {
+                Err(ref e) if is_lightweight && !uses_tools && e.is_retryable() && attempt < MAX_RETRIES => {
                     // Accumulate any partial tokens from the failed attempt
                     if let RoutineError::LlmFailed {
                         partial_tokens: Some(t),
                         ..
                     } = e
                     {
-                        accumulated_tokens += t;
+                        accumulated_tokens = accumulated_tokens.saturating_add(*t);
                     }
 
                     attempt += 1;
-
-                    // NOTE: When retrying a tools-enabled routine, the entire
-                    // execute_lightweight() call is re-run, which means
-                    // already-executed tool calls will be repeated. This is a
-                    // known limitation — restructuring the retry to wrap only
-                    // the LLM call would require splitting the tool loop from
-                    // the LLM call, which is too invasive for the current
-                    // architecture.
-                    if uses_tools {
-                        tracing::warn!(
-                            routine = %routine.name,
-                            attempt = attempt,
-                            "Retrying tools-enabled routine; previously executed tool calls \
-                             may be repeated causing duplicate side effects"
-                        );
-                    }
 
                     let delay = Duration::from_millis(
                         BASE_DELAY_MS.saturating_mul(2u64.saturating_pow(attempt - 1)),
@@ -1578,9 +1562,13 @@ async fn execute_lightweight_no_tools(
         .llm
         .complete(request)
         .await
-        .map_err(|e| RoutineError::LlmFailed {
-            reason: e.to_string(),
-            partial_tokens: None,
+        .map_err(|e| {
+            let retryable = crate::llm::retry::is_retryable(&e);
+            RoutineError::LlmFailed {
+                reason: e.to_string(),
+                partial_tokens: None,
+                retryable,
+            }
         })?;
 
     handle_text_response(
@@ -1687,9 +1675,11 @@ async fn execute_lightweight_with_tools(
 
             let response = ctx.llm.complete(request).await.map_err(|e| {
                 let partial = (total_input_tokens + total_output_tokens) as i32;
+                let retryable = crate::llm::retry::is_retryable(&e);
                 RoutineError::LlmFailed {
                     reason: e.to_string(),
                     partial_tokens: if partial > 0 { Some(partial) } else { None },
+                    retryable,
                 }
             })?;
 
@@ -1719,9 +1709,11 @@ async fn execute_lightweight_with_tools(
 
             let response = ctx.llm.complete_with_tools(request).await.map_err(|e| {
                 let partial = (total_input_tokens + total_output_tokens) as i32;
+                let retryable = crate::llm::retry::is_retryable(&e);
                 RoutineError::LlmFailed {
                     reason: e.to_string(),
                     partial_tokens: if partial > 0 { Some(partial) } else { None },
+                    retryable,
                 }
             })?;
 
@@ -2591,10 +2583,12 @@ mod tests {
             RoutineError::LlmFailed {
                 reason: "rate limit".into(),
                 partial_tokens: None,
+                retryable: true,
             },
             RoutineError::LlmFailed {
                 reason: "network timeout".into(),
                 partial_tokens: Some(42),
+                retryable: true,
             },
             RoutineError::EmptyResponse,
             RoutineError::TruncatedResponse,
@@ -2604,34 +2598,42 @@ mod tests {
         }
 
         // Permanent LLM failures that should NOT be retried
+        // (retryable: false is set at conversion time by llm::retry::is_retryable)
         let permanent_llm_errors: Vec<RoutineError> = vec![
             RoutineError::LlmFailed {
                 reason: "Authentication failed for provider openai".into(),
                 partial_tokens: None,
+                retryable: false,
             },
             RoutineError::LlmFailed {
                 reason: "invalid_api_key: bad key".into(),
                 partial_tokens: None,
+                retryable: false,
             },
             RoutineError::LlmFailed {
                 reason: "content policy violation".into(),
                 partial_tokens: None,
+                retryable: false,
             },
             RoutineError::LlmFailed {
                 reason: "content_filter triggered".into(),
                 partial_tokens: None,
+                retryable: false,
             },
             RoutineError::LlmFailed {
                 reason: "context length exceeded: 150000 tokens used, 128000 allowed".into(),
                 partial_tokens: Some(100),
+                retryable: false,
             },
             RoutineError::LlmFailed {
                 reason: "model not available on provider anthropic".into(),
                 partial_tokens: None,
+                retryable: false,
             },
             RoutineError::LlmFailed {
                 reason: "content moderation flagged".into(),
                 partial_tokens: None,
+                retryable: false,
             },
         ];
         for err in &permanent_llm_errors {

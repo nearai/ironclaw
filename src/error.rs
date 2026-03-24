@@ -400,6 +400,11 @@ pub enum RoutineError {
         /// Partial token count consumed before the failure (if any).
         /// Used to accumulate usage across retry attempts.
         partial_tokens: Option<i32>,
+        /// Whether the underlying LLM error was classified as retryable.
+        /// Set at the `LlmError` → `RoutineError` conversion site using
+        /// `crate::llm::retry::is_retryable()`, avoiding fragile substring
+        /// matching on the stringified reason.
+        retryable: bool,
     },
 
     #[error("Failed to dispatch full job: {reason}")]
@@ -413,40 +418,16 @@ pub enum RoutineError {
 }
 
 impl RoutineError {
-    /// Known permanent failure substrings in LLM error reasons.
-    ///
-    /// These map to `LlmError` variants that the LLM retry layer already
-    /// considers non-retryable (`AuthFailed`, `ContextLengthExceeded`,
-    /// `ModelNotAvailable`) plus content-policy rejections surfaced as
-    /// provider-level `RequestFailed` with descriptive messages.
-    const PERMANENT_LLM_PATTERNS: &'static [&'static str] = &[
-        "auth",
-        "authentication",
-        "invalid_api_key",
-        "content policy",
-        "content_policy",
-        "content_filter",
-        "context length",
-        "context_length",
-        "model not available",
-        "model_not_available",
-        "moderation",
-    ];
-
     /// Whether this error is transient and worth retrying with backoff.
     ///
-    /// Retryable: LLM failures (unless the reason matches a known permanent
-    /// pattern), empty responses, truncated responses.
+    /// Retryable: LLM failures where the underlying `LlmError` was classified
+    /// as retryable by `crate::llm::retry::is_retryable()`, empty responses,
+    /// and truncated responses.
     /// Non-retryable: configuration errors, authorization, resource limits,
     /// DB errors, and LLM failures caused by auth/content-policy/context-length.
     pub fn is_retryable(&self) -> bool {
         match self {
-            RoutineError::LlmFailed { reason, .. } => {
-                let lower = reason.to_ascii_lowercase();
-                !Self::PERMANENT_LLM_PATTERNS
-                    .iter()
-                    .any(|pat| lower.contains(pat))
-            }
+            RoutineError::LlmFailed { retryable, .. } => *retryable,
             RoutineError::EmptyResponse | RoutineError::TruncatedResponse => true,
             _ => false,
         }
@@ -567,6 +548,16 @@ mod tests {
             RoutineError::LlmFailed {
                 reason: "timeout".into(),
                 partial_tokens: None,
+                retryable: true,
+            }
+            .is_retryable()
+        );
+        // Non-retryable LLM error
+        assert!(
+            !RoutineError::LlmFailed {
+                reason: "timeout".into(),
+                partial_tokens: None,
+                retryable: false,
             }
             .is_retryable()
         );
