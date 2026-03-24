@@ -120,6 +120,7 @@ Both are first-class in the extension system (`ironclaw tool install` handles bo
 - Growing ecosystem of pre-built servers (GitHub, Notion, Postgres, etc.)
 - Any language (TypeScript/Python most common)
 - Can do websockets, streaming, background polling
+- HTTP-based MCP servers still honor IronClaw network policy; private-network and invalid-TLS exceptions require operator-managed `outbound_trust` policy plus per-server opt-in
 - Cost: external process with full system access (no sandbox), manages own credentials, IronClaw can't prevent leaks
 
 **Decision guide:**

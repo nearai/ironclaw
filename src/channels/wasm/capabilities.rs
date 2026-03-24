@@ -155,6 +155,11 @@ impl ChannelCapabilities {
         // Prefix with channel namespace
         Ok(self.prefix_workspace_path(path))
     }
+
+    /// Get the declared outbound trust policy IDs for this channel.
+    pub fn declared_outbound_trust_policy_ids(&self) -> &[String] {
+        self.tool_capabilities.declared_outbound_trust_policy_ids()
+    }
 }
 
 /// Configuration for an HTTP endpoint the channel wants to register.

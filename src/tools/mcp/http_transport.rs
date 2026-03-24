@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
+use crate::tools::mcp::network::{build_mcp_http_client, validate_mcp_url};
 use crate::tools::mcp::protocol::{McpRequest, McpResponse};
 use crate::tools::mcp::session::McpSessionManager;
 use crate::tools::mcp::transport::McpTransport;
@@ -22,6 +23,9 @@ pub struct HttpMcpTransport {
     server_url: String,
     server_name: String,
     http_client: reqwest::Client,
+    #[cfg(test)]
+    allow_invalid_tls: bool,
+    allow_private_network: bool,
     session_manager: Option<Arc<McpSessionManager>>,
     custom_headers: HashMap<String, String>,
 }
@@ -29,17 +33,24 @@ pub struct HttpMcpTransport {
 impl HttpMcpTransport {
     /// Create a new HTTP transport for the given server URL.
     pub fn new(server_url: impl Into<String>, server_name: impl Into<String>) -> Self {
+        Self::new_with_network_policy(server_url, server_name, false, false)
+    }
+
+    /// Create a new HTTP transport with explicit outbound network policy flags.
+    pub fn new_with_network_policy(
+        server_url: impl Into<String>,
+        server_name: impl Into<String>,
+        allow_invalid_tls: bool,
+        allow_private_network: bool,
+    ) -> Self {
         Self {
             server_url: server_url.into(),
             server_name: server_name.into(),
-            // reqwest::Client::builder().build() only fails if the TLS backend
-            // cannot initialize, which does not happen with the default rustls
-            // feature set. Panic is acceptable here (same as reqwest's own
-            // `Client::new()`).
-            http_client: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(30))
-                .build()
-                .expect("Failed to create HTTP client"), // safety: TLS init with default rustls cannot fail
+            http_client: build_mcp_http_client(allow_invalid_tls)
+                .unwrap_or_else(|e| panic!("Failed to create HTTP client: {e}")),
+            #[cfg(test)]
+            allow_invalid_tls,
+            allow_private_network,
             session_manager: None,
             custom_headers: HashMap::new(),
         }
@@ -69,6 +80,16 @@ impl HttpMcpTransport {
     pub(crate) fn session_manager(&self) -> Option<&Arc<McpSessionManager>> {
         self.session_manager.as_ref()
     }
+
+    #[cfg(test)]
+    pub(crate) fn allow_invalid_tls(&self) -> bool {
+        self.allow_invalid_tls
+    }
+
+    #[cfg(test)]
+    pub(crate) fn allow_private_network(&self) -> bool {
+        self.allow_private_network
+    }
 }
 
 #[async_trait]
@@ -78,6 +99,10 @@ impl McpTransport for HttpMcpTransport {
         request: &McpRequest,
         headers: &HashMap<String, String>,
     ) -> Result<McpResponse, ToolError> {
+        validate_mcp_url(&self.server_url, self.allow_private_network)
+            .await
+            .map_err(|e| ToolError::ExternalService(format!("[{}] {}", self.server_name, e)))?;
+
         // Build the HTTP request.
         let mut req_builder = self
             .http_client
@@ -398,6 +423,18 @@ mod tests {
         let transport =
             HttpMcpTransport::new("http://localhost:8080", "test").with_custom_headers(headers);
         assert_eq!(transport.custom_headers.get("X-Custom").unwrap(), "value");
+    }
+
+    #[test]
+    fn test_new_with_network_policy_records_flags() {
+        let transport = HttpMcpTransport::new_with_network_policy(
+            "https://mcp.internal.example",
+            "test",
+            true,
+            true,
+        );
+        assert!(transport.allow_invalid_tls());
+        assert!(transport.allow_private_network());
     }
 
     // -- Wire-level echo server tests -----------------------------------------

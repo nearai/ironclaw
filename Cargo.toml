@@ -199,6 +199,8 @@ pretty_assertions = "1"
 tempfile = "3"
 insta = "1.46.3"
 criterion = "0.5"
+rcgen = "0.13"
+tokio-rustls = "0.26"
 
 [[bench]]
 name = "safety_check"

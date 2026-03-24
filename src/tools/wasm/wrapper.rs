@@ -20,6 +20,10 @@ use crate::context::JobContext;
 use crate::llm::recording::{HttpExchangeRequest, HttpExchangeResponse, HttpInterceptor};
 use crate::safety::LeakDetector;
 use crate::secrets::SecretsStore;
+use crate::security::outbound_trust::{
+    OutboundTrustConfig, OutboundTrustDecision, OutboundTrustRequestContext, OutboundTrustResolver,
+    OutboundTrustSurface,
+};
 use crate::tools::tool::{Tool, ToolError, ToolOutput};
 use crate::tools::wasm::capabilities::Capabilities;
 use crate::tools::wasm::credential_injector::{
@@ -89,6 +93,8 @@ struct ResolvedHostCredential {
 struct StoreData {
     limiter: WasmResourceLimiter,
     host_state: HostState,
+    extension_name: String,
+    outbound_trust_resolver: Arc<OutboundTrustResolver>,
     wasi: WasiCtx,
     table: ResourceTable,
     /// Injected credentials for URL/header placeholder substitution.
@@ -108,7 +114,9 @@ struct StoreData {
 impl StoreData {
     fn new(
         memory_limit: u64,
+        extension_name: impl Into<String>,
         capabilities: Capabilities,
+        outbound_trust_resolver: Arc<OutboundTrustResolver>,
         credentials: HashMap<String, String>,
         host_credentials: Vec<ResolvedHostCredential>,
     ) -> Self {
@@ -118,6 +126,8 @@ impl StoreData {
         Self {
             limiter: WasmResourceLimiter::new(memory_limit),
             host_state: HostState::new(capabilities),
+            extension_name: extension_name.into(),
+            outbound_trust_resolver,
             wasi,
             table: ResourceTable::new(),
             credentials,
@@ -332,8 +342,16 @@ impl near::agent::host::Host for StoreData {
             .map(|h| h.max_response_bytes)
             .unwrap_or(10 * 1024 * 1024);
 
-        // Resolve hostname and reject private/internal IPs to prevent DNS rebinding.
-        reject_private_ip(&url)?;
+        let outbound_trust = resolve_http_outbound_trust_decision(
+            &self.outbound_trust_resolver,
+            self.host_state.capabilities(),
+            &self.extension_name,
+            &url,
+        );
+
+        // Resolve hostname and reject private/internal IPs unless a matching
+        // outbound trust policy explicitly allows private network access.
+        enforce_private_network_policy(&url, outbound_trust.allow_private_network)?;
 
         // Make HTTP request using a dedicated single-threaded runtime.
         // We're inside spawn_blocking, so we can't rely on the main runtime's
@@ -403,11 +421,7 @@ impl near::agent::host::Host for StoreData {
         });
 
         let result = rt.block_on(async {
-            let client = reqwest::Client::builder()
-                .connect_timeout(Duration::from_secs(10))
-                .redirect(reqwest::redirect::Policy::none())
-                .build()
-                .map_err(|e| format!("Failed to build HTTP client: {e}"))?;
+            let client = build_wasm_http_client(outbound_trust.allow_invalid_tls)?;
 
             let mut request = match method.to_uppercase().as_str() {
                 "GET" => client.get(&url),
@@ -579,6 +593,8 @@ pub struct WasmToolWrapper {
     secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
     /// OAuth refresh configuration for auto-refreshing expired tokens.
     oauth_refresh: Option<OAuthRefreshConfig>,
+    /// Shared outbound trust policy resolver for this tool surface.
+    outbound_trust_resolver: Arc<OutboundTrustResolver>,
     /// Optional HTTP interceptor for testing — returns canned responses
     /// instead of making real requests when set.
     http_interceptor: Option<Arc<dyn HttpInterceptor>>,
@@ -811,6 +827,7 @@ impl WasmToolWrapper {
             credentials: HashMap::new(),
             secrets_store: None,
             oauth_refresh: None,
+            outbound_trust_resolver: Arc::new(OutboundTrustResolver::default()),
             http_interceptor: None,
         }
     }
@@ -876,6 +893,12 @@ impl WasmToolWrapper {
         self
     }
 
+    /// Set the outbound trust policy config for this tool surface.
+    pub fn with_outbound_trust_config(mut self, config: OutboundTrustConfig) -> Self {
+        self.outbound_trust_resolver = Arc::new(OutboundTrustResolver::new(config));
+        self
+    }
+
     /// Get the resource limits for this tool.
     pub fn limits(&self) -> &ResourceLimits {
         &self.prepared.limits
@@ -911,7 +934,9 @@ impl WasmToolWrapper {
         // Create store with fresh state (NEAR pattern: fresh instance per call)
         let mut store_data = StoreData::new(
             limits.memory_bytes,
+            self.prepared.name.clone(),
             self.capabilities.clone(),
+            Arc::clone(&self.outbound_trust_resolver),
             self.credentials.clone(),
             host_credentials,
         );
@@ -1010,7 +1035,9 @@ pub(super) fn extract_wasm_metadata(
 ) -> Result<(String, serde_json::Value), WasmError> {
     let store_data = StoreData::new(
         limits.memory_bytes,
+        "metadata_extract",
         Capabilities::default(),
+        Arc::new(OutboundTrustResolver::default()),
         HashMap::new(),
         vec![],
     );
@@ -1119,6 +1146,7 @@ impl Tool for WasmToolWrapper {
         let description = self.description.clone();
         let schemas = self.schemas.clone();
         let credentials = self.credentials.clone();
+        let outbound_trust_resolver = Arc::clone(&self.outbound_trust_resolver);
 
         // Execute in blocking task with timeout
         let result = tokio::time::timeout(timeout, async move {
@@ -1131,6 +1159,7 @@ impl Tool for WasmToolWrapper {
                 credentials,
                 secrets_store: None, // Not needed in blocking task
                 oauth_refresh: None, // Already used above for pre-refresh
+                outbound_trust_resolver,
                 http_interceptor: self.http_interceptor.clone(),
             };
 
@@ -1497,6 +1526,42 @@ fn extract_host_from_url(url: &str) -> Option<String> {
             .unwrap_or(h)
             .to_lowercase()
     })
+}
+
+fn resolve_http_outbound_trust_decision(
+    resolver: &OutboundTrustResolver,
+    capabilities: &Capabilities,
+    extension_name: &str,
+    url: &str,
+) -> OutboundTrustDecision {
+    resolver.resolve(&OutboundTrustRequestContext {
+        surface: OutboundTrustSurface::WasmTool,
+        extension_name,
+        url,
+        declared_policy_ids: capabilities.declared_outbound_trust_policy_ids(),
+    })
+}
+
+fn enforce_private_network_policy(url: &str, allow_private_network: bool) -> Result<(), String> {
+    if allow_private_network {
+        Ok(())
+    } else {
+        reject_private_ip(url)
+    }
+}
+
+fn build_wasm_http_client(allow_invalid_tls: bool) -> Result<reqwest::Client, String> {
+    let mut builder = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::none());
+
+    if allow_invalid_tls {
+        builder = builder.danger_accept_invalid_certs(true);
+    }
+
+    builder
+        .build()
+        .map_err(|e| format!("Failed to build HTTP client: {e}"))
 }
 
 /// Resolve the URL's hostname and reject connections to private/internal IP addresses.
@@ -1996,7 +2061,9 @@ mod tests {
 
         let store_data = StoreData::new(
             1024 * 1024,
+            "test-tool",
             Capabilities::default(),
+            Arc::new(crate::security::outbound_trust::OutboundTrustResolver::default()),
             HashMap::new(),
             host_credentials,
         );
@@ -2035,7 +2102,9 @@ mod tests {
 
         let store_data = StoreData::new(
             1024 * 1024,
+            "test-tool",
             Capabilities::default(),
+            Arc::new(crate::security::outbound_trust::OutboundTrustResolver::default()),
             HashMap::new(),
             host_credentials,
         );
@@ -2061,7 +2130,9 @@ mod tests {
 
         let store_data = StoreData::new(
             1024 * 1024,
+            "test-tool",
             Capabilities::default(),
+            Arc::new(crate::security::outbound_trust::OutboundTrustResolver::default()),
             HashMap::new(),
             host_credentials,
         );
@@ -2492,6 +2563,201 @@ mod tests {
         // 8.8.8.8 (Google DNS) is public
         let result = super::reject_private_ip("https://8.8.8.8/dns-query");
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_resolve_http_outbound_trust_default_denies_exceptions() {
+        use crate::security::outbound_trust::OutboundTrustResolver;
+
+        let decision = super::resolve_http_outbound_trust_decision(
+            &OutboundTrustResolver::default(),
+            &Capabilities::default(),
+            "internal_tool",
+            "https://10.42.0.15/api/status",
+        );
+
+        assert_eq!(decision.matched_policy_id, None);
+        assert!(!decision.allow_invalid_tls);
+        assert!(!decision.allow_private_network);
+    }
+
+    #[test]
+    fn test_resolve_http_outbound_trust_policy_can_enable_private_network() {
+        use crate::security::outbound_trust::{
+            OutboundTrustConfig, OutboundTrustPolicy, OutboundTrustResolver, OutboundTrustRisk,
+            OutboundTrustSurface, OutboundTrustTarget,
+        };
+
+        let resolver = OutboundTrustResolver::new(OutboundTrustConfig {
+            enabled: true,
+            policies: vec![OutboundTrustPolicy {
+                id: "corp-internal-api".to_string(),
+                display_name: "corp-internal-api".to_string(),
+                description: None,
+                enabled: true,
+                allowed_surfaces: vec![OutboundTrustSurface::WasmTool],
+                allowed_risks: vec![OutboundTrustRisk::AllowPrivateNetwork],
+                targets: vec![OutboundTrustTarget {
+                    host: "10.42.0.15".to_string(),
+                    port: Some(443),
+                    path_prefix: Some("/api".to_string()),
+                }],
+            }],
+        });
+        let capabilities = Capabilities::default()
+            .with_outbound_trust_policy_ids(vec!["corp-internal-api".to_string()]);
+
+        let decision = super::resolve_http_outbound_trust_decision(
+            &resolver,
+            &capabilities,
+            "internal_tool",
+            "https://10.42.0.15/api/status",
+        );
+
+        assert_eq!(
+            decision.matched_policy_id.as_deref(),
+            Some("corp-internal-api")
+        );
+        assert!(!decision.allow_invalid_tls);
+        assert!(decision.allow_private_network);
+    }
+
+    #[test]
+    fn test_resolve_http_outbound_trust_policy_can_enable_invalid_tls() {
+        use crate::security::outbound_trust::{
+            OutboundTrustConfig, OutboundTrustPolicy, OutboundTrustResolver, OutboundTrustRisk,
+            OutboundTrustSurface, OutboundTrustTarget,
+        };
+
+        let resolver = OutboundTrustResolver::new(OutboundTrustConfig {
+            enabled: true,
+            policies: vec![OutboundTrustPolicy {
+                id: "corp-internal-api".to_string(),
+                display_name: "corp-internal-api".to_string(),
+                description: None,
+                enabled: true,
+                allowed_surfaces: vec![OutboundTrustSurface::WasmTool],
+                allowed_risks: vec![OutboundTrustRisk::AllowInvalidTls],
+                targets: vec![OutboundTrustTarget {
+                    host: "internal-api.example.test".to_string(),
+                    port: Some(443),
+                    path_prefix: Some("/api".to_string()),
+                }],
+            }],
+        });
+        let capabilities = Capabilities::default()
+            .with_outbound_trust_policy_ids(vec!["corp-internal-api".to_string()]);
+
+        let decision = super::resolve_http_outbound_trust_decision(
+            &resolver,
+            &capabilities,
+            "internal_tool",
+            "https://internal-api.example.test/api/status",
+        );
+
+        assert_eq!(
+            decision.matched_policy_id.as_deref(),
+            Some("corp-internal-api")
+        );
+        assert!(decision.allow_invalid_tls);
+        assert!(!decision.allow_private_network);
+    }
+
+    #[test]
+    fn test_enforce_private_network_policy_respects_outbound_trust() {
+        let denied = super::enforce_private_network_policy("https://127.0.0.1:8443/api", false);
+        assert!(denied.is_err());
+
+        let allowed = super::enforce_private_network_policy("https://127.0.0.1:8443/api", true);
+        assert!(allowed.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_outbound_trust_allows_private_self_signed_https_for_wasm_tools() {
+        use crate::security::outbound_trust::{
+            OutboundTrustConfig, OutboundTrustPolicy, OutboundTrustResolver, OutboundTrustRisk,
+            OutboundTrustSurface, OutboundTrustTarget,
+        };
+        use crate::testing::tls::SelfSignedHttpsServer;
+
+        let server = SelfSignedHttpsServer::start(r#"{"ok":true}"#).await;
+        let url = server.url("/api/status");
+
+        let tls_err = super::build_wasm_http_client(false)
+            .expect("client")
+            .get(&url)
+            .send()
+            .await
+            .expect_err("self-signed endpoint should fail without invalid-tls trust");
+        assert!(
+            tls_err.is_request() || tls_err.is_connect() || tls_err.is_body(),
+            "expected request failure for untrusted TLS, got: {tls_err}"
+        );
+
+        let denied = super::enforce_private_network_policy(&url, false);
+        assert!(denied.is_err(), "expected private-network denial");
+
+        let resolver = OutboundTrustResolver::new(OutboundTrustConfig {
+            enabled: true,
+            policies: vec![OutboundTrustPolicy {
+                id: "corp-lab".to_string(),
+                display_name: "corp-lab".to_string(),
+                description: None,
+                enabled: true,
+                allowed_surfaces: vec![OutboundTrustSurface::WasmTool],
+                allowed_risks: vec![
+                    OutboundTrustRisk::AllowInvalidTls,
+                    OutboundTrustRisk::AllowPrivateNetwork,
+                ],
+                targets: vec![OutboundTrustTarget {
+                    host: "127.0.0.1".to_string(),
+                    port: Some(server.port()),
+                    path_prefix: Some("/api".to_string()),
+                }],
+            }],
+        });
+        let capabilities =
+            Capabilities::default().with_outbound_trust_policy_ids(vec!["corp-lab".to_string()]);
+
+        let decision = super::resolve_http_outbound_trust_decision(
+            &resolver,
+            &capabilities,
+            "test-tool",
+            &url,
+        );
+        assert!(decision.allow_invalid_tls);
+        assert!(decision.allow_private_network);
+
+        super::enforce_private_network_policy(&url, decision.allow_private_network)
+            .expect("private-network trust should allow request");
+
+        let response = super::build_wasm_http_client(decision.allow_invalid_tls)
+            .expect("trusted client")
+            .get(&url)
+            .send()
+            .await
+            .expect("trusted request should succeed");
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+    }
+
+    #[test]
+    fn test_outbound_trust_does_not_expand_http_allowlist() {
+        use crate::tools::wasm::EndpointPattern;
+        use crate::tools::wasm::HostState;
+        use crate::tools::wasm::HttpCapability;
+
+        let caps = Capabilities {
+            http: Some(HttpCapability {
+                allowlist: vec![EndpointPattern::host("api.example.com")],
+                ..Default::default()
+            }),
+            outbound_trust_policy_ids: vec!["corp-internal-api".to_string()],
+            ..Default::default()
+        };
+        let host_state = HostState::new(caps);
+
+        let result = host_state.check_http_allowed("https://10.42.0.15/api/status", "GET");
+        assert!(result.is_err());
     }
 
     #[tokio::test]

@@ -2,7 +2,7 @@
 
 This document catalogs every network-facing surface in IronClaw, its authentication mechanism, bind address, security controls, and known findings. Use this as the authoritative reference during code reviews that touch network-facing code.
 
-**Last updated:** 2026-02-18
+**Last updated:** 2026-03-24
 
 ---
 
@@ -425,11 +425,18 @@ The `http` tool (`src/tools/builtin/http.rs`) has its own SSRF protections:
 
 ### MCP Client
 
-MCP servers are external processes accessed via HTTP. The MCP client (`src/tools/mcp/client.rs`) uses `reqwest` with a 30-second timeout but has **no SSRF protections** — it connects to whatever URL is configured for the MCP server.
+MCP HTTP transports and MCP OAuth/discovery flows now share the same outbound URL safety model:
 
-This is by design: MCP server URLs come from **operator-controlled configuration** (config files, environment variables, or the CLI `tool install` command), not from user input or LLM output. A compromised config file is outside IronClaw's threat model — it would imply the operator's machine is already compromised.
+- remote MCP servers must still use HTTPS
+- plain `http://` remains limited to localhost / loopback development targets
+- private/internal IPs and hostnames resolving to private IPs are rejected by default
+- invalid TLS certificates remain rejected by default
+- operator-managed outbound trust policies may grant narrowly scoped exceptions for
+  configured MCP servers that explicitly opt in via `outbound_trust.allowed_policy_ids`
 
-**Reference:** `src/tools/mcp/client.rs` — `reqwest::Client` builder
+This preserves the existing operator-configured server model while avoiding a global "trust any internal HTTPS" bypass. Stdio and Unix socket MCP transports are unchanged; the outbound trust policy applies only to MCP HTTP requests and MCP OAuth/discovery HTTP requests.
+
+**Reference:** `src/tools/mcp/http_transport.rs`, `src/tools/mcp/auth.rs`, `src/security/outbound_trust.rs`
 
 ### Sandbox Domain Allowlists
 

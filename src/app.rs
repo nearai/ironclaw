@@ -479,6 +479,8 @@ impl AppBuilder {
 
                 if let Some(ref runtime) = wasm_tool_runtime {
                     let mut loader = WasmToolLoader::new(Arc::clone(runtime), Arc::clone(&tools));
+                    loader = loader
+                        .with_outbound_trust_config(self.config.security.outbound_trust.clone());
                     if let Some(ref secrets) = secrets_store {
                         loader = loader.with_secrets_store(Arc::clone(secrets));
                     }
@@ -555,6 +557,7 @@ impl AppBuilder {
                             let tools = Arc::clone(&tools);
                             let pm = Arc::clone(&pm);
                             let owner_id = owner_id.clone();
+                            let outbound_trust_config = self.config.security.outbound_trust.clone();
 
                             join_set.spawn(async move {
                                 let server_name = server.name.clone();
@@ -565,6 +568,7 @@ impl AppBuilder {
                                     &pm,
                                     secrets,
                                     &owner_id,
+                                    &outbound_trust_config,
                                 )
                                 .await
                                 {
@@ -715,20 +719,23 @@ impl AppBuilder {
             Arc::new(InMemorySecretsStore::new(crypto))
         };
         let extension_manager = {
-            let manager = Arc::new(ExtensionManager::new(
-                Arc::clone(&mcp_session_manager),
-                Arc::clone(&mcp_process_manager),
-                ext_secrets,
-                Arc::clone(tools),
-                Some(Arc::clone(hooks)),
-                wasm_tool_runtime.clone(),
-                self.config.wasm.tools_dir.clone(),
-                self.config.channels.wasm_channels_dir.clone(),
-                self.config.tunnel.public_url.clone(),
-                self.config.owner_id.clone(),
-                self.db.clone(),
-                catalog_entries.clone(),
-            ));
+            let manager = Arc::new(
+                ExtensionManager::new(
+                    Arc::clone(&mcp_session_manager),
+                    Arc::clone(&mcp_process_manager),
+                    ext_secrets,
+                    Arc::clone(tools),
+                    Some(Arc::clone(hooks)),
+                    wasm_tool_runtime.clone(),
+                    self.config.wasm.tools_dir.clone(),
+                    self.config.channels.wasm_channels_dir.clone(),
+                    self.config.tunnel.public_url.clone(),
+                    self.config.owner_id.clone(),
+                    self.db.clone(),
+                    catalog_entries.clone(),
+                )
+                .with_outbound_trust_config(self.config.security.outbound_trust.clone()),
+            );
             tools.register_extension_tools(Arc::clone(&manager));
             tracing::debug!("Extension manager initialized with in-chat discovery tools");
 

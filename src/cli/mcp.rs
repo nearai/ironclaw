@@ -11,6 +11,7 @@ use clap::{Args, Subcommand};
 use crate::config::Config;
 use crate::db::Database;
 use crate::secrets::SecretsStore;
+use crate::security::outbound_trust::OutboundTrustConfig;
 use crate::tools::mcp::{
     McpClient, McpProcessManager, McpServerConfig, McpSessionManager, OAuthConfig,
     auth::{authorize_mcp_server, is_authenticated},
@@ -440,7 +441,9 @@ async fn auth_server(name: String, user_id: String) -> anyhow::Result<()> {
     println!();
 
     // Perform OAuth flow (supports both pre-configured OAuth and DCR)
-    match authorize_mcp_server(&server, &secrets, &user_id).await {
+    let outbound_trust_config = load_outbound_trust_config().await;
+
+    match authorize_mcp_server(&server, &secrets, &user_id, &outbound_trust_config).await {
         Ok(_token) => {
             println!();
             println!("  ✓ Successfully authenticated with '{}'!", name);
@@ -488,6 +491,7 @@ async fn test_server(name: String, user_id: String) -> anyhow::Result<()> {
 
     // Create client
     let session_manager = Arc::new(McpSessionManager::new());
+    let outbound_trust_config = load_outbound_trust_config().await;
 
     // Always check for stored tokens (from either pre-configured OAuth or DCR)
     let secrets = get_secrets_store().await?;
@@ -495,7 +499,13 @@ async fn test_server(name: String, user_id: String) -> anyhow::Result<()> {
 
     let client = if has_tokens {
         // We have stored tokens, use authenticated client
-        McpClient::new_authenticated(server.clone(), session_manager.clone(), secrets, user_id)
+        McpClient::new_authenticated(
+            server.clone(),
+            session_manager.clone(),
+            secrets,
+            user_id,
+            outbound_trust_config.clone(),
+        )
     } else if server.requires_auth() {
         // OAuth configured but no tokens - need to authenticate
         println!();
@@ -514,6 +524,7 @@ async fn test_server(name: String, user_id: String) -> anyhow::Result<()> {
             &process_manager,
             None,
             "default",
+            &outbound_trust_config,
         )
         .await
         .map_err(|e| anyhow::anyhow!("{}", e))?
@@ -613,6 +624,13 @@ const DEFAULT_USER_ID: &str = "default";
 async fn connect_db() -> Option<Arc<dyn Database>> {
     let config = Config::from_env().await.ok()?;
     crate::db::connect_from_config(&config.database).await.ok()
+}
+
+async fn load_outbound_trust_config() -> OutboundTrustConfig {
+    Config::from_env()
+        .await
+        .map(|config| config.security.outbound_trust)
+        .unwrap_or_default()
 }
 
 /// Load MCP servers (DB if available, else disk).

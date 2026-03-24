@@ -4,7 +4,6 @@
 //! See: https://spec.modelcontextprotocol.io/specification/2025-03-26/basic/authorization/
 
 use std::collections::HashMap;
-use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -16,26 +15,14 @@ use tokio::net::TcpListener;
 
 use crate::cli::oauth_defaults::{self, OAUTH_CALLBACK_PORT};
 use crate::secrets::{CreateSecretParams, SecretsStore};
+use crate::security::outbound_trust::{OutboundTrustConfig, OutboundTrustResolver};
 use crate::tools::mcp::config::McpServerConfig;
+use crate::tools::mcp::network::{
+    build_mcp_http_client, resolve_mcp_outbound_trust_decision, validate_mcp_url,
+};
 
-/// Shared HTTP client for all OAuth/discovery requests.
-///
-/// Redirects are disabled for security (prevents redirect-based SSRF).
-/// Per-request timeouts can override the default via `.timeout()` on
-/// the request builder.
-fn oauth_http_client() -> Result<&'static reqwest::Client, AuthError> {
-    static CLIENT: std::sync::OnceLock<Result<reqwest::Client, AuthError>> =
-        std::sync::OnceLock::new();
-    CLIENT
-        .get_or_init(|| {
-            reqwest::Client::builder()
-                .timeout(Duration::from_secs(30))
-                .redirect(reqwest::redirect::Policy::none())
-                .build()
-                .map_err(|e| AuthError::Http(e.to_string()))
-        })
-        .as_ref()
-        .map_err(Clone::clone)
+fn oauth_http_client(allow_invalid_tls: bool) -> Result<reqwest::Client, AuthError> {
+    build_mcp_http_client(allow_invalid_tls).map_err(AuthError::Http)
 }
 
 /// Log a debug message when a discovery/auth response is a redirect.
@@ -201,6 +188,14 @@ pub struct AccessToken {
     pub scope: Option<String>,
 }
 
+struct AuthorizationCodeExchange<'a> {
+    client_id: &'a str,
+    code: &'a str,
+    redirect_uri: &'a str,
+    pkce: Option<&'a PkceChallenge>,
+    resource: Option<&'a str>,
+}
+
 /// Token response from the authorization server.
 #[derive(Debug, Deserialize)]
 struct TokenResponse {
@@ -276,109 +271,13 @@ pub fn canonical_resource_uri(server_url: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// SSRF protection
+// Shared outbound HTTP validation
 // ---------------------------------------------------------------------------
 
-/// Check if an IP address is dangerous (loopback, link-local, private, etc.)
-fn is_dangerous_ip(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(v4) => {
-            v4.is_loopback()
-                || v4.is_private()
-                || v4.is_link_local()
-                || v4.is_broadcast()
-                || v4.is_unspecified()
-                || (v4.octets()[0] == 169 && v4.octets()[1] == 254) // link-local
-                || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xC0) == 64) // CGNAT 100.64/10
-        }
-        IpAddr::V6(v6) => {
-            let segs = v6.segments();
-            v6.is_loopback()
-                || v6.is_unspecified()
-                // Link-local (fe80::/10)
-                || (segs[0] & 0xffc0) == 0xfe80
-                // Site-local / deprecated (fec0::/10)
-                || (segs[0] & 0xffc0) == 0xfec0
-                // Unique local (fc00::/7)
-                || (segs[0] & 0xfe00) == 0xfc00
-                // Documentation (2001:db8::/32)
-                || (segs[0] == 0x2001 && segs[1] == 0x0db8)
-                // Check for IPv4-mapped IPv6 (::ffff:x.x.x.x)
-                || v6
-                    .to_ipv4_mapped()
-                    .is_some_and(|v4| is_dangerous_ip(IpAddr::V4(v4)))
-        }
-    }
-}
-
-/// Validate that a URL is safe for server-side requests (SSRF protection).
-async fn validate_url_safe(url: &str) -> Result<(), AuthError> {
-    let parsed = reqwest::Url::parse(url)
-        .map_err(|e| AuthError::DiscoveryFailed(format!("Invalid URL: {}", e)))?;
-
-    // Must be HTTPS. HTTP is only allowed for localhost/loopback (dev scenarios).
-    let scheme = parsed.scheme();
-    if scheme != "https" && scheme != "http" {
-        return Err(AuthError::DiscoveryFailed(format!(
-            "Unsupported scheme: {}",
-            scheme
-        )));
-    }
-    if scheme == "http" {
-        if !crate::tools::mcp::config::is_localhost_url(url) {
-            let host = parsed.host_str().unwrap_or("");
-            return Err(AuthError::DiscoveryFailed(format!(
-                "HTTP is only allowed for localhost; use HTTPS for '{}'",
-                host
-            )));
-        }
-        // Localhost HTTP is allowed for dev — skip SSRF checks since we've
-        // already validated the host is localhost/loopback.
-        return Ok(());
-    }
-
-    let host = parsed
-        .host_str()
-        .ok_or_else(|| AuthError::DiscoveryFailed("URL has no host".to_string()))?;
-
-    // For IP literals, parse directly and check.
-    if let Ok(ip) = host.parse::<IpAddr>()
-        && is_dangerous_ip(ip)
-    {
-        return Err(AuthError::DiscoveryFailed(format!(
-            "URL points to a restricted IP address: {}",
-            host
-        )));
-    }
-
-    // For hostnames, resolve DNS and check each resolved address.
-    // This prevents DNS-based SSRF where a hostname resolves to an internal IP
-    // (e.g., 169.254.169.254 for cloud metadata endpoints).
-    if host.parse::<IpAddr>().is_err() {
-        let addr = format!("{}:{}", host, parsed.port_or_known_default().unwrap_or(443));
-        match tokio::net::lookup_host(&addr).await {
-            Ok(addrs) => {
-                for socket_addr in addrs {
-                    if is_dangerous_ip(socket_addr.ip()) {
-                        return Err(AuthError::DiscoveryFailed(format!(
-                            "URL hostname '{}' resolves to restricted IP address: {}",
-                            host,
-                            socket_addr.ip()
-                        )));
-                    }
-                }
-            }
-            Err(e) => {
-                // DNS failure = fail closed (do not allow the request)
-                return Err(AuthError::DiscoveryFailed(format!(
-                    "DNS resolution failed for '{}': {}",
-                    host, e
-                )));
-            }
-        }
-    }
-
-    Ok(())
+async fn validate_url_safe(url: &str, allow_private_network: bool) -> Result<(), AuthError> {
+    validate_mcp_url(url, allow_private_network)
+        .await
+        .map_err(AuthError::DiscoveryFailed)
 }
 
 // ---------------------------------------------------------------------------
@@ -415,10 +314,15 @@ fn parse_resource_metadata_url(www_authenticate: &str) -> Option<String> {
 }
 
 /// Fetch protected resource metadata from a URL.
-async fn fetch_resource_metadata(url: &str) -> Result<ProtectedResourceMetadata, AuthError> {
-    validate_url_safe(url).await?;
+async fn fetch_resource_metadata(
+    resolver: &OutboundTrustResolver,
+    server_config: &McpServerConfig,
+    url: &str,
+) -> Result<ProtectedResourceMetadata, AuthError> {
+    let outbound_trust = resolve_mcp_outbound_trust_decision(resolver, server_config, url);
+    validate_url_safe(url, outbound_trust.allow_private_network).await?;
 
-    let client = oauth_http_client()?;
+    let client = oauth_http_client(outbound_trust.allow_invalid_tls)?;
 
     let response = client
         .get(url)
@@ -448,13 +352,18 @@ async fn fetch_resource_metadata(url: &str) -> Result<ProtectedResourceMetadata,
 /// unauthenticated requests.  In practice the 400 path rarely yields a
 /// `WWW-Authenticate` header (GitHub's MCP does not), so discovery
 /// typically falls through to strategy 2 (RFC 9728) or 3 (direct).
-async fn discover_via_401(server_url: &str) -> Result<AuthorizationServerMetadata, AuthError> {
-    validate_url_safe(server_url).await?;
+async fn discover_via_401(
+    resolver: &OutboundTrustResolver,
+    server_config: &McpServerConfig,
+) -> Result<AuthorizationServerMetadata, AuthError> {
+    let outbound_trust =
+        resolve_mcp_outbound_trust_decision(resolver, server_config, &server_config.url);
+    validate_url_safe(&server_config.url, outbound_trust.allow_private_network).await?;
 
-    let client = oauth_http_client()?;
+    let client = oauth_http_client(outbound_trust.allow_invalid_tls)?;
 
     let response = client
-        .post(server_url)
+        .post(&server_config.url)
         .timeout(Duration::from_secs(10))
         .header("Content-Type", "application/json")
         .body("{}")
@@ -462,7 +371,7 @@ async fn discover_via_401(server_url: &str) -> Result<AuthorizationServerMetadat
         .await
         .map_err(|e| AuthError::DiscoveryFailed(e.to_string()))?;
 
-    log_redirect_if_applicable(server_url, &response);
+    log_redirect_if_applicable(&server_config.url, &response);
 
     let status = response.status().as_u16();
 
@@ -489,12 +398,15 @@ async fn discover_via_401(server_url: &str) -> Result<AuthorizationServerMetadat
         )
     })?;
 
-    let resource_meta = fetch_resource_metadata(&resource_metadata_url).await?;
-    try_discover_from_auth_servers(&resource_meta).await
+    let resource_meta =
+        fetch_resource_metadata(resolver, server_config, &resource_metadata_url).await?;
+    try_discover_from_auth_servers(resolver, server_config, &resource_meta).await
 }
 
 /// Try to discover auth server metadata from resource metadata's authorization_servers list.
 async fn try_discover_from_auth_servers(
+    resolver: &OutboundTrustResolver,
+    server_config: &McpServerConfig,
     resource_meta: &ProtectedResourceMetadata,
 ) -> Result<AuthorizationServerMetadata, AuthError> {
     let auth_server_url = resource_meta
@@ -502,7 +414,7 @@ async fn try_discover_from_auth_servers(
         .first()
         .ok_or_else(|| AuthError::DiscoveryFailed("No authorization servers listed".to_string()))?;
 
-    discover_authorization_server(auth_server_url).await
+    discover_authorization_server(server_config, resolver, auth_server_url).await
 }
 
 // ---------------------------------------------------------------------------
@@ -511,13 +423,17 @@ async fn try_discover_from_auth_servers(
 
 /// Discover protected resource metadata from an MCP server.
 pub async fn discover_protected_resource(
-    server_url: &str,
+    server_config: &McpServerConfig,
+    outbound_trust_config: &OutboundTrustConfig,
 ) -> Result<ProtectedResourceMetadata, AuthError> {
-    validate_url_safe(server_url).await?;
+    let resolver = OutboundTrustResolver::new(outbound_trust_config.clone());
+    let outbound_trust =
+        resolve_mcp_outbound_trust_decision(&resolver, server_config, &server_config.url);
+    validate_url_safe(&server_config.url, outbound_trust.allow_private_network).await?;
 
-    let client = oauth_http_client()?;
+    let client = oauth_http_client(outbound_trust.allow_invalid_tls)?;
 
-    let well_known_url = build_well_known_uri(server_url, "oauth-protected-resource")?;
+    let well_known_url = build_well_known_uri(&server_config.url, "oauth-protected-resource")?;
 
     let response = client
         .get(&well_known_url)
@@ -540,11 +456,15 @@ pub async fn discover_protected_resource(
 
 /// Discover authorization server metadata.
 pub async fn discover_authorization_server(
+    server_config: &McpServerConfig,
+    resolver: &OutboundTrustResolver,
     auth_server_url: &str,
 ) -> Result<AuthorizationServerMetadata, AuthError> {
-    validate_url_safe(auth_server_url).await?;
+    let outbound_trust =
+        resolve_mcp_outbound_trust_decision(resolver, server_config, auth_server_url);
+    validate_url_safe(auth_server_url, outbound_trust.allow_private_network).await?;
 
-    let client = oauth_http_client()?;
+    let client = oauth_http_client(outbound_trust.allow_invalid_tls)?;
 
     let well_known_url = build_well_known_uri(auth_server_url, "oauth-authorization-server")?;
 
@@ -575,7 +495,9 @@ pub async fn discover_authorization_server(
 /// First checks if endpoints are explicitly configured, then falls back to discovery.
 pub async fn discover_oauth_endpoints(
     server_config: &McpServerConfig,
+    outbound_trust_config: &OutboundTrustConfig,
 ) -> Result<(String, String), AuthError> {
+    let resolver = OutboundTrustResolver::new(outbound_trust_config.clone());
     let oauth = server_config
         .oauth
         .as_ref()
@@ -587,7 +509,7 @@ pub async fn discover_oauth_endpoints(
     }
 
     // Try to discover from the server
-    let resource_meta = discover_protected_resource(&server_config.url).await?;
+    let resource_meta = discover_protected_resource(server_config, outbound_trust_config).await?;
 
     // Get the first authorization server
     let auth_server_url = resource_meta
@@ -596,7 +518,8 @@ pub async fn discover_oauth_endpoints(
         .ok_or_else(|| AuthError::DiscoveryFailed("No authorization servers listed".to_string()))?;
 
     // Discover the authorization server metadata
-    let auth_meta = discover_authorization_server(auth_server_url).await?;
+    let auth_meta =
+        discover_authorization_server(server_config, &resolver, auth_server_url).await?;
 
     Ok((auth_meta.authorization_endpoint, auth_meta.token_endpoint))
 }
@@ -609,34 +532,44 @@ pub async fn discover_oauth_endpoints(
 /// 2. **RFC 9728**: Discover protected resource metadata, then authorization server from it
 /// 3. **Direct**: Treat MCP server as its own auth server
 pub async fn discover_full_oauth_metadata(
-    server_url: &str,
+    server_config: &McpServerConfig,
+    outbound_trust_config: &OutboundTrustConfig,
 ) -> Result<AuthorizationServerMetadata, AuthError> {
+    let resolver = OutboundTrustResolver::new(outbound_trust_config.clone());
+
     // Strategy 1: 401-based discovery
-    if let Ok(meta) = discover_via_401(server_url).await {
+    if let Ok(meta) = discover_via_401(&resolver, server_config).await {
         return Ok(meta);
     }
 
     // Strategy 2: RFC 9728 protected resource discovery
-    if let Ok(resource_meta) = discover_protected_resource(server_url).await
-        && let Ok(meta) = try_discover_from_auth_servers(&resource_meta).await
+    if let Ok(resource_meta) =
+        discover_protected_resource(server_config, outbound_trust_config).await
+        && let Ok(meta) =
+            try_discover_from_auth_servers(&resolver, server_config, &resource_meta).await
     {
         return Ok(meta);
     }
 
     // Strategy 3: Direct - treat MCP server as its own auth server
-    discover_authorization_server(server_url).await
+    discover_authorization_server(server_config, &resolver, &server_config.url).await
 }
 
 /// Perform Dynamic Client Registration with an authorization server.
 ///
 /// This allows clients to register themselves at runtime without pre-configured credentials.
 pub async fn register_client(
+    server_config: &McpServerConfig,
+    outbound_trust_config: &OutboundTrustConfig,
     registration_endpoint: &str,
     redirect_uri: &str,
 ) -> Result<ClientRegistrationResponse, AuthError> {
-    validate_url_safe(registration_endpoint).await?;
+    let resolver = OutboundTrustResolver::new(outbound_trust_config.clone());
+    let outbound_trust =
+        resolve_mcp_outbound_trust_decision(&resolver, server_config, registration_endpoint);
+    validate_url_safe(registration_endpoint, outbound_trust.allow_private_network).await?;
 
-    let client = oauth_http_client()?;
+    let client = oauth_http_client(outbound_trust.allow_invalid_tls)?;
 
     let request = ClientRegistrationRequest {
         client_name: "IronClaw".to_string(),
@@ -689,6 +622,7 @@ pub async fn authorize_mcp_server(
     server_config: &McpServerConfig,
     secrets: &Arc<dyn SecretsStore + Send + Sync>,
     user_id: &str,
+    outbound_trust_config: &OutboundTrustConfig,
 ) -> Result<AccessToken, AuthError> {
     // Find an available port for the callback first (needed for DCR)
     let (listener, port) = find_available_port().await?;
@@ -709,7 +643,8 @@ pub async fn authorize_mcp_server(
     let (client_id, authorization_url, token_url, use_pkce, scopes, mut extra_params) =
         if let Some(oauth) = &server_config.oauth {
             // Pre-configured OAuth
-            let (auth_url, tok_url) = discover_oauth_endpoints(server_config).await?;
+            let (auth_url, tok_url) =
+                discover_oauth_endpoints(server_config, outbound_trust_config).await?;
             (
                 oauth.client_id.clone(),
                 auth_url,
@@ -721,14 +656,21 @@ pub async fn authorize_mcp_server(
         } else {
             // Try Dynamic Client Registration
             println!("  Discovering OAuth endpoints...");
-            let auth_meta = discover_full_oauth_metadata(&server_config.url).await?;
+            let auth_meta =
+                discover_full_oauth_metadata(server_config, outbound_trust_config).await?;
 
             let registration_endpoint = auth_meta
                 .registration_endpoint
                 .ok_or(AuthError::NotSupported)?;
 
             println!("  Registering client dynamically...");
-            let registration = register_client(&registration_endpoint, &redirect_uri).await?;
+            let registration = register_client(
+                server_config,
+                outbound_trust_config,
+                &registration_endpoint,
+                &redirect_uri,
+            )
+            .await?;
             println!("  Client registered: {}", registration.client_id);
 
             (
@@ -758,11 +700,18 @@ pub async fn authorize_mcp_server(
     // Compute canonical resource URI for RFC 8707
     let resource = canonical_resource_uri(&server_config.url);
 
+    let resolver = OutboundTrustResolver::new(outbound_trust_config.clone());
+    let auth_outbound_trust =
+        resolve_mcp_outbound_trust_decision(&resolver, server_config, &authorization_url);
+
     // Validate the discovered authorization URL to prevent a malicious MCP server
     // from redirecting the user to a phishing page or non-HTTPS endpoint.
-    validate_url_safe(&authorization_url)
-        .await
-        .map_err(|e| AuthError::DiscoveryFailed(format!("Unsafe authorization endpoint: {}", e)))?;
+    validate_url_safe(
+        &authorization_url,
+        auth_outbound_trust.allow_private_network,
+    )
+    .await
+    .map_err(|e| AuthError::DiscoveryFailed(format!("Unsafe authorization endpoint: {}", e)))?;
 
     // Build authorization URL
     let auth_url = build_authorization_url(
@@ -795,12 +744,16 @@ pub async fn authorize_mcp_server(
 
     // Exchange code for token
     let token = exchange_code_for_token(
+        server_config,
+        outbound_trust_config,
         &token_url,
-        &client_id,
-        &code,
-        &redirect_uri,
-        pkce.as_ref(),
-        Some(&resource),
+        AuthorizationCodeExchange {
+            client_id: &client_id,
+            code: &code,
+            redirect_uri: &redirect_uri,
+            pkce: pkce.as_ref(),
+            resource: Some(&resource),
+        },
     )
     .await?;
 
@@ -890,30 +843,30 @@ pub async fn wait_for_authorization_callback(
 }
 
 /// Exchange the authorization code for an access token.
-pub async fn exchange_code_for_token(
+async fn exchange_code_for_token(
+    server_config: &McpServerConfig,
+    outbound_trust_config: &OutboundTrustConfig,
     token_url: &str,
-    client_id: &str,
-    code: &str,
-    redirect_uri: &str,
-    pkce: Option<&PkceChallenge>,
-    resource: Option<&str>,
+    exchange: AuthorizationCodeExchange<'_>,
 ) -> Result<AccessToken, AuthError> {
-    validate_url_safe(token_url).await?;
+    let resolver = OutboundTrustResolver::new(outbound_trust_config.clone());
+    let outbound_trust = resolve_mcp_outbound_trust_decision(&resolver, server_config, token_url);
+    validate_url_safe(token_url, outbound_trust.allow_private_network).await?;
 
-    let client = oauth_http_client()?;
+    let client = oauth_http_client(outbound_trust.allow_invalid_tls)?;
 
     let mut params = vec![
         ("grant_type", "authorization_code".to_string()),
-        ("code", code.to_string()),
-        ("redirect_uri", redirect_uri.to_string()),
-        ("client_id", client_id.to_string()),
+        ("code", exchange.code.to_string()),
+        ("redirect_uri", exchange.redirect_uri.to_string()),
+        ("client_id", exchange.client_id.to_string()),
     ];
 
-    if let Some(pkce) = pkce {
+    if let Some(pkce) = exchange.pkce {
         params.push(("code_verifier", pkce.verifier.clone()));
     }
 
-    if let Some(resource) = resource {
+    if let Some(resource) = exchange.resource {
         params.push(("resource", resource.to_string()));
     }
 
@@ -1060,6 +1013,7 @@ pub async fn refresh_access_token(
     server_config: &McpServerConfig,
     secrets: &Arc<dyn SecretsStore + Send + Sync>,
     user_id: &str,
+    outbound_trust_config: &OutboundTrustConfig,
 ) -> Result<AccessToken, AuthError> {
     // Get client_id (from config or stored DCR)
     let client_id = get_client_id(server_config, secrets, user_id).await?;
@@ -1076,18 +1030,21 @@ pub async fn refresh_access_token(
             url.clone()
         } else {
             // Discover from server
-            let auth_meta = discover_full_oauth_metadata(&server_config.url).await?;
+            let auth_meta =
+                discover_full_oauth_metadata(server_config, outbound_trust_config).await?;
             auth_meta.token_endpoint
         }
     } else {
         // DCR - always discover
-        let auth_meta = discover_full_oauth_metadata(&server_config.url).await?;
+        let auth_meta = discover_full_oauth_metadata(server_config, outbound_trust_config).await?;
         auth_meta.token_endpoint
     };
 
-    validate_url_safe(&token_url).await?;
+    let resolver = OutboundTrustResolver::new(outbound_trust_config.clone());
+    let outbound_trust = resolve_mcp_outbound_trust_decision(&resolver, server_config, &token_url);
+    validate_url_safe(&token_url, outbound_trust.allow_private_network).await?;
 
-    let client = oauth_http_client()?;
+    let client = oauth_http_client(outbound_trust.allow_invalid_tls)?;
 
     // Compute canonical resource URI for RFC 8707
     let resource = canonical_resource_uri(&server_config.url);
@@ -1137,6 +1094,7 @@ pub async fn refresh_access_token(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::IpAddr;
 
     #[test]
     fn test_pkce_challenge_generation() {
@@ -1603,70 +1561,104 @@ mod tests {
 
     #[test]
     fn test_is_dangerous_ip_loopback_v4() {
-        assert!(is_dangerous_ip("127.0.0.1".parse().unwrap()));
-        assert!(is_dangerous_ip("127.0.0.2".parse().unwrap()));
+        assert!(crate::tools::mcp::network::is_dangerous_ip(
+            "127.0.0.1".parse().unwrap()
+        ));
+        assert!(crate::tools::mcp::network::is_dangerous_ip(
+            "127.0.0.2".parse().unwrap()
+        ));
     }
 
     #[test]
     fn test_is_dangerous_ip_private_v4() {
-        assert!(is_dangerous_ip("10.0.0.1".parse().unwrap()));
-        assert!(is_dangerous_ip("172.16.0.1".parse().unwrap()));
-        assert!(is_dangerous_ip("192.168.1.1".parse().unwrap()));
+        assert!(crate::tools::mcp::network::is_dangerous_ip(
+            "10.0.0.1".parse().unwrap()
+        ));
+        assert!(crate::tools::mcp::network::is_dangerous_ip(
+            "172.16.0.1".parse().unwrap()
+        ));
+        assert!(crate::tools::mcp::network::is_dangerous_ip(
+            "192.168.1.1".parse().unwrap()
+        ));
     }
 
     #[test]
     fn test_is_dangerous_ip_link_local_v4() {
-        assert!(is_dangerous_ip("169.254.169.254".parse().unwrap()));
+        assert!(crate::tools::mcp::network::is_dangerous_ip(
+            "169.254.169.254".parse().unwrap()
+        ));
     }
 
     #[test]
     fn test_is_dangerous_ip_cgnat() {
-        assert!(is_dangerous_ip("100.64.0.1".parse().unwrap()));
-        assert!(is_dangerous_ip("100.127.255.254".parse().unwrap()));
+        assert!(crate::tools::mcp::network::is_dangerous_ip(
+            "100.64.0.1".parse().unwrap()
+        ));
+        assert!(crate::tools::mcp::network::is_dangerous_ip(
+            "100.127.255.254".parse().unwrap()
+        ));
     }
 
     #[test]
     fn test_is_dangerous_ip_safe_v4() {
-        assert!(!is_dangerous_ip("8.8.8.8".parse().unwrap()));
-        assert!(!is_dangerous_ip("1.1.1.1".parse().unwrap()));
+        assert!(!crate::tools::mcp::network::is_dangerous_ip(
+            "8.8.8.8".parse().unwrap()
+        ));
+        assert!(!crate::tools::mcp::network::is_dangerous_ip(
+            "1.1.1.1".parse().unwrap()
+        ));
     }
 
     #[test]
     fn test_is_dangerous_ip_ipv4_mapped_v6_loopback() {
         // ::ffff:127.0.0.1 must be blocked
         let ip: IpAddr = "::ffff:127.0.0.1".parse().unwrap();
-        assert!(is_dangerous_ip(ip));
+        assert!(crate::tools::mcp::network::is_dangerous_ip(ip));
     }
 
     #[test]
     fn test_is_dangerous_ip_ipv4_mapped_v6_link_local() {
         // ::ffff:169.254.169.254 must be blocked
         let ip: IpAddr = "::ffff:169.254.169.254".parse().unwrap();
-        assert!(is_dangerous_ip(ip));
+        assert!(crate::tools::mcp::network::is_dangerous_ip(ip));
     }
 
     #[test]
     fn test_is_dangerous_ip_unspecified() {
-        assert!(is_dangerous_ip("0.0.0.0".parse().unwrap()));
-        assert!(is_dangerous_ip("::".parse().unwrap()));
+        assert!(crate::tools::mcp::network::is_dangerous_ip(
+            "0.0.0.0".parse().unwrap()
+        ));
+        assert!(crate::tools::mcp::network::is_dangerous_ip(
+            "::".parse().unwrap()
+        ));
     }
 
     #[test]
     fn test_is_dangerous_ip_v6_loopback() {
-        assert!(is_dangerous_ip("::1".parse().unwrap()));
+        assert!(crate::tools::mcp::network::is_dangerous_ip(
+            "::1".parse().unwrap()
+        ));
     }
 
     #[tokio::test]
     async fn test_validate_url_safe_https() {
-        assert!(validate_url_safe("https://example.com/path").await.is_ok());
+        assert!(
+            validate_url_safe("https://example.com/path", false)
+                .await
+                .is_ok()
+        );
     }
 
     #[tokio::test]
     async fn test_validate_url_safe_http_localhost_allowed() {
         // HTTP is only allowed for localhost dev scenarios
-        assert!(validate_url_safe("http://localhost/path").await.is_ok());
         assert!(
-            validate_url_safe("http://localhost:8080/path")
+            validate_url_safe("http://localhost/path", false)
+                .await
+                .is_ok()
+        );
+        assert!(
+            validate_url_safe("http://localhost:8080/path", false)
                 .await
                 .is_ok()
         );
@@ -1675,33 +1667,75 @@ mod tests {
     #[tokio::test]
     async fn test_validate_url_safe_http_non_localhost_rejected() {
         // HTTP to non-localhost hosts must be rejected (plaintext credential risk)
-        assert!(validate_url_safe("http://example.com/path").await.is_err());
+        assert!(
+            validate_url_safe("http://example.com/path", false)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
     async fn test_validate_url_safe_bad_scheme() {
-        assert!(validate_url_safe("ftp://example.com/path").await.is_err());
-        assert!(validate_url_safe("file:///etc/passwd").await.is_err());
+        assert!(
+            validate_url_safe("ftp://example.com/path", false)
+                .await
+                .is_err()
+        );
+        assert!(
+            validate_url_safe("file:///etc/passwd", false)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
     async fn test_validate_url_safe_private_ip() {
         // 127.0.0.1 over HTTP is allowed (localhost dev scenario)
-        assert!(validate_url_safe("http://127.0.0.1/path").await.is_ok());
-        // Private/link-local IPs over HTTPS are blocked (SSRF protection)
-        assert!(validate_url_safe("https://10.0.0.1/path").await.is_err());
         assert!(
-            validate_url_safe("https://169.254.169.254/latest/meta-data")
+            validate_url_safe("http://127.0.0.1/path", false)
+                .await
+                .is_ok()
+        );
+        // Private/link-local IPs over HTTPS are blocked (SSRF protection)
+        assert!(
+            validate_url_safe("https://10.0.0.1/path", false)
+                .await
+                .is_err()
+        );
+        assert!(
+            validate_url_safe("https://169.254.169.254/latest/meta-data", false)
                 .await
                 .is_err()
         );
         // Private IPs over HTTP (non-localhost) are blocked
-        assert!(validate_url_safe("http://10.0.0.1/path").await.is_err());
+        assert!(
+            validate_url_safe("http://10.0.0.1/path", false)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
     async fn test_validate_url_safe_public_ip() {
-        assert!(validate_url_safe("https://8.8.8.8/dns").await.is_ok());
+        assert!(
+            validate_url_safe("https://8.8.8.8/dns", false)
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_validate_url_safe_private_ip_allowed_by_policy() {
+        assert!(
+            validate_url_safe("https://10.0.0.1/path", true)
+                .await
+                .is_ok()
+        );
+        assert!(
+            validate_url_safe("https://192.168.1.1/path", true)
+                .await
+                .is_ok()
+        );
     }
 
     // --- New tests for parse_resource_metadata_url ---
