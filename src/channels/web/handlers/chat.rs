@@ -175,7 +175,7 @@ pub async fn chat_auth_token_handler(
             if result.verification.is_some() {
                 state.sse.broadcast_for_user(
                     &user.user_id,
-                    SseEvent::AuthRequired {
+                    AppEvent::AuthRequired {
                         extension_name: req.extension_name.clone(),
                         instructions: Some(result.message),
                         auth_url: None,
@@ -187,7 +187,7 @@ pub async fn chat_auth_token_handler(
 
                 state.sse.broadcast_for_user(
                     &user.user_id,
-                    SseEvent::AuthCompleted {
+                    AppEvent::AuthCompleted {
                         extension_name: req.extension_name.clone(),
                         success: true,
                         message: result.message,
@@ -202,7 +202,7 @@ pub async fn chat_auth_token_handler(
             if matches!(e, crate::extensions::ExtensionError::ValidationFailed(_)) {
                 state.sse.broadcast_for_user(
                     &user.user_id,
-                    SseEvent::AuthRequired {
+                    AppEvent::AuthRequired {
                         extension_name: req.extension_name.clone(),
                         instructions: Some(msg.clone()),
                         auth_url: None,

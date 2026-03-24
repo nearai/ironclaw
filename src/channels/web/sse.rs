@@ -11,7 +11,7 @@ use tokio::sync::broadcast;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
 
-use crate::channels::web::types::SseEvent;
+use crate::channels::web::types::AppEvent;
 
 /// Maximum number of concurrent SSE/WebSocket connections.
 /// Prevents resource exhaustion from connection flooding.
@@ -25,7 +25,7 @@ const MAX_CONNECTIONS: u64 = 100;
 #[derive(Debug, Clone)]
 pub(crate) struct ScopedEvent {
     pub(crate) user_id: Option<String>,
-    pub(crate) event: SseEvent,
+    pub(crate) event: AppEvent,
 }
 
 /// Manages SSE broadcast to all connected browser tabs.
@@ -75,7 +75,7 @@ impl SseManager {
     }
 
     /// Broadcast an event to all connected clients (global/unscoped).
-    pub fn broadcast(&self, event: SseEvent) {
+    pub fn broadcast(&self, event: AppEvent) {
         let _ = self.tx.send(ScopedEvent {
             user_id: None,
             event,
@@ -86,7 +86,7 @@ impl SseManager {
     ///
     /// Only subscribers for this user_id (or unscoped subscribers) will
     /// receive the event.
-    pub fn broadcast_for_user(&self, user_id: &str, event: SseEvent) {
+    pub fn broadcast_for_user(&self, user_id: &str, event: AppEvent) {
         let _ = self.tx.send(ScopedEvent {
             user_id: Some(user_id.to_string()),
             event,
@@ -108,7 +108,7 @@ impl SseManager {
     pub fn subscribe_raw(
         &self,
         user_id: Option<String>,
-    ) -> Option<impl Stream<Item = SseEvent> + Send + 'static + use<>> {
+    ) -> Option<impl Stream<Item = AppEvent> + Send + 'static + use<>> {
         // Atomically increment only if below the limit. This prevents
         // concurrent callers from overshooting max_connections.
         let counter = Arc::clone(&self.connection_count);
@@ -187,28 +187,28 @@ impl SseManager {
                     }
                 };
                 let event_type = match &event {
-                    SseEvent::Response { .. } => "response",
-                    SseEvent::Thinking { .. } => "thinking",
-                    SseEvent::ToolStarted { .. } => "tool_started",
-                    SseEvent::ToolCompleted { .. } => "tool_completed",
-                    SseEvent::ToolResult { .. } => "tool_result",
-                    SseEvent::StreamChunk { .. } => "stream_chunk",
-                    SseEvent::Status { .. } => "status",
-                    SseEvent::ApprovalNeeded { .. } => "approval_needed",
-                    SseEvent::AuthRequired { .. } => "auth_required",
-                    SseEvent::AuthCompleted { .. } => "auth_completed",
-                    SseEvent::Error { .. } => "error",
-                    SseEvent::JobStarted { .. } => "job_started",
-                    SseEvent::JobMessage { .. } => "job_message",
-                    SseEvent::JobToolUse { .. } => "job_tool_use",
-                    SseEvent::JobToolResult { .. } => "job_tool_result",
-                    SseEvent::JobStatus { .. } => "job_status",
-                    SseEvent::JobResult { .. } => "job_result",
-                    SseEvent::Heartbeat => "heartbeat",
-                    SseEvent::ImageGenerated { .. } => "image_generated",
-                    SseEvent::Suggestions { .. } => "suggestions",
-                    SseEvent::TurnCost { .. } => "turn_cost",
-                    SseEvent::ExtensionStatus { .. } => "extension_status",
+                    AppEvent::Response { .. } => "response",
+                    AppEvent::Thinking { .. } => "thinking",
+                    AppEvent::ToolStarted { .. } => "tool_started",
+                    AppEvent::ToolCompleted { .. } => "tool_completed",
+                    AppEvent::ToolResult { .. } => "tool_result",
+                    AppEvent::StreamChunk { .. } => "stream_chunk",
+                    AppEvent::Status { .. } => "status",
+                    AppEvent::ApprovalNeeded { .. } => "approval_needed",
+                    AppEvent::AuthRequired { .. } => "auth_required",
+                    AppEvent::AuthCompleted { .. } => "auth_completed",
+                    AppEvent::Error { .. } => "error",
+                    AppEvent::JobStarted { .. } => "job_started",
+                    AppEvent::JobMessage { .. } => "job_message",
+                    AppEvent::JobToolUse { .. } => "job_tool_use",
+                    AppEvent::JobToolResult { .. } => "job_tool_result",
+                    AppEvent::JobStatus { .. } => "job_status",
+                    AppEvent::JobResult { .. } => "job_result",
+                    AppEvent::Heartbeat => "heartbeat",
+                    AppEvent::ImageGenerated { .. } => "image_generated",
+                    AppEvent::Suggestions { .. } => "suggestions",
+                    AppEvent::TurnCost { .. } => "turn_cost",
+                    AppEvent::ExtensionStatus { .. } => "extension_status",
                 };
                 Some(Ok(Event::default().event(event_type).data(data)))
             });
@@ -272,7 +272,7 @@ mod tests {
     fn test_broadcast_without_receivers() {
         let manager = SseManager::new();
         // Should not panic even with no receivers
-        manager.broadcast(SseEvent::Heartbeat);
+        manager.broadcast(AppEvent::Heartbeat);
     }
 
     #[tokio::test]
@@ -280,14 +280,14 @@ mod tests {
         let manager = SseManager::new();
         let mut stream = Box::pin(manager.subscribe_raw(None).expect("should subscribe"));
 
-        manager.broadcast(SseEvent::Status {
+        manager.broadcast(AppEvent::Status {
             message: "test".to_string(),
             thread_id: None,
         });
 
         let event = stream.next().await.unwrap();
         match event {
-            SseEvent::Status { message, .. } => assert_eq!(message, "test"),
+            AppEvent::Status { message, .. } => assert_eq!(message, "test"),
             _ => panic!("unexpected event type"),
         }
     }
@@ -299,14 +299,14 @@ mod tests {
 
         assert_eq!(manager.connection_count(), 1);
 
-        manager.broadcast(SseEvent::Thinking {
+        manager.broadcast(AppEvent::Thinking {
             message: "working".to_string(),
             thread_id: None,
         });
 
         let event = stream.next().await.unwrap();
         match event {
-            SseEvent::Thinking { message, .. } => assert_eq!(message, "working"),
+            AppEvent::Thinking { message, .. } => assert_eq!(message, "working"),
             _ => panic!("Expected Thinking event"),
         }
     }
@@ -329,12 +329,12 @@ mod tests {
         let mut s2 = Box::pin(manager.subscribe_raw(None).expect("should subscribe"));
         assert_eq!(manager.connection_count(), 2);
 
-        manager.broadcast(SseEvent::Heartbeat);
+        manager.broadcast(AppEvent::Heartbeat);
 
         let e1 = s1.next().await.unwrap();
         let e2 = s2.next().await.unwrap();
-        assert!(matches!(e1, SseEvent::Heartbeat));
-        assert!(matches!(e2, SseEvent::Heartbeat));
+        assert!(matches!(e1, AppEvent::Heartbeat));
+        assert!(matches!(e2, AppEvent::Heartbeat));
 
         drop(s1);
         assert_eq!(manager.connection_count(), 1);
@@ -373,25 +373,25 @@ mod tests {
         // Send event scoped to alice
         manager.broadcast_for_user(
             "alice",
-            SseEvent::Status {
+            AppEvent::Status {
                 message: "alice only".to_string(),
                 thread_id: None,
             },
         );
 
         // Send global event
-        manager.broadcast(SseEvent::Heartbeat);
+        manager.broadcast(AppEvent::Heartbeat);
 
         // Alice gets her scoped event
         let e = alice.next().await.unwrap();
-        assert!(matches!(e, SseEvent::Status { .. }));
+        assert!(matches!(e, AppEvent::Status { .. }));
 
         // Alice also gets the global heartbeat
         let e = alice.next().await.unwrap();
-        assert!(matches!(e, SseEvent::Heartbeat));
+        assert!(matches!(e, AppEvent::Heartbeat));
 
         // Bob only gets the global heartbeat (alice's event was filtered)
         let e = bob.next().await.unwrap(); // safety: test-only
-        assert!(matches!(e, SseEvent::Heartbeat)); // safety: test assertion
+        assert!(matches!(e, AppEvent::Heartbeat)); // safety: test assertion
     }
 }
