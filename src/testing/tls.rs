@@ -21,10 +21,10 @@ impl SelfSignedHttpsServer {
         let body = Arc::<str>::from(body.into());
         let listener = TcpListener::bind(("127.0.0.1", 0))
             .await
-            .expect("bind self-signed HTTPS test listener");
+            .expect("bind self-signed HTTPS test listener"); // safety: test-only setup helper
         let addr = listener
             .local_addr()
-            .expect("read local addr for self-signed HTTPS test listener");
+            .expect("read local addr for self-signed HTTPS test listener"); // safety: test-only setup helper
         let acceptor = TlsAcceptor::from(Arc::new(server_config()));
         let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
 
@@ -89,17 +89,17 @@ fn server_config() -> ServerConfig {
     CRYPTO_PROVIDER.get_or_init(|| {
         tokio_rustls::rustls::crypto::ring::default_provider()
             .install_default()
-            .expect("install rustls crypto provider for test HTTPS server");
+            .expect("install rustls crypto provider for test HTTPS server"); // safety: test-only setup helper
     });
 
     let rcgen::CertifiedKey { cert, key_pair } =
         generate_simple_self_signed(vec!["localhost".to_string(), "127.0.0.1".to_string()])
-            .expect("generate self-signed cert for test HTTPS server");
+            .expect("generate self-signed cert for test HTTPS server"); // safety: test-only setup helper
 
     let key_der = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key_pair.serialize_der()));
 
     ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(vec![cert.der().clone()], key_der)
-        .expect("build rustls server config for test HTTPS server")
+        .expect("build rustls server config for test HTTPS server") // safety: test-only setup helper
 }
