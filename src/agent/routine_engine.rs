@@ -1994,19 +1994,37 @@ fn sanitize_summary(s: &str) -> String {
     }
 }
 
-/// Remove HTML/XML tags from a string.
+/// Remove actual HTML tags from a string while preserving non-HTML angle brackets.
+///
+/// Only strips patterns that look like real HTML/XML tags (e.g. `<div>`, `</p>`,
+/// `<img src=...>`), not generic angle-bracket content like `Vec<String>`,
+/// `cat < input.txt`, or comparison operators.
 fn strip_html_tags(s: &str) -> String {
-    let mut result = String::with_capacity(s.len());
-    let mut in_tag = false;
-    for c in s.chars() {
-        match c {
-            '<' => in_tag = true,
-            '>' if in_tag => in_tag = false,
-            _ if !in_tag => result.push(c),
-            _ => {}
-        }
-    }
-    result
+    use std::sync::LazyLock;
+
+    // Matches opening tags like <div>, <a href="...">, <img src=x onerror=...>,
+    // closing tags like </p>, </script>, and self-closing tags like <br/>.
+    // Does NOT match things like Vec<String>, x<10, or < input.txt because those
+    // don't have a letter immediately after '<' followed by valid tag structure,
+    // or they aren't among recognized HTML tag names.
+    static HTML_TAG_RE: LazyLock<Regex> = LazyLock::new(|| {
+        // Match <tagname ...> or </tagname> where tagname starts with a letter.
+        // We restrict to known HTML tag names to avoid false positives on generic
+        // identifiers like Vec<String>.
+        let tags = "a|abbr|address|area|article|aside|audio|b|base|bdi|bdo|blockquote|\
+            body|br|button|canvas|caption|cite|code|col|colgroup|data|datalist|dd|del|\
+            details|dfn|dialog|div|dl|dt|em|embed|fieldset|figcaption|figure|footer|\
+            form|h[1-6]|head|header|hgroup|hr|html|i|iframe|img|input|ins|kbd|label|\
+            legend|li|link|main|map|mark|meta|meter|nav|noscript|object|ol|optgroup|\
+            option|output|p|param|picture|pre|progress|q|rp|rt|ruby|s|samp|script|\
+            section|select|slot|small|source|span|strong|style|sub|summary|sup|table|\
+            tbody|td|template|textarea|tfoot|th|thead|time|title|tr|track|u|ul|var|\
+            video|wbr";
+        Regex::new(&format!(r"(?i)</?(?:{})(?:\s[^>]*)?>", tags))
+            .expect("HTML_TAG_RE is a valid static regex")
+    });
+
+    HTML_TAG_RE.replace_all(s, "").into_owned()
 }
 
 #[cfg(test)]
@@ -2575,6 +2593,33 @@ mod tests {
             "bold and link"
         );
         assert_eq!(sanitize_summary("<img src=x onerror=alert(1)>"), "");
+    }
+
+    #[test]
+    fn test_sanitize_summary_preserves_non_html_angle_brackets() {
+        use super::sanitize_summary;
+
+        // Rust/Java generics must pass through unchanged
+        assert_eq!(
+            sanitize_summary("expected Vec<String>"),
+            "expected Vec<String>"
+        );
+        assert_eq!(
+            sanitize_summary("HashMap<String, Vec<u8>>"),
+            "HashMap<String, Vec<u8>>"
+        );
+
+        // Shell redirects must pass through unchanged
+        assert_eq!(sanitize_summary("cat < input.txt"), "cat < input.txt");
+
+        // Comparison operators must pass through unchanged
+        assert_eq!(sanitize_summary("x < 10 && y > 20"), "x < 10 && y > 20");
+
+        // Mixed: real HTML stripped but generics preserved
+        assert_eq!(
+            sanitize_summary("Error in Vec<String>: <b>failed</b>"),
+            "Error in Vec<String>: failed"
+        );
     }
 
     #[test]
