@@ -1008,6 +1008,10 @@ impl Agent {
     }
 
     /// Process an approval or rejection of a pending tool execution.
+    // Nested `if` blocks are intentional: collapsing them would produce
+    // `if let … && …` (let-chains), which require `#![feature(let_chains)]`
+    // and are not available on our MSRV.
+    #[allow(clippy::collapsible_if)]
     pub(super) async fn process_approval(
         &self,
         message: &IncomingMessage,
@@ -1050,14 +1054,14 @@ impl Agent {
             };
 
             // Verify request ID while still holding the lock — atomic with take
-            if let Some(req_id) = request_id
-                && req_id != taken.request_id
-            {
-                // Restore atomically under same lock
-                thread.await_approval(taken);
-                return Ok(SubmissionResult::error(
-                    "Request ID mismatch. Use the correct request ID.",
-                ));
+            if let Some(req_id) = request_id {
+                if req_id != taken.request_id {
+                    // Restore atomically under same lock
+                    thread.await_approval(taken);
+                    return Ok(SubmissionResult::error(
+                        "Request ID mismatch. Use the correct request ID.",
+                    ));
+                }
             }
 
             taken
@@ -1188,20 +1192,20 @@ impl Agent {
                 )
                 .await;
 
-            if let Ok(ref output) = tool_result
-                && !output.is_empty()
-            {
-                let _ = self
-                    .channels
-                    .send_status(
-                        &message.channel,
-                        StatusUpdate::ToolResult {
-                            name: pending.tool_name.clone(),
-                            preview: output.clone(),
-                        },
-                        &message.metadata,
-                    )
-                    .await;
+            if let Ok(ref output) = tool_result {
+                if !output.is_empty() {
+                    let _ = self
+                        .channels
+                        .send_status(
+                            &message.channel,
+                            StatusUpdate::ToolResult {
+                                name: pending.tool_name.clone(),
+                                preview: output.clone(),
+                            },
+                            &message.metadata,
+                        )
+                        .await;
+                }
             }
 
             // Build context including the tool result
@@ -1457,20 +1461,20 @@ impl Agent {
             let mut deferred_auth: Option<String> = None;
 
             for (tc, deferred_result) in exec_results {
-                if let Ok(ref output) = deferred_result
-                    && !output.is_empty()
-                {
-                    let _ = self
-                        .channels
-                        .send_status(
-                            &message.channel,
-                            StatusUpdate::ToolResult {
-                                name: tc.name.clone(),
-                                preview: output.clone(),
-                            },
-                            &message.metadata,
-                        )
-                        .await;
+                if let Ok(ref output) = deferred_result {
+                    if !output.is_empty() {
+                        let _ = self
+                            .channels
+                            .send_status(
+                                &message.channel,
+                                StatusUpdate::ToolResult {
+                                    name: tc.name.clone(),
+                                    preview: output.clone(),
+                                },
+                                &message.metadata,
+                            )
+                            .await;
+                    }
                 }
 
                 // Sanitize first, then record the cleaned version in thread.
@@ -1510,20 +1514,21 @@ impl Agent {
                 }
 
                 // Auth detection — defer return until all results are recorded
-                if deferred_auth.is_none()
-                    && let Some((ext_name, instructions)) =
+                if deferred_auth.is_none() {
+                    if let Some((ext_name, instructions)) =
                         check_auth_required(&tc.name, &deferred_result)
-                {
-                    self.handle_auth_intercept(
-                        &session,
-                        thread_id,
-                        message,
-                        &deferred_result,
-                        ext_name,
-                        instructions.clone(),
-                    )
-                    .await;
-                    deferred_auth = Some(instructions);
+                    {
+                        self.handle_auth_intercept(
+                            &session,
+                            thread_id,
+                            message,
+                            &deferred_result,
+                            ext_name,
+                            instructions.clone(),
+                        )
+                        .await;
+                        deferred_auth = Some(instructions);
+                    }
                 }
 
                 context_messages.push(ChatMessage::tool_result(&tc.id, &tc.name, deferred_content));
