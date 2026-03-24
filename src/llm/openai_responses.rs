@@ -458,23 +458,19 @@ fn parse_sse_response(body: &str) -> Result<ParsedResponse, LlmError> {
                 }
             }
             "response.function_call_arguments.delta" => {
-                if let Some(item_id) = event.data.get("item_id").and_then(|v| v.as_str()) {
-                    if let Some(state) = active_function_calls.get_mut(item_id) {
-                        if let Some(delta) = event.data.get("delta").and_then(|d| d.as_str()) {
-                            state.arguments.push_str(delta);
-                        }
-                    }
+                if let Some(item_id) = event.data.get("item_id").and_then(|v| v.as_str())
+                    && let Some(state) = active_function_calls.get_mut(item_id)
+                    && let Some(delta) = event.data.get("delta").and_then(|d| d.as_str())
+                {
+                    state.arguments.push_str(delta);
                 }
             }
             "response.function_call_arguments.done" => {
-                if let Some(item_id) = event.data.get("item_id").and_then(|v| v.as_str()) {
-                    if let Some(state) = active_function_calls.get_mut(item_id) {
-                        if let Some(arguments) =
-                            event.data.get("arguments").and_then(|v| v.as_str())
-                        {
-                            state.arguments = arguments.to_string();
-                        }
-                    }
+                if let Some(item_id) = event.data.get("item_id").and_then(|v| v.as_str())
+                    && let Some(state) = active_function_calls.get_mut(item_id)
+                    && let Some(arguments) = event.data.get("arguments").and_then(|v| v.as_str())
+                {
+                    state.arguments = arguments.to_string();
                 }
             }
             "response.output_item.done" => {
@@ -578,7 +574,10 @@ fn parse_sse_response(body: &str) -> Result<ParsedResponse, LlmError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::LlmError;
+    use crate::llm::config::{CacheRetention, RegistryProviderConfig};
     use crate::llm::provider::{ChatMessage, ToolDefinition};
+    use crate::llm::registry::ProviderProtocol;
 
     #[test]
     fn build_request_body_uses_responses_format_for_text() {
@@ -627,6 +626,33 @@ mod tests {
         assert_eq!(body["tools"][0]["type"], "function");
         assert_eq!(body["tool_choice"], "auto");
         assert_eq!(body["parallel_tool_calls"], true);
+    }
+
+    #[test]
+    fn new_requires_api_key() {
+        let config = RegistryProviderConfig {
+            protocol: ProviderProtocol::OpenAiResponses,
+            provider_id: "openai_compatible".to_string(),
+            api_key: None,
+            base_url: "https://example.com/v1".to_string(),
+            model: "gpt-5.4".to_string(),
+            extra_headers: Vec::new(),
+            oauth_token: None,
+            is_codex_chatgpt: false,
+            refresh_token: None,
+            auth_path: None,
+            cache_retention: CacheRetention::None,
+            unsupported_params: Vec::new(),
+        };
+
+        let err = match OpenAiResponsesProvider::new(&config, 30) {
+            Ok(_) => panic!("api key is required"),
+            Err(err) => err,
+        };
+        assert!(matches!(
+            err,
+            LlmError::AuthFailed { provider } if provider == "openai_compatible"
+        ));
     }
 
     #[test]
