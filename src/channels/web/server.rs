@@ -1297,8 +1297,10 @@ async fn chat_send_handler(
         ));
     }
 
-    let mut msg = IncomingMessage::new("gateway", &user.user_id, &req.content)
-        .with_sender_id(&state.default_sender_id);
+    let mut msg = IncomingMessage::new("gateway", &user.user_id, &req.content);
+    if state.owner_id != state.default_sender_id && user.user_id == state.owner_id {
+        msg = msg.with_sender_id(&state.default_sender_id);
+    }
     // Prefer timezone from JSON body, fall back to X-Timezone header
     let tz = req
         .timezone
@@ -1399,8 +1401,10 @@ async fn chat_approval_handler(
         )
     })?;
 
-    let mut msg = IncomingMessage::new("gateway", &user.user_id, content)
-        .with_sender_id(&state.default_sender_id);
+    let mut msg = IncomingMessage::new("gateway", &user.user_id, content);
+    if state.owner_id != state.default_sender_id && user.user_id == state.owner_id {
+        msg = msg.with_sender_id(&state.default_sender_id);
+    }
 
     if let Some(ref thread_id) = req.thread_id {
         msg = msg.with_thread(thread_id);

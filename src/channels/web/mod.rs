@@ -126,16 +126,14 @@ impl GatewayChannel {
     /// preserving the configured gateway sender/routing identity.
     pub fn with_owner_scope(mut self, owner_id: impl Into<String>) -> Self {
         let owner_id = owner_id.into();
-        if self.config.user_tokens.is_none()
-            && let Some(token) = self.auth.first_token().map(ToOwned::to_owned)
-        {
-            self.auth = MultiAuthState::single(token, owner_id);
+        let single_user_token = if self.config.user_tokens.is_none() {
+            self.auth.first_token().map(ToOwned::to_owned)
+        } else {
+            None
+        };
+        if let Some(token) = single_user_token {
+            self.auth = MultiAuthState::single(token, owner_id.clone());
         }
-        let owner_id = self
-            .auth
-            .first_identity()
-            .map(|identity| identity.user_id.clone())
-            .unwrap_or_else(|| self.config.user_id.clone());
         self.rebuild_state(|s| s.owner_id = owner_id);
         self
     }
