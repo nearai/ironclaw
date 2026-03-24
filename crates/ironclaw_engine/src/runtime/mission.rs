@@ -154,7 +154,9 @@ impl MissionManager {
                     mission.next_fire_at.is_some_and(|next| next <= now)
                 }
                 MissionCadence::Manual => false,
-                MissionCadence::OnEvent { .. } | MissionCadence::OnPush => false,
+                MissionCadence::OnEvent { .. }
+                | MissionCadence::OnSystemEvent { .. }
+                | MissionCadence::Webhook { .. } => false,
             };
 
             if should_fire && let Some(tid) = self.fire_mission(mid, user_id).await? {
@@ -539,6 +541,7 @@ mod tests {
                 "periodic goal",
                 MissionCadence::Cron {
                     expression: "* * * * *".into(),
+                    timezone: None,
                 },
             )
             .await

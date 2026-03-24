@@ -47,15 +47,31 @@ pub enum MissionStatus {
 }
 
 /// How a mission triggers new threads.
+///
+/// The engine defines the trigger *types*. The bridge/host implements the
+/// actual trigger infrastructure (cron tickers, webhook endpoints, event
+/// matchers). The engine just needs to be told "fire this mission now."
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum MissionCadence {
     /// Spawn on a cron schedule (e.g., "0 */6 * * *" for every 6 hours).
-    Cron { expression: String },
-    /// Spawn in response to a named event.
+    Cron {
+        expression: String,
+        timezone: Option<String>,
+    },
+    /// Spawn in response to a channel message matching a pattern.
     OnEvent { event_pattern: String },
-    /// Spawn when code is pushed (webhook-driven).
-    OnPush,
-    /// Only spawn when manually triggered.
+    /// Spawn in response to a structured system event (from tools or external).
+    OnSystemEvent {
+        source: String,
+        event_type: String,
+    },
+    /// Spawn when an external webhook is received at a registered path.
+    /// The bridge registers the webhook endpoint and routes payloads here.
+    Webhook {
+        path: String,
+        secret: Option<String>,
+    },
+    /// Only spawn when manually triggered (via mission_fire tool or API).
     Manual,
 }
 
@@ -68,10 +84,30 @@ pub struct Mission {
     pub goal: String,
     pub status: MissionStatus,
     pub cadence: MissionCadence,
+
+    // ── Evolving strategy ──
+    /// What the next thread should focus on (updated after each thread).
+    pub current_focus: Option<String>,
+    /// What approaches have been tried and what happened.
+    pub approach_history: Vec<String>,
+
+    // ── Progress tracking ──
     /// History of threads spawned by this mission.
     pub thread_history: Vec<ThreadId>,
     /// Optional criteria for declaring the mission complete.
     pub success_criteria: Option<String>,
+
+    // ── Budget ──
+    /// Maximum threads per day (0 = unlimited).
+    pub max_threads_per_day: u32,
+    /// Threads spawned today (reset daily by the cron ticker).
+    pub threads_today: u32,
+
+    // ── Trigger payload ──
+    /// Payload from the most recent trigger (webhook body, event data, etc.).
+    /// Injected into the thread's context so the code can access it.
+    pub last_trigger_payload: Option<serde_json::Value>,
+
     pub metadata: serde_json::Value,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -94,8 +130,13 @@ impl Mission {
             goal: goal.into(),
             status: MissionStatus::Active,
             cadence,
+            current_focus: None,
+            approach_history: Vec::new(),
             thread_history: Vec::new(),
             success_criteria: None,
+            max_threads_per_day: 10,
+            threads_today: 0,
+            last_trigger_payload: None,
             metadata: serde_json::Value::Object(serde_json::Map::new()),
             created_at: now,
             updated_at: now,
