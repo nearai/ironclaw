@@ -914,7 +914,7 @@ mod tests {
             crate::tools::mcp::config::NEARAI_COMPANION_MCP_NAME,
             "http://localhost:3000/mcp",
         )
-            .with_auth_source(crate::tools::mcp::config::McpAuthSource::NearAi);
+        .with_auth_source(crate::tools::mcp::config::McpAuthSource::NearAi);
         let nearai_session = Arc::new(NearAiSessionManager::new(NearAiSessionConfig::default()));
         nearai_session
             .set_token(SecretString::from("sess_test_token"))
@@ -941,7 +941,7 @@ mod tests {
             crate::tools::mcp::config::NEARAI_COMPANION_MCP_NAME,
             "http://localhost:3000/mcp",
         )
-            .with_auth_source(crate::tools::mcp::config::McpAuthSource::NearAi);
+        .with_auth_source(crate::tools::mcp::config::McpAuthSource::NearAi);
         let nearai_session = Arc::new(NearAiSessionManager::new(NearAiSessionConfig::default()));
 
         let client = McpClient::new_with_config(config)
@@ -1011,7 +1011,7 @@ mod tests {
             crate::tools::mcp::config::NEARAI_COMPANION_MCP_NAME,
             "http://localhost:3000/mcp",
         )
-            .with_auth_source(crate::tools::mcp::config::McpAuthSource::NearAi);
+        .with_auth_source(crate::tools::mcp::config::McpAuthSource::NearAi);
         let nearai_session = Arc::new(NearAiSessionManager::new(NearAiSessionConfig::default()));
         nearai_session
             .set_token(SecretString::from("sess_runtime_token"))

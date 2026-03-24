@@ -6230,15 +6230,14 @@ mod tests {
         );
         let channels_dir = dir.path().join("channels");
 
-        let mgr =
-            make_test_manager_with_dirs(
-                None,
-                tools_dir,
-                channels_dir,
-                Some(Arc::clone(&store)),
-                None,
-                None,
-            );
+        let mgr = make_test_manager_with_dirs(
+            None,
+            tools_dir,
+            channels_dir,
+            Some(Arc::clone(&store)),
+            None,
+            None,
+        );
         let mut fields = std::collections::HashMap::new();
         fields.insert("llm_backend".to_string(), "openai".to_string());
 
@@ -6290,15 +6289,14 @@ mod tests {
         );
         let channels_dir = dir.path().join("channels");
 
-        let mgr =
-            make_test_manager_with_dirs(
-                None,
-                tools_dir,
-                channels_dir,
-                Some(Arc::clone(&store)),
-                None,
-                None,
-            );
+        let mgr = make_test_manager_with_dirs(
+            None,
+            tools_dir,
+            channels_dir,
+            Some(Arc::clone(&store)),
+            None,
+            None,
+        );
         let mut fields = std::collections::HashMap::new();
         fields.insert("session".to_string(), "overwrite".to_string());
 
@@ -7639,7 +7637,8 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
         let tools_dir = dir.path().join("tools");
         let channels_dir = dir.path().join("channels");
-        let mgr = make_test_manager_with_dirs(None, tools_dir, channels_dir.clone(), None, None, None);
+        let mgr =
+            make_test_manager_with_dirs(None, tools_dir, channels_dir.clone(), None, None, None);
 
         let wasm_path = channels_dir.join("telegram.wasm");
         let cap_path = channels_dir.join("telegram.capabilities.json");

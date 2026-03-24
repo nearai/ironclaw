@@ -726,9 +726,7 @@ async fn get_secrets_store() -> anyhow::Result<Arc<dyn SecretsStore + Send + Syn
     crate::cli::init_secrets_store().await
 }
 
-fn as_settings_store(
-    db: Option<&dyn Database>,
-) -> Option<&(dyn crate::db::SettingsStore + Sync)> {
+fn as_settings_store(db: Option<&dyn Database>) -> Option<&(dyn crate::db::SettingsStore + Sync)> {
     db.map(|db| db as &(dyn crate::db::SettingsStore + Sync))
 }
 
@@ -905,7 +903,10 @@ mod tests {
                 Err(DatabaseError::Query("unused in test".to_string()))
             }
 
-            async fn list_settings(&self, _user_id: &str) -> Result<Vec<SettingRow>, DatabaseError> {
+            async fn list_settings(
+                &self,
+                _user_id: &str,
+            ) -> Result<Vec<SettingRow>, DatabaseError> {
                 Ok(Vec::new())
             }
 
@@ -979,8 +980,8 @@ mod tests {
         assert_eq!(llm.backend, "nearai");
         assert_eq!(llm.nearai.model, "db-backed-nearai-model");
 
-        let companion = config::derive_nearai_companion_mcp_server_from_llm(&llm)
-            .expect("derived companion");
+        let companion =
+            config::derive_nearai_companion_mcp_server_from_llm(&llm).expect("derived companion");
         assert_eq!(companion.url, "http://127.0.0.1:11434/mcp");
     }
 }
