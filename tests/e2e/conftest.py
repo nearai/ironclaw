@@ -292,14 +292,14 @@ async def ironclaw_server(
                 pass
             try:
                 await asyncio.wait_for(proc.wait(), timeout=2)
-            except (asyncio.TimeoutError, Exception):
+            except asyncio.TimeoutError:
                 pass
         returncode = proc.returncode
         stderr_bytes = b""
         if proc.stderr:
             try:
                 stderr_bytes = await asyncio.wait_for(proc.stderr.read(8192), timeout=2)
-            except (asyncio.TimeoutError, Exception):
+            except asyncio.TimeoutError:
                 pass
         stderr_text = stderr_bytes.decode("utf-8", errors="replace")
         pytest.fail(
@@ -398,14 +398,14 @@ async def http_channel_server_without_secret(
                 pass
             try:
                 await asyncio.wait_for(proc.wait(), timeout=2)
-            except (asyncio.TimeoutError, Exception):
+            except asyncio.TimeoutError:
                 pass
         returncode = proc.returncode
         stderr_bytes = b""
         if proc.stderr:
             try:
                 stderr_bytes = await asyncio.wait_for(proc.stderr.read(8192), timeout=2)
-            except (asyncio.TimeoutError, Exception):
+            except asyncio.TimeoutError:
                 pass
         stderr_text = stderr_bytes.decode("utf-8", errors="replace")
         pytest.fail(
