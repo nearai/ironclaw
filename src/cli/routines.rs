@@ -10,7 +10,7 @@ use clap::Subcommand;
 use uuid::Uuid;
 
 use crate::agent::routine::{
-    NotifyConfig, Routine, RoutineAction, RoutineGuardrails, Trigger, next_cron_fire,
+    NotifyConfig, Routine, RoutineAction, RoutineGuardrails, RunStatus, Trigger, next_cron_fire,
 };
 use crate::db::Database;
 
@@ -251,15 +251,26 @@ async fn list(
     );
     println!("{}", "-".repeat(130));
 
+    // Fetch last-run status for all routines in a single batch query
+    let routine_ids: Vec<Uuid> = filtered.iter().map(|r| r.id).collect();
+    let last_run_results = db
+        .batch_get_last_run_status(&routine_ids)
+        .await
+        .unwrap_or_default();
+
     for r in &filtered {
-        let status = if r.enabled {
-            if r.consecutive_failures > 0 {
-                format!("err({})", r.consecutive_failures)
-            } else {
-                "active".to_string()
-            }
-        } else {
+        let last_run_status = last_run_results.get(&r.id).copied();
+
+        let status = if !r.enabled {
             "disabled".to_string()
+        } else if last_run_status == Some(RunStatus::Running) {
+            "running".to_string()
+        } else if r.consecutive_failures > 0 {
+            format!("err({})", r.consecutive_failures)
+        } else if last_run_status == Some(RunStatus::Attention) {
+            "attention".to_string()
+        } else {
+            "active".to_string()
         };
 
         let next_fire = r
