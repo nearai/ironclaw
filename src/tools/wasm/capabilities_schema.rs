@@ -357,8 +357,11 @@ pub struct EndpointPatternSchema {
 impl EndpointPatternSchema {
     fn to_endpoint_pattern(&self) -> EndpointPattern {
         EndpointPattern {
-            host: self.host.clone(),
-            path_prefix: self.path_prefix.clone(),
+            host: expand_env_placeholder(&self.host),
+            path_prefix: self
+                .path_prefix
+                .as_ref()
+                .map(|value| expand_env_placeholder(value)),
             methods: self.methods.clone(),
         }
     }
@@ -383,9 +386,24 @@ impl CredentialMappingSchema {
         CredentialMapping {
             secret_name: self.secret_name.clone(),
             location: self.location.to_credential_location(),
-            host_patterns: self.host_patterns.clone(),
+            host_patterns: self
+                .host_patterns
+                .iter()
+                .map(|value| expand_env_placeholder(value))
+                .collect(),
         }
     }
+}
+
+fn expand_env_placeholder(value: &str) -> String {
+    let Some(name) = value
+        .strip_prefix("${")
+        .and_then(|rest| rest.strip_suffix('}'))
+    else {
+        return value.to_string();
+    };
+
+    std::env::var(name).unwrap_or_else(|_| value.to_string())
 }
 
 /// Credential injection location schema.
@@ -843,6 +861,43 @@ mod tests {
                 assert_eq!(prefix, &Some("Key ".to_string()));
             }
             _ => panic!("Expected Header location"),
+        }
+    }
+
+    #[test]
+    fn test_expand_env_placeholder_in_http_host_patterns() {
+        // SAFETY: test-only scoped env mutation with restoration before exit.
+        unsafe {
+            std::env::set_var("M01_TOOL_HOST", "m01.internal.example");
+        }
+
+        let json = r#"{
+            "http": {
+                "allowlist": [{ "host": "${M01_TOOL_HOST}", "path_prefix": "/mail/" }],
+                "credentials": {
+                    "m01": {
+                        "secret_name": "m01_api_key",
+                        "location": { "type": "header", "name": "x-api-key" },
+                        "host_patterns": ["${M01_TOOL_HOST}"]
+                    }
+                }
+            }
+        }"#;
+
+        let caps = CapabilitiesFile::from_json(json).unwrap();
+        let runtime = caps.to_capabilities();
+        let http = runtime.http.unwrap();
+
+        assert_eq!(http.allowlist[0].host, "m01.internal.example");
+        assert_eq!(http.allowlist[0].path_prefix.as_deref(), Some("/mail/"));
+        assert_eq!(
+            http.credentials["m01_api_key"].host_patterns,
+            vec!["m01.internal.example"]
+        );
+
+        // SAFETY: test-only scoped env mutation with restoration before exit.
+        unsafe {
+            std::env::remove_var("M01_TOOL_HOST");
         }
     }
 

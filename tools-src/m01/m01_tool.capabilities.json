@@ -1,0 +1,77 @@
+{
+  "version": "0.1.0",
+  "wit_version": "0.3.0",
+  "description": "Read-only M01 integration for IronClaw. Reuses the shared m01-core request builders from m01-cli and executes selected JSON API operations through IronClaw's WASM HTTP sandbox.",
+  "parameters": {
+    "type": "object",
+    "required": ["base_url", "action"],
+    "properties": {
+      "base_url": {
+        "type": "string",
+        "description": "Full M01 base URL, such as https://m01.example.com"
+      },
+      "action": {
+        "type": "string",
+        "enum": [
+          "investigation_mail_list",
+          "investigation_mail_tags",
+          "investigation_mail_file_types",
+          "investigation_mail_related_emails_detection",
+          "workflow_queue_stats",
+          "intelligence_local_stats",
+          "safe_admin_firewall_zone_list",
+          "system_admin_monitor_status"
+        ]
+      }
+    },
+    "additionalProperties": true
+  },
+  "capabilities": {
+    "http": {
+      "allowlist": [
+        { "host": "${M01_TOOL_HOST}", "path_prefix": "/mail/list", "methods": ["POST"] },
+        { "host": "${M01_TOOL_HOST}", "path_prefix": "/tags/list", "methods": ["POST"] },
+        { "host": "${M01_TOOL_HOST}", "path_prefix": "/file-types/list", "methods": ["POST"] },
+        { "host": "${M01_TOOL_HOST}", "path_prefix": "/detection/related-emails", "methods": ["POST"] },
+        { "host": "${M01_TOOL_HOST}", "path_prefix": "/api/mail/active/statistics", "methods": ["GET"] },
+        { "host": "${M01_TOOL_HOST}", "path_prefix": "/api/deep-detection/statistics", "methods": ["GET"] },
+        { "host": "${M01_TOOL_HOST}", "path_prefix": "/api/mail/deferred/statistics", "methods": ["GET"] },
+        { "host": "${M01_TOOL_HOST}", "path_prefix": "/api/mail/quarantine/statistics", "methods": ["GET"] },
+        { "host": "${M01_TOOL_HOST}", "path_prefix": "/m01/intelligence/stats", "methods": ["GET"] },
+        { "host": "${M01_TOOL_HOST}", "path_prefix": "/firewall/zone/list", "methods": ["GET"] },
+        { "host": "${M01_TOOL_HOST}", "path_prefix": "/api/v1/monitor/status", "methods": ["GET"] }
+      ],
+      "credentials": {
+        "m01_api_key": {
+          "secret_name": "m01_api_key",
+          "location": {
+            "type": "header",
+            "name": "x-api-key"
+          },
+          "host_patterns": ["${M01_TOOL_HOST}"]
+        }
+      },
+      "rate_limit": {
+        "requests_per_minute": 60,
+        "requests_per_hour": 2000
+      }
+    },
+    "secrets": {
+      "allowed_names": ["m01_api_key"]
+    }
+  },
+  "auth": {
+    "secret_name": "m01_api_key",
+    "display_name": "M01",
+    "instructions": "Provide the M01 API key used to access your M01 instance. The IronClaw process must also have M01_TOOL_HOST set to the host part of that instance URL.",
+    "env_var": "M01_API_KEY"
+  },
+  "setup": {
+    "required_secrets": [
+      {
+        "name": "m01_api_key",
+        "prompt": "M01 API key for the configured M01 instance"
+      }
+    ]
+  }
+}
