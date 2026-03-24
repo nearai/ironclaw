@@ -1146,7 +1146,12 @@ async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) 
                     let total = Some(accumulated_tokens.saturating_add(tokens.unwrap_or(0)));
                     break Ok((status, summary, total));
                 }
-                Err(ref e) if is_lightweight && !uses_tools && e.is_retryable() && attempt < MAX_RETRIES => {
+                Err(ref e)
+                    if is_lightweight
+                        && !uses_tools
+                        && e.is_retryable()
+                        && attempt < MAX_RETRIES =>
+                {
                     // Accumulate any partial tokens from the failed attempt
                     if let RoutineError::LlmFailed {
                         partial_tokens: Some(t),
@@ -1558,18 +1563,14 @@ async fn execute_lightweight_no_tools(
         .with_max_tokens(effective_max_tokens)
         .with_temperature(0.3);
 
-    let response = ctx
-        .llm
-        .complete(request)
-        .await
-        .map_err(|e| {
-            let retryable = crate::llm::retry::is_retryable(&e);
-            RoutineError::LlmFailed {
-                reason: e.to_string(),
-                partial_tokens: None,
-                retryable,
-            }
-        })?;
+    let response = ctx.llm.complete(request).await.map_err(|e| {
+        let retryable = crate::llm::retry::is_retryable(&e);
+        RoutineError::LlmFailed {
+            reason: e.to_string(),
+            partial_tokens: None,
+            retryable,
+        }
+    })?;
 
     handle_text_response(
         &response.content,
