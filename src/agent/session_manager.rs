@@ -102,9 +102,8 @@ impl SessionManager {
     /// Resolve an external thread ID to an internal thread.
     ///
     /// Returns the session and thread ID. Creates both if they don't exist.
-    ///
-    /// Uses a single read-lock acquisition for both the key lookup and the UUID
-    /// adoption check to reduce contention under concurrent approval load.
+    /// Delegates to [`resolve_thread_with_parsed_uuid`](Self::resolve_thread_with_parsed_uuid)
+    /// with `parsed_uuid: None`.
     pub async fn resolve_thread(
         &self,
         user_id: &str,
@@ -118,6 +117,9 @@ impl SessionManager {
     /// Like [`resolve_thread`](Self::resolve_thread), but accepts a pre-parsed
     /// UUID to skip redundant parsing when the caller has already validated
     /// the external thread ID as a UUID (e.g. the approval routing path).
+    ///
+    /// Uses a single read-lock acquisition for both the key lookup and the UUID
+    /// adoption check to reduce contention under concurrent approval load.
     pub async fn resolve_thread_with_parsed_uuid(
         &self,
         user_id: &str,
@@ -137,6 +139,16 @@ impl SessionManager {
         let ext_uuid = parsed_uuid
             .or_else(|| external_thread_id.and_then(|ext_tid| Uuid::parse_str(ext_tid).ok()));
 
+        // Validate that parsed_uuid (if provided) is consistent with external_thread_id.
+        #[cfg(debug_assertions)]
+        if let (Some(parsed), Some(ext_tid)) = (&parsed_uuid, external_thread_id) {
+            debug_assert_eq!(
+                Uuid::parse_str(ext_tid).ok().as_ref(),
+                Some(parsed),
+                "parsed_uuid must be the parsed form of external_thread_id"
+            );
+        }
+
         // Single read lock for both the key lookup and UUID adoption check
         let adoptable_uuid = {
             let thread_map = self.thread_map.read().await;
@@ -153,13 +165,10 @@ impl SessionManager {
             // If external_thread_id is a valid UUID not mapped elsewhere,
             // it may be a thread created by chat_new_thread_handler or
             // hydrated from DB that we can adopt.
-            if let Some(ext_uuid) = ext_uuid {
-                let mapped_elsewhere = thread_map.values().any(|&v| v == ext_uuid);
-                if !mapped_elsewhere {
-                    Some(ext_uuid)
-                } else {
-                    None
-                }
+            // Only attempt adoption when external_thread_id is Some, preserving
+            // the invariant that None external_thread_id never triggers adoption.
+            if external_thread_id.is_some() {
+                ext_uuid.filter(|&uuid| !thread_map.values().any(|&v| v == uuid))
             } else {
                 None
             }
@@ -1058,5 +1067,39 @@ mod tests {
             .resolve_thread_with_parsed_uuid("user2", "chan2", Some(&known_id.to_string()), None)
             .await;
         assert_eq!(resolved, known_id);
+    }
+
+    #[tokio::test]
+    async fn test_resolve_thread_with_none_external_thread_id_does_not_adopt() {
+        use crate::agent::session::Thread;
+
+        let manager = SessionManager::new();
+        let (session, default_tid) = manager.resolve_thread("user3", "chan3", None).await;
+
+        // Manually insert a thread with a known UUID (simulating a thread
+        // created by chat_new_thread_handler)
+        let known_id = Uuid::new_v4();
+        {
+            let mut sess = session.lock().await;
+            let thread = Thread::with_id(known_id, sess.id);
+            sess.threads.insert(known_id, thread);
+        }
+
+        // Resolve with external_thread_id=None but parsed_uuid=Some.
+        // This should NOT adopt the UUID — the old code prevented adoption
+        // when external_thread_id was None, and we preserve that invariant.
+        let (_, resolved) = manager
+            .resolve_thread_with_parsed_uuid("user3", "chan3", None, Some(known_id))
+            .await;
+
+        // Should return the existing default thread, not the injected UUID
+        assert_eq!(
+            resolved, default_tid,
+            "should return existing default thread when external_thread_id is None"
+        );
+        assert_ne!(
+            resolved, known_id,
+            "should NOT adopt UUID when external_thread_id is None"
+        );
     }
 }
