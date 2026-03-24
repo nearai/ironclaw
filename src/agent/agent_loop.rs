@@ -157,8 +157,8 @@ pub struct AgentDeps {
     pub hooks: Arc<HookRegistry>,
     /// Cost enforcement guardrails (daily budget, hourly rate limits).
     pub cost_guard: Arc<crate::agent::cost_guard::CostGuard>,
-    /// SSE broadcast sender for live job event streaming to the web gateway.
-    pub sse_tx: Option<tokio::sync::broadcast::Sender<crate::channels::web::types::SseEvent>>,
+    /// SSE manager for live job event streaming to the web gateway.
+    pub sse_tx: Option<Arc<crate::channels::web::sse::SseManager>>,
     /// HTTP interceptor for trace recording/replay.
     pub http_interceptor: Option<Arc<dyn crate::llm::recording::HttpInterceptor>>,
     /// Audio transcription middleware for voice messages.
@@ -169,6 +169,9 @@ pub struct AgentDeps {
     pub sandbox_readiness: crate::agent::routine_engine::SandboxReadiness,
     /// Software builder for self-repair tool rebuilding.
     pub builder: Option<Arc<dyn crate::tools::SoftwareBuilder>>,
+    /// Resolved LLM backend identifier (e.g., "nearai", "openai", "groq").
+    /// Used by `/model` persistence to determine which env var to update.
+    pub llm_backend: String,
 }
 
 /// The main agent that coordinates all components.
@@ -235,8 +238,8 @@ impl Agent {
                 hooks: deps.hooks.clone(),
             },
         );
-        if let Some(ref tx) = deps.sse_tx {
-            scheduler.set_sse_sender(tx.clone());
+        if let Some(ref sse) = deps.sse_tx {
+            scheduler.set_sse_sender(Arc::clone(sse));
         }
         if let Some(ref interceptor) = deps.http_interceptor {
             scheduler.set_http_interceptor(Arc::clone(interceptor));
@@ -1136,9 +1139,9 @@ impl Agent {
             && let Submission::UserInput { ref content } = submission
             && let Some(engine) = self.routine_engine().await
         {
-            let fired = engine
-                .check_event_triggers(&message.user_id, &message.channel, content)
-                .await;
+            // Use post-hook content so that BeforeInbound hooks that rewrite
+            // input are respected by event trigger matching.
+            let fired = engine.check_event_triggers(message, content).await;
             if fired > 0 {
                 tracing::debug!(
                     channel = %message.channel,
