@@ -159,14 +159,14 @@ impl Agent {
                     let mut failed = 0;
                     let mut stuck = 0;
 
-                    if let Ok(s) = store.agent_job_summary().await {
+                    if let Ok(s) = store.agent_job_summary_for_user(user_id).await {
                         total += s.total;
                         in_progress += s.in_progress;
                         completed += s.completed;
                         failed += s.failed;
                         stuck += s.stuck;
                     }
-                    if let Ok(s) = store.sandbox_job_summary().await {
+                    if let Ok(s) = store.sandbox_job_summary_for_user(user_id).await {
                         total += s.total;
                         in_progress += s.running;
                         completed += s.completed;
@@ -236,7 +236,7 @@ impl Agent {
                     Vec::new()
                 }
             };
-            let sandbox_jobs = match store.list_sandbox_jobs().await {
+            let sandbox_jobs = match store.list_sandbox_jobs_for_user(user_id).await {
                 Ok(jobs) => jobs,
                 Err(e) => {
                     tracing::warn!("Failed to list sandbox jobs: {}", e);

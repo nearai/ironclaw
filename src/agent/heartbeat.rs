@@ -400,7 +400,7 @@ impl HeartbeatRunner {
     }
 
     /// Send a notification about heartbeat findings.
-    async fn send_notification(&self, message: &str) {
+    pub(crate) async fn send_notification(&self, message: &str) {
         let Some(ref tx) = self.response_tx else {
             tracing::debug!("No response channel configured for heartbeat notifications");
             return;
@@ -541,7 +541,6 @@ pub fn spawn_multi_user_heartbeat(
         // for persistently-failing users (same semantics as single-user mode).
         let mut user_failures: std::collections::HashMap<String, u32> =
             std::collections::HashMap::new();
-
         tracing::info!("Starting multi-user heartbeat loop");
 
         loop {
@@ -686,7 +685,6 @@ fn collect_heartbeat_result(
         }
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
