@@ -2010,7 +2010,7 @@ fn strip_html_tags(s: &str) -> String {
     // Does NOT match things like Vec<String>, x<10, or < input.txt because those
     // don't have a letter immediately after '<' followed by valid tag structure,
     // or they aren't among recognized HTML tag names.
-    static HTML_TAG_RE: LazyLock<Regex> = LazyLock::new(|| {
+    static HTML_TAG_RE: LazyLock<Option<Regex>> = LazyLock::new(|| {
         // Match <tagname ...> or </tagname> where tagname starts with a letter.
         // We restrict to known HTML tag names to avoid false positives on generic
         // identifiers like Vec<String>.
@@ -2023,11 +2023,13 @@ fn strip_html_tags(s: &str) -> String {
             section|select|slot|small|source|span|strong|style|sub|summary|sup|table|\
             tbody|td|template|textarea|tfoot|th|thead|time|title|tr|track|u|ul|var|\
             video|wbr";
-        Regex::new(&format!(r"(?i)</?(?:{})(?:\s[^>]*)?>", tags))
-            .expect("HTML_TAG_RE is a valid static regex")
+        Regex::new(&format!(r"(?i)</?(?:{})(?:\s[^>]*)?>", tags)).ok()
     });
 
-    HTML_TAG_RE.replace_all(s, "").into_owned()
+    match HTML_TAG_RE.as_ref() {
+        Some(re) => re.replace_all(s, "").into_owned(),
+        None => s.to_string(),
+    }
 }
 
 #[cfg(test)]
