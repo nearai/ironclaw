@@ -17,6 +17,7 @@ use wasmtime::component::Linker;
 use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiView};
 
 use crate::context::JobContext;
+use crate::llm::recording::{HttpExchangeRequest, HttpExchangeResponse, HttpInterceptor};
 use crate::safety::LeakDetector;
 use crate::secrets::SecretsStore;
 use crate::tools::tool::{Tool, ToolError, ToolOutput};
@@ -99,6 +100,9 @@ struct StoreData {
     /// Dedicated tokio runtime for HTTP requests, lazily initialized.
     /// Reused across multiple `http_request` calls within one execution.
     http_runtime: Option<tokio::runtime::Runtime>,
+    /// Optional HTTP interceptor for testing — returns canned responses
+    /// instead of making real requests when set.
+    http_interceptor: Option<Arc<dyn HttpInterceptor>>,
 }
 
 impl StoreData {
@@ -119,6 +123,7 @@ impl StoreData {
             credentials,
             host_credentials,
             http_runtime: None,
+            http_interceptor: None,
         }
     }
 
@@ -344,6 +349,59 @@ impl near::agent::host::Host for StoreData {
             );
         }
         let rt = self.http_runtime.as_ref().expect("just initialized"); // safety: is_none branch above guarantees Some
+
+        // If an HTTP interceptor is set (testing), short-circuit with a canned response.
+        if let Some(interceptor) = &self.http_interceptor {
+            let interceptor = Arc::clone(interceptor);
+            let intercept_url = url.clone();
+            let intercept_method = method.clone();
+            let mut intercept_headers: Vec<(String, String)> = headers
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            intercept_headers.sort_by(|a, b| a.0.cmp(&b.0));
+            let intercept_body = body
+                .as_ref()
+                .map(|b| String::from_utf8_lossy(b).to_string());
+            let intercepted = rt.block_on(async {
+                let req = HttpExchangeRequest {
+                    method: intercept_method,
+                    url: intercept_url,
+                    headers: intercept_headers,
+                    body: intercept_body,
+                };
+                interceptor.before_request(&req).await
+            });
+            if let Some(resp) = intercepted {
+                let resp_headers: HashMap<String, String> = resp
+                    .headers
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+                let resp_headers_json =
+                    serde_json::to_string(&resp_headers).unwrap_or_else(|_| "{}".to_string());
+                return Ok(near::agent::host::HttpResponse {
+                    status: resp.status,
+                    headers_json: resp_headers_json,
+                    body: resp.body.into_bytes(),
+                });
+            }
+        }
+
+        // Capture request metadata before headers/body are consumed by the reqwest
+        // builder. Used for after_response callback when a recording interceptor is set.
+        let interceptor_req = self.http_interceptor.as_ref().map(|_| HttpExchangeRequest {
+            method: method.clone(),
+            url: url.clone(),
+            headers: headers
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+            body: body
+                .as_ref()
+                .map(|b| String::from_utf8_lossy(b).to_string()),
+        });
+
         let result = rt.block_on(async {
             let client = reqwest::Client::builder()
                 .connect_timeout(Duration::from_secs(10))
@@ -434,6 +492,51 @@ impl near::agent::host::Host for StoreData {
             })
         });
 
+        // Notify the interceptor about the completed response (recording mode).
+        // RecordingHttpInterceptor returns None from before_request and captures
+        // exchanges via after_response, so this path is exercised during trace recording.
+        if let (Some(interceptor), Some(req), Ok(resp)) =
+            (&self.http_interceptor, &interceptor_req, &result)
+        {
+            let interceptor = Arc::clone(interceptor);
+
+            // Redact credentials from request before passing to the interceptor
+            // to prevent credential leakage into recorded traces.
+            let mut redacted_req = req.clone();
+            redacted_req.url = self.redact_credentials(&redacted_req.url);
+            redacted_req.headers = redacted_req
+                .headers
+                .into_iter()
+                .map(|(k, v)| (k, self.redact_credentials(&v)))
+                .collect();
+            redacted_req.body = redacted_req.body.map(|b| self.redact_credentials(&b));
+
+            let resp_headers: Vec<(String, String)> =
+                serde_json::from_str::<HashMap<String, String>>(&resp.headers_json)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .collect();
+            let resp_body = String::from_utf8_lossy(&resp.body).to_string();
+
+            // Redact credentials from response as well
+            let redacted_headers: Vec<(String, String)> = resp_headers
+                .into_iter()
+                .map(|(k, v)| (k, self.redact_credentials(&v)))
+                .collect();
+            let redacted_body = self.redact_credentials(&resp_body);
+
+            let exchange_resp = HttpExchangeResponse {
+                status: resp.status,
+                headers: redacted_headers,
+                body: redacted_body,
+            };
+            rt.block_on(async {
+                interceptor
+                    .after_response(&redacted_req, &exchange_resp)
+                    .await;
+            });
+        }
+
         // Redact credentials from error messages before returning to WASM
         result.map_err(|e| self.redact_credentials(&e))
     }
@@ -476,6 +579,9 @@ pub struct WasmToolWrapper {
     secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
     /// OAuth refresh configuration for auto-refreshing expired tokens.
     oauth_refresh: Option<OAuthRefreshConfig>,
+    /// Optional HTTP interceptor for testing — returns canned responses
+    /// instead of making real requests when set.
+    http_interceptor: Option<Arc<dyn HttpInterceptor>>,
 }
 
 #[derive(Debug, Clone)]
@@ -502,30 +608,171 @@ impl WasmToolSchemas {
     }
 
     fn is_permissive_schema(schema: &serde_json::Value) -> bool {
-        schema
+        if schema
             .get("properties")
             .and_then(|p| p.as_object())
-            .is_none_or(|p| p.is_empty())
+            .is_some_and(|p| !p.is_empty())
+        {
+            return false;
+        }
+
+        // Schemas with combinator variants containing properties are not permissive
+        for key in ["oneOf", "anyOf", "allOf"] {
+            if let Some(variants) = schema.get(key).and_then(|v| v.as_array())
+                && variants.iter().any(|v| {
+                    v.get("properties")
+                        .and_then(|p| p.as_object())
+                        .is_some_and(|p| !p.is_empty())
+                })
+            {
+                return false;
+            }
+        }
+
+        true
     }
 
     fn typed_property_count(schema: &serde_json::Value) -> usize {
-        schema
-            .get("properties")
-            .and_then(|p| p.as_object())
-            .map(|props| {
-                props
-                    .values()
-                    .filter(|prop| schema_is_typed_property(prop))
-                    .count()
-            })
-            .unwrap_or(0)
+        let mut all_props = serde_json::Map::new();
+
+        if let Some(props) = schema.get("properties").and_then(|p| p.as_object()) {
+            all_props.extend(props.iter().map(|(k, v)| (k.clone(), v.clone())));
+        }
+
+        for key in ["allOf", "oneOf", "anyOf"] {
+            if let Some(variants) = schema.get(key).and_then(|v| v.as_array()) {
+                for variant in variants {
+                    if let Some(props) = variant.get("properties").and_then(|p| p.as_object()) {
+                        all_props.extend(props.iter().map(|(k, v)| (k.clone(), v.clone())));
+                    }
+                }
+            }
+        }
+
+        all_props
+            .values()
+            .filter(|prop| schema_is_typed_property(prop))
+            .count()
     }
 
     fn new(discovery: serde_json::Value) -> Self {
+        let advertised = Self::compact_schema(&discovery);
         Self {
-            advertised: Self::permissive_schema(),
+            advertised,
             discovery,
         }
+    }
+
+    /// Derive a compact advertised schema from the full discovery schema.
+    ///
+    /// Collects properties from top-level `properties` and from
+    /// `oneOf`/`anyOf`/`allOf` variants. Keeps only properties that are in
+    /// the top-level `required` array or carry an `enum`/`const` constraint.
+    /// For properties defined via `const` across multiple variants (e.g.
+    /// `"action": {"const": "get_repo"}` in each `oneOf` branch), the `const`
+    /// values are merged into a single `enum` array.
+    ///
+    /// Variant-level `required` fields (e.g. `owner`, `repo` required within
+    /// each `oneOf` variant but not top-level) are intentionally omitted from
+    /// the compact schema — the LLM can discover them via
+    /// `tool_info(detail: "schema")`.
+    ///
+    /// At most `MAX_COMPACT_PROPERTIES` properties are collected to bound
+    /// allocations from adversarial schemas.
+    fn compact_schema(discovery: &serde_json::Value) -> serde_json::Value {
+        const MAX_COMPACT_PROPERTIES: usize = 100;
+
+        let required: std::collections::HashSet<String> = discovery
+            .get("required")
+            .and_then(|r| r.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        // Collect properties from top-level and oneOf/anyOf/allOf variants.
+        // For properties with `const` across variants, merge into an `enum`.
+        let mut all_properties = serde_json::Map::new();
+        // Track const values per property to merge into enum.
+        let mut const_values: std::collections::HashMap<String, Vec<serde_json::Value>> =
+            std::collections::HashMap::new();
+
+        if let Some(props) = discovery.get("properties").and_then(|p| p.as_object()) {
+            for (k, v) in props {
+                if all_properties.len() >= MAX_COMPACT_PROPERTIES {
+                    break;
+                }
+                all_properties.insert(k.clone(), v.clone());
+            }
+        }
+        for key in ["oneOf", "anyOf", "allOf"] {
+            if let Some(variants) = discovery.get(key).and_then(|v| v.as_array()) {
+                for variant in variants {
+                    if let Some(props) = variant.get("properties").and_then(|p| p.as_object()) {
+                        for (k, v) in props {
+                            if all_properties.len() >= MAX_COMPACT_PROPERTIES
+                                && !all_properties.contains_key(k)
+                            {
+                                continue;
+                            }
+                            // Track const values for merging into enum.
+                            if let Some(c) = v.get("const") {
+                                const_values.entry(k.clone()).or_default().push(c.clone());
+                            }
+                            all_properties.entry(k.clone()).or_insert_with(|| v.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        // Merge collected const values into enum arrays.
+        for (name, values) in &const_values {
+            if values.len() > 1
+                && let Some(prop) = all_properties.get_mut(name)
+            {
+                let mut merged = prop.clone();
+                if let Some(obj) = merged.as_object_mut() {
+                    obj.remove("const");
+                    obj.insert("enum".to_string(), serde_json::Value::Array(values.clone()));
+                }
+                *prop = merged;
+            }
+        }
+
+        if all_properties.is_empty() {
+            return Self::permissive_schema();
+        }
+
+        let kept: serde_json::Map<String, serde_json::Value> = all_properties
+            .into_iter()
+            .filter(|(name, prop)| {
+                required.contains(name) || prop.get("enum").is_some() || prop.get("const").is_some()
+            })
+            .collect();
+
+        if kept.is_empty() {
+            return Self::permissive_schema();
+        }
+
+        let kept_required: Vec<serde_json::Value> = required
+            .iter()
+            .filter(|name| kept.contains_key(name.as_str()))
+            .map(|name| serde_json::Value::String(name.clone()))
+            .collect();
+
+        let mut result = serde_json::json!({
+            "type": "object",
+            "properties": kept,
+            "additionalProperties": true,
+        });
+        if !kept_required.is_empty() {
+            result["required"] = serde_json::Value::Array(kept_required);
+        }
+
+        result
     }
 
     fn with_override(&self, schema: serde_json::Value) -> Self {
@@ -564,7 +811,18 @@ impl WasmToolWrapper {
             credentials: HashMap::new(),
             secrets_store: None,
             oauth_refresh: None,
+            http_interceptor: None,
         }
+    }
+
+    /// Set an HTTP interceptor for testing.
+    ///
+    /// When set, WASM tool HTTP requests are routed through the interceptor
+    /// instead of making real network calls. This allows tests to verify the
+    /// exact HTTP requests a WASM tool constructs.
+    pub fn with_http_interceptor(mut self, interceptor: Arc<dyn HttpInterceptor>) -> Self {
+        self.http_interceptor = Some(interceptor);
+        self
     }
 
     /// Override the tool description.
@@ -651,12 +909,13 @@ impl WasmToolWrapper {
         let limits = &self.prepared.limits;
 
         // Create store with fresh state (NEAR pattern: fresh instance per call)
-        let store_data = StoreData::new(
+        let mut store_data = StoreData::new(
             limits.memory_bytes,
             self.capabilities.clone(),
             self.credentials.clone(),
             host_credentials,
         );
+        store_data.http_interceptor = self.http_interceptor.clone();
         let mut store = Store::new(engine, store_data);
 
         // Configure fuel if enabled
@@ -872,6 +1131,7 @@ impl Tool for WasmToolWrapper {
                 credentials,
                 secrets_store: None, // Not needed in blocking task
                 oauth_refresh: None, // Already used above for pre-refresh
+                http_interceptor: self.http_interceptor.clone(),
             };
 
             tokio::task::spawn_blocking(move || {
@@ -1320,15 +1580,33 @@ fn is_private_ip(ip: std::net::IpAddr) -> bool {
 }
 
 fn schema_contains_container_properties(schema: &serde_json::Value) -> bool {
-    schema
+    let has_container = |props: &serde_json::Map<String, serde_json::Value>| {
+        props
+            .values()
+            .any(|prop| schema_declares_type(prop, "array") || schema_declares_type(prop, "object"))
+    };
+
+    if schema
         .get("properties")
         .and_then(|p| p.as_object())
-        .map(|props| {
-            props.values().any(|prop| {
-                schema_declares_type(prop, "array") || schema_declares_type(prop, "object")
+        .is_some_and(has_container)
+    {
+        return true;
+    }
+
+    for key in ["allOf", "oneOf", "anyOf"] {
+        if let Some(variants) = schema.get(key).and_then(|v| v.as_array())
+            && variants.iter().any(|v| {
+                v.get("properties")
+                    .and_then(|p| p.as_object())
+                    .is_some_and(has_container)
             })
-        })
-        .unwrap_or(false)
+        {
+            return true;
+        }
+    }
+
+    false
 }
 
 fn schema_declares_type(schema: &serde_json::Value, expected: &str) -> bool {
@@ -1490,7 +1768,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_advertised_schema_stays_permissive_until_sidecar_override() {
+    async fn test_advertised_schema_auto_compacted_from_discovery() {
         let discovery_schema = serde_json::json!({
             "type": "object",
             "properties": {
@@ -1510,42 +1788,7 @@ mod tests {
         wrapper.schemas = super::WasmToolSchemas::new(discovery_schema.clone());
         wrapper.description = "Search documents".to_string();
 
-        // Advertised schema stays permissive; discovery holds the typed schema
-        assert_eq!(
-            wrapper.parameters_schema(),
-            serde_json::json!({
-                "type": "object",
-                "properties": {},
-                "additionalProperties": true
-            })
-        );
-        assert_eq!(wrapper.discovery_schema(), discovery_schema);
-
-        // Raw description is clean — no tool_info hint baked in
-        assert!(!wrapper.description().contains("tool_info"));
-
-        // But schema() composes the hint at display time when advertised is permissive
-        let schema = wrapper.schema();
-        assert!(
-            schema.description.contains("tool_info"),
-            "schema().description should contain tool_info hint: {}",
-            schema.description
-        );
-        assert!(
-            schema.description.contains("include_schema: true"),
-            "hint should mention include_schema: true: {}",
-            schema.description
-        );
-
-        // After sidecar override, both schemas match and hint disappears
-        let wrapper = wrapper.with_schema(serde_json::json!({
-            "type": "object",
-            "properties": {
-                "query": { "type": "string" }
-            },
-            "required": ["query"]
-        }));
-
+        // Advertised schema is auto-compacted: keeps required props, drops optional
         assert_eq!(
             wrapper.parameters_schema(),
             serde_json::json!({
@@ -1553,18 +1796,141 @@ mod tests {
                 "properties": {
                     "query": { "type": "string" }
                 },
-                "required": ["query"]
+                "required": ["query"],
+                "additionalProperties": true
             })
         );
-        assert_eq!(wrapper.discovery_schema(), wrapper.parameters_schema());
+        // Discovery retains the full schema
+        assert_eq!(wrapper.discovery_schema(), discovery_schema);
 
-        // With typed schema, schema() should NOT include tool_info hint
+        // Compacted schema has typed properties, so no tool_info hint needed
         let schema = wrapper.schema();
         assert!(
             !schema.description.contains("tool_info"),
-            "schema().description should not contain tool_info hint when typed: {}",
+            "schema().description should not contain tool_info hint when auto-compacted: {}",
             schema.description
         );
+    }
+
+    #[test]
+    fn test_compact_schema_keeps_required_and_enum_properties() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["list", "get", "create"],
+                    "description": "The operation"
+                },
+                "query": { "type": "string" },
+                "limit": { "type": "integer" },
+                "format": {
+                    "type": "string",
+                    "enum": ["json", "csv"]
+                }
+            },
+            "required": ["action"]
+        });
+
+        let compacted = super::WasmToolSchemas::compact_schema(&schema);
+        let props = compacted["properties"].as_object().unwrap();
+
+        // action: required + enum → kept
+        assert!(props.contains_key("action"));
+        // format: has enum → kept
+        assert!(props.contains_key("format"));
+        // query: not required, no enum → dropped
+        assert!(!props.contains_key("query"));
+        // limit: not required, no enum → dropped
+        assert!(!props.contains_key("limit"));
+        // additionalProperties lets the LLM still pass dropped props
+        assert_eq!(compacted["additionalProperties"], true);
+        assert_eq!(compacted["required"], serde_json::json!(["action"]));
+    }
+
+    #[test]
+    fn test_compact_schema_falls_back_to_permissive_when_empty() {
+        // No required, no enum → permissive fallback
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "query": { "type": "string" },
+                "limit": { "type": "integer" }
+            }
+        });
+
+        let compacted = super::WasmToolSchemas::compact_schema(&schema);
+        assert!(compacted["properties"].as_object().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_compact_schema_handles_no_properties() {
+        let schema = serde_json::json!({ "type": "object" });
+        let compacted = super::WasmToolSchemas::compact_schema(&schema);
+        assert!(compacted["properties"].as_object().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_compact_schema_handles_oneof_variants() {
+        // GitHub-style schema: oneOf with no top-level properties, const per variant
+        let schema = serde_json::json!({
+            "type": "object",
+            "required": ["action"],
+            "oneOf": [
+                {
+                    "properties": {
+                        "action": { "const": "get_repo" },
+                        "owner": { "type": "string" },
+                        "repo": { "type": "string" }
+                    },
+                    "required": ["action", "owner", "repo"]
+                },
+                {
+                    "properties": {
+                        "action": { "const": "list_issues" },
+                        "owner": { "type": "string" },
+                        "repo": { "type": "string" },
+                        "state": { "type": "string", "enum": ["open", "closed", "all"] }
+                    },
+                    "required": ["action", "owner", "repo"]
+                }
+            ]
+        });
+
+        let compacted = super::WasmToolSchemas::compact_schema(&schema);
+        let props = compacted["properties"].as_object().unwrap();
+
+        // action: required + const values merged into enum → kept
+        let action = &props["action"];
+        assert!(
+            action.get("enum").is_some(),
+            "action const values should be merged into enum: {action}"
+        );
+        let action_enum = action["enum"].as_array().unwrap();
+        assert!(
+            action_enum.contains(&serde_json::json!("get_repo")),
+            "enum should contain get_repo"
+        );
+        assert!(
+            action_enum.contains(&serde_json::json!("list_issues")),
+            "enum should contain list_issues"
+        );
+        assert!(
+            action.get("const").is_none(),
+            "const should be removed after merging into enum"
+        );
+
+        // state: has enum → kept
+        assert!(
+            props.contains_key("state"),
+            "state should be kept (has enum)"
+        );
+        // owner/repo: not in top-level required, no enum → intentionally dropped
+        // (variant-level required is omitted; discoverable via tool_info)
+        assert!(!props.contains_key("owner"), "owner should be dropped");
+        assert!(!props.contains_key("repo"), "repo should be dropped");
+        assert_eq!(compacted["additionalProperties"], true);
+        assert_eq!(compacted["required"], serde_json::json!(["action"]));
     }
 
     #[test]

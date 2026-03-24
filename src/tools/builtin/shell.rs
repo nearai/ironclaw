@@ -56,7 +56,7 @@ use tokio::process::Command;
 use crate::context::JobContext;
 use crate::sandbox::{SandboxManager, SandboxPolicy};
 use crate::tools::tool::{
-    ApprovalRequirement, Tool, ToolDomain, ToolError, ToolOutput, require_str,
+    ApprovalRequirement, RiskLevel, Tool, ToolDomain, ToolError, ToolOutput, require_str,
 };
 
 /// Maximum output size before truncation (64KB).
@@ -117,7 +117,7 @@ static NEVER_AUTO_APPROVE_PATTERNS: LazyLock<Vec<&'static str>> = LazyLock::new(
         "init 0",
         "init 6",
         "iptables",
-        "nft ",
+        "nft",
         "useradd",
         "userdel",
         "passwd",
@@ -132,6 +132,7 @@ static NEVER_AUTO_APPROVE_PATTERNS: LazyLock<Vec<&'static str>> = LazyLock::new(
         "docker rmi",
         "docker system prune",
         "git push --force",
+        "git push --force-with-lease",
         "git push -f",
         "git reset --hard",
         "git clean -f",
@@ -139,6 +140,7 @@ static NEVER_AUTO_APPROVE_PATTERNS: LazyLock<Vec<&'static str>> = LazyLock::new(
         "DROP DATABASE",
         "TRUNCATE",
         "DELETE FROM",
+        "sudo",
     ]
 });
 
@@ -195,15 +197,205 @@ const SAFE_ENV_VARS: &[&str] = &[
     "WINDIR",
 ];
 
-/// Check whether a shell command contains patterns that must never be auto-approved.
+/// Low-risk command prefixes: strictly read-only commands with no side effects.
+/// Note: `sed`, `awk`, and `find` are intentionally excluded — they have destructive
+/// modes (`sed -i`, `awk -i inplace`, `find -delete`) and are classified as Medium.
+static LOW_RISK_PATTERNS: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
+    vec![
+        "ls",
+        "ll",
+        "la",
+        "dir",
+        "cat",
+        "less",
+        "more",
+        "head",
+        "tail",
+        "grep",
+        "rg",
+        "ag",
+        "fd",
+        "locate",
+        "echo",
+        "printf",
+        "pwd",
+        "cd",
+        "env",
+        "printenv",
+        "which",
+        "whereis",
+        "type",
+        "date",
+        "cal",
+        "uptime",
+        "uname",
+        "df",
+        "du",
+        "free",
+        "top",
+        "htop",
+        "ps",
+        "git status",
+        "git log",
+        "git diff",
+        "git show",
+        "git branch",
+        "git remote",
+        "git fetch",
+        "cargo check",
+        "cargo clippy",
+        "curl --head",
+        "curl -I",
+        "ping",
+        "wc",
+        "sort",
+        "uniq",
+        "tr",
+        "cut",
+        "jq",
+        "yq",
+        "file",
+        "stat",
+        "man",
+    ]
+});
+
+/// Medium-risk command prefixes: mutations that are generally reversible, plus commands with
+/// potentially destructive flags (e.g. `sed -i`, `awk -i inplace`, `find -delete`).
+static MEDIUM_RISK_PATTERNS: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
+    vec![
+        // Text processors with in-place/destructive modes
+        "awk",
+        "sed",
+        "find",
+        "mkdir",
+        "rmdir",
+        "touch",
+        "cp",
+        "copy",
+        "mv",
+        "move",
+        "git commit",
+        "git add",
+        "git push",
+        "git checkout",
+        "git switch",
+        "git merge",
+        "git rebase",
+        "git stash",
+        "git tag",
+        "cargo build",
+        "cargo run",
+        "cargo test",
+        "npm test",
+        "npm run test",
+        "yarn test",
+        "npm install",
+        "npm ci",
+        "npm update",
+        "pip install",
+        "pip uninstall",
+        "brew install",
+        "brew uninstall",
+        "apt install",
+        "apt remove",
+        "make",
+        "cmake",
+        "tar",
+        "zip",
+        "unzip",
+        "gzip",
+        "gunzip",
+        "ssh",
+        "scp",
+        "rsync",
+        "curl",
+        "wget",
+        "docker build",
+        "docker pull",
+        "docker run",
+        "kubectl apply",
+        "kubectl create",
+    ]
+});
+
+/// Match a pipeline segment against a risk pattern using word-boundary rules.
 ///
-/// Even when the user has chosen "always approve" for the shell tool, these commands
-/// require explicit per-invocation approval because they are destructive.
-pub fn requires_explicit_approval(command: &str) -> bool {
-    let lower = command.to_lowercase();
-    NEVER_AUTO_APPROVE_PATTERNS
-        .iter()
-        .any(|p| lower.contains(&p.to_lowercase()))
+/// - **Multi-word patterns** (e.g. `"git status"`): the segment must equal the
+///   pattern or start with `"<pattern> "`, so `"git statusbar"` does not match
+///   `"git status"`.
+/// - **Single-word patterns** (e.g. `"ls"`): the first whitespace-delimited
+///   token of the segment must equal the pattern exactly, so `"lsblk"` does
+///   not match `"ls"`.
+fn matches_command_pattern(segment: &str, pattern: &str) -> bool {
+    if pattern.contains(' ') {
+        segment == pattern || segment.starts_with(&format!("{} ", pattern))
+    } else {
+        segment.split_whitespace().next().unwrap_or("") == pattern
+    }
+}
+
+/// Classify a shell command into a [`RiskLevel`].
+///
+/// The command is split on `|`, `&`, `;` and each segment is classified
+/// independently; the overall risk is the **maximum** across all segments
+/// so a dangerous sub-command in a pipeline is never missed.
+///
+/// Per-segment priority (highest wins):
+/// 1. **High** — segment matches [`NEVER_AUTO_APPROVE_PATTERNS`] (destructive / irreversible).
+/// 2. **Low** — segment matches [`LOW_RISK_PATTERNS`] (strictly read-only).
+/// 3. **Medium** — segment matches [`MEDIUM_RISK_PATTERNS`] (reversible mutations).
+/// 4. **Medium** — unknown commands default to Medium (safer than auto-approving).
+///
+/// All matching uses word-boundary rules (see [`matches_command_pattern`]) to
+/// prevent false positives like `"makeshutdownscript"` matching `"shutdown"` or
+/// `"lsblk"` matching `"ls"`.
+pub fn classify_command_risk(command: &str) -> RiskLevel {
+    // For pipelines/chains, take the maximum risk across all segments.
+    command
+        .split(['|', '&', ';'])
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|segment| {
+            let seg_lower = segment.to_lowercase();
+            if NEVER_AUTO_APPROVE_PATTERNS
+                .iter()
+                .any(|p| matches_command_pattern(&seg_lower, &p.to_lowercase()))
+            {
+                RiskLevel::High
+            } else if LOW_RISK_PATTERNS
+                .iter()
+                .any(|p| matches_command_pattern(&seg_lower, p))
+            {
+                RiskLevel::Low
+            } else if MEDIUM_RISK_PATTERNS
+                .iter()
+                .any(|p| matches_command_pattern(&seg_lower, p))
+            {
+                RiskLevel::Medium
+            } else {
+                // Unknown commands default to Medium (safer than auto-approving).
+                RiskLevel::Medium
+            }
+        })
+        .max()
+        .unwrap_or(RiskLevel::Medium)
+}
+
+/// Extract the `command` field from a tool-call parameter value.
+///
+/// Handles both the normal case (a JSON object with a `"command"` key) and the
+/// rare case where the LLM provider returns string-encoded JSON.
+fn extract_command_param(params: &serde_json::Value) -> Option<String> {
+    params
+        .get("command")
+        .and_then(|c| c.as_str().map(String::from))
+        .or_else(|| {
+            params
+                .as_str()
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+                .and_then(|v| v.get("command").and_then(|c| c.as_str().map(String::from)))
+        })
 }
 
 /// Detect command injection and obfuscation attempts.
@@ -698,24 +890,24 @@ impl Tool for ShellTool {
         Ok(ToolOutput::success(result, duration))
     }
 
+    fn risk_level_for(&self, params: &serde_json::Value) -> RiskLevel {
+        extract_command_param(params)
+            .map(|cmd| classify_command_risk(&cmd))
+            .unwrap_or(RiskLevel::Medium)
+    }
+
     fn requires_approval(&self, params: &serde_json::Value) -> ApprovalRequirement {
-        let cmd = params
-            .get("command")
-            .and_then(|c| c.as_str().map(String::from))
-            .or_else(|| {
-                params
-                    .as_str()
-                    .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
-                    .and_then(|v| v.get("command").and_then(|c| c.as_str().map(String::from)))
-            });
-
-        if let Some(ref cmd) = cmd
-            && requires_explicit_approval(cmd)
-        {
-            return ApprovalRequirement::Always;
+        match self.risk_level_for(params) {
+            // Low maps to UnlessAutoApproved rather than Never: shell redirections
+            // (e.g. `cat /etc/shadow > /tmp/out`) are not split on `>`, so a Low command
+            // with a redirect would bypass approval entirely with Never. Keeping
+            // UnlessAutoApproved preserves the graduated metadata for audit while
+            // ensuring approval policy stays conservative until redirect-aware parsing
+            // is in place.
+            RiskLevel::Low => ApprovalRequirement::UnlessAutoApproved,
+            RiskLevel::Medium => ApprovalRequirement::UnlessAutoApproved,
+            RiskLevel::High => ApprovalRequirement::Always,
         }
-
-        ApprovalRequirement::UnlessAutoApproved
     }
 
     fn requires_sanitization(&self) -> bool {
@@ -800,73 +992,10 @@ mod tests {
     }
 
     #[test]
-    fn test_requires_explicit_approval() {
-        // Destructive commands should require explicit approval
-        assert!(requires_explicit_approval("rm -rf /tmp/stuff"));
-        assert!(requires_explicit_approval("git push --force origin main"));
-        assert!(requires_explicit_approval("git reset --hard HEAD~5"));
-        assert!(requires_explicit_approval("docker rm container_name"));
-        assert!(requires_explicit_approval("kill -9 12345"));
-        assert!(requires_explicit_approval("DROP TABLE users;"));
-
-        // Safe commands should not
-        assert!(!requires_explicit_approval("cargo build"));
-        assert!(!requires_explicit_approval("git status"));
-        assert!(!requires_explicit_approval("ls -la"));
-        assert!(!requires_explicit_approval("echo hello"));
-        assert!(!requires_explicit_approval("cat file.txt"));
-        assert!(!requires_explicit_approval(
-            "git push origin feature-branch"
-        ));
-    }
-
-    /// Replicate the extraction logic from agent_loop.rs to prove it works
-    /// when `arguments` is a `serde_json::Value::Object` (the common case
-    /// that was previously broken because `Value::Object.as_str()` returns None).
-    #[test]
-    fn test_destructive_command_extraction_from_object_args() {
-        let arguments = serde_json::json!({"command": "rm -rf /tmp/stuff"});
-
-        let cmd = arguments
-            .get("command")
-            .and_then(|c| c.as_str().map(String::from))
-            .or_else(|| {
-                arguments
-                    .as_str()
-                    .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
-                    .and_then(|v| v.get("command").and_then(|c| c.as_str().map(String::from)))
-            });
-
-        assert_eq!(cmd.as_deref(), Some("rm -rf /tmp/stuff"));
-        assert!(requires_explicit_approval(cmd.as_deref().unwrap()));
-    }
-
-    /// Verify extraction still works when `arguments` is a JSON string
-    /// (rare, but possible if the LLM provider returns string-encoded JSON).
-    #[test]
-    fn test_destructive_command_extraction_from_string_args() {
-        let arguments =
-            serde_json::Value::String(r#"{"command": "git push --force origin main"}"#.to_string());
-
-        let cmd = arguments
-            .get("command")
-            .and_then(|c| c.as_str().map(String::from))
-            .or_else(|| {
-                arguments
-                    .as_str()
-                    .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
-                    .and_then(|v| v.get("command").and_then(|c| c.as_str().map(String::from)))
-            });
-
-        assert_eq!(cmd.as_deref(), Some("git push --force origin main"));
-        assert!(requires_explicit_approval(cmd.as_deref().unwrap()));
-    }
-
-    #[test]
     fn test_requires_approval_destructive_command() {
         use crate::tools::tool::ApprovalRequirement;
         let tool = ShellTool::new();
-        // Destructive commands must return Always to bypass auto-approve.
+        // High-risk commands must return Always to bypass auto-approve.
         assert_eq!(
             tool.requires_approval(&serde_json::json!({"command": "rm -rf /tmp"})),
             ApprovalRequirement::Always
@@ -885,15 +1014,17 @@ mod tests {
     fn test_requires_approval_safe_command() {
         use crate::tools::tool::ApprovalRequirement;
         let tool = ShellTool::new();
-        // Safe commands return UnlessAutoApproved (can be auto-approved).
+        // Medium-risk commands return UnlessAutoApproved (can be auto-approved).
         assert_eq!(
             tool.requires_approval(&serde_json::json!({"command": "cargo build"})),
             ApprovalRequirement::UnlessAutoApproved
         );
-        assert_eq!(
-            tool.requires_approval(&serde_json::json!({"command": "echo hello"})),
-            ApprovalRequirement::UnlessAutoApproved
-        );
+        // Low-risk commands also return UnlessAutoApproved (conservative until
+        // redirect-aware parsing is in place — see RiskLevel::Low mapping comment).
+        let r_echo = tool.requires_approval(&serde_json::json!({"command": "echo hello"}));
+        assert_eq!(r_echo, ApprovalRequirement::UnlessAutoApproved); // safety: test code
+        let r_ls = tool.requires_approval(&serde_json::json!({"command": "ls -la"}));
+        assert_eq!(r_ls, ApprovalRequirement::UnlessAutoApproved); // safety: test code
     }
 
     #[test]
@@ -1370,9 +1501,12 @@ mod tests {
 
     #[test]
     fn test_approval_with_mixed_case_destructive() {
-        // Case-insensitive destructive command detection
-        assert!(requires_explicit_approval("RM -RF /tmp"));
-        assert!(requires_explicit_approval("Git Push --Force origin main"));
-        assert!(requires_explicit_approval("DROP table users;"));
+        // Case-insensitive destructive command detection → must be High risk
+        let r1 = classify_command_risk("RM -RF /tmp");
+        assert_eq!(r1, RiskLevel::High); // safety: test code
+        let r2 = classify_command_risk("Git Push --Force origin main");
+        assert_eq!(r2, RiskLevel::High); // safety: test code
+        let r3 = classify_command_risk("DROP table users;");
+        assert_eq!(r3, RiskLevel::High); // safety: test code
     }
 }

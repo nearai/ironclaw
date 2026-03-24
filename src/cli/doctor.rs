@@ -7,12 +7,13 @@
 use std::path::PathBuf;
 
 use crate::bootstrap::ironclaw_base_dir;
+use crate::cli::fmt;
 use crate::settings::Settings;
 
 /// Run all diagnostic checks and print results.
 pub async fn run_doctor_command() -> anyhow::Result<()> {
-    println!("IronClaw Doctor");
-    println!("===============\n");
+    println!();
+    println!("  {}IronClaw Doctor{}", fmt::bold(), fmt::reset());
 
     let mut passed = 0u32;
     let mut failed = 0u32;
@@ -21,7 +22,9 @@ pub async fn run_doctor_command() -> anyhow::Result<()> {
     // Load settings once for checks that need them.
     let settings = Settings::load();
 
-    // ── Settings & core config ─────────────────────────────────
+    // ── Core ─────────────────────────────────────────────────
+
+    section_header("Core");
 
     check(
         "Settings file",
@@ -63,7 +66,9 @@ pub async fn run_doctor_command() -> anyhow::Result<()> {
         &mut skipped,
     );
 
-    // ── Subsystem configuration checks ─────────────────────────
+    // ── Features ─────────────────────────────────────────────
+
+    section_header("Features");
 
     check(
         "Embeddings",
@@ -121,7 +126,9 @@ pub async fn run_doctor_command() -> anyhow::Result<()> {
         &mut skipped,
     );
 
-    // ── External binary checks ────────────────────────────────
+    // ── External ─────────────────────────────────────────────
+
+    section_header("External");
 
     check(
         "Docker daemon",
@@ -158,7 +165,18 @@ pub async fn run_doctor_command() -> anyhow::Result<()> {
     // ── Summary ───────────────────────────────────────────────
 
     println!();
-    println!("  {passed} passed, {failed} failed, {skipped} skipped");
+    println!(
+        "  {}{} passed{}, {}{} failed{}, {}{} skipped{}",
+        fmt::success(),
+        passed,
+        fmt::reset(),
+        if failed > 0 { fmt::error() } else { fmt::dim() },
+        failed,
+        fmt::reset(),
+        fmt::dim(),
+        skipped,
+        fmt::reset(),
+    );
 
     if failed > 0 {
         println!("\n  Some checks failed. This is normal if you don't use those features.");
@@ -167,21 +185,38 @@ pub async fn run_doctor_command() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Print a section header with a separator and bold group name.
+fn section_header(name: &str) {
+    println!();
+    println!("  {}", fmt::separator(36));
+    println!("  {}{}{}", fmt::bold(), name, fmt::reset());
+    println!();
+}
+
 // ── Individual checks ───────────────────────────────────────
 
 fn check(name: &str, result: CheckResult, passed: &mut u32, failed: &mut u32, skipped: &mut u32) {
     match result {
         CheckResult::Pass(detail) => {
             *passed += 1;
-            println!("  [pass] {name}: {detail}");
+            println!(
+                "{}",
+                fmt::check_line(fmt::StatusKind::Pass, name, &detail, 18)
+            );
         }
         CheckResult::Fail(detail) => {
             *failed += 1;
-            println!("  [FAIL] {name}: {detail}");
+            println!(
+                "{}",
+                fmt::check_line(fmt::StatusKind::Fail, name, &detail, 18)
+            );
         }
         CheckResult::Skip(reason) => {
             *skipped += 1;
-            println!("  [skip] {name}: {reason}");
+            println!(
+                "{}",
+                fmt::check_line(fmt::StatusKind::Skip, name, &reason, 18)
+            );
         }
     }
 }
@@ -657,7 +692,7 @@ mod tests {
             }
         }
 
-        let _mutex = crate::config::helpers::ENV_MUTEX.lock().expect("env mutex");
+        let _mutex = crate::config::helpers::lock_env();
         let prev = std::env::var("LLM_BACKEND").ok();
         // SAFETY: Under ENV_MUTEX, no concurrent env access.
         unsafe {
@@ -777,7 +812,7 @@ mod tests {
 
     #[test]
     fn check_llm_config_shows_nearai_model_for_nearai_backend() {
-        let _guard = crate::config::helpers::ENV_MUTEX.lock().expect("env mutex");
+        let _guard = crate::config::helpers::lock_env();
         // SAFETY: Under ENV_MUTEX, no concurrent env access.
         unsafe {
             std::env::remove_var("LLM_BACKEND");
@@ -804,7 +839,7 @@ mod tests {
 
     #[test]
     fn check_embeddings_disabled_by_default_returns_skip() {
-        let _guard = crate::config::helpers::ENV_MUTEX.lock().expect("env mutex");
+        let _guard = crate::config::helpers::lock_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("EMBEDDING_ENABLED");
@@ -826,7 +861,7 @@ mod tests {
 
     #[test]
     fn check_routines_enabled_by_default() {
-        let _guard = crate::config::helpers::ENV_MUTEX.lock().expect("env mutex");
+        let _guard = crate::config::helpers::lock_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("ROUTINES_ENABLED");

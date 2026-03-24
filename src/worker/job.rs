@@ -30,7 +30,9 @@ use crate::llm::{
 use crate::safety::SafetyLayer;
 use crate::tools::execute::process_tool_result;
 use crate::tools::rate_limiter::RateLimitResult;
-use crate::tools::{ApprovalContext, ToolRegistry, prepare_tool_params, redact_params};
+use crate::tools::{
+    ApprovalContext, ToolRegistry, autonomous_unavailable_error, prepare_tool_params, redact_params,
+};
 
 /// Shared dependencies for worker execution.
 ///
@@ -46,8 +48,8 @@ pub struct WorkerDeps {
     pub hooks: Arc<HookRegistry>,
     pub timeout: Duration,
     pub use_planning: bool,
-    /// SSE broadcast sender for live job event streaming to the web gateway.
-    pub sse_tx: Option<tokio::sync::broadcast::Sender<SseEvent>>,
+    /// SSE manager for live job event streaming to the web gateway.
+    pub sse_tx: Option<Arc<crate::channels::web::sse::SseManager>>,
     /// Approval context for tool execution. When `None`, all non-`Never` tools are
     /// blocked (legacy behavior). When `Some`, the context determines which tools
     /// are pre-approved for autonomous execution.
@@ -136,7 +138,7 @@ impl Worker {
         }
 
         // Broadcast SSE for live web UI updates
-        if let Some(ref tx) = self.deps.sse_tx {
+        if let Some(ref sse) = self.deps.sse_tx {
             let job_id_str = job_id.to_string();
             let event = match event_type {
                 "message" => Some(SseEvent::JobMessage {
@@ -201,7 +203,7 @@ impl Worker {
                 _ => None,
             };
             if let Some(event) = event {
-                let _ = tx.send(event);
+                sse.broadcast(event);
             }
         }
     }
@@ -486,22 +488,20 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
 
         let normalized_params = prepare_tool_params(tool.as_ref(), params);
 
+        // Fetch job context early so we have the real user_id for approval, hooks,
+        // and rate limiting decisions.
+        let mut job_ctx = deps.context_manager.get_context(job_id).await?;
+        // Propagate http_interceptor for trace recording/replay
+        if job_ctx.http_interceptor.is_none() {
+            job_ctx.http_interceptor = deps.http_interceptor.clone();
+        }
+
         // Check approval: use context-aware check if available, else block all non-Never tools
         let requirement = tool.requires_approval(&normalized_params);
         let blocked =
             ApprovalContext::is_blocked_or_default(&deps.approval_context, tool_name, requirement);
         if blocked {
-            return Err(crate::error::ToolError::AuthRequired {
-                name: tool_name.to_string(),
-            }
-            .into());
-        }
-
-        // Fetch job context early so we have the real user_id for hooks and rate limiting
-        let mut job_ctx = deps.context_manager.get_context(job_id).await?;
-        // Propagate http_interceptor for trace recording/replay
-        if job_ctx.http_interceptor.is_none() {
-            job_ctx.http_interceptor = deps.http_interceptor.clone();
+            return Err(autonomous_unavailable_error(tool_name, &job_ctx.user_id).into());
         }
 
         // Check per-tool rate limit before running hooks or executing (cheaper check first)
@@ -592,10 +592,12 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
 
         // Redact sensitive parameter values before they touch any observability or audit path.
         let safe_params = redact_params(&effective_params, tool.sensitive_params());
+        let risk = tool.risk_level_for(&effective_params);
         tracing::debug!(
             tool = %tool_name,
             params = %safe_params,
             job = %job_id,
+            risk = %risk,
             "Tool call started"
         );
 
@@ -761,12 +763,12 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
         );
         reason_ctx.messages.push(message);
 
-        match &result {
+        match result {
             Ok(raw_output) => {
                 let sanitized = self
                     .deps
                     .safety
-                    .sanitize_tool_output(&selection.tool_name, raw_output);
+                    .sanitize_tool_output(&selection.tool_name, &raw_output);
                 self.log_event(
                     "tool_result",
                     serde_json::json!({
@@ -798,16 +800,27 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                     });
                 }
 
+                let error_preview = {
+                    let msg = format!("Error: {}", e);
+                    truncate_for_preview(&msg, 500).into_owned()
+                };
                 self.log_event(
                     "tool_result",
                     serde_json::json!({
                         "tool_name": selection.tool_name,
                         "success": false,
-                        "output": truncate_for_preview(&format!("Error: {}", e), 500),
+                        "output": error_preview,
                     }),
                 );
 
-                Ok(())
+                if matches!(
+                    &e,
+                    Error::Tool(crate::error::ToolError::AutonomousUnavailable { .. })
+                ) {
+                    Err(e)
+                } else {
+                    Ok(())
+                }
             }
         }
     }
@@ -1425,6 +1438,9 @@ impl From<TaskOutput> for Result<String, Error> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use crate::channels::ChannelManager;
     use crate::llm::ToolSelection;
 
     use super::*;
@@ -1435,6 +1451,8 @@ mod tests {
         ToolCompletionResponse,
     };
     use crate::safety::SafetyLayer;
+    use crate::testing::{BroadcastCapture, RecordingBroadcastChannel};
+    use crate::tools::builtin::MessageTool;
     use crate::tools::{Tool, ToolError as ToolExecError, ToolOutput};
 
     /// A test tool that sleeps for a configurable duration before returning.
@@ -1524,6 +1542,20 @@ mod tests {
         };
 
         Worker::new(job_id, deps)
+    }
+
+    async fn make_worker_with_message_tool()
+    -> (Worker, Arc<MessageTool>, BroadcastCapture, BroadcastCapture) {
+        let channel_manager = ChannelManager::new();
+        let (gateway, gateway_captures) = RecordingBroadcastChannel::new("gateway");
+        let (telegram, telegram_captures) = RecordingBroadcastChannel::new("telegram");
+        channel_manager.add(Box::new(gateway)).await;
+        channel_manager.add(Box::new(telegram)).await;
+
+        let message_tool = Arc::new(MessageTool::new(Arc::new(channel_manager)));
+        let worker = make_worker(vec![message_tool.clone()]).await;
+
+        (worker, message_tool, gateway_captures, telegram_captures)
     }
 
     #[test]
@@ -1802,7 +1834,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_approval_context_unblocks_unless_auto_approved() {
+    async fn test_approval_context_requires_explicit_allowed_tool_names() {
         let worker_blocked = make_worker_with_approval(vec![Arc::new(ApprovalTool)], None).await;
         let result = worker_blocked
             .execute_tool("needs_approval", &serde_json::json!({}))
@@ -1815,13 +1847,18 @@ mod tests {
 
         let worker_allowed = make_worker_with_approval(
             vec![Arc::new(ApprovalTool)],
-            Some(crate::tools::ApprovalContext::autonomous()),
+            Some(crate::tools::ApprovalContext::autonomous_with_tools([
+                "needs_approval".to_string(),
+            ])),
         )
         .await;
         let result = worker_allowed
             .execute_tool("needs_approval", &serde_json::json!({}))
             .await;
-        assert!(result.is_ok(), "Should be allowed with autonomous context"); // safety: test
+        assert!(
+            result.is_ok(),
+            "Should be allowed when the tool is in the autonomous scope"
+        ); // safety: test
     }
 
     #[tokio::test]
@@ -1855,6 +1892,25 @@ mod tests {
             result.is_ok(),
             "Always tool should be allowed with permission"
         );
+    }
+
+    #[tokio::test]
+    async fn test_approval_context_returns_structured_autonomous_unavailable_error() {
+        let worker = make_worker_with_approval(
+            vec![Arc::new(AlwaysApprovalTool)],
+            Some(crate::tools::ApprovalContext::autonomous()),
+        )
+        .await;
+
+        let result = worker
+            .execute_tool("always_approval", &serde_json::json!({}))
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(Error::Tool(crate::error::ToolError::AutonomousUnavailable { name, .. }))
+                if name == "always_approval"
+        ));
     }
 
     #[tokio::test]
@@ -2109,5 +2165,51 @@ mod tests {
         store_fallback_in_metadata(&mut ctx, None);
 
         assert_eq!(ctx.metadata, original); // safety: test
+    }
+
+    #[tokio::test]
+    async fn autonomous_message_tool_ignores_stale_gateway_context_when_routine_metadata_targets_telegram()
+     {
+        let (worker, message_tool, gateway_captures, telegram_captures) =
+            make_worker_with_message_tool().await;
+
+        message_tool
+            .set_context(
+                Some("gateway".to_string()),
+                Some("stale-gateway-target".to_string()),
+            )
+            .await;
+
+        worker
+            .context_manager()
+            .update_context(worker.job_id, |ctx| {
+                ctx.user_id = "telegram".to_string();
+                ctx.metadata = serde_json::json!({
+                    "notify_channel": "telegram",
+                    "owner_id": "owner-scope",
+                });
+                Ok::<(), String>(())
+            })
+            .await
+            .unwrap() // safety: test
+            .unwrap(); // safety: test
+
+        let result = worker
+            .execute_tool(
+                "message",
+                &serde_json::json!({"content": "hello from routine"}),
+            )
+            .await
+            .unwrap(); // safety: test
+        assert!(
+            result.contains("telegram:owner-scope"),
+            "expected telegram owner-scope routing, got: {result}"
+        );
+
+        assert!(gateway_captures.lock().await.is_empty());
+        let telegram = telegram_captures.lock().await.clone();
+        assert_eq!(telegram.len(), 1);
+        assert_eq!(telegram[0].0, "owner-scope");
+        assert_eq!(telegram[0].1.content, "hello from routine");
     }
 }

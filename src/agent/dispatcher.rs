@@ -326,7 +326,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
             .channels
             .send_status(
                 &self.message.channel,
-                StatusUpdate::Thinking("Calling LLM...".into()),
+                StatusUpdate::Thinking(format!("Thinking (step {iteration})...")),
                 &self.message.metadata,
             )
             .await;
@@ -444,7 +444,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
             .channels
             .send_status(
                 &self.message.channel,
-                StatusUpdate::Thinking(format!("Executing {} tool(s)...", tool_calls.len())),
+                StatusUpdate::Thinking(contextual_tool_message(&tool_calls)),
                 &self.message.metadata,
             )
             .await;
@@ -854,11 +854,9 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                         Ok(output) => {
                             let sanitized =
                                 self.agent.safety().sanitize_tool_output(&tc.name, &output);
-                            self.agent.safety().wrap_for_llm(
-                                &tc.name,
-                                &sanitized.content,
-                                sanitized.was_modified,
-                            )
+                            self.agent
+                                .safety()
+                                .wrap_for_llm(&tc.name, &sanitized.content)
                         }
                         Err(e) => format!("Tool '{}' failed: {}", tc.name, e),
                     };
@@ -926,7 +924,14 @@ pub(super) async fn execute_chat_tool_standalone(
     params: &serde_json::Value,
     job_ctx: &crate::context::JobContext,
 ) -> Result<String, Error> {
-    crate::tools::execute::execute_tool_with_safety(tools, safety, tool_name, params, job_ctx).await
+    crate::tools::execute::execute_tool_with_safety(
+        tools,
+        safety,
+        tool_name,
+        params.clone(),
+        job_ctx,
+    )
+    .await
 }
 
 /// Parsed auth result fields for emitting StatusUpdate::AuthRequired.
@@ -978,6 +983,30 @@ pub(super) fn check_auth_required(
         .unwrap_or("Please provide your API token/key.")
         .to_string();
     Some((name, instructions))
+}
+
+/// Build a contextual thinking message based on tool names.
+///
+/// Instead of a generic "Executing 2 tool(s)..." this returns messages like
+/// "Running command..." or "Fetching page..." for single-tool calls, falling
+/// back to "Executing N tool(s)..." for multi-tool calls.
+fn contextual_tool_message(tool_calls: &[crate::llm::ToolCall]) -> String {
+    if tool_calls.len() == 1 {
+        match tool_calls[0].name.as_str() {
+            "shell" => "Running command...".into(),
+            "web_fetch" => "Fetching page...".into(),
+            "memory_search" => "Searching memory...".into(),
+            "memory_write" => "Writing to memory...".into(),
+            "memory_read" => "Reading memory...".into(),
+            "http_request" => "Making HTTP request...".into(),
+            "file_read" => "Reading file...".into(),
+            "file_write" => "Writing file...".into(),
+            "json_transform" => "Transforming data...".into(),
+            name => format!("Running {name}..."),
+        }
+    } else {
+        format!("Executing {} tool(s)...", tool_calls.len())
+    }
 }
 
 /// Compact messages for retry after a context-length-exceeded error.
@@ -1078,15 +1107,23 @@ pub(crate) fn extract_suggestions(text: &str) -> (String, Vec<String>) {
         Regex::new(r"(?s)<suggestions>\s*(.*?)\s*</suggestions>").expect("valid regex") // safety: constant pattern
     });
 
-    // Find the position of the last closing code fence to avoid matching inside code blocks
-    let last_code_fence = text.rfind("```").unwrap_or(0);
+    // Build a sorted list of code fence positions to determine open/close pairing.
+    // A position is "inside" a fenced block when it falls between an odd-numbered
+    // fence (opening) and the next even-numbered fence (closing).
+    let fence_positions: Vec<usize> = text.match_indices("```").map(|(pos, _)| pos).collect();
 
-    // Find all matches, take the last one that's after the last code fence
+    let is_inside_fence = |pos: usize| -> bool {
+        // Count how many fences appear before `pos`. If odd, we're inside a fence.
+        let count = fence_positions.iter().take_while(|&&fp| fp <= pos).count();
+        count % 2 == 1
+    };
+
+    // Find all matches, take the last one that's outside any code fence
     let mut best_match: Option<regex::Match<'_>> = None;
     let mut best_capture: Option<String> = None;
     for caps in RE.captures_iter(text) {
         if let (Some(full), Some(inner)) = (caps.get(0), caps.get(1))
-            && full.start() >= last_code_fence
+            && !is_inside_fence(full.start())
         {
             best_match = Some(full);
             best_capture = Some(inner.as_str().to_string());
@@ -1205,6 +1242,7 @@ mod tests {
             document_extraction: None,
             sandbox_readiness: crate::agent::routine_engine::SandboxReadiness::DisabledByConfig,
             builder: None,
+            llm_backend: "nearai".to_string(),
         };
 
         Agent::new(
@@ -1255,9 +1293,10 @@ mod tests {
 
     #[test]
     fn test_shell_destructive_command_requires_explicit_approval() {
-        // requires_explicit_approval() detects destructive commands that
-        // should return ApprovalRequirement::Always from ShellTool.
-        use crate::tools::builtin::shell::requires_explicit_approval;
+        // classify_command_risk() classifies destructive commands as High, which
+        // maps to ApprovalRequirement::Always in ShellTool::requires_approval().
+        use crate::tools::RiskLevel;
+        use crate::tools::builtin::shell::classify_command_risk;
 
         let destructive_cmds = [
             "rm -rf /tmp/test",
@@ -1265,20 +1304,14 @@ mod tests {
             "git reset --hard HEAD~5",
         ];
         for cmd in &destructive_cmds {
-            assert!(
-                requires_explicit_approval(cmd),
-                "'{}' should require explicit approval",
-                cmd
-            );
+            let r = classify_command_risk(cmd);
+            assert_eq!(r, RiskLevel::High, "'{}'", cmd); // safety: test code
         }
 
         let safe_cmds = ["git status", "cargo build", "ls -la"];
         for cmd in &safe_cmds {
-            assert!(
-                !requires_explicit_approval(cmd),
-                "'{}' should not require explicit approval",
-                cmd
-            );
+            let r = classify_command_risk(cmd);
+            assert_ne!(r, RiskLevel::High, "'{}'", cmd); // safety: test code
         }
     }
 
@@ -1885,7 +1918,7 @@ mod tests {
             Ok(ToolCompletionResponse {
                 content: None,
                 tool_calls: vec![ToolCall {
-                    id: format!("call_{}", uuid::Uuid::new_v4()),
+                    id: crate::llm::generate_tool_call_id(0, 0),
                     name: "echo".to_string(),
                     arguments: serde_json::json!({"message": "looping"}),
                 }],
@@ -2038,7 +2071,7 @@ mod tests {
             Ok(ToolCompletionResponse {
                 content: None,
                 tool_calls: vec![ToolCall {
-                    id: format!("call_{}", uuid::Uuid::new_v4()),
+                    id: crate::llm::generate_tool_call_id(0, 0),
                     name: "nonexistent_tool".to_string(),
                     arguments: serde_json::json!({}),
                 }],
@@ -2077,6 +2110,7 @@ mod tests {
             document_extraction: None,
             sandbox_readiness: crate::agent::routine_engine::SandboxReadiness::DisabledByConfig,
             builder: None,
+            llm_backend: "nearai".to_string(),
         };
 
         Agent::new(
@@ -2197,6 +2231,7 @@ mod tests {
                 document_extraction: None,
                 sandbox_readiness: crate::agent::routine_engine::SandboxReadiness::DisabledByConfig,
                 builder: None,
+                llm_backend: "nearai".to_string(),
             };
 
             Agent::new(
@@ -2326,6 +2361,16 @@ mod tests {
         let input = "```\n<suggestions>[\"foo\"]</suggestions>\n```";
         let (text, suggestions) = super::extract_suggestions(input);
         // The tag is inside a code fence, so it should not be extracted
+        assert_eq!(text, input); // safety: test
+        assert!(suggestions.is_empty()); // safety: test
+    }
+
+    #[test]
+    fn test_extract_suggestions_inside_unclosed_code_fence() {
+        // Regression: odd number of fences (unclosed fence) must still be
+        // treated as "inside a code block".
+        let input = "```\ncode\n<suggestions>[\"bar\"]</suggestions>";
+        let (text, suggestions) = super::extract_suggestions(input);
         assert_eq!(text, input); // safety: test
         assert!(suggestions.is_empty()); // safety: test
     }

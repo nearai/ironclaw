@@ -123,73 +123,51 @@ impl WasmToolLoader {
         }
         let wasm_bytes = fs::read(wasm_path).await?;
 
-        // Read capabilities (optional) and extract OAuth refresh config,
-        // tool description, and parameter schema.
-        let (capabilities, oauth_refresh, description, schema) =
-            if let Some(cap_path) = capabilities_path {
-                if cap_path.exists() {
-                    let cap_bytes = fs::read(cap_path).await?;
-                    let cap_file = CapabilitiesFile::from_bytes(&cap_bytes)
-                        .map_err(|e| WasmLoadError::InvalidCapabilities(e.to_string()))?;
-                    cap_file.validate(name);
+        // Read capabilities (optional) and extract OAuth refresh config
+        // and tool description. Parameter schema is auto-derived from the
+        // WASM module's schema() export (see WasmToolSchemas::compact_schema).
+        let (capabilities, oauth_refresh, description) = if let Some(cap_path) = capabilities_path {
+            if cap_path.exists() {
+                let cap_bytes = fs::read(cap_path).await?;
+                let cap_file = CapabilitiesFile::from_bytes(&cap_bytes)
+                    .map_err(|e| WasmLoadError::InvalidCapabilities(e.to_string()))?;
+                cap_file.validate(name);
 
-                    // Check WIT version compatibility
-                    check_wit_version_compat(
-                        name,
-                        cap_file.wit_version.as_deref(),
-                        crate::tools::wasm::WIT_TOOL_VERSION,
-                    )?;
+                // Check WIT version compatibility
+                check_wit_version_compat(
+                    name,
+                    cap_file.wit_version.as_deref(),
+                    crate::tools::wasm::WIT_TOOL_VERSION,
+                )?;
 
-                    let caps = cap_file.to_capabilities();
-                    let oauth = resolve_oauth_refresh_config(&cap_file);
-                    let desc = cap_file.description.clone();
-                    // Validate parameters schema before accepting it.
-                    let params = cap_file.parameters.clone().and_then(|p| {
-                        let errors = crate::tools::validate_tool_schema(&p, name);
-                        if errors.is_empty() {
-                            Some(p)
-                        } else {
-                            tracing::warn!(
-                                tool = name,
-                                ?errors,
-                                "Invalid parameters schema in capabilities.json, \
-                                 using permissive fallback"
-                            );
-                            None
-                        }
-                    });
-                    if desc.is_none() {
-                        tracing::warn!(
-                            tool = name,
-                            path = %cap_path.display(),
-                            "Capabilities file missing \"description\" field; \
-                             tool will use generic fallback description"
-                        );
-                    }
-                    if params.is_none() && cap_file.parameters.is_none() {
-                        tracing::warn!(
-                            tool = name,
-                            path = %cap_path.display(),
-                            "Capabilities file missing \"parameters\" field; \
-                             tool will accept any JSON object (permissive fallback)"
-                        );
-                    }
-                    (caps, oauth, desc, params)
-                } else {
+                let caps = cap_file.to_capabilities();
+                let oauth = resolve_oauth_refresh_config(&cap_file);
+                let desc = cap_file.description.clone();
+                if desc.is_none() {
                     tracing::warn!(
+                        tool = name,
                         path = %cap_path.display(),
-                        "Capabilities file not found, using default (no permissions)"
+                        "Capabilities file missing \"description\" field; \
+                         tool will use generic fallback description"
                     );
-                    (Capabilities::default(), None, None, None)
                 }
+                (caps, oauth, desc)
             } else {
                 tracing::warn!(
                     tool = name,
-                    "No capabilities file for WASM tool; \
-                     tool will use generic fallback description and accept any JSON object"
+                    path = %cap_path.display(),
+                    "Capabilities file not found, using default (no permissions)"
                 );
-                (Capabilities::default(), None, None, None)
-            };
+                (Capabilities::default(), None, None)
+            }
+        } else {
+            tracing::warn!(
+                tool = name,
+                "No capabilities file for WASM tool; \
+                     tool will use generic fallback description"
+            );
+            (Capabilities::default(), None, None)
+        };
 
         // Register the tool
         self.registry
@@ -200,13 +178,13 @@ impl WasmToolLoader {
                 capabilities,
                 limits: None,
                 description: description.as_deref(),
-                schema,
+                schema: None,
                 secrets_store: self.secrets_store.clone(),
                 oauth_refresh,
             })
             .await?;
 
-        tracing::info!(
+        tracing::debug!(
             name = name,
             wasm_path = %wasm_path.display(),
             "Loaded WASM tool from file"
@@ -306,7 +284,7 @@ impl WasmToolLoader {
         }
 
         if !results.loaded.is_empty() {
-            tracing::info!(
+            tracing::debug!(
                 count = results.loaded.len(),
                 tools = ?results.loaded,
                 "Loaded WASM tools from directory"

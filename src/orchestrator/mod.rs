@@ -63,7 +63,7 @@ fn resolve_orchestrator_port() -> u16 {
 /// Result of orchestrator setup, containing all handles needed by the agent.
 pub struct OrchestratorSetup {
     pub container_job_manager: Option<Arc<ContainerJobManager>>,
-    pub job_event_tx: Option<broadcast::Sender<(Uuid, SseEvent)>>,
+    pub job_event_tx: Option<broadcast::Sender<(Uuid, String, SseEvent)>>,
     pub prompt_queue: Arc<Mutex<HashMap<Uuid, VecDeque<api::PendingPrompt>>>>,
     pub docker_status: crate::sandbox::DockerStatus,
 }
@@ -134,6 +134,7 @@ pub async fn setup_orchestrator(
             store: db.cloned(),
             secrets_store: secrets_store.cloned(),
             user_id: "default".to_string(),
+            job_owner_cache: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
         };
 
         tokio::spawn(async move {
@@ -164,19 +165,15 @@ pub async fn setup_orchestrator(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
-
     use super::*;
-
-    /// Serialize access to `ORCHESTRATOR_PORT` env var across test threads.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    use crate::config::helpers::lock_env;
 
     #[test]
     fn resolve_orchestrator_port_from_env() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = lock_env();
 
         // Safety: env-var mutation requires unsafe in edition 2024;
-        // ENV_LOCK serializes concurrent access from other test threads.
+        // lock_env() serializes concurrent access from other test threads.
 
         // Absent env var → default 50051
         unsafe { std::env::remove_var("ORCHESTRATOR_PORT") };

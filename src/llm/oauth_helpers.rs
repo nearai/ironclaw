@@ -361,7 +361,7 @@ pub fn landing_html(provider_name: &str, success: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::helpers::ENV_MUTEX;
+    use crate::config::helpers::lock_env;
 
     #[test]
     fn loopback_detection() {
@@ -390,7 +390,7 @@ mod tests {
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn bind_rejects_wildcard_ipv4() {
-        let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = lock_env();
         let original = std::env::var("OAUTH_CALLBACK_HOST").ok();
         // SAFETY: Under ENV_MUTEX, no concurrent env access.
         unsafe { std::env::set_var("OAUTH_CALLBACK_HOST", "0.0.0.0") };
@@ -414,7 +414,7 @@ mod tests {
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn bind_rejects_wildcard_ipv6() {
-        let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = lock_env();
         let original = std::env::var("OAUTH_CALLBACK_HOST").ok();
         // SAFETY: Under ENV_MUTEX, no concurrent env access.
         unsafe { std::env::set_var("OAUTH_CALLBACK_HOST", "::") };

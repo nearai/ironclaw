@@ -842,6 +842,38 @@ impl Store {
             .collect())
     }
 
+    pub async fn list_agent_jobs_for_user(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<AgentJobRecord>, DatabaseError> {
+        let conn = self.conn().await?;
+        let rows = conn
+            .query(
+                r#"
+                SELECT id, title, status, user_id, failure_reason,
+                       created_at, started_at, completed_at
+                FROM agent_jobs WHERE source = 'direct' AND user_id = $1
+                ORDER BY created_at DESC
+                "#,
+                &[&user_id],
+            )
+            .await?;
+
+        Ok(rows
+            .iter()
+            .map(|r| AgentJobRecord {
+                id: r.get("id"),
+                title: r.get("title"),
+                status: r.get("status"),
+                user_id: r.get::<_, Option<String>>("user_id").unwrap_or_default(),
+                created_at: r.get("created_at"),
+                started_at: r.get("started_at"),
+                completed_at: r.get("completed_at"),
+                failure_reason: r.get("failure_reason"),
+            })
+            .collect())
+    }
+
     /// Get the failure reason for a single agent job.
     pub async fn get_agent_job_failure_reason(
         &self,
@@ -864,6 +896,27 @@ impl Store {
             .query(
                 "SELECT status, COUNT(*) as cnt FROM agent_jobs WHERE source = 'direct' GROUP BY status",
                 &[],
+            )
+            .await?;
+
+        let mut summary = AgentJobSummary::default();
+        for row in &rows {
+            let status: String = row.get("status");
+            let count: i64 = row.get("cnt");
+            summary.add_count(&status, count as usize);
+        }
+        Ok(summary)
+    }
+
+    pub async fn agent_job_summary_for_user(
+        &self,
+        user_id: &str,
+    ) -> Result<AgentJobSummary, DatabaseError> {
+        let conn = self.conn().await?;
+        let rows = conn
+            .query(
+                "SELECT status, COUNT(*) as cnt FROM agent_jobs WHERE source = 'direct' AND user_id = $1 GROUP BY status",
+                &[&user_id],
             )
             .await?;
 
@@ -1105,6 +1158,22 @@ impl Store {
         rows.iter().map(row_to_routine).collect()
     }
 
+    /// Find an enabled webhook routine by its configured path (or fallback to ID).
+    pub async fn get_webhook_routine_by_path(
+        &self,
+        path: &str,
+    ) -> Result<Option<Routine>, DatabaseError> {
+        let conn = self.conn().await?;
+        let row = conn
+            .query_opt(
+                "SELECT * FROM routines WHERE enabled AND trigger_type = 'webhook' \
+                 AND (trigger_config->>'path' = $1 OR (trigger_config->>'path' IS NULL AND id::text = $1))",
+                &[&path],
+            )
+            .await?;
+        row.as_ref().map(row_to_routine).transpose()
+    }
+
     /// List all enabled cron routines whose next_fire_at <= now.
     pub async fn list_due_cron_routines(&self) -> Result<Vec<Routine>, DatabaseError> {
         let conn = self.conn().await?;
@@ -1332,6 +1401,40 @@ impl Store {
         }
 
         Ok(counts)
+    }
+
+    /// Batch-load the most recent run status for multiple routines in a single query.
+    /// Uses a window function to pick only the latest run per routine.
+    #[cfg(feature = "postgres")]
+    pub async fn batch_get_last_run_status(
+        &self,
+        routine_ids: &[Uuid],
+    ) -> Result<HashMap<Uuid, RunStatus>, DatabaseError> {
+        if routine_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let conn = self.conn().await?;
+        let rows = conn
+            .query(
+                "SELECT DISTINCT ON (routine_id) routine_id, status
+                 FROM routine_runs
+                 WHERE routine_id = ANY($1)
+                 ORDER BY routine_id, started_at DESC",
+                &[&routine_ids],
+            )
+            .await?;
+
+        let mut statuses = HashMap::new();
+        for row in rows {
+            let id: Uuid = row.get("routine_id");
+            let status_str: String = row.get("status");
+            if let std::result::Result::Ok(status) = status_str.parse::<RunStatus>() {
+                statuses.insert(id, status);
+            }
+        }
+
+        Ok(statuses)
     }
 
     /// Link a routine run to a dispatched job.
