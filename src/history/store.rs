@@ -2279,6 +2279,402 @@ impl Store {
     }
 }
 
+// ==================== Users / API Tokens / Invitations ====================
+
+#[cfg(feature = "postgres")]
+use crate::db::{ApiTokenRecord, InvitationRecord, UserRecord};
+
+#[cfg(feature = "postgres")]
+impl Store {
+    /// Create a new user record.
+    pub async fn create_user(&self, user: &UserRecord) -> Result<(), DatabaseError> {
+        let conn = self.conn().await?;
+        conn.execute(
+            r#"
+            INSERT INTO users (id, email, display_name, status, created_at, updated_at, last_login_at, created_by, metadata)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            "#,
+            &[
+                &user.id,
+                &user.email,
+                &user.display_name,
+                &user.status,
+                &user.created_at,
+                &user.updated_at,
+                &user.last_login_at,
+                &user.created_by,
+                &user.metadata,
+            ],
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Get a user by their string id.
+    pub async fn get_user(&self, id: &str) -> Result<Option<UserRecord>, DatabaseError> {
+        let conn = self.conn().await?;
+        let row = conn
+            .query_opt("SELECT * FROM users WHERE id = $1", &[&id])
+            .await?;
+        Ok(row.map(|r| row_to_user(&r)))
+    }
+
+    /// Get a user by email address.
+    pub async fn get_user_by_email(
+        &self,
+        email: &str,
+    ) -> Result<Option<UserRecord>, DatabaseError> {
+        let conn = self.conn().await?;
+        let row = conn
+            .query_opt("SELECT * FROM users WHERE email = $1", &[&email])
+            .await?;
+        Ok(row.map(|r| row_to_user(&r)))
+    }
+
+    /// List users, optionally filtered by status.
+    pub async fn list_users(&self, status: Option<&str>) -> Result<Vec<UserRecord>, DatabaseError> {
+        let conn = self.conn().await?;
+        let rows = match status {
+            Some(s) => {
+                conn.query(
+                    "SELECT * FROM users WHERE status = $1 ORDER BY created_at",
+                    &[&s],
+                )
+                .await?
+            }
+            None => {
+                conn.query("SELECT * FROM users ORDER BY created_at", &[])
+                    .await?
+            }
+        };
+        Ok(rows.iter().map(row_to_user).collect())
+    }
+
+    /// Update a user's status.
+    pub async fn update_user_status(&self, id: &str, status: &str) -> Result<(), DatabaseError> {
+        let conn = self.conn().await?;
+        conn.execute(
+            "UPDATE users SET status = $1, updated_at = NOW() WHERE id = $2",
+            &[&status, &id],
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Update a user's display name and metadata.
+    pub async fn update_user_profile(
+        &self,
+        id: &str,
+        display_name: &str,
+        metadata: &serde_json::Value,
+    ) -> Result<(), DatabaseError> {
+        let conn = self.conn().await?;
+        conn.execute(
+            "UPDATE users SET display_name = $1, metadata = $2, updated_at = NOW() WHERE id = $3",
+            &[&display_name, metadata, &id],
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Record a login timestamp for a user.
+    pub async fn record_login(&self, id: &str) -> Result<(), DatabaseError> {
+        let conn = self.conn().await?;
+        conn.execute(
+            "UPDATE users SET last_login_at = NOW(), updated_at = NOW() WHERE id = $1",
+            &[&id],
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Create a new API token.
+    pub async fn create_api_token(
+        &self,
+        user_id: &str,
+        name: &str,
+        token_hash: &[u8; 32],
+        token_prefix: &str,
+        expires_at: Option<DateTime<Utc>>,
+    ) -> Result<ApiTokenRecord, DatabaseError> {
+        let conn = self.conn().await?;
+        let id = Uuid::new_v4();
+        let now = Utc::now();
+        conn.execute(
+            r#"
+            INSERT INTO api_tokens (id, user_id, token_hash, token_prefix, name, expires_at, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            "#,
+            &[
+                &id,
+                &user_id,
+                &token_hash.to_vec(),
+                &token_prefix,
+                &name,
+                &expires_at,
+                &now,
+            ],
+        )
+        .await?;
+        Ok(ApiTokenRecord {
+            id,
+            user_id: user_id.to_string(),
+            name: name.to_string(),
+            token_prefix: token_prefix.to_string(),
+            expires_at,
+            last_used_at: None,
+            created_at: now,
+            revoked_at: None,
+        })
+    }
+
+    /// List tokens for a user.
+    pub async fn list_api_tokens(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<ApiTokenRecord>, DatabaseError> {
+        let conn = self.conn().await?;
+        let rows = conn
+            .query(
+                r#"
+                SELECT id, user_id, name, token_prefix, expires_at, last_used_at, created_at, revoked_at
+                FROM api_tokens
+                WHERE user_id = $1
+                ORDER BY created_at DESC
+                "#,
+                &[&user_id],
+            )
+            .await?;
+        Ok(rows.iter().map(row_to_api_token).collect())
+    }
+
+    /// Soft-revoke a token. Returns false if the token doesn't exist or doesn't belong to the user.
+    pub async fn revoke_api_token(
+        &self,
+        token_id: Uuid,
+        user_id: &str,
+    ) -> Result<bool, DatabaseError> {
+        let conn = self.conn().await?;
+        let count = conn
+            .execute(
+                "UPDATE api_tokens SET revoked_at = NOW() WHERE id = $1 AND user_id = $2 AND revoked_at IS NULL",
+                &[&token_id, &user_id],
+            )
+            .await?;
+        Ok(count > 0)
+    }
+
+    /// Authenticate a token by hash. Returns the token record and its owning user
+    /// if the token is active (non-revoked, non-expired) and the user is active.
+    pub async fn authenticate_token(
+        &self,
+        token_hash: &[u8; 32],
+    ) -> Result<Option<(ApiTokenRecord, UserRecord)>, DatabaseError> {
+        let conn = self.conn().await?;
+        let row = conn
+            .query_opt(
+                r#"
+                SELECT t.id, t.user_id, t.name, t.token_prefix, t.expires_at, t.last_used_at, t.created_at, t.revoked_at,
+                       u.id as u_id, u.email, u.display_name, u.status, u.created_at as u_created_at, u.updated_at, u.last_login_at, u.created_by, u.metadata
+                FROM api_tokens t
+                JOIN users u ON t.user_id = u.id
+                WHERE t.token_hash = $1
+                  AND t.revoked_at IS NULL
+                  AND (t.expires_at IS NULL OR t.expires_at > NOW())
+                  AND u.status = 'active'
+                "#,
+                &[&token_hash.to_vec()],
+            )
+            .await?;
+        Ok(row.map(|r| {
+            let token = ApiTokenRecord {
+                id: r.get("id"),
+                user_id: r.get("user_id"),
+                name: r.get("name"),
+                token_prefix: r.get("token_prefix"),
+                expires_at: r.get("expires_at"),
+                last_used_at: r.get("last_used_at"),
+                created_at: r.get("created_at"),
+                revoked_at: r.get("revoked_at"),
+            };
+            let user = UserRecord {
+                id: r.get("u_id"),
+                email: r.get("email"),
+                display_name: r.get("display_name"),
+                status: r.get("status"),
+                created_at: r.get("u_created_at"),
+                updated_at: r.get("updated_at"),
+                last_login_at: r.get("last_login_at"),
+                created_by: r.get("created_by"),
+                metadata: r.get("metadata"),
+            };
+            (token, user)
+        }))
+    }
+
+    /// Update `last_used_at` for a token.
+    pub async fn record_token_usage(&self, token_id: Uuid) -> Result<(), DatabaseError> {
+        let conn = self.conn().await?;
+        conn.execute(
+            "UPDATE api_tokens SET last_used_at = NOW() WHERE id = $1",
+            &[&token_id],
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Create a new invitation.
+    pub async fn create_invitation(
+        &self,
+        invitation: &InvitationRecord,
+        invite_hash: &[u8; 32],
+    ) -> Result<(), DatabaseError> {
+        let conn = self.conn().await?;
+        conn.execute(
+            r#"
+            INSERT INTO invitations (id, email, invite_token_hash, invited_by, status, expires_at, accepted_at, accepted_by, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            "#,
+            &[
+                &invitation.id,
+                &invitation.email,
+                &invite_hash.to_vec(),
+                &invitation.invited_by,
+                &invitation.status,
+                &invitation.expires_at,
+                &invitation.accepted_at,
+                &invitation.accepted_by,
+                &invitation.created_at,
+            ],
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Look up a pending invitation by its hashed token.
+    pub async fn get_invitation_by_hash(
+        &self,
+        invite_hash: &[u8; 32],
+    ) -> Result<Option<InvitationRecord>, DatabaseError> {
+        let conn = self.conn().await?;
+        let row = conn
+            .query_opt(
+                r#"
+                SELECT id, email, invited_by, status, expires_at, accepted_at, accepted_by, created_at
+                FROM invitations
+                WHERE invite_token_hash = $1 AND status = 'pending' AND expires_at > NOW()
+                "#,
+                &[&invite_hash.to_vec()],
+            )
+            .await?;
+        Ok(row.map(|r| row_to_invitation(&r)))
+    }
+
+    /// Accept an invitation.
+    pub async fn accept_invitation(
+        &self,
+        id: Uuid,
+        accepted_by: &str,
+    ) -> Result<(), DatabaseError> {
+        let conn = self.conn().await?;
+        conn.execute(
+            "UPDATE invitations SET status = 'accepted', accepted_at = NOW(), accepted_by = $1 WHERE id = $2",
+            &[&accepted_by, &id],
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// List invitations, optionally filtered by inviter.
+    pub async fn list_invitations(
+        &self,
+        invited_by: Option<&str>,
+    ) -> Result<Vec<InvitationRecord>, DatabaseError> {
+        let conn = self.conn().await?;
+        let rows = match invited_by {
+            Some(user) => {
+                conn.query(
+                    r#"
+                    SELECT id, email, invited_by, status, expires_at, accepted_at, accepted_by, created_at
+                    FROM invitations
+                    WHERE invited_by = $1
+                    ORDER BY created_at DESC
+                    "#,
+                    &[&user],
+                )
+                .await?
+            }
+            None => {
+                conn.query(
+                    r#"
+                    SELECT id, email, invited_by, status, expires_at, accepted_at, accepted_by, created_at
+                    FROM invitations
+                    ORDER BY created_at DESC
+                    "#,
+                    &[],
+                )
+                .await?
+            }
+        };
+        Ok(rows.iter().map(row_to_invitation).collect())
+    }
+
+    /// Check whether any user records exist.
+    pub async fn has_any_users(&self) -> Result<bool, DatabaseError> {
+        let conn = self.conn().await?;
+        let row = conn
+            .query_one(
+                "SELECT EXISTS(SELECT 1 FROM users LIMIT 1) as has_users",
+                &[],
+            )
+            .await?;
+        Ok(row.get("has_users"))
+    }
+}
+
+#[cfg(feature = "postgres")]
+fn row_to_user(row: &tokio_postgres::Row) -> UserRecord {
+    UserRecord {
+        id: row.get("id"),
+        email: row.get("email"),
+        display_name: row.get("display_name"),
+        status: row.get("status"),
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+        last_login_at: row.get("last_login_at"),
+        created_by: row.get("created_by"),
+        metadata: row.get("metadata"),
+    }
+}
+
+#[cfg(feature = "postgres")]
+fn row_to_api_token(row: &tokio_postgres::Row) -> ApiTokenRecord {
+    ApiTokenRecord {
+        id: row.get("id"),
+        user_id: row.get("user_id"),
+        name: row.get("name"),
+        token_prefix: row.get("token_prefix"),
+        expires_at: row.get("expires_at"),
+        last_used_at: row.get("last_used_at"),
+        created_at: row.get("created_at"),
+        revoked_at: row.get("revoked_at"),
+    }
+}
+
+#[cfg(feature = "postgres")]
+fn row_to_invitation(row: &tokio_postgres::Row) -> InvitationRecord {
+    InvitationRecord {
+        id: row.get("id"),
+        email: row.get("email"),
+        invited_by: row.get("invited_by"),
+        status: row.get("status"),
+        expires_at: row.get("expires_at"),
+        accepted_at: row.get("accepted_at"),
+        accepted_by: row.get("accepted_by"),
+        created_at: row.get("created_at"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

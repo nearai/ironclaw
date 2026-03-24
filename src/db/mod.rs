@@ -309,6 +309,55 @@ async fn validate_postgres(pool: &deadpool_postgres::Pool) -> Result<(), Databas
     Ok(())
 }
 
+// ==================== User management record types ====================
+
+/// A registered user.
+#[derive(Debug, Clone)]
+pub struct UserRecord {
+    /// User identifier (string, matches existing `user_id` throughout the codebase).
+    pub id: String,
+    pub email: Option<String>,
+    pub display_name: String,
+    /// `active`, `suspended`, or `deactivated`.
+    pub status: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub last_login_at: Option<DateTime<Utc>>,
+    /// Who created/invited this user (nullable for bootstrap users).
+    pub created_by: Option<String>,
+    pub metadata: serde_json::Value,
+}
+
+/// An API token for authenticating requests (hash stored, never plaintext).
+#[derive(Debug, Clone)]
+pub struct ApiTokenRecord {
+    pub id: Uuid,
+    pub user_id: String,
+    /// Human label (e.g. "my-laptop", "ci-bot").
+    pub name: String,
+    /// First 8 hex chars of the plaintext token for display/identification.
+    pub token_prefix: String,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub last_used_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    /// Soft-revoke timestamp. Non-null means revoked.
+    pub revoked_at: Option<DateTime<Utc>>,
+}
+
+/// A pending invitation to create an account.
+#[derive(Debug, Clone)]
+pub struct InvitationRecord {
+    pub id: Uuid,
+    pub email: Option<String>,
+    pub invited_by: String,
+    /// `pending`, `accepted`, `expired`, or `revoked`.
+    pub status: String,
+    pub expires_at: DateTime<Utc>,
+    pub accepted_at: Option<DateTime<Utc>>,
+    pub accepted_by: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
 // ==================== Sub-traits ====================
 //
 // Each sub-trait groups related persistence methods. The `Database` supertrait
@@ -761,6 +810,78 @@ pub trait WorkspaceStore: Send + Sync {
     }
 }
 
+#[async_trait]
+pub trait UserStore: Send + Sync {
+    // ---- Users ----
+
+    /// Create a new user record.
+    async fn create_user(&self, user: &UserRecord) -> Result<(), DatabaseError>;
+    /// Get a user by their string id.
+    async fn get_user(&self, id: &str) -> Result<Option<UserRecord>, DatabaseError>;
+    /// Get a user by email address.
+    async fn get_user_by_email(&self, email: &str) -> Result<Option<UserRecord>, DatabaseError>;
+    /// List users, optionally filtered by status.
+    async fn list_users(&self, status: Option<&str>) -> Result<Vec<UserRecord>, DatabaseError>;
+    /// Update a user's status (active/suspended/deactivated).
+    async fn update_user_status(&self, id: &str, status: &str) -> Result<(), DatabaseError>;
+    /// Update a user's display name and metadata.
+    async fn update_user_profile(
+        &self,
+        id: &str,
+        display_name: &str,
+        metadata: &serde_json::Value,
+    ) -> Result<(), DatabaseError>;
+    /// Record a login timestamp.
+    async fn record_login(&self, id: &str) -> Result<(), DatabaseError>;
+
+    // ---- API Tokens ----
+
+    /// Create a new API token. The `token_hash` is SHA-256 of the plaintext.
+    async fn create_api_token(
+        &self,
+        user_id: &str,
+        name: &str,
+        token_hash: &[u8; 32],
+        token_prefix: &str,
+        expires_at: Option<DateTime<Utc>>,
+    ) -> Result<ApiTokenRecord, DatabaseError>;
+    /// List tokens for a user (never includes the hash).
+    async fn list_api_tokens(&self, user_id: &str) -> Result<Vec<ApiTokenRecord>, DatabaseError>;
+    /// Soft-revoke a token. Returns false if the token doesn't exist or doesn't belong to the user.
+    async fn revoke_api_token(&self, token_id: Uuid, user_id: &str) -> Result<bool, DatabaseError>;
+    /// Look up a token by hash, returning the token record and its owning user.
+    /// Only returns active (non-revoked, non-expired) tokens for active users.
+    async fn authenticate_token(
+        &self,
+        token_hash: &[u8; 32],
+    ) -> Result<Option<(ApiTokenRecord, UserRecord)>, DatabaseError>;
+    /// Update `last_used_at` for a token.
+    async fn record_token_usage(&self, token_id: Uuid) -> Result<(), DatabaseError>;
+
+    // ---- Invitations ----
+
+    /// Create a new invitation.
+    async fn create_invitation(
+        &self,
+        invitation: &InvitationRecord,
+        invite_hash: &[u8; 32],
+    ) -> Result<(), DatabaseError>;
+    /// Look up a pending invitation by its hashed token.
+    async fn get_invitation_by_hash(
+        &self,
+        invite_hash: &[u8; 32],
+    ) -> Result<Option<InvitationRecord>, DatabaseError>;
+    /// Accept an invitation (sets status=accepted, accepted_by, accepted_at).
+    async fn accept_invitation(&self, id: Uuid, accepted_by: &str) -> Result<(), DatabaseError>;
+    /// List invitations, optionally filtered by inviter.
+    async fn list_invitations(
+        &self,
+        invited_by: Option<&str>,
+    ) -> Result<Vec<InvitationRecord>, DatabaseError>;
+    /// Check whether any user records exist (for first-run bootstrap detection).
+    async fn has_any_users(&self) -> Result<bool, DatabaseError>;
+}
+
 /// Backend-agnostic database supertrait.
 ///
 /// Combines all sub-traits into one. Existing `Arc<dyn Database>` consumers
@@ -774,6 +895,7 @@ pub trait Database:
     + ToolFailureStore
     + SettingsStore
     + WorkspaceStore
+    + UserStore
     + Send
     + Sync
 {
