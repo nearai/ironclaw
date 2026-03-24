@@ -541,6 +541,10 @@ impl Reasoning {
                 // otherwise fall back to the shared response content.
                 let rationale = tool_call
                     .reasoning
+                    .map(|r| {
+                        let pre_truncated = truncate_at_tool_tags(&r);
+                        clean_response(&pre_truncated)
+                    })
                     .filter(|r| !r.trim().is_empty())
                     .unwrap_or_else(|| shared_reasoning.clone());
                 ToolSelection {

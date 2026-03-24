@@ -32,8 +32,8 @@ fn parse_tool_call_infos(calls: &[serde_json::Value]) -> Vec<ToolCallInfo> {
         .iter()
         .map(|c| ToolCallInfo {
             name: c["name"].as_str().unwrap_or("unknown").to_string(),
-            has_result: c.get("result_preview").is_some(),
-            has_error: c.get("error").is_some(),
+            has_result: c.get("result_preview").is_some_and(|v| !v.is_null()),
+            has_error: c.get("error").is_some_and(|v| !v.is_null()),
             result_preview: c["result_preview"].as_str().map(String::from),
             error: c["error"].as_str().map(String::from),
             rationale: c["rationale"].as_str().map(String::from),

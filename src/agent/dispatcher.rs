@@ -420,11 +420,18 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
         content: Option<String>,
         reason_ctx: &mut ReasoningContext,
     ) -> Result<Option<LoopOutcome>, Error> {
-        // Extract the narrative before consuming `content`.
+        // Extract and sanitize the narrative before consuming `content`.
         let narrative = content
             .as_deref()
             .filter(|c| !c.trim().is_empty())
-            .map(|c| c.to_string());
+            .map(|c| {
+                let sanitized = self
+                    .agent
+                    .safety()
+                    .sanitize_tool_output("agent_narrative", c);
+                sanitized.content
+            })
+            .filter(|c| !c.trim().is_empty());
 
         // Add the assistant message with tool_calls to context.
         // OpenAI protocol requires this before tool-result messages.

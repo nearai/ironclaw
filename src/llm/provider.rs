@@ -231,7 +231,8 @@ pub struct ToolCall {
     pub id: String,
     pub name: String,
     pub arguments: serde_json::Value,
-    /// LLM's reasoning for choosing this tool (populated from response content).
+    /// Optional reasoning for why this tool was chosen — supplied by the provider
+    /// or derived from the shared response content as a fallback.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<String>,
 }

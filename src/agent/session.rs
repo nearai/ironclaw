@@ -523,7 +523,12 @@ impl Thread {
                             && let Some(ref tcs) = assistant_msg.tool_calls
                         {
                             for tc in tcs {
-                                turn.record_tool_call(&tc.name, tc.arguments.clone());
+                                turn.record_tool_call_with_reasoning(
+                                    &tc.name,
+                                    tc.arguments.clone(),
+                                    tc.reasoning.clone(),
+                                    Some(tc.id.clone()),
+                                );
                             }
                         }
 
@@ -603,8 +608,8 @@ pub struct Turn {
     pub completed_at: Option<DateTime<Utc>>,
     /// Error message (if failed).
     pub error: Option<String>,
-    /// Agent's reasoning narrative for this turn (why it chose these actions).
-    /// Sanitized before storage — no raw LLM output.
+    /// Agent's reasoning narrative for this turn.
+    /// Cleaned via `clean_response` and sanitized through `SafetyLayer` before storage.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub narrative: Option<String>,
     /// Transient image content parts for multimodal LLM input.
@@ -1689,5 +1694,101 @@ mod tests {
         // Drain should return re-queued content first (front of queue)
         let merged = thread.drain_pending_messages().unwrap();
         assert_eq!(merged, "failed batch\nnew msg");
+    }
+
+    #[test]
+    fn test_record_tool_result_for_by_id() {
+        let mut turn = Turn::new(0, "test");
+        turn.record_tool_call_with_reasoning(
+            "tool_a",
+            serde_json::json!({}),
+            None,
+            Some("id_a".into()),
+        );
+        turn.record_tool_call_with_reasoning(
+            "tool_b",
+            serde_json::json!({}),
+            None,
+            Some("id_b".into()),
+        );
+
+        // Record result for second tool by ID
+        turn.record_tool_result_for("id_b", serde_json::json!("result_b"));
+        assert!(turn.tool_calls[0].result.is_none());
+        assert_eq!(
+            turn.tool_calls[1].result.as_ref().unwrap(),
+            &serde_json::json!("result_b")
+        );
+    }
+
+    #[test]
+    fn test_record_tool_error_for_by_id() {
+        let mut turn = Turn::new(0, "test");
+        turn.record_tool_call_with_reasoning(
+            "tool_a",
+            serde_json::json!({}),
+            None,
+            Some("id_a".into()),
+        );
+        turn.record_tool_call_with_reasoning(
+            "tool_b",
+            serde_json::json!({}),
+            None,
+            Some("id_b".into()),
+        );
+
+        turn.record_tool_error_for("id_a", "failed");
+        assert_eq!(turn.tool_calls[0].error.as_deref(), Some("failed"));
+        assert!(turn.tool_calls[1].error.is_none());
+    }
+
+    #[test]
+    fn test_record_tool_result_for_fallback_to_pending() {
+        let mut turn = Turn::new(0, "test");
+        turn.record_tool_call_with_reasoning(
+            "tool_a",
+            serde_json::json!({}),
+            None,
+            Some("id_a".into()),
+        );
+        turn.record_tool_call_with_reasoning(
+            "tool_b",
+            serde_json::json!({}),
+            None,
+            Some("id_b".into()),
+        );
+
+        // First tool already has a result
+        turn.tool_calls[0].result = Some(serde_json::json!("done"));
+
+        // Unknown ID should fall back to first pending (tool_b)
+        turn.record_tool_result_for("unknown_id", serde_json::json!("fallback"));
+        assert_eq!(
+            turn.tool_calls[0].result.as_ref().unwrap(),
+            &serde_json::json!("done")
+        );
+        assert_eq!(
+            turn.tool_calls[1].result.as_ref().unwrap(),
+            &serde_json::json!("fallback")
+        );
+    }
+
+    #[test]
+    fn test_record_tool_result_for_no_pending_is_noop() {
+        let mut turn = Turn::new(0, "test");
+        turn.record_tool_call_with_reasoning(
+            "tool_a",
+            serde_json::json!({}),
+            None,
+            Some("id_a".into()),
+        );
+        turn.tool_calls[0].result = Some(serde_json::json!("done"));
+
+        // No pending calls, unknown ID — should be a no-op
+        turn.record_tool_result_for("unknown_id", serde_json::json!("lost"));
+        assert_eq!(
+            turn.tool_calls[0].result.as_ref().unwrap(),
+            &serde_json::json!("done")
+        );
     }
 }

@@ -773,7 +773,8 @@ impl Agent {
                     obj["rationale"] = serde_json::Value::String(truncate_preview(rationale, 500));
                 }
                 if let Some(ref tool_call_id) = tc.tool_call_id {
-                    obj["tool_call_id"] = serde_json::Value::String(tool_call_id.clone());
+                    obj["tool_call_id"] =
+                        serde_json::Value::String(truncate_preview(tool_call_id, 128));
                 }
                 obj
             })
@@ -1124,9 +1125,12 @@ impl Agent {
                     && let Some(turn) = thread.last_turn_mut()
                 {
                     if is_tool_error {
-                        turn.record_tool_error(result_content.clone());
+                        turn.record_tool_error_for(&pending.tool_call_id, result_content.clone());
                     } else {
-                        turn.record_tool_result(serde_json::json!(result_content));
+                        turn.record_tool_result_for(
+                            &pending.tool_call_id,
+                            serde_json::json!(result_content),
+                        );
                     }
                 }
             }
@@ -1378,9 +1382,12 @@ impl Agent {
                         && let Some(turn) = thread.last_turn_mut()
                     {
                         if is_deferred_error {
-                            turn.record_tool_error(deferred_content.clone());
+                            turn.record_tool_error_for(&tc.id, deferred_content.clone());
                         } else {
-                            turn.record_tool_result(serde_json::json!(deferred_content));
+                            turn.record_tool_result_for(
+                                &tc.id,
+                                serde_json::json!(deferred_content),
+                            );
                         }
                     }
                 }
