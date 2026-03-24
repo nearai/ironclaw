@@ -78,7 +78,13 @@ impl AliyunProvider {
 
         for msg in messages {
             if msg.role == Role::System {
-                system_text = Some(msg.content.clone());
+                match &mut system_text {
+                    Some(existing) => {
+                        existing.push('\n');
+                        existing.push_str(&msg.content);
+                    }
+                    None => system_text = Some(msg.content.clone()),
+                }
                 continue;
             }
 
@@ -236,7 +242,10 @@ impl AliyunProvider {
             })?;
 
         let status = response.status();
-        let text = response.text().await.unwrap_or_default();
+        let text = response.text().await.map_err(|e| LlmError::RequestFailed {
+            provider: "aliyun".to_string(),
+            reason: format!("Failed to read response body: {}", e),
+        })?;
 
         if !status.is_success() {
             return Err(LlmError::RequestFailed {
@@ -547,5 +556,79 @@ impl LlmProvider for AliyunProvider {
             "qwen3-coder-next".to_string(),
             "qwen3-coder-plus".to_string(),
         ])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn provider() -> AliyunProvider {
+        AliyunProvider::new(AliyunConfig {
+            model: "test".to_string(),
+            base_url: "https://example.com/apps/anthropic/v1".to_string(),
+            api_key: None,
+            timeout_secs: 30,
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn test_build_url_anthropic_with_v1() {
+        assert_eq!(
+            provider().build_url(),
+            "https://example.com/apps/anthropic/v1/messages"
+        );
+    }
+
+    #[test]
+    fn test_build_url_anthropic_without_v1() {
+        let p = AliyunProvider::new(AliyunConfig {
+            model: "test".to_string(),
+            base_url: "https://example.com/apps/anthropic".to_string(),
+            api_key: None,
+            timeout_secs: 30,
+        })
+        .unwrap();
+        assert_eq!(
+            p.build_url(),
+            "https://example.com/apps/anthropic/v1/messages"
+        );
+    }
+
+    #[test]
+    fn test_build_url_trailing_slash() {
+        let p = AliyunProvider::new(AliyunConfig {
+            model: "test".to_string(),
+            base_url: "https://example.com/apps/anthropic/v1/".to_string(),
+            api_key: None,
+            timeout_secs: 30,
+        })
+        .unwrap();
+        assert_eq!(
+            p.build_url(),
+            "https://example.com/apps/anthropic/v1/messages"
+        );
+    }
+
+    #[test]
+    fn test_convert_messages_system_accumulation() {
+        let messages = vec![
+            ChatMessage::system("First system"),
+            ChatMessage::system("Second system"),
+            ChatMessage::user("Hello"),
+        ];
+        let (system, api_msgs) = provider().convert_messages_for_anthropic(&messages);
+        assert_eq!(system.unwrap(), "First system\nSecond system");
+        assert_eq!(api_msgs.len(), 1);
+    }
+
+    #[test]
+    fn test_convert_messages_tool_result() {
+        let messages = vec![ChatMessage::tool_result("call_123", "tool", "result")];
+        let (_, api_msgs) = provider().convert_messages_for_anthropic(&messages);
+        assert_eq!(api_msgs.len(), 1);
+        assert_eq!(api_msgs[0]["role"], "user");
+        assert_eq!(api_msgs[0]["content"][0]["type"], "tool_result");
     }
 }

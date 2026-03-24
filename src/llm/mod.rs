@@ -517,6 +517,18 @@ fn create_cheap_provider_for_backend(
         let mut cheap_gemini_config = gemini_config.clone();
         cheap_gemini_config.model = cheap_model.to_string();
         let provider = GeminiOauthProvider::new(cheap_gemini_config)?;
+        if config.backend == "aliyun" || config.backend == "coding_plan" {
+            let Some(ref aliyun_config) = config.aliyun else {
+                return Err(LlmError::RequestFailed {
+                    provider: "aliyun".to_string(),
+                    reason: "Aliyun config not available for cheap model".to_string(),
+                });
+            };
+            let mut cheap_aliyun = aliyun_config.clone();
+            cheap_aliyun.model = cheap_model.to_string();
+            let provider = AliyunProvider::new(cheap_aliyun)?;
+            return Ok(Some(Arc::new(provider)));
+        }
         return Ok(Some(Arc::new(provider)));
     }
 

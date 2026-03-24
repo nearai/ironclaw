@@ -232,6 +232,7 @@ impl LlmConfig {
                     "https://coding.dashscope.aliyuncs.com/apps/anthropic".to_string()
                 });
             let aliyun_api_key = optional_env("ALIYUN_API_KEY")?;
+            validate_base_url(&base_url, "ALIYUN_BASE_URL")?;
             let llm_api_key = optional_env("LLM_API_KEY")?;
             let api_key = aliyun_api_key
                 .filter(|s| !s.trim().is_empty())
