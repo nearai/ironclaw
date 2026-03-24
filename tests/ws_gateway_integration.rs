@@ -163,7 +163,7 @@ async fn test_ws_broadcast_event_received() {
     // Give the connection a moment to fully establish
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    // Broadcast an SSE event (simulates agent sending a response)
+    // Broadcast an event (simulates agent sending a response)
     state.sse.broadcast(AppEvent::Response {
         content: "agent says hi".to_string(),
         thread_id: "t1".to_string(),

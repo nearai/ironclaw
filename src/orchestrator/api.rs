@@ -277,9 +277,9 @@ async fn job_event_handler(
         });
     }
 
-    // Convert to SSE event and broadcast
+    // Convert to app event and broadcast
     let job_id_str = job_id.to_string();
-    let sse_event = match payload.event_type.as_str() {
+    let app_event = match payload.event_type.as_str() {
         "message" => AppEvent::JobMessage {
             job_id: job_id_str,
             role: payload
@@ -390,9 +390,9 @@ async fn job_event_handler(
         };
 
         if user_id.is_empty() {
-            let _ = tx.send((job_id, String::new(), sse_event));
+            let _ = tx.send((job_id, String::new(), app_event));
         } else {
-            let _ = tx.send((job_id, user_id, sse_event));
+            let _ = tx.send((job_id, user_id, app_event));
         }
     }
 

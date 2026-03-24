@@ -97,7 +97,7 @@ pub async fn handle_ws_connection(
             let msg = tokio::select! {
                 event = event_stream.next() => {
                     match event {
-                        Some(sse_event) => WsServerMessage::from_app_event(&sse_event),
+                        Some(app_event) => WsServerMessage::from_app_event(&app_event),
                         None => break, // Broadcast channel closed
                     }
                 }

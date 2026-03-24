@@ -922,12 +922,12 @@ mod tests {
     }
 
     #[test]
-    fn test_ws_server_from_sse_response() {
-        let sse = AppEvent::Response {
+    fn test_ws_server_from_app_event_response() {
+        let event = AppEvent::Response {
             content: "hello".to_string(),
             thread_id: "t1".to_string(),
         };
-        let ws = WsServerMessage::from_app_event(&sse);
+        let ws = WsServerMessage::from_app_event(&event);
         match ws {
             WsServerMessage::Event { event_type, data } => {
                 assert_eq!(event_type, "response");
@@ -939,12 +939,12 @@ mod tests {
     }
 
     #[test]
-    fn test_ws_server_from_sse_thinking() {
-        let sse = AppEvent::Thinking {
+    fn test_ws_server_from_app_event_thinking() {
+        let event = AppEvent::Thinking {
             message: "reasoning...".to_string(),
             thread_id: None,
         };
-        let ws = WsServerMessage::from_app_event(&sse);
+        let ws = WsServerMessage::from_app_event(&event);
         match ws {
             WsServerMessage::Event { event_type, data } => {
                 assert_eq!(event_type, "thinking");
@@ -955,8 +955,8 @@ mod tests {
     }
 
     #[test]
-    fn test_ws_server_from_sse_approval_needed() {
-        let sse = AppEvent::ApprovalNeeded {
+    fn test_ws_server_from_app_event_approval_needed() {
+        let event = AppEvent::ApprovalNeeded {
             request_id: "r1".to_string(),
             tool_name: "shell".to_string(),
             description: "Run ls".to_string(),
@@ -964,7 +964,7 @@ mod tests {
             thread_id: Some("t1".to_string()),
             allow_always: true,
         };
-        let ws = WsServerMessage::from_app_event(&sse);
+        let ws = WsServerMessage::from_app_event(&event);
         match ws {
             WsServerMessage::Event { event_type, data } => {
                 assert_eq!(event_type, "approval_needed");
@@ -976,9 +976,9 @@ mod tests {
     }
 
     #[test]
-    fn test_ws_server_from_sse_heartbeat() {
-        let sse = AppEvent::Heartbeat;
-        let ws = WsServerMessage::from_app_event(&sse);
+    fn test_ws_server_from_app_event_heartbeat() {
+        let event = AppEvent::Heartbeat;
+        let ws = WsServerMessage::from_app_event(&event);
         match ws {
             WsServerMessage::Event { event_type, .. } => {
                 assert_eq!(event_type, "heartbeat");
@@ -1018,7 +1018,7 @@ mod tests {
     }
 
     #[test]
-    fn test_sse_auth_required_serialize() {
+    fn test_app_event_auth_required_serialize() {
         let event = AppEvent::AuthRequired {
             extension_name: "notion".to_string(),
             instructions: Some("Get your token from...".to_string()),
@@ -1035,7 +1035,7 @@ mod tests {
     }
 
     #[test]
-    fn test_sse_auth_completed_serialize() {
+    fn test_app_event_auth_completed_serialize() {
         let event = AppEvent::AuthCompleted {
             extension_name: "notion".to_string(),
             success: true,
@@ -1049,14 +1049,14 @@ mod tests {
     }
 
     #[test]
-    fn test_ws_server_from_sse_auth_required() {
-        let sse = AppEvent::AuthRequired {
+    fn test_ws_server_from_app_event_auth_required() {
+        let event = AppEvent::AuthRequired {
             extension_name: "openai".to_string(),
             instructions: Some("Enter API key".to_string()),
             auth_url: None,
             setup_url: None,
         };
-        let ws = WsServerMessage::from_app_event(&sse);
+        let ws = WsServerMessage::from_app_event(&event);
         match ws {
             WsServerMessage::Event { event_type, data } => {
                 assert_eq!(event_type, "auth_required");
@@ -1067,13 +1067,13 @@ mod tests {
     }
 
     #[test]
-    fn test_ws_server_from_sse_auth_completed() {
-        let sse = AppEvent::AuthCompleted {
+    fn test_ws_server_from_app_event_auth_completed() {
+        let event = AppEvent::AuthCompleted {
             extension_name: "slack".to_string(),
             success: false,
             message: "Invalid token".to_string(),
         };
-        let ws = WsServerMessage::from_app_event(&sse);
+        let ws = WsServerMessage::from_app_event(&event);
         match ws {
             WsServerMessage::Event { event_type, data } => {
                 assert_eq!(event_type, "auth_completed");
