@@ -285,6 +285,12 @@ async def ironclaw_server(
         yield base_url
     except TimeoutError:
         # Dump stderr so CI logs show why the server failed to start
+        if proc.returncode is None:
+            proc.kill()
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=2)
+            except (asyncio.TimeoutError, Exception):
+                pass
         returncode = proc.returncode
         stderr_bytes = b""
         if proc.stderr:
@@ -293,7 +299,6 @@ async def ironclaw_server(
             except (asyncio.TimeoutError, Exception):
                 pass
         stderr_text = stderr_bytes.decode("utf-8", errors="replace")
-        proc.kill()
         pytest.fail(
             f"ironclaw server failed to start on port {gateway_port} "
             f"(returncode={returncode}).\nstderr:\n{stderr_text}"
@@ -383,6 +388,12 @@ async def http_channel_server_without_secret(
         yield http_base_url
     except TimeoutError:
         # Dump stderr so CI logs show why the server failed to start
+        if proc.returncode is None:
+            proc.kill()
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=2)
+            except (asyncio.TimeoutError, Exception):
+                pass
         returncode = proc.returncode
         stderr_bytes = b""
         if proc.stderr:
@@ -391,7 +402,6 @@ async def http_channel_server_without_secret(
             except (asyncio.TimeoutError, Exception):
                 pass
         stderr_text = stderr_bytes.decode("utf-8", errors="replace")
-        proc.kill()
         pytest.fail(
             f"ironclaw server without webhook secret failed to start on ports "
             f"gateway={gateway_port}, http={http_port} "

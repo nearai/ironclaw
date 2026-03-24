@@ -121,6 +121,18 @@ impl GatewayChannel {
         }
     }
 
+    /// Rebind the single-user auth identity to the durable owner scope while
+    /// preserving the configured gateway sender/routing identity.
+    pub fn with_owner_scope(mut self, owner_id: impl Into<String>) -> Self {
+        let owner_id = owner_id.into();
+        if self.config.user_tokens.is_none()
+            && let Some(token) = self.auth.first_token().map(ToOwned::to_owned)
+        {
+            self.auth = MultiAuthState::single(token, owner_id);
+        }
+        self
+    }
+
     /// Create a gateway channel with a pre-built multi-user auth state.
     pub fn new_multi_auth(config: GatewayConfig, auth: MultiAuthState) -> Self {
         let state = Arc::new(GatewayState {
