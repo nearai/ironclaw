@@ -125,6 +125,10 @@ async def _stop_process(
         else:
             proc.send_signal(sig)
     except ProcessLookupError:
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            pass
         return
 
     try:
