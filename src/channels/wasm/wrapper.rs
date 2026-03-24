@@ -46,6 +46,7 @@ use crate::channels::wasm::capabilities::ChannelCapabilities;
 use crate::channels::wasm::error::WasmChannelError;
 use crate::channels::wasm::host::{
     ChannelEmitRateLimiter, ChannelHostState, ChannelWorkspaceStore, EmittedMessage,
+    PendingWorkspaceWrite,
 };
 use crate::channels::wasm::router::RegisteredEndpoint;
 use crate::channels::wasm::runtime::{PreparedChannelModule, WasmChannelRuntime};
@@ -1593,7 +1594,6 @@ impl WasmChannel {
         )
         .await;
         let pairing_store = self.pairing_store.clone();
-        let workspace_store = self.workspace_store.clone();
 
         // Prepare request data
         let method = method.to_string();
@@ -1637,11 +1637,13 @@ impl WasmChannel {
                 let mut host_state =
                     Self::extract_host_state(&mut store, &prepared.name, &capabilities);
 
-                // Commit pending workspace writes to the persistent store
+                // Defer workspace commit until after successful message delivery.
+                // This prevents dedup keys from being committed before messages
+                // reach the agent queue — the root cause of message loss when the
+                // queue is temporarily full and the upstream platform retries.
                 let pending_writes = host_state.take_pending_writes();
-                workspace_store.commit_writes(&pending_writes);
 
-                Ok((response, host_state))
+                Ok((response, host_state, pending_writes))
             })
             .await
             .map_err(|e| WasmChannelError::ExecutionPanicked {
@@ -1653,10 +1655,19 @@ impl WasmChannel {
 
         let channel_name = self.name.clone();
         match result {
-            Ok(Ok((response, mut host_state))) => {
-                // Process emitted messages
+            Ok(Ok((response, mut host_state, pending_writes))) => {
+                // Process emitted messages BEFORE committing workspace writes.
+                // If delivery fails, workspace (including dedup keys) stays
+                // uncommitted so the upstream platform can retry successfully.
+                // NOTE: This assumes each webhook/poll produces at most 1 emitted
+                // message. If multiple messages per event are needed in the future,
+                // a per-message ack or outbox mechanism must be added to avoid
+                // partial-success replay issues.
                 let emitted = host_state.take_emitted_messages();
                 self.process_emitted_messages(emitted).await?;
+
+                self.workspace_store.commit_writes(&pending_writes);
+                self.workspace_store.promote_pending_to_delivered(&pending_writes);
 
                 tracing::debug!(
                     channel = %channel_name,
@@ -1699,7 +1710,6 @@ impl WasmChannel {
         )
         .await;
         let pairing_store = self.pairing_store.clone();
-        let workspace_store = self.workspace_store.clone();
 
         // Execute in blocking task with timeout
         let result = tokio::time::timeout(timeout, async move {
@@ -1723,11 +1733,12 @@ impl WasmChannel {
                 let mut host_state =
                     Self::extract_host_state(&mut store, &prepared.name, &capabilities);
 
-                // Commit pending workspace writes to the persistent store
+                // Defer workspace commit until after successful message delivery.
+                // For poll-based channels, failure recovery relies on the next
+                // poll tick re-running the WASM callback (no external retry).
                 let pending_writes = host_state.take_pending_writes();
-                workspace_store.commit_writes(&pending_writes);
 
-                Ok(((), host_state))
+                Ok(((), host_state, pending_writes))
             })
             .await
             .map_err(|e| WasmChannelError::ExecutionPanicked {
@@ -1739,12 +1750,17 @@ impl WasmChannel {
 
         let channel_name = self.name.clone();
         match result {
-            Ok(Ok(((), mut host_state))) => {
+            Ok(Ok(((), mut host_state, pending_writes))) => {
                 let _ = drain_guest_logs(&channel_name, "on_poll", &mut host_state);
 
-                // Process emitted messages
+                // Deliver messages before committing workspace writes.
+                // For poll-based channels, failure recovery relies on the next
+                // poll tick re-running the WASM callback (no external retry).
                 let emitted = host_state.take_emitted_messages();
                 self.process_emitted_messages(emitted).await?;
+
+                self.workspace_store.commit_writes(&pending_writes);
+                self.workspace_store.promote_pending_to_delivered(&pending_writes);
 
                 tracing::debug!(
                     channel = %channel_name,
@@ -2393,9 +2409,10 @@ impl WasmChannel {
         &self,
         messages: Vec<EmittedMessage>,
     ) -> Result<(), WasmChannelError> {
+        let emitted_count = messages.len();
         tracing::info!(
             channel = %self.name,
-            message_count = messages.len(),
+            message_count = emitted_count,
             "Processing emitted messages from WASM callback"
         );
 
@@ -2410,7 +2427,7 @@ impl WasmChannel {
             let Some(tx) = tx_guard.as_ref() else {
                 tracing::error!(
                     channel = %self.name,
-                    count = messages.len(),
+                    count = emitted_count,
                     "Messages emitted but no sender available - channel may not be started!"
                 );
                 return Ok(());
@@ -2480,7 +2497,11 @@ impl WasmChannel {
                 self.update_broadcast_metadata(&emitted.metadata_json).await;
             }
 
-            // Send to stream — no locks held across this await
+            // Send to stream with timeout to prevent indefinite blocking when
+            // the agent queue is full. A blocked send would hold up the WASM
+            // callback, delay commit_writes, and cause dedup keys to never be
+            // persisted — making webhook retries look like new events.
+            const SEND_TIMEOUT_SECS: u64 = 10;
             tracing::info!(
                 channel = %self.name,
                 user_id = %emitted.user_id,
@@ -2489,18 +2510,44 @@ impl WasmChannel {
                 "Sending emitted message to agent"
             );
 
-            if tx.send(msg).await.is_err() {
-                tracing::error!(
-                    channel = %self.name,
-                    "Failed to send emitted message, channel closed"
-                );
-                break;
+            match tokio::time::timeout(
+                Duration::from_secs(SEND_TIMEOUT_SECS),
+                tx.send(msg),
+            )
+            .await
+            {
+                Ok(Ok(())) => {
+                    tracing::info!(
+                        channel = %self.name,
+                        "Message successfully sent to agent queue"
+                    );
+                }
+                Ok(Err(_)) => {
+                    tracing::error!(
+                        channel = %self.name,
+                        emitted_count,
+                        "Agent message channel closed"
+                    );
+                    return Err(WasmChannelError::SendTimeout {
+                        name: self.name.clone(),
+                        timeout_secs: SEND_TIMEOUT_SECS,
+                        emitted_count,
+                    });
+                }
+                Err(_) => {
+                    tracing::error!(
+                        channel = %self.name,
+                        emitted_count,
+                        timeout_secs = SEND_TIMEOUT_SECS,
+                        "Send to agent queue timed out — agent may be blocked"
+                    );
+                    return Err(WasmChannelError::SendTimeout {
+                        name: self.name.clone(),
+                        timeout_secs: SEND_TIMEOUT_SECS,
+                        emitted_count,
+                    });
+                }
             }
-
-            tracing::info!(
-                channel = %self.name,
-                "Message successfully sent to agent queue"
-            );
         }
 
         Ok(())
@@ -2563,10 +2610,12 @@ impl WasmChannel {
                         ).await;
 
                         match result {
-                            Ok(emitted_messages) => {
-                                // Process any emitted messages
-                                if !emitted_messages.is_empty()
-                                    && let Err(e) = Self::dispatch_emitted_messages(
+                            Ok((emitted_messages, pending_writes)) => {
+                                // Dispatch messages BEFORE committing workspace.
+                                // On failure, dedup keys stay uncommitted so the
+                                // next poll tick can re-try.
+                                let dispatch_ok = if !emitted_messages.is_empty() {
+                                    match Self::dispatch_emitted_messages(
                                         EmitDispatchContext {
                                             channel_name: &channel_name,
                                             owner_scope_id: &owner_scope_id,
@@ -2578,12 +2627,24 @@ impl WasmChannel {
                                         },
                                         emitted_messages,
                                     ).await {
-                                        tracing::warn!(
-                                            channel = %channel_name,
-                                            error = %e,
-                                            "Failed to dispatch emitted messages from poll"
-                                        );
+                                        Ok(()) => true,
+                                        Err(e) => {
+                                            tracing::warn!(
+                                                channel = %channel_name,
+                                                error = %e,
+                                                "Failed to dispatch emitted messages from poll"
+                                            );
+                                            false
+                                        }
                                     }
+                                } else {
+                                    true
+                                };
+
+                                if dispatch_ok {
+                                    workspace_store.commit_writes(&pending_writes);
+                                    workspace_store.promote_pending_to_delivered(&pending_writes);
+                                }
                             }
                             Err(e) => {
                                 tracing::warn!(
@@ -2622,14 +2683,14 @@ impl WasmChannel {
         pairing_store: Arc<PairingStore>,
         timeout: Duration,
         workspace_store: &Arc<ChannelWorkspaceStore>,
-    ) -> Result<Vec<EmittedMessage>, WasmChannelError> {
+    ) -> Result<(Vec<EmittedMessage>, Vec<PendingWorkspaceWrite>), WasmChannelError> {
         // Skip if no WASM bytes (testing mode)
         if prepared.component().is_none() {
             tracing::debug!(
                 channel = %channel_name,
                 "WASM channel on_poll called (no WASM module)"
             );
-            return Ok(Vec::new());
+            return Ok((Vec::new(), Vec::new()));
         }
 
         let runtime = Arc::clone(runtime);
@@ -2637,7 +2698,6 @@ impl WasmChannel {
         let capabilities = Self::inject_workspace_reader(capabilities, workspace_store);
         let credentials_snapshot = credentials.read().await.clone();
         let channel_name_owned = channel_name.to_string();
-        let workspace_store = Arc::clone(workspace_store);
 
         // Execute in blocking task with timeout
         let result = tokio::time::timeout(timeout, async move {
@@ -2661,11 +2721,11 @@ impl WasmChannel {
                 let mut host_state =
                     Self::extract_host_state(&mut store, &prepared.name, &capabilities);
 
-                // Commit pending workspace writes to the persistent store
+                // Return pending writes without committing — the caller commits
+                // only after successful message delivery.
                 let pending_writes = host_state.take_pending_writes();
-                workspace_store.commit_writes(&pending_writes);
 
-                Ok(host_state)
+                Ok((host_state, pending_writes))
             })
             .await
             .map_err(|e| WasmChannelError::ExecutionPanicked {
@@ -2676,7 +2736,7 @@ impl WasmChannel {
         .await;
 
         match result {
-            Ok(Ok(mut host_state)) => {
+            Ok(Ok((mut host_state, pending_writes))) => {
                 let _ = drain_guest_logs(channel_name, "on_poll", &mut host_state);
                 let emitted = host_state.take_emitted_messages();
                 tracing::debug!(
@@ -2684,7 +2744,7 @@ impl WasmChannel {
                     emitted_count = emitted.len(),
                     "WASM channel on_poll completed"
                 );
-                Ok(emitted)
+                Ok((emitted, pending_writes))
             }
             Ok(Err(e)) => Err(e),
             Err(_) => Err(WasmChannelError::Timeout {
@@ -2702,9 +2762,10 @@ impl WasmChannel {
         dispatch: EmitDispatchContext<'_>,
         messages: Vec<EmittedMessage>,
     ) -> Result<(), WasmChannelError> {
+        let emitted_count = messages.len();
         tracing::info!(
             channel = %dispatch.channel_name,
-            message_count = messages.len(),
+            message_count = emitted_count,
             "Processing emitted messages from polling callback"
         );
 
@@ -2714,7 +2775,7 @@ impl WasmChannel {
             let Some(tx) = tx_guard.as_ref() else {
                 tracing::error!(
                     channel = %dispatch.channel_name,
-                    count = messages.len(),
+                    count = emitted_count,
                     "Messages emitted but no sender available - channel may not be started!"
                 );
                 return Ok(());
@@ -2791,7 +2852,7 @@ impl WasmChannel {
                 .await;
             }
 
-            // Send to stream — no locks held across this await
+            const SEND_TIMEOUT_SECS: u64 = 10;
             tracing::info!(
                 channel = %dispatch.channel_name,
                 user_id = %emitted.user_id,
@@ -2800,18 +2861,44 @@ impl WasmChannel {
                 "Sending polled message to agent"
             );
 
-            if tx.send(msg).await.is_err() {
-                tracing::error!(
-                    channel = %dispatch.channel_name,
-                    "Failed to send polled message, channel closed"
-                );
-                break;
+            match tokio::time::timeout(
+                Duration::from_secs(SEND_TIMEOUT_SECS),
+                tx.send(msg),
+            )
+            .await
+            {
+                Ok(Ok(())) => {
+                    tracing::info!(
+                        channel = %dispatch.channel_name,
+                        "Message successfully sent to agent queue"
+                    );
+                }
+                Ok(Err(_)) => {
+                    tracing::error!(
+                        channel = %dispatch.channel_name,
+                        emitted_count,
+                        "Agent message channel closed"
+                    );
+                    return Err(WasmChannelError::SendTimeout {
+                        name: dispatch.channel_name.to_string(),
+                        timeout_secs: SEND_TIMEOUT_SECS,
+                        emitted_count,
+                    });
+                }
+                Err(_) => {
+                    tracing::error!(
+                        channel = %dispatch.channel_name,
+                        emitted_count,
+                        timeout_secs = SEND_TIMEOUT_SECS,
+                        "Send to agent queue timed out — agent may be blocked"
+                    );
+                    return Err(WasmChannelError::SendTimeout {
+                        name: dispatch.channel_name.to_string(),
+                        timeout_secs: SEND_TIMEOUT_SECS,
+                        emitted_count,
+                    });
+                }
             }
-
-            tracing::info!(
-                channel = %dispatch.channel_name,
-                "Message successfully sent to agent queue"
-            );
         }
 
         Ok(())

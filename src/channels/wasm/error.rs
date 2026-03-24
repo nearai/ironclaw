@@ -83,6 +83,13 @@ pub enum WasmChannelError {
 
     #[error("WIT version mismatch: {0}")]
     IncompatibleWitVersion(String),
+
+    #[error("Channel {name} failed to send message to agent queue (timeout={timeout_secs}s, emitted={emitted_count})")]
+    SendTimeout {
+        name: String,
+        timeout_secs: u64,
+        emitted_count: usize,
+    },
 }
 
 impl From<crate::tools::wasm::WasmError> for WasmChannelError {
