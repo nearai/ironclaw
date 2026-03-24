@@ -6238,12 +6238,16 @@ let _builtinOverrides = {};
 let _editingProviderId = null;
 let _configuringBuiltinId = null;
 let _configLoaded = false;
+let _envDefaults = {};
 
 function loadConfig() {
   const list = document.getElementById('providers-list');
   list.innerHTML = '<div class="empty-state">' + I18n.t('common.loading') + '</div>';
 
-  apiFetch('/api/settings/export').then((d) => {
+  Promise.all([
+    apiFetch('/api/settings/export'),
+    apiFetch('/api/llm/env_defaults').catch(() => ({})),
+  ]).then(([d, envDefs]) => {
     const s = (d && d.settings) ? d.settings : {};
     _activeLlmBackend = s['llm_backend'] ? String(s['llm_backend']) : 'nearai';
     _selectedModel = s['selected_model'] ? String(s['selected_model']) : '';
@@ -6259,6 +6263,7 @@ function loadConfig() {
     } catch (e) {
       _builtinOverrides = {};
     }
+    _envDefaults = (envDefs && typeof envDefs === 'object') ? envDefs : {};
     _configLoaded = true;
     renderProviders();
   }).catch(() => {
@@ -6266,6 +6271,7 @@ function loadConfig() {
     _selectedModel = '';
     _customProviders = [];
     _builtinOverrides = {};
+    _envDefaults = {};
     _configLoaded = true;
     renderProviders();
   });
@@ -6311,13 +6317,16 @@ function renderProviders() {
     const useBtn = !isActive
       ? '<button class="provider-action-btn" data-action="set-active-provider" data-id="' + escapeHtml(p.id) + '">' + I18n.t('config.useProvider') + '</button>'
       : '';
-    const baseUrlText = p.base_url
-      ? '<span class="provider-url">' + escapeHtml(p.base_url) + '</span>'
+    const envDef = _envDefaults[p.id] || {};
+    const effectiveBaseUrl = envDef.base_url || p.base_url;
+    const baseUrlText = effectiveBaseUrl
+      ? '<span class="provider-url">' + escapeHtml(effectiveBaseUrl) + '</span>'
       : '';
-    // Show configured model: for active provider use _selectedModel, for others check _builtinOverrides
+    // Show configured model: for active provider use _selectedModel, for others check _builtinOverrides then env defaults
+    const overrideModel = p.builtin && _builtinOverrides[p.id] ? (_builtinOverrides[p.id].model || '') : '';
     const displayModel = isActive
-      ? _selectedModel
-      : (p.builtin && _builtinOverrides[p.id] ? (_builtinOverrides[p.id].model || '') : '');
+      ? (_selectedModel || envDef.model || '')
+      : (overrideModel || envDef.model || '');
     const modelText = displayModel
       ? '<span class="provider-current-model">' + escapeHtml(I18n.t('config.currentModel', { model: displayModel })) + '</span>'
       : '';
@@ -6417,9 +6426,11 @@ function configureBuiltinProvider(id) {
   document.getElementById('provider-id-row').style.display = 'none';
   document.getElementById('provider-adapter-row').style.display = 'none';
   const baseUrlInput = document.getElementById('provider-base-url');
-  if (p.base_url) {
+  const envBaseUrl = (_envDefaults[id] || {}).base_url;
+  const effectiveBaseUrl = envBaseUrl || p.base_url;
+  if (effectiveBaseUrl) {
     document.getElementById('provider-base-url-row').style.display = '';
-    baseUrlInput.value = p.base_url;
+    baseUrlInput.value = effectiveBaseUrl;
     baseUrlInput.readOnly = true;
     baseUrlInput.style.opacity = '0.6';
   } else {
@@ -6428,8 +6439,11 @@ function configureBuiltinProvider(id) {
   document.getElementById('provider-api-key-row').style.display = p.api_key_required !== false ? '' : 'none';
   document.getElementById('fetch-models-btn').style.display = p.can_list_models ? '' : 'none';
   const override = _builtinOverrides[id] || {};
-  document.getElementById('provider-api-key').value = override.api_key || '';
-  document.getElementById('provider-model').value = override.model || p.default_model || '';
+  const envDef = _envDefaults[id] || {};
+  const apiKeyInput = document.getElementById('provider-api-key');
+  apiKeyInput.value = override.api_key || envDef.api_key || '';
+  apiKeyInput.placeholder = '';
+  document.getElementById('provider-model').value = override.model || envDef.model || p.default_model || '';
   openProviderDialog(true);
   document.getElementById('provider-model').focus();
 }

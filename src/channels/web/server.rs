@@ -343,6 +343,7 @@ pub async fn start_server(
             post(llm_test_connection_handler),
         )
         .route("/api/llm/list_models", post(llm_list_models_handler))
+        .route("/api/llm/env_defaults", get(llm_env_defaults_handler))
         // Gateway control plane
         .route("/api/gateway/status", get(gateway_status_handler))
         // OpenAI-compatible API
@@ -2796,6 +2797,69 @@ async fn fetch_provider_models(req: ListModelsRequest) -> ListModelsResponse {
     }
 }
 
+// --- LLM env defaults handler ---
+
+/// Returns env-var-based defaults for each builtin LLM provider.
+///
+/// The frontend uses these as fallback values when the DB has no overrides.
+/// API keys are never returned — only a boolean `has_api_key`.
+async fn llm_env_defaults_handler() -> Json<serde_json::Value> {
+    use crate::llm::registry::ProviderRegistry;
+
+    let registry = ProviderRegistry::load();
+    let mut defaults = serde_json::Map::new();
+
+    // NEAR AI is a special case (not in the registry)
+    {
+        let mut entry = serde_json::Map::new();
+        if let Ok(key) = std::env::var("NEARAI_API_KEY")
+            && !key.is_empty()
+        {
+            entry.insert("api_key".to_string(), serde_json::Value::String(key));
+        }
+        if let Ok(model) = std::env::var("NEARAI_MODEL")
+            && !model.is_empty()
+        {
+            entry.insert("model".to_string(), serde_json::Value::String(model));
+        }
+        if let Ok(url) = std::env::var("NEARAI_BASE_URL")
+            && !url.is_empty()
+        {
+            entry.insert("base_url".to_string(), serde_json::Value::String(url));
+        }
+        defaults.insert("nearai".to_string(), serde_json::Value::Object(entry));
+    }
+
+    // Registry-based providers
+    for def in registry.all() {
+        let mut entry = serde_json::Map::new();
+
+        if let Some(ref api_key_env) = def.api_key_env
+            && let Ok(key) = std::env::var(api_key_env)
+            && !key.is_empty()
+        {
+            entry.insert("api_key".to_string(), serde_json::Value::String(key));
+        }
+
+        if let Ok(model) = std::env::var(&def.model_env)
+            && !model.is_empty()
+        {
+            entry.insert("model".to_string(), serde_json::Value::String(model));
+        }
+
+        if let Some(ref base_url_env) = def.base_url_env
+            && let Ok(url) = std::env::var(base_url_env)
+            && !url.is_empty()
+        {
+            entry.insert("base_url".to_string(), serde_json::Value::String(url));
+        }
+
+        defaults.insert(def.id.clone(), serde_json::Value::Object(entry));
+    }
+
+    Json(serde_json::Value::Object(defaults))
+}
+
 // --- Gateway control plane handlers ---
 
 async fn gateway_status_handler(
@@ -3038,6 +3102,62 @@ mod tests {
         }
 
         Ok(())
+    }
+
+    // --- LLM env defaults handler tests ---
+
+    #[tokio::test]
+    async fn test_llm_env_defaults_returns_nearai_env_vars() {
+        // SAFETY: test-only; tokio::test runs single-threaded by default.
+        unsafe {
+            std::env::set_var("NEARAI_API_KEY", "test-key-123");
+            std::env::set_var("NEARAI_MODEL", "test-model");
+            std::env::set_var("NEARAI_BASE_URL", "https://test.near.ai/v1");
+        }
+
+        let Json(result) = llm_env_defaults_handler().await;
+        let map = result.as_object().expect("should be an object");
+
+        // Check NEAR AI entry
+        let nearai = map
+            .get("nearai")
+            .and_then(|v| v.as_object())
+            .expect("nearai entry");
+        assert_eq!(
+            nearai.get("api_key").and_then(|v| v.as_str()),
+            Some("test-key-123")
+        );
+        assert_eq!(
+            nearai.get("model").and_then(|v| v.as_str()),
+            Some("test-model")
+        );
+        assert_eq!(
+            nearai.get("base_url").and_then(|v| v.as_str()),
+            Some("https://test.near.ai/v1")
+        );
+
+        // Clean up
+        unsafe {
+            std::env::remove_var("NEARAI_API_KEY");
+            std::env::remove_var("NEARAI_MODEL");
+            std::env::remove_var("NEARAI_BASE_URL");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_llm_env_defaults_includes_registry_providers() {
+        let Json(result) = llm_env_defaults_handler().await;
+        let map = result.as_object().expect("should be an object");
+
+        // Registry providers should be present (openai, anthropic, ollama, etc.)
+        assert!(map.contains_key("openai"), "should contain openai");
+        assert!(map.contains_key("anthropic"), "should contain anthropic");
+        assert!(map.contains_key("ollama"), "should contain ollama");
+
+        // Each entry should have has_api_key field
+        for (id, val) in map {
+            assert!(val.is_object(), "{id} should be an object");
+        }
     }
 
     // --- OAuth callback handler tests ---

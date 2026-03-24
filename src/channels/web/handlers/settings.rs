@@ -193,34 +193,10 @@ pub async fn settings_export_handler(
         .store
         .as_ref()
         .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
-    let mut settings = store.get_all_settings(&state.user_id).await.map_err(|e| {
+    let settings = store.get_all_settings(&state.user_id).await.map_err(|e| {
         tracing::error!("Failed to export settings: {}", e);
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
-
-    // Redact API keys — never expose secrets over the export endpoint.
-    if let Some(val) = settings.get_mut("llm_custom_providers")
-        && let Some(providers) = val.as_array_mut()
-    {
-        for p in providers.iter_mut() {
-            if let Some(obj) = p.as_object_mut()
-                && obj.contains_key("api_key")
-            {
-                obj.insert("api_key".to_string(), serde_json::Value::Null);
-            }
-        }
-    }
-    if let Some(val) = settings.get_mut("llm_builtin_overrides")
-        && let Some(obj) = val.as_object_mut()
-    {
-        for override_val in obj.values_mut() {
-            if let Some(provider_obj) = override_val.as_object_mut()
-                && provider_obj.contains_key("api_key")
-            {
-                provider_obj.insert("api_key".to_string(), serde_json::Value::Null);
-            }
-        }
-    }
 
     Ok(Json(SettingsExportResponse { settings }))
 }
