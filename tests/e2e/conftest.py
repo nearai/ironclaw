@@ -113,6 +113,27 @@ def _reserve_loopback_sockets(count: int) -> list[socket.socket]:
         raise
 
 
+async def _stop_process(
+    proc: asyncio.subprocess.Process, *, sig: int | None = None, timeout: float
+) -> None:
+    """Signal a subprocess and wait briefly without masking exit races."""
+    if proc.returncode is not None:
+        return
+
+    try:
+        if sig is None:
+            proc.kill()
+        else:
+            proc.send_signal(sig)
+    except ProcessLookupError:
+        return
+
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=timeout)
+    except asyncio.TimeoutError:
+        pass
+
+
 @pytest.fixture(scope="session")
 def ironclaw_binary():
     """Ensure ironclaw binary is built. Returns the binary path."""
@@ -279,6 +300,7 @@ async def ironclaw_server(
         stderr=asyncio.subprocess.PIPE,
         env=env,
     )
+    startup_kill_attempted = False
     base_url = f"http://127.0.0.1:{gateway_port}"
     try:
         await wait_for_ready(f"{base_url}/api/health", timeout=60)
@@ -286,14 +308,8 @@ async def ironclaw_server(
     except TimeoutError:
         # Dump stderr so CI logs show why the server failed to start
         if proc.returncode is None:
-            try:
-                proc.kill()
-            except ProcessLookupError:
-                pass
-            try:
-                await asyncio.wait_for(proc.wait(), timeout=2)
-            except asyncio.TimeoutError:
-                pass
+            startup_kill_attempted = True
+            await _stop_process(proc, timeout=2)
         returncode = proc.returncode
         stderr_bytes = b""
         if proc.stderr:
@@ -308,14 +324,15 @@ async def ironclaw_server(
         )
     finally:
         if proc.returncode is None:
-            # Use SIGINT (not SIGTERM) so tokio's ctrl_c handler triggers a
-            # graceful shutdown.  This lets the LLVM coverage runtime run its
-            # atexit handler and flush .profraw files for cargo-llvm-cov.
-            proc.send_signal(signal.SIGINT)
-            try:
-                await asyncio.wait_for(proc.wait(), timeout=10)
-            except asyncio.TimeoutError:
-                proc.kill()
+            if startup_kill_attempted:
+                await _stop_process(proc, timeout=2)
+            else:
+                # Use SIGINT (not SIGTERM) so tokio's ctrl_c handler triggers a
+                # graceful shutdown.  This lets the LLVM coverage runtime run its
+                # atexit handler and flush .profraw files for cargo-llvm-cov.
+                await _stop_process(proc, sig=signal.SIGINT, timeout=10)
+                if proc.returncode is None:
+                    await _stop_process(proc, timeout=2)
 
 
 @pytest.fixture(scope="session")
@@ -383,6 +400,7 @@ async def http_channel_server_without_secret(
         stderr=asyncio.subprocess.PIPE,
         env=env,
     )
+    startup_kill_attempted = False
     gateway_url = f"http://127.0.0.1:{gateway_port}"
     http_base_url = f"http://127.0.0.1:{http_port}"
     try:
@@ -392,14 +410,8 @@ async def http_channel_server_without_secret(
     except TimeoutError:
         # Dump stderr so CI logs show why the server failed to start
         if proc.returncode is None:
-            try:
-                proc.kill()
-            except ProcessLookupError:
-                pass
-            try:
-                await asyncio.wait_for(proc.wait(), timeout=2)
-            except asyncio.TimeoutError:
-                pass
+            startup_kill_attempted = True
+            await _stop_process(proc, timeout=2)
         returncode = proc.returncode
         stderr_bytes = b""
         if proc.stderr:
@@ -415,14 +427,15 @@ async def http_channel_server_without_secret(
         )
     finally:
         if proc.returncode is None:
-            # Use SIGINT (not SIGTERM) so tokio's ctrl_c handler triggers a
-            # graceful shutdown.  This lets the LLVM coverage runtime run its
-            # atexit handler and flush .profraw files for cargo-llvm-cov.
-            proc.send_signal(signal.SIGINT)
-            try:
-                await asyncio.wait_for(proc.wait(), timeout=10)
-            except asyncio.TimeoutError:
-                proc.kill()
+            if startup_kill_attempted:
+                await _stop_process(proc, timeout=2)
+            else:
+                # Use SIGINT (not SIGTERM) so tokio's ctrl_c handler triggers a
+                # graceful shutdown.  This lets the LLVM coverage runtime run its
+                # atexit handler and flush .profraw files for cargo-llvm-cov.
+                await _stop_process(proc, sig=signal.SIGINT, timeout=10)
+                if proc.returncode is None:
+                    await _stop_process(proc, timeout=2)
 
 
 @pytest.fixture(scope="session")
