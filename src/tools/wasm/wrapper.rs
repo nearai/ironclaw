@@ -656,10 +656,123 @@ impl WasmToolSchemas {
     }
 
     fn new(discovery: serde_json::Value) -> Self {
+        let advertised = Self::compact_schema(&discovery);
         Self {
-            advertised: Self::permissive_schema(),
+            advertised,
             discovery,
         }
+    }
+
+    /// Derive a compact advertised schema from the full discovery schema.
+    ///
+    /// Collects properties from top-level `properties` and from
+    /// `oneOf`/`anyOf`/`allOf` variants. Keeps only properties that are in
+    /// the top-level `required` array or carry an `enum`/`const` constraint.
+    /// For properties defined via `const` across multiple variants (e.g.
+    /// `"action": {"const": "get_repo"}` in each `oneOf` branch), the `const`
+    /// values are merged into a single `enum` array.
+    ///
+    /// Variant-level `required` fields (e.g. `owner`, `repo` required within
+    /// each `oneOf` variant but not top-level) are intentionally omitted from
+    /// the compact schema — the LLM can discover them via
+    /// `tool_info(detail: "schema")`.
+    ///
+    /// At most `MAX_COMPACT_PROPERTIES` properties are collected to bound
+    /// allocations from adversarial schemas.
+    fn compact_schema(discovery: &serde_json::Value) -> serde_json::Value {
+        const MAX_COMPACT_PROPERTIES: usize = 100;
+
+        let required: std::collections::HashSet<String> = discovery
+            .get("required")
+            .and_then(|r| r.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        // Collect properties from top-level and oneOf/anyOf/allOf variants.
+        // For properties with `const` across variants, merge into an `enum`.
+        let mut all_properties = serde_json::Map::new();
+        // Track const values per property to merge into enum.
+        let mut const_values: std::collections::HashMap<String, Vec<serde_json::Value>> =
+            std::collections::HashMap::new();
+
+        if let Some(props) = discovery.get("properties").and_then(|p| p.as_object()) {
+            for (k, v) in props {
+                if all_properties.len() >= MAX_COMPACT_PROPERTIES {
+                    break;
+                }
+                all_properties.insert(k.clone(), v.clone());
+            }
+        }
+        for key in ["oneOf", "anyOf", "allOf"] {
+            if let Some(variants) = discovery.get(key).and_then(|v| v.as_array()) {
+                for variant in variants {
+                    if let Some(props) = variant.get("properties").and_then(|p| p.as_object()) {
+                        for (k, v) in props {
+                            if all_properties.len() >= MAX_COMPACT_PROPERTIES
+                                && !all_properties.contains_key(k)
+                            {
+                                continue;
+                            }
+                            // Track const values for merging into enum.
+                            if let Some(c) = v.get("const") {
+                                const_values.entry(k.clone()).or_default().push(c.clone());
+                            }
+                            all_properties.entry(k.clone()).or_insert_with(|| v.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        // Merge collected const values into enum arrays.
+        for (name, values) in &const_values {
+            if values.len() > 1
+                && let Some(prop) = all_properties.get_mut(name)
+            {
+                let mut merged = prop.clone();
+                if let Some(obj) = merged.as_object_mut() {
+                    obj.remove("const");
+                    obj.insert("enum".to_string(), serde_json::Value::Array(values.clone()));
+                }
+                *prop = merged;
+            }
+        }
+
+        if all_properties.is_empty() {
+            return Self::permissive_schema();
+        }
+
+        let kept: serde_json::Map<String, serde_json::Value> = all_properties
+            .into_iter()
+            .filter(|(name, prop)| {
+                required.contains(name) || prop.get("enum").is_some() || prop.get("const").is_some()
+            })
+            .collect();
+
+        if kept.is_empty() {
+            return Self::permissive_schema();
+        }
+
+        let kept_required: Vec<serde_json::Value> = required
+            .iter()
+            .filter(|name| kept.contains_key(name.as_str()))
+            .map(|name| serde_json::Value::String(name.clone()))
+            .collect();
+
+        let mut result = serde_json::json!({
+            "type": "object",
+            "properties": kept,
+            "additionalProperties": true,
+        });
+        if !kept_required.is_empty() {
+            result["required"] = serde_json::Value::Array(kept_required);
+        }
+
+        result
     }
 
     fn with_override(&self, schema: serde_json::Value) -> Self {
@@ -1655,7 +1768,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_advertised_schema_stays_permissive_until_sidecar_override() {
+    async fn test_advertised_schema_auto_compacted_from_discovery() {
         let discovery_schema = serde_json::json!({
             "type": "object",
             "properties": {
@@ -1675,42 +1788,7 @@ mod tests {
         wrapper.schemas = super::WasmToolSchemas::new(discovery_schema.clone());
         wrapper.description = "Search documents".to_string();
 
-        // Advertised schema stays permissive; discovery holds the typed schema
-        assert_eq!(
-            wrapper.parameters_schema(),
-            serde_json::json!({
-                "type": "object",
-                "properties": {},
-                "additionalProperties": true
-            })
-        );
-        assert_eq!(wrapper.discovery_schema(), discovery_schema);
-
-        // Raw description is clean — no tool_info hint baked in
-        assert!(!wrapper.description().contains("tool_info"));
-
-        // But schema() composes the hint at display time when advertised is permissive
-        let schema = wrapper.schema();
-        assert!(
-            schema.description.contains("tool_info"),
-            "schema().description should contain tool_info hint: {}",
-            schema.description
-        );
-        assert!(
-            schema.description.contains("include_schema: true"),
-            "hint should mention include_schema: true: {}",
-            schema.description
-        );
-
-        // After sidecar override, both schemas match and hint disappears
-        let wrapper = wrapper.with_schema(serde_json::json!({
-            "type": "object",
-            "properties": {
-                "query": { "type": "string" }
-            },
-            "required": ["query"]
-        }));
-
+        // Advertised schema is auto-compacted: keeps required props, drops optional
         assert_eq!(
             wrapper.parameters_schema(),
             serde_json::json!({
@@ -1718,18 +1796,141 @@ mod tests {
                 "properties": {
                     "query": { "type": "string" }
                 },
-                "required": ["query"]
+                "required": ["query"],
+                "additionalProperties": true
             })
         );
-        assert_eq!(wrapper.discovery_schema(), wrapper.parameters_schema());
+        // Discovery retains the full schema
+        assert_eq!(wrapper.discovery_schema(), discovery_schema);
 
-        // With typed schema, schema() should NOT include tool_info hint
+        // Compacted schema has typed properties, so no tool_info hint needed
         let schema = wrapper.schema();
         assert!(
             !schema.description.contains("tool_info"),
-            "schema().description should not contain tool_info hint when typed: {}",
+            "schema().description should not contain tool_info hint when auto-compacted: {}",
             schema.description
         );
+    }
+
+    #[test]
+    fn test_compact_schema_keeps_required_and_enum_properties() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["list", "get", "create"],
+                    "description": "The operation"
+                },
+                "query": { "type": "string" },
+                "limit": { "type": "integer" },
+                "format": {
+                    "type": "string",
+                    "enum": ["json", "csv"]
+                }
+            },
+            "required": ["action"]
+        });
+
+        let compacted = super::WasmToolSchemas::compact_schema(&schema);
+        let props = compacted["properties"].as_object().unwrap();
+
+        // action: required + enum → kept
+        assert!(props.contains_key("action"));
+        // format: has enum → kept
+        assert!(props.contains_key("format"));
+        // query: not required, no enum → dropped
+        assert!(!props.contains_key("query"));
+        // limit: not required, no enum → dropped
+        assert!(!props.contains_key("limit"));
+        // additionalProperties lets the LLM still pass dropped props
+        assert_eq!(compacted["additionalProperties"], true);
+        assert_eq!(compacted["required"], serde_json::json!(["action"]));
+    }
+
+    #[test]
+    fn test_compact_schema_falls_back_to_permissive_when_empty() {
+        // No required, no enum → permissive fallback
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "query": { "type": "string" },
+                "limit": { "type": "integer" }
+            }
+        });
+
+        let compacted = super::WasmToolSchemas::compact_schema(&schema);
+        assert!(compacted["properties"].as_object().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_compact_schema_handles_no_properties() {
+        let schema = serde_json::json!({ "type": "object" });
+        let compacted = super::WasmToolSchemas::compact_schema(&schema);
+        assert!(compacted["properties"].as_object().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_compact_schema_handles_oneof_variants() {
+        // GitHub-style schema: oneOf with no top-level properties, const per variant
+        let schema = serde_json::json!({
+            "type": "object",
+            "required": ["action"],
+            "oneOf": [
+                {
+                    "properties": {
+                        "action": { "const": "get_repo" },
+                        "owner": { "type": "string" },
+                        "repo": { "type": "string" }
+                    },
+                    "required": ["action", "owner", "repo"]
+                },
+                {
+                    "properties": {
+                        "action": { "const": "list_issues" },
+                        "owner": { "type": "string" },
+                        "repo": { "type": "string" },
+                        "state": { "type": "string", "enum": ["open", "closed", "all"] }
+                    },
+                    "required": ["action", "owner", "repo"]
+                }
+            ]
+        });
+
+        let compacted = super::WasmToolSchemas::compact_schema(&schema);
+        let props = compacted["properties"].as_object().unwrap();
+
+        // action: required + const values merged into enum → kept
+        let action = &props["action"];
+        assert!(
+            action.get("enum").is_some(),
+            "action const values should be merged into enum: {action}"
+        );
+        let action_enum = action["enum"].as_array().unwrap();
+        assert!(
+            action_enum.contains(&serde_json::json!("get_repo")),
+            "enum should contain get_repo"
+        );
+        assert!(
+            action_enum.contains(&serde_json::json!("list_issues")),
+            "enum should contain list_issues"
+        );
+        assert!(
+            action.get("const").is_none(),
+            "const should be removed after merging into enum"
+        );
+
+        // state: has enum → kept
+        assert!(
+            props.contains_key("state"),
+            "state should be kept (has enum)"
+        );
+        // owner/repo: not in top-level required, no enum → intentionally dropped
+        // (variant-level required is omitted; discoverable via tool_info)
+        assert!(!props.contains_key("owner"), "owner should be dropped");
+        assert!(!props.contains_key("repo"), "repo should be dropped");
+        assert_eq!(compacted["additionalProperties"], true);
+        assert_eq!(compacted["required"], serde_json::json!(["action"]));
     }
 
     #[test]
