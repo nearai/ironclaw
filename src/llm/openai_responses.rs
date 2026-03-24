@@ -458,19 +458,23 @@ fn parse_sse_response(body: &str) -> Result<ParsedResponse, LlmError> {
                 }
             }
             "response.function_call_arguments.delta" => {
-                if let Some(item_id) = event.data.get("item_id").and_then(|v| v.as_str())
-                    && let Some(state) = active_function_calls.get_mut(item_id)
-                    && let Some(delta) = event.data.get("delta").and_then(|d| d.as_str())
-                {
-                    state.arguments.push_str(delta);
+                if let Some(item_id) = event.data.get("item_id").and_then(|v| v.as_str()) {
+                    if let Some(state) = active_function_calls.get_mut(item_id) {
+                        if let Some(delta) = event.data.get("delta").and_then(|d| d.as_str()) {
+                            state.arguments.push_str(delta);
+                        }
+                    }
                 }
             }
             "response.function_call_arguments.done" => {
-                if let Some(item_id) = event.data.get("item_id").and_then(|v| v.as_str())
-                    && let Some(state) = active_function_calls.get_mut(item_id)
-                    && let Some(arguments) = event.data.get("arguments").and_then(|v| v.as_str())
-                {
-                    state.arguments = arguments.to_string();
+                if let Some(item_id) = event.data.get("item_id").and_then(|v| v.as_str()) {
+                    if let Some(state) = active_function_calls.get_mut(item_id) {
+                        if let Some(arguments) =
+                            event.data.get("arguments").and_then(|v| v.as_str())
+                        {
+                            state.arguments = arguments.to_string();
+                        }
+                    }
                 }
             }
             "response.output_item.done" => {
