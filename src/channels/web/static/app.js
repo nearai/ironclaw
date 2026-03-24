@@ -6601,7 +6601,7 @@ document.getElementById('save-provider-btn').addEventListener('click', () => {
     return;
   }
 
-  if (!/^[a-z0-9_-]+$/.test(id)) {
+  if (!/^[a-z0-9-]+$/.test(id)) {
     showToast(I18n.t('config.providerIdInvalid'), 'error');
     return;
   }
@@ -6682,7 +6682,7 @@ document.getElementById('fetch-models-btn').addEventListener('click', () => {
 
   const btn = document.getElementById('fetch-models-btn');
   btn.disabled = true;
-  btn.textContent = 'Fetching…';
+  btn.textContent = I18n.t('config.fetchingModels');
 
   apiFetch('/api/llm/list_models', {
     method: 'POST',
@@ -6705,7 +6705,7 @@ document.getElementById('fetch-models-btn').addEventListener('click', () => {
     .catch((e) => showToast(e.message, 'error'))
     .finally(() => {
       btn.disabled = false;
-      btn.textContent = '↻ Fetch available models';
+      btn.textContent = I18n.t('config.fetchModels');
     });
 });
 

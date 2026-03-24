@@ -2603,7 +2603,10 @@ struct TestConnectionRequest {
     base_url: String,
     #[serde(default)]
     api_key: Option<String>,
+    /// Accepted for backward compatibility with frontends that still send it,
+    /// but no longer used since test_connection switched to `GET /models`.
     #[serde(default)]
+    #[allow(dead_code)]
     model: Option<String>,
 }
 
@@ -2617,6 +2620,16 @@ async fn llm_test_connection_handler(
     Json(body): Json<TestConnectionRequest>,
 ) -> Json<TestConnectionResponse> {
     Json(test_provider_connection(body).await)
+}
+
+/// Check if a base URL belongs to a NEAR AI private endpoint by verifying the
+/// hostname ends with `.near.ai` and contains "private". This prevents an
+/// attacker from crafting `https://evil.com/private/...` to match.
+fn is_nearai_private_endpoint(base_url: &str) -> bool {
+    url::Url::parse(base_url)
+        .ok()
+        .and_then(|u| u.host_str().map(|h| h.to_lowercase()))
+        .is_some_and(|host| host.ends_with(".near.ai") && host.contains("private"))
 }
 
 async fn test_provider_connection(req: TestConnectionRequest) -> TestConnectionResponse {
@@ -2643,7 +2656,7 @@ async fn test_provider_connection(req: TestConnectionRequest) -> TestConnectionR
     let base = req.base_url.trim_end_matches('/');
 
     match req.adapter.as_str() {
-        "nearai" if base.contains("private") => {
+        "nearai" if is_nearai_private_endpoint(base) => {
             // NEAR AI private endpoints use /health for connectivity checks.
             let url = format!("{base}/health");
             let mut builder = client.get(&url);
@@ -2692,37 +2705,24 @@ async fn test_provider_connection(req: TestConnectionRequest) -> TestConnectionR
             }
         }
         "anthropic" => {
+            // Use GET /v1/models to verify connectivity + auth without consuming tokens.
             let anthropic_base = if base.ends_with("/v1") || base.contains("/v1/") {
                 base.to_string()
             } else {
                 format!("{base}/v1")
             };
-            let url = format!("{anthropic_base}/messages");
-            let model = req.model.as_deref().unwrap_or("claude-3-haiku-20240307");
-            let payload = serde_json::json!({
-                "model": model,
-                "max_tokens": 1,
-                "messages": [{"role": "user", "content": "hi"}]
-            });
-            let mut builder = client
-                .post(&url)
-                .header("anthropic-version", "2023-06-01")
-                .json(&payload);
+            let url = format!("{anthropic_base}/models");
+            let mut builder = client.get(&url).header("anthropic-version", "2023-06-01");
             if let Some(key) = req.api_key.as_deref().filter(|k| !k.is_empty()) {
                 builder = builder.header("x-api-key", key);
             }
             interpret_chat_response(builder.send().await)
         }
         _ => {
-            // OpenAI-compatible
-            let url = format!("{base}/chat/completions");
-            let model = req.model.as_deref().unwrap_or("gpt-4o-mini");
-            let payload = serde_json::json!({
-                "model": model,
-                "messages": [{"role": "user", "content": "hi"}],
-                "max_tokens": 1
-            });
-            let mut builder = client.post(&url).json(&payload);
+            // OpenAI-compatible: use GET /models to verify connectivity + auth
+            // without consuming tokens (no chat/completions call).
+            let url = format!("{base}/models");
+            let mut builder = client.get(&url);
             if let Some(key) = req.api_key.as_deref().filter(|k| !k.is_empty()) {
                 builder = builder.header("Authorization", format!("Bearer {key}"));
             }
@@ -2865,7 +2865,7 @@ async fn fetch_provider_models(req: ListModelsRequest) -> ListModelsResponse {
         _ => {
             // OpenAI-compatible, Anthropic, and NEAR AI all support GET /models.
             // NEAR AI private endpoints and Anthropic need a /v1 prefix.
-            let effective_base = if (req.adapter == "nearai" && base.contains("private"))
+            let effective_base = if (req.adapter == "nearai" && is_nearai_private_endpoint(base))
                 || (req.adapter == "anthropic" && !base.ends_with("/v1") && !base.contains("/v1/"))
             {
                 format!("{base}/v1")

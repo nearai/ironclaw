@@ -99,9 +99,12 @@ fn validate_custom_providers_adapters(value: &serde_json::Value) -> Result<(), S
         None => return Ok(()),
     };
     for p in providers {
-        if let Some(adapter) = p.get("adapter").and_then(|v| v.as_str())
-            && !VALID_ADAPTERS.contains(&adapter)
-        {
+        let adapter = p.get("adapter").and_then(|v| v.as_str()).unwrap_or("");
+        if adapter.is_empty() {
+            tracing::warn!("Rejected custom provider with missing adapter field");
+            return Err(StatusCode::UNPROCESSABLE_ENTITY);
+        }
+        if !VALID_ADAPTERS.contains(&adapter) {
             tracing::warn!(adapter = %adapter, "Rejected unknown LLM adapter");
             return Err(StatusCode::UNPROCESSABLE_ENTITY);
         }

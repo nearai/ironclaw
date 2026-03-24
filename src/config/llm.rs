@@ -79,7 +79,8 @@ impl LlmConfig {
         );
         // Warn operators when a DB-persisted value silently overrides LLM_BACKEND.
         if backend_source == "db:llm_backend"
-            && let Ok(Some(env_val)) = optional_env("LLM_BACKEND")
+            && let Ok(env_val) = std::env::var("LLM_BACKEND")
+            && !env_val.is_empty()
         {
             tracing::warn!(
                 db_value = %backend,
@@ -143,7 +144,13 @@ impl LlmConfig {
                     .map(SecretString::from)
             });
         let nearai = NearAiConfig {
-            model: Self::resolve_model("NEARAI_MODEL", settings, crate::llm::DEFAULT_MODEL)?,
+            // Model priority: selected_model (DB) > builtin_overrides (DB) > env > default
+            model: settings
+                .selected_model
+                .clone()
+                .or_else(|| nearai_override.and_then(|o| o.model.clone()))
+                .or_else(|| optional_env("NEARAI_MODEL").ok().flatten())
+                .unwrap_or_else(|| crate::llm::DEFAULT_MODEL.to_string()),
             cheap_model: optional_env("NEARAI_CHEAP_MODEL")?,
             base_url: {
                 let url = nearai_override
@@ -347,6 +354,11 @@ impl LlmConfig {
         let base_url = custom.base_url.clone().unwrap_or_default();
         if base_url.is_empty() {
             tracing::warn!(id = %custom.id, "Custom provider has no base_url configured — requests will fail");
+        } else {
+            validate_base_url(
+                &base_url,
+                &format!("custom provider '{}' base_url", custom.id),
+            )?;
         }
 
         let model = settings
@@ -665,7 +677,7 @@ pub fn default_session_path() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::helpers::{ENV_MUTEX, lock_env};
+    use crate::config::helpers::lock_env;
     use crate::settings::Settings;
     use crate::testing::credentials::*;
 
@@ -1383,7 +1395,7 @@ mod tests {
 
     #[test]
     fn custom_provider_resolves_when_backend_matches_id() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = lock_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("LLM_BACKEND");
@@ -1396,7 +1408,7 @@ mod tests {
                 id: "myprovider".to_string(),
                 name: "My Provider".to_string(),
                 adapter: "open_ai_completions".to_string(),
-                base_url: Some("https://api.example.com/v1".to_string()),
+                base_url: Some("http://localhost:9090/v1".to_string()),
                 default_model: Some("my-model".to_string()),
                 api_key: Some("sk-test".to_string()),
                 builtin: false,
@@ -1408,7 +1420,7 @@ mod tests {
         assert_eq!(cfg.backend, "myprovider");
         let provider = cfg.provider.expect("provider config should be present");
         assert_eq!(provider.provider_id, "myprovider");
-        assert_eq!(provider.base_url, "https://api.example.com/v1");
+        assert_eq!(provider.base_url, "http://localhost:9090/v1");
         assert_eq!(provider.model, "my-model");
         assert_eq!(
             provider.protocol,
@@ -1439,7 +1451,7 @@ mod tests {
                 id: "myprovider".to_string(),
                 name: "My Provider".to_string(),
                 adapter: "open_ai_completions".to_string(),
-                base_url: Some("https://api.example.com/v1".to_string()),
+                base_url: Some("http://localhost:9090/v1".to_string()),
                 default_model: Some("my-model".to_string()),
                 api_key: None,
                 builtin: false,
@@ -1468,7 +1480,7 @@ mod tests {
 
     #[test]
     fn builtin_override_model_used_when_no_selected_model() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = lock_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("LLM_BACKEND");
@@ -1520,7 +1532,7 @@ mod tests {
 
     #[test]
     fn selected_model_takes_priority_over_builtin_override_model() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = lock_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("LLM_BACKEND");
@@ -1577,7 +1589,7 @@ mod tests {
 
     #[test]
     fn builtin_override_api_key_used_when_no_env_var() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = lock_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("LLM_BACKEND");
@@ -1810,7 +1822,7 @@ mod tests {
                 id: "myprovider".to_string(),
                 name: "My Provider".to_string(),
                 adapter: "open_ai_completions".to_string(),
-                base_url: Some("https://api.example.com/v1".to_string()),
+                base_url: Some("http://localhost:9090/v1".to_string()),
                 default_model: Some("default-model".to_string()),
                 api_key: None,
                 builtin: false,
@@ -1884,6 +1896,74 @@ mod tests {
         unsafe {
             std::env::remove_var("NEARAI_MODEL");
         }
+    }
+
+    #[test]
+    fn nearai_override_model_wins_over_env() {
+        let _guard = lock_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("LLM_BACKEND");
+            std::env::set_var("NEARAI_MODEL", "model-from-env");
+        }
+
+        let mut overrides = std::collections::HashMap::new();
+        overrides.insert(
+            "nearai".to_string(),
+            crate::settings::LlmBuiltinOverride {
+                api_key: None,
+                model: Some("model-from-db-override".to_string()),
+                base_url: None,
+            },
+        );
+        let settings = Settings {
+            llm_backend: Some("nearai".to_string()),
+            llm_builtin_overrides: overrides,
+            ..Default::default()
+        };
+
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
+        assert_eq!(
+            cfg.nearai.model, "model-from-db-override",
+            "DB builtin_overrides model must take priority over NEARAI_MODEL env var"
+        );
+
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("NEARAI_MODEL");
+        }
+    }
+
+    #[test]
+    fn nearai_selected_model_wins_over_override_model() {
+        let _guard = lock_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("LLM_BACKEND");
+            std::env::remove_var("NEARAI_MODEL");
+        }
+
+        let mut overrides = std::collections::HashMap::new();
+        overrides.insert(
+            "nearai".to_string(),
+            crate::settings::LlmBuiltinOverride {
+                api_key: None,
+                model: Some("model-from-override".to_string()),
+                base_url: None,
+            },
+        );
+        let settings = Settings {
+            llm_backend: Some("nearai".to_string()),
+            selected_model: Some("model-from-selected".to_string()),
+            llm_builtin_overrides: overrides,
+            ..Default::default()
+        };
+
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
+        assert_eq!(
+            cfg.nearai.model, "model-from-selected",
+            "selected_model must take priority over builtin_overrides model"
+        );
     }
 
     #[test]

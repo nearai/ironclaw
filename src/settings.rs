@@ -1,10 +1,11 @@
 //! User settings persistence.
 //!
 //! Stores user preferences in `~/.ironclaw` (JSON/TOML) and, for some values,
-//! in the database. At runtime, settings are resolved using the following
-//! precedence: database > environment variables > on-disk config > built-in
-//! defaults. In particular, LLM backend and related settings prefer DB values
-//! over environment variables.
+//! in the database. Precedence between database values, environment variables,
+//! on-disk config, and built-in defaults is determined on a per-setting basis
+//! by the corresponding resolver. LLM provider settings (backend, model,
+//! api_key, base_url) prefer DB values over environment variables, as
+//! documented on their respective types.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -901,7 +902,7 @@ impl Settings {
         let content = format!(
             "# IronClaw configuration file.\n\
              #\n\
-             # Priority: env var > this file > database settings > defaults.\n\
+             # Priority: database settings > env var > this file > defaults.\n\
              # Uncomment and edit values to override defaults.\n\
              # Run `ironclaw config init` to regenerate this file.\n\
              #\n\
