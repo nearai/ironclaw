@@ -862,6 +862,7 @@ async fn async_main() -> anyhow::Result<()> {
             ironclaw::agent::routine_engine::SandboxReadiness::DockerUnavailable
         },
         builder: components.builder,
+        llm_backend: config.llm.backend.clone(),
     };
 
     let channels_for_warnings = Arc::clone(&channels);

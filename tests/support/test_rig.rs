@@ -768,6 +768,7 @@ impl TestRigBuilder {
             document_extraction: None,
             sandbox_readiness: ironclaw::agent::SandboxReadiness::Available, // tests don't use real Docker
             builder: None,
+            llm_backend: "nearai".to_string(),
         };
 
         // 7. Create TestChannel and ChannelManager.
