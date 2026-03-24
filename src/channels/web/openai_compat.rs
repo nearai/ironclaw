@@ -463,9 +463,10 @@ fn build_tool_request(
 
 pub async fn chat_completions_handler(
     State(state): State<Arc<GatewayState>>,
+    super::auth::AuthenticatedUser(user): super::auth::AuthenticatedUser,
     Json(req): Json<OpenAiChatRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<OpenAiErrorResponse>)> {
-    if !state.chat_rate_limiter.check() {
+    if !state.chat_rate_limiter.check(&user.user_id) {
         return Err(openai_error(
             StatusCode::TOO_MANY_REQUESTS,
             "Rate limit exceeded. Please try again later.",

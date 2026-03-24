@@ -249,8 +249,22 @@ impl JobStore for PgBackend {
         self.store.list_agent_jobs().await
     }
 
+    async fn list_agent_jobs_for_user(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<AgentJobRecord>, DatabaseError> {
+        self.store.list_agent_jobs_for_user(user_id).await
+    }
+
     async fn agent_job_summary(&self) -> Result<AgentJobSummary, DatabaseError> {
         self.store.agent_job_summary().await
+    }
+
+    async fn agent_job_summary_for_user(
+        &self,
+        user_id: &str,
+    ) -> Result<AgentJobSummary, DatabaseError> {
+        self.store.agent_job_summary_for_user(user_id).await
     }
 
     async fn get_agent_job_failure_reason(

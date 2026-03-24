@@ -440,7 +440,7 @@ impl LlmConfig {
         // Resolve extra headers
         let extra_headers = if let Some(env_var) = extra_headers_env {
             optional_env(env_var)?
-                .map(|val| parse_extra_headers(&val))
+                .map(|val| parse_extra_headers_with_key(&val, env_var))
                 .transpose()?
                 .unwrap_or_default()
         } else {
@@ -509,7 +509,10 @@ impl LlmConfig {
 ///
 /// Format: `Key1:Value1,Key2:Value2` (colon-separated, not `=`, because
 /// header values often contain `=`).
-fn parse_extra_headers(val: &str) -> Result<Vec<(String, String)>, ConfigError> {
+fn parse_extra_headers_with_key(
+    val: &str,
+    env_var_name: &str,
+) -> Result<Vec<(String, String)>, ConfigError> {
     if val.trim().is_empty() {
         return Ok(Vec::new());
     }
@@ -522,14 +525,14 @@ fn parse_extra_headers(val: &str) -> Result<Vec<(String, String)>, ConfigError> 
         }
         let Some((key, value)) = pair.split_once(':') else {
             return Err(ConfigError::InvalidValue {
-                key: "LLM_EXTRA_HEADERS".to_string(),
+                key: env_var_name.to_string(),
                 message: format!("malformed header entry '{}', expected Key:Value", pair),
             });
         };
         let key = key.trim();
         if key.is_empty() {
             return Err(ConfigError::InvalidValue {
-                key: "LLM_EXTRA_HEADERS".to_string(),
+                key: env_var_name.to_string(),
                 message: format!("empty header name in entry '{}'", pair),
             });
         }
@@ -569,6 +572,11 @@ mod tests {
     use crate::config::helpers::lock_env;
     use crate::settings::Settings;
     use crate::testing::credentials::*;
+
+    /// Convenience wrapper for tests — uses "TEST_HEADERS" as the env var name.
+    fn parse_extra_headers(val: &str) -> Result<Vec<(String, String)>, ConfigError> {
+        parse_extra_headers_with_key(val, "TEST_HEADERS")
+    }
 
     /// Clear all openai-compatible-related env vars.
     fn clear_openai_compatible_env() {

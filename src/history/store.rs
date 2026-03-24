@@ -842,6 +842,38 @@ impl Store {
             .collect())
     }
 
+    pub async fn list_agent_jobs_for_user(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<AgentJobRecord>, DatabaseError> {
+        let conn = self.conn().await?;
+        let rows = conn
+            .query(
+                r#"
+                SELECT id, title, status, user_id, failure_reason,
+                       created_at, started_at, completed_at
+                FROM agent_jobs WHERE source = 'direct' AND user_id = $1
+                ORDER BY created_at DESC
+                "#,
+                &[&user_id],
+            )
+            .await?;
+
+        Ok(rows
+            .iter()
+            .map(|r| AgentJobRecord {
+                id: r.get("id"),
+                title: r.get("title"),
+                status: r.get("status"),
+                user_id: r.get::<_, Option<String>>("user_id").unwrap_or_default(),
+                created_at: r.get("created_at"),
+                started_at: r.get("started_at"),
+                completed_at: r.get("completed_at"),
+                failure_reason: r.get("failure_reason"),
+            })
+            .collect())
+    }
+
     /// Get the failure reason for a single agent job.
     pub async fn get_agent_job_failure_reason(
         &self,
@@ -864,6 +896,27 @@ impl Store {
             .query(
                 "SELECT status, COUNT(*) as cnt FROM agent_jobs WHERE source = 'direct' GROUP BY status",
                 &[],
+            )
+            .await?;
+
+        let mut summary = AgentJobSummary::default();
+        for row in &rows {
+            let status: String = row.get("status");
+            let count: i64 = row.get("cnt");
+            summary.add_count(&status, count as usize);
+        }
+        Ok(summary)
+    }
+
+    pub async fn agent_job_summary_for_user(
+        &self,
+        user_id: &str,
+    ) -> Result<AgentJobSummary, DatabaseError> {
+        let conn = self.conn().await?;
+        let rows = conn
+            .query(
+                "SELECT status, COUNT(*) as cnt FROM agent_jobs WHERE source = 'direct' AND user_id = $1 GROUP BY status",
+                &[&user_id],
             )
             .await?;
 

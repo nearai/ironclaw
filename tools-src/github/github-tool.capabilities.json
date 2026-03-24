@@ -1,6 +1,7 @@
 {
   "version": "0.2.1",
   "wit_version": "0.3.0",
+  "description": "Manage GitHub repositories, issues, pull requests, reviews, and workflows. Supports listing, creating, commenting, merging PRs, and triggering GitHub Actions.",
   "capabilities": {
     "webhook": {
       "hmac_secret_name": "github_webhook_secret",

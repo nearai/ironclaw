@@ -40,7 +40,8 @@ pub struct OrchestratorState {
     pub job_manager: Arc<ContainerJobManager>,
     pub token_store: TokenStore,
     /// Broadcast channel for job events (consumed by the web gateway SSE).
-    pub job_event_tx: Option<broadcast::Sender<(Uuid, SseEvent)>>,
+    /// Tuple: (job_id, user_id, event).
+    pub job_event_tx: Option<broadcast::Sender<(Uuid, String, SseEvent)>>,
     /// Buffered follow-up prompts for sandbox jobs, keyed by job_id.
     pub prompt_queue: Arc<Mutex<HashMap<Uuid, VecDeque<PendingPrompt>>>>,
     /// Database handle for persisting job events.
@@ -49,6 +50,9 @@ pub struct OrchestratorState {
     pub secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
     /// User ID for secret lookups (single-tenant, typically "default").
     pub user_id: String,
+    /// In-memory cache of job_id → user_id for SSE scoping. Populated when
+    /// sandbox jobs are created, avoiding a DB round-trip on every job event.
+    pub job_owner_cache: Arc<std::sync::RwLock<HashMap<Uuid, String>>>,
 }
 
 /// The orchestrator's internal API server.
@@ -351,9 +355,45 @@ async fn job_event_handler(
         },
     };
 
-    // Broadcast via the channel (if configured)
+    // Broadcast via the channel (if configured).
+    // Look up the job owner from the in-memory cache (populated at job creation).
     if let Some(ref tx) = state.job_event_tx {
-        let _ = tx.send((job_id, sse_event));
+        let cached_uid = state
+            .job_owner_cache
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&job_id)
+            .cloned();
+
+        let user_id = match cached_uid {
+            Some(uid) => uid,
+            None => {
+                // Cache miss: fall back to DB lookup and populate cache.
+                let uid = match state.store.as_ref() {
+                    Some(store) => store
+                        .get_sandbox_job(job_id)
+                        .await
+                        .ok()
+                        .flatten()
+                        .map(|j| j.user_id),
+                    None => None,
+                };
+                if let Some(ref uid) = uid {
+                    state
+                        .job_owner_cache
+                        .write()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .insert(job_id, uid.clone());
+                }
+                uid.unwrap_or_default()
+            }
+        };
+
+        if user_id.is_empty() {
+            let _ = tx.send((job_id, String::new(), sse_event));
+        } else {
+            let _ = tx.send((job_id, user_id, sse_event));
+        }
     }
 
     Ok(StatusCode::OK)
@@ -480,6 +520,7 @@ mod tests {
             store: None,
             secrets_store: None,
             user_id: "default".to_string(),
+            job_owner_cache: Arc::new(std::sync::RwLock::new(HashMap::new())),
         }
     }
 
@@ -709,6 +750,7 @@ mod tests {
             store: None,
             secrets_store: Some(secrets_store),
             user_id: "default".to_string(),
+            job_owner_cache: Arc::new(std::sync::RwLock::new(HashMap::new())),
         };
 
         let router = OrchestratorApi::router(state);
@@ -744,6 +786,7 @@ mod tests {
             store: None,
             secrets_store: None,
             user_id: "default".to_string(),
+            job_owner_cache: Arc::new(std::sync::RwLock::new(HashMap::new())),
         };
 
         let job_id = Uuid::new_v4();
@@ -769,8 +812,10 @@ mod tests {
         let resp = router.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
 
-        let (recv_id, event) = rx.recv().await.unwrap();
+        let (recv_id, recv_uid, event) = rx.recv().await.unwrap();
         assert_eq!(recv_id, job_id);
+        // No store configured, so user_id falls back to empty string.
+        assert_eq!(recv_uid, "");
         match event {
             SseEvent::JobMessage {
                 job_id: jid,
@@ -799,6 +844,7 @@ mod tests {
             store: None,
             secrets_store: None,
             user_id: "default".to_string(),
+            job_owner_cache: Arc::new(std::sync::RwLock::new(HashMap::new())),
         };
 
         let job_id = Uuid::new_v4();
@@ -824,7 +870,7 @@ mod tests {
         let resp = router.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
 
-        let (_recv_id, event) = rx.recv().await.unwrap();
+        let (_recv_id, _recv_uid, event) = rx.recv().await.unwrap();
         match event {
             SseEvent::JobToolUse { tool_name, .. } => {
                 assert_eq!(tool_name, "shell");
@@ -847,6 +893,7 @@ mod tests {
             store: None,
             secrets_store: None,
             user_id: "default".to_string(),
+            job_owner_cache: Arc::new(std::sync::RwLock::new(HashMap::new())),
         };
 
         let job_id = Uuid::new_v4();
@@ -869,7 +916,7 @@ mod tests {
         let resp = router.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
 
-        let (_recv_id, event) = rx.recv().await.unwrap();
+        let (_recv_id, _recv_uid, event) = rx.recv().await.unwrap();
         // Unknown event types fall through to JobStatus
         assert!(matches!(event, SseEvent::JobStatus { .. }));
     }

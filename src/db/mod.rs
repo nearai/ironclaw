@@ -409,7 +409,15 @@ pub trait JobStore: Send + Sync {
     async fn mark_job_stuck(&self, id: Uuid) -> Result<(), DatabaseError>;
     async fn get_stuck_jobs(&self) -> Result<Vec<Uuid>, DatabaseError>;
     async fn list_agent_jobs(&self) -> Result<Vec<AgentJobRecord>, DatabaseError>;
+    async fn list_agent_jobs_for_user(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<AgentJobRecord>, DatabaseError>;
     async fn agent_job_summary(&self) -> Result<AgentJobSummary, DatabaseError>;
+    async fn agent_job_summary_for_user(
+        &self,
+        user_id: &str,
+    ) -> Result<AgentJobSummary, DatabaseError>;
     /// Get the failure reason for a single agent job (O(1) lookup).
     async fn get_agent_job_failure_reason(&self, id: Uuid)
     -> Result<Option<String>, DatabaseError>;

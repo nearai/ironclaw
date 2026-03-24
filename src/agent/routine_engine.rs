@@ -1305,6 +1305,19 @@ async fn execute_lightweight(
     }
 }
 
+/// Sanitize a user-controlled string before interpolation into an LLM prompt.
+/// Strips newlines (which could break prompt structure) and truncates to a
+/// reasonable length to limit abuse surface.
+fn sanitize_prompt_field(value: &str) -> String {
+    const MAX_LEN: usize = 128;
+    value
+        .chars()
+        .filter(|&c| c != '\n' && c != '\r')
+        .take(MAX_LEN)
+        .map(|c| if c == '`' { '\'' } else { c })
+        .collect()
+}
+
 fn build_lightweight_prompt(
     prompt: &str,
     context_parts: &[String],
@@ -1323,14 +1336,16 @@ fn build_lightweight_prompt(
         );
 
         if let Some(channel) = notify.channel.as_deref() {
+            let sanitized = sanitize_prompt_field(channel);
             full_prompt.push_str(&format!(
-                "The configured delivery channel for this routine is `{channel}`.\n"
+                "The configured delivery channel for this routine is `{sanitized}`.\n"
             ));
         }
 
         if let Some(user) = notify.user.as_deref() {
+            let sanitized = sanitize_prompt_field(user);
             full_prompt.push_str(&format!(
-                "The configured delivery target for this routine is `{user}`.\n"
+                "The configured delivery target for this routine is `{sanitized}`.\n"
             ));
         }
 
@@ -1440,6 +1455,7 @@ fn handle_text_response(
 /// This is a simplified version of the full dispatcher loop:
 /// - Max 3-5 iterations (configurable)
 /// - Sequential tool execution (not parallel)
+/// - Uses the owner's live autonomous tool scope when lightweight tools are enabled
 /// - Auto-approval of non-Always tools
 /// - No hooks or approval dialogs
 async fn execute_lightweight_with_tools(
