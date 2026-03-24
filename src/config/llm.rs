@@ -855,19 +855,19 @@ mod tests {
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::set_var("LLM_BACKEND", "openai_compatible");
-            std::env::set_var("LLM_BASE_URL", "http://env-url/v1");
+            std::env::set_var("LLM_BASE_URL", "http://localhost:8000/v1");
         }
 
         let settings = Settings {
             llm_backend: Some("openai_compatible".to_string()),
-            openai_compatible_base_url: Some("http://settings-url/v1".to_string()),
+            openai_compatible_base_url: Some("http://localhost:9000/v1".to_string()),
             ..Default::default()
         };
 
         let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
         let provider = cfg.provider.expect("should have provider config");
         assert_eq!(
-            provider.base_url, "http://env-url/v1",
+            provider.base_url, "http://localhost:8000/v1",
             "env var should take priority over settings"
         );
 
@@ -879,7 +879,7 @@ mod tests {
         let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
         let provider = cfg.provider.expect("should have provider config");
         assert_eq!(
-            provider.base_url, "http://settings-url/v1",
+            provider.base_url, "http://localhost:9000/v1",
             "settings should take priority over registry default"
         );
 
