@@ -355,15 +355,13 @@ impl AppBuilder {
                 .is_some_and(|gw| gw.user_tokens.is_some());
 
             if is_multi_tenant {
-                let pool = Arc::new(
-                    crate::channels::web::server::WorkspacePool::new(
-                        Arc::clone(db),
-                        embeddings.clone(),
-                        emb_cache_config,
-                        self.config.search.clone(),
-                        self.config.workspace.clone(),
-                    ),
-                );
+                let pool = Arc::new(crate::channels::web::server::WorkspacePool::new(
+                    Arc::clone(db),
+                    embeddings.clone(),
+                    emb_cache_config,
+                    self.config.search.clone(),
+                    self.config.workspace.clone(),
+                ));
                 tools.register_memory_tools_with_resolver(pool);
                 tracing::info!(
                     "Memory tools configured with per-user workspace resolver (multi-tenant mode)"
