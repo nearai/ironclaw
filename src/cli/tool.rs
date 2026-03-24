@@ -1327,7 +1327,7 @@ mod tests {
                     "credentials": {
                         "github": {
                             "secret_name": "gh_token",
-                            "location": "AuthorizationBearer",
+                            "location": { "type": "bearer" },
                             "host_patterns": ["api.github.com"]
                         }
                     }
