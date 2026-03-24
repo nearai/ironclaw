@@ -334,15 +334,37 @@ impl ToolRegistry {
         tracing::debug!("Registered 5 development tools");
     }
 
-    /// Register memory tools with a workspace.
+    /// Register memory tools with a workspace resolver.
+    ///
+    /// Memory tools require a workspace resolver for persistence. Call this after
+    /// `register_builtin_tools()` if you have a workspace available.
+    pub fn register_memory_tools_with_resolver(
+        &self,
+        resolver: Arc<dyn crate::tools::builtin::memory::WorkspaceResolver>,
+    ) {
+        self.register_sync(Arc::new(MemorySearchTool::new(Arc::clone(&resolver))));
+        self.register_sync(Arc::new(MemoryWriteTool::new(Arc::clone(&resolver))));
+        self.register_sync(Arc::new(MemoryReadTool::new(Arc::clone(&resolver))));
+        self.register_sync(Arc::new(MemoryTreeTool::new(resolver)));
+
+        tracing::debug!("Registered 4 memory tools");
+    }
+
+    /// Register memory tools with a fixed workspace (backward compatibility).
     ///
     /// Memory tools require a workspace for persistence. Call this after
     /// `register_builtin_tools()` if you have a workspace available.
     pub fn register_memory_tools(&self, workspace: Arc<Workspace>) {
-        self.register_sync(Arc::new(MemorySearchTool::new(Arc::clone(&workspace))));
-        self.register_sync(Arc::new(MemoryWriteTool::new(Arc::clone(&workspace))));
-        self.register_sync(Arc::new(MemoryReadTool::new(Arc::clone(&workspace))));
-        self.register_sync(Arc::new(MemoryTreeTool::new(workspace)));
+        self.register_sync(Arc::new(MemorySearchTool::from_workspace(Arc::clone(
+            &workspace,
+        ))));
+        self.register_sync(Arc::new(MemoryWriteTool::from_workspace(Arc::clone(
+            &workspace,
+        ))));
+        self.register_sync(Arc::new(MemoryReadTool::from_workspace(Arc::clone(
+            &workspace,
+        ))));
+        self.register_sync(Arc::new(MemoryTreeTool::from_workspace(workspace)));
 
         tracing::debug!("Registered 4 memory tools");
     }
@@ -361,7 +383,11 @@ impl ToolRegistry {
         job_manager: Option<Arc<ContainerJobManager>>,
         store: Option<Arc<dyn Database>>,
         job_event_tx: Option<
-            tokio::sync::broadcast::Sender<(uuid::Uuid, crate::channels::web::types::SseEvent)>,
+            tokio::sync::broadcast::Sender<(
+                uuid::Uuid,
+                String,
+                crate::channels::web::types::SseEvent,
+            )>,
         >,
         inject_tx: Option<tokio::sync::mpsc::Sender<crate::channels::IncomingMessage>>,
         prompt_queue: Option<PromptQueue>,

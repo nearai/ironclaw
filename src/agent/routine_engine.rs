@@ -24,7 +24,7 @@ use crate::agent::Scheduler;
 use crate::agent::routine::{
     NotifyConfig, Routine, RoutineAction, RoutineRun, RunStatus, Trigger, next_cron_fire,
 };
-use crate::channels::OutgoingResponse;
+use crate::channels::{IncomingMessage, OutgoingResponse};
 use crate::config::RoutineConfig;
 use crate::context::{JobContext, JobState};
 use crate::db::Database;
@@ -54,6 +54,40 @@ pub enum SandboxReadiness {
     DisabledByConfig,
     /// Sandbox is enabled but Docker is not running or not installed.
     DockerUnavailable,
+}
+
+/// Check whether an event-triggered routine's user/channel filters match an
+/// incoming message.
+///
+/// Returns `true` if:
+/// - The routine has an `Event` trigger (non-Event routines always return `false`)
+/// - The routine's `user_id` matches the message's user scope
+/// - The routine's channel filter (if any) matches the message channel
+///   case-insensitively
+///
+/// This is a pure function extracted from `check_event_triggers` so the
+/// filter logic can be unit-tested without async infrastructure.
+pub(crate) fn routine_matches_message(routine: &Routine, message: &IncomingMessage) -> bool {
+    // Only Event-triggered routines can match incoming messages.
+    if !matches!(routine.trigger, Trigger::Event { .. }) {
+        return false;
+    }
+
+    // User ownership filter — only fire routines scoped to this user.
+    if routine.user_id != message.user_id {
+        return false;
+    }
+
+    // Channel filter (case-insensitive, matching emit_system_event behavior)
+    if let Trigger::Event {
+        channel: Some(ch), ..
+    } = &routine.trigger
+        && !ch.eq_ignore_ascii_case(&message.channel)
+    {
+        return false;
+    }
+
+    true
 }
 
 /// The routine execution engine.
@@ -167,10 +201,7 @@ impl RoutineEngine {
     }
 
     /// Check incoming message against event triggers. Returns number of routines fired.
-    ///
-    /// Accepts only the three fields needed for matching (user scope, channel,
-    /// message content) so callers never need to clone a full `IncomingMessage`.
-    pub async fn check_event_triggers(&self, user_id: &str, channel: &str, content: &str) -> usize {
+    pub async fn check_event_triggers(&self, message: &IncomingMessage, content: &str) -> usize {
         let cache = self.event_cache.read().await;
 
         // Early return if there are no message matchers at all.
@@ -208,16 +239,24 @@ impl RoutineEngine {
                 EventMatcher::System { .. } => continue,
             };
 
-            if routine.user_id != user_id {
-                continue;
-            }
-
-            // Channel filter
-            if let Trigger::Event {
-                channel: Some(ch), ..
-            } = &routine.trigger
-                && ch != channel
-            {
+            // User ownership + channel filter (extracted for testability).
+            if !routine_matches_message(routine, message) {
+                // User mismatch is expected for multi-user setups — keep at
+                // trace to avoid one log per routine per inbound message.
+                if routine.user_id != message.user_id {
+                    tracing::trace!(
+                        routine = %routine.name,
+                        routine_user = %routine.user_id,
+                        message_user = %message.user_id,
+                        "Skipped: user scope mismatch"
+                    );
+                } else {
+                    tracing::debug!(
+                        routine = %routine.name,
+                        channel = %message.channel,
+                        "Skipped: channel mismatch"
+                    );
+                }
                 continue;
             }
 
@@ -228,14 +267,14 @@ impl RoutineEngine {
 
             // Cooldown check
             if !self.check_cooldown(routine) {
-                tracing::trace!(routine = %routine.name, "Skipped: cooldown active");
+                tracing::debug!(routine = %routine.name, "Skipped: cooldown active");
                 continue;
             }
 
             // Concurrent run check (using batch-loaded counts)
             let running_count = concurrent_counts.get(&routine.id).copied().unwrap_or(0);
             if running_count >= routine.guardrails.max_concurrent as i64 {
-                tracing::trace!(routine = %routine.name, "Skipped: max concurrent reached");
+                tracing::debug!(routine = %routine.name, "Skipped: max concurrent reached");
                 continue;
             }
 
@@ -1305,6 +1344,19 @@ async fn execute_lightweight(
     }
 }
 
+/// Sanitize a user-controlled string before interpolation into an LLM prompt.
+/// Strips newlines (which could break prompt structure) and truncates to a
+/// reasonable length to limit abuse surface.
+fn sanitize_prompt_field(value: &str) -> String {
+    const MAX_LEN: usize = 128;
+    value
+        .chars()
+        .filter(|&c| c != '\n' && c != '\r')
+        .take(MAX_LEN)
+        .map(|c| if c == '`' { '\'' } else { c })
+        .collect()
+}
+
 fn build_lightweight_prompt(
     prompt: &str,
     context_parts: &[String],
@@ -1323,14 +1375,16 @@ fn build_lightweight_prompt(
         );
 
         if let Some(channel) = notify.channel.as_deref() {
+            let sanitized = sanitize_prompt_field(channel);
             full_prompt.push_str(&format!(
-                "The configured delivery channel for this routine is `{channel}`.\n"
+                "The configured delivery channel for this routine is `{sanitized}`.\n"
             ));
         }
 
         if let Some(user) = notify.user.as_deref() {
+            let sanitized = sanitize_prompt_field(user);
             full_prompt.push_str(&format!(
-                "The configured delivery target for this routine is `{user}`.\n"
+                "The configured delivery target for this routine is `{sanitized}`.\n"
             ));
         }
 
@@ -1440,6 +1494,7 @@ fn handle_text_response(
 /// This is a simplified version of the full dispatcher loop:
 /// - Max 3-5 iterations (configurable)
 /// - Sequential tool execution (not parallel)
+/// - Uses the owner's live autonomous tool scope when lightweight tools are enabled
 /// - Auto-approval of non-Always tools
 /// - No hooks or approval dialogs
 async fn execute_lightweight_with_tools(
@@ -1765,6 +1820,13 @@ pub fn spawn_cron_ticker(
         engine.check_cron_triggers().await;
 
         let mut ticker = tokio::time::interval(interval);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // Periodic event cache refresh so web/CLI mutations are picked up
+        // without requiring tool-path code to call refresh_event_cache().
+        // Uses wall-clock elapsed time so the refresh cadence is stable
+        // regardless of the cron tick interval configuration.
+        let refresh_interval = Duration::from_secs(60);
+        let mut last_refresh = tokio::time::Instant::now();
 
         loop {
             ticker.tick().await;
@@ -1772,7 +1834,11 @@ pub fn spawn_cron_ticker(
             // never races with FullJobWatcher instances from this process.
             engine.sync_dispatched_runs().await;
             engine.check_cron_triggers().await;
-            engine.sync_dispatched_runs().await;
+
+            if last_refresh.elapsed() >= refresh_interval {
+                engine.refresh_event_cache().await;
+                last_refresh = tokio::time::Instant::now();
+            }
         }
     })
 }
@@ -1838,7 +1904,13 @@ fn strip_html_tags(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use crate::agent::routine::{NotifyConfig, RunStatus};
+    use chrono::Utc;
+    use uuid::Uuid;
+
+    use crate::agent::routine::{
+        NotifyConfig, Routine, RoutineAction, RoutineGuardrails, RunStatus, Trigger,
+    };
+    use crate::channels::IncomingMessage;
     use crate::config::RoutineConfig;
 
     #[test]
@@ -2034,6 +2106,117 @@ mod tests {
             };
             assert_eq!(label, expected, "Approval pattern should match");
         }
+    }
+
+    /// Helper to build a test routine with the given user_id and trigger.
+    fn make_routine(user_id: &str, trigger: Trigger) -> Routine {
+        Routine {
+            id: Uuid::new_v4(),
+            name: "test".to_string(),
+            description: String::new(),
+            user_id: user_id.to_string(),
+            enabled: true,
+            trigger,
+            action: RoutineAction::Lightweight {
+                prompt: String::new(),
+                context_paths: vec![],
+                max_tokens: 1000,
+                use_tools: false,
+                max_tool_rounds: 0,
+            },
+            guardrails: RoutineGuardrails::default(),
+            notify: Default::default(),
+            last_run_at: None,
+            next_fire_at: None,
+            run_count: 0,
+            consecutive_failures: 0,
+            state: serde_json::Value::Null,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    /// Helper to build a test IncomingMessage.
+    fn make_message(user_id: &str, channel: &str, content: &str) -> IncomingMessage {
+        IncomingMessage {
+            id: Uuid::new_v4(),
+            channel: channel.to_string(),
+            user_id: user_id.to_string(),
+            owner_id: user_id.to_string(),
+            sender_id: user_id.to_string(),
+            user_name: None,
+            content: content.to_string(),
+            thread_id: None,
+            conversation_scope_id: None,
+            received_at: Utc::now(),
+            metadata: serde_json::Value::Null,
+            timezone: None,
+            attachments: vec![],
+            is_internal: false,
+        }
+    }
+
+    /// Regression test for issue #1051: event triggers used case-sensitive
+    /// channel comparison, so "Telegram" != "telegram" caused silent mismatch.
+    /// Tests the actual `routine_matches_message` function used in `check_event_triggers`.
+    #[test]
+    fn test_channel_filter_is_case_insensitive() {
+        let routine = make_routine(
+            "user1",
+            Trigger::Event {
+                pattern: ".*".to_string(),
+                channel: Some("Telegram".to_string()),
+            },
+        );
+        let msg = make_message("user1", "telegram", "hello");
+
+        // Case-insensitive channel match must succeed
+        assert!(super::routine_matches_message(&routine, &msg));
+
+        // Exact case must also work
+        let msg_exact = make_message("user1", "Telegram", "hello");
+        assert!(super::routine_matches_message(&routine, &msg_exact));
+
+        // Different channel must not match
+        let msg_wrong = make_message("user1", "discord", "hello");
+        assert!(!super::routine_matches_message(&routine, &msg_wrong));
+    }
+
+    /// Regression test for issue #1051: event triggers did not filter by
+    /// user_id, so routines from user A could fire on messages from user B.
+    /// Tests the actual `routine_matches_message` function used in `check_event_triggers`.
+    #[test]
+    fn test_event_trigger_requires_user_match() {
+        let routine = make_routine(
+            "alice",
+            Trigger::Event {
+                pattern: ".*".to_string(),
+                channel: None,
+            },
+        );
+
+        // Different user must not match
+        let msg_bob = make_message("bob", "telegram", "hello");
+        assert!(!super::routine_matches_message(&routine, &msg_bob));
+
+        // Same user must match
+        let msg_alice = make_message("alice", "telegram", "hello");
+        assert!(super::routine_matches_message(&routine, &msg_alice));
+    }
+
+    /// When no channel filter is set, any channel should match (given user matches).
+    #[test]
+    fn test_no_channel_filter_matches_any_channel() {
+        let routine = make_routine(
+            "user1",
+            Trigger::Event {
+                pattern: ".*".to_string(),
+                channel: None,
+            },
+        );
+
+        let msg = make_message("user1", "whatever_channel", "hello");
+        assert!(super::routine_matches_message(&routine, &msg));
     }
 
     #[test]

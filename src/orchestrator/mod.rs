@@ -63,7 +63,7 @@ fn resolve_orchestrator_port() -> u16 {
 /// Result of orchestrator setup, containing all handles needed by the agent.
 pub struct OrchestratorSetup {
     pub container_job_manager: Option<Arc<ContainerJobManager>>,
-    pub job_event_tx: Option<broadcast::Sender<(Uuid, SseEvent)>>,
+    pub job_event_tx: Option<broadcast::Sender<(Uuid, String, SseEvent)>>,
     pub prompt_queue: Arc<Mutex<HashMap<Uuid, VecDeque<api::PendingPrompt>>>>,
     pub docker_status: crate::sandbox::DockerStatus,
 }
@@ -134,6 +134,7 @@ pub async fn setup_orchestrator(
             store: db.cloned(),
             secrets_store: secrets_store.cloned(),
             user_id: "default".to_string(),
+            job_owner_cache: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
         };
 
         tokio::spawn(async move {
