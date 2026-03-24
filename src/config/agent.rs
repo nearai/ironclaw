@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use crate::config::helpers::{parse_bool_env, parse_option_env, parse_optional_env};
+use crate::config::helpers::{optional_env, parse_bool_env, parse_option_env, parse_optional_env};
 use crate::error::ConfigError;
 use crate::settings::Settings;
 
