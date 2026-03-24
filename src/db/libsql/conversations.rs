@@ -67,19 +67,20 @@ impl ConversationStore for LibSqlBackend {
         channel: &str,
         user_id: &str,
         thread_id: Option<&str>,
+        source_channel: Option<&str>,
     ) -> Result<bool, DatabaseError> {
         let conn = self.connect().await?;
         let now = fmt_ts(&Utc::now());
         let affected = conn
             .execute(
             r#"
-                INSERT INTO conversations (id, channel, user_id, thread_id, started_at, last_activity)
-                VALUES (?1, ?2, ?3, ?4, ?5, ?5)
+                INSERT INTO conversations (id, channel, user_id, thread_id, source_channel, started_at, last_activity)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)
                 ON CONFLICT (id) DO UPDATE SET last_activity = excluded.last_activity
                 WHERE conversations.user_id = excluded.user_id
                   AND conversations.channel = excluded.channel
                 "#,
-            params![id.to_string(), channel, user_id, opt_text(thread_id), now],
+            params![id.to_string(), channel, user_id, opt_text(thread_id), opt_text(source_channel), now],
         )
             .await
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
@@ -564,6 +565,28 @@ impl ConversationStore for LibSqlBackend {
             .await
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
         Ok(found.is_some())
+    }
+
+    async fn get_conversation_source_channel(
+        &self,
+        conversation_id: Uuid,
+    ) -> Result<Option<String>, DatabaseError> {
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                "SELECT source_channel FROM conversations WHERE id = ?1",
+                params![conversation_id.to_string()],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        match rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        {
+            Some(row) => Ok(get_opt_text(&row, 0)),
+            None => Ok(None),
+        }
     }
 }
 

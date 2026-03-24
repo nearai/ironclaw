@@ -593,7 +593,7 @@ pub async fn chat_new_thread_handler(
     // so that the subsequent loadThreads() call from the frontend sees it.
     if let Some(ref store) = state.store {
         match store
-            .ensure_conversation(thread_id, "gateway", &identity.user_id, None)
+            .ensure_conversation(thread_id, "gateway", &identity.user_id, None, Some("gateway"))
             .await
         {
             Ok(true) => {}

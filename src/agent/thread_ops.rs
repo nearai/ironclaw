@@ -135,14 +135,28 @@ impl Agent {
             msg_count = 0;
         }
 
-        // Create thread with the historical ID and restore messages
+        // Create thread with the historical ID and restore messages.
+        // Read source_channel from DB so the authorization check uses the
+        // original creator's channel, not the requesting message's channel.
+        let db_source_channel = if let Some(store) = self.store() {
+            store
+                .get_conversation_source_channel(thread_uuid)
+                .await
+                .unwrap_or(None)
+        } else {
+            None
+        };
+        let effective_source_channel = db_source_channel
+            .as_deref()
+            .or(Some(&*message.channel));
+
         let session_id = {
             let sess = session.lock().await;
             sess.id
         };
 
         let mut thread =
-            crate::agent::session::Thread::with_id(thread_uuid, session_id, Some(&message.channel));
+            crate::agent::session::Thread::with_id(thread_uuid, session_id, effective_source_channel);
         if !chat_messages.is_empty() {
             thread.restore_from_messages(chat_messages);
         }
@@ -637,7 +651,7 @@ impl Agent {
         user_id: &str,
     ) -> bool {
         match store
-            .ensure_conversation(thread_id, channel, user_id, None)
+            .ensure_conversation(thread_id, channel, user_id, None, Some(channel))
             .await
         {
             Ok(true) => true,

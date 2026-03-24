@@ -71,7 +71,21 @@ pub async fn setup_wasm_channels(
     let mut channels: Vec<(String, Box<dyn crate::channels::Channel>)> = Vec::new();
     let mut channel_names: Vec<String> = Vec::new();
 
+    // Reserved channel names that WASM modules must not claim.
+    // A malicious module could otherwise register as a trusted built-in
+    // channel and bypass cross-channel authorization checks.
+    const RESERVED_CHANNEL_NAMES: &[&str] = &["web", "gateway", "cli", "repl"];
+
     for loaded in results.loaded {
+        let name_lower = loaded.name().to_ascii_lowercase();
+        if RESERVED_CHANNEL_NAMES.contains(&name_lower.as_str()) {
+            tracing::warn!(
+                channel = %loaded.name(),
+                "Rejected WASM channel with reserved name"
+            );
+            continue;
+        }
+
         let (name, channel) = register_channel(
             loaded,
             config,

@@ -236,6 +236,28 @@ pub struct Thread {
 /// rapid follow-ups. The drain loop processes them as one newline-delimited turn.
 pub const MAX_PENDING_MESSAGES: usize = 10;
 
+/// Sentinel value for bootstrap threads that accept approvals from any channel.
+pub const BOOTSTRAP_SOURCE_CHANNEL: &str = "__bootstrap__";
+
+/// Check whether an approval from `requesting_channel` is authorized for a
+/// thread whose `source_channel` is `source`.
+///
+/// Rules:
+/// - `None` (unknown origin) -> denied (fail-closed)
+/// - `Some("__bootstrap__")` -> authorized from any channel
+/// - `Some(src) == requesting` -> same channel, authorized
+/// - requesting is "web" or "gateway" -> always authorized (trusted UI)
+/// - Otherwise -> denied
+pub fn is_approval_authorized(source: Option<&str>, requesting: &str) -> bool {
+    match source {
+        None => false,
+        Some(src) if src == BOOTSTRAP_SOURCE_CHANNEL => true,
+        Some(src) => {
+            src == requesting || requesting == "web" || requesting == "gateway"
+        }
+    }
+}
+
 impl Thread {
     /// Create a new thread.
     pub fn new(session_id: Uuid, source_channel: Option<&str>) -> Self {
@@ -1845,6 +1867,66 @@ mod tests {
         assert!(
             deserialized.source_channel.is_none(),
             "missing source_channel should deserialize as None"
+        );
+    }
+
+    #[test]
+    fn test_approval_authorized_same_channel() {
+        assert!(
+            is_approval_authorized(Some("telegram"), "telegram"),
+            "same channel should be authorized"
+        );
+    }
+
+    #[test]
+    fn test_approval_authorized_different_channel_blocked() {
+        assert!(
+            !is_approval_authorized(Some("telegram"), "http"),
+            "different channel should be blocked"
+        );
+    }
+
+    #[test]
+    fn test_approval_authorized_web_always_allowed() {
+        assert!(
+            is_approval_authorized(Some("telegram"), "web"),
+            "web channel should always be authorized"
+        );
+    }
+
+    #[test]
+    fn test_approval_authorized_gateway_always_allowed() {
+        assert!(
+            is_approval_authorized(Some("telegram"), "gateway"),
+            "gateway channel should always be authorized"
+        );
+    }
+
+    #[test]
+    fn test_approval_authorized_none_denied() {
+        assert!(
+            !is_approval_authorized(None, "telegram"),
+            "None source_channel should be denied (fail-closed)"
+        );
+        assert!(
+            !is_approval_authorized(None, "web"),
+            "None source_channel should be denied even for web"
+        );
+    }
+
+    #[test]
+    fn test_approval_authorized_bootstrap_any_channel() {
+        assert!(
+            is_approval_authorized(Some(BOOTSTRAP_SOURCE_CHANNEL), "telegram"),
+            "__bootstrap__ should be authorized from any channel"
+        );
+        assert!(
+            is_approval_authorized(Some(BOOTSTRAP_SOURCE_CHANNEL), "http"),
+            "__bootstrap__ should be authorized from any channel"
+        );
+        assert!(
+            is_approval_authorized(Some(BOOTSTRAP_SOURCE_CHANNEL), "cli"),
+            "__bootstrap__ should be authorized from any channel"
         );
     }
 }
