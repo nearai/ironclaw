@@ -828,14 +828,11 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                     }),
                 );
 
-                if matches!(
-                    &e,
-                    Error::Tool(crate::error::ToolError::AutonomousUnavailable { .. })
-                ) {
-                    Err(e)
-                } else {
-                    Ok(())
-                }
+                // All tool errors (including AutonomousUnavailable) are
+                // recoverable — the error message is already recorded in
+                // reason_ctx so the LLM can see it and try a different
+                // approach. Returning Err here would kill the entire job.
+                Ok(())
             }
         }
     }
@@ -2428,5 +2425,40 @@ mod tests {
                 reason: "timeout".to_string(),
             }
         ));
+    }
+
+    /// Regression test: AutonomousUnavailable errors must be recoverable.
+    /// Previously the job worker treated them as fatal, killing the entire
+    /// job instead of feeding the error back to the LLM.
+    #[tokio::test]
+    async fn test_autonomous_unavailable_is_recoverable() {
+        let worker = make_worker(vec![]).await;
+        let mut reason_ctx = ReasoningContext::new();
+        let selection = ToolSelection {
+            tool_name: "secret_list".to_string(),
+            parameters: serde_json::json!({}),
+            reasoning: "list secrets".to_string(),
+            alternatives: vec![],
+            tool_call_id: "call_123".to_string(),
+        };
+        let err = Error::Tool(crate::error::ToolError::AutonomousUnavailable {
+            name: "secret_list".to_string(),
+            reason: "not available in autonomous jobs".to_string(),
+        });
+
+        let result = worker
+            .process_tool_result_job(&mut reason_ctx, &selection, Err(err))
+            .await;
+
+        assert!(
+            result.is_ok(),
+            "AutonomousUnavailable must be recoverable, not fatal: {:?}",
+            result
+        );
+        // The error should be fed back to the LLM as a message.
+        assert!(
+            !reason_ctx.messages.is_empty(),
+            "Error message should be added to reason_ctx for the LLM"
+        );
     }
 }
