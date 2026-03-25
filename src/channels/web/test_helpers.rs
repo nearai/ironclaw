@@ -10,7 +10,8 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use crate::channels::IncomingMessage;
-use crate::channels::web::server::{GatewayState, RateLimiter, start_server};
+use crate::channels::web::auth::MultiAuthState;
+use crate::channels::web::server::{GatewayState, PerUserRateLimiter, RateLimiter, start_server};
 use crate::channels::web::sse::SseManager;
 use crate::channels::web::ws::WsConnectionTracker;
 
@@ -64,8 +65,9 @@ impl TestGatewayBuilder {
     pub fn build(self) -> Arc<GatewayState> {
         Arc::new(GatewayState {
             msg_tx: tokio::sync::RwLock::new(self.msg_tx),
-            sse: SseManager::new(),
+            sse: Arc::new(SseManager::new()),
             workspace: None,
+            workspace_pool: None,
             session_manager: None,
             log_broadcaster: None,
             log_level_handle: None,
@@ -74,14 +76,15 @@ impl TestGatewayBuilder {
             store: None,
             job_manager: None,
             prompt_queue: None,
-            user_id: self.user_id,
+            owner_id: self.user_id.clone(),
+            default_sender_id: self.user_id,
             shutdown_tx: tokio::sync::RwLock::new(None),
             ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
             llm_provider: self.llm_provider,
             skill_registry: None,
             skill_catalog: None,
             scheduler: None,
-            chat_rate_limiter: RateLimiter::new(30, 60),
+            chat_rate_limiter: PerUserRateLimiter::new(30, 60),
             oauth_rate_limiter: RateLimiter::new(10, 60),
             webhook_rate_limiter: RateLimiter::new(10, 60),
             registry_entries: Vec::new(),
@@ -98,11 +101,26 @@ impl TestGatewayBuilder {
         self,
         auth_token: &str,
     ) -> Result<(SocketAddr, Arc<GatewayState>), crate::error::ChannelError> {
+        let auth = MultiAuthState::single(auth_token.to_string(), "test-user".to_string());
         let state = self.build();
         let addr: SocketAddr = "127.0.0.1:0"
             .parse()
-            .expect("hard-coded address must parse");
-        let bound = start_server(addr, state.clone(), auth_token.to_string()).await?;
+            .expect("hard-coded address must parse"); // safety: constant literal
+        let bound = start_server(addr, state.clone(), auth).await?;
+        Ok((bound, state))
+    }
+
+    /// Build the state and start a gateway server with multi-user auth.
+    /// Returns the bound address and the shared state.
+    pub async fn start_multi(
+        self,
+        auth: MultiAuthState,
+    ) -> Result<(SocketAddr, Arc<GatewayState>), crate::error::ChannelError> {
+        let state = self.build();
+        let addr: SocketAddr = "127.0.0.1:0"
+            .parse()
+            .expect("hard-coded address must parse"); // safety: constant literal
+        let bound = start_server(addr, state.clone(), auth).await?;
         Ok((bound, state))
     }
 }

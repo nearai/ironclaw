@@ -587,6 +587,7 @@ mod advanced {
     async fn mcp_extension_lifecycle() {
         use crate::support::mock_mcp_server::{MockToolResponse, start_mock_mcp_server};
         use ironclaw::extensions::{AuthHint, ExtensionKind, ExtensionSource, RegistryEntry};
+        const TEST_USER_ID: &str = "test-user";
 
         // 1. Start mock MCP server with pre-configured tool responses.
         let mock_server = start_mock_mcp_server(vec![
@@ -654,14 +655,14 @@ mod advanced {
         ext_mgr
             .secrets()
             .create(
-                "default",
+                TEST_USER_ID,
                 ironclaw::secrets::CreateSecretParams::new(secret_name, "mock-access-token")
                     .with_provider("mcp:mock-notion".to_string()),
             )
             .await
             .expect("failed to inject test token");
 
-        let activate_result = ext_mgr.activate("mock-notion").await;
+        let activate_result = ext_mgr.activate("mock-notion", TEST_USER_ID).await;
         assert!(
             activate_result.is_ok(),
             "activation failed: {:?}",
@@ -707,7 +708,115 @@ mod advanced {
     }
 
     // -----------------------------------------------------------------------
-    // 9. Bootstrap greeting fires on fresh workspace
+    // 9. Message queue during tool execution
+    //
+    // Verifies that messages queued on a thread's pending_messages are
+    // auto-processed by the drain loop after the current turn completes.
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn message_queue_drains_after_tool_turn() {
+        let trace =
+            LlmTrace::from_file(format!("{FIXTURES}/message_queue_during_tools.json")).unwrap();
+        let rig = TestRigBuilder::new()
+            .with_trace(trace.clone())
+            .build()
+            .await;
+
+        // Turn 1: Send initial message to establish the session and thread.
+        rig.send_message("Echo hello for me").await;
+        let r1 = rig.wait_for_responses(1, TIMEOUT).await;
+        assert!(!r1.is_empty(), "Turn 1: no response");
+        assert!(
+            r1[0].content.to_lowercase().contains("hello"),
+            "Turn 1: missing 'hello' in: {}",
+            r1[0].content,
+        );
+
+        // Verify the echo tool was used in turn 1.
+        let started = rig.tool_calls_started();
+        assert!(
+            started.iter().any(|s| s == "echo"),
+            "Turn 1: echo tool not called: {started:?}",
+        );
+
+        // Pre-populate the thread's pending_messages queue.
+        // This simulates what happens when a concurrent request (e.g. gateway
+        // POST) arrives while the thread is in Processing state.
+        {
+            let session = rig
+                .session_manager()
+                .get_or_create_session("test-user")
+                .await;
+            let mut sess = session.lock().await;
+            // Find the active thread and queue a message.
+            let thread = sess
+                .active_thread
+                .and_then(|tid| sess.threads.get_mut(&tid))
+                .expect("active thread should exist after turn 1");
+            thread.queue_message("What is 2+2?".to_string());
+            assert_eq!(thread.pending_messages.len(), 1);
+        }
+
+        // Turn 2: Send a message that triggers tool calls.
+        // After this turn completes, the drain loop should find "What is 2+2?"
+        // in pending_messages and process it automatically.
+        rig.send_message("Now echo world and check the time").await;
+
+        // Wait for 3 total responses:
+        //   r1 = turn 1 response ("hello")
+        //   r2 = turn 2 response ("echo world + time") — sent inline by drain loop
+        //   r3 = queued message response ("2+2 = 4") — processed by drain loop
+        let all = rig.wait_for_responses(3, TIMEOUT).await;
+        assert!(
+            all.len() >= 3,
+            "Expected 3 responses (turn1 + turn2 + queued), got {}:\n{:?}",
+            all.len(),
+            all.iter().map(|r| &r.content).collect::<Vec<_>>(),
+        );
+
+        // The third response should be from the queued message ("What is 2+2?")
+        let queued_response = &all[2].content;
+        assert!(
+            queued_response.contains("4"),
+            "Queued message response should contain '4', got: {queued_response}",
+        );
+
+        // Verify the pending queue was fully drained.
+        {
+            let session = rig
+                .session_manager()
+                .get_or_create_session("test-user")
+                .await;
+            let sess = session.lock().await;
+            let thread = sess
+                .active_thread
+                .and_then(|tid| sess.threads.get(&tid))
+                .expect("active thread should still exist");
+            assert!(
+                thread.pending_messages.is_empty(),
+                "Pending queue should be empty after drain, got: {:?}",
+                thread.pending_messages,
+            );
+        }
+
+        // Verify tool usage across all turns.
+        let all_started = rig.tool_calls_started();
+        let echo_count = all_started.iter().filter(|s| *s == "echo").count();
+        assert_eq!(
+            echo_count, 2,
+            "Expected 2 echo calls (turn 1 + turn 2), got {echo_count}",
+        );
+        assert!(
+            all_started.iter().any(|s| s == "time"),
+            "time tool should have been called in turn 2: {all_started:?}",
+        );
+
+        rig.shutdown();
+    }
+
+    // -----------------------------------------------------------------------
+    // 10. Bootstrap greeting fires on fresh workspace
     // -----------------------------------------------------------------------
 
     /// Verifies that a fresh workspace triggers a static bootstrap greeting
@@ -740,7 +849,7 @@ mod advanced {
     }
 
     // -----------------------------------------------------------------------
-    // 10. Bootstrap onboarding completes and clears BOOTSTRAP.md
+    // 11. Bootstrap onboarding completes and clears BOOTSTRAP.md
     // -----------------------------------------------------------------------
 
     /// Exercises the full onboarding flow: bootstrap greeting fires, user

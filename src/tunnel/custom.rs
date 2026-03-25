@@ -73,6 +73,7 @@ impl Tunnel for CustomTunnel {
         let stderr = child.stderr.take();
 
         let mut public_url = format!("http://{local_host}:{local_port}");
+        let mut drain_handle: Option<tokio::task::JoinHandle<()>> = None;
 
         if self.url_pattern.is_some()
             && let Some(stdout) = stdout
@@ -103,17 +104,26 @@ impl Tunnel for CustomTunnel {
                     Err(_) => {}
                 }
             }
-            // Drain remaining stdout to prevent SIGPIPE/buffer stalls.
-            tokio::spawn(async move { while let Ok(Some(_)) = reader.next_line().await {} });
+            // We took ownership of the process's stdout pipe above to parse the
+            // URL. The process may continue writing to stdout for its lifetime.
+            // If we drop the reader, the pipe closes and the process gets SIGPIPE.
+            // We can't just store the reader without reading — the OS pipe buffer
+            // fills up and the process blocks. So we drain it in a background task.
+            // The task exits naturally when the process is killed (EOF).
+            drain_handle = Some(tokio::spawn(async move {
+                while let Ok(Some(line)) = reader.next_line().await {
+                    tracing::trace!("custom-tunnel: {line}");
+                }
+            }));
         } else if let Some(stdout) = stdout {
-            // No url_pattern: still drain stdout to prevent pipe stalls.
+            // No url_pattern: still drain stdout to prevent SIGPIPE/buffer stalls.
             tokio::spawn(async move {
                 let mut reader = tokio::io::BufReader::new(stdout).lines();
                 while let Ok(Some(_)) = reader.next_line().await {}
             });
         }
 
-        // Drain stderr silently.
+        // Drain stderr to prevent SIGPIPE/buffer stalls.
         if let Some(stderr) = stderr {
             tokio::spawn(async move {
                 let mut reader = tokio::io::BufReader::new(stderr).lines();
@@ -126,7 +136,10 @@ impl Tunnel for CustomTunnel {
         }
 
         let mut guard = self.proc.lock().await;
-        *guard = Some(TunnelProcess { child });
+        *guard = Some(TunnelProcess {
+            child,
+            _pipe_drain: drain_handle,
+        });
 
         Ok(public_url)
     }

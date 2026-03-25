@@ -36,7 +36,7 @@ pub(crate) fn resolve_embedding_dimension() -> Option<usize> {
         .unwrap_or(false);
 
     if !enabled {
-        tracing::info!("Vector index setup skipped (EMBEDDING_ENABLED not set in env)");
+        tracing::debug!("Vector index setup skipped (EMBEDDING_ENABLED not set in env)");
         return None;
     }
 
@@ -1017,7 +1017,7 @@ mod tests {
 
     mod resolve_dimension {
         use super::*;
-        use crate::config::helpers::ENV_MUTEX;
+        use crate::config::helpers::lock_env;
 
         fn clear_embedding_env() {
             // SAFETY: called under ENV_MUTEX
@@ -1030,14 +1030,14 @@ mod tests {
 
         #[test]
         fn returns_none_when_disabled() {
-            let _guard = ENV_MUTEX.lock().expect("env mutex");
+            let _guard = lock_env();
             clear_embedding_env();
             assert!(resolve_embedding_dimension().is_none());
         }
 
         #[test]
         fn returns_explicit_dimension() {
-            let _guard = ENV_MUTEX.lock().expect("env mutex");
+            let _guard = lock_env();
             clear_embedding_env();
             // SAFETY: under ENV_MUTEX
             unsafe {
@@ -1053,7 +1053,7 @@ mod tests {
 
         #[test]
         fn infers_from_model() {
-            let _guard = ENV_MUTEX.lock().expect("env mutex");
+            let _guard = lock_env();
             clear_embedding_env();
             // SAFETY: under ENV_MUTEX
             unsafe {
@@ -1069,7 +1069,7 @@ mod tests {
 
         #[test]
         fn defaults_to_1536_for_unknown_model() {
-            let _guard = ENV_MUTEX.lock().expect("env mutex");
+            let _guard = lock_env();
             clear_embedding_env();
             // SAFETY: under ENV_MUTEX
             unsafe {
