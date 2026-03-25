@@ -33,6 +33,7 @@ impl Agent {
         &self,
         intent: MessageIntent,
         message: &IncomingMessage,
+        tenant: &crate::tenant::TenantCtx,
     ) -> Result<SubmissionResult, Error> {
         // Send thinking status for non-trivial operations
         if let MessageIntent::CreateJob { .. } = &intent {
@@ -52,24 +53,18 @@ impl Agent {
                 description,
                 category,
             } => {
-                self.handle_create_job(&message.user_id, title, description, category)
+                self.handle_create_job(tenant, title, description, category)
                     .await?
             }
             MessageIntent::CheckJobStatus { job_id } => {
-                self.handle_check_status(&message.user_id, job_id).await?
+                self.handle_check_status(tenant, job_id).await?
             }
-            MessageIntent::CancelJob { job_id } => {
-                self.handle_cancel_job(&message.user_id, &job_id).await?
-            }
-            MessageIntent::ListJobs { filter } => {
-                self.handle_list_jobs(&message.user_id, filter).await?
-            }
-            MessageIntent::HelpJob { job_id } => {
-                self.handle_help_job(&message.user_id, &job_id).await?
-            }
+            MessageIntent::CancelJob { job_id } => self.handle_cancel_job(tenant, &job_id).await?,
+            MessageIntent::ListJobs { filter } => self.handle_list_jobs(tenant, filter).await?,
+            MessageIntent::HelpJob { job_id } => self.handle_help_job(tenant, &job_id).await?,
             MessageIntent::Command { command, args } => {
                 match self
-                    .handle_command(&command, &args, &message.channel, &message.user_id)
+                    .handle_command(&command, &args, &message.channel, tenant)
                     .await?
                 {
                     Some(s) => s,
@@ -83,14 +78,14 @@ impl Agent {
 
     async fn handle_create_job(
         &self,
-        user_id: &str,
+        tenant: &crate::tenant::TenantCtx,
         title: String,
         description: String,
         category: Option<String>,
     ) -> Result<String, Error> {
         let job_id = self
             .scheduler
-            .dispatch_job(user_id, &title, &description, None)
+            .dispatch_job(tenant.user_id(), &title, &description, None)
             .await?;
 
         // Set the dedicated category field (not stored in metadata)
@@ -113,7 +108,7 @@ impl Agent {
 
     async fn handle_check_status(
         &self,
-        user_id: &str,
+        tenant: &crate::tenant::TenantCtx,
         job_id: Option<String>,
     ) -> Result<String, Error> {
         match job_id {
@@ -122,13 +117,10 @@ impl Agent {
                     .map_err(|_| crate::error::JobError::NotFound { id: Uuid::nil() })?;
 
                 // Try DB first for persistent state, fall back to ContextManager.
-                if let Some(store) = self.store()
+                // TenantScope.get_job() auto-filters by ownership — no manual check needed.
+                if let Some(store) = tenant.store()
                     && let Ok(Some(ctx)) = store.get_job(uuid).await
                 {
-                    // Ownership check: ensure the job belongs to the requesting user.
-                    if ctx.user_id != user_id {
-                        return Err(crate::error::JobError::NotFound { id: uuid }.into());
-                    }
                     return Ok(format!(
                         "Job: {}\nStatus: {:?}\nCreated: {}\nStarted: {}\nActual cost: {}",
                         ctx.title,
@@ -142,7 +134,7 @@ impl Agent {
                 }
 
                 let ctx = self.context_manager.get_context(uuid).await?;
-                if ctx.user_id != user_id {
+                if ctx.user_id != tenant.user_id() {
                     return Err(crate::error::JobError::NotFound { id: uuid }.into());
                 }
 
@@ -159,21 +151,22 @@ impl Agent {
             }
             None => {
                 // Show summary from DB for consistency with Jobs tab.
-                if let Some(store) = self.store() {
+                // TenantScope methods auto-scope to user — no user_id parameter needed.
+                if let Some(store) = tenant.store() {
                     let mut total = 0;
                     let mut in_progress = 0;
                     let mut completed = 0;
                     let mut failed = 0;
                     let mut stuck = 0;
 
-                    if let Ok(s) = store.agent_job_summary_for_user(user_id).await {
+                    if let Ok(s) = store.agent_job_summary().await {
                         total += s.total;
                         in_progress += s.in_progress;
                         completed += s.completed;
                         failed += s.failed;
                         stuck += s.stuck;
                     }
-                    if let Ok(s) = store.sandbox_job_summary_for_user(user_id).await {
+                    if let Ok(s) = store.sandbox_job_summary().await {
                         total += s.total;
                         in_progress += s.running;
                         completed += s.completed;
@@ -187,7 +180,7 @@ impl Agent {
                 }
 
                 // Fallback to ContextManager if no DB.
-                let summary = self.context_manager.summary_for(user_id).await;
+                let summary = self.context_manager.summary_for(tenant.user_id()).await;
                 Ok(format!(
                     "Jobs summary: Total: {} In Progress: {} Completed: {} Failed: {} Stuck: {}",
                     summary.total,
@@ -200,19 +193,24 @@ impl Agent {
         }
     }
 
-    async fn handle_cancel_job(&self, user_id: &str, job_id: &str) -> Result<String, Error> {
+    async fn handle_cancel_job(
+        &self,
+        tenant: &crate::tenant::TenantCtx,
+        job_id: &str,
+    ) -> Result<String, Error> {
         let uuid = Uuid::parse_str(job_id)
             .map_err(|_| crate::error::JobError::NotFound { id: Uuid::nil() })?;
 
         let ctx = self.context_manager.get_context(uuid).await?;
-        if ctx.user_id != user_id {
+        if ctx.user_id != tenant.user_id() {
             return Err(crate::error::JobError::NotFound { id: uuid }.into());
         }
 
         self.scheduler.stop(uuid).await?;
 
         // Also update DB so the Jobs tab reflects cancellation immediately.
-        if let Some(store) = self.store()
+        // Use TenantScope — ownership already verified above.
+        if let Some(store) = tenant.store()
             && let Err(e) = store
                 .update_job_status(uuid, JobState::Cancelled, Some("Cancelled by user"))
                 .await
@@ -225,19 +223,20 @@ impl Agent {
 
     async fn handle_list_jobs(
         &self,
-        user_id: &str,
+        tenant: &crate::tenant::TenantCtx,
         _filter: Option<String>,
     ) -> Result<String, Error> {
         // List from DB for consistency with Jobs tab.
-        if let Some(store) = self.store() {
-            let agent_jobs = match store.list_agent_jobs_for_user(user_id).await {
+        // TenantScope methods auto-scope to user.
+        if let Some(store) = tenant.store() {
+            let agent_jobs = match store.list_agent_jobs().await {
                 Ok(jobs) => jobs,
                 Err(e) => {
                     tracing::warn!("Failed to list agent jobs: {}", e);
                     Vec::new()
                 }
             };
-            let sandbox_jobs = match store.list_sandbox_jobs_for_user(user_id).await {
+            let sandbox_jobs = match store.list_sandbox_jobs().await {
                 Ok(jobs) => jobs,
                 Err(e) => {
                     tracing::warn!("Failed to list sandbox jobs: {}", e);
@@ -260,7 +259,7 @@ impl Agent {
         }
 
         // Fallback to ContextManager if no DB.
-        let jobs = self.context_manager.all_jobs_for(user_id).await;
+        let jobs = self.context_manager.all_jobs_for(tenant.user_id()).await;
         if jobs.is_empty() {
             return Ok("No jobs found.".to_string());
         }
@@ -274,12 +273,16 @@ impl Agent {
         Ok(output)
     }
 
-    async fn handle_help_job(&self, user_id: &str, job_id: &str) -> Result<String, Error> {
+    async fn handle_help_job(
+        &self,
+        tenant: &crate::tenant::TenantCtx,
+        job_id: &str,
+    ) -> Result<String, Error> {
         let uuid = Uuid::parse_str(job_id)
             .map_err(|_| crate::error::JobError::NotFound { id: Uuid::nil() })?;
 
         let ctx = self.context_manager.get_context(uuid).await?;
-        if ctx.user_id != user_id {
+        if ctx.user_id != tenant.user_id() {
             return Err(crate::error::JobError::NotFound { id: uuid }.into());
         }
 
@@ -312,11 +315,11 @@ impl Agent {
     /// Show job status inline — either all jobs (no id) or a specific job.
     pub(super) async fn process_job_status(
         &self,
-        user_id: &str,
+        tenant: &crate::tenant::TenantCtx,
         job_id: Option<&str>,
     ) -> Result<SubmissionResult, Error> {
         match self
-            .handle_check_status(user_id, job_id.map(|s| s.to_string()))
+            .handle_check_status(tenant, job_id.map(|s| s.to_string()))
             .await
         {
             Ok(text) => Ok(SubmissionResult::response(text)),
@@ -327,10 +330,10 @@ impl Agent {
     /// Cancel a job by ID.
     pub(super) async fn process_job_cancel(
         &self,
-        user_id: &str,
+        tenant: &crate::tenant::TenantCtx,
         job_id: &str,
     ) -> Result<SubmissionResult, Error> {
-        match self.handle_cancel_job(user_id, job_id).await {
+        match self.handle_cancel_job(tenant, job_id).await {
             Ok(text) => Ok(SubmissionResult::response(text)),
             Err(e) => Ok(SubmissionResult::error(format!("Cancel error: {}", e))),
         }
@@ -475,7 +478,7 @@ impl Agent {
         command: &str,
         args: &[String],
         channel: &str,
-        user_id: &str,
+        tenant: &crate::tenant::TenantCtx,
     ) -> Result<SubmissionResult, Error> {
         match command {
             "help" => Ok(SubmissionResult::response(concat!(
@@ -674,7 +677,7 @@ impl Agent {
                         // would change the default for all users. The per-request
                         // model_override in the dispatcher reads from the same
                         // "selected_model" setting and applies it per-user.
-                        self.persist_selected_model(user_id, requested).await;
+                        self.persist_selected_model(tenant, requested).await;
                         Ok(SubmissionResult::response(format!(
                             "Model preference set to: {} (per-user)",
                             requested
@@ -683,7 +686,7 @@ impl Agent {
                         match self.llm().set_model(requested) {
                             Ok(()) => {
                                 // Persist the model choice so it survives restarts.
-                                self.persist_selected_model(user_id, requested).await;
+                                self.persist_selected_model(tenant, requested).await;
                                 Ok(SubmissionResult::response(format!(
                                     "Switched model to: {}",
                                     requested
@@ -835,12 +838,12 @@ impl Agent {
         command: &str,
         args: &[String],
         channel: &str,
-        user_id: &str,
+        tenant: &crate::tenant::TenantCtx,
     ) -> Result<Option<String>, Error> {
         // System commands are now handled directly via Submission::SystemCommand,
         // but the router may still send us unknown /commands.
         match self
-            .handle_system_command(command, args, channel, user_id)
+            .handle_system_command(command, args, channel, tenant)
             .await?
         {
             SubmissionResult::Response { content } => Ok(Some(content)),
@@ -857,14 +860,18 @@ impl Agent {
     ///
     /// In multi-tenant mode, only the per-user DB setting is written — global
     /// .env and TOML files are shared across users and must not be mutated.
-    async fn persist_selected_model(&self, user_id: &str, model: &str) {
-        // 1. Persist to DB if available (per-user scoped).
-        if let Some(store) = self.store() {
+    async fn persist_selected_model(&self, tenant: &crate::tenant::TenantCtx, model: &str) {
+        // 1. Persist to DB if available (per-user scoped via TenantScope).
+        if let Some(store) = tenant.store() {
             let value = serde_json::Value::String(model.to_string());
-            if let Err(e) = store.set_setting(user_id, "selected_model", &value).await {
+            if let Err(e) = store.set_setting("selected_model", &value).await {
                 tracing::warn!("Failed to persist model to DB: {}", e);
             } else {
-                tracing::debug!(user_id, "Persisted selected_model to DB: {}", model);
+                tracing::debug!(
+                    user_id = tenant.user_id(),
+                    "Persisted selected_model to DB: {}",
+                    model
+                );
             }
         } else {
             tracing::warn!("No database store available — model choice will not persist to DB");

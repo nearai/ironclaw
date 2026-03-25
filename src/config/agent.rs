@@ -36,6 +36,10 @@ pub struct AgentConfig {
     /// Whether the deployment is multi-tenant (multiple users sharing one
     /// instance). Auto-detected from GATEWAY_USER_TOKENS presence.
     pub multi_tenant: bool,
+    /// Maximum concurrent LLM calls per user. None = use default (4).
+    pub max_llm_concurrent_per_user: Option<usize>,
+    /// Maximum concurrent jobs per user. None = use default (3).
+    pub max_jobs_concurrent_per_user: Option<usize>,
 }
 
 impl AgentConfig {
@@ -60,6 +64,8 @@ impl AgentConfig {
             default_timezone: "UTC".to_string(),
             max_tokens_per_job: 0,
             multi_tenant: false,
+            max_llm_concurrent_per_user: None,
+            max_jobs_concurrent_per_user: None,
         }
     }
 
@@ -123,6 +129,8 @@ impl AgentConfig {
             // Auto-detected from GATEWAY_USER_TOKENS presence. Not a separate
             // knob — multi-tenant mode is always implied by configuring user tokens.
             multi_tenant: optional_env("GATEWAY_USER_TOKENS")?.is_some(),
+            max_llm_concurrent_per_user: parse_option_env("TENANT_MAX_LLM_CONCURRENT")?,
+            max_jobs_concurrent_per_user: parse_option_env("TENANT_MAX_JOBS_CONCURRENT")?,
         })
     }
 }

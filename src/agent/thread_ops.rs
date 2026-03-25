@@ -175,6 +175,7 @@ impl Agent {
     pub(super) async fn process_user_input(
         &self,
         message: &IncomingMessage,
+        tenant: crate::tenant::TenantCtx,
         session: Arc<Mutex<Session>>,
         thread_id: Uuid,
         content: &str,
@@ -351,7 +352,7 @@ impl Agent {
 
         if let Some(intent) = self.router.route_command(&temp_message) {
             // Explicit command like /status, /job, /list - handle directly
-            return self.handle_job_or_command(intent, message).await;
+            return self.handle_job_or_command(intent, message, &tenant).await;
         }
 
         // Natural language goes through the agentic loop
@@ -462,7 +463,7 @@ impl Agent {
 
         // Run the agentic tool execution loop
         let result = self
-            .run_agentic_loop(message, session.clone(), thread_id, turn_messages)
+            .run_agentic_loop(message, tenant, session.clone(), thread_id, turn_messages)
             .await;
 
         // Re-acquire lock and check if interrupted
@@ -1444,7 +1445,13 @@ impl Agent {
 
             // Continue the agentic loop (a tool was already executed this turn)
             let result = self
-                .run_agentic_loop(message, session.clone(), thread_id, context_messages)
+                .run_agentic_loop(
+                    message,
+                    self.tenant_ctx(&message.user_id).await,
+                    session.clone(),
+                    thread_id,
+                    context_messages,
+                )
                 .await;
 
             // Handle the result

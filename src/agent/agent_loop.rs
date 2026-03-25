@@ -172,6 +172,8 @@ pub struct AgentDeps {
     /// Resolved LLM backend identifier (e.g., "nearai", "openai", "groq").
     /// Used by `/model` persistence to determine which env var to update.
     pub llm_backend: String,
+    /// Per-tenant rate limiting registry (lazily creates rate state per user).
+    pub tenant_rates: Arc<crate::tenant::TenantRateRegistry>,
 }
 
 /// The main agent that coordinates all components.
@@ -234,7 +236,10 @@ impl Agent {
             SchedulerDeps {
                 tools: deps.tools.clone(),
                 extension_manager: deps.extension_manager.clone(),
-                store: deps.store.clone(),
+                store: deps
+                    .store
+                    .as_ref()
+                    .map(|db| crate::tenant::AdminScope::new(Arc::clone(db))),
                 hooks: deps.hooks.clone(),
             },
         );
@@ -313,6 +318,50 @@ impl Agent {
 
     pub(super) fn cost_guard(&self) -> &Arc<crate::agent::cost_guard::CostGuard> {
         &self.deps.cost_guard
+    }
+
+    /// Build a tenant-scoped execution context for the given user.
+    ///
+    /// This is the standard entry point for per-user operations. The returned
+    /// [`TenantCtx`] provides a [`TenantScope`] that auto-binds `user_id` on
+    /// every database operation and a per-user rate limiter.
+    pub(super) async fn tenant_ctx(&self, user_id: &str) -> crate::tenant::TenantCtx {
+        let rate = self.deps.tenant_rates.get_or_create(user_id).await;
+
+        let store = self
+            .deps
+            .store
+            .as_ref()
+            .map(|db| crate::tenant::TenantScope::new(user_id, Arc::clone(db)));
+
+        // Reuse the owner workspace if user matches, otherwise create per-user.
+        let workspace = match &self.deps.workspace {
+            Some(ws) if ws.user_id() == user_id => Some(Arc::clone(ws)),
+            _ => self
+                .deps
+                .store
+                .as_ref()
+                .map(|db| Arc::new(Workspace::new_with_db(user_id, Arc::clone(db)))),
+        };
+
+        crate::tenant::TenantCtx::new(
+            user_id,
+            store,
+            workspace,
+            Arc::clone(&self.deps.cost_guard),
+            rate,
+        )
+    }
+
+    /// Get an admin-scoped database accessor for cross-tenant operations.
+    ///
+    /// Only for system-level components (heartbeat, routine engine, self-repair,
+    /// scheduler). Handler code should use [`tenant_ctx()`](Self::tenant_ctx) instead.
+    pub(super) fn admin_store(&self) -> Option<crate::tenant::AdminScope> {
+        self.deps
+            .store
+            .as_ref()
+            .map(|db| crate::tenant::AdminScope::new(Arc::clone(db)))
     }
 
     pub(super) fn skill_registry(&self) -> Option<&Arc<std::sync::RwLock<SkillRegistry>>> {
@@ -400,8 +449,8 @@ impl Agent {
             self.config.stuck_threshold,
             self.config.max_repair_attempts,
         );
-        if let Some(ref store) = self.deps.store {
-            self_repair = self_repair.with_store(Arc::clone(store));
+        if let Some(admin) = self.admin_store() {
+            self_repair = self_repair.with_store(admin);
         }
         if let Some(ref builder) = self.deps.builder {
             self_repair = self_repair.with_builder(Arc::clone(builder), Arc::clone(self.tools()));
@@ -597,13 +646,13 @@ impl Agent {
                         .unwrap_or_default();
 
                     if config.multi_tenant {
-                        if let Some(store) = self.store() {
+                        if let Some(admin) = self.admin_store() {
                             Some(spawn_multi_user_heartbeat(
                                 config,
                                 hygiene,
                                 self.cheap_llm().clone(),
                                 Some(notify_tx),
-                                Arc::clone(store),
+                                admin,
                             ))
                         } else {
                             tracing::warn!("Multi-tenant heartbeat requires a database store");
@@ -616,7 +665,7 @@ impl Agent {
                             workspace.clone(),
                             self.cheap_llm().clone(),
                             Some(notify_tx),
-                            self.store().map(Arc::clone),
+                            self.admin_store(),
                         ))
                     }
                 } else {
@@ -640,7 +689,7 @@ impl Agent {
 
                     let engine = Arc::new(RoutineEngine::new(
                         rt_config.clone(),
-                        Arc::clone(store),
+                        crate::tenant::AdminScope::new(Arc::clone(store)),
                         self.llm().clone(),
                         Arc::clone(workspace),
                         notify_tx,
@@ -1192,11 +1241,20 @@ impl Agent {
             }
         }
 
+        // Build per-tenant execution context once; threaded through all handlers.
+        let tenant = self.tenant_ctx(&message.user_id).await;
+
         // Process based on submission type
         let result = match submission {
             Submission::UserInput { content } => {
                 let mut result = self
-                    .process_user_input(message, session.clone(), thread_id, &content)
+                    .process_user_input(
+                        message,
+                        tenant.clone(),
+                        session.clone(),
+                        thread_id,
+                        &content,
+                    )
                     .await;
 
                 // Drain any messages queued during processing.
@@ -1263,7 +1321,13 @@ impl Agent {
                     let mut queued_msg = message.clone();
                     queued_msg.attachments.clear();
                     result = self
-                        .process_user_input(&queued_msg, session.clone(), thread_id, &next_content)
+                        .process_user_input(
+                            &queued_msg,
+                            tenant.clone(),
+                            session.clone(),
+                            thread_id,
+                            &next_content,
+                        )
                         .await;
 
                     // If processing failed, re-queue the drained content so it
@@ -1289,7 +1353,7 @@ impl Agent {
                     message.channel
                 );
                 // Authorization checks (including restart channel check) are enforced in handle_system_command
-                self.handle_system_command(&command, &args, &message.channel, &message.user_id)
+                self.handle_system_command(&command, &args, &message.channel, &tenant)
                     .await
             }
             Submission::Undo => self.process_undo(session, thread_id).await,
@@ -1302,12 +1366,9 @@ impl Agent {
             Submission::Summarize => self.process_summarize(session, thread_id).await,
             Submission::Suggest => self.process_suggest(session, thread_id).await,
             Submission::JobStatus { job_id } => {
-                self.process_job_status(&message.user_id, job_id.as_deref())
-                    .await
+                self.process_job_status(&tenant, job_id.as_deref()).await
             }
-            Submission::JobCancel { job_id } => {
-                self.process_job_cancel(&message.user_id, &job_id).await
-            }
+            Submission::JobCancel { job_id } => self.process_job_cancel(&tenant, &job_id).await,
             Submission::Quit => return Ok(None),
             Submission::SwitchThread { thread_id: target } => {
                 self.process_switch_thread(message, target).await

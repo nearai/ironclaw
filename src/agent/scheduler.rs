@@ -11,12 +11,12 @@ use uuid::Uuid;
 use crate::agent::task::{Task, TaskContext, TaskOutput};
 use crate::config::AgentConfig;
 use crate::context::{ContextManager, JobContext, JobState};
-use crate::db::Database;
 use crate::error::{Error, JobError};
 use crate::extensions::ExtensionManager;
 use crate::hooks::HookRegistry;
 use crate::llm::LlmProvider;
 use crate::safety::SafetyLayer;
+use crate::tenant::AdminScope;
 use crate::tools::{
     ApprovalContext, ToolRegistry, autonomous_allowed_tool_names, autonomous_unavailable_error,
     prepare_tool_params,
@@ -52,7 +52,7 @@ struct ScheduledSubtask {
 pub struct SchedulerDeps {
     pub tools: Arc<ToolRegistry>,
     pub extension_manager: Option<Arc<ExtensionManager>>,
-    pub store: Option<Arc<dyn Database>>,
+    pub store: Option<AdminScope>,
     pub hooks: Arc<HookRegistry>,
 }
 
@@ -64,7 +64,7 @@ pub struct Scheduler {
     safety: Arc<SafetyLayer>,
     tools: Arc<ToolRegistry>,
     extension_manager: Option<Arc<ExtensionManager>>,
-    store: Option<Arc<dyn Database>>,
+    store: Option<AdminScope>,
     hooks: Arc<HookRegistry>,
     /// SSE manager for live job event streaming.
     sse_tx: Option<Arc<crate::channels::web::sse::SseManager>>,
@@ -786,6 +786,8 @@ mod tests {
             default_timezone: "UTC".to_string(),
             max_tokens_per_job,
             multi_tenant: false,
+            max_llm_concurrent_per_user: None,
+            max_jobs_concurrent_per_user: None,
         };
         let cm = Arc::new(ContextManager::new(5));
         let llm: Arc<dyn LlmProvider> = Arc::new(StubLlm);

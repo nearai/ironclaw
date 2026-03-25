@@ -27,12 +27,12 @@ use crate::agent::routine::{
 use crate::channels::{IncomingMessage, OutgoingResponse};
 use crate::config::RoutineConfig;
 use crate::context::{JobContext, JobState};
-use crate::db::Database;
 use crate::error::RoutineError;
 use crate::extensions::ExtensionManager;
 use crate::llm::{
     ChatMessage, CompletionRequest, FinishReason, LlmProvider, ToolCall, ToolCompletionRequest,
 };
+use crate::tenant::AdminScope;
 use crate::tools::{
     ToolError, ToolRegistry, autonomous_allowed_tool_names, autonomous_unavailable_message,
     prepare_tool_params,
@@ -93,7 +93,7 @@ pub(crate) fn routine_matches_message(routine: &Routine, message: &IncomingMessa
 /// The routine execution engine.
 pub struct RoutineEngine {
     config: RoutineConfig,
-    store: Arc<dyn Database>,
+    store: AdminScope,
     llm: Arc<dyn LlmProvider>,
     workspace: Arc<Workspace>,
     /// Sender for notifications (routed to channel manager).
@@ -122,7 +122,7 @@ impl RoutineEngine {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         config: RoutineConfig,
-        store: Arc<dyn Database>,
+        store: AdminScope,
         llm: Arc<dyn LlmProvider>,
         workspace: Arc<Workspace>,
         notify_tx: mpsc::Sender<OutgoingResponse>,
@@ -741,7 +741,10 @@ impl RoutineEngine {
         let routine_workspace = if routine.user_id == self.workspace.user_id() {
             self.workspace.clone()
         } else {
-            Arc::new(Workspace::new_with_db(&routine.user_id, self.store.clone()))
+            Arc::new(Workspace::new_with_db(
+                &routine.user_id,
+                Arc::clone(self.store.db()),
+            ))
         };
 
         // Execute inline for manual triggers (caller wants to wait)
@@ -873,7 +876,10 @@ impl RoutineEngine {
         let routine_workspace = if routine.user_id == self.workspace.user_id() {
             self.workspace.clone()
         } else {
-            Arc::new(Workspace::new_with_db(&routine.user_id, self.store.clone()))
+            Arc::new(Workspace::new_with_db(
+                &routine.user_id,
+                Arc::clone(self.store.db()),
+            ))
         };
 
         let engine = EngineContext {
@@ -933,7 +939,7 @@ impl RoutineEngine {
 /// an active state (Pending/InProgress/Stuck). Maps the final `JobState` to
 /// a `RunStatus` for the routine run.
 struct FullJobWatcher {
-    store: Arc<dyn Database>,
+    store: AdminScope,
     job_id: Uuid,
     routine_name: String,
 }
@@ -944,7 +950,7 @@ impl FullJobWatcher {
     /// Safety ceiling: 24 hours, derived from POLL_INTERVAL.
     const MAX_POLLS: u32 = (24 * 60 * 60) / Self::POLL_INTERVAL.as_secs() as u32;
 
-    fn new(store: Arc<dyn Database>, job_id: Uuid, routine_name: String) -> Self {
+    fn new(store: AdminScope, job_id: Uuid, routine_name: String) -> Self {
         Self {
             store,
             job_id,
@@ -1016,7 +1022,7 @@ impl FullJobWatcher {
 /// Shared context passed to the execution function.
 struct EngineContext {
     config: RoutineConfig,
-    store: Arc<dyn Database>,
+    store: AdminScope,
     llm: Arc<dyn LlmProvider>,
     workspace: Arc<Workspace>,
     notify_tx: mpsc::Sender<OutgoingResponse>,

@@ -642,7 +642,7 @@ impl TestRigBuilder {
                 let (notify_tx, _notify_rx) = tokio::sync::mpsc::channel(16);
                 let engine = Arc::new(RoutineEngine::new(
                     routine_config,
-                    Arc::clone(db_arc),
+                    ironclaw::tenant::AdminScope::new(Arc::clone(db_arc)),
                     components.llm.clone(),
                     Arc::clone(ws),
                     notify_tx,
@@ -762,6 +762,7 @@ impl TestRigBuilder {
             sandbox_readiness: ironclaw::agent::SandboxReadiness::Available, // tests don't use real Docker
             builder: None,
             llm_backend: "nearai".to_string(),
+            tenant_rates: std::sync::Arc::new(ironclaw::tenant::TenantRateRegistry::new(4, 3)),
         };
 
         // 7. Create TestChannel and ChannelManager.

@@ -42,6 +42,7 @@ impl Agent {
     pub(super) async fn run_agentic_loop(
         &self,
         message: &IncomingMessage,
+        tenant: crate::tenant::TenantCtx,
         session: Arc<Mutex<Session>>,
         thread_id: Uuid,
         initial_messages: Vec<ChatMessage>,
@@ -163,6 +164,7 @@ impl Agent {
 
         let delegate = ChatDelegate {
             agent: self,
+            tenant,
             session: session.clone(),
             thread_id,
             message,
@@ -235,6 +237,7 @@ impl Agent {
 /// auth intercept, and cost tracking.
 struct ChatDelegate<'a> {
     agent: &'a Agent,
+    tenant: crate::tenant::TenantCtx,
     session: Arc<Mutex<Session>>,
     thread_id: Uuid,
     message: &'a IncomingMessage,
@@ -332,12 +335,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
         iteration: usize,
     ) -> Result<crate::llm::RespondOutput, Error> {
         // Enforce cost guardrails before the LLM call (global + per-user)
-        if let Err(limit) = self
-            .agent
-            .cost_guard()
-            .check_allowed_for_user(&self.message.user_id)
-            .await
-        {
+        if let Err(limit) = self.tenant.check_cost_allowed().await {
             return Err(crate::error::LlmError::InvalidResponse {
                 provider: "agent".to_string(),
                 reason: limit.to_string(),
@@ -348,12 +346,10 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
         // Apply per-user model override from settings (first iteration only
         // to avoid repeated DB lookups within the same agentic loop).
         // Uses "selected_model" — the same key the /model command persists to
-        // via SettingsStore (per-user scoped).
+        // via SettingsStore (per-user scoped via TenantScope).
         if iteration == 0
-            && let Some(store) = self.agent.store()
-            && let Ok(Some(value)) = store
-                .get_setting(&self.message.user_id, "selected_model")
-                .await
+            && let Some(store) = self.tenant.store()
+            && let Ok(Some(value)) = store.get_setting("selected_model").await
             && let Some(model) = value.as_str()
         {
             let model = model.trim();
@@ -411,10 +407,8 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
         let read_discount = self.agent.llm().cache_read_discount();
         let write_multiplier = self.agent.llm().cache_write_multiplier();
         let call_cost = self
-            .agent
-            .cost_guard()
-            .record_llm_call_for_user(
-                &self.message.user_id,
+            .tenant
+            .record_llm_call(
                 &model_name,
                 output.usage.input_tokens,
                 output.usage.output_tokens,
@@ -1267,6 +1261,7 @@ mod tests {
             sandbox_readiness: crate::agent::routine_engine::SandboxReadiness::DisabledByConfig,
             builder: None,
             llm_backend: "nearai".to_string(),
+            tenant_rates: Arc::new(crate::tenant::TenantRateRegistry::new(4, 3)),
         };
 
         Agent::new(
@@ -1288,6 +1283,8 @@ mod tests {
                 default_timezone: "UTC".to_string(),
                 max_tokens_per_job: 0,
                 multi_tenant: false,
+                max_llm_concurrent_per_user: None,
+                max_jobs_concurrent_per_user: None,
             },
             deps,
             Arc::new(ChannelManager::new()),
@@ -2137,6 +2134,7 @@ mod tests {
             sandbox_readiness: crate::agent::routine_engine::SandboxReadiness::DisabledByConfig,
             builder: None,
             llm_backend: "nearai".to_string(),
+            tenant_rates: Arc::new(crate::tenant::TenantRateRegistry::new(4, 3)),
         };
 
         Agent::new(
@@ -2158,6 +2156,8 @@ mod tests {
                 default_timezone: "UTC".to_string(),
                 max_tokens_per_job: 0,
                 multi_tenant: false,
+                max_llm_concurrent_per_user: None,
+                max_jobs_concurrent_per_user: None,
             },
             deps,
             Arc::new(ChannelManager::new()),
@@ -2192,13 +2192,14 @@ mod tests {
 
         let message = IncomingMessage::new("test", "test-user", "do something");
         let initial_messages = vec![ChatMessage::user("do something")];
+        let tenant = agent.tenant_ctx("test-user").await;
 
         // The dispatcher must terminate within 5 seconds. If there is an
         // infinite loop bug (e.g., index not advancing on tool failure), the
         // timeout will fire and the test will fail.
         let result = tokio::time::timeout(
             Duration::from_secs(5),
-            agent.run_agentic_loop(&message, session, thread_id, initial_messages),
+            agent.run_agentic_loop(&message, tenant, session, thread_id, initial_messages),
         )
         .await;
 
@@ -2260,6 +2261,7 @@ mod tests {
                 sandbox_readiness: crate::agent::routine_engine::SandboxReadiness::DisabledByConfig,
                 builder: None,
                 llm_backend: "nearai".to_string(),
+                tenant_rates: Arc::new(crate::tenant::TenantRateRegistry::new(4, 3)),
             };
 
             Agent::new(
@@ -2281,6 +2283,8 @@ mod tests {
                     default_timezone: "UTC".to_string(),
                     max_tokens_per_job: 0,
                     multi_tenant: false,
+                    max_llm_concurrent_per_user: None,
+                    max_jobs_concurrent_per_user: None,
                 },
                 deps,
                 Arc::new(ChannelManager::new()),
@@ -2300,13 +2304,14 @@ mod tests {
 
         let message = IncomingMessage::new("test", "test-user", "keep calling tools");
         let initial_messages = vec![ChatMessage::user("keep calling tools")];
+        let tenant = agent.tenant_ctx("test-user").await;
 
         // Even with an LLM that always wants to call tools, the dispatcher
         // must terminate within the timeout thanks to force_text at
         // max_tool_iterations.
         let result = tokio::time::timeout(
             Duration::from_secs(5),
-            agent.run_agentic_loop(&message, session, thread_id, initial_messages),
+            agent.run_agentic_loop(&message, tenant, session, thread_id, initial_messages),
         )
         .await;
 
