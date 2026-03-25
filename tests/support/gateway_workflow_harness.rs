@@ -270,6 +270,7 @@ impl GatewayWorkflowHarness {
             channels,
             None,
             None,
+            None,
             Some(RoutineConfig {
                 enabled: true,
                 cron_check_interval_secs: 60,

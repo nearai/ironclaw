@@ -94,7 +94,13 @@ async fn test_heartbeat_end_to_end() {
 
     let hb_config = ironclaw::agent::HeartbeatConfig::default();
     let hygiene_config = ironclaw::workspace::hygiene::HygieneConfig::default();
-    let runner = HeartbeatRunner::new(hb_config, hygiene_config, workspace, llm);
+    let snapshot_config = ironclaw::workspace::snapshot::SnapshotConfig {
+        enabled: false,
+        cadence_hours: 24,
+        snapshot_path: std::path::PathBuf::new(),
+        state_path: std::path::PathBuf::new(),
+    };
+    let runner = HeartbeatRunner::new(hb_config, hygiene_config, snapshot_config, workspace, llm);
 
     let result = runner.check_heartbeat().await;
 

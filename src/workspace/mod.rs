@@ -50,6 +50,7 @@ pub mod privacy;
 #[cfg(feature = "postgres")]
 mod repository;
 mod search;
+pub mod snapshot;
 
 pub use chunker::{ChunkConfig, chunk_document};
 pub use document::{

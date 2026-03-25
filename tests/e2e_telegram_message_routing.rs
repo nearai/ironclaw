@@ -223,6 +223,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             Some(Arc::clone(&components.context_manager)),
             None,
         );

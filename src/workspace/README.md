@@ -35,6 +35,10 @@ workspace/
 └── ...
 ```
 
+### Snapshot Security
+
+The snapshot file (`MEMORY_SNAPSHOT_{user_id}.md`) contains sensitive workspace content in plaintext, including identity files, memory, heartbeat configuration, tool notes, and context documents. On Unix systems, snapshot files are written with 0600 permissions (owner read/write only). Ensure the snapshot path (`SNAPSHOT_PATH` env var) points to a user-controlled directory.
+
 ## Using the Workspace
 
 ```rust
@@ -123,12 +127,19 @@ Proactive periodic execution (default: 30 minutes):
 
 ```rust
 use crate::agent::{HeartbeatConfig, spawn_heartbeat};
+use crate::workspace::snapshot::SnapshotConfig as WsSnapshotConfig;
 
 let config = HeartbeatConfig::default()
     .with_interval(Duration::from_secs(60 * 30))
     .with_notify("user_123", "telegram");
 
-spawn_heartbeat(config, workspace, llm, response_tx);
+let snapshot = WsSnapshotConfig {
+    enabled: false,
+    cadence_hours: 24,
+    snapshot_path: PathBuf::new(),
+    state_path: PathBuf::new(),
+};
+spawn_heartbeat(config, hygiene_config, snapshot, workspace, llm, response_tx, store);
 ```
 
 ## Chunking Strategy
