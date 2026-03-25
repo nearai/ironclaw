@@ -18,6 +18,7 @@ use std::time::Duration;
 use chrono::Utc;
 use regex::Regex;
 use tokio::sync::{RwLock, mpsc};
+use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 use crate::agent::Scheduler;
@@ -43,6 +44,11 @@ use ironclaw_safety::SafetyLayer;
 enum EventMatcher {
     Message { routine: Routine, regex: Regex },
     System { routine: Routine },
+}
+
+struct TriggeredRoutine {
+    routine: Routine,
+    detail: String,
 }
 
 /// Distinguishes why sandbox is unavailable so error messages are accurate.
@@ -202,6 +208,44 @@ impl RoutineEngine {
 
     /// Check incoming message against event triggers. Returns number of routines fired.
     pub async fn check_event_triggers(&self, message: &IncomingMessage, content: &str) -> usize {
+        let triggered = self.matching_event_triggers(message, content).await;
+        let fired = triggered.len();
+        for triggered in triggered {
+            std::mem::drop(self.spawn_fire(triggered.routine, "event", Some(triggered.detail)));
+        }
+        fired
+    }
+
+    /// Fire matching event-triggered routines and wait for them to complete.
+    ///
+    /// Used by single-message REPL mode so the process does not exit before
+    /// background event-triggered routines finish.
+    pub async fn check_event_triggers_and_wait(
+        &self,
+        message: &IncomingMessage,
+        content: &str,
+    ) -> usize {
+        let triggered = self.matching_event_triggers(message, content).await;
+        let fired = triggered.len();
+        let handles: Vec<JoinHandle<()>> = triggered
+            .into_iter()
+            .map(|triggered| self.spawn_fire(triggered.routine, "event", Some(triggered.detail)))
+            .collect();
+
+        for handle in handles {
+            if let Err(e) = handle.await {
+                tracing::warn!(error = %e, "Event-triggered routine task failed");
+            }
+        }
+
+        fired
+    }
+
+    async fn matching_event_triggers(
+        &self,
+        message: &IncomingMessage,
+        content: &str,
+    ) -> Vec<TriggeredRoutine> {
         let cache = self.event_cache.read().await;
 
         // Early return if there are no message matchers at all.
@@ -209,10 +253,9 @@ impl RoutineEngine {
             .iter()
             .any(|m| matches!(m, EventMatcher::Message { .. }))
         {
-            return 0;
+            return Vec::new();
         }
-
-        let mut fired = 0;
+        let mut triggered = Vec::new();
 
         // Collect routine IDs for batch query
         let routine_ids: Vec<Uuid> = cache
@@ -224,13 +267,13 @@ impl RoutineEngine {
             .collect();
 
         if routine_ids.is_empty() {
-            return 0;
+            return Vec::new();
         }
 
         // Single batch query instead of N queries
         let concurrent_counts = match self.batch_concurrent_counts(&routine_ids).await {
             Some(counts) => counts,
-            None => return 0,
+            None => return Vec::new(),
         };
 
         for matcher in cache.iter() {
@@ -285,11 +328,13 @@ impl RoutineEngine {
             }
 
             let detail = truncate(content, 200);
-            self.spawn_fire(routine.clone(), "event", Some(detail));
-            fired += 1;
+            triggered.push(TriggeredRoutine {
+                routine: routine.clone(),
+                detail,
+            });
         }
 
-        fired
+        triggered
     }
 
     /// Emit a structured event to system-event routines.
@@ -845,7 +890,12 @@ impl RoutineEngine {
     }
 
     /// Spawn a fire in a background task.
-    fn spawn_fire(&self, routine: Routine, trigger_type: &str, trigger_detail: Option<String>) {
+    fn spawn_fire(
+        &self,
+        routine: Routine,
+        trigger_type: &str,
+        trigger_detail: Option<String>,
+    ) -> JoinHandle<()> {
         let run = RoutineRun {
             id: Uuid::new_v4(),
             routine_id: routine.id,
@@ -882,7 +932,7 @@ impl RoutineEngine {
                 return;
             }
             execute_routine(engine, routine, run).await;
-        });
+        })
     }
 
     fn check_cooldown(&self, routine: &Routine) -> bool {

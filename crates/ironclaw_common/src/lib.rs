@@ -3,5 +3,5 @@
 mod event;
 mod util;
 
-pub use event::AppEvent;
+pub use event::{AppEvent, ToolDecisionDto};
 pub use util::truncate_preview;
