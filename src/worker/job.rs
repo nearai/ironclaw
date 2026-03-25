@@ -1158,6 +1158,7 @@ impl<'a> JobDelegate<'a> {
         Ok(crate::llm::RespondOutput {
             result: RespondResult::Text(String::new()),
             usage: crate::llm::TokenUsage::default(),
+            finish_reason: crate::llm::FinishReason::Stop,
         })
     }
 }
@@ -1283,6 +1284,7 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
                         content: reasoning_text,
                     },
                     usage: crate::llm::TokenUsage::default(),
+                    finish_reason: crate::llm::FinishReason::ToolUse,
                 });
             }
             Ok(_) => {} // empty selections, fall through
