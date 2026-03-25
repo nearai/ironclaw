@@ -14,14 +14,14 @@ use crate::agent::compaction::ContextCompactor;
 use crate::agent::dispatcher::{
     AgenticLoopResult, check_auth_required, execute_chat_tool_standalone, parse_auth_result,
 };
-use crate::agent::session::{PendingApproval, Session, ThreadState};
+use crate::agent::session::{MAX_PENDING_MESSAGES, PendingApproval, Session, ThreadState};
 use crate::agent::submission::SubmissionResult;
-use crate::channels::web::util::truncate_preview;
 use crate::channels::{IncomingMessage, StatusUpdate};
 use crate::context::JobContext;
 use crate::error::Error;
 use crate::llm::{ChatMessage, ToolCall};
 use crate::tools::redact_params;
+use ironclaw_common::truncate_preview;
 
 const FORGED_THREAD_ID_ERROR: &str = "Invalid or unauthorized thread ID.";
 
@@ -211,14 +211,72 @@ impl Agent {
         // Check thread state
         match thread_state {
             ThreadState::Processing => {
-                tracing::warn!(
-                    message_id = %message.id,
-                    thread_id = %thread_id,
-                    "Thread is processing, rejecting new input"
-                );
-                return Ok(SubmissionResult::error(
-                    "Turn in progress. Use /interrupt to cancel.",
-                ));
+                let mut sess = session.lock().await;
+                if let Some(thread) = sess.threads.get_mut(&thread_id) {
+                    // Re-check state under lock — the turn may have completed
+                    // between the snapshot read and this mutable lock acquisition.
+                    if thread.state == ThreadState::Processing {
+                        // Reject messages with attachments — the queue stores
+                        // text only, so attachments would be silently dropped.
+                        if !message.attachments.is_empty() {
+                            return Ok(SubmissionResult::error(
+                                "Cannot queue messages with attachments while a turn is processing. \
+                                 Please resend after the current turn completes.",
+                            ));
+                        }
+
+                        // Run the same safety checks that the normal path applies
+                        // (validation, policy, secret scan) so that blocked content
+                        // is never stored in pending_messages or serialized.
+                        let validation = self.safety().validate_input(content);
+                        if !validation.is_valid {
+                            let details = validation
+                                .errors
+                                .iter()
+                                .map(|e| format!("{}: {}", e.field, e.message))
+                                .collect::<Vec<_>>()
+                                .join("; ");
+                            return Ok(SubmissionResult::error(format!(
+                                "Input rejected by safety validation: {details}",
+                            )));
+                        }
+                        let violations = self.safety().check_policy(content);
+                        if violations
+                            .iter()
+                            .any(|rule| rule.action == crate::safety::PolicyAction::Block)
+                        {
+                            return Ok(SubmissionResult::error("Input rejected by safety policy."));
+                        }
+                        if let Some(warning) = self.safety().scan_inbound_for_secrets(content) {
+                            tracing::warn!(
+                                user = %message.user_id,
+                                channel = %message.channel,
+                                "Queued message blocked: contains leaked secret"
+                            );
+                            return Ok(SubmissionResult::error(warning));
+                        }
+
+                        if !thread.queue_message(content.to_string()) {
+                            return Ok(SubmissionResult::error(format!(
+                                "Message queue full ({MAX_PENDING_MESSAGES}). Wait for the current turn to complete.",
+                            )));
+                        }
+                        // Return `Ok` (not `Response`) so the drain loop in
+                        // agent_loop.rs breaks — `Ok` signals a control
+                        // acknowledgment, not a completed LLM turn.
+                        return Ok(SubmissionResult::Ok {
+                            message: Some(
+                                "Message queued — will be processed after the current turn.".into(),
+                            ),
+                        });
+                    }
+                    // State changed (turn completed) — fall through to process normally.
+                    // NOTE: `sess` (the Mutex guard) is dropped at the end of
+                    // this `Processing` match arm, releasing the session lock
+                    // before the rest of process_user_input runs. No deadlock.
+                } else {
+                    return Ok(SubmissionResult::error("Thread no longer exists."));
+                }
             }
             ThreadState::AwaitingApproval => {
                 tracing::warn!(
@@ -455,10 +513,10 @@ impl Agent {
                 };
 
                 thread.complete_turn(&response);
-                let (turn_number, tool_calls) = thread
+                let (turn_number, tool_calls, narrative) = thread
                     .turns
                     .last()
-                    .map(|t| (t.turn_number, t.tool_calls.clone()))
+                    .map(|t| (t.turn_number, t.tool_calls.clone(), t.narrative.clone()))
                     .unwrap_or_default();
                 let _ = self
                     .channels
@@ -476,6 +534,7 @@ impl Agent {
                     &message.user_id,
                     turn_number,
                     &tool_calls,
+                    narrative.as_deref(),
                 )
                 .await;
                 self.persist_assistant_response(
@@ -493,6 +552,33 @@ impl Agent {
                         .send_status(
                             &message.channel,
                             StatusUpdate::Suggestions { suggestions },
+                            &message.metadata,
+                        )
+                        .await;
+                }
+
+                // Emit per-turn cost summary
+                {
+                    let usage = self.cost_guard().model_usage().await;
+                    let (total_in, total_out, total_cost) =
+                        usage
+                            .values()
+                            .fold((0u64, 0u64, rust_decimal::Decimal::ZERO), |acc, m| {
+                                (
+                                    acc.0 + m.input_tokens,
+                                    acc.1 + m.output_tokens,
+                                    acc.2 + m.cost,
+                                )
+                            });
+                    let _ = self
+                        .channels
+                        .send_status(
+                            &message.channel,
+                            StatusUpdate::TurnCost {
+                                input_tokens: total_in,
+                                output_tokens: total_out,
+                                cost_usd: format!("${:.4}", total_cost),
+                            },
                             &message.metadata,
                         )
                         .await;
@@ -640,7 +726,9 @@ impl Agent {
     ///
     /// Stored between the user and assistant messages so that
     /// `build_turns_from_db_messages` can reconstruct the tool call history.
-    /// Content is a JSON array of tool call summaries.
+    /// Content is a JSON object: `{ "calls": [...], "narrative": "..." }`.
+    /// The `calls` array contains tool call summaries with optional `rationale`
+    /// and `tool_call_id` fields. Legacy rows may be plain JSON arrays.
     pub(super) async fn persist_tool_calls(
         &self,
         thread_id: Uuid,
@@ -648,6 +736,7 @@ impl Agent {
         user_id: &str,
         turn_number: usize,
         tool_calls: &[crate::agent::session::TurnToolCall],
+        narrative: Option<&str>,
     ) {
         if tool_calls.is_empty() {
             return;
@@ -682,11 +771,30 @@ impl Agent {
                 if let Some(ref error) = tc.error {
                     obj["error"] = serde_json::Value::String(truncate_preview(error, 200));
                 }
+                if let Some(ref rationale) = tc.rationale {
+                    obj["rationale"] = serde_json::Value::String(truncate_preview(rationale, 500));
+                }
+                if let Some(ref tool_call_id) = tc.tool_call_id {
+                    obj["tool_call_id"] =
+                        serde_json::Value::String(truncate_preview(tool_call_id, 128));
+                }
                 obj
             })
             .collect();
 
-        let content = match serde_json::to_string(&summaries) {
+        // Wrap in an object with optional narrative so it can be reconstructed.
+        // safety: no byte-index slicing here; comment describes JSON shape
+        let wrapper = if let Some(n) = narrative {
+            serde_json::json!({
+                "narrative": truncate_preview(n, 1000),
+                "calls": summaries,
+            })
+        } else {
+            serde_json::json!({
+                "calls": summaries,
+            })
+        };
+        let content = match serde_json::to_string(&wrapper) {
             Ok(c) => c,
             Err(e) => {
                 tracing::warn!("Failed to serialize tool calls: {}", e);
@@ -849,6 +957,7 @@ impl Agent {
             .get_mut(&thread_id)
             .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
         thread.turns.clear();
+        thread.pending_messages.clear();
         thread.state = ThreadState::Idle;
 
         // Clear undo history too
@@ -939,6 +1048,7 @@ impl Agent {
                 JobContext::with_user(&message.user_id, "chat", "Interactive chat session")
                     .with_requester_id(&message.sender_id);
             job_ctx.http_interceptor = self.deps.http_interceptor.clone();
+            job_ctx.metadata = crate::agent::agent_loop::chat_tool_execution_metadata(message);
             // Prefer a valid timezone from the approval message, fall back to the
             // resolved timezone stored when the approval was originally requested.
             let tz_candidate = message
@@ -1017,9 +1127,12 @@ impl Agent {
                     && let Some(turn) = thread.last_turn_mut()
                 {
                     if is_tool_error {
-                        turn.record_tool_error(result_content.clone());
+                        turn.record_tool_error_for(&pending.tool_call_id, result_content.clone());
                     } else {
-                        turn.record_tool_result(serde_json::json!(result_content));
+                        turn.record_tool_result_for(
+                            &pending.tool_call_id,
+                            serde_json::json!(result_content),
+                        );
                     }
                 }
             }
@@ -1271,9 +1384,12 @@ impl Agent {
                         && let Some(turn) = thread.last_turn_mut()
                     {
                         if is_deferred_error {
-                            turn.record_tool_error(deferred_content.clone());
+                            turn.record_tool_error_for(&tc.id, deferred_content.clone());
                         } else {
-                            turn.record_tool_result(serde_json::json!(deferred_content));
+                            turn.record_tool_result_for(
+                                &tc.id,
+                                serde_json::json!(deferred_content),
+                            );
                         }
                     }
                 }
@@ -1372,10 +1488,10 @@ impl Agent {
                     let (response, suggestions) =
                         crate::agent::dispatcher::extract_suggestions(&response);
                     thread.complete_turn(&response);
-                    let (turn_number, tool_calls) = thread
+                    let (turn_number, tool_calls, narrative) = thread
                         .turns
                         .last()
-                        .map(|t| (t.turn_number, t.tool_calls.clone()))
+                        .map(|t| (t.turn_number, t.tool_calls.clone(), t.narrative.clone()))
                         .unwrap_or_default();
                     // User message already persisted at turn start; save tool calls then assistant response
                     self.persist_tool_calls(
@@ -1384,6 +1500,7 @@ impl Agent {
                         &message.user_id,
                         turn_number,
                         &tool_calls,
+                        narrative.as_deref(),
                     )
                     .await;
                     self.persist_assistant_response(
@@ -1559,7 +1676,7 @@ impl Agent {
         };
 
         match ext_mgr
-            .configure_token(&pending.extension_name, token)
+            .configure_token(&pending.extension_name, token, &message.user_id)
             .await
         {
             Ok(result) if result.activated => {
@@ -1729,7 +1846,20 @@ fn rebuild_chat_messages_from_db(
             "assistant" => result.push(ChatMessage::assistant(&msg.content)),
             "tool_calls" => {
                 // Try to parse the enriched JSON and rebuild tool messages.
-                if let Ok(calls) = serde_json::from_str::<Vec<serde_json::Value>>(&msg.content) {
+                // Supports two formats:
+                // - Old: plain JSON array of tool call summaries
+                // - New: wrapped object { "calls": [...], "narrative": "..." }
+                let calls: Vec<serde_json::Value> =
+                    match serde_json::from_str::<serde_json::Value>(&msg.content) {
+                        Ok(serde_json::Value::Array(arr)) => arr,
+                        Ok(serde_json::Value::Object(obj)) => obj
+                            .get("calls")
+                            .and_then(|v| v.as_array())
+                            .cloned()
+                            .unwrap_or_default(),
+                        _ => Vec::new(),
+                    };
+                {
                     if calls.is_empty() {
                         continue;
                     }
@@ -1752,6 +1882,10 @@ fn rebuild_chat_messages_from_db(
                                     .get("parameters")
                                     .cloned()
                                     .unwrap_or(serde_json::json!({})),
+                                reasoning: c
+                                    .get("rationale")
+                                    .and_then(|v| v.as_str())
+                                    .map(String::from),
                             })
                             .collect();
 
@@ -2009,6 +2143,112 @@ mod tests {
             }
             _ => panic!("Expected approval rejection message"),
         }
+    }
+
+    #[test]
+    fn test_queue_cap_rejects_at_capacity() {
+        use crate::agent::session::{MAX_PENDING_MESSAGES, Thread, ThreadState};
+        use uuid::Uuid;
+
+        let mut thread = Thread::new(Uuid::new_v4());
+        thread.start_turn("processing something");
+        assert_eq!(thread.state, ThreadState::Processing);
+
+        // Fill the queue to the cap
+        for i in 0..MAX_PENDING_MESSAGES {
+            assert!(thread.queue_message(format!("msg-{}", i)));
+        }
+        assert_eq!(thread.pending_messages.len(), MAX_PENDING_MESSAGES);
+
+        // The next message should be rejected by queue_message
+        assert!(!thread.queue_message("overflow".to_string()));
+        assert_eq!(thread.pending_messages.len(), MAX_PENDING_MESSAGES);
+
+        // Verify all drain in FIFO order
+        for i in 0..MAX_PENDING_MESSAGES {
+            assert_eq!(thread.take_pending_message(), Some(format!("msg-{}", i)));
+        }
+        assert!(thread.take_pending_message().is_none());
+    }
+
+    #[test]
+    fn test_clear_clears_pending_messages() {
+        use crate::agent::session::{Thread, ThreadState};
+        use uuid::Uuid;
+
+        let mut thread = Thread::new(Uuid::new_v4());
+        thread.start_turn("processing");
+
+        thread.queue_message("pending-1".to_string());
+        thread.queue_message("pending-2".to_string());
+        assert_eq!(thread.pending_messages.len(), 2);
+
+        // Simulate what process_clear does: clear turns and pending_messages
+        thread.turns.clear();
+        thread.pending_messages.clear();
+        thread.state = ThreadState::Idle;
+
+        assert!(thread.pending_messages.is_empty());
+        assert!(thread.turns.is_empty());
+        assert_eq!(thread.state, ThreadState::Idle);
+    }
+
+    #[test]
+    fn test_processing_arm_thread_gone_returns_error() {
+        // Regression: if the thread disappears between the state snapshot and the
+        // mutable lock, the Processing arm must return an error — not a false
+        // "queued" acknowledgment.
+        //
+        // Exercises the exact branch at the `else` of
+        // `if let Some(thread) = sess.threads.get_mut(&thread_id)`.
+        use crate::agent::session::{Session, Thread, ThreadState};
+        use uuid::Uuid;
+
+        let thread_id = Uuid::new_v4();
+        let session_id = Uuid::new_v4();
+        let mut thread = Thread::with_id(thread_id, session_id);
+        thread.start_turn("working");
+        assert_eq!(thread.state, ThreadState::Processing);
+
+        let mut session = Session::new("test-user");
+        session.threads.insert(thread_id, thread);
+
+        // Simulate the thread disappearing (e.g., /clear racing with queue)
+        session.threads.remove(&thread_id);
+
+        // The Processing arm re-locks and calls get_mut — must get None.
+        assert!(session.threads.get_mut(&thread_id).is_none());
+        // Nothing was queued anywhere — the removed thread's queue is gone.
+    }
+
+    #[test]
+    fn test_processing_arm_state_changed_does_not_queue() {
+        // Regression: if the thread transitions from Processing to Idle between
+        // the state snapshot and the mutable lock, the message must NOT be queued.
+        // Instead the Processing arm falls through to normal processing.
+        //
+        // Exercises the `if thread.state == ThreadState::Processing` re-check.
+        use crate::agent::session::{Session, Thread, ThreadState};
+        use uuid::Uuid;
+
+        let thread_id = Uuid::new_v4();
+        let session_id = Uuid::new_v4();
+        let mut thread = Thread::with_id(thread_id, session_id);
+        thread.start_turn("working");
+        assert_eq!(thread.state, ThreadState::Processing);
+
+        // Simulate the turn completing between snapshot and re-lock
+        thread.complete_turn("done");
+        assert_eq!(thread.state, ThreadState::Idle);
+
+        let mut session = Session::new("test-user");
+        session.threads.insert(thread_id, thread);
+
+        // Re-check under lock: state is Idle, so queue_message must NOT be called.
+        let t = session.threads.get_mut(&thread_id).unwrap();
+        assert_ne!(t.state, ThreadState::Processing);
+        // Verify nothing was queued — the fall-through path doesn't touch the queue.
+        assert!(t.pending_messages.is_empty());
     }
 
     // Helper function to extract the approval message without needing a full Agent instance

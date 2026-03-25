@@ -19,9 +19,8 @@ use serde_json::{Map, Value};
 use uuid::Uuid;
 
 use crate::agent::routine::{
-    FullJobPermissionDefaultMode, FullJobPermissionMode, NotifyConfig, Routine, RoutineAction,
-    RoutineGuardrails, Trigger, load_full_job_permission_settings, next_cron_fire,
-    normalize_tool_names,
+    NotifyConfig, Routine, RoutineAction, RoutineGuardrails, Trigger, next_cron_fire,
+    normalize_cron_expression,
 };
 use crate::agent::routine_engine::RoutineEngine;
 use crate::context::JobContext;
@@ -48,6 +47,10 @@ enum NormalizedTriggerRequest {
         event_type: String,
         filters: HashMap<String, String>,
     },
+    Webhook {
+        path: Option<String>,
+        secret: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,21 +59,12 @@ enum NormalizedExecutionMode {
     FullJob,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RequestedFullJobPermissionMode {
-    Explicit,
-    InheritOwner,
-    CopyOwner,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct NormalizedExecutionRequest {
     mode: NormalizedExecutionMode,
     context_paths: Vec<String>,
     use_tools: bool,
     max_tool_rounds: u32,
-    tool_permissions: Vec<String>,
-    permission_mode: Option<RequestedFullJobPermissionMode>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -146,7 +140,8 @@ fn execution_properties() -> Value {
         },
         "use_tools": {
             "type": "boolean",
-            "description": "Only applies to lightweight mode. When true, safe non-approval tools are available."
+            "default": true,
+            "description": "Only applies to lightweight mode. New lightweight routines default this to true; when enabled, the routine can use the owner's live autonomous tool scope."
         },
         "max_tool_rounds": {
             "type": "integer",
@@ -154,16 +149,6 @@ fn execution_properties() -> Value {
             "maximum": crate::agent::routine::MAX_TOOL_ROUNDS_LIMIT,
             "default": 3,
             "description": "Only applies when execution.mode='lightweight' and use_tools=true. Runtime-capped to prevent loops."
-        },
-        "tool_permissions": {
-            "type": "array",
-            "items": { "type": "string" },
-            "description": "Only applies when execution.mode='full_job'. These tools are pre-authorized for Always-approval checks."
-        },
-        "permission_mode": {
-            "type": "string",
-            "enum": ["inherit_owner", "explicit", "copy_owner"],
-            "description": "Only applies when execution.mode='full_job'. 'inherit_owner' uses the owner defaults at run time, 'explicit' uses only tool_permissions, and 'copy_owner' snapshots the current owner allowlist into tool_permissions."
         }
     })
 }
@@ -306,7 +291,7 @@ fn routine_request_discovery_schema() -> Value {
 fn lightweight_execution_variant() -> Value {
     serde_json::json!({
         "type": "object",
-        "description": "Default lightweight execution. Applies when execution is omitted or execution.mode='lightweight'.",
+        "description": "Default lightweight execution. Applies when execution is omitted or execution.mode='lightweight'. New lightweight routines default to tools enabled unless execution.use_tools=false is set.",
         "properties": {
             "mode": {
                 "type": "string",
@@ -320,7 +305,8 @@ fn lightweight_execution_variant() -> Value {
             },
             "use_tools": {
                 "type": "boolean",
-                "description": "When true, safe non-approval tools are available."
+                "default": true,
+                "description": "Defaults to true for new lightweight routines. When enabled, the routine can use the owner's live autonomous tool scope."
             },
             "max_tool_rounds": {
                 "type": "integer",
@@ -336,22 +322,12 @@ fn lightweight_execution_variant() -> Value {
 fn full_job_execution_variant() -> Value {
     serde_json::json!({
         "type": "object",
-        "description": "Full-job execution. Uses owner-scoped permission defaults plus tool_permissions and ignores lightweight-only fields such as use_tools, max_tool_rounds, and context_paths.",
+        "description": "Full-job execution. Uses the owner's live autonomous tool scope and ignores lightweight-only fields such as use_tools, max_tool_rounds, and context_paths.",
         "properties": {
             "mode": {
                 "type": "string",
                 "enum": ["full_job"],
                 "description": "Full-job execution mode."
-            },
-            "tool_permissions": {
-                "type": "array",
-                "items": { "type": "string" },
-                "description": "Tools pre-authorized for Always-approval checks."
-            },
-            "permission_mode": {
-                "type": "string",
-                "enum": ["inherit_owner", "explicit", "copy_owner"],
-                "description": "When omitted, new routines use the owner default. 'copy_owner' snapshots the current owner allowlist into this routine."
             }
         },
         "required": ["mode"]
@@ -361,7 +337,7 @@ fn full_job_execution_variant() -> Value {
 fn execution_discovery_schema() -> Value {
     serde_json::json!({
         "type": "object",
-        "description": "Optional execution settings. Omit this block for the default lightweight mode.",
+        "description": "Optional execution settings. Omit this block for the default lightweight mode with tools enabled.",
         "properties": execution_properties(),
         "oneOf": [
             lightweight_execution_variant(),
@@ -369,7 +345,7 @@ fn execution_discovery_schema() -> Value {
         ],
         "examples": [
             { "mode": "lightweight", "use_tools": true, "max_tool_rounds": 3 },
-            { "mode": "full_job", "permission_mode": "inherit_owner", "tool_permissions": ["message", "http"] }
+            { "mode": "full_job" }
         ]
     })
 }
@@ -418,9 +394,7 @@ fn routine_create_examples() -> Vec<Value> {
                 "filters": { "repository": "nearai/ironclaw" }
             },
             "execution": {
-                "mode": "full_job",
-                "permission_mode": "inherit_owner",
-                "tool_permissions": ["message"]
+                "mode": "full_job"
             }
         }),
     ]
@@ -433,10 +407,11 @@ fn routine_create_tool_summary() -> ToolDiscoverySummary {
             "request.kind='cron' requires request.schedule.".into(),
             "request.kind='message_event' requires request.pattern.".into(),
             "request.kind='system_event' requires request.source and request.event_type.".into(),
-            "execution.mode='full_job' uses permission_mode and tool_permissions, and ignores use_tools, max_tool_rounds, and context_paths.".into(),
+            "execution.mode='full_job' uses the owner's live autonomous tool scope and ignores use_tools, max_tool_rounds, and context_paths.".into(),
         ],
         notes: vec![
-            "Omitting execution defaults to lightweight mode.".into(),
+            "Omitting execution defaults to lightweight mode with tools enabled.".into(),
+            "Set execution.use_tools=false to keep a new lightweight routine text-only.".into(),
             "Omitting delivery.user falls back to the owner's last-seen notification target.".into(),
             "advanced.cooldown_secs defaults to 300.".into(),
             "Legacy flat aliases are still accepted for compatibility, but grouped fields are preferred.".into(),
@@ -591,22 +566,6 @@ fn routine_create_schema(include_compatibility_aliases: bool) -> Value {
                 }),
             );
             properties.insert(
-                "tool_permissions".to_string(),
-                serde_json::json!({
-                    "type": "array",
-                    "items": { "type": "string" },
-                    "description": "Compatibility alias for execution.tool_permissions."
-                }),
-            );
-            properties.insert(
-                "permission_mode".to_string(),
-                serde_json::json!({
-                    "type": "string",
-                    "enum": ["inherit_owner", "explicit", "copy_owner"],
-                    "description": "Compatibility alias for execution.permission_mode."
-                }),
-            );
-            properties.insert(
                 "notify_channel".to_string(),
                 serde_json::json!({
                     "type": "string",
@@ -649,7 +608,8 @@ fn routine_create_schema(include_compatibility_aliases: bool) -> Value {
 }
 
 pub(crate) fn routine_create_parameters_schema() -> Value {
-    routine_create_schema(false)
+    static CACHE: OnceLock<Value> = OnceLock::new();
+    CACHE.get_or_init(|| routine_create_schema(false)).clone()
 }
 
 fn routine_create_discovery_schema() -> Value {
@@ -684,16 +644,6 @@ pub(crate) fn routine_update_parameters_schema() -> Value {
             "description": {
                 "type": "string",
                 "description": "New description"
-            },
-            "tool_permissions": {
-                "type": "array",
-                "items": { "type": "string" },
-                "description": "Updated Always-approval tool allowlist for full_job routines only."
-            },
-            "permission_mode": {
-                "type": "string",
-                "enum": ["inherit_owner", "explicit", "copy_owner"],
-                "description": "Updated permission mode for full_job routines only. 'copy_owner' snapshots the current owner allowlist into the routine and persists as explicit."
             }
         },
         "required": ["name"]
@@ -739,27 +689,6 @@ fn u64_field(params: &Value, group: &str, field: &str, aliases: &[&str]) -> Opti
 }
 
 fn string_array_field(params: &Value, group: &str, field: &str, aliases: &[&str]) -> Vec<String> {
-    normalize_tool_names(
-        nested_object(params, group)
-            .and_then(|obj| obj.get(field))
-            .and_then(Value::as_array)
-            .or_else(|| {
-                aliases
-                    .iter()
-                    .find_map(|alias| params.get(*alias).and_then(Value::as_array))
-            })
-            .into_iter()
-            .flatten()
-            .filter_map(|value| value.as_str().map(String::from)),
-    )
-}
-
-fn optional_string_array_field(
-    params: &Value,
-    group: &str,
-    field: &str,
-    aliases: &[&str],
-) -> Option<Vec<String>> {
     nested_object(params, group)
         .and_then(|obj| obj.get(field))
         .and_then(Value::as_array)
@@ -769,11 +698,21 @@ fn optional_string_array_field(
                 .find_map(|alias| params.get(*alias).and_then(Value::as_array))
         })
         .map(|arr| {
-            normalize_tool_names(
-                arr.iter()
-                    .filter_map(|value| value.as_str().map(String::from)),
-            )
+            let mut seen = std::collections::HashSet::new();
+            arr.iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .filter_map(|value| {
+                    if seen.insert(value.to_string()) {
+                        Some(value.to_string())
+                    } else {
+                        None
+                    }
+                })
+                .collect()
         })
+        .unwrap_or_default()
 }
 
 fn object_field(
@@ -896,6 +835,11 @@ fn parse_routine_trigger(params: &Value) -> Result<NormalizedTriggerRequest, Too
                 filters,
             })
         }
+        "webhook" => {
+            let path = string_field(params, "request", "path", &["webhook_path"]);
+            let secret = string_field(params, "request", "secret", &["webhook_secret"]);
+            Ok(NormalizedTriggerRequest::Webhook { path, secret })
+        }
         other => Err(ToolError::InvalidParameters(format!(
             "unknown request.kind: {other}"
         ))),
@@ -912,49 +856,25 @@ fn parse_execution_mode(value: Option<String>) -> Result<NormalizedExecutionMode
     }
 }
 
-fn parse_requested_full_job_permission_mode(
-    value: Option<String>,
-) -> Result<Option<RequestedFullJobPermissionMode>, ToolError> {
-    match value.as_deref() {
-        None => Ok(None),
-        Some("explicit") => Ok(Some(RequestedFullJobPermissionMode::Explicit)),
-        Some("inherit_owner") => Ok(Some(RequestedFullJobPermissionMode::InheritOwner)),
-        Some("copy_owner") => Ok(Some(RequestedFullJobPermissionMode::CopyOwner)),
-        Some(other) => Err(ToolError::InvalidParameters(format!(
-            "unknown full_job permission_mode: {other}"
-        ))),
-    }
-}
-
-fn parse_routine_execution(params: &Value) -> Result<NormalizedExecutionRequest, ToolError> {
+fn parse_routine_execution(
+    params: &Value,
+    default_use_tools: bool,
+) -> Result<NormalizedExecutionRequest, ToolError> {
     let mode = parse_execution_mode(string_field(params, "execution", "mode", &["action_type"]))?;
     let context_paths =
         string_array_field(params, "execution", "context_paths", &["context_paths"]);
-    let use_tools = bool_field(params, "execution", "use_tools", &["use_tools"]).unwrap_or(false);
+    let use_tools =
+        bool_field(params, "execution", "use_tools", &["use_tools"]).unwrap_or(default_use_tools);
     let max_tool_rounds = u64_field(params, "execution", "max_tool_rounds", &["max_tool_rounds"])
         .unwrap_or(3)
         .clamp(1, crate::agent::routine::MAX_TOOL_ROUNDS_LIMIT as u64)
         as u32;
-    let tool_permissions = string_array_field(
-        params,
-        "execution",
-        "tool_permissions",
-        &["tool_permissions"],
-    );
-    let permission_mode = parse_requested_full_job_permission_mode(string_field(
-        params,
-        "execution",
-        "permission_mode",
-        &["permission_mode"],
-    ))?;
 
     Ok(NormalizedExecutionRequest {
         mode,
         context_paths,
         use_tools,
         max_tool_rounds,
-        tool_permissions,
-        permission_mode,
     })
 }
 
@@ -976,7 +896,7 @@ fn parse_routine_create_request(
         .unwrap_or("")
         .to_string();
     let trigger = parse_routine_trigger(params)?;
-    let execution = parse_routine_execution(params)?;
+    let execution = parse_routine_execution(params, true)?;
     let delivery = parse_routine_delivery(params);
     let cooldown_secs =
         u64_field(params, "advanced", "cooldown_secs", &["cooldown_secs"]).unwrap_or(300);
@@ -995,7 +915,7 @@ fn parse_routine_create_request(
 fn build_routine_trigger(trigger: &NormalizedTriggerRequest) -> Trigger {
     match trigger {
         NormalizedTriggerRequest::Cron { schedule, timezone } => Trigger::Cron {
-            schedule: schedule.clone(),
+            schedule: normalize_cron_expression(schedule),
             timezone: timezone.clone(),
         },
         NormalizedTriggerRequest::Manual => Trigger::Manual,
@@ -1012,92 +932,31 @@ fn build_routine_trigger(trigger: &NormalizedTriggerRequest) -> Trigger {
             event_type: event_type.clone(),
             filters: filters.clone(),
         },
+        NormalizedTriggerRequest::Webhook { path, secret } => Trigger::Webhook {
+            path: path.clone(),
+            secret: secret.clone(),
+        },
     }
 }
 
-async fn build_routine_action(
-    store: &dyn Database,
-    user_id: &str,
+fn build_routine_action(
     name: &str,
     prompt: &str,
     execution: &NormalizedExecutionRequest,
-) -> Result<RoutineAction, ToolError> {
+) -> RoutineAction {
     match execution.mode {
-        NormalizedExecutionMode::Lightweight => Ok(RoutineAction::Lightweight {
+        NormalizedExecutionMode::Lightweight => RoutineAction::Lightweight {
             prompt: prompt.to_string(),
             context_paths: execution.context_paths.clone(),
             max_tokens: 4096,
             use_tools: execution.use_tools,
             max_tool_rounds: execution.max_tool_rounds,
-        }),
-        NormalizedExecutionMode::FullJob => {
-            let mut owner_settings = None;
-            let requested_mode = match execution.permission_mode {
-                Some(mode) => mode,
-                None => {
-                    let settings = load_full_job_permission_settings(store, user_id)
-                        .await
-                        .map_err(|e| {
-                            ToolError::ExecutionFailed(format!(
-                                "failed to load routine permission settings: {e}"
-                            ))
-                        })?;
-                    let mode = match settings.default_mode {
-                        FullJobPermissionDefaultMode::Explicit => {
-                            RequestedFullJobPermissionMode::Explicit
-                        }
-                        FullJobPermissionDefaultMode::InheritOwner => {
-                            RequestedFullJobPermissionMode::InheritOwner
-                        }
-                        FullJobPermissionDefaultMode::CopyOwner => {
-                            RequestedFullJobPermissionMode::CopyOwner
-                        }
-                    };
-                    owner_settings = Some(settings);
-                    mode
-                }
-            };
-            let (permission_mode, tool_permissions) = match requested_mode {
-                RequestedFullJobPermissionMode::Explicit => (
-                    FullJobPermissionMode::Explicit,
-                    execution.tool_permissions.clone(),
-                ),
-                RequestedFullJobPermissionMode::InheritOwner => (
-                    FullJobPermissionMode::InheritOwner,
-                    execution.tool_permissions.clone(),
-                ),
-                RequestedFullJobPermissionMode::CopyOwner => {
-                    let owner_allowed_tools = match owner_settings {
-                        Some(settings) => settings.owner_allowed_tools,
-                        None => {
-                            load_full_job_permission_settings(store, user_id)
-                                .await
-                                .map_err(|e| {
-                                    ToolError::ExecutionFailed(format!(
-                                        "failed to load routine permission settings: {e}"
-                                    ))
-                                })?
-                                .owner_allowed_tools
-                        }
-                    };
-                    (
-                        FullJobPermissionMode::Explicit,
-                        normalize_tool_names(
-                            owner_allowed_tools
-                                .into_iter()
-                                .chain(execution.tool_permissions.iter().cloned()),
-                        ),
-                    )
-                }
-            };
-            Ok(RoutineAction::FullJob {
-                title: name.to_string(),
-                description: prompt.to_string(),
-                max_iterations: 10,
-                tool_permissions,
-                permission_mode,
-            })
-        }
+        },
+        NormalizedExecutionMode::FullJob => RoutineAction::FullJob {
+            title: name.to_string(),
+            description: prompt.to_string(),
+            max_iterations: 10,
+        },
     }
 }
 
@@ -1106,13 +965,6 @@ fn routine_requests_full_job(params: &Value) -> bool {
         string_field(params, "execution", "mode", &["action_type"]).as_deref(),
         Some("full_job")
     )
-}
-
-fn routine_permission_fields_present(params: &Value) -> bool {
-    nested_object(params, "execution").is_some_and(|execution| {
-        execution.contains_key("tool_permissions") || execution.contains_key("permission_mode")
-    }) || params.get("tool_permissions").is_some()
-        || params.get("permission_mode").is_some()
 }
 
 fn event_emit_schema(include_source_alias: bool) -> Value {
@@ -1163,7 +1015,8 @@ fn event_emit_schema(include_source_alias: bool) -> Value {
 }
 
 pub(crate) fn event_emit_parameters_schema() -> Value {
-    event_emit_schema(false)
+    static CACHE: OnceLock<Value> = OnceLock::new();
+    CACHE.get_or_init(|| event_emit_schema(false)).clone()
 }
 
 fn event_emit_discovery_schema() -> Value {
@@ -1241,14 +1094,8 @@ impl Tool for RoutineCreateTool {
         let start = std::time::Instant::now();
         let normalized = parse_routine_create_request(&params)?;
         let trigger = build_routine_trigger(&normalized.trigger);
-        let action = build_routine_action(
-            self.store.as_ref(),
-            &ctx.user_id,
-            &normalized.name,
-            &normalized.prompt,
-            &normalized.execution,
-        )
-        .await?;
+        let action =
+            build_routine_action(&normalized.name, &normalized.prompt, &normalized.execution);
 
         // Compute next fire time for cron
         let next_fire = if let Trigger::Cron {
@@ -1412,20 +1259,11 @@ impl Tool for RoutineUpdateTool {
 
     fn description(&self) -> &str {
         "Update an existing routine. Can change prompt, description, enabled state, cron schedule/timezone, \
-         or full_job permission settings. Pass the routine name and only the fields you want to change. \
-         This does not convert trigger types."
+         Pass the routine name and only the fields you want to change. This does not convert trigger types."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
         routine_update_parameters_schema()
-    }
-
-    fn requires_approval(&self, params: &serde_json::Value) -> ApprovalRequirement {
-        if routine_permission_fields_present(params) {
-            ApprovalRequirement::UnlessAutoApproved
-        } else {
-            ApprovalRequirement::Never
-        }
     }
 
     async fn execute(
@@ -1460,72 +1298,6 @@ impl Tool for RoutineUpdateTool {
             }
         }
 
-        let requested_permission_mode = parse_requested_full_job_permission_mode(string_field(
-            &params,
-            "execution",
-            "permission_mode",
-            &["permission_mode"],
-        ))?;
-        let requested_tool_permissions = optional_string_array_field(
-            &params,
-            "execution",
-            "tool_permissions",
-            &["tool_permissions"],
-        );
-        let updates_permissions =
-            requested_permission_mode.is_some() || requested_tool_permissions.is_some();
-
-        if updates_permissions {
-            match &mut routine.action {
-                RoutineAction::FullJob {
-                    tool_permissions,
-                    permission_mode,
-                    ..
-                } => {
-                    let next_tool_permissions =
-                        requested_tool_permissions.unwrap_or_else(|| tool_permissions.clone());
-                    match requested_permission_mode {
-                        Some(RequestedFullJobPermissionMode::Explicit) => {
-                            *permission_mode = FullJobPermissionMode::Explicit;
-                            *tool_permissions = next_tool_permissions;
-                        }
-                        Some(RequestedFullJobPermissionMode::InheritOwner) => {
-                            *permission_mode = FullJobPermissionMode::InheritOwner;
-                            *tool_permissions = next_tool_permissions;
-                        }
-                        Some(RequestedFullJobPermissionMode::CopyOwner) => {
-                            let owner_settings = load_full_job_permission_settings(
-                                self.store.as_ref(),
-                                &ctx.user_id,
-                            )
-                            .await
-                            .map_err(|e| {
-                                ToolError::ExecutionFailed(format!(
-                                    "failed to load routine permission settings: {e}"
-                                ))
-                            })?;
-                            *permission_mode = FullJobPermissionMode::Explicit;
-                            *tool_permissions = normalize_tool_names(
-                                owner_settings
-                                    .owner_allowed_tools
-                                    .into_iter()
-                                    .chain(next_tool_permissions),
-                            );
-                        }
-                        None => {
-                            *tool_permissions = next_tool_permissions;
-                        }
-                    }
-                }
-                RoutineAction::Lightweight { .. } => {
-                    return Err(ToolError::InvalidParameters(
-                        "permission_mode and tool_permissions can only be updated for full_job routines"
-                            .to_string(),
-                    ));
-                }
-            }
-        }
-
         // Validate timezone param if provided
         let new_timezone = params
             .get("timezone")
@@ -1539,7 +1311,10 @@ impl Tool for RoutineUpdateTool {
             })
             .transpose()?;
 
-        let new_schedule = params.get("schedule").and_then(|v| v.as_str());
+        let new_schedule = params
+            .get("schedule")
+            .and_then(|v| v.as_str())
+            .map(normalize_cron_expression);
 
         if new_schedule.is_some() || new_timezone.is_some() {
             // Extract existing cron fields (cloned to avoid borrow conflict)
@@ -1549,7 +1324,7 @@ impl Tool for RoutineUpdateTool {
             };
 
             if let Some((old_schedule, old_tz)) = existing_cron {
-                let effective_schedule = new_schedule.unwrap_or(&old_schedule);
+                let effective_schedule = new_schedule.as_deref().unwrap_or(&old_schedule);
                 let effective_tz = new_timezone.or(old_tz);
                 // Validate
                 next_cron_fire(effective_schedule, effective_tz.as_deref()).map_err(|e| {
@@ -1933,8 +1708,6 @@ mod tests {
         "context_paths",
         "use_tools",
         "max_tool_rounds",
-        "tool_permissions",
-        "permission_mode",
         "notify_channel",
         "notify_user",
         "cooldown_secs",
@@ -2033,8 +1806,7 @@ mod tests {
                 "timezone": "UTC"
             },
             "execution": {
-                "mode": "full_job",
-                "tool_permissions": ["message", "http"]
+                "mode": "full_job"
             },
             "delivery": {
                 "channel": "telegram",
@@ -2059,14 +1831,23 @@ mod tests {
             matches!(parsed.execution.mode, NormalizedExecutionMode::FullJob),
             "expected full_job execution mode",
         );
-        assert_eq!(
-            parsed.execution.tool_permissions,
-            vec!["message".to_string(), "http".to_string()],
-        );
-        assert_eq!(parsed.execution.permission_mode, None);
         assert_eq!(parsed.delivery.channel.as_deref(), Some("telegram"));
         assert_eq!(parsed.delivery.user.as_deref(), Some("ops-team"));
         assert_eq!(parsed.cooldown_secs, 30);
+    }
+
+    #[test]
+    fn build_routine_trigger_normalizes_cron_schedule() {
+        let trigger = build_routine_trigger(&NormalizedTriggerRequest::Cron {
+            schedule: "0 0 9 * * MON-FRI".to_string(),
+            timezone: Some("UTC".to_string()),
+        });
+
+        assert!(matches!(
+            trigger,
+            Trigger::Cron { schedule, timezone }
+                if schedule == "0 0 9 * * MON-FRI *" && timezone.as_deref() == Some("UTC")
+        ));
     }
 
     #[test]
@@ -2102,6 +1883,87 @@ mod tests {
         assert_eq!(
             parsed.execution.context_paths,
             vec!["context/deploy.md".to_string()],
+        );
+    }
+
+    #[test]
+    fn parses_lightweight_create_with_tools_enabled_by_default() {
+        let params = serde_json::json!({
+            "name": "manual-check",
+            "prompt": "Inspect the repo for issues.",
+            "request": {
+                "kind": "manual"
+            }
+        });
+
+        let parsed = parse_routine_create_request(&params).expect("parse default lightweight");
+
+        assert!(
+            matches!(parsed.execution.mode, NormalizedExecutionMode::Lightweight),
+            "expected lightweight execution mode",
+        );
+        assert!(
+            parsed.execution.use_tools,
+            "new lightweight routines should default use_tools=true",
+        );
+        assert_eq!(parsed.execution.max_tool_rounds, 3);
+    }
+
+    #[test]
+    fn parses_lightweight_create_with_explicit_tools_disabled() {
+        let params = serde_json::json!({
+            "name": "manual-check",
+            "prompt": "Inspect the repo for issues.",
+            "request": {
+                "kind": "manual"
+            },
+            "execution": {
+                "use_tools": false
+            }
+        });
+
+        let parsed =
+            parse_routine_create_request(&params).expect("parse lightweight with tools disabled");
+
+        assert!(
+            matches!(parsed.execution.mode, NormalizedExecutionMode::Lightweight),
+            "expected lightweight execution mode",
+        );
+        assert!(
+            !parsed.execution.use_tools,
+            "explicit use_tools=false should be preserved",
+        );
+        assert_eq!(parsed.execution.max_tool_rounds, 3);
+    }
+
+    #[test]
+    fn parses_context_paths_with_trim_drop_empty_and_stable_dedupe() {
+        let params = serde_json::json!({
+            "name": "deploy-watch",
+            "prompt": "Look for deploy requests.",
+            "request": {
+                "kind": "manual"
+            },
+            "execution": {
+                "context_paths": [
+                    " context/deploy.md ",
+                    "",
+                    "   ",
+                    "context/deploy.md",
+                    "context/notes.md"
+                ]
+            }
+        });
+
+        let parsed =
+            parse_routine_create_request(&params).expect("parse context_paths normalization");
+
+        assert_eq!(
+            parsed.execution.context_paths,
+            vec![
+                "context/deploy.md".to_string(),
+                "context/notes.md".to_string()
+            ],
         );
     }
 
@@ -2184,7 +2046,6 @@ mod tests {
             "event_pattern": "hello",
             "event_channel": "telegram",
             "action_type": "full_job",
-            "tool_permissions": ["message"],
             "notify_channel": "telegram",
             "notify_user": "123"
         });
@@ -2202,10 +2063,6 @@ mod tests {
         assert!(
             matches!(parsed.execution.mode, NormalizedExecutionMode::FullJob),
             "expected full_job execution mode",
-        );
-        assert_eq!(
-            parsed.execution.tool_permissions,
-            vec!["message".to_string()],
         );
         assert_eq!(parsed.delivery.channel.as_deref(), Some("telegram"));
         assert_eq!(parsed.delivery.user.as_deref(), Some("123"));
@@ -2393,9 +2250,8 @@ mod tests {
             .and_then(Value::as_object)
             .expect("full_job properties");
         assert!(
-            full_job_props.contains_key("tool_permissions")
-                && full_job_props.contains_key("permission_mode"),
-            "full_job variant should expose permission fields",
+            full_job_props.len() == 1 && full_job_props.contains_key("mode"),
+            "full_job variant should only expose the execution mode",
         );
     }
 
@@ -2417,6 +2273,20 @@ mod tests {
                 .iter()
                 .any(|rule| rule.contains("request.kind='cron'")),
             "summary should explain cron requirement",
+        );
+        assert!(
+            summary
+                .notes
+                .iter()
+                .any(|note| note.contains("lightweight mode with tools enabled")),
+            "summary should mention the new lightweight default",
+        );
+        assert!(
+            summary
+                .notes
+                .iter()
+                .any(|note| note.contains("execution.use_tools=false")),
+            "summary should mention the text-only opt-out",
         );
         assert!(
             summary
@@ -2500,8 +2370,6 @@ mod tests {
             "schedule",
             "timezone",
             "description",
-            "tool_permissions",
-            "permission_mode",
         ] {
             let _ = schema_property(&schema, field);
         }
@@ -2584,71 +2452,26 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "libsql")]
-    #[tokio::test]
-    async fn build_full_job_action_defaults_to_inherit_owner_for_new_routines() {
-        let (db, _tmp) = crate::testing::test_db().await;
+    #[test]
+    fn build_full_job_action_uses_live_owner_scope_defaults() {
         let execution = NormalizedExecutionRequest {
             mode: NormalizedExecutionMode::FullJob,
             context_paths: Vec::new(),
             use_tools: false,
             max_tool_rounds: 3,
-            tool_permissions: vec!["shell".to_string()],
-            permission_mode: None,
         };
 
-        let action =
-            build_routine_action(db.as_ref(), "default", "issue-1316", "Run it", &execution)
-                .await
-                .expect("build action");
+        let action = build_routine_action("issue-1316", "Run it", &execution);
 
         assert!(matches!(
             action,
             RoutineAction::FullJob {
-                permission_mode: FullJobPermissionMode::InheritOwner,
-                tool_permissions,
-                ..
-            } if tool_permissions == vec!["shell".to_string()]
-        ));
-    }
-
-    #[cfg(feature = "libsql")]
-    #[tokio::test]
-    async fn build_full_job_action_copy_owner_snapshots_allowlist() {
-        let (db, _tmp) = crate::testing::test_db().await;
-        db.set_setting(
-            "default",
-            crate::agent::routine::FULL_JOB_OWNER_ALLOWED_TOOLS_SETTING_KEY,
-            &serde_json::json!(["http", "shell"]),
-        )
-        .await
-        .expect("set owner allowlist");
-        let execution = NormalizedExecutionRequest {
-            mode: NormalizedExecutionMode::FullJob,
-            context_paths: Vec::new(),
-            use_tools: false,
-            max_tool_rounds: 3,
-            tool_permissions: vec!["message".to_string(), "shell".to_string()],
-            permission_mode: Some(RequestedFullJobPermissionMode::CopyOwner),
-        };
-
-        let action =
-            build_routine_action(db.as_ref(), "default", "issue-1316", "Run it", &execution)
-                .await
-                .expect("build action");
-
-        assert!(matches!(
-            action,
-            RoutineAction::FullJob {
-                permission_mode: FullJobPermissionMode::Explicit,
-                tool_permissions,
-                ..
-            } if tool_permissions
-                == vec![
-                    "http".to_string(),
-                    "shell".to_string(),
-                    "message".to_string(),
-                ]
+                title,
+                description,
+                max_iterations,
+            } if title == "issue-1316"
+                && description == "Run it"
+                && max_iterations == 10
         ));
     }
 }

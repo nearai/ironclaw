@@ -45,11 +45,23 @@ impl ToolInfoDetail {
 }
 
 fn schema_param_names(schema: &serde_json::Value) -> Vec<String> {
-    schema
-        .get("properties")
-        .and_then(|p| p.as_object())
-        .map(|props| props.keys().cloned().collect())
-        .unwrap_or_default()
+    let mut names = std::collections::BTreeSet::new();
+
+    if let Some(props) = schema.get("properties").and_then(|p| p.as_object()) {
+        names.extend(props.keys().cloned());
+    }
+
+    for key in ["allOf", "oneOf", "anyOf"] {
+        if let Some(variants) = schema.get(key).and_then(|v| v.as_array()) {
+            for variant in variants {
+                if let Some(props) = variant.get("properties").and_then(|p| p.as_object()) {
+                    names.extend(props.keys().cloned());
+                }
+            }
+        }
+    }
+
+    names.into_iter().collect()
 }
 
 fn fallback_summary(schema: &serde_json::Value) -> ToolDiscoverySummary {

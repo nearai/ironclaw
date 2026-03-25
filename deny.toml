@@ -15,6 +15,8 @@ ignore = [
     "RUSTSEC-2026-0020",
     # wasmtime wasi:http/types.fields panic — mitigated by fuel limits
     "RUSTSEC-2026-0021",
+    # rustls-webpki CRL distributionPoint matching — 0.102.8 pinned by libsql transitive dep
+    "RUSTSEC-2026-0049",
 ]
 
 [licenses]

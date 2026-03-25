@@ -7,6 +7,7 @@ use axum::{
 };
 
 use crate::bootstrap::ironclaw_base_dir;
+use crate::channels::web::auth::AuthenticatedUser;
 use crate::channels::web::types::*;
 
 // --- Static file handlers ---
@@ -113,6 +114,7 @@ use crate::channels::web::server::GatewayState;
 
 pub async fn logs_events_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(_user): AuthenticatedUser,
 ) -> Result<
     Sse<impl futures::Stream<Item = Result<Event, Infallible>> + Send + 'static>,
     (StatusCode, String),
@@ -152,6 +154,7 @@ pub async fn logs_events_handler(
 
 pub async fn gateway_status_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(_user): AuthenticatedUser,
 ) -> Json<GatewayStatusResponse> {
     let sse_connections = state.sse.connection_count();
     let ws_connections = state

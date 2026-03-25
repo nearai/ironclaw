@@ -15,7 +15,7 @@ mod tests {
 
     use chrono::Utc;
     use ironclaw::agent::routine::{
-        FullJobPermissionMode, NotifyConfig, Routine, RoutineAction, RoutineGuardrails, Trigger,
+        NotifyConfig, Routine, RoutineAction, RoutineGuardrails, Trigger,
     };
     use uuid::Uuid;
 
@@ -266,7 +266,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn routines_detail_exposes_full_job_permission_resolution() {
+    async fn routines_detail_omits_legacy_full_job_permission_surface() {
         let mock = MockOpenAiServerBuilder::new()
             .with_default_response(MockOpenAiResponse::Text("ack".to_string()))
             .start()
@@ -275,25 +275,6 @@ mod tests {
         let harness =
             GatewayWorkflowHarness::start_openai_compatible(&mock.openai_base_url(), "mock-model")
                 .await;
-
-        harness
-            .db
-            .set_setting(
-                &harness.user_id,
-                ironclaw::agent::routine::FULL_JOB_OWNER_ALLOWED_TOOLS_SETTING_KEY,
-                &serde_json::json!(["shell", "http"]),
-            )
-            .await
-            .expect("set owner allowlist");
-        harness
-            .db
-            .set_setting(
-                &harness.user_id,
-                ironclaw::agent::routine::FULL_JOB_DEFAULT_PERMISSION_MODE_SETTING_KEY,
-                &serde_json::json!("copy_owner"),
-            )
-            .await
-            .expect("set owner default mode");
 
         let routine = Routine {
             id: Uuid::new_v4(),
@@ -306,8 +287,6 @@ mod tests {
                 title: "permission-detail".to_string(),
                 description: "Check effective permission detail".to_string(),
                 max_iterations: 3,
-                tool_permissions: vec!["message".to_string()],
-                permission_mode: FullJobPermissionMode::InheritOwner,
             },
             guardrails: RoutineGuardrails {
                 cooldown: Duration::from_secs(0),
@@ -346,21 +325,14 @@ mod tests {
             .await
             .expect("invalid detail response");
 
-        assert_eq!(
-            detail["full_job_permissions"]["permission_mode"].as_str(),
-            Some("inherit_owner")
+        assert!(
+            detail.get("full_job_permissions").is_none(),
+            "detail response should not expose legacy permission fields: {detail}"
         );
+        assert_eq!(detail["action"]["type"].as_str(), Some("full_job"));
         assert_eq!(
-            detail["full_job_permissions"]["default_permission_mode"].as_str(),
-            Some("copy_owner")
-        );
-        assert_eq!(
-            detail["full_job_permissions"]["owner_allowed_tools"],
-            serde_json::json!(["shell", "http"])
-        );
-        assert_eq!(
-            detail["full_job_permissions"]["effective_tool_permissions"],
-            serde_json::json!(["shell", "http", "message"])
+            detail["action"]["description"].as_str(),
+            Some("Check effective permission detail")
         );
 
         harness.shutdown().await;
