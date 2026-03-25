@@ -92,7 +92,7 @@ impl WorkspaceSearchConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::helpers::ENV_MUTEX;
+    use crate::config::helpers::lock_env;
 
     fn clear_search_env() {
         // SAFETY: Only called under ENV_MUTEX in tests.
@@ -106,7 +106,7 @@ mod tests {
 
     #[test]
     fn defaults_when_no_env() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = lock_env();
         clear_search_env();
 
         let config = WorkspaceSearchConfig::resolve().expect("should resolve");
@@ -118,7 +118,7 @@ mod tests {
 
     #[test]
     fn env_overrides() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = lock_env();
         clear_search_env();
 
         // SAFETY: Under ENV_MUTEX.
@@ -140,7 +140,7 @@ mod tests {
 
     #[test]
     fn invalid_strategy_rejected() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = lock_env();
         clear_search_env();
 
         // SAFETY: Under ENV_MUTEX.
@@ -156,7 +156,7 @@ mod tests {
 
     #[test]
     fn weighted_strategy_defaults() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = lock_env();
         clear_search_env();
 
         // SAFETY: Under ENV_MUTEX.
@@ -175,7 +175,7 @@ mod tests {
 
     #[test]
     fn weighted_both_zero_rejected() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = lock_env();
         clear_search_env();
 
         // SAFETY: Under ENV_MUTEX.
@@ -193,7 +193,7 @@ mod tests {
 
     #[test]
     fn rrf_both_zero_allowed() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = lock_env();
         clear_search_env();
 
         // SAFETY: Under ENV_MUTEX.

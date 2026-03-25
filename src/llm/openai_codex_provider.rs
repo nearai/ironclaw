@@ -625,6 +625,7 @@ fn parse_sse_response(body: &str) -> Result<ParsedResponse, LlmError> {
                                 id: state.call_id,
                                 name: state.name,
                                 arguments,
+                                reasoning: None,
                             });
                         } else {
                             // Fallback: extract directly from the item
@@ -650,6 +651,7 @@ fn parse_sse_response(body: &str) -> Result<ParsedResponse, LlmError> {
                                 id: call_id,
                                 name,
                                 arguments,
+                                reasoning: None,
                             });
                         }
                     }
@@ -727,6 +729,7 @@ fn parse_sse_response(body: &str) -> Result<ParsedResponse, LlmError> {
                 id: state.call_id,
                 name: state.name,
                 arguments,
+                reasoning: None,
             });
         }
     }
@@ -822,11 +825,13 @@ mod tests {
                 id: "call_1".to_string(),
                 name: "search".to_string(),
                 arguments: serde_json::json!({"query": "test"}),
+                reasoning: None,
             },
             ToolCall {
                 id: "call_2".to_string(),
                 name: "read".to_string(),
                 arguments: serde_json::json!({"path": "/tmp"}),
+                reasoning: None,
             },
         ];
         let msg =

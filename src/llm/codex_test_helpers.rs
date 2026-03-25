@@ -1,7 +1,5 @@
 //! Shared test helpers for OpenAI Codex provider tests.
 
-#![cfg(test)]
-
 use crate::config::OpenAiCodexConfig;
 
 /// Build a minimal JWT for testing (header.payload.signature).
