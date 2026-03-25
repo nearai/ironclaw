@@ -162,7 +162,7 @@ flate2 = "1"
 tar = "0.4"
 
 # Document text extraction
-pdf-extract = "0.7"
+pdf_oxide = "0.3"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 
 # HTTP proxy for sandboxed network access
