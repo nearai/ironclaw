@@ -307,7 +307,7 @@ fn per_user_rate_limiter_single_user_mode() {
 
 #[tokio::test]
 async fn sse_scoped_event_only_delivered_to_target_user() {
-    use ironclaw::channels::web::types::SseEvent;
+    use ironclaw_common::AppEvent;
     use tokio_stream::StreamExt;
 
     let manager = SseManager::new();
@@ -325,34 +325,34 @@ async fn sse_scoped_event_only_delivered_to_target_user() {
     // Send event scoped to alice
     manager.broadcast_for_user(
         ALICE_USER_ID,
-        SseEvent::Status {
+        AppEvent::Status {
             message: "alice's event".to_string(),
             thread_id: None,
         },
     );
 
     // Send global heartbeat (both should get it)
-    manager.broadcast(SseEvent::Heartbeat);
+    manager.broadcast(AppEvent::Heartbeat);
 
     // Alice gets her scoped event first
     let e = alice_stream.next().await.unwrap();
     match &e {
-        SseEvent::Status { message, .. } => assert_eq!(message, "alice's event"),
+        AppEvent::Status { message, .. } => assert_eq!(message, "alice's event"),
         _ => panic!("Expected Status, got {:?}", e),
     }
 
     // Alice also gets heartbeat
     let e = alice_stream.next().await.unwrap();
-    assert!(matches!(e, SseEvent::Heartbeat));
+    assert!(matches!(e, AppEvent::Heartbeat));
 
     // Bob only gets the heartbeat (alice's event was filtered)
     let e = bob_stream.next().await.unwrap();
-    assert!(matches!(e, SseEvent::Heartbeat));
+    assert!(matches!(e, AppEvent::Heartbeat));
 }
 
 #[tokio::test]
 async fn sse_global_event_delivered_to_all_users() {
-    use ironclaw::channels::web::types::SseEvent;
+    use ironclaw_common::AppEvent;
     use tokio_stream::StreamExt;
 
     let manager = SseManager::new();
@@ -367,7 +367,7 @@ async fn sse_global_event_delivered_to_all_users() {
             .expect("subscribe"),
     );
 
-    manager.broadcast(SseEvent::Status {
+    manager.broadcast(AppEvent::Status {
         message: "global announcement".to_string(),
         thread_id: None,
     });
@@ -375,7 +375,7 @@ async fn sse_global_event_delivered_to_all_users() {
     let ea = alice.next().await.unwrap();
     let eb = bob.next().await.unwrap();
     match (&ea, &eb) {
-        (SseEvent::Status { message: a, .. }, SseEvent::Status { message: b, .. }) => {
+        (AppEvent::Status { message: a, .. }, AppEvent::Status { message: b, .. }) => {
             assert_eq!(a, "global announcement");
             assert_eq!(b, "global announcement");
         }
@@ -385,7 +385,7 @@ async fn sse_global_event_delivered_to_all_users() {
 
 #[tokio::test]
 async fn sse_user_b_event_not_visible_to_user_a() {
-    use ironclaw::channels::web::types::SseEvent;
+    use ironclaw_common::AppEvent;
     use tokio_stream::StreamExt;
 
     let manager = SseManager::new();
@@ -398,19 +398,19 @@ async fn sse_user_b_event_not_visible_to_user_a() {
     // Send event for bob only
     manager.broadcast_for_user(
         BOB_USER_ID,
-        SseEvent::Response {
+        AppEvent::Response {
             content: "bob's secret".to_string(),
             thread_id: "t1".to_string(),
         },
     );
 
     // Send heartbeat so alice has something to receive
-    manager.broadcast(SseEvent::Heartbeat);
+    manager.broadcast(AppEvent::Heartbeat);
 
     // Alice should only get heartbeat, not bob's response
     let e = alice.next().await.unwrap();
     assert!(
-        matches!(e, SseEvent::Heartbeat),
+        matches!(e, AppEvent::Heartbeat),
         "Expected Heartbeat, got {:?}",
         e
     );
@@ -418,7 +418,7 @@ async fn sse_user_b_event_not_visible_to_user_a() {
 
 #[tokio::test]
 async fn sse_unscoped_subscriber_receives_all_events() {
-    use ironclaw::channels::web::types::SseEvent;
+    use ironclaw_common::AppEvent;
     use tokio_stream::StreamExt;
 
     let manager = SseManager::new();
@@ -427,19 +427,19 @@ async fn sse_unscoped_subscriber_receives_all_events() {
 
     manager.broadcast_for_user(
         ALICE_USER_ID,
-        SseEvent::Status {
+        AppEvent::Status {
             message: "alice only".to_string(),
             thread_id: None,
         },
     );
     manager.broadcast_for_user(
         BOB_USER_ID,
-        SseEvent::Status {
+        AppEvent::Status {
             message: "bob only".to_string(),
             thread_id: None,
         },
     );
-    manager.broadcast(SseEvent::Heartbeat);
+    manager.broadcast(AppEvent::Heartbeat);
 
     // Unscoped subscriber gets ALL three events
     let e1 = stream.next().await.unwrap();
@@ -447,14 +447,14 @@ async fn sse_unscoped_subscriber_receives_all_events() {
     let e3 = stream.next().await.unwrap();
 
     match &e1 {
-        SseEvent::Status { message, .. } => assert_eq!(message, "alice only"),
+        AppEvent::Status { message, .. } => assert_eq!(message, "alice only"),
         _ => panic!("Expected alice's Status"),
     }
     match &e2 {
-        SseEvent::Status { message, .. } => assert_eq!(message, "bob only"),
+        AppEvent::Status { message, .. } => assert_eq!(message, "bob only"),
         _ => panic!("Expected bob's Status"),
     }
-    assert!(matches!(e3, SseEvent::Heartbeat));
+    assert!(matches!(e3, AppEvent::Heartbeat));
 }
 
 // ===========================================================================
@@ -881,7 +881,7 @@ async fn full_server_jobs_endpoint_rejected_without_auth() {
 #[tokio::test]
 async fn full_server_ws_multi_user_event_isolation() {
     use futures::StreamExt;
-    use ironclaw::channels::web::types::SseEvent;
+    use ironclaw_common::AppEvent;
     use tokio_tungstenite::tungstenite::Message;
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
@@ -914,14 +914,14 @@ async fn full_server_ws_multi_user_event_isolation() {
     // Broadcast an event scoped to Alice only
     state.sse.broadcast_for_user(
         ALICE_USER_ID,
-        SseEvent::Status {
+        AppEvent::Status {
             message: "alice-only-event".to_string(),
             thread_id: None,
         },
     );
 
     // Broadcast a global heartbeat so Bob has something to receive
-    state.sse.broadcast(SseEvent::Heartbeat);
+    state.sse.broadcast(AppEvent::Heartbeat);
 
     // Alice should get her scoped event
     let alice_msg = tokio::time::timeout(Duration::from_secs(2), alice_ws.next())

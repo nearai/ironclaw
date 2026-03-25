@@ -813,7 +813,7 @@ async fn oauth_callback_handler(
         if let Some(ref sse) = flow.sse_manager {
             sse.broadcast_for_user(
                 &flow.user_id,
-                SseEvent::AuthCompleted {
+                AppEvent::AuthCompleted {
                     extension_name: flow.extension_name.clone(),
                     success: false,
                     message: "OAuth flow expired. Please try again.".to_string(),
@@ -951,11 +951,11 @@ async fn oauth_callback_handler(
         message
     };
 
-    // Broadcast SSE event to notify the web UI
+    // Broadcast event to notify the web UI
     if let Some(ref sse) = flow.sse_manager {
         sse.broadcast_for_user(
             &flow.user_id,
-            SseEvent::AuthCompleted {
+            AppEvent::AuthCompleted {
                 extension_name: flow.extension_name,
                 success,
                 message: final_message.clone(),
@@ -1197,8 +1197,8 @@ async fn slack_relay_oauth_callback_handler(
         }
     };
 
-    // Broadcast SSE event to notify the web UI
-    state.sse.broadcast(SseEvent::AuthCompleted {
+    // Broadcast event to notify the web UI
+    state.sse.broadcast(AppEvent::AuthCompleted {
         extension_name: DEFAULT_RELAY_NAME.to_string(),
         success,
         message: message.clone(),
@@ -1471,7 +1471,7 @@ async fn chat_auth_token_handler(
             if result.verification.is_some() {
                 state.sse.broadcast_for_user(
                     &user.user_id,
-                    SseEvent::AuthRequired {
+                    AppEvent::AuthRequired {
                         extension_name: req.extension_name.clone(),
                         instructions: Some(result.message),
                         auth_url: None,
@@ -1484,7 +1484,7 @@ async fn chat_auth_token_handler(
 
                 state.sse.broadcast_for_user(
                     &user.user_id,
-                    SseEvent::AuthCompleted {
+                    AppEvent::AuthCompleted {
                         extension_name: req.extension_name.clone(),
                         success: true,
                         message: result.message,
@@ -1493,7 +1493,7 @@ async fn chat_auth_token_handler(
             } else {
                 state.sse.broadcast_for_user(
                     &user.user_id,
-                    SseEvent::AuthCompleted {
+                    AppEvent::AuthCompleted {
                         extension_name: req.extension_name.clone(),
                         success: false,
                         message: result.message,
@@ -1509,7 +1509,7 @@ async fn chat_auth_token_handler(
             if matches!(e, crate::extensions::ExtensionError::ValidationFailed(_)) {
                 state.sse.broadcast_for_user(
                     &user.user_id,
-                    SseEvent::AuthRequired {
+                    AppEvent::AuthRequired {
                         extension_name: req.extension_name.clone(),
                         instructions: Some(msg.clone()),
                         auth_url: None,
@@ -2477,7 +2477,7 @@ async fn extensions_setup_submit_handler(
                 // auth card or setup modal that was triggered by tool_auth/tool_activate.
                 state.sse.broadcast_for_user(
                     &user.user_id,
-                    SseEvent::AuthCompleted {
+                    AppEvent::AuthCompleted {
                         extension_name: name.clone(),
                         success: result.activated,
                         message: resp.message.clone(),
@@ -3169,7 +3169,7 @@ mod tests {
                 Ok(Ok(scoped))
                     if matches!(
                         scoped.event,
-                        crate::channels::web::types::SseEvent::AuthRequired { .. }
+                        crate::channels::web::types::AppEvent::AuthRequired { .. }
                     ) =>
                 {
                     panic!("verification responses should not emit auth_required SSE events")
@@ -3451,7 +3451,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
 
         match receiver.recv().await.expect("auth_completed event").event {
-            crate::channels::web::types::SseEvent::AuthCompleted {
+            crate::channels::web::types::AppEvent::AuthCompleted {
                 extension_name,
                 success,
                 message,
