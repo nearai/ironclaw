@@ -18,7 +18,6 @@ use crate::agent::agentic_loop::{
 };
 use crate::agent::scheduler::WorkerMessage;
 use crate::agent::task::TaskOutput;
-use crate::channels::web::types::SseEvent;
 use crate::context::{ContextManager, JobState};
 use crate::db::Database;
 use crate::error::Error;
@@ -33,6 +32,7 @@ use crate::tools::rate_limiter::RateLimitResult;
 use crate::tools::{
     ApprovalContext, ToolRegistry, autonomous_unavailable_error, prepare_tool_params, redact_params,
 };
+use ironclaw_common::AppEvent;
 
 /// Shared dependencies for worker execution.
 ///
@@ -48,8 +48,8 @@ pub struct WorkerDeps {
     pub hooks: Arc<HookRegistry>,
     pub timeout: Duration,
     pub use_planning: bool,
-    /// SSE broadcast sender for live job event streaming to the web gateway.
-    pub sse_tx: Option<tokio::sync::broadcast::Sender<SseEvent>>,
+    /// Broadcast sender for live job event streaming to the web gateway.
+    pub sse_tx: Option<Arc<crate::channels::web::sse::SseManager>>,
     /// Approval context for tool execution. When `None`, all non-`Never` tools are
     /// blocked (legacy behavior). When `Some`, the context determines which tools
     /// are pre-approved for autonomous execution.
@@ -138,10 +138,10 @@ impl Worker {
         }
 
         // Broadcast SSE for live web UI updates
-        if let Some(ref tx) = self.deps.sse_tx {
+        if let Some(ref sse) = self.deps.sse_tx {
             let job_id_str = job_id.to_string();
             let event = match event_type {
-                "message" => Some(SseEvent::JobMessage {
+                "message" => Some(AppEvent::JobMessage {
                     job_id: job_id_str,
                     role: data
                         .get("role")
@@ -154,7 +154,7 @@ impl Worker {
                         .unwrap_or("")
                         .to_string(),
                 }),
-                "tool_use" => Some(SseEvent::JobToolUse {
+                "tool_use" => Some(AppEvent::JobToolUse {
                     job_id: job_id_str,
                     tool_name: data
                         .get("tool_name")
@@ -166,7 +166,7 @@ impl Worker {
                         .cloned()
                         .unwrap_or(serde_json::Value::Null),
                 }),
-                "tool_result" => Some(SseEvent::JobToolResult {
+                "tool_result" => Some(AppEvent::JobToolResult {
                     job_id: job_id_str,
                     tool_name: data
                         .get("tool_name")
@@ -179,7 +179,7 @@ impl Worker {
                         .unwrap_or("")
                         .to_string(),
                 }),
-                "status" => Some(SseEvent::JobStatus {
+                "status" => Some(AppEvent::JobStatus {
                     job_id: job_id_str,
                     message: data
                         .get("message")
@@ -187,7 +187,7 @@ impl Worker {
                         .unwrap_or("")
                         .to_string(),
                 }),
-                "result" => Some(SseEvent::JobResult {
+                "result" => Some(AppEvent::JobResult {
                     job_id: job_id_str,
                     status: data
                         .get("status")
@@ -203,7 +203,7 @@ impl Worker {
                 _ => None,
             };
             if let Some(event) = event {
-                let _ = tx.send(event);
+                sse.broadcast(event);
             }
         }
     }
@@ -1232,6 +1232,11 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
     ) -> Option<LoopOutcome> {
         // Refresh tool definitions so newly built tools become visible
         reason_ctx.available_tools = self.worker.tools().tool_definitions().await;
+
+        // Claude 4.6 rejects assistant prefill; NEAR AI rejects any non-user-ending
+        // conversation. Ensure the last message is user-role before calling the LLM.
+        crate::util::ensure_ends_with_user_message(&mut reason_ctx.messages);
+
         None
     }
 
@@ -1438,6 +1443,9 @@ impl From<TaskOutput> for Result<String, Error> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use crate::channels::ChannelManager;
     use crate::llm::ToolSelection;
 
     use super::*;
@@ -1448,6 +1456,8 @@ mod tests {
         ToolCompletionResponse,
     };
     use crate::safety::SafetyLayer;
+    use crate::testing::{BroadcastCapture, RecordingBroadcastChannel};
+    use crate::tools::builtin::MessageTool;
     use crate::tools::{Tool, ToolError as ToolExecError, ToolOutput};
 
     /// A test tool that sleeps for a configurable duration before returning.
@@ -1537,6 +1547,20 @@ mod tests {
         };
 
         Worker::new(job_id, deps)
+    }
+
+    async fn make_worker_with_message_tool()
+    -> (Worker, Arc<MessageTool>, BroadcastCapture, BroadcastCapture) {
+        let channel_manager = ChannelManager::new();
+        let (gateway, gateway_captures) = RecordingBroadcastChannel::new("gateway");
+        let (telegram, telegram_captures) = RecordingBroadcastChannel::new("telegram");
+        channel_manager.add(Box::new(gateway)).await;
+        channel_manager.add(Box::new(telegram)).await;
+
+        let message_tool = Arc::new(MessageTool::new(Arc::new(channel_manager)));
+        let worker = make_worker(vec![message_tool.clone()]).await;
+
+        (worker, message_tool, gateway_captures, telegram_captures)
     }
 
     #[test]
@@ -2146,5 +2170,51 @@ mod tests {
         store_fallback_in_metadata(&mut ctx, None);
 
         assert_eq!(ctx.metadata, original); // safety: test
+    }
+
+    #[tokio::test]
+    async fn autonomous_message_tool_ignores_stale_gateway_context_when_routine_metadata_targets_telegram()
+     {
+        let (worker, message_tool, gateway_captures, telegram_captures) =
+            make_worker_with_message_tool().await;
+
+        message_tool
+            .set_context(
+                Some("gateway".to_string()),
+                Some("stale-gateway-target".to_string()),
+            )
+            .await;
+
+        worker
+            .context_manager()
+            .update_context(worker.job_id, |ctx| {
+                ctx.user_id = "telegram".to_string();
+                ctx.metadata = serde_json::json!({
+                    "notify_channel": "telegram",
+                    "owner_id": "owner-scope",
+                });
+                Ok::<(), String>(())
+            })
+            .await
+            .unwrap() // safety: test
+            .unwrap(); // safety: test
+
+        let result = worker
+            .execute_tool(
+                "message",
+                &serde_json::json!({"content": "hello from routine"}),
+            )
+            .await
+            .unwrap(); // safety: test
+        assert!(
+            result.contains("telegram:owner-scope"),
+            "expected telegram owner-scope routing, got: {result}"
+        );
+
+        assert!(gateway_captures.lock().await.is_empty());
+        let telegram = telegram_captures.lock().await.clone();
+        assert_eq!(telegram.len(), 1);
+        assert_eq!(telegram[0].0, "owner-scope");
+        assert_eq!(telegram[0].1.content, "hello from routine");
     }
 }

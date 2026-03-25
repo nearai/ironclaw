@@ -21,8 +21,8 @@ use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 use crate::channels::IncomingMessage;
-use crate::channels::web::types::SseEvent;
 use crate::context::{ContextManager, JobState};
+use ironclaw_common::AppEvent;
 
 /// Route context for forwarding job monitor events back to the user's channel.
 #[derive(Debug, Clone)]
@@ -36,15 +36,15 @@ pub struct JobMonitorRoute {
 /// injects assistant messages into the agent loop.
 ///
 /// The monitor forwards:
-/// - `SseEvent::JobMessage` (assistant role): injected as incoming messages so
+/// - `AppEvent::JobMessage` (assistant role): injected as incoming messages so
 ///   the main agent can read and relay to the user.
-/// - `SseEvent::JobResult`: injected as a completion notice, then the task exits.
+/// - `AppEvent::JobResult`: injected as a completion notice, then the task exits.
 ///
 /// Tool use/result and status events are intentionally skipped (too noisy for
 /// the main agent's context window).
 pub fn spawn_job_monitor(
     job_id: Uuid,
-    event_rx: broadcast::Receiver<(Uuid, SseEvent)>,
+    event_rx: broadcast::Receiver<(Uuid, String, AppEvent)>,
     inject_tx: mpsc::Sender<IncomingMessage>,
     route: JobMonitorRoute,
 ) -> JoinHandle<()> {
@@ -56,7 +56,7 @@ pub fn spawn_job_monitor(
 /// jobs don't stay `InProgress` forever in the `ContextManager`.
 pub fn spawn_job_monitor_with_context(
     job_id: Uuid,
-    mut event_rx: broadcast::Receiver<(Uuid, SseEvent)>,
+    mut event_rx: broadcast::Receiver<(Uuid, String, AppEvent)>,
     inject_tx: mpsc::Sender<IncomingMessage>,
     route: JobMonitorRoute,
     context_manager: Option<Arc<ContextManager>>,
@@ -68,13 +68,13 @@ pub fn spawn_job_monitor_with_context(
 
         loop {
             match event_rx.recv().await {
-                Ok((ev_job_id, event)) => {
+                Ok((ev_job_id, _user_id, event)) => {
                     if ev_job_id != job_id {
                         continue;
                     }
 
                     match event {
-                        SseEvent::JobMessage { role, content, .. } if role == "assistant" => {
+                        AppEvent::JobMessage { role, content, .. } if role == "assistant" => {
                             let mut msg = IncomingMessage::new(
                                 route.channel.clone(),
                                 route.user_id.clone(),
@@ -92,7 +92,7 @@ pub fn spawn_job_monitor_with_context(
                                 break;
                             }
                         }
-                        SseEvent::JobResult { status, .. } => {
+                        AppEvent::JobResult { status, .. } => {
                             // Transition in-memory state so the job frees its
                             // max_jobs slot and query tools show the final state.
                             if let Some(ref cm) = context_manager {
@@ -162,7 +162,7 @@ pub fn spawn_job_monitor_with_context(
 /// inject messages into) but we still need to free the `max_jobs` slot.
 pub fn spawn_completion_watcher(
     job_id: Uuid,
-    mut event_rx: broadcast::Receiver<(Uuid, SseEvent)>,
+    mut event_rx: broadcast::Receiver<(Uuid, String, AppEvent)>,
     context_manager: Arc<ContextManager>,
 ) -> JoinHandle<()> {
     let short_id = job_id.to_string()[..8].to_string();
@@ -170,7 +170,9 @@ pub fn spawn_completion_watcher(
     tokio::spawn(async move {
         loop {
             match event_rx.recv().await {
-                Ok((ev_job_id, SseEvent::JobResult { status, .. })) if ev_job_id == job_id => {
+                Ok((ev_job_id, _user_id, AppEvent::JobResult { status, .. }))
+                    if ev_job_id == job_id =>
+                {
                     let target = if status == "completed" {
                         JobState::Completed
                     } else {
@@ -227,7 +229,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_monitor_forwards_assistant_messages() {
-        let (event_tx, _) = broadcast::channel::<(Uuid, SseEvent)>(16);
+        let (event_tx, _) = broadcast::channel::<(Uuid, String, AppEvent)>(16);
         let (inject_tx, mut inject_rx) = mpsc::channel::<IncomingMessage>(16);
 
         let job_id = Uuid::new_v4();
@@ -237,7 +239,8 @@ mod tests {
         event_tx
             .send((
                 job_id,
-                SseEvent::JobMessage {
+                "test-user".to_string(),
+                AppEvent::JobMessage {
                     job_id: job_id.to_string(),
                     role: "assistant".to_string(),
                     content: "I found a bug".to_string(),
@@ -259,7 +262,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_monitor_ignores_other_jobs() {
-        let (event_tx, _) = broadcast::channel::<(Uuid, SseEvent)>(16);
+        let (event_tx, _) = broadcast::channel::<(Uuid, String, AppEvent)>(16);
         let (inject_tx, mut inject_rx) = mpsc::channel::<IncomingMessage>(16);
 
         let job_id = Uuid::new_v4();
@@ -270,7 +273,8 @@ mod tests {
         event_tx
             .send((
                 other_job_id,
-                SseEvent::JobMessage {
+                "test-user".to_string(),
+                AppEvent::JobMessage {
                     job_id: other_job_id.to_string(),
                     role: "assistant".to_string(),
                     content: "wrong job".to_string(),
@@ -289,7 +293,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_monitor_exits_on_job_result() {
-        let (event_tx, _) = broadcast::channel::<(Uuid, SseEvent)>(16);
+        let (event_tx, _) = broadcast::channel::<(Uuid, String, AppEvent)>(16);
         let (inject_tx, mut inject_rx) = mpsc::channel::<IncomingMessage>(16);
 
         let job_id = Uuid::new_v4();
@@ -299,7 +303,8 @@ mod tests {
         event_tx
             .send((
                 job_id,
-                SseEvent::JobResult {
+                "test-user".to_string(),
+                AppEvent::JobResult {
                     job_id: job_id.to_string(),
                     status: "completed".to_string(),
                     session_id: None,
@@ -324,7 +329,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_monitor_skips_tool_events() {
-        let (event_tx, _) = broadcast::channel::<(Uuid, SseEvent)>(16);
+        let (event_tx, _) = broadcast::channel::<(Uuid, String, AppEvent)>(16);
         let (inject_tx, mut inject_rx) = mpsc::channel::<IncomingMessage>(16);
 
         let job_id = Uuid::new_v4();
@@ -334,7 +339,8 @@ mod tests {
         event_tx
             .send((
                 job_id,
-                SseEvent::JobToolUse {
+                "test-user".to_string(),
+                AppEvent::JobToolUse {
                     job_id: job_id.to_string(),
                     tool_name: "shell".to_string(),
                     input: serde_json::json!({"command": "ls"}),
@@ -346,7 +352,8 @@ mod tests {
         event_tx
             .send((
                 job_id,
-                SseEvent::JobMessage {
+                "test-user".to_string(),
+                AppEvent::JobMessage {
                     job_id: job_id.to_string(),
                     role: "user".to_string(),
                     content: "user prompt".to_string(),
@@ -402,7 +409,7 @@ mod tests {
             .await
             .unwrap();
 
-        let (event_tx, _) = broadcast::channel::<(Uuid, SseEvent)>(16);
+        let (event_tx, _) = broadcast::channel::<(Uuid, String, AppEvent)>(16);
         let (inject_tx, mut inject_rx) = mpsc::channel::<IncomingMessage>(16);
 
         let handle = spawn_job_monitor_with_context(
@@ -417,7 +424,8 @@ mod tests {
         event_tx
             .send((
                 job_id,
-                SseEvent::JobResult {
+                "test-user".to_string(),
+                AppEvent::JobResult {
                     job_id: job_id.to_string(),
                     status: "completed".to_string(),
                     session_id: None,
@@ -450,7 +458,7 @@ mod tests {
             .await
             .unwrap();
 
-        let (event_tx, _) = broadcast::channel::<(Uuid, SseEvent)>(16);
+        let (event_tx, _) = broadcast::channel::<(Uuid, String, AppEvent)>(16);
         let (inject_tx, mut inject_rx) = mpsc::channel::<IncomingMessage>(16);
 
         let handle = spawn_job_monitor_with_context(
@@ -465,7 +473,8 @@ mod tests {
         event_tx
             .send((
                 job_id,
-                SseEvent::JobResult {
+                "test-user".to_string(),
+                AppEvent::JobResult {
                     job_id: job_id.to_string(),
                     status: "failed".to_string(),
                     session_id: None,
@@ -498,13 +507,14 @@ mod tests {
             .await
             .unwrap();
 
-        let (event_tx, _) = broadcast::channel::<(Uuid, SseEvent)>(16);
+        let (event_tx, _) = broadcast::channel::<(Uuid, String, AppEvent)>(16);
         let handle = spawn_completion_watcher(job_id, event_tx.subscribe(), Arc::clone(&cm));
 
         event_tx
             .send((
                 job_id,
-                SseEvent::JobResult {
+                "test-user".to_string(),
+                AppEvent::JobResult {
                     job_id: job_id.to_string(),
                     status: "completed".to_string(),
                     session_id: None,

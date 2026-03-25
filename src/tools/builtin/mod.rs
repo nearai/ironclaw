@@ -6,7 +6,7 @@ mod file;
 mod http;
 mod job;
 mod json;
-mod memory;
+pub mod memory;
 mod message;
 pub mod path_utils;
 mod restart;

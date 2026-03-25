@@ -46,10 +46,10 @@ use std::sync::Arc;
 use tokio::sync::{Mutex, broadcast};
 use uuid::Uuid;
 
-use crate::channels::web::types::SseEvent;
 use crate::db::Database;
 use crate::llm::LlmProvider;
 use crate::secrets::SecretsStore;
+use ironclaw_common::AppEvent;
 
 /// Resolve the orchestrator port from the `ORCHESTRATOR_PORT` environment
 /// variable, falling back to 50051.
@@ -63,7 +63,7 @@ fn resolve_orchestrator_port() -> u16 {
 /// Result of orchestrator setup, containing all handles needed by the agent.
 pub struct OrchestratorSetup {
     pub container_job_manager: Option<Arc<ContainerJobManager>>,
-    pub job_event_tx: Option<broadcast::Sender<(Uuid, SseEvent)>>,
+    pub job_event_tx: Option<broadcast::Sender<(Uuid, String, AppEvent)>>,
     pub prompt_queue: Arc<Mutex<HashMap<Uuid, VecDeque<api::PendingPrompt>>>>,
     pub docker_status: crate::sandbox::DockerStatus,
 }
@@ -134,6 +134,7 @@ pub async fn setup_orchestrator(
             store: db.cloned(),
             secrets_store: secrets_store.cloned(),
             user_id: "default".to_string(),
+            job_owner_cache: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
         };
 
         tokio::spawn(async move {
