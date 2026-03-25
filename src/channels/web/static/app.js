@@ -4371,11 +4371,11 @@ function renderUsersList(users) {
     var roleLabel = u.role === 'admin' ? '<span class="badge badge-admin">admin</span>' : '<span class="badge">member</span>';
     var actions = '';
     if (u.status === 'active') {
-      actions += '<button class="btn-small btn-danger" onclick="suspendUser(\'' + u.id + '\')">Suspend</button> ';
+      actions += '<button class="btn-small btn-danger" data-action="suspend-user" data-user-id="' + escapeHtml(u.id) + '">Suspend</button> ';
     } else {
-      actions += '<button class="btn-small btn-primary" onclick="activateUser(\'' + u.id + '\')">Activate</button> ';
+      actions += '<button class="btn-small btn-primary" data-action="activate-user" data-user-id="' + escapeHtml(u.id) + '">Activate</button> ';
     }
-    actions += '<button class="btn-small" onclick="createTokenForUser(\'' + u.id + '\', \'' + escapeHtml(u.display_name) + '\')">+ Token</button>';
+    actions += '<button class="btn-small" data-action="create-token" data-user-id="' + escapeHtml(u.id) + '" data-user-name="' + escapeHtml(u.display_name) + '">+ Token</button>';
     return '<tr>'
       + '<td class="user-id" title="' + escapeHtml(u.id) + '">' + escapeHtml(u.id.substring(0, 8)) + '…</td>'
       + '<td>' + escapeHtml(u.display_name) + '</td>'
@@ -4425,10 +4425,17 @@ function showTokenBanner(tokenValue) {
   });
 }
 
-// Make functions accessible for delegated event handlers
-window.suspendUser = suspendUser;
-window.activateUser = activateUser;
-window.createTokenForUser = createTokenForUser;
+// Delegated click handler for user action buttons (CSP-safe, no inline onclick)
+document.getElementById('users-table')?.addEventListener('click', function(e) {
+  var btn = e.target.closest('[data-action]');
+  if (!btn) return;
+  var action = btn.getAttribute('data-action');
+  var userId = btn.getAttribute('data-user-id');
+  var userName = btn.getAttribute('data-user-name');
+  if (action === 'suspend-user') suspendUser(userId);
+  else if (action === 'activate-user') activateUser(userId);
+  else if (action === 'create-token') createTokenForUser(userId, userName || '');
+});
 
 // Wire up Users tab create form
 document.getElementById('users-create-btn')?.addEventListener('click', function() {
