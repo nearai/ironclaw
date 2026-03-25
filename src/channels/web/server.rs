@@ -534,6 +534,7 @@ pub async fn start_server(
     let statics = Router::new()
         .route("/", get(index_handler))
         .route("/style.css", get(css_handler))
+        .route("/providers.js", get(providers_js_handler))
         .route("/app.js", get(js_handler))
         .route("/theme-init.js", get(theme_init_handler))
         .route("/favicon.ico", get(favicon_handler))
@@ -644,6 +645,16 @@ async fn css_handler() -> impl IntoResponse {
             (header::CACHE_CONTROL, "no-cache"),
         ],
         include_str!("static/style.css"),
+    )
+}
+
+async fn providers_js_handler() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "application/javascript"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        include_str!("static/providers.js"),
     )
 }
 
