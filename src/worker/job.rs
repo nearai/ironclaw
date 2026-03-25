@@ -18,7 +18,7 @@ use crate::agent::agentic_loop::{
 };
 use crate::agent::scheduler::WorkerMessage;
 use crate::agent::task::TaskOutput;
-use crate::channels::web::types::{SseEvent, ToolDecisionDto};
+use crate::channels::web::types::ToolDecisionDto;
 use crate::context::{ContextManager, JobState};
 use crate::db::Database;
 use crate::error::Error;
@@ -33,6 +33,7 @@ use crate::tools::rate_limiter::RateLimitResult;
 use crate::tools::{
     ApprovalContext, ToolRegistry, autonomous_unavailable_error, prepare_tool_params, redact_params,
 };
+use ironclaw_common::AppEvent;
 
 /// Shared dependencies for worker execution.
 ///
@@ -48,8 +49,8 @@ pub struct WorkerDeps {
     pub hooks: Arc<HookRegistry>,
     pub timeout: Duration,
     pub use_planning: bool,
-    /// SSE broadcast sender for live job event streaming to the web gateway.
-    pub sse_tx: Option<tokio::sync::broadcast::Sender<SseEvent>>,
+    /// Broadcast sender for live job event streaming to the web gateway.
+    pub sse_tx: Option<Arc<crate::channels::web::sse::SseManager>>,
     /// Approval context for tool execution. When `None`, all non-`Never` tools are
     /// blocked (legacy behavior). When `Some`, the context determines which tools
     /// are pre-approved for autonomous execution.
@@ -138,10 +139,10 @@ impl Worker {
         }
 
         // Broadcast SSE for live web UI updates
-        if let Some(ref tx) = self.deps.sse_tx {
+        if let Some(ref sse) = self.deps.sse_tx {
             let job_id_str = job_id.to_string();
             let event = match event_type {
-                "message" => Some(SseEvent::JobMessage {
+                "message" => Some(AppEvent::JobMessage {
                     job_id: job_id_str,
                     role: data
                         .get("role")
@@ -154,7 +155,7 @@ impl Worker {
                         .unwrap_or("")
                         .to_string(),
                 }),
-                "tool_use" => Some(SseEvent::JobToolUse {
+                "tool_use" => Some(AppEvent::JobToolUse {
                     job_id: job_id_str,
                     tool_name: data
                         .get("tool_name")
@@ -166,7 +167,7 @@ impl Worker {
                         .cloned()
                         .unwrap_or(serde_json::Value::Null),
                 }),
-                "tool_result" => Some(SseEvent::JobToolResult {
+                "tool_result" => Some(AppEvent::JobToolResult {
                     job_id: job_id_str,
                     tool_name: data
                         .get("tool_name")
@@ -179,7 +180,7 @@ impl Worker {
                         .unwrap_or("")
                         .to_string(),
                 }),
-                "status" => Some(SseEvent::JobStatus {
+                "status" => Some(AppEvent::JobStatus {
                     job_id: job_id_str,
                     message: data
                         .get("message")
@@ -187,7 +188,7 @@ impl Worker {
                         .unwrap_or("")
                         .to_string(),
                 }),
-                "result" => Some(SseEvent::JobResult {
+                "result" => Some(AppEvent::JobResult {
                     job_id: job_id_str,
                     status: data
                         .get("status")
@@ -207,7 +208,7 @@ impl Worker {
                         .unwrap_or("")
                         .to_string();
                     let decisions = ToolDecisionDto::from_json_array(&data["decisions"]);
-                    Some(SseEvent::JobReasoning {
+                    Some(AppEvent::JobReasoning {
                         job_id: job_id_str,
                         narrative,
                         decisions,
@@ -216,7 +217,7 @@ impl Worker {
                 _ => None,
             };
             if let Some(event) = event {
-                let _ = tx.send(event);
+                sse.broadcast(event);
             }
         }
     }

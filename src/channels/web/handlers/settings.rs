@@ -8,17 +8,19 @@ use axum::{
     http::StatusCode,
 };
 
+use crate::channels::web::auth::AuthenticatedUser;
 use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::*;
 
 pub async fn settings_list_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
 ) -> Result<Json<SettingsListResponse>, StatusCode> {
     let store = state
         .store
         .as_ref()
         .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
-    let rows = store.list_settings(&state.user_id).await.map_err(|e| {
+    let rows = store.list_settings(&user.user_id).await.map_err(|e| {
         tracing::error!("Failed to list settings: {}", e);
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
@@ -37,6 +39,7 @@ pub async fn settings_list_handler(
 
 pub async fn settings_get_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
     Path(key): Path<String>,
 ) -> Result<Json<SettingResponse>, StatusCode> {
     let store = state
@@ -44,7 +47,7 @@ pub async fn settings_get_handler(
         .as_ref()
         .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
     let row = store
-        .get_setting_full(&state.user_id, &key)
+        .get_setting_full(&user.user_id, &key)
         .await
         .map_err(|e| {
             tracing::error!("Failed to get setting '{}': {}", key, e);
@@ -61,6 +64,7 @@ pub async fn settings_get_handler(
 
 pub async fn settings_set_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
     Path(key): Path<String>,
     Json(body): Json<SettingWriteRequest>,
 ) -> Result<StatusCode, StatusCode> {
@@ -69,7 +73,7 @@ pub async fn settings_set_handler(
         .as_ref()
         .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
     store
-        .set_setting(&state.user_id, &key, &body.value)
+        .set_setting(&user.user_id, &key, &body.value)
         .await
         .map_err(|e| {
             tracing::error!("Failed to set setting '{}': {}", key, e);
@@ -81,6 +85,7 @@ pub async fn settings_set_handler(
 
 pub async fn settings_delete_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
     Path(key): Path<String>,
 ) -> Result<StatusCode, StatusCode> {
     let store = state
@@ -88,7 +93,7 @@ pub async fn settings_delete_handler(
         .as_ref()
         .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
     store
-        .delete_setting(&state.user_id, &key)
+        .delete_setting(&user.user_id, &key)
         .await
         .map_err(|e| {
             tracing::error!("Failed to delete setting '{}': {}", key, e);
@@ -100,12 +105,13 @@ pub async fn settings_delete_handler(
 
 pub async fn settings_export_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
 ) -> Result<Json<SettingsExportResponse>, StatusCode> {
     let store = state
         .store
         .as_ref()
         .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
-    let settings = store.get_all_settings(&state.user_id).await.map_err(|e| {
+    let settings = store.get_all_settings(&user.user_id).await.map_err(|e| {
         tracing::error!("Failed to export settings: {}", e);
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
@@ -115,6 +121,7 @@ pub async fn settings_export_handler(
 
 pub async fn settings_import_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
     Json(body): Json<SettingsImportRequest>,
 ) -> Result<StatusCode, StatusCode> {
     let store = state
@@ -122,7 +129,7 @@ pub async fn settings_import_handler(
         .as_ref()
         .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
     store
-        .set_all_settings(&state.user_id, &body.settings)
+        .set_all_settings(&user.user_id, &body.settings)
         .await
         .map_err(|e| {
             tracing::error!("Failed to import settings: {}", e);
