@@ -3304,7 +3304,7 @@ impl ExtensionManager {
                 }
                 .await;
 
-                // Broadcast SSE event
+                // Broadcast auth result event
                 let (success, message) = match result {
                     Ok(()) => (true, format!("{} authenticated successfully", display_name)),
                     Err(ref e) => (

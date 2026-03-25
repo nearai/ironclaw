@@ -949,7 +949,7 @@ async fn oauth_callback_handler(
         message
     };
 
-    // Broadcast SSE event to notify the web UI
+    // Broadcast event to notify the web UI
     if let Some(ref sse) = flow.sse_manager {
         sse.broadcast_for_user(
             &flow.user_id,
@@ -1202,7 +1202,7 @@ async fn slack_relay_oauth_callback_handler(
         }
     };
 
-    // Broadcast SSE event to notify the web UI
+    // Broadcast event to notify the web UI
     state.sse.broadcast(AppEvent::AuthCompleted {
         extension_name: DEFAULT_RELAY_NAME.to_string(),
         success,

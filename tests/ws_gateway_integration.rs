@@ -5,7 +5,7 @@
 //! - WebSocket upgrade with auth
 //! - Ping/pong
 //! - Client message → agent msg_tx
-//! - Broadcast SSE event → WebSocket client
+//! - Broadcast AppEvent → WebSocket client
 //! - Connection tracking (counter increment/decrement)
 //! - Gateway status endpoint
 

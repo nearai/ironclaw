@@ -5,9 +5,9 @@
 //! frames, but other subsystems (agent loop, orchestrator, extensions)
 //! produce and consume them too.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum AppEvent {
     #[serde(rename = "response")]
@@ -192,5 +192,147 @@ impl AppEvent {
             Self::TurnCost { .. } => "turn_cost",
             Self::ExtensionStatus { .. } => "extension_status",
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Verify that `event_type()` returns the same string as the serde
+    /// `"type"` field for every variant.  This catches drift between the
+    /// `#[serde(rename)]` attributes and the manual match arms.
+    #[test]
+    fn event_type_matches_serde_type_field() {
+        let variants: Vec<AppEvent> = vec![
+            AppEvent::Response {
+                content: String::new(),
+                thread_id: String::new(),
+            },
+            AppEvent::Thinking {
+                message: String::new(),
+                thread_id: None,
+            },
+            AppEvent::ToolStarted {
+                name: String::new(),
+                thread_id: None,
+            },
+            AppEvent::ToolCompleted {
+                name: String::new(),
+                success: true,
+                error: None,
+                parameters: None,
+                thread_id: None,
+            },
+            AppEvent::ToolResult {
+                name: String::new(),
+                preview: String::new(),
+                thread_id: None,
+            },
+            AppEvent::StreamChunk {
+                content: String::new(),
+                thread_id: None,
+            },
+            AppEvent::Status {
+                message: String::new(),
+                thread_id: None,
+            },
+            AppEvent::JobStarted {
+                job_id: String::new(),
+                title: String::new(),
+                browse_url: String::new(),
+            },
+            AppEvent::ApprovalNeeded {
+                request_id: String::new(),
+                tool_name: String::new(),
+                description: String::new(),
+                parameters: String::new(),
+                thread_id: None,
+                allow_always: false,
+            },
+            AppEvent::AuthRequired {
+                extension_name: String::new(),
+                instructions: None,
+                auth_url: None,
+                setup_url: None,
+            },
+            AppEvent::AuthCompleted {
+                extension_name: String::new(),
+                success: true,
+                message: String::new(),
+            },
+            AppEvent::Error {
+                message: String::new(),
+                thread_id: None,
+            },
+            AppEvent::Heartbeat,
+            AppEvent::JobMessage {
+                job_id: String::new(),
+                role: String::new(),
+                content: String::new(),
+            },
+            AppEvent::JobToolUse {
+                job_id: String::new(),
+                tool_name: String::new(),
+                input: serde_json::Value::Null,
+            },
+            AppEvent::JobToolResult {
+                job_id: String::new(),
+                tool_name: String::new(),
+                output: String::new(),
+            },
+            AppEvent::JobStatus {
+                job_id: String::new(),
+                message: String::new(),
+            },
+            AppEvent::JobResult {
+                job_id: String::new(),
+                status: String::new(),
+                session_id: None,
+                fallback_deliverable: None,
+            },
+            AppEvent::ImageGenerated {
+                data_url: String::new(),
+                path: None,
+                thread_id: None,
+            },
+            AppEvent::Suggestions {
+                suggestions: vec![],
+                thread_id: None,
+            },
+            AppEvent::TurnCost {
+                input_tokens: 0,
+                output_tokens: 0,
+                cost_usd: String::new(),
+                thread_id: None,
+            },
+            AppEvent::ExtensionStatus {
+                extension_name: String::new(),
+                status: String::new(),
+                message: None,
+            },
+        ];
+
+        for variant in &variants {
+            let json: serde_json::Value = serde_json::to_value(variant).unwrap();
+            let serde_type = json["type"].as_str().unwrap();
+            assert_eq!(
+                variant.event_type(),
+                serde_type,
+                "event_type() mismatch for variant: {:?}",
+                variant
+            );
+        }
+    }
+
+    #[test]
+    fn round_trip_deserialize() {
+        let original = AppEvent::Response {
+            content: "hello".to_string(),
+            thread_id: "t1".to_string(),
+        };
+        let json = serde_json::to_string(&original).unwrap();
+        let deserialized: AppEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.event_type(), "response");
     }
 }
