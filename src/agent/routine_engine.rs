@@ -1541,7 +1541,10 @@ async fn execute_lightweight_with_tools(
         let force_text = iteration >= max_iterations;
 
         if force_text {
-            // Final iteration: no tools, just get text response
+            // Final iteration: no tools, just get text response.
+            // Claude 4.6 rejects assistant prefill; NEAR AI rejects any non-user-ending
+            // conversation. Ensure the last message is user-role.
+            crate::util::ensure_ends_with_user_message(&mut messages);
             let request = CompletionRequest::new(messages)
                 .with_max_tokens(effective_max_tokens)
                 .with_temperature(0.3);
