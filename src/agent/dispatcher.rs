@@ -63,7 +63,12 @@ impl Agent {
         );
 
         let system_prompt = if let Some(ws) = self.workspace() {
-            match ws
+            let scoped_workspace = if ws.user_id() == message.user_id {
+                Arc::clone(ws)
+            } else {
+                Arc::new(ws.scoped_to_user(&message.user_id))
+            };
+            match scoped_workspace
                 .system_prompt_for_context_tz(is_group_chat, user_tz)
                 .await
             {
