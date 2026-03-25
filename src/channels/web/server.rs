@@ -345,8 +345,10 @@ pub struct GatewayState {
     pub job_manager: Option<Arc<ContainerJobManager>>,
     /// Prompt queue for Claude Code follow-up prompts.
     pub prompt_queue: Option<PromptQueue>,
-    /// Default user ID (fallback for non-request contexts like heartbeat/routines).
-    pub default_user_id: String,
+    /// Durable owner scope for persistence and unauthenticated callback flows.
+    pub owner_id: String,
+    /// Default sender/routing identity for gateway-originated messages.
+    pub default_sender_id: String,
     /// Shutdown signal sender.
     pub shutdown_tx: tokio::sync::RwLock<Option<oneshot::Sender<()>>>,
     /// WebSocket connection tracker.
@@ -821,7 +823,7 @@ async fn oauth_callback_handler(
                 error = %error,
                 "OAuth callback received with malformed state"
             );
-            clear_auth_mode(&state, &state.default_user_id).await;
+            clear_auth_mode(&state, &state.owner_id).await;
             return oauth_error_page("IronClaw");
         }
     };
@@ -857,7 +859,7 @@ async fn oauth_callback_handler(
         if let Some(ref sse) = flow.sse_manager {
             sse.broadcast_for_user(
                 &flow.user_id,
-                SseEvent::AuthCompleted {
+                AppEvent::AuthCompleted {
                     extension_name: flow.extension_name.clone(),
                     success: false,
                     message: "OAuth flow expired. Please try again.".to_string(),
@@ -995,11 +997,11 @@ async fn oauth_callback_handler(
         message
     };
 
-    // Broadcast SSE event to notify the web UI
+    // Broadcast event to notify the web UI
     if let Some(ref sse) = flow.sse_manager {
         sse.broadcast_for_user(
             &flow.user_id,
-            SseEvent::AuthCompleted {
+            AppEvent::AuthCompleted {
                 extension_name: flow.extension_name,
                 success,
                 message: final_message.clone(),
@@ -1182,7 +1184,7 @@ async fn slack_relay_oauth_callback_handler(
     let state_key = format!("relay:{}:oauth_state", DEFAULT_RELAY_NAME);
     let stored_state = match ext_mgr
         .secrets()
-        .get_decrypted(&state.default_user_id, &state_key)
+        .get_decrypted(&state.owner_id, &state_key)
         .await
     {
         Ok(secret) => secret.expose().to_string(),
@@ -1206,10 +1208,7 @@ async fn slack_relay_oauth_callback_handler(
     }
 
     // Delete the nonce (one-time use)
-    let _ = ext_mgr
-        .secrets()
-        .delete(&state.default_user_id, &state_key)
-        .await;
+    let _ = ext_mgr.secrets().delete(&state.owner_id, &state_key).await;
 
     let result: Result<(), String> = async {
         let store = state.store.as_ref().ok_or_else(|| {
@@ -1220,16 +1219,12 @@ async fn slack_relay_oauth_callback_handler(
         // Store team_id in settings
         let team_id_key = format!("relay:{}:team_id", DEFAULT_RELAY_NAME);
         let _ = store
-            .set_setting(
-                &state.default_user_id,
-                &team_id_key,
-                &serde_json::json!(team_id),
-            )
+            .set_setting(&state.owner_id, &team_id_key, &serde_json::json!(team_id))
             .await;
 
         // Activate the relay channel
         ext_mgr
-            .activate_stored_relay(DEFAULT_RELAY_NAME, &state.default_user_id)
+            .activate_stored_relay(DEFAULT_RELAY_NAME, &state.owner_id)
             .await
             .map_err(|e| format!("Failed to activate relay channel: {}", e))?;
 
@@ -1248,8 +1243,8 @@ async fn slack_relay_oauth_callback_handler(
         }
     };
 
-    // Broadcast SSE event to notify the web UI
-    state.sse.broadcast(SseEvent::AuthCompleted {
+    // Broadcast event to notify the web UI
+    state.sse.broadcast(AppEvent::AuthCompleted {
         extension_name: DEFAULT_RELAY_NAME.to_string(),
         success,
         message: message.clone(),
@@ -1349,6 +1344,9 @@ async fn chat_send_handler(
     }
 
     let mut msg = IncomingMessage::new("gateway", &user.user_id, &req.content);
+    if state.owner_id != state.default_sender_id && user.user_id == state.owner_id {
+        msg = msg.with_sender_id(&state.default_sender_id);
+    }
     // Prefer timezone from JSON body, fall back to X-Timezone header
     let tz = req
         .timezone
@@ -1450,6 +1448,9 @@ async fn chat_approval_handler(
     })?;
 
     let mut msg = IncomingMessage::new("gateway", &user.user_id, content);
+    if state.owner_id != state.default_sender_id && user.user_id == state.owner_id {
+        msg = msg.with_sender_id(&state.default_sender_id);
+    }
 
     if let Some(ref thread_id) = req.thread_id {
         msg = msg.with_thread(thread_id);
@@ -1516,7 +1517,7 @@ async fn chat_auth_token_handler(
             if result.verification.is_some() {
                 state.sse.broadcast_for_user(
                     &user.user_id,
-                    SseEvent::AuthRequired {
+                    AppEvent::AuthRequired {
                         extension_name: req.extension_name.clone(),
                         instructions: Some(result.message),
                         auth_url: None,
@@ -1529,7 +1530,7 @@ async fn chat_auth_token_handler(
 
                 state.sse.broadcast_for_user(
                     &user.user_id,
-                    SseEvent::AuthCompleted {
+                    AppEvent::AuthCompleted {
                         extension_name: req.extension_name.clone(),
                         success: true,
                         message: result.message,
@@ -1538,7 +1539,7 @@ async fn chat_auth_token_handler(
             } else {
                 state.sse.broadcast_for_user(
                     &user.user_id,
-                    SseEvent::AuthCompleted {
+                    AppEvent::AuthCompleted {
                         extension_name: req.extension_name.clone(),
                         success: false,
                         message: result.message,
@@ -1554,7 +1555,7 @@ async fn chat_auth_token_handler(
             if matches!(e, crate::extensions::ExtensionError::ValidationFailed(_)) {
                 state.sse.broadcast_for_user(
                     &user.user_id,
-                    SseEvent::AuthRequired {
+                    AppEvent::AuthRequired {
                         extension_name: req.extension_name.clone(),
                         instructions: Some(msg.clone()),
                         auth_url: None,
@@ -1770,8 +1771,10 @@ async fn chat_history_handler(
                             truncate_preview(&s, 500)
                         }),
                         error: tc.error.clone(),
+                        rationale: tc.rationale.clone(),
                     })
                     .collect(),
+                narrative: t.narrative.clone(),
             })
             .collect();
 
@@ -2522,7 +2525,7 @@ async fn extensions_setup_submit_handler(
                 // auth card or setup modal that was triggered by tool_auth/tool_activate.
                 state.sse.broadcast_for_user(
                     &user.user_id,
-                    SseEvent::AuthCompleted {
+                    AppEvent::AuthCompleted {
                         extension_name: name.clone(),
                         success: result.activated,
                         message: resp.message.clone(),
@@ -3022,7 +3025,8 @@ mod tests {
             store: None,
             job_manager: None,
             prompt_queue: None,
-            default_user_id: "test".to_string(),
+            owner_id: "test".to_string(),
+            default_sender_id: "test".to_string(),
             shutdown_tx: tokio::sync::RwLock::new(None),
             ws_tracker: None,
             llm_provider: None,
@@ -3215,7 +3219,7 @@ mod tests {
                 Ok(Ok(scoped))
                     if matches!(
                         scoped.event,
-                        crate::channels::web::types::SseEvent::AuthRequired { .. }
+                        crate::channels::web::types::AppEvent::AuthRequired { .. }
                     ) =>
                 {
                     panic!("verification responses should not emit auth_required SSE events")
@@ -3500,7 +3504,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
 
         match receiver.recv().await.expect("auth_completed event").event {
-            crate::channels::web::types::SseEvent::AuthCompleted {
+            crate::channels::web::types::AppEvent::AuthCompleted {
                 extension_name,
                 success,
                 message,

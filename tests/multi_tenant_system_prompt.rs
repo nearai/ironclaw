@@ -1,10 +1,10 @@
-//! Tests proving that multi-tenant system prompts are broken.
+//! Regression tests for multi-tenant system prompts.
 //!
-//! Bug: In multi-tenant mode, the agent loop uses `self.workspace()` which
-//! returns a single shared workspace (user_id="default"). Identity files
-//! (IDENTITY.md, SOUL.md, USER.md) seeded under per-user IDs ("alice",
-//! "bob") are invisible to this workspace, so the system prompt is
-//! empty/wrong.
+//! The agent must build the conversational system prompt from a workspace
+//! scoped to the incoming message's user, not from the shared owner-scope
+//! workspace created at startup. Otherwise per-user identity files
+//! (IDENTITY.md, SOUL.md, USER.md) become invisible and different users can
+//! see the same owner-scoped prompt.
 //!
 //! These tests:
 //! 1. Seed identity files for two users (alice, bob) in the database
@@ -13,7 +13,7 @@
 //!    correct user's identity
 //! 4. Verify user A's identity doesn't leak into user B's prompt
 //!
-//! All tests are expected to FAIL until the bug is fixed.
+//! These tests ensure each user's identity is isolated correctly.
 
 #[cfg(feature = "libsql")]
 mod support;

@@ -53,22 +53,6 @@ struct HostedOAuthFlowStart {
     flow: crate::cli::oauth_defaults::PendingOAuthFlow,
 }
 
-fn hosted_proxy_client_secret(
-    client_secret: &Option<String>,
-    builtin: Option<&crate::cli::oauth_defaults::OAuthCredentials>,
-    exchange_proxy_configured: bool,
-) -> Option<String> {
-    if !exchange_proxy_configured {
-        return client_secret.clone();
-    }
-
-    let builtin_secret = builtin.map(|credentials| credentials.client_secret);
-    match (client_secret, builtin_secret) {
-        (Some(resolved), Some(baked_in)) if resolved == baked_in => None,
-        _ => client_secret.clone(),
-    }
-}
-
 fn normalize_oauth_callback_path(path: &str) -> String {
     let trimmed_path = path.trim_end_matches('/');
     if trimmed_path.is_empty() {
@@ -1134,7 +1118,7 @@ impl ExtensionManager {
     /// Broadcast an extension status change to the web UI via SSE.
     async fn broadcast_extension_status(&self, name: &str, status: &str, message: Option<&str>) {
         if let Some(ref sse) = *self.sse_manager.read().await {
-            sse.broadcast(crate::channels::web::types::SseEvent::ExtensionStatus {
+            sse.broadcast(ironclaw_common::AppEvent::ExtensionStatus {
                 extension_name: name.to_string(),
                 status: status.to_string(),
                 message: message.map(|m| m.to_string()),
@@ -3199,7 +3183,7 @@ impl ExtensionManager {
             // apps. Sending the desktop secret would cause a client_id/secret
             // mismatch because the container's GOOGLE_OAUTH_CLIENT_ID is the web
             // app, not the desktop app.
-            let proxy_client_secret = hosted_proxy_client_secret(
+            let proxy_client_secret = oauth_defaults::hosted_proxy_client_secret(
                 &client_secret,
                 builtin.as_ref(),
                 oauth_defaults::exchange_proxy_url().is_some(),
@@ -3304,7 +3288,7 @@ impl ExtensionManager {
                 }
                 .await;
 
-                // Broadcast SSE event
+                // Broadcast auth result event
                 let (success, message) = match result {
                     Ok(()) => (true, format!("{} authenticated successfully", display_name)),
                     Err(ref e) => (
@@ -3330,7 +3314,7 @@ impl ExtensionManager {
                 }
 
                 if let Some(ref sse) = sse_manager {
-                    sse.broadcast(crate::channels::web::types::SseEvent::AuthCompleted {
+                    sse.broadcast(ironclaw_common::AppEvent::AuthCompleted {
                         extension_name: ext_name,
                         success,
                         message,
@@ -5714,7 +5698,7 @@ mod tests {
     use crate::extensions::manager::{
         ChannelRuntimeState, FallbackDecision, TelegramBindingData, TelegramBindingResult,
         TelegramOwnerBindingState, build_wasm_channel_runtime_config_updates,
-        combine_install_errors, fallback_decision, hosted_proxy_client_secret, infer_kind_from_url,
+        combine_install_errors, fallback_decision, infer_kind_from_url,
         normalize_hosted_callback_url, send_telegram_text_message,
         telegram_message_matches_verification_code,
     };
@@ -7966,7 +7950,8 @@ mod tests {
         let builtin_ref = builtin.as_ref();
         let secret = Some(builtin_ref.unwrap().client_secret.to_string());
 
-        let result = hosted_proxy_client_secret(&secret, builtin_ref, true);
+        let result =
+            crate::cli::oauth_defaults::hosted_proxy_client_secret(&secret, builtin_ref, true);
         assert_eq!(
             result, None,
             "built-in desktop secret must be suppressed when the exchange proxy is configured"
@@ -7978,7 +7963,8 @@ mod tests {
         let builtin = crate::cli::oauth_defaults::builtin_credentials("google_oauth_token");
         let secret = Some("user-entered-custom-secret".to_string());
 
-        let result = hosted_proxy_client_secret(&secret, builtin.as_ref(), true);
+        let result =
+            crate::cli::oauth_defaults::hosted_proxy_client_secret(&secret, builtin.as_ref(), true);
         assert_eq!(
             result,
             Some("user-entered-custom-secret".to_string()),
@@ -7992,7 +7978,8 @@ mod tests {
         let builtin_ref = builtin.as_ref();
         let secret = Some(builtin_ref.unwrap().client_secret.to_string());
 
-        let result = hosted_proxy_client_secret(&secret, builtin_ref, false);
+        let result =
+            crate::cli::oauth_defaults::hosted_proxy_client_secret(&secret, builtin_ref, false);
         assert_eq!(
             result, secret,
             "built-in secret must be kept when the callback will exchange directly"
@@ -8003,7 +7990,8 @@ mod tests {
     fn test_proxy_client_secret_none_stays_none() {
         let builtin = crate::cli::oauth_defaults::builtin_credentials("google_oauth_token");
 
-        let result = hosted_proxy_client_secret(&None, builtin.as_ref(), true);
+        let result =
+            crate::cli::oauth_defaults::hosted_proxy_client_secret(&None, builtin.as_ref(), true);
         assert_eq!(
             result, None,
             "None secret stays None even when the exchange proxy is configured"
@@ -8017,7 +8005,8 @@ mod tests {
         assert!(builtin.is_none());
 
         let secret = Some("dcr-secret".to_string());
-        let result = hosted_proxy_client_secret(&secret, builtin.as_ref(), true);
+        let result =
+            crate::cli::oauth_defaults::hosted_proxy_client_secret(&secret, builtin.as_ref(), true);
         assert_eq!(
             result,
             Some("dcr-secret".to_string()),

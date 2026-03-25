@@ -39,6 +39,10 @@ pub struct AgentConfig {
     /// instance). Detected at runtime after DB initialization, not from config.
     /// See app.rs startup logic.
     pub multi_tenant: bool,
+    /// Maximum concurrent LLM calls per user. None = use default (4).
+    pub max_llm_concurrent_per_user: Option<usize>,
+    /// Maximum concurrent jobs per user. None = use default (3).
+    pub max_jobs_concurrent_per_user: Option<usize>,
 }
 
 impl AgentConfig {
@@ -64,6 +68,8 @@ impl AgentConfig {
             max_jobs_per_user: None,
             max_tokens_per_job: 0,
             multi_tenant: false,
+            max_llm_concurrent_per_user: None,
+            max_jobs_concurrent_per_user: None,
         }
     }
 
@@ -128,6 +134,8 @@ impl AgentConfig {
             // Multi-tenant mode is detected at runtime after DB initialization,
             // not from config. See app.rs startup logic.
             multi_tenant: false,
+            max_llm_concurrent_per_user: parse_option_env("TENANT_MAX_LLM_CONCURRENT")?,
+            max_jobs_concurrent_per_user: parse_option_env("TENANT_MAX_JOBS_CONCURRENT")?,
         })
     }
 }

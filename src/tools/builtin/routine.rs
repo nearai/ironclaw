@@ -915,7 +915,7 @@ fn parse_routine_create_request(
 fn build_routine_trigger(trigger: &NormalizedTriggerRequest) -> Trigger {
     match trigger {
         NormalizedTriggerRequest::Cron { schedule, timezone } => Trigger::Cron {
-            schedule: schedule.clone(),
+            schedule: normalize_cron_expression(schedule),
             timezone: timezone.clone(),
         },
         NormalizedTriggerRequest::Manual => Trigger::Manual,
@@ -1834,6 +1834,20 @@ mod tests {
         assert_eq!(parsed.delivery.channel.as_deref(), Some("telegram"));
         assert_eq!(parsed.delivery.user.as_deref(), Some("ops-team"));
         assert_eq!(parsed.cooldown_secs, 30);
+    }
+
+    #[test]
+    fn build_routine_trigger_normalizes_cron_schedule() {
+        let trigger = build_routine_trigger(&NormalizedTriggerRequest::Cron {
+            schedule: "0 0 9 * * MON-FRI".to_string(),
+            timezone: Some("UTC".to_string()),
+        });
+
+        assert!(matches!(
+            trigger,
+            Trigger::Cron { schedule, timezone }
+                if schedule == "0 0 9 * * MON-FRI *" && timezone.as_deref() == Some("UTC")
+        ));
     }
 
     #[test]

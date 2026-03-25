@@ -1898,6 +1898,7 @@ impl GeminiOauthProvider {
                         id,
                         name,
                         arguments: args,
+                        reasoning: None,
                     });
                 }
             }

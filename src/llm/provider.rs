@@ -231,6 +231,10 @@ pub struct ToolCall {
     pub id: String,
     pub name: String,
     pub arguments: serde_json::Value,
+    /// Optional reasoning for why this tool was chosen — supplied by the provider
+    /// or derived from the shared response content as a fallback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
 }
 
 /// Generate a tool-call ID that satisfies all providers.
@@ -637,6 +641,7 @@ mod tests {
             id: "call_1".to_string(),
             name: "echo".to_string(),
             arguments: serde_json::json!({}),
+            reasoning: None,
         };
         let mut messages = vec![
             ChatMessage::user("hello"),
@@ -680,6 +685,7 @@ mod tests {
             id: "call_1".to_string(),
             name: "echo".to_string(),
             arguments: serde_json::json!({}),
+            reasoning: None,
         };
         let mut messages = vec![
             ChatMessage::user("test"),
@@ -705,11 +711,13 @@ mod tests {
             id: "call_sel_1".to_string(),
             name: "search".to_string(),
             arguments: serde_json::json!({"q": "test"}),
+            reasoning: None,
         };
         let tc2 = ToolCall {
             id: "call_sel_2".to_string(),
             name: "http".to_string(),
             arguments: serde_json::json!({"url": "https://example.com"}),
+            reasoning: None,
         };
         let mut messages = vec![
             ChatMessage::system("You are a helpful assistant."),

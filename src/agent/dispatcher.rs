@@ -42,6 +42,7 @@ impl Agent {
     pub(super) async fn run_agentic_loop(
         &self,
         message: &IncomingMessage,
+        tenant: crate::tenant::TenantCtx,
         session: Arc<Mutex<Session>>,
         thread_id: Uuid,
         initial_messages: Vec<ChatMessage>,
@@ -63,7 +64,12 @@ impl Agent {
         );
 
         let system_prompt = if let Some(ws) = self.workspace() {
-            match ws
+            let scoped_workspace = if ws.user_id() == message.user_id {
+                Arc::clone(ws)
+            } else {
+                Arc::new(ws.scoped_to_user(&message.user_id))
+            };
+            match scoped_workspace
                 .system_prompt_for_context_tz(is_group_chat, user_tz)
                 .await
             {
@@ -163,6 +169,7 @@ impl Agent {
 
         let delegate = ChatDelegate {
             agent: self,
+            tenant,
             session: session.clone(),
             thread_id,
             message,
@@ -235,6 +242,7 @@ impl Agent {
 /// auth intercept, and cost tracking.
 struct ChatDelegate<'a> {
     agent: &'a Agent,
+    tenant: crate::tenant::TenantCtx,
     session: Arc<Mutex<Session>>,
     thread_id: Uuid,
     message: &'a IncomingMessage,
@@ -332,12 +340,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
         iteration: usize,
     ) -> Result<crate::llm::RespondOutput, Error> {
         // Enforce cost guardrails before the LLM call (global + per-user)
-        if let Err(limit) = self
-            .agent
-            .cost_guard()
-            .check_allowed_for_user(&self.message.user_id)
-            .await
-        {
+        if let Err(limit) = self.tenant.check_cost_allowed().await {
             return Err(crate::error::LlmError::InvalidResponse {
                 provider: "agent".to_string(),
                 reason: limit.to_string(),
@@ -348,12 +351,10 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
         // Apply per-user model override from settings (first iteration only
         // to avoid repeated DB lookups within the same agentic loop).
         // Uses "selected_model" — the same key the /model command persists to
-        // via SettingsStore (per-user scoped).
+        // via SettingsStore (per-user scoped via TenantScope).
         if iteration == 0
-            && let Some(store) = self.agent.store()
-            && let Ok(Some(value)) = store
-                .get_setting(&self.message.user_id, "selected_model")
-                .await
+            && let Some(store) = self.tenant.store()
+            && let Ok(Some(value)) = store.get_setting("selected_model").await
             && let Some(model) = value.as_str()
         {
             let model = model.trim();
@@ -411,10 +412,8 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
         let read_discount = self.agent.llm().cache_read_discount();
         let write_multiplier = self.agent.llm().cache_write_multiplier();
         let call_cost = self
-            .agent
-            .cost_guard()
-            .record_llm_call_for_user(
-                &self.message.user_id,
+            .tenant
+            .record_llm_call(
                 &model_name,
                 output.usage.input_tokens,
                 output.usage.output_tokens,
@@ -453,6 +452,19 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
         content: Option<String>,
         reason_ctx: &mut ReasoningContext,
     ) -> Result<Option<LoopOutcome>, Error> {
+        // Extract and sanitize the narrative before consuming `content`.
+        let narrative = content
+            .as_deref()
+            .filter(|c| !c.trim().is_empty())
+            .map(|c| {
+                let sanitized = self
+                    .agent
+                    .safety()
+                    .sanitize_tool_output("agent_narrative", c);
+                sanitized.content
+            })
+            .filter(|c| !c.trim().is_empty());
+
         // Add the assistant message with tool_calls to context.
         // OpenAI protocol requires this before tool-result messages.
         reason_ctx
@@ -473,6 +485,41 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
             )
             .await;
 
+        // Build per-tool decisions for the reasoning update.
+        // Sanitize each rationale through SafetyLayer (parity with JobDelegate).
+        let decisions: Vec<crate::channels::ToolDecision> = tool_calls
+            .iter()
+            .filter_map(|tc| {
+                tc.reasoning.as_ref().map(|r| {
+                    let sanitized = self
+                        .agent
+                        .safety()
+                        .sanitize_tool_output("tool_rationale", r)
+                        .content;
+                    crate::channels::ToolDecision {
+                        tool_name: tc.name.clone(),
+                        rationale: sanitized,
+                    }
+                })
+            })
+            .collect();
+
+        // Emit reasoning update to channels.
+        if narrative.is_some() || !decisions.is_empty() {
+            let _ = self
+                .agent
+                .channels
+                .send_status(
+                    &self.message.channel,
+                    StatusUpdate::ReasoningUpdate {
+                        narrative: narrative.clone().unwrap_or_default(),
+                        decisions: decisions.clone(),
+                    },
+                    &self.message.metadata,
+                )
+                .await;
+        }
+
         // Record tool calls in the thread with sensitive params redacted.
         {
             let mut redacted_args: Vec<serde_json::Value> = Vec::with_capacity(tool_calls.len());
@@ -488,8 +535,23 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
             if let Some(thread) = sess.threads.get_mut(&self.thread_id)
                 && let Some(turn) = thread.last_turn_mut()
             {
+                // Set turn-level narrative.
+                if turn.narrative.is_none() {
+                    turn.narrative = narrative;
+                }
                 for (tc, safe_args) in tool_calls.iter().zip(redacted_args) {
-                    turn.record_tool_call(&tc.name, safe_args);
+                    let sanitized_rationale = tc.reasoning.as_ref().map(|r| {
+                        self.agent
+                            .safety()
+                            .sanitize_tool_output("tool_rationale", r)
+                            .content
+                    });
+                    turn.record_tool_call_with_reasoning(
+                        &tc.name,
+                        safe_args,
+                        sanitized_rationale,
+                        Some(tc.id.clone()),
+                    );
                 }
             }
         }
@@ -759,7 +821,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                         if let Some(thread) = sess.threads.get_mut(&self.thread_id)
                             && let Some(turn) = thread.last_turn_mut()
                         {
-                            turn.record_tool_error(error_msg.clone());
+                            turn.record_tool_error_for(&tc.id, error_msg.clone());
                         }
                     }
                     reason_ctx
@@ -885,16 +947,19 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                         Err(e) => format!("Tool '{}' failed: {}", tc.name, e),
                     };
 
-                    // Record sanitized result in thread
+                    // Record sanitized result in thread (identity-based matching).
                     {
                         let mut sess = self.session.lock().await;
                         if let Some(thread) = sess.threads.get_mut(&self.thread_id)
                             && let Some(turn) = thread.last_turn_mut()
                         {
                             if is_tool_error {
-                                turn.record_tool_error(result_content.clone());
+                                turn.record_tool_error_for(&tc.id, result_content.clone());
                             } else {
-                                turn.record_tool_result(serde_json::json!(result_content));
+                                turn.record_tool_result_for(
+                                    &tc.id,
+                                    serde_json::json!(result_content),
+                                );
                             }
                         }
                     }
@@ -1267,6 +1332,7 @@ mod tests {
             sandbox_readiness: crate::agent::routine_engine::SandboxReadiness::DisabledByConfig,
             builder: None,
             llm_backend: "nearai".to_string(),
+            tenant_rates: Arc::new(crate::tenant::TenantRateRegistry::new(4, 3)),
         };
 
         Agent::new(
@@ -1289,6 +1355,8 @@ mod tests {
                 max_jobs_per_user: None,
                 max_tokens_per_job: 0,
                 multi_tenant: false,
+                max_llm_concurrent_per_user: None,
+                max_jobs_concurrent_per_user: None,
             },
             deps,
             Arc::new(ChannelManager::new()),
@@ -1498,11 +1566,13 @@ mod tests {
                     id: "call_2".to_string(),
                     name: "http".to_string(),
                     arguments: serde_json::json!({"url": "https://example.com"}),
+                    reasoning: None,
                 },
                 ToolCall {
                     id: "call_3".to_string(),
                     name: "echo".to_string(),
                     arguments: serde_json::json!({"message": "done"}),
+                    reasoning: None,
                 },
             ],
             user_timezone: None,
@@ -1688,6 +1758,7 @@ mod tests {
                     id: "call_1".to_string(),
                     name: "echo".to_string(),
                     arguments: serde_json::json!({"message": "hi"}),
+                    reasoning: None,
                 }],
             ),
             ChatMessage::tool_result("call_1", "echo", "hi"),
@@ -1780,11 +1851,13 @@ mod tests {
                         id: "c1".to_string(),
                         name: "http".to_string(),
                         arguments: serde_json::json!({}),
+                        reasoning: None,
                     },
                     ToolCall {
                         id: "c2".to_string(),
                         name: "echo".to_string(),
                         arguments: serde_json::json!({}),
+                        reasoning: None,
                     },
                 ],
             ),
@@ -1818,6 +1891,7 @@ mod tests {
                     id: "c1".to_string(),
                     name: "echo".to_string(),
                     arguments: serde_json::json!({}),
+                    reasoning: None,
                 }],
             ),
             ChatMessage::tool_result("c1", "echo", "done"),
@@ -1948,6 +2022,7 @@ mod tests {
                     id: crate::llm::generate_tool_call_id(0, 0),
                     name: "echo".to_string(),
                     arguments: serde_json::json!({"message": "looping"}),
+                    reasoning: None,
                 }],
                 input_tokens: 0,
                 output_tokens: 5,
@@ -2101,6 +2176,7 @@ mod tests {
                     id: crate::llm::generate_tool_call_id(0, 0),
                     name: "nonexistent_tool".to_string(),
                     arguments: serde_json::json!({}),
+                    reasoning: None,
                 }],
                 input_tokens: 0,
                 output_tokens: 5,
@@ -2138,6 +2214,7 @@ mod tests {
             sandbox_readiness: crate::agent::routine_engine::SandboxReadiness::DisabledByConfig,
             builder: None,
             llm_backend: "nearai".to_string(),
+            tenant_rates: Arc::new(crate::tenant::TenantRateRegistry::new(4, 3)),
         };
 
         Agent::new(
@@ -2160,6 +2237,8 @@ mod tests {
                 max_jobs_per_user: None,
                 max_tokens_per_job: 0,
                 multi_tenant: false,
+                max_llm_concurrent_per_user: None,
+                max_jobs_concurrent_per_user: None,
             },
             deps,
             Arc::new(ChannelManager::new()),
@@ -2194,13 +2273,14 @@ mod tests {
 
         let message = IncomingMessage::new("test", "test-user", "do something");
         let initial_messages = vec![ChatMessage::user("do something")];
+        let tenant = agent.tenant_ctx("test-user").await;
 
         // The dispatcher must terminate within 5 seconds. If there is an
         // infinite loop bug (e.g., index not advancing on tool failure), the
         // timeout will fire and the test will fail.
         let result = tokio::time::timeout(
             Duration::from_secs(5),
-            agent.run_agentic_loop(&message, session, thread_id, initial_messages),
+            agent.run_agentic_loop(&message, tenant, session, thread_id, initial_messages),
         )
         .await;
 
@@ -2262,6 +2342,7 @@ mod tests {
                 sandbox_readiness: crate::agent::routine_engine::SandboxReadiness::DisabledByConfig,
                 builder: None,
                 llm_backend: "nearai".to_string(),
+                tenant_rates: Arc::new(crate::tenant::TenantRateRegistry::new(4, 3)),
             };
 
             Agent::new(
@@ -2284,6 +2365,8 @@ mod tests {
                     max_jobs_per_user: None,
                     max_tokens_per_job: 0,
                     multi_tenant: false,
+                    max_llm_concurrent_per_user: None,
+                    max_jobs_concurrent_per_user: None,
                 },
                 deps,
                 Arc::new(ChannelManager::new()),
@@ -2303,13 +2386,14 @@ mod tests {
 
         let message = IncomingMessage::new("test", "test-user", "keep calling tools");
         let initial_messages = vec![ChatMessage::user("keep calling tools")];
+        let tenant = agent.tenant_ctx("test-user").await;
 
         // Even with an LLM that always wants to call tools, the dispatcher
         // must terminate within the timeout thanks to force_text at
         // max_tool_iterations.
         let result = tokio::time::timeout(
             Duration::from_secs(5),
-            agent.run_agentic_loop(&message, session, thread_id, initial_messages),
+            agent.run_agentic_loop(&message, tenant, session, thread_id, initial_messages),
         )
         .await;
 

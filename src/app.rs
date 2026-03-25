@@ -312,13 +312,7 @@ impl AppBuilder {
             .create_provider(&self.config.llm.nearai.base_url, self.session.clone());
 
         // Register memory tools if database is available
-        let workspace_user_id = self
-            .config
-            .channels
-            .gateway
-            .as_ref()
-            .map(|gw| gw.user_id.as_str())
-            .unwrap_or("default");
+        let workspace_user_id = self.config.owner_id.as_str();
         let workspace = if let Some(ref db) = self.db {
             let emb_cache_config = EmbeddingCacheConfig {
                 max_entries: self.config.embeddings.cache_size,

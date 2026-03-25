@@ -31,8 +31,8 @@ use chrono_tz::Tz;
 use tokio::sync::mpsc;
 
 use crate::channels::OutgoingResponse;
-use crate::db::Database;
 use crate::llm::{ChatMessage, CompletionRequest, LlmProvider, Reasoning};
+use crate::tenant::AdminScope;
 use crate::workspace::Workspace;
 use crate::workspace::hygiene::HygieneConfig;
 
@@ -182,7 +182,7 @@ pub struct HeartbeatRunner {
     workspace: Arc<Workspace>,
     llm: Arc<dyn LlmProvider>,
     response_tx: Option<mpsc::Sender<OutgoingResponse>>,
-    store: Option<Arc<dyn Database>>,
+    store: Option<AdminScope>,
     consecutive_failures: u32,
 }
 
@@ -211,8 +211,8 @@ impl HeartbeatRunner {
         self
     }
 
-    /// Set the database store for persistent heartbeat conversations.
-    pub fn with_store(mut self, store: Arc<dyn Database>) -> Self {
+    /// Set the admin-scoped database store for persistent heartbeat conversations.
+    pub fn with_store(mut self, store: AdminScope) -> Self {
         self.store = Some(store);
         self
     }
@@ -497,7 +497,7 @@ pub fn spawn_heartbeat(
     workspace: Arc<Workspace>,
     llm: Arc<dyn LlmProvider>,
     response_tx: Option<mpsc::Sender<OutgoingResponse>>,
-    store: Option<Arc<dyn Database>>,
+    store: Option<AdminScope>,
 ) -> tokio::task::JoinHandle<()> {
     let mut runner = HeartbeatRunner::new(config, hygiene_config, workspace, llm);
     if let Some(tx) = response_tx {
@@ -521,7 +521,7 @@ pub fn spawn_multi_user_heartbeat(
     hygiene_config: HygieneConfig,
     llm: Arc<dyn LlmProvider>,
     response_tx: Option<mpsc::Sender<OutgoingResponse>>,
-    store: Arc<dyn Database>,
+    store: AdminScope,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         if !config.enabled {
@@ -586,7 +586,7 @@ pub fn spawn_multi_user_heartbeat(
                     continue;
                 }
 
-                let workspace = Arc::new(Workspace::new_with_db(user_id, store.clone()));
+                let workspace = Arc::new(Workspace::new_with_db(user_id, Arc::clone(store.db())));
 
                 // Run memory hygiene per user (same as single-user heartbeat).
                 let hygiene_ws = Arc::clone(&workspace);
@@ -617,14 +617,14 @@ pub fn spawn_multi_user_heartbeat(
                 let hyg = hygiene_config.clone();
                 let llm_clone = llm.clone();
                 let tx = response_tx.clone();
-                let st = store.clone();
+                let admin = store.clone();
 
                 join_set.spawn(async move {
                     let mut runner = HeartbeatRunner::new(cfg, hyg, workspace, llm_clone);
                     if let Some(tx) = tx {
                         runner = runner.with_response_channel(tx);
                     }
-                    runner = runner.with_store(st);
+                    runner = runner.with_store(admin);
 
                     let result = runner.check_heartbeat().await;
                     if let HeartbeatResult::NeedsAttention(msg) = &result {
@@ -903,7 +903,7 @@ mod tests {
             Arc<crate::workspace::Workspace>,
             Arc<dyn crate::llm::LlmProvider>,
             Option<tokio::sync::mpsc::Sender<crate::channels::OutgoingResponse>>,
-            Option<Arc<dyn crate::db::Database>>,
+            Option<AdminScope>,
         ) -> tokio::task::JoinHandle<()> = spawn_heartbeat;
         let _ = _fn_ptr;
     }

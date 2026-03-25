@@ -16,6 +16,7 @@ use axum::routing::{delete, get, post};
 use tower::ServiceExt;
 use uuid::Uuid;
 
+use crate::channels::web::GatewayChannel;
 use crate::channels::web::auth::{
     AuthenticatedUser, MultiAuthState, UserIdentity, auth_middleware,
 };
@@ -23,6 +24,7 @@ use crate::channels::web::server::{
     ActiveConfigSnapshot, GatewayState, PerUserRateLimiter, PromptQueue, RateLimiter, WorkspacePool,
 };
 use crate::channels::web::sse::SseManager;
+use crate::config::GatewayConfig;
 
 // ── Helpers ────────────────────────────────────────────────────────────
 
@@ -66,7 +68,8 @@ fn build_state(
         store,
         job_manager: None,
         prompt_queue,
-        default_user_id: "test".to_string(),
+        owner_id: "test".to_string(),
+        default_sender_id: "test".to_string(),
         shutdown_tx: tokio::sync::RwLock::new(None),
         ws_tracker: None,
         llm_provider: None,
@@ -82,6 +85,40 @@ fn build_state(
         startup_time: std::time::Instant::now(),
         active_config: ActiveConfigSnapshot::default(),
     })
+}
+
+fn gateway_config() -> GatewayConfig {
+    GatewayConfig {
+        host: "127.0.0.1".to_string(),
+        port: 3000,
+        auth_token: Some("gateway-auth".to_string()),
+        user_id: "gateway-sender".to_string(),
+        workspace_read_scopes: Vec::new(),
+        memory_layers: Vec::new(),
+    }
+}
+
+#[test]
+fn with_owner_scope_updates_gateway_owner_scope_in_multi_user_mode() {
+    let mut gateway = GatewayChannel::new(gateway_config());
+    gateway.auth = two_user_auth().into();
+    let gateway = gateway.with_owner_scope("owner-scope");
+
+    assert_eq!(gateway.state.owner_id, "owner-scope");
+    assert_eq!(gateway.state.default_sender_id, "gateway-sender");
+
+    let alice = gateway
+        .auth
+        .env_auth
+        .authenticate("tok-alice")
+        .expect("alice token should remain valid");
+    let bob = gateway
+        .auth
+        .env_auth
+        .authenticate("tok-bob")
+        .expect("bob token should remain valid");
+    assert_eq!(alice.user_id, "alice");
+    assert_eq!(bob.user_id, "bob");
 }
 
 /// Create a libSQL-backed test database in a temporary directory.
