@@ -23,7 +23,8 @@
 //! - App credentials (app_id, app_secret) are injected by the host into
 //!   the config JSON during startup for token exchange
 //! - Bearer token for API calls is obtained via token exchange and cached
-//! - Verification token validated by host for webhook requests
+//! - Webhook requests must be authenticated by the host or by a matching
+//!   Feishu verification token in the request body
 
 // Generate bindings from the WIT file
 wit_bindgen::generate!({
@@ -50,6 +51,7 @@ const ALLOW_FROM_PATH: &str = "allow_from";
 const API_BASE_PATH: &str = "api_base";
 const APP_ID_PATH: &str = "app_id";
 const APP_SECRET_PATH: &str = "app_secret";
+const VERIFICATION_TOKEN_PATH: &str = "verification_token";
 const TOKEN_PATH: &str = "tenant_access_token";
 const TOKEN_EXPIRY_PATH: &str = "token_expiry";
 
@@ -251,6 +253,9 @@ struct FeishuConfig {
     /// Feishu App Secret (for token exchange).
     app_secret: Option<String>,
 
+    /// Feishu Event Subscription verification token.
+    verification_token: Option<String>,
+
     /// API base URL. Defaults to "https://open.feishu.cn" (use
     /// "https://open.larksuite.com" for Lark international).
     #[serde(default = "default_api_base")]
@@ -299,6 +304,11 @@ impl Guest for FeishuChannel {
         }
         if let Some(ref app_secret) = config.app_secret {
             let _ = channel_host::workspace_write(APP_SECRET_PATH, app_secret);
+        }
+        if let Some(ref verification_token) = config.verification_token {
+            let _ = channel_host::workspace_write(VERIFICATION_TOKEN_PATH, verification_token);
+        } else {
+            let _ = channel_host::workspace_write(VERIFICATION_TOKEN_PATH, "");
         }
 
         if let Some(owner_id) = &config.owner_id {
@@ -375,6 +385,23 @@ impl Guest for FeishuChannel {
                 return json_response(200, serde_json::json!({}));
             }
         };
+
+        let configured_token =
+            channel_host::workspace_read(VERIFICATION_TOKEN_PATH).filter(|token| !token.is_empty());
+        if !is_authenticated_webhook(
+            req.secret_validated,
+            configured_token.as_deref(),
+            event.token.as_deref(),
+        ) {
+            channel_host::log(
+                channel_host::LogLevel::Warn,
+                "Rejecting unauthenticated Feishu webhook request",
+            );
+            return json_response(
+                401,
+                serde_json::json!({"error": "Webhook authentication failed"}),
+            );
+        }
 
         // Handle URL verification challenge (initial webhook setup).
         if event.event_type.as_deref() == Some("url_verification") {
@@ -839,6 +866,21 @@ fn json_response(status: u16, body: serde_json::Value) -> OutgoingHttpResponse {
     }
 }
 
+fn is_authenticated_webhook(
+    secret_validated: bool,
+    configured_token: Option<&str>,
+    request_token: Option<&str>,
+) -> bool {
+    if secret_validated {
+        return true;
+    }
+
+    match (configured_token, request_token) {
+        (Some(expected), Some(provided)) => expected == provided,
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -862,7 +904,10 @@ mod tests {
     fn parse_token_response_rejects_missing_token() {
         let json = r#"{"code": 0, "msg": "ok", "expire": 7200}"#;
         let result: Result<TenantAccessTokenResponse, _> = serde_json::from_str(json);
-        assert!(result.is_err(), "should fail when tenant_access_token is missing");
+        assert!(
+            result.is_err(),
+            "should fail when tenant_access_token is missing"
+        );
     }
 
     #[test]
@@ -893,5 +938,33 @@ mod tests {
         let resp: TenantAccessTokenResponse = serde_json::from_str(json).unwrap();
         assert_eq!(resp.code, 10003);
         assert!(resp.tenant_access_token.is_empty());
+    }
+
+    #[test]
+    fn webhook_auth_requires_host_auth_or_matching_verification_token() {
+        assert!(
+            !is_authenticated_webhook(false, None, Some("token")),
+            "requests without any configured verification mechanism must be rejected"
+        );
+        assert!(
+            !is_authenticated_webhook(false, Some("expected"), None),
+            "requests missing the Feishu token must be rejected when host auth did not pass"
+        );
+        assert!(
+            !is_authenticated_webhook(false, Some("expected"), Some("wrong")),
+            "requests with the wrong Feishu token must be rejected"
+        );
+        assert!(
+            is_authenticated_webhook(false, Some("expected"), Some("expected")),
+            "matching Feishu verification token should authenticate the request"
+        );
+        assert!(
+            is_authenticated_webhook(true, None, None),
+            "host-authenticated requests should still be accepted"
+        );
+        assert!(
+            is_authenticated_webhook(true, Some("expected"), Some("wrong")),
+            "host authentication should take precedence over body token checks"
+        );
     }
 }

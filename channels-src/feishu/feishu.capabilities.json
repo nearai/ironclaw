@@ -27,7 +27,7 @@
       {
         "name": "feishu_verification_token",
         "prompt": "Enter your Feishu/Lark Verification Token (from Event Subscription webhook settings)",
-        "optional": true
+        "optional": false
       }
     ],
     "setup_url": "https://open.feishu.cn/app"
@@ -70,6 +70,7 @@
   "config": {
     "app_id": null,
     "app_secret": null,
+    "verification_token": null,
     "api_base": "https://open.feishu.cn",
     "owner_id": null,
     "dm_policy": "pairing",
