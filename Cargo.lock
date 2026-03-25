@@ -3428,6 +3428,7 @@ dependencies = [
  "hyper-util",
  "iana-time-zone",
  "insta",
+ "ironclaw_common",
  "ironclaw_safety",
  "json5",
  "libsql",
@@ -3483,6 +3484,14 @@ dependencies = [
  "wasmtime-wasi",
  "zbus",
  "zip",
+]
+
+[[package]]
+name = "ironclaw_common"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

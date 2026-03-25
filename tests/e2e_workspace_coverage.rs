@@ -12,6 +12,7 @@ mod tests {
 
     use crate::support::test_rig::TestRigBuilder;
     use crate::support::trace_llm::LlmTrace;
+    use ironclaw::workspace::Workspace;
 
     // -----------------------------------------------------------------------
     // Test 1: write_chunk_search
@@ -268,6 +269,7 @@ mod tests {
 
     #[tokio::test]
     async fn identity_in_system_prompt() {
+        const TEST_USER_ID: &str = "test-user";
         let trace = LlmTrace::from_file(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/tests/fixtures/llm_traces/workspace/identity_prompt.json"
@@ -280,7 +282,7 @@ mod tests {
             .await;
 
         // Seed an IDENTITY.md so the system prompt has real content to inject.
-        let ws = rig.workspace().expect("workspace must be available");
+        let ws = Workspace::new_with_db(TEST_USER_ID, rig.database().clone());
         ws.write(
             "IDENTITY.md",
             "I am TestBot, a helpful testing assistant created for E2E verification.",

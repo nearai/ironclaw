@@ -1,5 +1,7 @@
 //! Shared utility functions used across the codebase.
 
+use crate::llm::{ChatMessage, Role};
+
 /// Find the largest valid UTF-8 char boundary at or before `pos`.
 ///
 /// Polyfill for `str::floor_char_boundary` (nightly-only). Use when
@@ -14,6 +16,17 @@ pub fn floor_char_boundary(s: &str, pos: usize) -> usize {
         i -= 1;
     }
     i
+}
+
+/// Ensure the last message in `messages` is a user-role message.
+///
+/// NEAR AI rejects conversations that don't end with a user message;
+/// Claude 4.6 rejects assistant prefill. Call this before any LLM
+/// completion request to satisfy both requirements.
+pub fn ensure_ends_with_user_message(messages: &mut Vec<ChatMessage>) {
+    if !matches!(messages.last(), Some(m) if m.role == Role::User) {
+        messages.push(ChatMessage::user("Continue."));
+    }
 }
 
 /// Check if an LLM response explicitly signals that a job/task is complete.
@@ -72,7 +85,8 @@ pub fn llm_signals_completion(response: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use crate::util::{floor_char_boundary, llm_signals_completion};
+    use crate::llm::ChatMessage;
+    use crate::util::{ensure_ends_with_user_message, floor_char_boundary, llm_signals_completion};
 
     // ── floor_char_boundary ──
 
@@ -101,6 +115,42 @@ mod tests {
     #[test]
     fn floor_char_boundary_empty_string() {
         assert_eq!(floor_char_boundary("", 5), 0);
+    }
+
+    // ── ensure_ends_with_user_message ──
+
+    #[test]
+    fn ensure_user_message_injects_when_empty() {
+        let mut msgs: Vec<ChatMessage> = vec![];
+        ensure_ends_with_user_message(&mut msgs);
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].role, crate::llm::Role::User);
+    }
+
+    #[test]
+    fn ensure_user_message_injects_after_assistant() {
+        let mut msgs = vec![ChatMessage::user("hi"), ChatMessage::assistant("hello")];
+        ensure_ends_with_user_message(&mut msgs);
+        assert_eq!(msgs.len(), 3);
+        assert_eq!(msgs[2].role, crate::llm::Role::User);
+    }
+
+    #[test]
+    fn ensure_user_message_injects_after_tool_result() {
+        let mut msgs = vec![
+            ChatMessage::user("run tool"),
+            ChatMessage::tool_result("call_1", "my_tool", "result"),
+        ];
+        ensure_ends_with_user_message(&mut msgs);
+        assert_eq!(msgs.len(), 3);
+        assert_eq!(msgs[2].role, crate::llm::Role::User);
+    }
+
+    #[test]
+    fn ensure_user_message_no_op_when_already_user() {
+        let mut msgs = vec![ChatMessage::user("hello")];
+        ensure_ends_with_user_message(&mut msgs);
+        assert_eq!(msgs.len(), 1);
     }
 
     // ── llm_signals_completion ──
