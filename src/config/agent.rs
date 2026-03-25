@@ -31,6 +31,8 @@ pub struct AgentConfig {
     pub default_timezone: String,
     /// Maximum tokens per job (0 = unlimited).
     pub max_tokens_per_job: u64,
+    /// Cognitive Guardian configuration (proactive memory discipline).
+    pub cognitive: crate::agent::cognitive::CognitiveConfig,
 }
 
 impl AgentConfig {
@@ -53,6 +55,7 @@ impl AgentConfig {
             auto_approve_tools: true,
             default_timezone: "UTC".to_string(),
             max_tokens_per_job: 0,
+            cognitive: crate::agent::cognitive::CognitiveConfig::default(),
         }
     }
 
@@ -112,6 +115,7 @@ impl AgentConfig {
                 "AGENT_MAX_TOKENS_PER_JOB",
                 settings.agent.max_tokens_per_job,
             )?,
+            cognitive: settings.agent.cognitive.clone(),
         })
     }
 }
