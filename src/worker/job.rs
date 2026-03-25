@@ -1232,6 +1232,11 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
     ) -> Option<LoopOutcome> {
         // Refresh tool definitions so newly built tools become visible
         reason_ctx.available_tools = self.worker.tools().tool_definitions().await;
+
+        // Claude 4.6 rejects assistant prefill; NEAR AI rejects any non-user-ending
+        // conversation. Ensure the last message is user-role before calling the LLM.
+        crate::util::ensure_ends_with_user_message(&mut reason_ctx.messages);
+
         None
     }
 
