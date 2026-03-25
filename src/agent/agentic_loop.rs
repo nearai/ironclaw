@@ -414,6 +414,7 @@ mod tests {
             id: "call_1".to_string(),
             name: "echo".to_string(),
             arguments: serde_json::json!({}),
+            reasoning: None,
         };
         let delegate = MockDelegate::new(vec![
             tool_calls_output(vec![tool_call]),
