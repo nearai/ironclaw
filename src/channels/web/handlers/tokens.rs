@@ -53,8 +53,15 @@ pub async fn tokens_create_handler(
     // First 8 chars of the hex token as a prefix for identification.
     let token_prefix = &plaintext_token[..8];
 
+    // Admin users can create tokens for other users via optional "user_id" field.
+    let target_user = body
+        .get("user_id")
+        .and_then(|v| v.as_str())
+        .filter(|_| user.role == "admin")
+        .unwrap_or(&user.user_id);
+
     let record = store
-        .create_api_token(&user.user_id, &name, &hash, token_prefix, expires_at)
+        .create_api_token(target_user, &name, &hash, token_prefix, expires_at)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 

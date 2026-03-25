@@ -7,6 +7,9 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
 };
+use rand::RngCore;
+use rand::rngs::OsRng;
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::channels::web::auth::{AdminUser, AuthenticatedUser};
@@ -67,12 +70,27 @@ pub async fn users_create_handler(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
+    // Generate a first API token so the new user can authenticate immediately.
+    let mut token_bytes = [0u8; 32];
+    OsRng.fill_bytes(&mut token_bytes);
+    let plaintext_token = hex::encode(token_bytes);
+    let mut hasher = Sha256::new();
+    hasher.update(token_bytes);
+    let token_hash: [u8; 32] = hasher.finalize().into();
+    let token_prefix = &plaintext_token[..8];
+
+    let _token_record = store
+        .create_api_token(&user_id, "initial", &token_hash, token_prefix, None)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
     Ok(Json(serde_json::json!({
         "id": user_record.id,
         "email": user_record.email,
         "display_name": user_record.display_name,
         "status": user_record.status,
         "role": user_record.role,
+        "token": plaintext_token,
         "created_at": user_record.created_at.to_rfc3339(),
         "created_by": user_record.created_by,
     })))

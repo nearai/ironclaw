@@ -4408,13 +4408,27 @@ function createTokenForUser(userId, displayName) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name: tokenName, user_id: userId }),
   }).then(function(data) {
-    var banner = document.getElementById('users-token-result');
-    banner.style.display = 'block';
-    banner.innerHTML = '<strong>Token created!</strong> Copy this now — it won\'t be shown again:<br>'
-      + '<code class="token-display">' + escapeHtml(data.token) + '</code>'
-      + '<button class="btn-small" onclick="navigator.clipboard.writeText(\'' + escapeHtml(data.token) + '\');this.textContent=\'Copied!\'">Copy</button>';
+    showTokenBanner(data.token);
   }).catch(function(e) { alert('Failed to create token: ' + e.message); });
 }
+
+function showTokenBanner(tokenValue) {
+  var banner = document.getElementById('users-token-result');
+  if (!banner) return;
+  banner.style.display = 'block';
+  banner.innerHTML = '<strong>Token created!</strong> Copy this now — it won\'t be shown again:<br>'
+    + '<code class="token-display" id="token-copy-value">' + escapeHtml(tokenValue) + '</code>'
+    + '<button class="btn-small" id="token-copy-btn">Copy</button>';
+  document.getElementById('token-copy-btn').addEventListener('click', function() {
+    navigator.clipboard.writeText(tokenValue);
+    this.textContent = 'Copied!';
+  });
+}
+
+// Make functions accessible for delegated event handlers
+window.suspendUser = suspendUser;
+window.activateUser = activateUser;
+window.createTokenForUser = createTokenForUser;
 
 // Wire up Users tab create form
 document.getElementById('users-create-btn')?.addEventListener('click', function() {
@@ -4441,10 +4455,13 @@ document.getElementById('users-create-submit')?.addEventListener('click', functi
       email: email || undefined,
       role: role,
     }),
-  }).then(function() {
+  }).then(function(data) {
     document.getElementById('users-create-form').style.display = 'none';
     document.getElementById('user-display-name').value = '';
     document.getElementById('user-email').value = '';
+    if (data.token) {
+      showTokenBanner(data.token);
+    }
     loadUsers();
   }).catch(function(e) { alert('Failed to create user: ' + e.message); });
 });

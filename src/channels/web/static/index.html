@@ -397,9 +397,9 @@
                 <h3>User Management</h3>
                 <button id="users-create-btn" class="btn-primary">+ New User</button>
               </div>
-              <div id="users-create-form" style="display:none" class="users-form">
-                <input type="text" id="user-display-name" placeholder="Display name" />
-                <input type="email" id="user-email" placeholder="Email (optional)" />
+              <div id="users-create-form" style="display:none" class="users-form" autocomplete="off">
+                <input type="text" id="user-display-name" placeholder="Display name" autocomplete="off" />
+                <input type="text" id="user-email" placeholder="Email (optional)" autocomplete="off" />
                 <select id="user-role"><option value="member">Member</option><option value="admin">Admin</option></select>
                 <button id="users-create-submit" class="btn-primary">Create</button>
                 <button id="users-create-cancel" class="btn-secondary">Cancel</button>
