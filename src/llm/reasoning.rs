@@ -1319,16 +1319,21 @@ fn is_recoverable_tool_call_segment(
     }
 
     let (first_line_start, first_line_end) = line_bounds(text, start);
+    let first_line = &text[first_line_start..first_line_end];
+
+    if first_line.trim_start().starts_with('>') {
+        return false;
+    }
+
     let (_, last_line_end) = line_bounds(text, end.saturating_sub(1));
     let first_line_prefix = &text[first_line_start..start];
     let last_line_suffix = &text[end..last_line_end];
-    let first_line = &text[first_line_start..first_line_end];
 
     if !first_line_prefix.trim().is_empty() || !last_line_suffix.trim().is_empty() {
         return false;
     }
 
-    !first_line.trim_start().starts_with('>')
+    true
 }
 
 /// Clean up LLM response by stripping model-internal tags and reasoning patterns.
