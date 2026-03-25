@@ -92,6 +92,7 @@
   <div id="app">
     <!-- Tab Bar -->
     <div class="tab-bar">
+      <div class="tab-indicator" id="tab-indicator"></div>
       <button class="active" data-tab="chat" data-i18n="tab.chat">Chat</button>
       <button data-tab="memory" data-i18n="tab.memory">Memory</button>
       <button data-tab="jobs" data-i18n="tab.jobs">Jobs</button>
@@ -292,9 +293,11 @@
           <button class="settings-subtab" data-settings-subtab="extensions" data-i18n="tab.extensions">Extensions</button>
           <button class="settings-subtab" data-settings-subtab="mcp" data-i18n="settings.mcp">MCP</button>
           <button class="settings-subtab" data-settings-subtab="skills" data-i18n="tab.skills">Skills</button>
+          <button class="settings-theme-toggle" id="settings-theme-toggle" data-i18n="theme.tooltipSystem" title="Toggle theme">Theme</button>
         </div>
         <div class="settings-content">
           <div class="settings-toolbar">
+            <button id="settings-back-btn" class="settings-back-btn">&larr; Back</button>
             <div class="settings-search">
               <input type="text" id="settings-search-input" data-i18n-placeholder="settings.searchPlaceholder" placeholder="Search settings..." data-i18n-attr="aria-label" data-i18n="settings.searchPlaceholder" aria-label="Search settings...">
             </div>

@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use secrecy::SecretString;
+use serde::Deserialize;
 
 use crate::bootstrap::ironclaw_base_dir;
 use crate::config::helpers::{optional_env, parse_bool_env, parse_optional_env};
@@ -45,6 +46,26 @@ pub struct GatewayConfig {
     /// Bearer token for authentication. Random hex generated at startup if unset.
     pub auth_token: Option<String>,
     pub user_id: String,
+    /// Additional user scopes for workspace reads.
+    ///
+    /// When set, the workspace will be able to read (search, read, list) from
+    /// these additional user scopes while writes remain isolated to `user_id`.
+    /// Parsed from `WORKSPACE_READ_SCOPES` (comma-separated).
+    pub workspace_read_scopes: Vec<String>,
+    /// Memory layer definitions (JSON in env var, or from external config).
+    pub memory_layers: Vec<crate::workspace::layer::MemoryLayer>,
+    /// Multi-user token map. When set, each token maps to a user identity.
+    /// Parsed from `GATEWAY_USER_TOKENS` (JSON string). When absent, falls back
+    /// to single-user mode via `auth_token` + `user_id`.
+    pub user_tokens: Option<HashMap<String, UserTokenConfig>>,
+}
+
+/// Per-user token configuration for multi-user mode.
+#[derive(Debug, Clone, Deserialize)]
+pub struct UserTokenConfig {
+    pub user_id: String,
+    #[serde(default)]
+    pub workspace_read_scopes: Vec<String>,
 }
 
 /// Signal channel configuration (signal-cli daemon HTTP/JSON-RPC).
@@ -111,6 +132,122 @@ impl ChannelsConfig {
 
         let gateway_enabled = parse_bool_env("GATEWAY_ENABLED", cs.gateway_enabled)?;
         let gateway = if gateway_enabled {
+            let user_id = optional_env("GATEWAY_USER_ID")?
+                .or_else(|| cs.gateway_user_id.clone())
+                .unwrap_or_else(|| owner_id.to_string());
+
+            let memory_layers: Vec<crate::workspace::layer::MemoryLayer> =
+                match optional_env("MEMORY_LAYERS")? {
+                    Some(json_str) => {
+                        serde_json::from_str(&json_str).map_err(|e| ConfigError::InvalidValue {
+                            key: "MEMORY_LAYERS".to_string(),
+                            message: format!("must be valid JSON array of layer objects: {e}"),
+                        })?
+                    }
+                    None => crate::workspace::layer::MemoryLayer::default_for_user(&user_id),
+                };
+
+            // Validate layer names and scopes
+            for layer in &memory_layers {
+                if layer.name.trim().is_empty() {
+                    return Err(ConfigError::InvalidValue {
+                        key: "MEMORY_LAYERS".to_string(),
+                        message: "layer name must not be empty".to_string(),
+                    });
+                }
+                if layer.name.len() > 64 {
+                    return Err(ConfigError::InvalidValue {
+                        key: "MEMORY_LAYERS".to_string(),
+                        message: format!("layer name '{}' exceeds 64 characters", layer.name),
+                    });
+                }
+                if !layer
+                    .name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+                {
+                    return Err(ConfigError::InvalidValue {
+                        key: "MEMORY_LAYERS".to_string(),
+                        message: format!(
+                            "layer name '{}' contains invalid characters \
+                             (allowed: a-z, A-Z, 0-9, _, -)",
+                            layer.name
+                        ),
+                    });
+                }
+                if layer.scope.trim().is_empty() {
+                    return Err(ConfigError::InvalidValue {
+                        key: "MEMORY_LAYERS".to_string(),
+                        message: format!("layer '{}' has an empty scope", layer.name),
+                    });
+                }
+            }
+
+            // Check for duplicate layer names
+            {
+                let mut seen = std::collections::HashSet::new();
+                for layer in &memory_layers {
+                    if !seen.insert(&layer.name) {
+                        return Err(ConfigError::InvalidValue {
+                            key: "MEMORY_LAYERS".to_string(),
+                            message: format!("duplicate layer name '{}'", layer.name),
+                        });
+                    }
+                }
+            }
+
+            let user_tokens: Option<HashMap<String, UserTokenConfig>> =
+                match optional_env("GATEWAY_USER_TOKENS")? {
+                    Some(json_str) => {
+                        let tokens: HashMap<String, UserTokenConfig> = serde_json::from_str(
+                            &json_str,
+                        )
+                        .map_err(|e| ConfigError::InvalidValue {
+                            key: "GATEWAY_USER_TOKENS".to_string(),
+                            message: format!(
+                                "must be valid JSON object mapping tokens to user configs: {e}"
+                            ),
+                        })?;
+                        if tokens.is_empty() {
+                            return Err(ConfigError::InvalidValue {
+                            key: "GATEWAY_USER_TOKENS".to_string(),
+                            message:
+                                "token map is empty — remove the variable to use single-user mode"
+                                    .to_string(),
+                        });
+                        }
+                        for (tok, cfg) in &tokens {
+                            if cfg.user_id.trim().is_empty() {
+                                return Err(ConfigError::InvalidValue {
+                                    key: "GATEWAY_USER_TOKENS".to_string(),
+                                    message: format!(
+                                        "token '{}...' has an empty user_id",
+                                        &tok[..tok.len().min(8)]
+                                    ),
+                                });
+                            }
+                        }
+                        Some(tokens)
+                    }
+                    None => None,
+                };
+            let workspace_read_scopes: Vec<String> = optional_env("WORKSPACE_READ_SCOPES")?
+                .map(|s| {
+                    s.split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            for scope in &workspace_read_scopes {
+                if scope.len() > 128 {
+                    return Err(ConfigError::InvalidValue {
+                        key: "WORKSPACE_READ_SCOPES".to_string(),
+                        message: format!("scope '{}...' exceeds 128 characters", &scope[..32]),
+                    });
+                }
+            }
             Some(GatewayConfig {
                 host: optional_env("GATEWAY_HOST")?
                     .or_else(|| cs.gateway_host.clone())
@@ -121,7 +258,10 @@ impl ChannelsConfig {
                 )?,
                 auth_token: optional_env("GATEWAY_AUTH_TOKEN")?
                     .or_else(|| cs.gateway_auth_token.clone()),
-                user_id: owner_id.to_string(),
+                user_id,
+                workspace_read_scopes,
+                memory_layers,
+                user_tokens,
             })
         } else {
             None
@@ -232,7 +372,7 @@ fn default_channels_dir() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use crate::config::channels::*;
-    use crate::config::helpers::ENV_MUTEX;
+    use crate::config::helpers::lock_env;
     use crate::settings::Settings;
 
     #[test]
@@ -277,6 +417,9 @@ mod tests {
             port: 3000,
             auth_token: Some("tok-abc".to_string()),
             user_id: "default".to_string(),
+            workspace_read_scopes: vec![],
+            memory_layers: vec![],
+            user_tokens: None,
         };
         assert_eq!(cfg.host, "127.0.0.1");
         assert_eq!(cfg.port, 3000);
@@ -291,6 +434,9 @@ mod tests {
             port: 3001,
             auth_token: None,
             user_id: "anon".to_string(),
+            workspace_read_scopes: vec![],
+            memory_layers: vec![],
+            user_tokens: None,
         };
         assert!(cfg.auth_token.is_none());
     }
@@ -391,7 +537,7 @@ mod tests {
 
     #[test]
     fn resolve_uses_settings_channel_values_with_owner_scope_user_ids() {
-        let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = lock_env();
         let mut settings = Settings::default();
         settings.channels.http_enabled = true;
         settings.channels.http_host = Some("127.0.0.2".to_string());

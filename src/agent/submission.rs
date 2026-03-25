@@ -92,6 +92,17 @@ impl SubmissionParser {
                 args: vec![],
             };
         }
+        if lower == "/reasoning" || lower.starts_with("/reasoning ") {
+            let args: Vec<String> = trimmed
+                .split_whitespace()
+                .skip(1)
+                .map(|s| s.to_string())
+                .collect();
+            return Submission::SystemCommand {
+                command: "reasoning".to_string(),
+                args,
+            };
+        }
         if lower == "/restart" {
             tracing::debug!("[SubmissionParser::parse] Recognized /restart command");
             return Submission::SystemCommand {

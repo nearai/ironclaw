@@ -42,10 +42,10 @@ impl exports::near::agent::tool::Guest for WebSearchTool {
     }
 
     fn description() -> String {
-        "Search the web using Brave Search. Returns titles, URLs, descriptions, and \
-         publication dates for matching web pages. Supports filtering by country, \
-         language, and freshness. Authentication is handled via the 'brave_api_key' \
-         secret injected by the host."
+        "Search the web using Brave Search. Returns titles, URLs, descriptions, \
+         publication dates, and thumbnail images for matching web pages. Supports \
+         filtering by country, language, and freshness. Authentication is handled \
+         via the 'brave_api_key' secret injected by the host."
             .to_string()
     }
 }
@@ -76,6 +76,12 @@ struct BraveSearchResult {
     url: Option<String>,
     description: Option<String>,
     age: Option<String>,
+    thumbnail: Option<BraveThumbnail>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BraveThumbnail {
+    src: Option<String>,
 }
 
 fn execute_inner(params: &str) -> Result<String, String> {
@@ -197,6 +203,9 @@ fn execute_inner(params: &str) -> Result<String, String> {
             });
             if let Some(age) = r.age {
                 entry["published"] = serde_json::json!(age);
+            }
+            if let Some(thumb) = r.thumbnail.and_then(|t| t.src) {
+                entry["thumbnail"] = serde_json::json!(thumb);
             }
             // Extract hostname for site_name.
             if let Some(host) = extract_hostname(&url) {

@@ -218,6 +218,7 @@ env-var mode or skipped secrets.
 | NEAR AI Cloud | API key | `llm_nearai_api_key` | `NEARAI_API_KEY` |
 | Anthropic | API key | `llm_anthropic_api_key` | `ANTHROPIC_API_KEY` |
 | OpenAI | API key | `llm_openai_api_key` | `OPENAI_API_KEY` |
+| GitHub Copilot | OAuth token | `llm_github_copilot_token` | `GITHUB_COPILOT_TOKEN` |
 | Ollama | None | - | - |
 | OpenRouter | API key | `llm_openrouter_api_key` | `OPENROUTER_API_KEY` |
 | OpenAI-compatible | Optional API key | `llm_compatible_api_key` | `LLM_API_KEY` |
@@ -239,6 +240,12 @@ with its own secret name and env var. It is **not** stored as `openai_compatible
 4. **Cache key in `self.llm_api_key`** for model fetching in Step 4
 5. Preserve `selected_model` on a same-backend re-run; clear it only when
    switching to a different backend
+
+**GitHub Copilot** (`setup_github_copilot`):
+- Offers **GitHub device login** (recommended) or manual token paste
+- Device login uses the VS Code Copilot OAuth client and stores the resulting token as `llm_github_copilot_token`
+- Validates the token against `https://api.githubcopilot.com/models` before saving
+- Injects `GITHUB_COPILOT_TOKEN` into the config overlay for immediate provider use
 
 **NEAR AI** (`setup_nearai`):
 - Calls `session_manager.ensure_authenticated()` which shows the auth menu:
@@ -530,7 +537,7 @@ pub struct Settings {
     pub secrets_master_key_source: KeySource, // Keychain | Env | None
 
     // Step 3: Inference
-    pub llm_backend: Option<String>,         // "nearai" | "anthropic" | "openai" | "ollama" | "openai_compatible" | "bedrock"
+    pub llm_backend: Option<String>,         // "nearai" | "anthropic" | "openai" | "github_copilot" | "ollama" | "openai_compatible" | "bedrock"
     pub ollama_base_url: Option<String>,
     pub openai_compatible_base_url: Option<String>,
 

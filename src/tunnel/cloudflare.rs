@@ -111,10 +111,23 @@ impl Tunnel for CloudflareTunnel {
             }
         }
 
-        // Drain stderr in the background to prevent SIGPIPE/buffer stalls.
-        tokio::spawn(async move { while let Ok(Some(_)) = reader.next_line().await {} });
+        if let Ok(mut guard) = self.url.write() {
+            *guard = Some(public_url.clone());
+        }
 
-        // Drain stdout silently.
+        // We took ownership of cloudflared's stderr pipe above to parse the URL.
+        // cloudflared continues writing logs for its entire lifetime. If we drop
+        // the reader, the pipe closes and cloudflared gets SIGPIPE on its next
+        // write. We can't just store the reader without reading — the OS pipe
+        // buffer fills up and cloudflared blocks. So we drain it in a background
+        // task. The task exits naturally when cloudflared is killed (EOF).
+        let drain_handle = tokio::spawn(async move {
+            while let Ok(Some(line)) = reader.next_line().await {
+                tracing::trace!("cloudflared: {line}");
+            }
+        });
+
+        // Drain stdout silently to prevent SIGPIPE/buffer stalls.
         if let Some(stdout) = stdout {
             tokio::spawn(async move {
                 let mut out_reader = tokio::io::BufReader::new(stdout).lines();
@@ -122,12 +135,11 @@ impl Tunnel for CloudflareTunnel {
             });
         }
 
-        if let Ok(mut guard) = self.url.write() {
-            *guard = Some(public_url.clone());
-        }
-
         let mut guard = self.proc.lock().await;
-        *guard = Some(TunnelProcess { child });
+        *guard = Some(TunnelProcess {
+            child,
+            _pipe_drain: Some(drain_handle),
+        });
 
         Ok(public_url)
     }

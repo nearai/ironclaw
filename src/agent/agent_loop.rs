@@ -16,6 +16,7 @@ use crate::agent::context_monitor::ContextMonitor;
 use crate::agent::heartbeat::spawn_heartbeat;
 use crate::agent::routine_engine::{RoutineEngine, spawn_cron_ticker};
 use crate::agent::self_repair::{DefaultSelfRepair, RepairResult, SelfRepair};
+use crate::agent::session::ThreadState;
 use crate::agent::session_manager::SessionManager;
 use crate::agent::submission::{Submission, SubmissionParser, SubmissionResult};
 use crate::agent::{HeartbeatConfig as AgentHeartbeatConfig, Router, Scheduler, SchedulerDeps};
@@ -82,6 +83,15 @@ fn resolve_owner_scope_notification_user(
     owner_fallback: Option<&str>,
 ) -> Option<String> {
     trimmed_option(explicit_user).or_else(|| trimmed_option(owner_fallback))
+}
+
+fn is_single_message_repl(message: &IncomingMessage) -> bool {
+    message.channel == "repl"
+        && message
+            .metadata
+            .get("single_message_mode")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false)
 }
 
 async fn resolve_channel_notification_user(
@@ -157,18 +167,21 @@ pub struct AgentDeps {
     pub hooks: Arc<HookRegistry>,
     /// Cost enforcement guardrails (daily budget, hourly rate limits).
     pub cost_guard: Arc<crate::agent::cost_guard::CostGuard>,
-    /// SSE broadcast sender for live job event streaming to the web gateway.
-    pub sse_tx: Option<tokio::sync::broadcast::Sender<crate::channels::web::types::SseEvent>>,
+    /// SSE manager for live job event streaming to the web gateway.
+    pub sse_tx: Option<Arc<crate::channels::web::sse::SseManager>>,
     /// HTTP interceptor for trace recording/replay.
     pub http_interceptor: Option<Arc<dyn crate::llm::recording::HttpInterceptor>>,
     /// Audio transcription middleware for voice messages.
-    pub transcription: Option<Arc<crate::transcription::TranscriptionMiddleware>>,
+    pub transcription: Option<Arc<crate::llm::transcription::TranscriptionMiddleware>>,
     /// Document text extraction middleware for PDF, DOCX, PPTX, etc.
     pub document_extraction: Option<Arc<crate::document_extraction::DocumentExtractionMiddleware>>,
     /// Sandbox readiness state for full-job routine dispatch.
     pub sandbox_readiness: crate::agent::routine_engine::SandboxReadiness,
     /// Software builder for self-repair tool rebuilding.
     pub builder: Option<Arc<dyn crate::tools::SoftwareBuilder>>,
+    /// Resolved LLM backend identifier (e.g., "nearai", "openai", "groq").
+    /// Used by `/model` persistence to determine which env var to update.
+    pub llm_backend: String,
 }
 
 /// The main agent that coordinates all components.
@@ -235,8 +248,8 @@ impl Agent {
                 hooks: deps.hooks.clone(),
             },
         );
-        if let Some(ref tx) = deps.sse_tx {
-            scheduler.set_sse_sender(tx.clone());
+        if let Some(ref sse) = deps.sse_tx {
+            scheduler.set_sse_sender(Arc::clone(sse));
         }
         if let Some(ref interceptor) = deps.http_interceptor {
             scheduler.set_http_interceptor(Arc::clone(interceptor));
@@ -1052,10 +1065,11 @@ impl Agent {
             } else {
                 drop(sess);
                 self.session_manager
-                    .resolve_thread(
+                    .resolve_thread_with_parsed_uuid(
                         &message.user_id,
                         &message.channel,
                         message.conversation_scope(),
+                        approval_thread_uuid,
                     )
                     .await
             }
@@ -1136,9 +1150,14 @@ impl Agent {
             && let Submission::UserInput { ref content } = submission
             && let Some(engine) = self.routine_engine().await
         {
-            let fired = engine
-                .check_event_triggers(&message.user_id, &message.channel, content)
-                .await;
+            let single_message_repl = is_single_message_repl(message);
+            // Use post-hook content so that BeforeInbound hooks that rewrite
+            // input are respected by event trigger matching.
+            let fired = if single_message_repl {
+                engine.check_event_triggers_and_wait(message, content).await
+            } else {
+                engine.check_event_triggers(message, content).await
+            };
             if fired > 0 {
                 tracing::debug!(
                     channel = %message.channel,
@@ -1146,15 +1165,105 @@ impl Agent {
                     fired,
                     "Consumed inbound user message with matching event-triggered routine(s)"
                 );
-                return Ok(Some(String::new()));
+                return if single_message_repl {
+                    Ok(None)
+                } else {
+                    Ok(Some(String::new()))
+                };
             }
         }
+
+        let session_for_empty_exit = Arc::clone(&session);
 
         // Process based on submission type
         let result = match submission {
             Submission::UserInput { content } => {
-                self.process_user_input(message, session, thread_id, &content)
-                    .await
+                let mut result = self
+                    .process_user_input(message, session.clone(), thread_id, &content)
+                    .await;
+
+                // Drain any messages queued during processing.
+                // Messages are merged (newline-separated) so the LLM receives
+                // full context from rapid consecutive inputs instead of
+                // processing each as a separate turn with partial context (#259).
+                //
+                // Only `Response` continues the drain — the user got a normal
+                // reply and there may be more queued messages to process.
+                //
+                // Everything else stops the loop:
+                // - `NeedApproval`: thread is blocked on user approval
+                // - `Interrupted`: turn was cancelled
+                // - `Ok`: control-command acknowledgment (including the "queued"
+                //    ack returned when a message arrives during Processing)
+                // - `Error`: soft error — draining more messages after an error
+                //    would produce confusing interleaved output
+                // - `Err(_)`: hard error
+                while let Ok(SubmissionResult::Response { content: outgoing }) = &result {
+                    let merged = {
+                        let mut sess = session.lock().await;
+                        sess.threads
+                            .get_mut(&thread_id)
+                            .and_then(|t| t.drain_pending_messages())
+                    };
+                    let Some(next_content) = merged else {
+                        break;
+                    };
+
+                    tracing::debug!(
+                        thread_id = %thread_id,
+                        merged_len = next_content.len(),
+                        "Drain loop: processing merged queued messages"
+                    );
+
+                    // Send the completed turn's response before starting the next.
+                    //
+                    // Known limitations:
+                    // - One-shot channels (HttpChannel) consume the response
+                    //   sender on the first respond() call keyed by msg.id.
+                    //   Subsequent calls (including the outer handler's final
+                    //   respond) are silently dropped. For one-shot channels
+                    //   only this intermediate response is delivered.
+                    // - All drain-loop responses are routed via the original
+                    //   `message`, so channels that key routing on message
+                    //   identity will attribute every response to the first
+                    //   message. This is acceptable for the current
+                    //   single-user-per-thread model.
+                    if let Err(e) = self
+                        .channels
+                        .respond(message, OutgoingResponse::text(outgoing.clone()))
+                        .await
+                    {
+                        tracing::warn!(
+                            thread_id = %thread_id,
+                            "Failed to send intermediate drain-loop response: {e}"
+                        );
+                    }
+
+                    // Process merged queued messages as a single turn.
+                    // Use a message clone with cleared attachments so
+                    // augment_with_attachments doesn't re-apply the original
+                    // message's attachments to unrelated queued text.
+                    let mut queued_msg = message.clone();
+                    queued_msg.attachments.clear();
+                    result = self
+                        .process_user_input(&queued_msg, session.clone(), thread_id, &next_content)
+                        .await;
+
+                    // If processing failed, re-queue the drained content so it
+                    // isn't lost. It will be picked up on the next successful turn.
+                    if !matches!(&result, Ok(SubmissionResult::Response { .. })) {
+                        let mut sess = session.lock().await;
+                        if let Some(thread) = sess.threads.get_mut(&thread_id) {
+                            thread.requeue_drained(next_content);
+                            tracing::debug!(
+                                thread_id = %thread_id,
+                                "Re-queued drained content after non-Response result"
+                            );
+                        }
+                    }
+                }
+
+                result
             }
             Submission::SystemCommand { command, args } => {
                 tracing::debug!(
@@ -1162,6 +1271,28 @@ impl Agent {
                     command,
                     message.channel
                 );
+                // /reasoning is special-cased here (not in handle_system_command)
+                // because it needs the session + thread_id to read turn reasoning
+                // data, which handle_system_command's signature doesn't provide.
+                if command == "reasoning" {
+                    let result = self
+                        .handle_reasoning_command(&args, &session, thread_id)
+                        .await;
+                    return match result {
+                        SubmissionResult::Response { content } => Ok(Some(content)),
+                        SubmissionResult::Ok { message } => Ok(message),
+                        SubmissionResult::Error { message } => {
+                            Ok(Some(format!("Error: {}", message)))
+                        }
+                        _ => {
+                            if is_single_message_repl(message) {
+                                Ok(None)
+                            } else {
+                                Ok(Some(String::new()))
+                            }
+                        }
+                    };
+                }
                 // Authorization checks (including restart channel check) are enforced in handle_system_command
                 self.handle_system_command(&command, &args, &message.channel)
                     .await
@@ -1221,7 +1352,26 @@ impl Agent {
                     Ok(Some(content))
                 }
             }
-            SubmissionResult::Ok { message } => Ok(message),
+            SubmissionResult::Ok {
+                message: output_message,
+            } => {
+                let should_exit =
+                    if output_message.as_deref() == Some("") && is_single_message_repl(message) {
+                        let sess = session_for_empty_exit.lock().await;
+                        sess.threads
+                            .get(&thread_id)
+                            .map(|thread| thread.state != ThreadState::AwaitingApproval)
+                            .unwrap_or(true)
+                    } else {
+                        false
+                    };
+
+                if should_exit {
+                    Ok(None)
+                } else {
+                    Ok(output_message)
+                }
+            }
             SubmissionResult::Error { message } => Ok(Some(format!("Error: {}", message))),
             SubmissionResult::Interrupted => Ok(Some("Interrupted.".into())),
             SubmissionResult::NeedApproval { .. } => {
@@ -1237,7 +1387,7 @@ impl Agent {
 #[cfg(test)]
 mod tests {
     use super::{
-        chat_tool_execution_metadata, resolve_routine_notification_user,
+        chat_tool_execution_metadata, is_single_message_repl, resolve_routine_notification_user,
         should_fallback_routine_notification, truncate_for_preview,
     };
     use crate::channels::IncomingMessage;
@@ -1398,5 +1548,18 @@ mod tests {
         };
 
         assert!(should_fallback_routine_notification(&error)); // safety: test-only assertion
+    }
+
+    #[test]
+    fn single_message_repl_detection_requires_repl_channel_and_metadata_flag() {
+        let repl = IncomingMessage::new("repl", "owner-scope", "hello")
+            .with_metadata(serde_json::json!({ "single_message_mode": true }));
+        let gateway = IncomingMessage::new("gateway", "owner-scope", "hello")
+            .with_metadata(serde_json::json!({ "single_message_mode": true }));
+        let plain_repl = IncomingMessage::new("repl", "owner-scope", "hello");
+
+        assert!(is_single_message_repl(&repl)); // safety: test-only assertion
+        assert!(!is_single_message_repl(&gateway)); // safety: test-only assertion
+        assert!(!is_single_message_repl(&plain_repl)); // safety: test-only assertion
     }
 }
