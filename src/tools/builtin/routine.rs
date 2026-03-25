@@ -608,7 +608,8 @@ fn routine_create_schema(include_compatibility_aliases: bool) -> Value {
 }
 
 pub(crate) fn routine_create_parameters_schema() -> Value {
-    routine_create_schema(false)
+    static CACHE: OnceLock<Value> = OnceLock::new();
+    CACHE.get_or_init(|| routine_create_schema(false)).clone()
 }
 
 fn routine_create_discovery_schema() -> Value {
@@ -914,7 +915,7 @@ fn parse_routine_create_request(
 fn build_routine_trigger(trigger: &NormalizedTriggerRequest) -> Trigger {
     match trigger {
         NormalizedTriggerRequest::Cron { schedule, timezone } => Trigger::Cron {
-            schedule: schedule.clone(),
+            schedule: normalize_cron_expression(schedule),
             timezone: timezone.clone(),
         },
         NormalizedTriggerRequest::Manual => Trigger::Manual,
@@ -1014,7 +1015,8 @@ fn event_emit_schema(include_source_alias: bool) -> Value {
 }
 
 pub(crate) fn event_emit_parameters_schema() -> Value {
-    event_emit_schema(false)
+    static CACHE: OnceLock<Value> = OnceLock::new();
+    CACHE.get_or_init(|| event_emit_schema(false)).clone()
 }
 
 fn event_emit_discovery_schema() -> Value {
@@ -1832,6 +1834,20 @@ mod tests {
         assert_eq!(parsed.delivery.channel.as_deref(), Some("telegram"));
         assert_eq!(parsed.delivery.user.as_deref(), Some("ops-team"));
         assert_eq!(parsed.cooldown_secs, 30);
+    }
+
+    #[test]
+    fn build_routine_trigger_normalizes_cron_schedule() {
+        let trigger = build_routine_trigger(&NormalizedTriggerRequest::Cron {
+            schedule: "0 0 9 * * MON-FRI".to_string(),
+            timezone: Some("UTC".to_string()),
+        });
+
+        assert!(matches!(
+            trigger,
+            Trigger::Cron { schedule, timezone }
+                if schedule == "0 0 9 * * MON-FRI *" && timezone.as_deref() == Some("UTC")
+        ));
     }
 
     #[test]

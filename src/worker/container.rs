@@ -151,7 +151,7 @@ Job: {}
 Description: {}
 
 You have tools for shell commands, file operations, and code editing.
-Work independently to complete this job. Report when done."#,
+Work independently to complete this job. When finished, your final message MUST include the phrase "The job is complete" to signal termination."#,
             job.title, job.description
         )));
 
@@ -372,6 +372,10 @@ impl LoopDelegate for ContainerDelegate {
 
         // Poll for follow-up prompts from the user
         self.poll_and_inject_prompt(reason_ctx).await;
+
+        // Claude 4.6 rejects assistant prefill; NEAR AI rejects any non-user-ending
+        // conversation. Ensure the last message is user-role before calling the LLM.
+        crate::util::ensure_ends_with_user_message(&mut reason_ctx.messages);
 
         // Refresh tools (in case WASM tools were built)
         reason_ctx.available_tools = self.tools.tool_definitions().await;

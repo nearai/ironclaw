@@ -15,6 +15,7 @@ use crate::workspace::document::{MemoryChunk, MemoryDocument, WorkspaceEntry};
 use crate::workspace::search::{RankedResult, SearchConfig, SearchResult, fuse_results};
 
 /// Database repository for workspace operations.
+#[derive(Clone)]
 pub struct Repository {
     pool: Pool,
 }
