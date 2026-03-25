@@ -93,6 +93,8 @@ pub async fn reflect(
         .grant(refl_thread.id, "reflection_tools", vec![], None, None)
         .await;
     refl_thread.capability_leases.push(lease.id);
+    store.save_thread(&refl_thread).await?;
+    store.save_lease(&lease).await?;
 
     // Run the execution loop
     let mut exec_loop = ExecutionLoop::new(
@@ -103,7 +105,8 @@ pub async fn reflect(
         policy,
         signal_rx,
         "system".to_string(),
-    );
+    )
+    .with_store(Arc::clone(store));
 
     let outcome = exec_loop.run().await?;
 

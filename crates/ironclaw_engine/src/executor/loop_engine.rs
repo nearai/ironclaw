@@ -39,6 +39,8 @@ pub struct ExecutionLoop {
     event_tx: Option<tokio::sync::broadcast::Sender<crate::types::event::ThreadEvent>>,
     /// Optional retrieval engine for injecting prior knowledge into context.
     retrieval: Option<crate::memory::RetrievalEngine>,
+    /// Optional Store for runtime prompt overlay loading.
+    store: Option<Arc<dyn crate::traits::store::Store>>,
 }
 
 impl ExecutionLoop {
@@ -62,6 +64,7 @@ impl ExecutionLoop {
             capabilities: None,
             event_tx: None,
             retrieval: None,
+            store: None,
         }
     }
 
@@ -89,6 +92,12 @@ impl ExecutionLoop {
         self
     }
 
+    /// Set the Store for runtime prompt overlay loading.
+    pub fn with_store(mut self, store: Arc<dyn crate::traits::store::Store>) -> Self {
+        self.store = Some(store);
+        self
+    }
+
     /// Add an event to the thread and broadcast it for live status updates.
     fn emit_event(&mut self, kind: EventKind) {
         let event = crate::types::event::ThreadEvent::new(self.thread.id, kind);
@@ -99,8 +108,32 @@ impl ExecutionLoop {
         self.thread.updated_at = chrono::Utc::now();
     }
 
+    async fn persist_runtime_state(
+        &self,
+        step: Option<&Step>,
+        persisted_event_count: &mut usize,
+    ) -> Result<(), EngineError> {
+        let Some(store) = self.store.as_ref() else {
+            return Ok(());
+        };
+
+        if let Some(step) = step {
+            store.save_step(step).await?;
+        }
+        if *persisted_event_count < self.thread.events.len() {
+            store
+                .append_events(&self.thread.events[*persisted_event_count..])
+                .await?;
+            *persisted_event_count = self.thread.events.len();
+        }
+        store.save_thread(&self.thread).await?;
+        Ok(())
+    }
+
     /// Run the execution loop to completion.
     pub async fn run(&mut self) -> Result<ThreadOutcome, EngineError> {
+        let mut persisted_event_count = 0;
+
         // Transition to Running
         self.thread.transition_to(ThreadState::Running, None)?;
 
@@ -120,11 +153,18 @@ impl ExecutionLoop {
                     Vec::new()
                 }
             };
-            let system_prompt = crate::executor::prompt::build_codeact_system_prompt(&actions);
+            let system_prompt = crate::executor::prompt::build_codeact_system_prompt(
+                &actions,
+                self.store.as_ref(),
+                self.thread.project_id,
+            )
+            .await;
             self.thread
                 .messages
                 .insert(0, ThreadMessage::system(system_prompt));
         }
+        self.persist_runtime_state(None, &mut persisted_event_count)
+            .await?;
 
         let max_iterations = self.thread.config.max_iterations;
         let max_nudges = self.thread.config.max_tool_intent_nudges;
@@ -145,10 +185,14 @@ impl ExecutionLoop {
                 SignalAction::Stop => {
                     self.thread
                         .transition_to(ThreadState::Completed, Some("stopped by signal".into()))?;
+                    self.persist_runtime_state(None, &mut persisted_event_count)
+                        .await?;
                     return Ok(ThreadOutcome::Stopped);
                 }
                 SignalAction::Inject(msg) => {
                     self.thread.add_message(msg);
+                    self.persist_runtime_state(None, &mut persisted_event_count)
+                        .await?;
                 }
             }
 
@@ -164,6 +208,8 @@ impl ExecutionLoop {
                 );
                 self.thread
                     .transition_to(ThreadState::Completed, Some("token limit exceeded".into()))?;
+                self.persist_runtime_state(None, &mut persisted_event_count)
+                    .await?;
                 return Ok(ThreadOutcome::Failed {
                     error: format!(
                         "Token limit exceeded: {} of {} tokens",
@@ -183,6 +229,8 @@ impl ExecutionLoop {
                     );
                     self.thread
                         .transition_to(ThreadState::Completed, Some("timeout".into()))?;
+                    self.persist_runtime_state(None, &mut persisted_event_count)
+                        .await?;
                     return Ok(ThreadOutcome::Failed {
                         error: format!("Thread timeout: {elapsed:?} of {max_dur:?}"),
                     });
@@ -200,6 +248,8 @@ impl ExecutionLoop {
                 );
                 self.thread
                     .transition_to(ThreadState::Completed, Some("USD budget exceeded".into()))?;
+                self.persist_runtime_state(None, &mut persisted_event_count)
+                    .await?;
                 return Ok(ThreadOutcome::Failed {
                     error: format!(
                         "USD budget exceeded: ${:.4} of ${:.4}",
@@ -257,6 +307,8 @@ impl ExecutionLoop {
             let mut step = Step::new(self.thread.id, iteration + 1);
             step.status = StepStatus::LlmCalling;
             self.emit_event(EventKind::StepStarted { step_id: step.id });
+            self.persist_runtime_state(Some(&step), &mut persisted_event_count)
+                .await?;
 
             // 7. Call LLM
             // CodeAct/RLM: send NO structured tool definitions — tools are described
@@ -338,6 +390,8 @@ impl ExecutionLoop {
                             ThreadState::Completed,
                             Some("FINAL() in text".into()),
                         )?;
+                        self.persist_runtime_state(Some(&step), &mut persisted_event_count)
+                            .await?;
                         return Ok(ThreadOutcome::Completed {
                             response: Some(answer),
                         });
@@ -365,6 +419,8 @@ impl ExecutionLoop {
                             tokens: step.tokens_used,
                         });
                         self.thread.step_count += 1;
+                        self.persist_runtime_state(Some(&step), &mut persisted_event_count)
+                            .await?;
                         continue;
                     }
 
@@ -382,6 +438,8 @@ impl ExecutionLoop {
 
                     self.thread
                         .transition_to(ThreadState::Completed, Some("text response".into()))?;
+                    self.persist_runtime_state(Some(&step), &mut persisted_event_count)
+                        .await?;
                     return Ok(ThreadOutcome::Completed {
                         response: Some(text),
                     });
@@ -464,8 +522,12 @@ impl ExecutionLoop {
                             ThreadState::Waiting,
                             Some("awaiting approval".into()),
                         )?;
+                        self.persist_runtime_state(Some(&step), &mut persisted_event_count)
+                            .await?;
                         return Ok(outcome);
                     }
+                    self.persist_runtime_state(Some(&step), &mut persisted_event_count)
+                        .await?;
                 }
 
                 LlmResponse::Code { code, content } => {
@@ -654,6 +716,8 @@ impl ExecutionLoop {
                     if let Some(answer) = code_result.final_answer {
                         self.thread
                             .transition_to(ThreadState::Completed, Some("FINAL() called".into()))?;
+                        self.persist_runtime_state(Some(&step), &mut persisted_event_count)
+                            .await?;
                         return Ok(ThreadOutcome::Completed {
                             response: Some(answer),
                         });
@@ -665,6 +729,8 @@ impl ExecutionLoop {
                             ThreadState::Waiting,
                             Some("awaiting approval".into()),
                         )?;
+                        self.persist_runtime_state(Some(&step), &mut persisted_event_count)
+                            .await?;
                         return Ok(outcome);
                     }
 
@@ -674,6 +740,9 @@ impl ExecutionLoop {
                     } else {
                         consecutive_errors = 0;
                     }
+
+                    self.persist_runtime_state(Some(&step), &mut persisted_event_count)
+                        .await?;
                 }
             }
 
@@ -693,6 +762,8 @@ impl ExecutionLoop {
                         "consecutive error threshold: {consecutive_errors} errors"
                     )),
                 )?;
+                self.persist_runtime_state(None, &mut persisted_event_count)
+                    .await?;
                 return Ok(ThreadOutcome::Failed {
                     error: format!(
                         "Consecutive error threshold exceeded: {consecutive_errors} of {max_errors}"
@@ -711,6 +782,8 @@ impl ExecutionLoop {
             ThreadState::Completed,
             Some("max iterations reached".into()),
         )?;
+        self.persist_runtime_state(None, &mut persisted_event_count)
+            .await?;
         Ok(ThreadOutcome::MaxIterations)
     }
 

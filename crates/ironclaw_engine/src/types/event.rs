@@ -132,4 +132,14 @@ pub enum EventKind {
     ReflectionFailed {
         error: String,
     },
+
+    // ── Self-improvement ──────────────────────────────────────
+    SelfImprovementStarted,
+    SelfImprovementComplete {
+        prompt_updated: bool,
+        patterns_added: usize,
+    },
+    SelfImprovementFailed {
+        error: String,
+    },
 }

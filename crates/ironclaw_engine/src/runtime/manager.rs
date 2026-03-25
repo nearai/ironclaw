@@ -7,6 +7,7 @@ use tokio::sync::RwLock;
 use tracing::{debug, error};
 
 use crate::capability::lease::LeaseManager;
+use crate::capability::planner::LeasePlanner;
 use crate::capability::policy::PolicyEngine;
 use crate::capability::registry::CapabilityRegistry;
 use crate::executor::ExecutionLoop;
@@ -18,7 +19,7 @@ use crate::traits::store::Store;
 use crate::types::error::EngineError;
 use crate::types::message::ThreadMessage;
 use crate::types::project::ProjectId;
-use crate::types::thread::{Thread, ThreadConfig, ThreadId, ThreadType};
+use crate::types::thread::{Thread, ThreadConfig, ThreadId, ThreadState, ThreadType};
 
 /// Handle to a running thread for checking results.
 struct RunningThread {
@@ -36,6 +37,7 @@ pub struct ThreadManager {
     pub capabilities: Arc<CapabilityRegistry>,
     pub leases: Arc<LeaseManager>,
     pub policy: Arc<PolicyEngine>,
+    lease_planner: LeasePlanner,
     tree: RwLock<ThreadTree>,
     running: RwLock<HashMap<ThreadId, RunningThread>>,
     /// Broadcast channel for thread events (for live status updates).
@@ -59,6 +61,7 @@ impl ThreadManager {
             capabilities,
             leases,
             policy,
+            lease_planner: LeasePlanner::new(),
             tree: RwLock::new(ThreadTree::new()),
             running: RwLock::new(HashMap::new()),
             event_tx,
@@ -124,12 +127,22 @@ impl ThreadManager {
             self.tree.write().await.add_child(pid, thread_id);
         }
 
-        // Grant leases for all registered capabilities
-        for cap in self.capabilities.list() {
+        // Grant explicit capability leases based on thread type.
+        for grant in self
+            .lease_planner
+            .plan_for_thread(thread_type, &self.capabilities)
+        {
             let lease = self
                 .leases
-                .grant(thread_id, &cap.name, vec![], None, None)
+                .grant(
+                    thread_id,
+                    grant.capability_name,
+                    grant.granted_actions,
+                    None,
+                    None,
+                )
                 .await;
+            self.store.save_lease(&lease).await?;
             thread.capability_leases.push(lease.id);
         }
 
@@ -159,7 +172,8 @@ impl ThreadManager {
         let exec_loop = ExecutionLoop::new(thread, llm, effects, leases, policy, rx, user_id)
             .with_capabilities(Arc::clone(&self.capabilities))
             .with_event_tx(self.event_tx.clone())
-            .with_retrieval(retrieval);
+            .with_retrieval(retrieval)
+            .with_store(Arc::clone(&self.store));
 
         // Spawn background task
         let store_for_task = Arc::clone(&self.store);
@@ -268,6 +282,13 @@ impl ThreadManager {
                 crate::executor::trace::write_trace(&trace);
             }
 
+            if let Err(e) = store_for_task.append_events(&exec.thread.events).await {
+                tracing::warn!(
+                    thread_id = %thread_id,
+                    "failed to persist thread events: {e}"
+                );
+            }
+
             // Save final thread state to store
             if let Err(e) = store_for_task.save_thread(&exec.thread).await {
                 tracing::warn!(
@@ -373,6 +394,38 @@ impl ThreadManager {
         }
         finished
     }
+
+    /// Reconcile persisted non-terminal threads after process startup.
+    ///
+    /// The current engine does not support mid-thread replay/resume, so any
+    /// thread left in a non-terminal state is marked failed-safe.
+    pub async fn recover_project_threads(
+        &self,
+        project_id: ProjectId,
+    ) -> Result<Vec<ThreadId>, EngineError> {
+        let threads = self.store.list_threads(project_id).await?;
+        let mut recovered = Vec::new();
+
+        for mut thread in threads {
+            if thread.state.is_terminal() || thread.state == ThreadState::Completed {
+                continue;
+            }
+
+            if thread
+                .transition_to(
+                    ThreadState::Failed,
+                    Some("engine restart before thread completion".into()),
+                )
+                .is_ok()
+            {
+                self.store.append_events(&thread.events).await?;
+                self.store.save_thread(&thread).await?;
+                recovered.push(thread.id);
+            }
+        }
+
+        Ok(recovered)
+    }
 }
 
 #[cfg(test)]
@@ -457,18 +510,38 @@ mod tests {
         }
     }
 
-    struct MockStore;
+    struct MockStore {
+        threads: RwLock<HashMap<ThreadId, Thread>>,
+        events: RwLock<HashMap<ThreadId, Vec<ThreadEvent>>>,
+    }
+
+    impl MockStore {
+        fn new() -> Self {
+            Self {
+                threads: RwLock::new(HashMap::new()),
+                events: RwLock::new(HashMap::new()),
+            }
+        }
+    }
 
     #[async_trait::async_trait]
     impl Store for MockStore {
-        async fn save_thread(&self, _: &Thread) -> Result<(), EngineError> {
+        async fn save_thread(&self, thread: &Thread) -> Result<(), EngineError> {
+            self.threads.write().await.insert(thread.id, thread.clone());
             Ok(())
         }
-        async fn load_thread(&self, _: ThreadId) -> Result<Option<Thread>, EngineError> {
-            Ok(None)
+        async fn load_thread(&self, id: ThreadId) -> Result<Option<Thread>, EngineError> {
+            Ok(self.threads.read().await.get(&id).cloned())
         }
-        async fn list_threads(&self, _: ProjectId) -> Result<Vec<Thread>, EngineError> {
-            Ok(vec![])
+        async fn list_threads(&self, project_id: ProjectId) -> Result<Vec<Thread>, EngineError> {
+            Ok(self
+                .threads
+                .read()
+                .await
+                .values()
+                .filter(|thread| thread.project_id == project_id)
+                .cloned()
+                .collect())
         }
         async fn update_thread_state(
             &self,
@@ -483,11 +556,24 @@ mod tests {
         async fn load_steps(&self, _: ThreadId) -> Result<Vec<Step>, EngineError> {
             Ok(vec![])
         }
-        async fn append_events(&self, _: &[ThreadEvent]) -> Result<(), EngineError> {
+        async fn append_events(&self, events: &[ThreadEvent]) -> Result<(), EngineError> {
+            let mut stored = self.events.write().await;
+            for event in events {
+                stored
+                    .entry(event.thread_id)
+                    .or_default()
+                    .push(event.clone());
+            }
             Ok(())
         }
-        async fn load_events(&self, _: ThreadId) -> Result<Vec<ThreadEvent>, EngineError> {
-            Ok(vec![])
+        async fn load_events(&self, thread_id: ThreadId) -> Result<Vec<ThreadEvent>, EngineError> {
+            Ok(self
+                .events
+                .read()
+                .await
+                .get(&thread_id)
+                .cloned()
+                .unwrap_or_default())
         }
         async fn save_project(&self, _: &Project) -> Result<(), EngineError> {
             Ok(())
@@ -566,7 +652,33 @@ mod tests {
         ThreadManager::new(
             llm,
             Arc::new(MockEffects),
-            Arc::new(MockStore),
+            Arc::new(MockStore::new()),
+            Arc::new(caps),
+            Arc::new(LeaseManager::new()),
+            Arc::new(PolicyEngine::new()),
+        )
+    }
+
+    fn make_manager_with_store(llm: Arc<dyn LlmBackend>, store: Arc<MockStore>) -> ThreadManager {
+        let mut caps = CapabilityRegistry::new();
+        caps.register(Capability {
+            name: "test".into(),
+            description: "Test capability".into(),
+            actions: vec![ActionDef {
+                name: "test_tool".into(),
+                description: "Test".into(),
+                parameters_schema: serde_json::json!({}),
+                effects: vec![EffectType::ReadLocal],
+                requires_approval: false,
+            }],
+            knowledge: vec![],
+            policies: vec![],
+        });
+
+        ThreadManager::new(
+            llm,
+            Arc::new(MockEffects),
+            store,
             Arc::new(caps),
             Arc::new(LeaseManager::new()),
             Arc::new(PolicyEngine::new()),
@@ -672,5 +784,40 @@ mod tests {
 
         assert_eq!(mgr.parent_of(child).await, Some(parent));
         assert_eq!(mgr.children_of(parent).await, vec![child]);
+    }
+
+    #[tokio::test]
+    async fn recover_project_threads_marks_non_terminal_as_failed() {
+        let store = Arc::new(MockStore::new());
+        let project = ProjectId::new();
+
+        let mut running = Thread::new(
+            "running",
+            ThreadType::Foreground,
+            project,
+            ThreadConfig::default(),
+        );
+        running.transition_to(ThreadState::Running, None).unwrap();
+        store.save_thread(&running).await.unwrap();
+
+        let mut completed = Thread::new(
+            "done",
+            ThreadType::Foreground,
+            project,
+            ThreadConfig::default(),
+        );
+        completed
+            .transition_to(ThreadState::Failed, Some("already terminal".into()))
+            .unwrap();
+        store.save_thread(&completed).await.unwrap();
+
+        let mgr = make_manager_with_store(MockLlm::text("ignored"), Arc::clone(&store));
+        let recovered = mgr.recover_project_threads(project).await.unwrap();
+
+        assert_eq!(recovered, vec![running.id]);
+        let saved = store.load_thread(running.id).await.unwrap().unwrap();
+        assert_eq!(saved.state, ThreadState::Failed);
+        let events = store.load_events(running.id).await.unwrap();
+        assert!(!events.is_empty());
     }
 }

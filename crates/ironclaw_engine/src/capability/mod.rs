@@ -5,6 +5,7 @@
 //! - [`PolicyEngine`] — deterministic effect-level allow/deny/approve
 
 pub mod lease;
+pub mod planner;
 pub mod policy;
 pub mod registry;
 

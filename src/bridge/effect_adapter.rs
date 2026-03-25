@@ -223,8 +223,7 @@ impl EffectBridgeAdapter {
         })
     }
 
-    /// Reset the per-step call counter (called between code steps).
-    #[allow(dead_code)]
+    /// Reset the per-step call counter (called between threads/steps).
     pub fn reset_call_count(&self) {
         self.call_count
             .store(0, std::sync::atomic::Ordering::Relaxed);
@@ -514,4 +513,61 @@ fn is_v1_only_tool(name: &str) -> bool {
             | "build_software"
             | "build-software"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_adapter() -> EffectBridgeAdapter {
+        use ironclaw_safety::SafetyConfig;
+        let config = SafetyConfig {
+            max_output_length: 10_000,
+            injection_check_enabled: false,
+        };
+        EffectBridgeAdapter::new(
+            Arc::new(ToolRegistry::new()),
+            Arc::new(SafetyLayer::new(&config)),
+            Arc::new(HookRegistry::default()),
+        )
+    }
+
+    /// Verify that reset_call_count resets the counter to zero,
+    /// preventing the "call limit reached" error across threads.
+    #[test]
+    fn call_count_resets_between_threads() {
+        let adapter = make_adapter();
+
+        // Simulate 50 tool calls (the limit)
+        for _ in 0..50 {
+            adapter
+                .call_count
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        assert_eq!(
+            adapter
+                .call_count
+                .load(std::sync::atomic::Ordering::Relaxed),
+            50
+        );
+
+        // Reset — simulates what handle_with_engine does before each thread
+        adapter.reset_call_count();
+        assert_eq!(
+            adapter
+                .call_count
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+    }
+
+    /// Verify that auto_approve_tool adds entries and is queryable.
+    #[tokio::test]
+    async fn auto_approve_tracks_tools() {
+        let adapter = make_adapter();
+
+        assert!(!adapter.auto_approved.read().await.contains("shell"));
+        adapter.auto_approve_tool("shell").await;
+        assert!(adapter.auto_approved.read().await.contains("shell"));
+    }
 }

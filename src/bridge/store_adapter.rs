@@ -1,40 +1,43 @@
-//! Hybrid store adapter — in-memory for ephemeral data, workspace for durable knowledge.
+//! Hybrid store adapter — workspace-backed persistence for engine state.
 //!
-//! Threads, steps, events, and leases are ephemeral (per-session).
-//! MemoryDocs (lessons, specs, playbooks from reflection) persist to the
-//! workspace so the engine learns across restarts.
+//! Reflection docs, projects, threads, steps, events, leases, and missions are
+//! cached in memory and mirrored to the workspace as JSON. This keeps the
+//! engine restart-safe without introducing dedicated DB tables yet.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use serde::de::DeserializeOwned;
 use tokio::sync::RwLock;
 use tracing::debug;
 
 use ironclaw_engine::{
-    CapabilityLease, DocId, DocType, EngineError, LeaseId, MemoryDoc, Project, ProjectId, Step,
-    Store, Thread, ThreadEvent, ThreadId, ThreadState,
+    CapabilityLease, ConversationId, ConversationSurface, DocId, DocType, EngineError, LeaseId,
+    MemoryDoc, Project, ProjectId, Step, Store, Thread, ThreadEvent, ThreadId, ThreadState,
     types::mission::{Mission, MissionId, MissionStatus},
 };
 
-use crate::workspace::Workspace;
+use crate::workspace::{Workspace, WorkspaceEntry};
 
-/// Workspace path prefix for engine memory docs.
 const ENGINE_DOCS_PREFIX: &str = "engine/docs";
+const PROJECTS_PREFIX: &str = "engine/state/projects";
+const CONVERSATIONS_PREFIX: &str = "engine/state/conversations";
+const THREADS_PREFIX: &str = "engine/state/threads";
+const STEPS_PREFIX: &str = "engine/state/steps";
+const EVENTS_PREFIX: &str = "engine/state/events";
+const LEASES_PREFIX: &str = "engine/state/leases";
+const MISSIONS_PREFIX: &str = "engine/state/missions";
 
-/// Hybrid store: in-memory for session data, workspace for durable knowledge.
+/// Workspace-backed engine store.
 pub struct HybridStore {
-    // ── Ephemeral (in-memory, per-session) ──
     threads: RwLock<HashMap<ThreadId, Thread>>,
     steps: RwLock<HashMap<ThreadId, Vec<Step>>>,
     events: RwLock<HashMap<ThreadId, Vec<ThreadEvent>>>,
     projects: RwLock<HashMap<ProjectId, Project>>,
+    conversations: RwLock<HashMap<ConversationId, ConversationSurface>>,
     leases: RwLock<HashMap<LeaseId, CapabilityLease>>,
     missions: RwLock<HashMap<MissionId, Mission>>,
-
-    // ── Durable (workspace-backed, survives restarts) ──
-    /// In-memory cache of docs (always in sync with workspace).
     docs: RwLock<HashMap<DocId, MemoryDoc>>,
-    /// Workspace for persistent storage. None if workspace unavailable.
     workspace: Option<Arc<Workspace>>,
 }
 
@@ -45,6 +48,7 @@ impl HybridStore {
             steps: RwLock::new(HashMap::new()),
             events: RwLock::new(HashMap::new()),
             projects: RwLock::new(HashMap::new()),
+            conversations: RwLock::new(HashMap::new()),
             leases: RwLock::new(HashMap::new()),
             missions: RwLock::new(HashMap::new()),
             docs: RwLock::new(HashMap::new()),
@@ -52,66 +56,139 @@ impl HybridStore {
         }
     }
 
-    /// Load existing docs from workspace on startup.
-    pub async fn load_docs_from_workspace(&self) {
-        let Some(ref ws) = self.workspace else {
+    /// Load persisted engine state from the workspace on startup.
+    pub async fn load_state_from_workspace(&self) {
+        let Some(ws) = self.workspace.as_ref() else {
             return;
         };
 
-        // List all engine doc files
-        let entries = match ws.list(ENGINE_DOCS_PREFIX).await {
-            Ok(entries) => entries,
-            Err(e) => {
-                debug!("no engine docs in workspace: {e}");
-                return;
+        self.load_docs(ws).await;
+        self.load_map(ws, PROJECTS_PREFIX, |project: Project| async {
+            self.projects.write().await.insert(project.id, project);
+        })
+        .await;
+        self.load_map(
+            ws,
+            CONVERSATIONS_PREFIX,
+            |conversation: ConversationSurface| async {
+                self.conversations
+                    .write()
+                    .await
+                    .insert(conversation.id, conversation);
+            },
+        )
+        .await;
+        self.load_map(ws, THREADS_PREFIX, |thread: Thread| async {
+            self.threads.write().await.insert(thread.id, thread);
+        })
+        .await;
+        self.load_map(ws, STEPS_PREFIX, |steps: Vec<Step>| async {
+            if let Some(thread_id) = steps.first().map(|step| step.thread_id) {
+                self.steps.write().await.insert(thread_id, steps);
             }
-        };
+        })
+        .await;
+        self.load_map(ws, EVENTS_PREFIX, |events: Vec<ThreadEvent>| async {
+            if let Some(thread_id) = events.first().map(|event| event.thread_id) {
+                self.events.write().await.insert(thread_id, events);
+            }
+        })
+        .await;
+        self.load_map(ws, LEASES_PREFIX, |lease: CapabilityLease| async {
+            self.leases.write().await.insert(lease.id, lease);
+        })
+        .await;
+        self.load_map(ws, MISSIONS_PREFIX, |mission: Mission| async {
+            self.missions.write().await.insert(mission.id, mission);
+        })
+        .await;
 
-        let mut loaded = 0;
-        for entry in &entries {
-            if entry.is_directory || !entry.path.ends_with(".json") {
-                continue;
-            }
+        debug!(
+            projects = self.projects.read().await.len(),
+            conversations = self.conversations.read().await.len(),
+            threads = self.threads.read().await.len(),
+            steps = self.steps.read().await.len(),
+            events = self.events.read().await.len(),
+            leases = self.leases.read().await.len(),
+            missions = self.missions.read().await.len(),
+            docs = self.docs.read().await.len(),
+            "loaded engine state from workspace"
+        );
+    }
+
+    async fn load_docs(&self, ws: &Workspace) {
+        for entry in self.json_entries(ws, ENGINE_DOCS_PREFIX).await {
             match ws.read(&entry.path).await {
-                Ok(ws_doc) => {
-                    if let Ok(doc) = serde_json::from_str::<MemoryDoc>(&ws_doc.content) {
-                        self.docs.write().await.insert(doc.id, doc);
-                        loaded += 1;
+                Ok(doc) => match serde_json::from_str::<MemoryDoc>(&doc.content) {
+                    Ok(memory_doc) => {
+                        self.docs.write().await.insert(memory_doc.id, memory_doc);
                     }
-                }
-                Err(e) => {
-                    debug!(path = %entry.path, "failed to read engine doc: {e}");
-                }
+                    Err(e) => debug!(path = %entry.path, "failed to parse engine doc: {e}"),
+                },
+                Err(e) => debug!(path = %entry.path, "failed to read engine doc: {e}"),
             }
-        }
-
-        if loaded > 0 {
-            debug!(loaded, "loaded engine docs from workspace");
         }
     }
 
-    /// Persist a MemoryDoc to workspace.
-    async fn persist_doc(&self, doc: &MemoryDoc) {
-        let Some(ref ws) = self.workspace else {
+    async fn load_map<T, F, Fut>(&self, ws: &Workspace, directory: &str, on_value: F)
+    where
+        T: DeserializeOwned,
+        F: Fn(T) -> Fut,
+        Fut: std::future::Future<Output = ()>,
+    {
+        for entry in self.json_entries(ws, directory).await {
+            match ws.read(&entry.path).await {
+                Ok(doc) => match serde_json::from_str::<T>(&doc.content) {
+                    Ok(value) => on_value(value).await,
+                    Err(e) => debug!(path = %entry.path, "failed to parse engine state: {e}"),
+                },
+                Err(e) => debug!(path = %entry.path, "failed to read engine state: {e}"),
+            }
+        }
+    }
+
+    async fn json_entries(&self, ws: &Workspace, directory: &str) -> Vec<WorkspaceEntry> {
+        let top = match ws.list(directory).await {
+            Ok(entries) => entries,
+            Err(_) => return Vec::new(),
+        };
+
+        let mut files = Vec::new();
+        for entry in top {
+            if entry.is_directory {
+                if let Ok(children) = ws.list(&entry.path).await {
+                    files.extend(
+                        children
+                            .into_iter()
+                            .filter(|child| !child.is_directory && child.path.ends_with(".json")),
+                    );
+                }
+            } else if entry.path.ends_with(".json") {
+                files.push(entry);
+            }
+        }
+        files
+    }
+
+    async fn persist_json<T: serde::Serialize>(&self, path: String, value: &T) {
+        let Some(ws) = self.workspace.as_ref() else {
             return;
         };
 
-        let path = doc_workspace_path(doc);
-        let json = match serde_json::to_string_pretty(doc) {
-            Ok(j) => j,
+        let json = match serde_json::to_string_pretty(value) {
+            Ok(json) => json,
             Err(e) => {
-                debug!("failed to serialize doc: {e}");
+                debug!(path = %path, "failed to serialize engine state: {e}");
                 return;
             }
         };
 
         if let Err(e) = ws.write(&path, &json).await {
-            debug!(path = %path, "failed to persist engine doc: {e}");
+            debug!(path = %path, "failed to persist engine state: {e}");
         }
     }
 }
 
-/// Build workspace path for a MemoryDoc.
 fn doc_workspace_path(doc: &MemoryDoc) -> String {
     let type_dir = match doc.doc_type {
         DocType::Summary => "summaries",
@@ -124,12 +201,39 @@ fn doc_workspace_path(doc: &MemoryDoc) -> String {
     format!("{ENGINE_DOCS_PREFIX}/{type_dir}/{}.json", doc.id.0)
 }
 
+fn project_path(project_id: ProjectId) -> String {
+    format!("{PROJECTS_PREFIX}/{}.json", project_id.0)
+}
+
+fn thread_path(thread_id: ThreadId) -> String {
+    format!("{THREADS_PREFIX}/{}.json", thread_id.0)
+}
+
+fn conversation_path(conversation_id: ConversationId) -> String {
+    format!("{CONVERSATIONS_PREFIX}/{}.json", conversation_id.0)
+}
+
+fn step_path(thread_id: ThreadId) -> String {
+    format!("{STEPS_PREFIX}/{}.json", thread_id.0)
+}
+
+fn event_path(thread_id: ThreadId) -> String {
+    format!("{EVENTS_PREFIX}/{}.json", thread_id.0)
+}
+
+fn lease_path(lease_id: LeaseId) -> String {
+    format!("{LEASES_PREFIX}/{}.json", lease_id.0)
+}
+
+fn mission_path(mission_id: MissionId) -> String {
+    format!("{MISSIONS_PREFIX}/{}.json", mission_id.0)
+}
+
 #[async_trait::async_trait]
 impl Store for HybridStore {
-    // ── Thread (ephemeral) ──────────────────────────────────
-
     async fn save_thread(&self, thread: &Thread) -> Result<(), EngineError> {
         self.threads.write().await.insert(thread.id, thread.clone());
+        self.persist_json(thread_path(thread.id), thread).await;
         Ok(())
     }
 
@@ -143,7 +247,7 @@ impl Store for HybridStore {
             .read()
             .await
             .values()
-            .filter(|t| t.project_id == project_id)
+            .filter(|thread| thread.project_id == project_id)
             .cloned()
             .collect())
     }
@@ -153,21 +257,38 @@ impl Store for HybridStore {
         id: ThreadId,
         state: ThreadState,
     ) -> Result<(), EngineError> {
-        if let Some(thread) = self.threads.write().await.get_mut(&id) {
-            thread.state = state;
+        let updated = {
+            let mut threads = self.threads.write().await;
+            if let Some(thread) = threads.get_mut(&id) {
+                thread.state = state;
+                Some(thread.clone())
+            } else {
+                None
+            }
+        };
+        if let Some(thread) = updated.as_ref() {
+            self.persist_json(thread_path(id), thread).await;
         }
         Ok(())
     }
 
-    // ── Step (ephemeral) ────────────────────────────────────
-
     async fn save_step(&self, step: &Step) -> Result<(), EngineError> {
-        self.steps
-            .write()
-            .await
-            .entry(step.thread_id)
-            .or_default()
-            .push(step.clone());
+        let snapshot = {
+            let mut steps = self.steps.write().await;
+            let thread_steps = steps.entry(step.thread_id).or_default();
+            if let Some(existing) = thread_steps
+                .iter_mut()
+                .find(|existing| existing.id == step.id)
+            {
+                *existing = step.clone();
+            } else {
+                thread_steps.push(step.clone());
+                thread_steps.sort_by_key(|saved| saved.sequence);
+            }
+            thread_steps.clone()
+        };
+        self.persist_json(step_path(step.thread_id), &snapshot)
+            .await;
         Ok(())
     }
 
@@ -181,15 +302,28 @@ impl Store for HybridStore {
             .unwrap_or_default())
     }
 
-    // ── Event (ephemeral) ───────────────────────────────────
-
     async fn append_events(&self, events: &[ThreadEvent]) -> Result<(), EngineError> {
-        let mut store = self.events.write().await;
+        let mut grouped: HashMap<ThreadId, Vec<ThreadEvent>> = HashMap::new();
         for event in events {
-            store
+            grouped
                 .entry(event.thread_id)
                 .or_default()
                 .push(event.clone());
+        }
+
+        for (thread_id, new_events) in grouped {
+            let snapshot = {
+                let mut stored = self.events.write().await;
+                let thread_events = stored.entry(thread_id).or_default();
+                for event in new_events {
+                    if !thread_events.iter().any(|existing| existing.id == event.id) {
+                        thread_events.push(event);
+                    }
+                }
+                thread_events.sort_by_key(|event| event.timestamp);
+                thread_events.clone()
+            };
+            self.persist_json(event_path(thread_id), &snapshot).await;
         }
         Ok(())
     }
@@ -204,13 +338,12 @@ impl Store for HybridStore {
             .unwrap_or_default())
     }
 
-    // ── Project (ephemeral) ─────────────────────────────────
-
     async fn save_project(&self, project: &Project) -> Result<(), EngineError> {
         self.projects
             .write()
             .await
             .insert(project.id, project.clone());
+        self.persist_json(project_path(project.id), project).await;
         Ok(())
     }
 
@@ -218,13 +351,47 @@ impl Store for HybridStore {
         Ok(self.projects.read().await.get(&id).cloned())
     }
 
-    // ── MemoryDoc (DURABLE — persisted to workspace) ────────
+    async fn list_projects(&self) -> Result<Vec<Project>, EngineError> {
+        Ok(self.projects.read().await.values().cloned().collect())
+    }
+
+    async fn save_conversation(
+        &self,
+        conversation: &ConversationSurface,
+    ) -> Result<(), EngineError> {
+        self.conversations
+            .write()
+            .await
+            .insert(conversation.id, conversation.clone());
+        self.persist_json(conversation_path(conversation.id), conversation)
+            .await;
+        Ok(())
+    }
+
+    async fn load_conversation(
+        &self,
+        id: ConversationId,
+    ) -> Result<Option<ConversationSurface>, EngineError> {
+        Ok(self.conversations.read().await.get(&id).cloned())
+    }
+
+    async fn list_conversations(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<ConversationSurface>, EngineError> {
+        Ok(self
+            .conversations
+            .read()
+            .await
+            .values()
+            .filter(|conversation| conversation.user_id == user_id)
+            .cloned()
+            .collect())
+    }
 
     async fn save_memory_doc(&self, doc: &MemoryDoc) -> Result<(), EngineError> {
-        // Save to in-memory cache
         self.docs.write().await.insert(doc.id, doc.clone());
-        // Persist to workspace
-        self.persist_doc(doc).await;
+        self.persist_json(doc_workspace_path(doc), doc).await;
         Ok(())
     }
 
@@ -238,15 +405,14 @@ impl Store for HybridStore {
             .read()
             .await
             .values()
-            .filter(|d| d.project_id == project_id)
+            .filter(|doc| doc.project_id == project_id)
             .cloned()
             .collect())
     }
 
-    // ── Lease (ephemeral) ───────────────────────────────────
-
     async fn save_lease(&self, lease: &CapabilityLease) -> Result<(), EngineError> {
         self.leases.write().await.insert(lease.id, lease.clone());
+        self.persist_json(lease_path(lease.id), lease).await;
         Ok(())
     }
 
@@ -259,25 +425,33 @@ impl Store for HybridStore {
             .read()
             .await
             .values()
-            .filter(|l| l.thread_id == thread_id && l.is_valid())
+            .filter(|lease| lease.thread_id == thread_id && lease.is_valid())
             .cloned()
             .collect())
     }
 
     async fn revoke_lease(&self, lease_id: LeaseId, _reason: &str) -> Result<(), EngineError> {
-        if let Some(lease) = self.leases.write().await.get_mut(&lease_id) {
-            lease.revoked = true;
+        let updated = {
+            let mut leases = self.leases.write().await;
+            if let Some(lease) = leases.get_mut(&lease_id) {
+                lease.revoked = true;
+                Some(lease.clone())
+            } else {
+                None
+            }
+        };
+        if let Some(lease) = updated.as_ref() {
+            self.persist_json(lease_path(lease_id), lease).await;
         }
         Ok(())
     }
-
-    // ── Mission (ephemeral) ──────────────────────────────────
 
     async fn save_mission(&self, mission: &Mission) -> Result<(), EngineError> {
         self.missions
             .write()
             .await
             .insert(mission.id, mission.clone());
+        self.persist_json(mission_path(mission.id), mission).await;
         Ok(())
     }
 
@@ -291,7 +465,7 @@ impl Store for HybridStore {
             .read()
             .await
             .values()
-            .filter(|m| m.project_id == project_id)
+            .filter(|mission| mission.project_id == project_id)
             .cloned()
             .collect())
     }
@@ -301,8 +475,18 @@ impl Store for HybridStore {
         id: MissionId,
         status: MissionStatus,
     ) -> Result<(), EngineError> {
-        if let Some(mission) = self.missions.write().await.get_mut(&id) {
-            mission.status = status;
+        let updated = {
+            let mut missions = self.missions.write().await;
+            if let Some(mission) = missions.get_mut(&id) {
+                mission.status = status;
+                mission.updated_at = chrono::Utc::now();
+                Some(mission.clone())
+            } else {
+                None
+            }
+        };
+        if let Some(mission) = updated.as_ref() {
+            self.persist_json(mission_path(id), mission).await;
         }
         Ok(())
     }

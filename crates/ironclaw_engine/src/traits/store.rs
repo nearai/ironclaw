@@ -4,6 +4,7 @@
 //! this by wrapping its dual-backend `Database` trait (PostgreSQL + libSQL).
 
 use crate::types::capability::{CapabilityLease, LeaseId};
+use crate::types::conversation::{ConversationId, ConversationSurface};
 use crate::types::error::EngineError;
 use crate::types::event::ThreadEvent;
 use crate::types::memory::{DocId, MemoryDoc};
@@ -40,6 +41,33 @@ pub trait Store: Send + Sync {
 
     async fn save_project(&self, project: &Project) -> Result<(), EngineError>;
     async fn load_project(&self, id: ProjectId) -> Result<Option<Project>, EngineError>;
+    async fn list_projects(&self) -> Result<Vec<Project>, EngineError> {
+        Ok(Vec::new())
+    }
+
+    // ── Conversation operations ─────────────────────────────
+
+    async fn save_conversation(
+        &self,
+        conversation: &ConversationSurface,
+    ) -> Result<(), EngineError> {
+        let _ = conversation;
+        Ok(())
+    }
+    async fn load_conversation(
+        &self,
+        id: ConversationId,
+    ) -> Result<Option<ConversationSurface>, EngineError> {
+        let _ = id;
+        Ok(None)
+    }
+    async fn list_conversations(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<ConversationSurface>, EngineError> {
+        let _ = user_id;
+        Ok(Vec::new())
+    }
 
     // ── Memory doc operations ───────────────────────────────
 

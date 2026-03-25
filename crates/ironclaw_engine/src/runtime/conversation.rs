@@ -13,6 +13,7 @@ use tracing::debug;
 
 use crate::runtime::manager::ThreadManager;
 use crate::runtime::messaging::ThreadOutcome;
+use crate::traits::store::Store;
 use crate::types::conversation::{ConversationEntry, ConversationId, ConversationSurface};
 use crate::types::error::EngineError;
 use crate::types::message::ThreadMessage;
@@ -27,29 +28,69 @@ use crate::types::thread::{ThreadConfig, ThreadId, ThreadType};
 /// 3. Create a new conversation if none exists for this channel+user
 pub struct ConversationManager {
     thread_manager: Arc<ThreadManager>,
+    store: Arc<dyn Store>,
     conversations: RwLock<HashMap<ConversationId, ConversationSurface>>,
     /// Maps (channel, user_id) → conversation ID for lookup.
     channel_user_index: RwLock<HashMap<(String, String), ConversationId>>,
 }
 
 impl ConversationManager {
-    pub fn new(thread_manager: Arc<ThreadManager>) -> Self {
+    pub fn new(thread_manager: Arc<ThreadManager>, store: Arc<dyn Store>) -> Self {
         Self {
             thread_manager,
+            store,
             conversations: RwLock::new(HashMap::new()),
             channel_user_index: RwLock::new(HashMap::new()),
         }
     }
 
+    /// Restore persisted conversations for a user into the in-memory index.
+    pub async fn bootstrap_user(&self, user_id: &str) -> Result<usize, EngineError> {
+        let conversations = self.store.list_conversations(user_id).await?;
+        let count = conversations.len();
+        let mut convs = self.conversations.write().await;
+        let mut index = self.channel_user_index.write().await;
+
+        for conversation in conversations {
+            index.insert(
+                (conversation.channel.clone(), conversation.user_id.clone()),
+                conversation.id,
+            );
+            convs.insert(conversation.id, conversation);
+        }
+
+        Ok(count)
+    }
+
     /// Get or create a conversation for a channel+user pair.
-    pub async fn get_or_create_conversation(&self, channel: &str, user_id: &str) -> ConversationId {
+    pub async fn get_or_create_conversation(
+        &self,
+        channel: &str,
+        user_id: &str,
+    ) -> Result<ConversationId, EngineError> {
         // Check index first
         let key = (channel.to_string(), user_id.to_string());
         {
             let index = self.channel_user_index.read().await;
             if let Some(conv_id) = index.get(&key) {
-                return *conv_id;
+                return Ok(*conv_id);
             }
+        }
+
+        // Check persisted conversations for this user/channel.
+        if let Some(conv) = self
+            .store
+            .list_conversations(user_id)
+            .await?
+            .into_iter()
+            .find(|conv| conv.channel == channel)
+        {
+            let conv_id = conv.id;
+            let mut convs = self.conversations.write().await;
+            let mut index = self.channel_user_index.write().await;
+            convs.insert(conv_id, conv);
+            index.insert(key, conv_id);
+            return Ok(conv_id);
         }
 
         // Create new conversation
@@ -58,11 +99,12 @@ impl ConversationManager {
 
         let mut convs = self.conversations.write().await;
         let mut index = self.channel_user_index.write().await;
-        convs.insert(conv_id, conv);
+        convs.insert(conv_id, conv.clone());
         index.insert(key, conv_id);
+        self.store.save_conversation(&conv).await?;
 
         debug!(conversation_id = %conv_id, channel, user_id, "created conversation");
-        conv_id
+        Ok(conv_id)
     }
 
     /// Handle an incoming user message.
@@ -101,6 +143,7 @@ impl ConversationManager {
                 self.thread_manager
                     .inject_message(thread_id, ThreadMessage::user(content))
                     .await?;
+                self.store.save_conversation(conv).await?;
                 Ok(thread_id)
             }
             None => {
@@ -126,6 +169,7 @@ impl ConversationManager {
                     thread_id,
                     "Thread started",
                 ));
+                self.store.save_conversation(conv).await?;
 
                 debug!(
                     conversation_id = %conversation_id,
@@ -143,7 +187,7 @@ impl ConversationManager {
         conversation_id: ConversationId,
         thread_id: ThreadId,
         outcome: &ThreadOutcome,
-    ) {
+    ) -> Result<(), EngineError> {
         let mut convs = self.conversations.write().await;
         if let Some(conv) = convs.get_mut(&conversation_id) {
             match outcome {
@@ -186,7 +230,9 @@ impl ConversationManager {
                     // Thread stays active — waiting for approval
                 }
             }
+            self.store.save_conversation(conv).await?;
         }
+        Ok(())
     }
 
     /// Get a snapshot of a conversation.
@@ -259,7 +305,7 @@ mod tests {
     use crate::traits::llm::{LlmBackend, LlmCallConfig, LlmOutput};
     use crate::traits::store::Store;
     use crate::types::capability::{ActionDef, CapabilityLease};
-    use crate::types::conversation::EntrySender;
+    use crate::types::conversation::{ConversationId, ConversationSurface, EntrySender};
     use crate::types::event::ThreadEvent;
     use crate::types::memory::{DocId, MemoryDoc};
     use crate::types::project::Project;
@@ -322,7 +368,17 @@ mod tests {
         }
     }
 
-    struct MockStore;
+    struct MockStore {
+        conversations: RwLock<HashMap<ConversationId, ConversationSurface>>,
+    }
+
+    impl MockStore {
+        fn new() -> Self {
+            Self {
+                conversations: RwLock::new(HashMap::new()),
+            }
+        }
+    }
 
     #[async_trait::async_trait]
     impl Store for MockStore {
@@ -365,6 +421,35 @@ mod tests {
         }
         async fn load_project(&self, _: ProjectId) -> Result<Option<Project>, EngineError> {
             Ok(None)
+        }
+        async fn save_conversation(
+            &self,
+            conversation: &ConversationSurface,
+        ) -> Result<(), EngineError> {
+            self.conversations
+                .write()
+                .await
+                .insert(conversation.id, conversation.clone());
+            Ok(())
+        }
+        async fn load_conversation(
+            &self,
+            id: ConversationId,
+        ) -> Result<Option<ConversationSurface>, EngineError> {
+            Ok(self.conversations.read().await.get(&id).cloned())
+        }
+        async fn list_conversations(
+            &self,
+            user_id: &str,
+        ) -> Result<Vec<ConversationSurface>, EngineError> {
+            Ok(self
+                .conversations
+                .read()
+                .await
+                .values()
+                .filter(|conversation| conversation.user_id == user_id)
+                .cloned()
+                .collect())
         }
         async fn save_memory_doc(&self, _: &MemoryDoc) -> Result<(), EngineError> {
             Ok(())
@@ -419,18 +504,19 @@ mod tests {
     }
 
     fn make_conv_manager() -> (Arc<ThreadManager>, ConversationManager) {
+        let store = Arc::new(MockStore::new());
         let tm = Arc::new(ThreadManager::new(
             Arc::new(MockLlm(Mutex::new(vec![LlmOutput {
                 response: LlmResponse::Text("Hello!".into()),
                 usage: TokenUsage::default(),
             }]))),
             Arc::new(MockEffects),
-            Arc::new(MockStore),
+            store.clone(),
             Arc::new(CapabilityRegistry::new()),
             Arc::new(LeaseManager::new()),
             Arc::new(PolicyEngine::new()),
         ));
-        let cm = ConversationManager::new(Arc::clone(&tm));
+        let cm = ConversationManager::new(Arc::clone(&tm), store);
         (tm, cm)
     }
 
@@ -439,18 +525,27 @@ mod tests {
     #[tokio::test]
     async fn get_or_create_conversation() {
         let (_, cm) = make_conv_manager();
-        let c1 = cm.get_or_create_conversation("telegram", "user1").await;
-        let c2 = cm.get_or_create_conversation("telegram", "user1").await;
+        let c1 = cm
+            .get_or_create_conversation("telegram", "user1")
+            .await
+            .unwrap();
+        let c2 = cm
+            .get_or_create_conversation("telegram", "user1")
+            .await
+            .unwrap();
         assert_eq!(c1, c2); // same channel+user returns same conversation
 
-        let c3 = cm.get_or_create_conversation("slack", "user1").await;
+        let c3 = cm
+            .get_or_create_conversation("slack", "user1")
+            .await
+            .unwrap();
         assert_ne!(c1, c3); // different channel → different conversation
     }
 
     #[tokio::test]
     async fn handle_message_spawns_thread() {
         let (tm, cm) = make_conv_manager();
-        let conv_id = cm.get_or_create_conversation("web", "user1").await;
+        let conv_id = cm.get_or_create_conversation("web", "user1").await.unwrap();
         let project = ProjectId::new();
 
         let tid = cm
@@ -471,7 +566,7 @@ mod tests {
     #[tokio::test]
     async fn record_outcome_adds_entry() {
         let (_, cm) = make_conv_manager();
-        let conv_id = cm.get_or_create_conversation("cli", "user1").await;
+        let conv_id = cm.get_or_create_conversation("cli", "user1").await.unwrap();
         let tid = ThreadId::new();
 
         // Manually track a thread
@@ -489,7 +584,8 @@ mod tests {
                 response: Some("Done!".into()),
             },
         )
-        .await;
+        .await
+        .unwrap();
 
         let conv = cm.get_conversation(conv_id).await.unwrap();
         assert!(conv.active_threads.is_empty());
@@ -506,14 +602,43 @@ mod tests {
     #[tokio::test]
     async fn list_conversations_filters_by_user() {
         let (_, cm) = make_conv_manager();
-        cm.get_or_create_conversation("web", "alice").await;
-        cm.get_or_create_conversation("telegram", "alice").await;
-        cm.get_or_create_conversation("web", "bob").await;
+        cm.get_or_create_conversation("web", "alice").await.unwrap();
+        cm.get_or_create_conversation("telegram", "alice")
+            .await
+            .unwrap();
+        cm.get_or_create_conversation("web", "bob").await.unwrap();
 
         let alice_convs = cm.list_conversations("alice").await;
         assert_eq!(alice_convs.len(), 2);
 
         let bob_convs = cm.list_conversations("bob").await;
         assert_eq!(bob_convs.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn bootstrap_user_loads_persisted_conversations() {
+        let store = Arc::new(MockStore::new());
+        let mut conv = ConversationSurface::new("web", "user1");
+        conv.add_entry(ConversationEntry::user("persisted"));
+        store.save_conversation(&conv).await.unwrap();
+
+        let tm = Arc::new(ThreadManager::new(
+            Arc::new(MockLlm(Mutex::new(vec![]))),
+            Arc::new(MockEffects),
+            store.clone(),
+            Arc::new(CapabilityRegistry::new()),
+            Arc::new(LeaseManager::new()),
+            Arc::new(PolicyEngine::new()),
+        ));
+        let cm = ConversationManager::new(tm, store);
+
+        let loaded = cm.bootstrap_user("user1").await.unwrap();
+        assert_eq!(loaded, 1);
+
+        let conv_id = cm.get_or_create_conversation("web", "user1").await.unwrap();
+        assert_eq!(conv_id, conv.id);
+        let saved = cm.get_conversation(conv.id).await.unwrap();
+        assert_eq!(saved.entries.len(), 1);
+        assert_eq!(saved.entries[0].content, "persisted");
     }
 }

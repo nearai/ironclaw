@@ -36,6 +36,21 @@ impl MissionManager {
         }
     }
 
+    /// Populate the active mission index from persisted mission state.
+    pub async fn bootstrap_project(&self, project_id: ProjectId) -> Result<usize, EngineError> {
+        let missions = self.store.list_missions(project_id).await?;
+        let active_ids: Vec<MissionId> = missions
+            .into_iter()
+            .filter(|mission| mission.status == MissionStatus::Active)
+            .map(|mission| mission.id)
+            .collect();
+
+        let count = active_ids.len();
+        *self.active.write().await = active_ids;
+        debug!(project_id = ?project_id, active_missions = count, "bootstrapped active missions");
+        Ok(count)
+    }
+
     /// Create and persist a new mission. Returns the mission ID.
     pub async fn create_mission(
         &self,
@@ -57,6 +72,7 @@ impl MissionManager {
         self.store
             .update_mission_status(id, MissionStatus::Paused)
             .await?;
+        self.active.write().await.retain(|mid| *mid != id);
         debug!(mission_id = %id, "mission paused");
         Ok(())
     }
@@ -66,6 +82,10 @@ impl MissionManager {
         self.store
             .update_mission_status(id, MissionStatus::Active)
             .await?;
+        let mut active = self.active.write().await;
+        if !active.contains(&id) {
+            active.push(id);
+        }
         debug!(mission_id = %id, "mission resumed");
         Ok(())
     }
@@ -196,6 +216,218 @@ impl MissionManager {
         self.store.load_mission(id).await
     }
 
+    /// Fire all active `OnSystemEvent` missions whose source and event_type match.
+    ///
+    /// The optional `payload` is forwarded as `trigger_payload` to each mission's
+    /// thread, carrying context like trace issues and reflection docs.
+    pub async fn fire_on_system_event(
+        &self,
+        source: &str,
+        event_type: &str,
+        user_id: &str,
+        payload: Option<serde_json::Value>,
+    ) -> Result<Vec<ThreadId>, EngineError> {
+        let active_ids = self.active.read().await.clone();
+        let mut spawned = Vec::new();
+
+        for mid in active_ids {
+            let mission = match self.store.load_mission(mid).await? {
+                Some(m) if m.status == MissionStatus::Active => m,
+                _ => continue,
+            };
+
+            let matches = match &mission.cadence {
+                MissionCadence::OnSystemEvent {
+                    source: s,
+                    event_type: et,
+                } => s == source && et == event_type,
+                _ => false,
+            };
+
+            if matches && let Some(tid) = self.fire_mission(mid, user_id, payload.clone()).await? {
+                spawned.push(tid);
+            }
+        }
+
+        Ok(spawned)
+    }
+
+    /// Start a background event listener that fires `OnSystemEvent` missions
+    /// when threads complete with issues.
+    ///
+    /// Subscribes to the ThreadManager's event broadcast channel and watches
+    /// for thread completion events. When a non-Mission, non-Reflection thread
+    /// completes and its trace has issues, fires matching OnSystemEvent missions
+    /// with trace data as the trigger payload.
+    pub fn start_event_listener(self: &Arc<Self>, user_id: String) {
+        let mgr = Arc::clone(self);
+        let mut rx = mgr.thread_manager.subscribe_events();
+        tokio::spawn(async move {
+            loop {
+                match rx.recv().await {
+                    Ok(event) => {
+                        // React to ReflectionComplete — the thread is done and
+                        // we have reflection doc info for the trigger payload.
+                        if let crate::types::event::EventKind::ReflectionComplete {
+                            docs_produced,
+                            ref doc_types,
+                            ..
+                        } = event.kind
+                        {
+                            // Load the thread to check its type and build the payload
+                            let thread = mgr.store.load_thread(event.thread_id).await;
+                            let thread = match thread {
+                                Ok(Some(t)) => t,
+                                _ => continue,
+                            };
+
+                            // Skip Mission and Reflection threads (no recursive self-improvement)
+                            if matches!(
+                                thread.thread_type,
+                                ThreadType::Mission | ThreadType::Reflection
+                            ) {
+                                continue;
+                            }
+
+                            // Build trace to check for issues
+                            let trace = crate::executor::trace::build_trace(&thread);
+                            if trace.issues.is_empty() {
+                                continue;
+                            }
+
+                            // Build trigger payload with trace issues, error messages,
+                            // and reflection summary
+                            let issues: Vec<serde_json::Value> = trace
+                                .issues
+                                .iter()
+                                .map(|i| {
+                                    serde_json::json!({
+                                        "severity": format!("{:?}", i.severity),
+                                        "category": i.category,
+                                        "description": i.description,
+                                        "step": i.step,
+                                    })
+                                })
+                                .collect();
+
+                            // Extract actual error text from ActionFailed events
+                            // and system messages (these contain the real diagnostics)
+                            let error_messages: Vec<String> = thread
+                                .events
+                                .iter()
+                                .filter_map(|e| {
+                                    if let crate::types::event::EventKind::ActionFailed {
+                                        action_name,
+                                        error,
+                                        ..
+                                    } = &e.kind
+                                    {
+                                        Some(format!("{action_name}: {error}"))
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .take(10) // cap to avoid bloating payload
+                                .collect();
+
+                            let payload = serde_json::json!({
+                                "source_thread_id": event.thread_id.0.to_string(),
+                                "goal": thread.goal,
+                                "issues": issues,
+                                "error_messages": error_messages,
+                                "reflection": {
+                                    "docs_produced": docs_produced,
+                                    "doc_types": doc_types,
+                                },
+                            });
+
+                            if let Err(e) = mgr
+                                .fire_on_system_event(
+                                    "engine",
+                                    "thread_completed_with_issues",
+                                    &user_id,
+                                    Some(payload),
+                                )
+                                .await
+                            {
+                                warn!("event listener: failed to fire self-improvement: {e}");
+                            }
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        debug!("event listener: lagged {n} events");
+                    }
+                }
+            }
+        });
+    }
+
+    /// Ensure a self-improvement mission exists for the given project.
+    ///
+    /// Checks if a mission with `"self_improvement": true` in metadata already
+    /// exists. If not, creates one with `OnSystemEvent` cadence that fires
+    /// when threads complete with issues. Also seeds the fix pattern database.
+    ///
+    /// Returns the mission ID (existing or newly created).
+    pub async fn ensure_self_improvement_mission(
+        &self,
+        project_id: ProjectId,
+    ) -> Result<MissionId, EngineError> {
+        // Check if one already exists
+        let missions = self.store.list_missions(project_id).await?;
+        if let Some(existing) = missions.iter().find(|m| is_self_improvement_mission(m)) {
+            debug!(mission_id = %existing.id, "self-improvement mission already exists");
+            // Make sure it's in the active list
+            let mut active = self.active.write().await;
+            if !active.contains(&existing.id) {
+                active.push(existing.id);
+            }
+            return Ok(existing.id);
+        }
+
+        // Create the self-improvement mission
+        let mut mission = Mission::new(
+            project_id,
+            "self-improvement",
+            SELF_IMPROVEMENT_GOAL,
+            MissionCadence::OnSystemEvent {
+                source: "engine".into(),
+                event_type: "thread_completed_with_issues".into(),
+            },
+        );
+        mission.success_criteria = Some(
+            "Continuously improve system prompts and fix patterns based on execution traces".into(),
+        );
+        mission.metadata = serde_json::json!({"self_improvement": true});
+        mission.max_threads_per_day = 5;
+
+        let id = mission.id;
+        self.store.save_mission(&mission).await?;
+        self.active.write().await.push(id);
+
+        // Seed the fix pattern database if it doesn't exist
+        let docs = self.store.list_memory_docs(project_id).await?;
+        let has_patterns = docs.iter().any(|d| {
+            d.title == FIX_PATTERN_DB_TITLE && d.tags.contains(&FIX_PATTERN_DB_TAG.to_string())
+        });
+        if !has_patterns {
+            use crate::types::memory::{DocType, MemoryDoc};
+            let pattern_doc = MemoryDoc::new(
+                project_id,
+                DocType::Playbook,
+                FIX_PATTERN_DB_TITLE,
+                SEED_FIX_PATTERNS,
+            )
+            .with_tags(vec![FIX_PATTERN_DB_TAG.to_string()]);
+            self.store.save_memory_doc(&pattern_doc).await?;
+            debug!("seeded fix pattern database");
+        }
+
+        debug!(mission_id = %id, "created self-improvement mission");
+        Ok(id)
+    }
+
     /// Tick — check all active missions and fire any that are due.
     ///
     /// For `Cron` cadence missions, checks `next_fire_at` against current time.
@@ -314,6 +546,8 @@ When done, call FINAL() with your response. Include:\n\
 /// Process a completed mission thread's outcome.
 ///
 /// Extracts next_focus from the FINAL() response and updates the mission.
+/// For self-improvement missions (metadata contains `"self_improvement": true`),
+/// also processes prompt overlay additions and fix pattern updates.
 async fn process_mission_outcome(
     store: &Arc<dyn Store>,
     mission_id: MissionId,
@@ -353,6 +587,16 @@ async fn process_mission_outcome(
             // Record approach
             let accomplishment: String = text.chars().take(200).collect();
             mission.approach_history.push(accomplishment);
+
+            // If this is a self-improvement mission, process structured output
+            if is_self_improvement_mission(&mission)
+                && let Err(e) = process_self_improvement_output(store, &mission, text).await
+            {
+                warn!(
+                    mission_id = %mission_id,
+                    "failed to process self-improvement output: {e}"
+                );
+            }
         }
         ThreadOutcome::Completed { response: None } => {}
         ThreadOutcome::Failed { error } => {
@@ -369,6 +613,250 @@ async fn process_mission_outcome(
     mission.updated_at = chrono::Utc::now();
     store.save_mission(&mission).await
 }
+
+/// Check if a mission is the self-improvement mission.
+fn is_self_improvement_mission(mission: &Mission) -> bool {
+    mission
+        .metadata
+        .get("self_improvement")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
+/// Process output from a self-improvement mission thread.
+///
+/// Two paths:
+/// 1. The agent used tools directly (memory_write for prompt overlay, shell for
+///    code fixes) — in this case the FINAL() response is just a summary and
+///    there is nothing extra to do here.
+/// 2. The agent returned structured JSON with `prompt_additions` and/or
+///    `fix_patterns` — we apply those to the Store.
+///
+/// This function handles path 2. Path 1 is handled by the tools themselves.
+async fn process_self_improvement_output(
+    store: &Arc<dyn Store>,
+    mission: &Mission,
+    response: &str,
+) -> Result<(), EngineError> {
+    use crate::executor::prompt::{PREAMBLE_OVERLAY_TITLE, PROMPT_OVERLAY_TAG};
+    use crate::types::memory::{DocType, MemoryDoc};
+
+    // Try to extract JSON from the response. If the agent used tools directly
+    // (the preferred autoresearch-style path), there's no JSON and we return
+    // early — the work was already done via tool calls.
+    let json_val = match extract_json_from_response(response) {
+        Some(v) => v,
+        None => {
+            debug!("self-improvement: no structured JSON in response (agent likely used tools directly)");
+            return Ok(());
+        }
+    };
+
+    let project_id = mission.project_id;
+
+    // Process prompt additions
+    if let Some(additions) = json_val.get("prompt_additions").and_then(|v| v.as_array())
+        && !additions.is_empty()
+    {
+        let new_rules: Vec<String> = additions
+            .iter()
+            .filter_map(|v| v.as_str().map(String::from))
+            .collect();
+
+        if !new_rules.is_empty() {
+            // Load or create the prompt overlay doc
+            let docs = store.list_memory_docs(project_id).await?;
+            let existing = docs.iter().find(|d| {
+                d.title == PREAMBLE_OVERLAY_TITLE
+                    && d.tags.contains(&PROMPT_OVERLAY_TAG.to_string())
+            });
+
+            let mut overlay = if let Some(doc) = existing {
+                doc.clone()
+            } else {
+                MemoryDoc::new(project_id, DocType::Note, PREAMBLE_OVERLAY_TITLE, "")
+                    .with_tags(vec![PROMPT_OVERLAY_TAG.to_string()])
+            };
+
+            // Append new rules
+            for rule in &new_rules {
+                if !overlay.content.is_empty() {
+                    overlay.content.push('\n');
+                }
+                overlay.content.push_str(rule);
+            }
+            overlay.updated_at = chrono::Utc::now();
+
+            store.save_memory_doc(&overlay).await?;
+            debug!(
+                rules_added = new_rules.len(),
+                "self-improvement: updated prompt overlay"
+            );
+        }
+    }
+
+    // Process fix patterns
+    if let Some(patterns) = json_val.get("fix_patterns").and_then(|v| v.as_array())
+        && !patterns.is_empty()
+    {
+        let docs = store.list_memory_docs(project_id).await?;
+        let existing = docs.iter().find(|d| {
+            d.title == FIX_PATTERN_DB_TITLE && d.tags.contains(&FIX_PATTERN_DB_TAG.to_string())
+        });
+
+        let mut pattern_doc = if let Some(doc) = existing {
+            doc.clone()
+        } else {
+            MemoryDoc::new(
+                project_id,
+                DocType::Playbook,
+                FIX_PATTERN_DB_TITLE,
+                SEED_FIX_PATTERNS,
+            )
+            .with_tags(vec![FIX_PATTERN_DB_TAG.to_string()])
+        };
+
+        for pattern in patterns {
+            let p = pattern
+                .get("pattern")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let s = pattern
+                .get("strategy")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let l = pattern
+                .get("location")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if !p.is_empty() {
+                pattern_doc
+                    .content
+                    .push_str(&format!("\n| {p} | {s} | {l} |"));
+            }
+        }
+        pattern_doc.updated_at = chrono::Utc::now();
+
+        store.save_memory_doc(&pattern_doc).await?;
+        debug!(
+            patterns_added = patterns.len(),
+            "self-improvement: updated fix pattern database"
+        );
+    }
+
+    Ok(())
+}
+
+/// Try to extract a JSON object from a response string.
+///
+/// Looks for `{...}` in the text, trying the whole string first,
+/// then searching for embedded JSON.
+fn extract_json_from_response(response: &str) -> Option<serde_json::Value> {
+    // Try parsing the whole response as JSON
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(response)
+        && v.is_object()
+    {
+        return Some(v);
+    }
+
+    // Search for embedded JSON object
+    let start = response.find('{')?;
+    let end = response.rfind('}')?;
+    if end <= start {
+        return None;
+    }
+    let candidate = &response[start..=end];
+    serde_json::from_str::<serde_json::Value>(candidate)
+        .ok()
+        .filter(|v| v.is_object())
+}
+
+/// The goal for the self-improvement mission (autoresearch-style program).
+///
+/// This is the "program.md" — a concrete, step-by-step prompt that tells the
+/// agent exactly what to do. Inspired by karpathy/autoresearch: the entire
+/// research org is a markdown file with an explicit loop.
+const SELF_IMPROVEMENT_GOAL: &str = "\
+You are a self-improvement agent for the IronClaw engine. You receive trigger \
+payloads containing execution trace issues from completed threads. Your job is \
+to diagnose root causes and apply fixes so the same issue doesn't recur.
+
+## What you have access to
+
+- `state[\"trigger_payload\"]` — JSON with `issues` (list of {severity, category, description, step}), \
+  `error_messages` (actual error text from failed actions), `goal` (what the thread was trying to do), \
+  and `source_thread_id`.
+- All tools: shell, read_file, write_file, apply_patch, web_search, memory_write, etc.
+- The codebase at the current working directory.
+- The fix pattern database in prior knowledge (if loaded).
+
+## The experiment loop
+
+For each issue in the trigger payload:
+
+1. **Diagnose**: Read the error messages and issue descriptions. Classify the root cause:
+   - PROMPT: The LLM made a mistake because the system prompt is missing a rule \
+     (wrong tool name, bad API usage, ignoring tool results)
+   - CONFIG: A default value is wrong (truncation length, iteration limit, timeout)
+   - CODE: There is a bug in the engine or bridge code (crash, type error, missing conversion)
+
+2. **Check the fix pattern database** in prior knowledge. Has this pattern been seen before? \
+   If yes, apply the known strategy. If no, proceed to step 3.
+
+3. **Apply the fix** based on the level:
+
+   Level 1 (PROMPT — low risk, apply directly):
+   - Read the current prompt overlay: `memory_search(\"prompt:codeact_preamble\")`
+   - Write an updated overlay with a new rule appended
+   - Use `memory_write` with title=\"prompt:codeact_preamble\" and tags=[\"prompt_overlay\"]
+   - The rule should be specific and actionable (e.g. \"Never call web_fetch — use http() instead\")
+
+   Level 2 (CONFIG — medium risk):
+   - Use `read_file` to find the relevant constant or default
+   - Use `shell` to create a git branch: `git checkout -b self-improve/issue-description`
+   - Apply the change with `apply_patch` or `write_file`
+   - Run tests: `cargo test -p ironclaw_engine`
+   - If tests pass, commit. If not, revert: `git checkout main`
+
+   Level 3 (CODE — high risk, just propose):
+   - Read the relevant source files
+   - Describe the fix needed but DO NOT apply it directly
+   - Log it as a recommendation in your FINAL() response
+
+4. **Record what you did** — include in your FINAL() response:
+   - What issue you analyzed
+   - What level fix you applied (1/2/3)
+   - What specific change you made
+   - Next focus: what to look for next time
+
+## Important rules
+
+- Be specific. \"Never call web_fetch\" is good. \"Be careful with tool names\" is useless.
+- One fix per issue. Don't try to fix everything at once.
+- For Level 1 fixes, the rule must be one sentence that can be appended to the prompt.
+- If the trigger payload has no actionable issues (only Info severity), skip and call FINAL() immediately.
+- NEVER modify test files to make a fix pass.
+- NEVER modify security-sensitive code (safety layer, policy engine, leak detection).
+- If you can't diagnose the root cause after reading the errors, log it and move on.";
+
+/// Well-known title for the fix pattern database.
+pub const FIX_PATTERN_DB_TITLE: &str = "fix_pattern_database";
+
+/// Well-known tag for the fix pattern database.
+pub const FIX_PATTERN_DB_TAG: &str = "fix_patterns";
+
+/// Seed content for the fix pattern database.
+const SEED_FIX_PATTERNS: &str = "\
+| Trace pattern | Fix strategy | Location pattern |
+|---|---|---|
+| Tool X not found | Add name alias or prompt hint about correct name | prompt overlay or effect_adapter |
+| TypeError: str indices must be integers | Parse JSON before wrapping | Where tool output is converted |
+| NameError: name 'X' not defined | Add prompt hint about using state dict | prompt overlay |
+| byte index N is not a char boundary | Replace byte slicing with chars().take(N) | Code that slices strings |
+| Model calls nonexistent tool | Add prompt rule listing correct tool name | prompt overlay |
+| Model ignores tool results | Improve output metadata format | prompt overlay |
+| Excessive steps (>5) for simple task | Add prompt rule or fix tool schema | prompt overlay |
+| Code error in REPL output | Add prompt hint about correct API usage | prompt overlay |";
 
 #[cfg(test)]
 mod tests {
@@ -398,6 +886,7 @@ mod tests {
     struct TestStore {
         threads: tokio::sync::RwLock<HashMap<ThreadId, Thread>>,
         missions: tokio::sync::RwLock<HashMap<MissionId, Mission>>,
+        docs: tokio::sync::RwLock<Vec<MemoryDoc>>,
     }
 
     impl TestStore {
@@ -405,6 +894,7 @@ mod tests {
             Self {
                 threads: tokio::sync::RwLock::new(HashMap::new()),
                 missions: tokio::sync::RwLock::new(HashMap::new()),
+                docs: tokio::sync::RwLock::new(Vec::new()),
             }
         }
     }
@@ -454,15 +944,28 @@ mod tests {
             Ok(None)
         }
 
-        // ── MemoryDoc (noop) ──
-        async fn save_memory_doc(&self, _: &MemoryDoc) -> Result<(), EngineError> {
+        // ── MemoryDoc ──
+        async fn save_memory_doc(&self, doc: &MemoryDoc) -> Result<(), EngineError> {
+            let mut docs = self.docs.write().await;
+            docs.retain(|d| d.id != doc.id);
+            docs.push(doc.clone());
             Ok(())
         }
-        async fn load_memory_doc(&self, _: DocId) -> Result<Option<MemoryDoc>, EngineError> {
-            Ok(None)
+        async fn load_memory_doc(&self, id: DocId) -> Result<Option<MemoryDoc>, EngineError> {
+            Ok(self.docs.read().await.iter().find(|d| d.id == id).cloned())
         }
-        async fn list_memory_docs(&self, _: ProjectId) -> Result<Vec<MemoryDoc>, EngineError> {
-            Ok(vec![])
+        async fn list_memory_docs(
+            &self,
+            project_id: ProjectId,
+        ) -> Result<Vec<MemoryDoc>, EngineError> {
+            Ok(self
+                .docs
+                .read()
+                .await
+                .iter()
+                .filter(|d| d.project_id == project_id)
+                .cloned()
+                .collect())
         }
 
         // ── Lease (noop) ──
@@ -1002,6 +1505,228 @@ mod tests {
         let mission = mgr.get_mission(id).await.unwrap().unwrap();
         assert_eq!(mission.last_trigger_payload, Some(payload));
         assert_eq!(mission.threads_today, 1);
+    }
+
+    #[tokio::test]
+    async fn fire_on_system_event_matches_cadence() {
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager_with_response(Arc::clone(&store) as Arc<dyn Store>, "done");
+        let project_id = ProjectId::new();
+
+        // Create an OnSystemEvent mission
+        mgr.create_mission(
+            project_id,
+            "self-improve",
+            "improve prompts",
+            MissionCadence::OnSystemEvent {
+                source: "engine".into(),
+                event_type: "thread_completed_with_issues".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let spawned = mgr
+            .fire_on_system_event(
+                "engine",
+                "thread_completed_with_issues",
+                "test-user",
+                Some(serde_json::json!({"issues": []})),
+            )
+            .await
+            .unwrap();
+        assert_eq!(spawned.len(), 1, "should fire the matching mission");
+    }
+
+    #[tokio::test]
+    async fn fire_on_system_event_ignores_non_matching() {
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager_with_response(Arc::clone(&store) as Arc<dyn Store>, "done");
+        let project_id = ProjectId::new();
+
+        // Create an OnSystemEvent mission for a different event
+        mgr.create_mission(
+            project_id,
+            "webhook handler",
+            "handle webhooks",
+            MissionCadence::OnSystemEvent {
+                source: "github".into(),
+                event_type: "push".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let spawned = mgr
+            .fire_on_system_event("engine", "thread_completed_with_issues", "test-user", None)
+            .await
+            .unwrap();
+        assert_eq!(spawned.len(), 0, "should not fire non-matching mission");
+    }
+
+    #[tokio::test]
+    async fn fire_on_system_event_skips_manual_and_cron() {
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager_with_response(Arc::clone(&store) as Arc<dyn Store>, "done");
+        let project_id = ProjectId::new();
+
+        mgr.create_mission(project_id, "manual", "goal", MissionCadence::Manual)
+            .await
+            .unwrap();
+        mgr.create_mission(
+            project_id,
+            "cron",
+            "goal",
+            MissionCadence::Cron {
+                expression: "* * * * *".into(),
+                timezone: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let spawned = mgr
+            .fire_on_system_event("engine", "thread_completed_with_issues", "test-user", None)
+            .await
+            .unwrap();
+        assert_eq!(spawned.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn self_improvement_outcome_saves_prompt_overlay() {
+        let store: Arc<dyn Store> = Arc::new(TestStore::new());
+        let project_id = ProjectId::new();
+
+        let mut mission = Mission::new(
+            project_id,
+            "self-improve",
+            "improve prompts",
+            MissionCadence::OnSystemEvent {
+                source: "engine".into(),
+                event_type: "thread_completed_with_issues".into(),
+            },
+        );
+        mission.metadata = serde_json::json!({"self_improvement": true});
+        let id = mission.id;
+        store.save_mission(&mission).await.unwrap();
+
+        let response = r#"{"prompt_additions": ["9. Never call web_fetch — use http() instead."], "fix_patterns": [], "level": 1}"#;
+        let outcome = ThreadOutcome::Completed {
+            response: Some(response.into()),
+        };
+        process_mission_outcome(&store, id, ThreadId::new(), &outcome)
+            .await
+            .unwrap();
+
+        // Verify prompt overlay was saved
+        let docs = store.list_memory_docs(project_id).await.unwrap();
+        let overlay = docs
+            .iter()
+            .find(|d| d.title == crate::executor::prompt::PREAMBLE_OVERLAY_TITLE);
+        assert!(overlay.is_some(), "prompt overlay should be saved");
+        assert!(overlay.unwrap().content.contains("Never call web_fetch"));
+    }
+
+    #[tokio::test]
+    async fn self_improvement_outcome_saves_fix_patterns() {
+        let store: Arc<dyn Store> = Arc::new(TestStore::new());
+        let project_id = ProjectId::new();
+
+        let mut mission = Mission::new(
+            project_id,
+            "self-improve",
+            "improve prompts",
+            MissionCadence::Manual,
+        );
+        mission.metadata = serde_json::json!({"self_improvement": true});
+        let id = mission.id;
+        store.save_mission(&mission).await.unwrap();
+
+        let response = r#"{"prompt_additions": [], "fix_patterns": [{"pattern": "Tool xyz not found", "strategy": "Add alias xyz -> x-y-z", "location": "effect_adapter"}]}"#;
+        let outcome = ThreadOutcome::Completed {
+            response: Some(response.into()),
+        };
+        process_mission_outcome(&store, id, ThreadId::new(), &outcome)
+            .await
+            .unwrap();
+
+        let docs = store.list_memory_docs(project_id).await.unwrap();
+        let patterns = docs.iter().find(|d| d.title == FIX_PATTERN_DB_TITLE);
+        assert!(patterns.is_some(), "fix patterns should be saved");
+        assert!(patterns.unwrap().content.contains("Tool xyz not found"));
+        // Should also contain seed patterns
+        assert!(patterns.unwrap().content.contains("NameError"));
+    }
+
+    #[tokio::test]
+    async fn non_self_improvement_mission_skips_structured_output() {
+        let store: Arc<dyn Store> = Arc::new(TestStore::new());
+        let project_id = ProjectId::new();
+
+        let mission = Mission::new(project_id, "regular", "do stuff", MissionCadence::Manual);
+        let id = mission.id;
+        store.save_mission(&mission).await.unwrap();
+
+        // Even if the response has JSON, it should not create overlays
+        let response = r#"{"prompt_additions": ["should not appear"], "level": 1}"#;
+        let outcome = ThreadOutcome::Completed {
+            response: Some(response.into()),
+        };
+        process_mission_outcome(&store, id, ThreadId::new(), &outcome)
+            .await
+            .unwrap();
+
+        let docs = store.list_memory_docs(project_id).await.unwrap();
+        assert!(docs.is_empty(), "non-SI mission should not create overlay");
+    }
+
+    #[tokio::test]
+    async fn ensure_self_improvement_mission_creates_on_first_call() {
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        let id = mgr
+            .ensure_self_improvement_mission(project_id)
+            .await
+            .unwrap();
+
+        let mission = mgr.get_mission(id).await.unwrap().unwrap();
+        assert_eq!(mission.name, "self-improvement");
+        assert!(is_self_improvement_mission(&mission));
+        assert!(matches!(
+            mission.cadence,
+            MissionCadence::OnSystemEvent { .. }
+        ));
+        assert_eq!(mission.max_threads_per_day, 5);
+
+        // Fix pattern database should be seeded
+        let docs = store.list_memory_docs(project_id).await.unwrap();
+        let patterns = docs.iter().find(|d| d.title == FIX_PATTERN_DB_TITLE);
+        assert!(patterns.is_some(), "fix patterns should be seeded");
+        assert!(patterns.unwrap().content.contains("NameError"));
+    }
+
+    #[tokio::test]
+    async fn ensure_self_improvement_mission_idempotent() {
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        let id1 = mgr
+            .ensure_self_improvement_mission(project_id)
+            .await
+            .unwrap();
+        let id2 = mgr
+            .ensure_self_improvement_mission(project_id)
+            .await
+            .unwrap();
+
+        assert_eq!(id1, id2, "should return the same mission ID");
+
+        // Should only have one mission
+        let missions = store.list_missions(project_id).await.unwrap();
+        assert_eq!(missions.len(), 1);
     }
 
     #[tokio::test]

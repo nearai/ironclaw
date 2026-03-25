@@ -1,5 +1,6 @@
 //! Engine v2 router — handles user messages via the engine when enabled.
 
+use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
 use tokio::sync::RwLock;
@@ -40,17 +41,13 @@ struct EngineState {
     thread_manager: Arc<ThreadManager>,
     conversation_manager: ConversationManager,
     effect_adapter: Arc<EffectBridgeAdapter>,
-    #[allow(dead_code)]
-    store: Arc<HybridStore>,
     default_project_id: ironclaw_engine::ProjectId,
-    /// Currently pending approval (if any).
-    pending_approval: RwLock<Option<PendingApproval>>,
+    /// Per-user pending approvals (keyed by user_id).
+    pending_approvals: RwLock<HashMap<String, PendingApproval>>,
     /// SSE manager for broadcasting AppEvents to the web gateway.
     sse: Option<Arc<SseManager>>,
     /// V1 database for writing conversation messages (gateway reads from here).
     db: Option<Arc<dyn Database>>,
-    /// Mission manager for long-running goals.
-    mission_manager: Arc<MissionManager>,
 }
 
 /// Global engine state, initialized on first use.
@@ -85,9 +82,7 @@ async fn get_or_init_engine(agent: &Agent) -> Result<(), Error> {
     ));
 
     let store = Arc::new(HybridStore::new(agent.workspace().cloned()));
-
-    // Load existing reflection docs from workspace (lessons from prior sessions)
-    store.load_docs_from_workspace().await;
+    store.load_state_from_workspace().await;
 
     // Build capability registry from available tools
     let mut capabilities = CapabilityRegistry::new();
@@ -114,33 +109,63 @@ async fn get_or_init_engine(agent: &Agent) -> Result<(), Error> {
     let leases = Arc::new(LeaseManager::new());
     let policy = Arc::new(PolicyEngine::new());
 
+    let store_dyn: Arc<dyn Store> = store.clone();
+
     let thread_manager = Arc::new(ThreadManager::new(
         llm_adapter,
         effect_adapter.clone(),
-        store.clone(),
+        store_dyn.clone(),
         Arc::new(capabilities),
         leases,
         policy,
     ));
 
-    // Create a default project
-    let project = Project::new("default", "Default project for engine v2");
-    let project_id = project.id;
-    store.save_project(&project).await.map_err(|e| {
-        crate::error::Error::from(crate::error::JobError::ContextError {
-            id: uuid::Uuid::nil(),
-            reason: format!("engine v2 store error: {e}"),
-        })
-    })?;
+    // Reuse the persisted default project when available.
+    let project_id = match store
+        .list_projects()
+        .await
+        .map_err(|e| {
+            crate::error::Error::from(crate::error::JobError::ContextError {
+                id: uuid::Uuid::nil(),
+                reason: format!("engine v2 store error: {e}"),
+            })
+        })?
+        .into_iter()
+        .find(|project| project.name == "default")
+    {
+        Some(project) => project.id,
+        None => {
+            let project = Project::new("default", "Default project for engine v2");
+            let project_id = project.id;
+            store.save_project(&project).await.map_err(|e| {
+                crate::error::Error::from(crate::error::JobError::ContextError {
+                    id: uuid::Uuid::nil(),
+                    reason: format!("engine v2 store error: {e}"),
+                })
+            })?;
+            project_id
+        }
+    };
 
-    let conversation_manager = ConversationManager::new(Arc::clone(&thread_manager));
+    let conversation_manager = ConversationManager::new(Arc::clone(&thread_manager), store.clone());
+    let _ = conversation_manager
+        .bootstrap_user(&agent.deps.owner_id)
+        .await;
 
     // Create mission manager and start cron ticker
-    let mission_manager = Arc::new(MissionManager::new(
-        store.clone() as Arc<dyn Store>,
-        Arc::clone(&thread_manager),
-    ));
+    let mission_manager = Arc::new(MissionManager::new(store_dyn, Arc::clone(&thread_manager)));
+    let _ = thread_manager.recover_project_threads(project_id).await;
+    let _ = mission_manager.bootstrap_project(project_id).await;
     mission_manager.start_cron_ticker(agent.deps.owner_id.clone());
+    mission_manager.start_event_listener(agent.deps.owner_id.clone());
+
+    // Ensure self-improvement mission exists for this project
+    if let Err(e) = mission_manager
+        .ensure_self_improvement_mission(project_id)
+        .await
+    {
+        debug!("engine v2: failed to create self-improvement mission: {e}");
+    }
 
     // Wire mission manager into effect adapter for mission_* function calls
     effect_adapter
@@ -151,12 +176,10 @@ async fn get_or_init_engine(agent: &Agent) -> Result<(), Error> {
         thread_manager,
         conversation_manager,
         effect_adapter,
-        store: store.clone(),
         default_project_id: project_id,
-        pending_approval: RwLock::new(None),
+        pending_approvals: RwLock::new(HashMap::new()),
         sse: agent.deps.sse_tx.clone(),
         db: agent.deps.store.clone(),
-        mission_manager,
     });
 
     Ok(())
@@ -177,12 +200,16 @@ pub async fn handle_approval(
     let guard = lock.read().await;
     let state = guard.as_ref().expect("engine initialized");
 
-    // Take the pending approval
-    let pending = state.pending_approval.write().await.take();
+    // Take the pending approval for this user
+    let pending = state
+        .pending_approvals
+        .write()
+        .await
+        .remove(&message.user_id);
     let pending = match pending {
         Some(p) => p,
         None => {
-            debug!("engine v2: no pending approval, ignoring");
+            debug!(user_id = %message.user_id, "engine v2: no pending approval for user, ignoring");
             return Ok(Some("No pending approval.".into()));
         }
     };
@@ -202,22 +229,21 @@ pub async fn handle_approval(
         )));
     }
 
-    // Approved — add to auto-approved set
+    // Approved — only persist auto-approval when user chose "always"
     debug!(
         tool = %pending.action_name,
         always,
         "engine v2: tool approved"
     );
 
-    // Convert Python name back to registry name for auto-approve
-    let registry_name = pending.action_name.replace('_', "-");
-    state
-        .effect_adapter
-        .auto_approve_tool(&pending.action_name)
-        .await;
-    state.effect_adapter.auto_approve_tool(&registry_name).await;
-
     if always {
+        // Convert Python name back to registry name for auto-approve
+        let registry_name = pending.action_name.replace('_', "-");
+        state
+            .effect_adapter
+            .auto_approve_tool(&pending.action_name)
+            .await;
+        state.effect_adapter.auto_approve_tool(&registry_name).await;
         debug!(tool = %pending.action_name, "engine v2: tool auto-approved for session");
     }
 
@@ -263,11 +289,20 @@ pub async fn handle_with_engine(
         )
         .await;
 
+    // Reset the per-step call counter so each thread starts fresh
+    state.effect_adapter.reset_call_count();
+
     // Get or create conversation for this channel+user
     let conv_id = state
         .conversation_manager
         .get_or_create_conversation(&message.channel, &message.user_id)
-        .await;
+        .await
+        .map_err(|e| {
+            crate::error::Error::from(crate::error::JobError::ContextError {
+                id: uuid::Uuid::nil(),
+                reason: format!("engine v2 conversation error: {e}"),
+            })
+        })?;
 
     // Handle the message — spawns a new thread or injects into active one
     let thread_id = state
@@ -310,7 +345,7 @@ pub async fn handle_with_engine(
                         if let Some(sse) = sse
                             && let Some(app_event) = thread_event_to_app_event(evt, &tid_str)
                         {
-                            sse.broadcast(app_event);
+                            sse.broadcast_for_user(&message.user_id, app_event);
                         }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
@@ -341,7 +376,13 @@ pub async fn handle_with_engine(
     state
         .conversation_manager
         .record_thread_outcome(conv_id, thread_id, &outcome)
-        .await;
+        .await
+        .map_err(|e| {
+            crate::error::Error::from(crate::error::JobError::ContextError {
+                id: uuid::Uuid::nil(),
+                reason: format!("engine v2 conversation error: {e}"),
+            })
+        })?;
 
     // Note: trace recording, retrospective analysis, and LLM reflection
     // all run automatically inside ThreadManager after the thread completes.
@@ -370,16 +411,19 @@ pub async fn handle_with_engine(
         }
     }
 
-    // Broadcast final response as AppEvent for web gateway SSE
+    // Broadcast final response as AppEvent for web gateway SSE (scoped to requesting user)
     if let Some(ref sse) = state.sse
         && let ThreadOutcome::Completed {
             response: Some(ref text),
         } = outcome
     {
-        sse.broadcast(AppEvent::Response {
-            content: text.clone(),
-            thread_id: thread_id.to_string(),
-        });
+        sse.broadcast_for_user(
+            &message.user_id,
+            AppEvent::Response {
+                content: text.clone(),
+                thread_id: thread_id.to_string(),
+            },
+        );
     }
 
     // Convert outcome to response
@@ -398,11 +442,14 @@ pub async fn handle_with_engine(
             call_id: _,
             parameters,
         } => {
-            // Store pending approval for when the user responds
-            *state.pending_approval.write().await = Some(PendingApproval {
-                action_name: action_name.clone(),
-                original_content: content.to_string(),
-            });
+            // Store pending approval keyed by user so concurrent users don't collide
+            state.pending_approvals.write().await.insert(
+                message.user_id.clone(),
+                PendingApproval {
+                    action_name: action_name.clone(),
+                    original_content: content.to_string(),
+                },
+            );
 
             // Send approval request to channel (matches v1 ApprovalNeeded format)
             let _ = agent
@@ -526,5 +573,75 @@ fn thread_event_to_app_event(
             thread_id: Some(thread_id.into()),
         }),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Per-user approval storage: two users' approvals don't collide.
+    #[tokio::test]
+    async fn pending_approvals_are_per_user() {
+        let approvals: RwLock<HashMap<String, PendingApproval>> = RwLock::new(HashMap::new());
+
+        // User A stores an approval
+        approvals.write().await.insert(
+            "alice".into(),
+            PendingApproval {
+                action_name: "shell".into(),
+                original_content: "run ls".into(),
+            },
+        );
+
+        // User B stores a different approval
+        approvals.write().await.insert(
+            "bob".into(),
+            PendingApproval {
+                action_name: "web_fetch".into(),
+                original_content: "fetch example.com".into(),
+            },
+        );
+
+        // Taking Alice's approval doesn't affect Bob's
+        let alice_approval = approvals.write().await.remove("alice");
+        assert_eq!(alice_approval.unwrap().action_name, "shell");
+
+        let bob_approval = approvals.write().await.remove("bob");
+        assert_eq!(bob_approval.unwrap().action_name, "web_fetch");
+    }
+
+    /// A second approval from the same user overwrites their previous one,
+    /// but doesn't affect other users.
+    #[tokio::test]
+    async fn same_user_approval_overwrites() {
+        let approvals: RwLock<HashMap<String, PendingApproval>> = RwLock::new(HashMap::new());
+
+        approvals.write().await.insert(
+            "alice".into(),
+            PendingApproval {
+                action_name: "shell".into(),
+                original_content: "first".into(),
+            },
+        );
+        approvals.write().await.insert(
+            "alice".into(),
+            PendingApproval {
+                action_name: "http".into(),
+                original_content: "second".into(),
+            },
+        );
+
+        let pending = approvals.write().await.remove("alice");
+        assert_eq!(pending.unwrap().action_name, "http");
+    }
+
+    /// No pending approval for an unknown user returns None.
+    #[tokio::test]
+    async fn no_approval_for_unknown_user() {
+        let approvals: RwLock<HashMap<String, PendingApproval>> = RwLock::new(HashMap::new());
+
+        let result = approvals.write().await.remove("nobody");
+        assert!(result.is_none());
     }
 }
