@@ -97,7 +97,7 @@ pub async fn handle_ws_connection(
             let msg = tokio::select! {
                 event = event_stream.next() => {
                     match event {
-                        Some(sse_event) => WsServerMessage::from_sse_event(&sse_event),
+                        Some(app_event) => WsServerMessage::from_app_event(&app_event),
                         None => break, // Broadcast channel closed
                     }
                 }
@@ -275,7 +275,7 @@ async fn handle_client_message(
                         if result.verification.is_some() {
                             state.sse.broadcast_for_user(
                                 user_id,
-                                crate::channels::web::types::SseEvent::AuthRequired {
+                                crate::channels::web::types::AppEvent::AuthRequired {
                                     extension_name: extension_name.clone(),
                                     instructions: Some(result.message),
                                     auth_url: None,
@@ -286,7 +286,7 @@ async fn handle_client_message(
                             crate::channels::web::server::clear_auth_mode(state, user_id).await;
                             state.sse.broadcast_for_user(
                                 user_id,
-                                crate::channels::web::types::SseEvent::AuthCompleted {
+                                crate::channels::web::types::AppEvent::AuthCompleted {
                                     extension_name,
                                     success: true,
                                     message: result.message,
@@ -299,7 +299,7 @@ async fn handle_client_message(
                         if matches!(e, crate::extensions::ExtensionError::ValidationFailed(_)) {
                             state.sse.broadcast_for_user(
                                 user_id,
-                                crate::channels::web::types::SseEvent::AuthRequired {
+                                crate::channels::web::types::AppEvent::AuthRequired {
                                     extension_name: extension_name.clone(),
                                     instructions: Some(msg.clone()),
                                     auth_url: None,
@@ -520,7 +520,8 @@ mod tests {
             job_manager: None,
             prompt_queue: None,
             scheduler: None,
-            default_user_id: "test".to_string(),
+            owner_id: "test".to_string(),
+            default_sender_id: "test".to_string(),
             shutdown_tx: tokio::sync::RwLock::new(None),
             ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
             llm_provider: None,

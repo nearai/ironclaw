@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, broadcast};
 use uuid::Uuid;
 
-use crate::channels::web::types::SseEvent;
+use crate::channels::web::types::ToolDecisionDto;
 use crate::db::Database;
 use crate::llm::{CompletionRequest, LlmProvider, ToolCompletionRequest};
 use crate::orchestrator::auth::{TokenStore, worker_auth_middleware};
@@ -25,6 +25,7 @@ use crate::worker::api::{
     CompletionReport, CredentialResponse, JobDescription, ProxyCompletionRequest,
     ProxyCompletionResponse, ProxyToolCompletionRequest, ProxyToolCompletionResponse, StatusUpdate,
 };
+use ironclaw_common::AppEvent;
 
 /// A follow-up prompt queued for a Claude Code bridge.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -41,7 +42,7 @@ pub struct OrchestratorState {
     pub token_store: TokenStore,
     /// Broadcast channel for job events (consumed by the web gateway SSE).
     /// Tuple: (job_id, user_id, event).
-    pub job_event_tx: Option<broadcast::Sender<(Uuid, String, SseEvent)>>,
+    pub job_event_tx: Option<broadcast::Sender<(Uuid, String, AppEvent)>>,
     /// Buffered follow-up prompts for sandbox jobs, keyed by job_id.
     pub prompt_queue: Arc<Mutex<HashMap<Uuid, VecDeque<PendingPrompt>>>>,
     /// Database handle for persisting job events.
@@ -277,10 +278,10 @@ async fn job_event_handler(
         });
     }
 
-    // Convert to SSE event and broadcast
+    // Convert to app event and broadcast
     let job_id_str = job_id.to_string();
-    let sse_event = match payload.event_type.as_str() {
-        "message" => SseEvent::JobMessage {
+    let app_event = match payload.event_type.as_str() {
+        "message" => AppEvent::JobMessage {
             job_id: job_id_str,
             role: payload
                 .data
@@ -295,7 +296,7 @@ async fn job_event_handler(
                 .unwrap_or("")
                 .to_string(),
         },
-        "tool_use" => SseEvent::JobToolUse {
+        "tool_use" => AppEvent::JobToolUse {
             job_id: job_id_str,
             tool_name: payload
                 .data
@@ -309,7 +310,7 @@ async fn job_event_handler(
                 .cloned()
                 .unwrap_or(serde_json::Value::Null),
         },
-        "tool_result" => SseEvent::JobToolResult {
+        "tool_result" => AppEvent::JobToolResult {
             job_id: job_id_str,
             tool_name: payload
                 .data
@@ -324,7 +325,7 @@ async fn job_event_handler(
                 .unwrap_or("")
                 .to_string(),
         },
-        "result" => SseEvent::JobResult {
+        "result" => AppEvent::JobResult {
             job_id: job_id_str,
             status: payload
                 .data
@@ -344,7 +345,21 @@ async fn job_event_handler(
             // gain context/memory tracking capabilities.
             fallback_deliverable: payload.data.get("fallback_deliverable").cloned(),
         },
-        _ => SseEvent::JobStatus {
+        "reasoning" => {
+            let narrative = payload
+                .data
+                .get("narrative")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let decisions = ToolDecisionDto::from_json_array(&payload.data["decisions"]);
+            AppEvent::JobReasoning {
+                job_id: job_id_str,
+                narrative,
+                decisions,
+            }
+        }
+        _ => AppEvent::JobStatus {
             job_id: job_id_str,
             message: payload
                 .data
@@ -390,9 +405,9 @@ async fn job_event_handler(
         };
 
         if user_id.is_empty() {
-            let _ = tx.send((job_id, String::new(), sse_event));
+            let _ = tx.send((job_id, String::new(), app_event));
         } else {
-            let _ = tx.send((job_id, user_id, sse_event));
+            let _ = tx.send((job_id, user_id, app_event));
         }
     }
 
@@ -817,7 +832,7 @@ mod tests {
         // No store configured, so user_id falls back to empty string.
         assert_eq!(recv_uid, "");
         match event {
-            SseEvent::JobMessage {
+            AppEvent::JobMessage {
                 job_id: jid,
                 role,
                 content,
@@ -872,7 +887,7 @@ mod tests {
 
         let (_recv_id, _recv_uid, event) = rx.recv().await.unwrap();
         match event {
-            SseEvent::JobToolUse { tool_name, .. } => {
+            AppEvent::JobToolUse { tool_name, .. } => {
                 assert_eq!(tool_name, "shell");
             }
             other => panic!("Expected JobToolUse, got {:?}", other),
@@ -918,7 +933,7 @@ mod tests {
 
         let (_recv_id, _recv_uid, event) = rx.recv().await.unwrap();
         // Unknown event types fall through to JobStatus
-        assert!(matches!(event, SseEvent::JobStatus { .. }));
+        assert!(matches!(event, AppEvent::JobStatus { .. }));
     }
 
     // -- Status update test --

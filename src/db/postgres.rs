@@ -510,6 +510,14 @@ impl RoutineStore for PgBackend {
             .await
     }
 
+    async fn batch_get_last_run_status(
+        &self,
+        routine_ids: &[Uuid],
+    ) -> Result<std::collections::HashMap<Uuid, crate::agent::routine::RunStatus>, DatabaseError>
+    {
+        self.store.batch_get_last_run_status(routine_ids).await
+    }
+
     async fn link_routine_run_to_job(
         &self,
         run_id: Uuid,

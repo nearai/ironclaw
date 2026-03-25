@@ -465,6 +465,94 @@ impl Agent {
         }
     }
 
+    /// Handle `/reasoning [N|all]` — show reasoning history for the active thread.
+    pub(super) async fn handle_reasoning_command(
+        &self,
+        args: &[String],
+        session: &Arc<Mutex<Session>>,
+        thread_id: Uuid,
+    ) -> SubmissionResult {
+        // Clone the turn data we need, then drop the session lock.
+        let turns_snapshot: Vec<(
+            usize,
+            Option<String>,
+            Vec<crate::agent::session::TurnToolCall>,
+        )>;
+        {
+            let sess = session.lock().await;
+            let thread = match sess.threads.get(&thread_id) {
+                Some(t) => t,
+                None => return SubmissionResult::error("No active thread."),
+            };
+
+            if thread.turns.is_empty() {
+                return SubmissionResult::ok_with_message("No turns yet.");
+            }
+
+            // Parse argument: default=last turn, "all"=all turns, N=specific turn (1-based).
+            let selected: Vec<&crate::agent::session::Turn> = match args.first().map(|s| s.as_str())
+            {
+                Some("all") => thread.turns.iter().collect(),
+                Some(n) => match n.parse::<usize>() {
+                    Ok(0) => return SubmissionResult::error("Turn numbers start at 1."),
+                    Ok(num) if num > thread.turns.len() => {
+                        return SubmissionResult::error(format!(
+                            "Turn {} does not exist (max: {}).",
+                            num,
+                            thread.turns.len()
+                        ));
+                    }
+                    Ok(num) => vec![&thread.turns[num - 1]],
+                    Err(_) => return SubmissionResult::error("Usage: /reasoning [N|all]"),
+                },
+                None => {
+                    // Default: last turn that has tool calls
+                    match thread.turns.iter().rev().find(|t| !t.tool_calls.is_empty()) {
+                        Some(t) => vec![t],
+                        None => {
+                            return SubmissionResult::ok_with_message("No turns with tool calls.");
+                        }
+                    }
+                }
+            };
+
+            turns_snapshot = selected
+                .into_iter()
+                .map(|t| (t.turn_number, t.narrative.clone(), t.tool_calls.clone()))
+                .collect();
+        }
+        // Session lock is now dropped — format output without holding it.
+
+        let mut output = String::new();
+        for (turn_number, narrative, tool_calls) in &turns_snapshot {
+            output.push_str(&format!("--- Turn {} ---\n", turn_number + 1));
+            if let Some(narrative) = narrative {
+                output.push_str(&format!("Reasoning: {}\n", narrative));
+            }
+            if tool_calls.is_empty() {
+                output.push_str("  (no tool calls)\n");
+            } else {
+                for tc in tool_calls {
+                    let status = if tc.error.is_some() {
+                        "error"
+                    } else if tc.result.is_some() {
+                        "ok"
+                    } else {
+                        "pending"
+                    };
+                    output.push_str(&format!("  {} [{}]", tc.name, status));
+                    if let Some(ref rationale) = tc.rationale {
+                        output.push_str(&format!(" — {}", rationale));
+                    }
+                    output.push('\n');
+                }
+            }
+            output.push('\n');
+        }
+
+        SubmissionResult::response(output.trim_end())
+    }
+
     /// Handle system commands that bypass thread-state checks entirely.
     pub(super) async fn handle_system_command(
         &self,
@@ -480,6 +568,7 @@ impl Agent {
                 "  /version          Show version info\n",
                 "  /tools            List available tools\n",
                 "  /debug            Toggle debug mode\n",
+                "  /reasoning [N|all] Show agent reasoning for turns\n",
                 "  /ping             Connectivity check\n",
                 "\n",
                 "Jobs:\n",

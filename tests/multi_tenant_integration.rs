@@ -19,10 +19,13 @@ use axum::middleware;
 use axum::routing::{get, post};
 use tower::ServiceExt;
 
+use ironclaw::channels::IncomingMessage;
 use ironclaw::channels::web::auth::{
     AuthenticatedUser, MultiAuthState, UserIdentity, auth_middleware,
 };
-use ironclaw::channels::web::server::{GatewayState, PerUserRateLimiter, RateLimiter};
+use ironclaw::channels::web::server::{
+    GatewayState, PerUserRateLimiter, RateLimiter, start_server,
+};
 use ironclaw::channels::web::sse::SseManager;
 use ironclaw::channels::web::test_helpers::TestGatewayBuilder;
 use ironclaw::channels::web::ws::WsConnectionTracker;
@@ -37,6 +40,9 @@ const ALICE_TOKEN: &str = "tok-alice-secret";
 const BOB_TOKEN: &str = "tok-bob-secret";
 const ALICE_USER_ID: &str = "alice";
 const BOB_USER_ID: &str = "bob";
+const OWNER_TOKEN: &str = "tok-owner-secret";
+const OWNER_SCOPE_ID: &str = "owner-scope";
+const GATEWAY_SENDER_ID: &str = "gateway-sender";
 
 /// Build a MultiAuthState with two users.
 fn two_user_auth() -> MultiAuthState {
@@ -301,7 +307,7 @@ fn per_user_rate_limiter_single_user_mode() {
 
 #[tokio::test]
 async fn sse_scoped_event_only_delivered_to_target_user() {
-    use ironclaw::channels::web::types::SseEvent;
+    use ironclaw_common::AppEvent;
     use tokio_stream::StreamExt;
 
     let manager = SseManager::new();
@@ -319,34 +325,34 @@ async fn sse_scoped_event_only_delivered_to_target_user() {
     // Send event scoped to alice
     manager.broadcast_for_user(
         ALICE_USER_ID,
-        SseEvent::Status {
+        AppEvent::Status {
             message: "alice's event".to_string(),
             thread_id: None,
         },
     );
 
     // Send global heartbeat (both should get it)
-    manager.broadcast(SseEvent::Heartbeat);
+    manager.broadcast(AppEvent::Heartbeat);
 
     // Alice gets her scoped event first
     let e = alice_stream.next().await.unwrap();
     match &e {
-        SseEvent::Status { message, .. } => assert_eq!(message, "alice's event"),
+        AppEvent::Status { message, .. } => assert_eq!(message, "alice's event"),
         _ => panic!("Expected Status, got {:?}", e),
     }
 
     // Alice also gets heartbeat
     let e = alice_stream.next().await.unwrap();
-    assert!(matches!(e, SseEvent::Heartbeat));
+    assert!(matches!(e, AppEvent::Heartbeat));
 
     // Bob only gets the heartbeat (alice's event was filtered)
     let e = bob_stream.next().await.unwrap();
-    assert!(matches!(e, SseEvent::Heartbeat));
+    assert!(matches!(e, AppEvent::Heartbeat));
 }
 
 #[tokio::test]
 async fn sse_global_event_delivered_to_all_users() {
-    use ironclaw::channels::web::types::SseEvent;
+    use ironclaw_common::AppEvent;
     use tokio_stream::StreamExt;
 
     let manager = SseManager::new();
@@ -361,7 +367,7 @@ async fn sse_global_event_delivered_to_all_users() {
             .expect("subscribe"),
     );
 
-    manager.broadcast(SseEvent::Status {
+    manager.broadcast(AppEvent::Status {
         message: "global announcement".to_string(),
         thread_id: None,
     });
@@ -369,7 +375,7 @@ async fn sse_global_event_delivered_to_all_users() {
     let ea = alice.next().await.unwrap();
     let eb = bob.next().await.unwrap();
     match (&ea, &eb) {
-        (SseEvent::Status { message: a, .. }, SseEvent::Status { message: b, .. }) => {
+        (AppEvent::Status { message: a, .. }, AppEvent::Status { message: b, .. }) => {
             assert_eq!(a, "global announcement");
             assert_eq!(b, "global announcement");
         }
@@ -379,7 +385,7 @@ async fn sse_global_event_delivered_to_all_users() {
 
 #[tokio::test]
 async fn sse_user_b_event_not_visible_to_user_a() {
-    use ironclaw::channels::web::types::SseEvent;
+    use ironclaw_common::AppEvent;
     use tokio_stream::StreamExt;
 
     let manager = SseManager::new();
@@ -392,19 +398,19 @@ async fn sse_user_b_event_not_visible_to_user_a() {
     // Send event for bob only
     manager.broadcast_for_user(
         BOB_USER_ID,
-        SseEvent::Response {
+        AppEvent::Response {
             content: "bob's secret".to_string(),
             thread_id: "t1".to_string(),
         },
     );
 
     // Send heartbeat so alice has something to receive
-    manager.broadcast(SseEvent::Heartbeat);
+    manager.broadcast(AppEvent::Heartbeat);
 
     // Alice should only get heartbeat, not bob's response
     let e = alice.next().await.unwrap();
     assert!(
-        matches!(e, SseEvent::Heartbeat),
+        matches!(e, AppEvent::Heartbeat),
         "Expected Heartbeat, got {:?}",
         e
     );
@@ -412,7 +418,7 @@ async fn sse_user_b_event_not_visible_to_user_a() {
 
 #[tokio::test]
 async fn sse_unscoped_subscriber_receives_all_events() {
-    use ironclaw::channels::web::types::SseEvent;
+    use ironclaw_common::AppEvent;
     use tokio_stream::StreamExt;
 
     let manager = SseManager::new();
@@ -421,19 +427,19 @@ async fn sse_unscoped_subscriber_receives_all_events() {
 
     manager.broadcast_for_user(
         ALICE_USER_ID,
-        SseEvent::Status {
+        AppEvent::Status {
             message: "alice only".to_string(),
             thread_id: None,
         },
     );
     manager.broadcast_for_user(
         BOB_USER_ID,
-        SseEvent::Status {
+        AppEvent::Status {
             message: "bob only".to_string(),
             thread_id: None,
         },
     );
-    manager.broadcast(SseEvent::Heartbeat);
+    manager.broadcast(AppEvent::Heartbeat);
 
     // Unscoped subscriber gets ALL three events
     let e1 = stream.next().await.unwrap();
@@ -441,14 +447,14 @@ async fn sse_unscoped_subscriber_receives_all_events() {
     let e3 = stream.next().await.unwrap();
 
     match &e1 {
-        SseEvent::Status { message, .. } => assert_eq!(message, "alice only"),
+        AppEvent::Status { message, .. } => assert_eq!(message, "alice only"),
         _ => panic!("Expected alice's Status"),
     }
     match &e2 {
-        SseEvent::Status { message, .. } => assert_eq!(message, "bob only"),
+        AppEvent::Status { message, .. } => assert_eq!(message, "bob only"),
         _ => panic!("Expected bob's Status"),
     }
-    assert!(matches!(e3, SseEvent::Heartbeat));
+    assert!(matches!(e3, AppEvent::Heartbeat));
 }
 
 // ===========================================================================
@@ -537,7 +543,8 @@ fn gateway_state_has_multi_tenant_fields() {
         job_manager: None,
         prompt_queue: None,
         scheduler: None,
-        default_user_id: "fallback".to_string(), // Multi-tenant: renamed from user_id
+        owner_id: "fallback".to_string(),
+        default_sender_id: "fallback".to_string(),
         shutdown_tx: tokio::sync::RwLock::new(None),
         ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
         llm_provider: None,
@@ -553,7 +560,8 @@ fn gateway_state_has_multi_tenant_fields() {
         active_config: Default::default(),
     };
 
-    assert_eq!(state.default_user_id, "fallback");
+    assert_eq!(state.owner_id, "fallback");
+    assert_eq!(state.default_sender_id, "fallback");
     assert!(state.workspace_pool.is_none());
 }
 
@@ -570,6 +578,69 @@ async fn start_multi_user_server() -> (SocketAddr, Arc<GatewayState>) {
         .start_multi(auth)
         .await
         .expect("Failed to start multi-user test server")
+}
+
+async fn start_owner_scoped_sender_server() -> (
+    SocketAddr,
+    Arc<GatewayState>,
+    tokio::sync::mpsc::Receiver<IncomingMessage>,
+) {
+    let (agent_tx, agent_rx) = tokio::sync::mpsc::channel(64);
+
+    let mut tokens = HashMap::new();
+    tokens.insert(
+        OWNER_TOKEN.to_string(),
+        UserIdentity {
+            user_id: OWNER_SCOPE_ID.to_string(),
+            workspace_read_scopes: Vec::new(),
+        },
+    );
+    tokens.insert(
+        BOB_TOKEN.to_string(),
+        UserIdentity {
+            user_id: BOB_USER_ID.to_string(),
+            workspace_read_scopes: Vec::new(),
+        },
+    );
+
+    let state = Arc::new(GatewayState {
+        msg_tx: tokio::sync::RwLock::new(Some(agent_tx)),
+        sse: Arc::new(SseManager::new()),
+        workspace: None,
+        workspace_pool: None,
+        session_manager: None,
+        log_broadcaster: None,
+        log_level_handle: None,
+        extension_manager: None,
+        tool_registry: None,
+        store: None,
+        job_manager: None,
+        prompt_queue: None,
+        scheduler: None,
+        owner_id: OWNER_SCOPE_ID.to_string(),
+        default_sender_id: GATEWAY_SENDER_ID.to_string(),
+        shutdown_tx: tokio::sync::RwLock::new(None),
+        ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
+        llm_provider: None,
+        skill_registry: None,
+        skill_catalog: None,
+        chat_rate_limiter: PerUserRateLimiter::new(30, 60),
+        oauth_rate_limiter: RateLimiter::new(10, 60),
+        webhook_rate_limiter: RateLimiter::new(10, 60),
+        registry_entries: Vec::new(),
+        cost_guard: None,
+        routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
+        startup_time: std::time::Instant::now(),
+        active_config: Default::default(),
+    });
+
+    let auth = MultiAuthState::multi(tokens);
+    let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+    let bound = start_server(addr, state.clone(), auth)
+        .await
+        .expect("Failed to start owner-scoped sender test server");
+
+    (bound, state, agent_rx)
 }
 
 #[tokio::test]
@@ -678,6 +749,49 @@ async fn full_server_chat_send_accepted_for_alice() {
 }
 
 #[tokio::test]
+async fn full_server_chat_send_rewrites_sender_only_for_owner_scope_rebind() {
+    let (addr, _state, mut agent_rx) = start_owner_scoped_sender_server().await;
+
+    let client = reqwest::Client::new();
+
+    let owner_resp = client
+        .post(format!("http://{}/api/chat/send", addr))
+        .header("Authorization", format!("Bearer {}", OWNER_TOKEN))
+        .header("Content-Type", "application/json")
+        .body(r#"{"content":"hello from owner"}"#)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(owner_resp.status(), 202);
+
+    let owner_msg = tokio::time::timeout(Duration::from_secs(2), agent_rx.recv())
+        .await
+        .expect("Timed out waiting for owner message")
+        .expect("Agent channel closed");
+    assert_eq!(owner_msg.user_id, OWNER_SCOPE_ID);
+    assert_eq!(owner_msg.sender_id, GATEWAY_SENDER_ID);
+    assert_eq!(owner_msg.content, "hello from owner");
+
+    let other_resp = client
+        .post(format!("http://{}/api/chat/send", addr))
+        .header("Authorization", format!("Bearer {}", BOB_TOKEN))
+        .header("Content-Type", "application/json")
+        .body(r#"{"content":"hello from bob"}"#)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(other_resp.status(), 202);
+
+    let other_msg = tokio::time::timeout(Duration::from_secs(2), agent_rx.recv())
+        .await
+        .expect("Timed out waiting for non-owner message")
+        .expect("Agent channel closed");
+    assert_eq!(other_msg.user_id, BOB_USER_ID);
+    assert_eq!(other_msg.sender_id, BOB_USER_ID);
+    assert_eq!(other_msg.content, "hello from bob");
+}
+
+#[tokio::test]
 async fn full_server_chat_send_rejected_without_auth() {
     let (addr, _state) = start_multi_user_server().await;
 
@@ -767,7 +881,7 @@ async fn full_server_jobs_endpoint_rejected_without_auth() {
 #[tokio::test]
 async fn full_server_ws_multi_user_event_isolation() {
     use futures::StreamExt;
-    use ironclaw::channels::web::types::SseEvent;
+    use ironclaw_common::AppEvent;
     use tokio_tungstenite::tungstenite::Message;
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
@@ -800,14 +914,14 @@ async fn full_server_ws_multi_user_event_isolation() {
     // Broadcast an event scoped to Alice only
     state.sse.broadcast_for_user(
         ALICE_USER_ID,
-        SseEvent::Status {
+        AppEvent::Status {
             message: "alice-only-event".to_string(),
             thread_id: None,
         },
     );
 
     // Broadcast a global heartbeat so Bob has something to receive
-    state.sse.broadcast(SseEvent::Heartbeat);
+    state.sse.broadcast(AppEvent::Heartbeat);
 
     // Alice should get her scoped event
     let alice_msg = tokio::time::timeout(Duration::from_secs(2), alice_ws.next())
@@ -888,7 +1002,8 @@ async fn start_multi_user_server_with_db() -> (
         job_manager: None,
         prompt_queue: None,
         scheduler: None,
-        default_user_id: ALICE_USER_ID.to_string(),
+        owner_id: ALICE_USER_ID.to_string(),
+        default_sender_id: ALICE_USER_ID.to_string(),
         shutdown_tx: tokio::sync::RwLock::new(None),
         ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
         llm_provider: None,
