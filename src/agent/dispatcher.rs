@@ -2400,12 +2400,8 @@ mod tests {
             injection_check_enabled: true,
         });
         let result: Result<String, _> = Err(err);
-        let (formatted, message) = crate::tools::execute::process_tool_result(
-            &safety,
-            tool_name,
-            "call_1",
-            &result,
-        );
+        let (formatted, message) =
+            crate::tools::execute::process_tool_result(&safety, tool_name, "call_1", &result);
 
         assert!(
             formatted.contains("Tool 'http' failed:"),
