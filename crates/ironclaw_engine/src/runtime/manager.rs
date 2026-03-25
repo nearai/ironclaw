@@ -39,7 +39,8 @@ pub struct ThreadManager {
     pub policy: Arc<PolicyEngine>,
     lease_planner: LeasePlanner,
     tree: RwLock<ThreadTree>,
-    running: RwLock<HashMap<ThreadId, RunningThread>>,
+    running: Arc<RwLock<HashMap<ThreadId, RunningThread>>>,
+    completed: Arc<RwLock<HashMap<ThreadId, ThreadOutcome>>>,
     /// Broadcast channel for thread events (for live status updates).
     event_tx: tokio::sync::broadcast::Sender<crate::types::event::ThreadEvent>,
 }
@@ -63,7 +64,8 @@ impl ThreadManager {
             policy,
             lease_planner: LeasePlanner::new(),
             tree: RwLock::new(ThreadTree::new()),
-            running: RwLock::new(HashMap::new()),
+            running: Arc::new(RwLock::new(HashMap::new())),
+            completed: Arc::new(RwLock::new(HashMap::new())),
             event_tx,
         }
     }
@@ -121,6 +123,9 @@ impl ThreadManager {
         }
         let thread_id = thread.id;
         let user_id = user_id.into();
+        if let Some(metadata) = thread.metadata.as_object_mut() {
+            metadata.insert("user_id".into(), serde_json::Value::String(user_id.clone()));
+        }
 
         // Register in tree
         if let Some(pid) = parent_id {
@@ -157,6 +162,69 @@ impl ThreadManager {
         // Persist
         self.store.save_thread(&thread).await?;
 
+        self.start_thread(thread, user_id, false).await
+    }
+
+    /// Resume a persisted waiting or suspended thread.
+    pub async fn resume_thread(
+        &self,
+        thread_id: ThreadId,
+        user_id: impl Into<String>,
+        injected_message: Option<ThreadMessage>,
+        approval_event: Option<(String, bool)>,
+    ) -> Result<(), EngineError> {
+        if self.is_running(thread_id).await {
+            return Err(EngineError::Thread(
+                crate::types::error::ThreadError::AlreadyRunning(thread_id),
+            ));
+        }
+
+        let mut thread = self
+            .store
+            .load_thread(thread_id)
+            .await?
+            .ok_or(EngineError::ThreadNotFound(thread_id))?;
+
+        if !matches!(
+            thread.state,
+            crate::types::thread::ThreadState::Waiting
+                | crate::types::thread::ThreadState::Suspended
+        ) {
+            return Err(EngineError::Store {
+                reason: format!(
+                    "thread {thread_id} is not resumable from {:?}",
+                    thread.state
+                ),
+            });
+        }
+
+        if let Some((call_id, approved)) = approval_event {
+            let event = crate::types::event::ThreadEvent::new(
+                thread_id,
+                crate::types::event::EventKind::ApprovalReceived { call_id, approved },
+            );
+            let _ = self.event_tx.send(event.clone());
+            thread.events.push(event);
+            thread.updated_at = chrono::Utc::now();
+        }
+
+        if let Some(message) = injected_message {
+            thread.add_message(message);
+        }
+
+        self.store.save_thread(&thread).await?;
+        self.start_thread(thread, user_id.into(), true).await?;
+        Ok(())
+    }
+
+    async fn start_thread(
+        &self,
+        thread: Thread,
+        user_id: String,
+        is_resume: bool,
+    ) -> Result<ThreadId, EngineError> {
+        let thread_id = thread.id;
+
         // Create signal channel
         let (tx, rx) = messaging::signal_channel(32);
 
@@ -180,6 +248,8 @@ impl ThreadManager {
         let llm_for_reflection = Arc::clone(&self.llm);
         let caps_for_reflection = Arc::clone(&self.capabilities);
         let event_tx = self.event_tx.clone();
+        let running = Arc::clone(&self.running);
+        let completed = Arc::clone(&self.completed);
         let handle = tokio::spawn(async move {
             let mut exec = exec_loop;
             let result = exec.run().await;
@@ -296,7 +366,16 @@ impl ThreadManager {
                     "failed to save final thread state: {e}"
                 );
             }
-            result
+
+            let outcome = match result {
+                Ok(outcome) => outcome,
+                Err(error) => ThreadOutcome::Failed {
+                    error: error.to_string(),
+                },
+            };
+            completed.write().await.insert(thread_id, outcome.clone());
+            running.write().await.remove(&thread_id);
+            Ok(outcome)
         });
 
         self.running.write().await.insert(
@@ -306,6 +385,10 @@ impl ThreadManager {
                 handle,
             },
         );
+
+        if is_resume {
+            debug!(thread_id = %thread_id, "resumed thread");
+        }
 
         Ok(thread_id)
     }
@@ -350,6 +433,10 @@ impl ThreadManager {
     /// Wait for a thread to finish and return its outcome.
     /// Removes the thread from the running set.
     pub async fn join_thread(&self, thread_id: ThreadId) -> Result<ThreadOutcome, EngineError> {
+        if let Some(outcome) = self.completed.write().await.remove(&thread_id) {
+            return Ok(outcome);
+        }
+
         let rt = {
             let mut running = self.running.write().await;
             running.remove(&thread_id)
@@ -395,6 +482,41 @@ impl ThreadManager {
         finished
     }
 
+    /// Automatically resume checkpointed non-foreground threads.
+    pub async fn resume_background_threads(
+        &self,
+        project_id: ProjectId,
+    ) -> Result<Vec<ThreadId>, EngineError> {
+        let threads = self.store.list_threads(project_id).await?;
+        let mut resumed = Vec::new();
+
+        for thread in threads {
+            if thread.state != ThreadState::Suspended {
+                continue;
+            }
+            if thread.thread_type != ThreadType::Research {
+                continue;
+            }
+            if thread.metadata.get("runtime_checkpoint").is_none() {
+                continue;
+            }
+            let Some(user_id) = thread
+                .metadata
+                .get("user_id")
+                .and_then(|value| value.as_str())
+                .filter(|user_id| !user_id.is_empty())
+            else {
+                continue;
+            };
+
+            self.resume_thread(thread.id, user_id.to_string(), None, None)
+                .await?;
+            resumed.push(thread.id);
+        }
+
+        Ok(resumed)
+    }
+
     /// Reconcile persisted non-terminal threads after process startup.
     ///
     /// The current engine does not support mid-thread replay/resume, so any
@@ -403,11 +525,37 @@ impl ThreadManager {
         &self,
         project_id: ProjectId,
     ) -> Result<Vec<ThreadId>, EngineError> {
+        const PENDING_APPROVAL_METADATA_KEY: &str = "pending_approval";
+        const RUNTIME_CHECKPOINT_METADATA_KEY: &str = "runtime_checkpoint";
         let threads = self.store.list_threads(project_id).await?;
         let mut recovered = Vec::new();
 
         for mut thread in threads {
             if thread.state.is_terminal() || thread.state == ThreadState::Completed {
+                continue;
+            }
+
+            if thread.state == ThreadState::Waiting
+                && thread.metadata.get(PENDING_APPROVAL_METADATA_KEY).is_some()
+            {
+                continue;
+            }
+
+            if thread
+                .metadata
+                .get(RUNTIME_CHECKPOINT_METADATA_KEY)
+                .is_some()
+                && matches!(thread.state, ThreadState::Running | ThreadState::Suspended)
+            {
+                if thread.state == ThreadState::Running {
+                    thread.transition_to(
+                        ThreadState::Suspended,
+                        Some("engine restart; resumable from checkpoint".into()),
+                    )?;
+                }
+                self.store.append_events(&thread.events).await?;
+                self.store.save_thread(&thread).await?;
+                recovered.push(thread.id);
                 continue;
             }
 
@@ -744,7 +892,7 @@ mod tests {
 
         // Give it a moment to start, then stop
         tokio::time::sleep(Duration::from_millis(10)).await;
-        mgr.stop_thread(tid).await.unwrap();
+        let _ = mgr.stop_thread(tid).await;
 
         let outcome = mgr.join_thread(tid).await.unwrap();
         assert!(matches!(
@@ -819,5 +967,104 @@ mod tests {
         assert_eq!(saved.state, ThreadState::Failed);
         let events = store.load_events(running.id).await.unwrap();
         assert!(!events.is_empty());
+    }
+
+    #[tokio::test]
+    async fn recover_project_threads_preserves_waiting_approval_threads() {
+        let store = Arc::new(MockStore::new());
+        let project = ProjectId::new();
+
+        let mut waiting = Thread::new(
+            "awaiting approval",
+            ThreadType::Foreground,
+            project,
+            ThreadConfig::default(),
+        );
+        waiting.transition_to(ThreadState::Running, None).unwrap();
+        waiting
+            .transition_to(ThreadState::Waiting, Some("approval".into()))
+            .unwrap();
+        waiting.metadata = serde_json::json!({
+            "pending_approval": {
+                "request_id": "req-1",
+                "action_name": "shell",
+                "call_id": "call-1"
+            }
+        });
+        store.save_thread(&waiting).await.unwrap();
+
+        let mgr = make_manager_with_store(MockLlm::text("ignored"), Arc::clone(&store));
+        let recovered = mgr.recover_project_threads(project).await.unwrap();
+
+        assert!(recovered.is_empty());
+        let saved = store.load_thread(waiting.id).await.unwrap().unwrap();
+        assert_eq!(saved.state, ThreadState::Waiting);
+    }
+
+    #[tokio::test]
+    async fn recover_project_threads_suspends_checkpointed_threads() {
+        let store = Arc::new(MockStore::new());
+        let project = ProjectId::new();
+
+        let mut running = Thread::new(
+            "resume me",
+            ThreadType::Foreground,
+            project,
+            ThreadConfig::default(),
+        );
+        running.transition_to(ThreadState::Running, None).unwrap();
+        running.metadata = serde_json::json!({
+            "runtime_checkpoint": {
+                "persisted_state": {"last_return": 7},
+                "nudge_count": 0,
+                "consecutive_errors": 0,
+                "compaction_count": 0
+            }
+        });
+        store.save_thread(&running).await.unwrap();
+
+        let mgr = make_manager_with_store(MockLlm::text("ignored"), Arc::clone(&store));
+        let recovered = mgr.recover_project_threads(project).await.unwrap();
+
+        assert_eq!(recovered, vec![running.id]);
+        let saved = store.load_thread(running.id).await.unwrap().unwrap();
+        assert_eq!(saved.state, ThreadState::Suspended);
+    }
+
+    #[tokio::test]
+    async fn resume_background_threads_restarts_suspended_research_threads() {
+        let store = Arc::new(MockStore::new());
+        let project = ProjectId::new();
+
+        let mut research = Thread::new(
+            "background research",
+            ThreadType::Research,
+            project,
+            ThreadConfig::default(),
+        );
+        research.transition_to(ThreadState::Running, None).unwrap();
+        research.metadata = serde_json::json!({
+            "user_id": "owner",
+            "runtime_checkpoint": {
+                "persisted_state": {},
+                "nudge_count": 0,
+                "consecutive_errors": 0,
+                "compaction_count": 0
+            }
+        });
+        research
+            .transition_to(
+                ThreadState::Suspended,
+                Some("engine restart; resumable from checkpoint".into()),
+            )
+            .unwrap();
+        store.save_thread(&research).await.unwrap();
+
+        let mgr = make_manager_with_store(MockLlm::text("done"), Arc::clone(&store));
+        let resumed = mgr.resume_background_threads(project).await.unwrap();
+        assert_eq!(resumed, vec![research.id]);
+
+        let outcome = mgr.join_thread(research.id).await.unwrap();
+        assert!(matches!(outcome, ThreadOutcome::Completed { .. }));
     }
 }

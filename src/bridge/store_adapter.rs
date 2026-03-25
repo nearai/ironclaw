@@ -103,15 +103,24 @@ impl HybridStore {
         })
         .await;
 
+        let projects = self.projects.read().await.len();
+        let conversations = self.conversations.read().await.len();
+        let threads = self.threads.read().await.len();
+        let steps = self.steps.read().await.len();
+        let events = self.events.read().await.len();
+        let leases = self.leases.read().await.len();
+        let missions = self.missions.read().await.len();
+        let docs = self.docs.read().await.len();
+
         debug!(
-            projects = self.projects.read().await.len(),
-            conversations = self.conversations.read().await.len(),
-            threads = self.threads.read().await.len(),
-            steps = self.steps.read().await.len(),
-            events = self.events.read().await.len(),
-            leases = self.leases.read().await.len(),
-            missions = self.missions.read().await.len(),
-            docs = self.docs.read().await.len(),
+            projects,
+            conversations,
+            threads,
+            steps,
+            events,
+            leases,
+            missions,
+            docs,
             "loaded engine state from workspace"
         );
     }

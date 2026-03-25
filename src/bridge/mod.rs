@@ -9,4 +9,6 @@ mod llm_adapter;
 mod router;
 mod store_adapter;
 
-pub use router::{handle_approval, handle_with_engine, is_engine_v2_enabled};
+pub use router::{
+    handle_approval, handle_with_engine, is_engine_v2_enabled, pending_approval_for_user_thread,
+};

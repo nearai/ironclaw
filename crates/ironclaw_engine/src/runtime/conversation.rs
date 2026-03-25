@@ -18,7 +18,12 @@ use crate::types::conversation::{ConversationEntry, ConversationId, Conversation
 use crate::types::error::EngineError;
 use crate::types::message::ThreadMessage;
 use crate::types::project::ProjectId;
-use crate::types::thread::{ThreadConfig, ThreadId, ThreadType};
+use crate::types::thread::{ThreadConfig, ThreadId, ThreadState, ThreadType};
+
+enum ActiveForeground {
+    Running(ThreadId),
+    Resumable(ThreadId),
+}
 
 /// Manages conversation surfaces and routes messages to threads.
 ///
@@ -133,8 +138,7 @@ impl ConversationManager {
         let active_foreground = self.find_active_foreground(conv).await;
 
         match active_foreground {
-            Some(thread_id) => {
-                // Inject into existing thread
+            Some(ActiveForeground::Running(thread_id)) => {
                 debug!(
                     conversation_id = %conversation_id,
                     thread_id = %thread_id,
@@ -143,6 +147,22 @@ impl ConversationManager {
                 self.thread_manager
                     .inject_message(thread_id, ThreadMessage::user(content))
                     .await?;
+                self.store.save_conversation(conv).await?;
+                Ok(thread_id)
+            }
+            Some(ActiveForeground::Resumable(thread_id)) => {
+                debug!(
+                    conversation_id = %conversation_id,
+                    thread_id = %thread_id,
+                    "resuming suspended foreground thread"
+                );
+                self.thread_manager
+                    .resume_thread(thread_id, user_id, Some(ThreadMessage::user(content)), None)
+                    .await?;
+                conv.add_entry(ConversationEntry::system_for_thread(
+                    thread_id,
+                    "Thread resumed",
+                ));
                 self.store.save_conversation(conv).await?;
                 Ok(thread_id)
             }
@@ -255,10 +275,16 @@ impl ConversationManager {
     }
 
     /// Find an active foreground thread in a conversation.
-    async fn find_active_foreground(&self, conv: &ConversationSurface) -> Option<ThreadId> {
+    async fn find_active_foreground(&self, conv: &ConversationSurface) -> Option<ActiveForeground> {
         for &tid in &conv.active_threads {
             if self.thread_manager.is_running(tid).await {
-                return Some(tid);
+                return Some(ActiveForeground::Running(tid));
+            }
+            if let Ok(Some(thread)) = self.store.load_thread(tid).await
+                && thread.thread_type == ThreadType::Foreground
+                && thread.state == ThreadState::Suspended
+            {
+                return Some(ActiveForeground::Resumable(tid));
             }
         }
         None
@@ -370,32 +396,45 @@ mod tests {
 
     struct MockStore {
         conversations: RwLock<HashMap<ConversationId, ConversationSurface>>,
+        threads: RwLock<HashMap<ThreadId, crate::types::thread::Thread>>,
     }
 
     impl MockStore {
         fn new() -> Self {
             Self {
                 conversations: RwLock::new(HashMap::new()),
+                threads: RwLock::new(HashMap::new()),
             }
         }
     }
 
     #[async_trait::async_trait]
     impl Store for MockStore {
-        async fn save_thread(&self, _: &crate::types::thread::Thread) -> Result<(), EngineError> {
+        async fn save_thread(
+            &self,
+            thread: &crate::types::thread::Thread,
+        ) -> Result<(), EngineError> {
+            self.threads.write().await.insert(thread.id, thread.clone());
             Ok(())
         }
         async fn load_thread(
             &self,
-            _: ThreadId,
+            id: ThreadId,
         ) -> Result<Option<crate::types::thread::Thread>, EngineError> {
-            Ok(None)
+            Ok(self.threads.read().await.get(&id).cloned())
         }
         async fn list_threads(
             &self,
-            _: ProjectId,
+            project_id: ProjectId,
         ) -> Result<Vec<crate::types::thread::Thread>, EngineError> {
-            Ok(vec![])
+            Ok(self
+                .threads
+                .read()
+                .await
+                .values()
+                .filter(|thread| thread.project_id == project_id)
+                .cloned()
+                .collect())
         }
         async fn update_thread_state(
             &self,
@@ -560,6 +599,71 @@ mod tests {
 
         // Wait for thread to complete
         let outcome = tm.join_thread(tid).await.unwrap();
+        assert!(matches!(outcome, ThreadOutcome::Completed { .. }));
+    }
+
+    #[tokio::test]
+    async fn handle_message_resumes_suspended_thread() {
+        let store = Arc::new(MockStore::new());
+        let tm = Arc::new(ThreadManager::new(
+            Arc::new(MockLlm(Mutex::new(vec![LlmOutput {
+                response: LlmResponse::Text("Recovered".into()),
+                usage: TokenUsage::default(),
+            }]))),
+            Arc::new(MockEffects),
+            store.clone(),
+            Arc::new(CapabilityRegistry::new()),
+            Arc::new(LeaseManager::new()),
+            Arc::new(PolicyEngine::new()),
+        ));
+        let cm = ConversationManager::new(Arc::clone(&tm), store.clone());
+
+        let conv_id = cm.get_or_create_conversation("web", "user1").await.unwrap();
+        let project = ProjectId::new();
+        let mut thread = crate::types::thread::Thread::new(
+            "resume",
+            ThreadType::Foreground,
+            project,
+            ThreadConfig::default(),
+        );
+        thread.transition_to(ThreadState::Running, None).unwrap();
+        thread.add_message(ThreadMessage::user("earlier"));
+        thread.step_count = 1;
+        thread.metadata = serde_json::json!({
+            "runtime_checkpoint": {
+                "persisted_state": {"last_return": 7},
+                "nudge_count": 0,
+                "consecutive_errors": 0,
+                "compaction_count": 0
+            }
+        });
+        thread
+            .transition_to(
+                ThreadState::Suspended,
+                Some("engine restart; resumable from checkpoint".into()),
+            )
+            .unwrap();
+        store.save_thread(&thread).await.unwrap();
+
+        {
+            let mut convs = cm.conversations.write().await;
+            let conv = convs.get_mut(&conv_id).unwrap();
+            conv.track_thread(thread.id);
+        }
+
+        let resumed = cm
+            .handle_user_message(
+                conv_id,
+                "continue from there",
+                project,
+                "user1",
+                ThreadConfig::default(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resumed, thread.id);
+        let outcome = tm.join_thread(thread.id).await.unwrap();
         assert!(matches!(outcome, ThreadOutcome::Completed { .. }));
     }
 

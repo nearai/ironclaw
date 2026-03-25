@@ -88,8 +88,8 @@ pub struct HistoryResponse {
     pub oldest_timestamp: Option<String>,
     /// Pending tool approval that needs user action (re-rendered on thread switch).
     ///
-    /// Only populated from in-memory state; not persisted to DB.
-    /// Server restart clears pending approvals.
+    /// Populated from live session state and, when engine v2 is active,
+    /// durable engine metadata so approval cards survive thread switches and restarts.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pending_approval: Option<PendingApprovalInfo>,
 }

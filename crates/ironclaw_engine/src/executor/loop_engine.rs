@@ -24,6 +24,16 @@ use crate::types::message::ThreadMessage;
 use crate::types::step::{ExecutionTier, LlmResponse, Step, StepStatus};
 use crate::types::thread::{Thread, ThreadState};
 
+const RUNTIME_CHECKPOINT_METADATA_KEY: &str = "runtime_checkpoint";
+
+#[derive(Default)]
+struct RuntimeCheckpoint {
+    persisted_state: serde_json::Value,
+    nudge_count: u32,
+    consecutive_errors: u32,
+    compaction_count: u32,
+}
+
 /// The core execution loop for a thread.
 pub struct ExecutionLoop {
     pub thread: Thread,
@@ -108,6 +118,67 @@ impl ExecutionLoop {
         self.thread.updated_at = chrono::Utc::now();
     }
 
+    fn load_runtime_checkpoint(&self) -> RuntimeCheckpoint {
+        let Some(checkpoint) = self
+            .thread
+            .metadata
+            .get(RUNTIME_CHECKPOINT_METADATA_KEY)
+            .and_then(|value| value.as_object())
+        else {
+            return RuntimeCheckpoint {
+                persisted_state: serde_json::json!({}),
+                ..RuntimeCheckpoint::default()
+            };
+        };
+
+        RuntimeCheckpoint {
+            persisted_state: checkpoint
+                .get("persisted_state")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({})),
+            nudge_count: checkpoint
+                .get("nudge_count")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(0) as u32,
+            consecutive_errors: checkpoint
+                .get("consecutive_errors")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(0) as u32,
+            compaction_count: checkpoint
+                .get("compaction_count")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(0) as u32,
+        }
+    }
+
+    fn save_runtime_checkpoint(
+        &mut self,
+        persisted_state: &serde_json::Value,
+        nudge_count: u32,
+        consecutive_errors: u32,
+        compaction_count: u32,
+    ) {
+        if let Some(metadata) = self.thread.metadata.as_object_mut() {
+            metadata.insert(
+                RUNTIME_CHECKPOINT_METADATA_KEY.into(),
+                serde_json::json!({
+                    "persisted_state": persisted_state,
+                    "nudge_count": nudge_count,
+                    "consecutive_errors": consecutive_errors,
+                    "compaction_count": compaction_count,
+                }),
+            );
+        }
+        self.thread.updated_at = chrono::Utc::now();
+    }
+
+    fn clear_runtime_checkpoint(&mut self) {
+        if let Some(metadata) = self.thread.metadata.as_object_mut() {
+            metadata.remove(RUNTIME_CHECKPOINT_METADATA_KEY);
+        }
+        self.thread.updated_at = chrono::Utc::now();
+    }
+
     async fn persist_runtime_state(
         &self,
         step: Option<&Step>,
@@ -132,10 +203,13 @@ impl ExecutionLoop {
 
     /// Run the execution loop to completion.
     pub async fn run(&mut self) -> Result<ThreadOutcome, EngineError> {
-        let mut persisted_event_count = 0;
+        let mut persisted_event_count = self.thread.events.len();
+        let checkpoint = self.load_runtime_checkpoint();
 
-        // Transition to Running
-        self.thread.transition_to(ThreadState::Running, None)?;
+        // Transition to Running if this is a fresh start or restart from a resumable state.
+        if self.thread.state != ThreadState::Running {
+            self.thread.transition_to(ThreadState::Running, None)?;
+        }
 
         // Inject CodeAct/RLM system prompt if none exists
         if !self
@@ -173,18 +247,19 @@ impl ExecutionLoop {
 
         // Persisted state across code steps — accumulates return values
         // and tool results so the next step can access them via `state`.
-        let mut persisted_state = serde_json::json!({});
-        let mut nudge_count: u32 = 0;
-        let mut consecutive_errors: u32 = 0;
-        let mut compaction_count: u32 = 0;
+        let mut persisted_state = checkpoint.persisted_state;
+        let mut nudge_count = checkpoint.nudge_count;
+        let mut consecutive_errors = checkpoint.consecutive_errors;
+        let mut compaction_count = checkpoint.compaction_count;
 
-        for iteration in 0..max_iterations {
+        for iteration in self.thread.step_count..max_iterations {
             // 1. Check signals
             match self.check_signals() {
                 SignalAction::Continue => {}
                 SignalAction::Stop => {
                     self.thread
                         .transition_to(ThreadState::Completed, Some("stopped by signal".into()))?;
+                    self.clear_runtime_checkpoint();
                     self.persist_runtime_state(None, &mut persisted_event_count)
                         .await?;
                     return Ok(ThreadOutcome::Stopped);
@@ -208,6 +283,7 @@ impl ExecutionLoop {
                 );
                 self.thread
                     .transition_to(ThreadState::Completed, Some("token limit exceeded".into()))?;
+                self.clear_runtime_checkpoint();
                 self.persist_runtime_state(None, &mut persisted_event_count)
                     .await?;
                 return Ok(ThreadOutcome::Failed {
@@ -229,6 +305,7 @@ impl ExecutionLoop {
                     );
                     self.thread
                         .transition_to(ThreadState::Completed, Some("timeout".into()))?;
+                    self.clear_runtime_checkpoint();
                     self.persist_runtime_state(None, &mut persisted_event_count)
                         .await?;
                     return Ok(ThreadOutcome::Failed {
@@ -248,6 +325,7 @@ impl ExecutionLoop {
                 );
                 self.thread
                     .transition_to(ThreadState::Completed, Some("USD budget exceeded".into()))?;
+                self.clear_runtime_checkpoint();
                 self.persist_runtime_state(None, &mut persisted_event_count)
                     .await?;
                 return Ok(ThreadOutcome::Failed {
@@ -288,7 +366,7 @@ impl ExecutionLoop {
             let active_leases = self.leases.active_for_thread(self.thread.id).await;
 
             // 5. Build context (inject prior knowledge on first iteration only)
-            let retrieval_ref = if iteration == 0 {
+            let retrieval_ref = if self.thread.step_count == 0 {
                 self.retrieval.as_ref()
             } else {
                 None
@@ -304,7 +382,7 @@ impl ExecutionLoop {
             .await?;
 
             // 6. Create step
-            let mut step = Step::new(self.thread.id, iteration + 1);
+            let mut step = Step::new(self.thread.id, self.thread.step_count + 1);
             step.status = StepStatus::LlmCalling;
             self.emit_event(EventKind::StepStarted { step_id: step.id });
             self.persist_runtime_state(Some(&step), &mut persisted_event_count)
@@ -315,7 +393,7 @@ impl ExecutionLoop {
             // in the system prompt as Python functions. The LLM produces text with
             // ```repl code blocks that the bridge detects and converts to LlmResponse::Code.
             // This avoids the LLM using structured tool calls instead of writing code.
-            let force_text = iteration >= max_iterations.saturating_sub(1);
+            let force_text = self.thread.step_count >= max_iterations.saturating_sub(1);
             let config = LlmCallConfig {
                 force_text,
                 depth: self.thread.config.depth,
@@ -390,6 +468,7 @@ impl ExecutionLoop {
                             ThreadState::Completed,
                             Some("FINAL() in text".into()),
                         )?;
+                        self.clear_runtime_checkpoint();
                         self.persist_runtime_state(Some(&step), &mut persisted_event_count)
                             .await?;
                         return Ok(ThreadOutcome::Completed {
@@ -419,6 +498,12 @@ impl ExecutionLoop {
                             tokens: step.tokens_used,
                         });
                         self.thread.step_count += 1;
+                        self.save_runtime_checkpoint(
+                            &persisted_state,
+                            nudge_count,
+                            consecutive_errors,
+                            compaction_count,
+                        );
                         self.persist_runtime_state(Some(&step), &mut persisted_event_count)
                             .await?;
                         continue;
@@ -438,6 +523,7 @@ impl ExecutionLoop {
 
                     self.thread
                         .transition_to(ThreadState::Completed, Some("text response".into()))?;
+                    self.clear_runtime_checkpoint();
                     self.persist_runtime_state(Some(&step), &mut persisted_event_count)
                         .await?;
                     return Ok(ThreadOutcome::Completed {
@@ -522,10 +608,22 @@ impl ExecutionLoop {
                             ThreadState::Waiting,
                             Some("awaiting approval".into()),
                         )?;
+                        self.save_runtime_checkpoint(
+                            &persisted_state,
+                            nudge_count,
+                            consecutive_errors,
+                            compaction_count,
+                        );
                         self.persist_runtime_state(Some(&step), &mut persisted_event_count)
                             .await?;
                         return Ok(outcome);
                     }
+                    self.save_runtime_checkpoint(
+                        &persisted_state,
+                        nudge_count,
+                        consecutive_errors,
+                        compaction_count,
+                    );
                     self.persist_runtime_state(Some(&step), &mut persisted_event_count)
                         .await?;
                 }
@@ -716,6 +814,7 @@ impl ExecutionLoop {
                     if let Some(answer) = code_result.final_answer {
                         self.thread
                             .transition_to(ThreadState::Completed, Some("FINAL() called".into()))?;
+                        self.clear_runtime_checkpoint();
                         self.persist_runtime_state(Some(&step), &mut persisted_event_count)
                             .await?;
                         return Ok(ThreadOutcome::Completed {
@@ -729,6 +828,12 @@ impl ExecutionLoop {
                             ThreadState::Waiting,
                             Some("awaiting approval".into()),
                         )?;
+                        self.save_runtime_checkpoint(
+                            &persisted_state,
+                            nudge_count,
+                            consecutive_errors,
+                            compaction_count,
+                        );
                         self.persist_runtime_state(Some(&step), &mut persisted_event_count)
                             .await?;
                         return Ok(outcome);
@@ -741,6 +846,12 @@ impl ExecutionLoop {
                         consecutive_errors = 0;
                     }
 
+                    self.save_runtime_checkpoint(
+                        &persisted_state,
+                        nudge_count,
+                        consecutive_errors,
+                        compaction_count,
+                    );
                     self.persist_runtime_state(Some(&step), &mut persisted_event_count)
                         .await?;
                 }
@@ -762,6 +873,7 @@ impl ExecutionLoop {
                         "consecutive error threshold: {consecutive_errors} errors"
                     )),
                 )?;
+                self.clear_runtime_checkpoint();
                 self.persist_runtime_state(None, &mut persisted_event_count)
                     .await?;
                 return Ok(ThreadOutcome::Failed {
@@ -782,6 +894,7 @@ impl ExecutionLoop {
             ThreadState::Completed,
             Some("max iterations reached".into()),
         )?;
+        self.clear_runtime_checkpoint();
         self.persist_runtime_state(None, &mut persisted_event_count)
             .await?;
         Ok(ThreadOutcome::MaxIterations)

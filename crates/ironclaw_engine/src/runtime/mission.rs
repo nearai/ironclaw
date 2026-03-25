@@ -163,27 +163,45 @@ impl MissionManager {
         self.store.save_mission(&updated).await?;
 
         debug!(mission_id = %id, thread_id = %thread_id, "mission fired");
-
-        // Wait for thread completion and process the outcome
-        let tm = Arc::clone(&self.thread_manager);
-        let store = Arc::clone(&self.store);
-        let mission_id = id;
-        tokio::spawn(async move {
-            match tm.join_thread(thread_id).await {
-                Ok(outcome) => {
-                    if let Err(e) =
-                        process_mission_outcome(&store, mission_id, thread_id, &outcome).await
-                    {
-                        warn!(mission_id = %mission_id, "failed to process outcome: {e}");
-                    }
-                }
-                Err(e) => {
-                    warn!(mission_id = %mission_id, "thread join failed: {e}");
-                }
-            }
-        });
+        self.spawn_mission_outcome_watcher(id, thread_id);
 
         Ok(Some(thread_id))
+    }
+
+    /// Resume suspended checkpointed mission threads after restart.
+    pub async fn resume_recoverable_threads(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<ThreadId>, EngineError> {
+        let mut resumed = Vec::new();
+
+        for mission_id in self.active.read().await.clone() {
+            let Some(mission) = self.store.load_mission(mission_id).await? else {
+                continue;
+            };
+
+            for &thread_id in mission.thread_history.iter().rev() {
+                let Some(thread) = self.store.load_thread(thread_id).await? else {
+                    continue;
+                };
+                if thread.thread_type != ThreadType::Mission
+                    || thread.state != crate::types::thread::ThreadState::Suspended
+                {
+                    continue;
+                }
+                if thread.metadata.get("runtime_checkpoint").is_none() {
+                    continue;
+                }
+
+                self.thread_manager
+                    .resume_thread(thread_id, user_id.to_string(), None, None)
+                    .await?;
+                self.spawn_mission_outcome_watcher(mission_id, thread_id);
+                resumed.push(thread_id);
+            }
+        }
+
+        Ok(resumed)
     }
 
     /// Start a background cron ticker that fires due missions every 60 seconds.
@@ -462,6 +480,25 @@ impl MissionManager {
 
         Ok(spawned)
     }
+
+    fn spawn_mission_outcome_watcher(&self, mission_id: MissionId, thread_id: ThreadId) {
+        let tm = Arc::clone(&self.thread_manager);
+        let store = Arc::clone(&self.store);
+        tokio::spawn(async move {
+            match tm.join_thread(thread_id).await {
+                Ok(outcome) => {
+                    if let Err(e) =
+                        process_mission_outcome(&store, mission_id, thread_id, &outcome).await
+                    {
+                        warn!(mission_id = %mission_id, "failed to process outcome: {e}");
+                    }
+                }
+                Err(e) => {
+                    warn!(mission_id = %mission_id, "thread join failed: {e}");
+                }
+            }
+        });
+    }
 }
 
 // ── Meta-prompt generation ───────────────────────────────────
@@ -647,7 +684,9 @@ async fn process_self_improvement_output(
     let json_val = match extract_json_from_response(response) {
         Some(v) => v,
         None => {
-            debug!("self-improvement: no structured JSON in response (agent likely used tools directly)");
+            debug!(
+                "self-improvement: no structured JSON in response (agent likely used tools directly)"
+            );
             return Ok(());
         }
     };
