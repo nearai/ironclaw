@@ -201,6 +201,8 @@ pub struct ReasoningContext {
     pub metadata: std::collections::HashMap<String, String>,
     /// When true, force a text-only response (ignore available tools).
     /// Used by the agentic loop to guarantee termination near the iteration limit.
+    /// Sticky: once set, never cleared within a loop invocation. Callers must
+    /// create a fresh `ReasoningContext` per `run_agentic_loop()` call.
     pub force_text: bool,
     /// Pre-built system prompt. When set, `respond_with_tools` uses this directly
     /// instead of calling `build_system_prompt_with_tools`. Allows callers to build

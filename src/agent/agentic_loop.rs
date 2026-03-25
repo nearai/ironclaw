@@ -134,7 +134,9 @@ pub async fn run_agentic_loop(
     config: &AgenticLoopConfig,
 ) -> Result<LoopOutcome, Error> {
     let mut consecutive_tool_intent_nudges: u32 = 0;
-    let mut consecutive_truncations: u32 = 0;
+    // Accumulates across all iterations (not reset by text responses) so
+    // non-consecutive truncations still escalate to force_text.
+    let mut truncation_count: u32 = 0;
 
     for iteration in 1..=config.max_iterations {
         // Check for external signals (stop, cancellation, user messages)
@@ -220,12 +222,12 @@ pub async fn run_agentic_loop(
                 // incomplete. Discard them and tell the LLM to try a different
                 // approach rather than executing malformed tool calls.
                 if output.finish_reason == FinishReason::Length {
-                    consecutive_truncations += 1;
+                    truncation_count += 1;
                     let names: Vec<&str> = tool_calls.iter().map(|tc| tc.name.as_str()).collect();
                     tracing::warn!(
                         iteration,
                         tools = ?names,
-                        consecutive_truncations,
+                        truncation_count,
                         "Discarding truncated tool calls (finish_reason=Length)"
                     );
                     if let Some(ref text) = content {
@@ -236,7 +238,7 @@ pub async fn run_agentic_loop(
                         .push(ChatMessage::user(crate::llm::TRUNCATED_TOOL_CALL_NOTICE));
                     // After repeated truncations, force text-only mode so the LLM
                     // stops attempting tool calls it can't fit in the output budget.
-                    if consecutive_truncations >= 3 {
+                    if truncation_count >= 3 {
                         reason_ctx.force_text = true;
                     }
                     delegate.after_iteration(iteration).await;
@@ -244,7 +246,7 @@ pub async fn run_agentic_loop(
                 }
 
                 consecutive_tool_intent_nudges = 0;
-                consecutive_truncations = 0;
+                truncation_count = 0;
 
                 if let Some(outcome) = delegate
                     .execute_tool_calls(tool_calls, content, reason_ctx)
