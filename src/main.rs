@@ -142,6 +142,11 @@ async fn async_main() -> anyhow::Result<()> {
             init_cli_tracing();
             return ironclaw::cli::run_logs_command(logs_cmd.clone(), cli.config.as_deref()).await;
         }
+        Some(Command::Models(models_cmd)) => {
+            init_cli_tracing();
+            return ironclaw::cli::run_models_command(models_cmd.clone(), cli.config.as_deref())
+                .await;
+        }
         Some(Command::Doctor) => {
             init_cli_tracing();
             return ironclaw::cli::run_doctor_command().await;
@@ -584,14 +589,46 @@ async fn async_main() -> anyhow::Result<()> {
     // ── Gateway channel ────────────────────────────────────────────────
 
     let mut gateway_url: Option<String> = None;
-    let mut sse_sender: Option<
-        tokio::sync::broadcast::Sender<ironclaw::channels::web::types::SseEvent>,
-    > = None;
+    let mut sse_manager: Option<std::sync::Arc<ironclaw::channels::web::sse::SseManager>> = None;
     if let Some(ref gw_config) = config.channels.gateway {
-        let mut gw =
-            GatewayChannel::new(gw_config.clone()).with_llm_provider(Arc::clone(&components.llm));
+        // Build multi-user auth state if user_tokens is configured, else single-user.
+        let mut gw = if let Some(ref user_tokens) = gw_config.user_tokens {
+            use ironclaw::channels::web::auth::{MultiAuthState, UserIdentity};
+            let tokens = user_tokens
+                .iter()
+                .map(|(token, cfg)| {
+                    (
+                        token.clone(),
+                        UserIdentity {
+                            user_id: cfg.user_id.clone(),
+                            workspace_read_scopes: cfg.workspace_read_scopes.clone(),
+                        },
+                    )
+                })
+                .collect();
+            let auth = MultiAuthState::multi(tokens);
+            GatewayChannel::new_multi_auth(gw_config.clone(), auth)
+        } else {
+            GatewayChannel::new(gw_config.clone())
+        };
+        gw = gw.with_owner_scope(config.owner_id.clone());
+        gw = gw.with_llm_provider(Arc::clone(&components.llm));
         if let Some(ref ws) = components.workspace {
             gw = gw.with_workspace(Arc::clone(ws));
+        }
+        // Create per-user workspace pool for multi-user mode.
+        if let Some(ref db) = components.db {
+            let emb_cache_config = ironclaw::workspace::EmbeddingCacheConfig {
+                max_entries: config.embeddings.cache_size,
+            };
+            let pool = Arc::new(ironclaw::channels::web::server::WorkspacePool::new(
+                Arc::clone(db),
+                components.embeddings.clone(),
+                emb_cache_config,
+                config.search.clone(),
+                config.workspace.clone(),
+            ));
+            gw = gw.with_workspace_pool(pool);
         }
         gw = gw.with_session_manager(Arc::clone(&session_manager));
         gw = gw.with_log_broadcaster(Arc::clone(&log_broadcaster));
@@ -643,8 +680,12 @@ async fn async_main() -> anyhow::Result<()> {
                 let mut rx = tx.subscribe();
                 let gw_state = Arc::clone(gw.state());
                 tokio::spawn(async move {
-                    while let Ok((_job_id, event)) = rx.recv().await {
-                        gw_state.sse.broadcast(event);
+                    while let Ok((_job_id, user_id, event)) = rx.recv().await {
+                        if user_id.is_empty() {
+                            gw_state.sse.broadcast(event);
+                        } else {
+                            gw_state.sse.broadcast_for_user(&user_id, event);
+                        }
                     }
                 });
             }
@@ -686,7 +727,7 @@ async fn async_main() -> anyhow::Result<()> {
         // Capture SSE sender and routine engine slot before moving gw into channels.
         // IMPORTANT: This must come after all `with_*` calls since `rebuild_state`
         // creates a new SseManager, which would orphan this sender.
-        sse_sender = Some(gw.state().sse.sender());
+        sse_manager = Some(Arc::clone(&gw.state().sse));
         channel_names.push("gateway".to_string());
         channels.add(Box::new(gw)).await;
     }
@@ -749,6 +790,14 @@ async fn async_main() -> anyhow::Result<()> {
         .register_message_tools(Arc::clone(&channels), components.extension_manager.clone())
         .await;
 
+    // Default user ID for extension operations (single-user mode).
+    let ext_user_id = config
+        .channels
+        .gateway
+        .as_ref()
+        .map(|g| g.user_id.clone())
+        .unwrap_or_else(|| "default".to_string());
+
     // Wire up channel runtime for hot-activation of WASM channels.
     if let Some(ref ext_mgr) = components.extension_manager
         && let Some((rt, ps, router)) = wasm_channel_runtime_state.take()
@@ -769,12 +818,14 @@ async fn async_main() -> anyhow::Result<()> {
 
         // Auto-activate WASM channels that were active in a previous session.
         // Relay channels are handled separately below via restore_relay_channels().
-        let persisted = ext_mgr.load_persisted_active_channels().await;
+        let persisted = ext_mgr.load_persisted_active_channels(&ext_user_id).await;
         for name in &persisted {
-            if active_at_startup.contains(name) || ext_mgr.is_relay_channel(name).await {
+            if active_at_startup.contains(name)
+                || ext_mgr.is_relay_channel(name, &ext_user_id).await
+            {
                 continue;
             }
-            match ext_mgr.activate(name).await {
+            match ext_mgr.activate(name, &ext_user_id).await {
                 Ok(result) => {
                     tracing::debug!(
                         channel = %name,
@@ -799,14 +850,14 @@ async fn async_main() -> anyhow::Result<()> {
         ext_mgr
             .set_relay_channel_manager(Arc::clone(&channels))
             .await;
-        ext_mgr.restore_relay_channels().await;
+        ext_mgr.restore_relay_channels(&ext_user_id).await;
     }
 
     // Wire SSE sender into extension manager for broadcasting status events.
     if let Some(ref ext_mgr) = components.extension_manager
-        && let Some(ref sender) = sse_sender
+        && let Some(ref sse) = sse_manager
     {
-        ext_mgr.set_sse_sender(sender.clone()).await;
+        ext_mgr.set_sse_sender(Arc::clone(sse)).await;
     }
 
     // Snapshot memory for trace recording before the agent starts
@@ -844,12 +895,13 @@ async fn async_main() -> anyhow::Result<()> {
         skills_config: config.skills.clone(),
         hooks: components.hooks,
         cost_guard: components.cost_guard,
-        sse_tx: sse_sender,
+        sse_tx: sse_manager,
         http_interceptor,
-        transcription: config
-            .transcription
-            .create_provider()
-            .map(|p| Arc::new(ironclaw::transcription::TranscriptionMiddleware::new(p))),
+        transcription: config.transcription.create_provider().map(|p| {
+            Arc::new(ironclaw::llm::transcription::TranscriptionMiddleware::new(
+                p,
+            ))
+        }),
         document_extraction: Some(Arc::new(
             ironclaw::document_extraction::DocumentExtractionMiddleware::new(),
         )),
@@ -861,6 +913,7 @@ async fn async_main() -> anyhow::Result<()> {
             ironclaw::agent::routine_engine::SandboxReadiness::DockerUnavailable
         },
         builder: components.builder,
+        llm_backend: config.llm.backend.clone(),
     };
 
     let channels_for_warnings = Arc::clone(&channels);

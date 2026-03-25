@@ -17,7 +17,6 @@ use uuid::Uuid;
 
 use crate::bootstrap::ironclaw_base_dir;
 use crate::channels::IncomingMessage;
-use crate::channels::web::types::SseEvent;
 use crate::context::{ContextManager, JobContext, JobState};
 use crate::db::Database;
 use crate::history::SandboxJobRecord;
@@ -25,6 +24,7 @@ use crate::orchestrator::auth::CredentialGrant;
 use crate::orchestrator::job_manager::{ContainerJobManager, JobMode};
 use crate::secrets::SecretsStore;
 use crate::tools::tool::{ApprovalRequirement, Tool, ToolError, ToolOutput, require_str};
+use ironclaw_common::AppEvent;
 
 /// Lazy scheduler reference, filled after Agent::new creates the Scheduler.
 ///
@@ -85,7 +85,7 @@ pub struct CreateJobTool {
     job_manager: Option<Arc<ContainerJobManager>>,
     store: Option<Arc<dyn Database>>,
     /// Broadcast sender for job events (used to subscribe a monitor).
-    event_tx: Option<tokio::sync::broadcast::Sender<(Uuid, SseEvent)>>,
+    event_tx: Option<tokio::sync::broadcast::Sender<(Uuid, String, AppEvent)>>,
     /// Injection channel for pushing messages into the agent loop.
     inject_tx: Option<tokio::sync::mpsc::Sender<IncomingMessage>>,
     /// Encrypted secrets store for validating credential grants.
@@ -120,7 +120,7 @@ impl CreateJobTool {
     /// monitor that forwards Claude Code output to the main agent loop.
     pub fn with_monitor_deps(
         mut self,
-        event_tx: tokio::sync::broadcast::Sender<(Uuid, SseEvent)>,
+        event_tx: tokio::sync::broadcast::Sender<(Uuid, String, AppEvent)>,
         inject_tx: tokio::sync::mpsc::Sender<IncomingMessage>,
     ) -> Self {
         self.event_tx = Some(event_tx);

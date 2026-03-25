@@ -406,7 +406,7 @@ impl LlmConfig {
         // Resolve extra headers
         let extra_headers = if let Some(env_var) = extra_headers_env {
             optional_env(env_var)?
-                .map(|val| parse_extra_headers(&val))
+                .map(|val| parse_extra_headers_with_key(&val, env_var))
                 .transpose()?
                 .unwrap_or_default()
         } else {
@@ -475,7 +475,10 @@ impl LlmConfig {
 ///
 /// Format: `Key1:Value1,Key2:Value2` (colon-separated, not `=`, because
 /// header values often contain `=`).
-fn parse_extra_headers(val: &str) -> Result<Vec<(String, String)>, ConfigError> {
+fn parse_extra_headers_with_key(
+    val: &str,
+    env_var_name: &str,
+) -> Result<Vec<(String, String)>, ConfigError> {
     if val.trim().is_empty() {
         return Ok(Vec::new());
     }
@@ -488,14 +491,14 @@ fn parse_extra_headers(val: &str) -> Result<Vec<(String, String)>, ConfigError> 
         }
         let Some((key, value)) = pair.split_once(':') else {
             return Err(ConfigError::InvalidValue {
-                key: "LLM_EXTRA_HEADERS".to_string(),
+                key: env_var_name.to_string(),
                 message: format!("malformed header entry '{}', expected Key:Value", pair),
             });
         };
         let key = key.trim();
         if key.is_empty() {
             return Err(ConfigError::InvalidValue {
-                key: "LLM_EXTRA_HEADERS".to_string(),
+                key: env_var_name.to_string(),
                 message: format!("empty header name in entry '{}'", pair),
             });
         }
@@ -532,9 +535,14 @@ pub fn default_session_path() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::helpers::ENV_MUTEX;
+    use crate::config::helpers::lock_env;
     use crate::settings::Settings;
     use crate::testing::credentials::*;
+
+    /// Convenience wrapper for tests — uses "TEST_HEADERS" as the env var name.
+    fn parse_extra_headers(val: &str) -> Result<Vec<(String, String)>, ConfigError> {
+        parse_extra_headers_with_key(val, "TEST_HEADERS")
+    }
 
     /// Clear all openai-compatible-related env vars.
     fn clear_openai_compatible_env() {
@@ -548,7 +556,7 @@ mod tests {
 
     #[test]
     fn openai_compatible_uses_selected_model_when_llm_model_unset() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = lock_env();
         clear_openai_compatible_env();
 
         let settings = Settings {
@@ -566,7 +574,7 @@ mod tests {
 
     #[test]
     fn openai_compatible_llm_model_env_overrides_selected_model() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = lock_env();
         clear_openai_compatible_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
@@ -690,7 +698,7 @@ mod tests {
 
     #[test]
     fn ollama_uses_selected_model_when_ollama_model_unset() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = lock_env();
         clear_ollama_env();
 
         let settings = Settings {
@@ -707,7 +715,7 @@ mod tests {
 
     #[test]
     fn ollama_model_env_overrides_selected_model() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = lock_env();
         clear_ollama_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
@@ -733,7 +741,7 @@ mod tests {
 
     #[test]
     fn openai_compatible_preserves_dotted_model_name() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = lock_env();
         clear_openai_compatible_env();
 
         let settings = Settings {
@@ -754,7 +762,7 @@ mod tests {
 
     #[test]
     fn registry_provider_resolves_groq() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = lock_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("LLM_BACKEND");
@@ -779,7 +787,7 @@ mod tests {
 
     #[test]
     fn registry_provider_resolves_tinfoil() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = lock_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("LLM_BACKEND");
@@ -807,7 +815,7 @@ mod tests {
 
     #[test]
     fn registry_provider_alias_resolves_zai() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = lock_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("LLM_BACKEND");
@@ -832,7 +840,7 @@ mod tests {
 
     #[test]
     fn registry_provider_resolves_github_copilot_alias() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = lock_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::set_var("LLM_BACKEND", "github-copilot");
@@ -880,7 +888,7 @@ mod tests {
 
     #[test]
     fn nearai_backend_has_no_registry_provider() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = lock_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("LLM_BACKEND");
@@ -894,7 +902,7 @@ mod tests {
 
     #[test]
     fn backend_alias_normalized_to_canonical_id() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = lock_env();
         clear_openai_compatible_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
@@ -920,7 +928,7 @@ mod tests {
 
     #[test]
     fn unknown_backend_falls_back_to_openai_compatible() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = lock_env();
         clear_openai_compatible_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
@@ -944,7 +952,7 @@ mod tests {
 
     #[test]
     fn nearai_aliases_all_resolve_to_nearai() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = lock_env();
 
         for alias in &["nearai", "near_ai", "near"] {
             // SAFETY: Under ENV_MUTEX.
@@ -971,7 +979,7 @@ mod tests {
 
     #[test]
     fn base_url_resolution_priority() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = lock_env();
         clear_openai_compatible_env();
 
         // SAFETY: Under ENV_MUTEX.
@@ -1029,7 +1037,7 @@ mod tests {
     fn anthropic_oauth_token_sets_placeholder_api_key() {
         use secrecy::ExposeSecret;
 
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = lock_env();
         clear_anthropic_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
@@ -1067,7 +1075,7 @@ mod tests {
     fn anthropic_api_key_takes_priority_over_oauth() {
         use secrecy::ExposeSecret;
 
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = lock_env();
         clear_anthropic_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
@@ -1100,7 +1108,7 @@ mod tests {
 
     #[test]
     fn non_anthropic_provider_has_no_oauth_token() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = lock_env();
         clear_anthropic_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
@@ -1208,7 +1216,7 @@ mod tests {
 
     #[test]
     fn test_request_timeout_defaults_to_120() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = lock_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("LLM_REQUEST_TIMEOUT_SECS");
@@ -1219,7 +1227,7 @@ mod tests {
 
     #[test]
     fn test_request_timeout_configurable() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = lock_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::set_var("LLM_REQUEST_TIMEOUT_SECS", "300");
@@ -1246,7 +1254,7 @@ mod tests {
 
     #[test]
     fn openai_codex_resolves_config() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = lock_env();
         clear_openai_codex_env();
 
         let settings = Settings {
@@ -1266,7 +1274,7 @@ mod tests {
 
     #[test]
     fn openai_codex_model_env_resolution() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = lock_env();
         clear_openai_codex_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
@@ -1290,7 +1298,7 @@ mod tests {
 
     #[test]
     fn openai_codex_falls_back_to_openai_model() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = lock_env();
         clear_openai_codex_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
@@ -1314,7 +1322,7 @@ mod tests {
 
     #[test]
     fn openai_codex_falls_back_to_selected_model() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = lock_env();
         clear_openai_codex_env();
 
         let settings = Settings {
@@ -1331,7 +1339,7 @@ mod tests {
     /// Regression: SSRF validation on OPENAI_CODEX_API_URL (#1103).
     #[test]
     fn openai_codex_rejects_ssrf_api_url() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = lock_env();
         clear_openai_codex_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
@@ -1362,7 +1370,7 @@ mod tests {
     /// Regression: SSRF validation on OPENAI_CODEX_AUTH_URL (#1103).
     #[test]
     fn openai_codex_rejects_ssrf_auth_url() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = lock_env();
         clear_openai_codex_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {

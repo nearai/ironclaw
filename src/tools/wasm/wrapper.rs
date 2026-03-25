@@ -19,7 +19,7 @@ use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiView};
 use crate::context::JobContext;
 use crate::llm::recording::{HttpExchangeRequest, HttpExchangeResponse, HttpInterceptor};
 use crate::safety::LeakDetector;
-use crate::secrets::SecretsStore;
+use crate::secrets::{DecryptedSecret, SecretsStore};
 use crate::tools::tool::{Tool, ToolError, ToolOutput};
 use crate::tools::wasm::capabilities::Capabilities;
 use crate::tools::wasm::credential_injector::{
@@ -44,6 +44,7 @@ wasmtime::component::bindgen!({
 });
 
 // Alias the export interface types for convenience.
+use crate::cli::oauth_defaults;
 use exports::near::agent::tool as wit_tool;
 
 /// Configuration needed to refresh an expired OAuth access token.
@@ -59,6 +60,10 @@ pub struct OAuthRefreshConfig {
     pub client_id: String,
     /// OAuth client_secret (optional, some providers use PKCE without a secret).
     pub client_secret: Option<String>,
+    /// Hosted OAuth proxy base URL (e.g., "http://host.docker.internal:8080").
+    pub exchange_proxy_url: Option<String>,
+    /// Gateway auth token for authenticating with the hosted OAuth proxy.
+    pub gateway_token: Option<String>,
     /// Secret name of the access token (e.g., "google_oauth_token").
     /// The refresh token lives at `{secret_name}_refresh_token`.
     pub secret_name: String,
@@ -656,10 +661,123 @@ impl WasmToolSchemas {
     }
 
     fn new(discovery: serde_json::Value) -> Self {
+        let advertised = Self::compact_schema(&discovery);
         Self {
-            advertised: Self::permissive_schema(),
+            advertised,
             discovery,
         }
+    }
+
+    /// Derive a compact advertised schema from the full discovery schema.
+    ///
+    /// Collects properties from top-level `properties` and from
+    /// `oneOf`/`anyOf`/`allOf` variants. Keeps only properties that are in
+    /// the top-level `required` array or carry an `enum`/`const` constraint.
+    /// For properties defined via `const` across multiple variants (e.g.
+    /// `"action": {"const": "get_repo"}` in each `oneOf` branch), the `const`
+    /// values are merged into a single `enum` array.
+    ///
+    /// Variant-level `required` fields (e.g. `owner`, `repo` required within
+    /// each `oneOf` variant but not top-level) are intentionally omitted from
+    /// the compact schema — the LLM can discover them via
+    /// `tool_info(detail: "schema")`.
+    ///
+    /// At most `MAX_COMPACT_PROPERTIES` properties are collected to bound
+    /// allocations from adversarial schemas.
+    fn compact_schema(discovery: &serde_json::Value) -> serde_json::Value {
+        const MAX_COMPACT_PROPERTIES: usize = 100;
+
+        let required: std::collections::HashSet<String> = discovery
+            .get("required")
+            .and_then(|r| r.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        // Collect properties from top-level and oneOf/anyOf/allOf variants.
+        // For properties with `const` across variants, merge into an `enum`.
+        let mut all_properties = serde_json::Map::new();
+        // Track const values per property to merge into enum.
+        let mut const_values: std::collections::HashMap<String, Vec<serde_json::Value>> =
+            std::collections::HashMap::new();
+
+        if let Some(props) = discovery.get("properties").and_then(|p| p.as_object()) {
+            for (k, v) in props {
+                if all_properties.len() >= MAX_COMPACT_PROPERTIES {
+                    break;
+                }
+                all_properties.insert(k.clone(), v.clone());
+            }
+        }
+        for key in ["oneOf", "anyOf", "allOf"] {
+            if let Some(variants) = discovery.get(key).and_then(|v| v.as_array()) {
+                for variant in variants {
+                    if let Some(props) = variant.get("properties").and_then(|p| p.as_object()) {
+                        for (k, v) in props {
+                            if all_properties.len() >= MAX_COMPACT_PROPERTIES
+                                && !all_properties.contains_key(k)
+                            {
+                                continue;
+                            }
+                            // Track const values for merging into enum.
+                            if let Some(c) = v.get("const") {
+                                const_values.entry(k.clone()).or_default().push(c.clone());
+                            }
+                            all_properties.entry(k.clone()).or_insert_with(|| v.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        // Merge collected const values into enum arrays.
+        for (name, values) in &const_values {
+            if values.len() > 1
+                && let Some(prop) = all_properties.get_mut(name)
+            {
+                let mut merged = prop.clone();
+                if let Some(obj) = merged.as_object_mut() {
+                    obj.remove("const");
+                    obj.insert("enum".to_string(), serde_json::Value::Array(values.clone()));
+                }
+                *prop = merged;
+            }
+        }
+
+        if all_properties.is_empty() {
+            return Self::permissive_schema();
+        }
+
+        let kept: serde_json::Map<String, serde_json::Value> = all_properties
+            .into_iter()
+            .filter(|(name, prop)| {
+                required.contains(name) || prop.get("enum").is_some() || prop.get("const").is_some()
+            })
+            .collect();
+
+        if kept.is_empty() {
+            return Self::permissive_schema();
+        }
+
+        let kept_required: Vec<serde_json::Value> = required
+            .iter()
+            .filter(|name| kept.contains_key(name.as_str()))
+            .map(|name| serde_json::Value::String(name.clone()))
+            .collect();
+
+        let mut result = serde_json::json!({
+            "type": "object",
+            "properties": kept,
+            "additionalProperties": true,
+        });
+        if !kept_required.is_empty() {
+            result["required"] = serde_json::Value::Array(kept_required);
+        }
+
+        result
     }
 
     fn with_override(&self, schema: serde_json::Value) -> Self {
@@ -1097,6 +1215,53 @@ async fn refresh_oauth_token(
     user_id: &str,
     config: &OAuthRefreshConfig,
 ) -> bool {
+    let refresh_name = format!("{}_refresh_token", config.secret_name);
+
+    if let Some(proxy_url) = config.exchange_proxy_url.as_deref() {
+        let Some(gateway_token) = config.gateway_token.as_deref() else {
+            tracing::warn!(
+                "OAuth refresh proxy is configured, but no gateway auth token is available"
+            );
+            return false;
+        };
+
+        // In hosted mode, the configured exchange proxy owns the outbound token
+        // refresh and validation policy for the provider token_url. Direct-mode
+        // HTTPS/private-IP checks remain in place for self-hosted refreshes below.
+        let refresh_secret = match load_oauth_refresh_secret(store, user_id, &refresh_name).await {
+            Some(secret) => secret,
+            None => return false,
+        };
+        let token_response = match oauth_defaults::refresh_token_via_proxy(
+            oauth_defaults::ProxyRefreshTokenRequest {
+                proxy_url,
+                gateway_token,
+                token_url: &config.token_url,
+                client_id: &config.client_id,
+                client_secret: config.client_secret.as_deref(),
+                refresh_token: refresh_secret.expose(),
+                provider: config.provider.as_deref(),
+            },
+        )
+        .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                tracing::warn!(error = %error, "OAuth token refresh via proxy failed");
+                return false;
+            }
+        };
+
+        return persist_refreshed_oauth_tokens(
+            store,
+            user_id,
+            config,
+            &refresh_name,
+            token_response,
+        )
+        .await;
+    }
+
     // SSRF defense: token_url comes from the tool's capabilities file.
     if !config.token_url.starts_with("https://") {
         tracing::warn!(
@@ -1114,19 +1279,6 @@ async fn refresh_oauth_token(
         return false;
     }
 
-    let refresh_name = format!("{}_refresh_token", config.secret_name);
-    let refresh_secret = match store.get_decrypted(user_id, &refresh_name).await {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::debug!(
-                secret_name = %refresh_name,
-                error = %e,
-                "No refresh token available, skipping token refresh"
-            );
-            return false;
-        }
-    };
-
     let client = match reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
         .redirect(reqwest::redirect::Policy::none())
@@ -1139,6 +1291,10 @@ async fn refresh_oauth_token(
         }
     };
 
+    let refresh_secret = match load_oauth_refresh_secret(store, user_id, &refresh_name).await {
+        Some(secret) => secret,
+        None => return false,
+    };
     let mut params = vec![
         ("grant_type", "refresh_token".to_string()),
         ("refresh_token", refresh_secret.expose().to_string()),
@@ -1174,22 +1330,55 @@ async fn refresh_oauth_token(
             return false;
         }
     };
-
-    let new_access_token = match token_data.get("access_token").and_then(|v| v.as_str()) {
-        Some(t) => t,
+    let token_response = match token_data.get("access_token").and_then(|v| v.as_str()) {
+        Some(access_token) => oauth_defaults::OAuthTokenResponse {
+            access_token: access_token.to_string(),
+            refresh_token: token_data
+                .get("refresh_token")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+            expires_in: token_data.get("expires_in").and_then(|v| v.as_u64()),
+        },
         None => {
             tracing::warn!("Token refresh response missing access_token field");
             return false;
         }
     };
 
-    // Store the new access token with expiry
+    persist_refreshed_oauth_tokens(store, user_id, config, &refresh_name, token_response).await
+}
+
+async fn load_oauth_refresh_secret(
+    store: &(dyn SecretsStore + Send + Sync),
+    user_id: &str,
+    refresh_name: &str,
+) -> Option<DecryptedSecret> {
+    match store.get_decrypted(user_id, refresh_name).await {
+        Ok(secret) => Some(secret),
+        Err(error) => {
+            tracing::debug!(
+                secret_name = %refresh_name,
+                error = %error,
+                "No refresh token available, skipping token refresh"
+            );
+            None
+        }
+    }
+}
+
+async fn persist_refreshed_oauth_tokens(
+    store: &(dyn SecretsStore + Send + Sync),
+    user_id: &str,
+    config: &OAuthRefreshConfig,
+    refresh_name: &str,
+    token_response: oauth_defaults::OAuthTokenResponse,
+) -> bool {
     let mut access_params =
-        crate::secrets::CreateSecretParams::new(&config.secret_name, new_access_token);
+        crate::secrets::CreateSecretParams::new(&config.secret_name, &token_response.access_token);
     if let Some(ref provider) = config.provider {
         access_params = access_params.with_provider(provider);
     }
-    if let Some(expires_in) = token_data.get("expires_in").and_then(|v| v.as_u64()) {
+    if let Some(expires_in) = token_response.expires_in {
         let expires_at = chrono::Utc::now() + chrono::Duration::seconds(expires_in as i64);
         access_params = access_params.with_expiry(expires_at);
     }
@@ -1199,10 +1388,8 @@ async fn refresh_oauth_token(
         return false;
     }
 
-    // Store rotated refresh token if the provider sent a new one
-    if let Some(new_refresh) = token_data.get("refresh_token").and_then(|v| v.as_str()) {
-        let mut refresh_params =
-            crate::secrets::CreateSecretParams::new(&refresh_name, new_refresh);
+    if let Some(new_refresh) = token_response.refresh_token.as_deref() {
+        let mut refresh_params = crate::secrets::CreateSecretParams::new(refresh_name, new_refresh);
         if let Some(ref provider) = config.provider {
             refresh_params = refresh_params.with_provider(provider);
         }
@@ -1551,9 +1738,18 @@ fn build_tool_usage_hint(tool_name: &str, schema: &serde_json::Value) -> String 
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+    use std::net::SocketAddr;
     use std::sync::{Arc, Mutex};
 
     use async_trait::async_trait;
+    use axum::extract::{Form, State};
+    use axum::http::HeaderMap;
+    use axum::routing::post;
+    use axum::{Json, Router};
+    use serde_json::json;
+    use tokio::net::TcpListener;
+    use tokio::sync::{Mutex as AsyncMutex, oneshot};
     use uuid::Uuid;
 
     use crate::context::JobContext;
@@ -1643,6 +1839,95 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct RecordedProxyRequest {
+        authorization: Option<String>,
+        form: HashMap<String, String>,
+    }
+
+    struct MockProxyServer {
+        addr: SocketAddr,
+        requests: Arc<AsyncMutex<Vec<RecordedProxyRequest>>>,
+        shutdown_tx: Option<oneshot::Sender<()>>,
+        server_task: Option<tokio::task::JoinHandle<()>>,
+    }
+
+    impl MockProxyServer {
+        async fn start() -> Self {
+            async fn refresh_handler(
+                State(requests): State<Arc<AsyncMutex<Vec<RecordedProxyRequest>>>>,
+                headers: HeaderMap,
+                Form(form): Form<HashMap<String, String>>,
+            ) -> Json<serde_json::Value> {
+                requests.lock().await.push(RecordedProxyRequest {
+                    authorization: headers
+                        .get(axum::http::header::AUTHORIZATION)
+                        .and_then(|value| value.to_str().ok())
+                        .map(str::to_string),
+                    form,
+                });
+                Json(json!({
+                    "access_token": "mock-refreshed-access-token",
+                    "refresh_token": "mock-rotated-refresh-token",
+                    "expires_in": 3600
+                }))
+            }
+
+            let requests = Arc::new(AsyncMutex::new(Vec::new()));
+            let app = Router::new()
+                .route("/oauth/refresh", post(refresh_handler))
+                .with_state(Arc::clone(&requests));
+
+            let listener = TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind mock proxy");
+            let addr = listener.local_addr().expect("read mock proxy addr");
+            let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+            let server_task = tokio::spawn(async move {
+                let _ = axum::serve(listener, app)
+                    .with_graceful_shutdown(async {
+                        let _ = shutdown_rx.await;
+                    })
+                    .await;
+            });
+
+            Self {
+                addr,
+                requests,
+                shutdown_tx: Some(shutdown_tx),
+                server_task: Some(server_task),
+            }
+        }
+
+        fn base_url(&self) -> String {
+            format!("http://{}", self.addr)
+        }
+
+        async fn requests(&self) -> Vec<RecordedProxyRequest> {
+            self.requests.lock().await.clone()
+        }
+
+        async fn shutdown(mut self) {
+            if let Some(tx) = self.shutdown_tx.take() {
+                let _ = tx.send(());
+            }
+            if let Some(task) = self.server_task.take() {
+                let _ = task.await;
+            }
+        }
+    }
+
+    impl Drop for MockProxyServer {
+        fn drop(&mut self) {
+            if let Some(tx) = self.shutdown_tx.take() {
+                let _ = tx.send(());
+            }
+            if let Some(task) = self.server_task.take() {
+                task.abort();
+            }
+        }
+    }
+
     #[test]
     fn test_wrapper_creation() {
         // This test verifies the runtime can be created
@@ -1655,7 +1940,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_advertised_schema_stays_permissive_until_sidecar_override() {
+    async fn test_advertised_schema_auto_compacted_from_discovery() {
         let discovery_schema = serde_json::json!({
             "type": "object",
             "properties": {
@@ -1675,42 +1960,7 @@ mod tests {
         wrapper.schemas = super::WasmToolSchemas::new(discovery_schema.clone());
         wrapper.description = "Search documents".to_string();
 
-        // Advertised schema stays permissive; discovery holds the typed schema
-        assert_eq!(
-            wrapper.parameters_schema(),
-            serde_json::json!({
-                "type": "object",
-                "properties": {},
-                "additionalProperties": true
-            })
-        );
-        assert_eq!(wrapper.discovery_schema(), discovery_schema);
-
-        // Raw description is clean — no tool_info hint baked in
-        assert!(!wrapper.description().contains("tool_info"));
-
-        // But schema() composes the hint at display time when advertised is permissive
-        let schema = wrapper.schema();
-        assert!(
-            schema.description.contains("tool_info"),
-            "schema().description should contain tool_info hint: {}",
-            schema.description
-        );
-        assert!(
-            schema.description.contains("include_schema: true"),
-            "hint should mention include_schema: true: {}",
-            schema.description
-        );
-
-        // After sidecar override, both schemas match and hint disappears
-        let wrapper = wrapper.with_schema(serde_json::json!({
-            "type": "object",
-            "properties": {
-                "query": { "type": "string" }
-            },
-            "required": ["query"]
-        }));
-
+        // Advertised schema is auto-compacted: keeps required props, drops optional
         assert_eq!(
             wrapper.parameters_schema(),
             serde_json::json!({
@@ -1718,18 +1968,141 @@ mod tests {
                 "properties": {
                     "query": { "type": "string" }
                 },
-                "required": ["query"]
+                "required": ["query"],
+                "additionalProperties": true
             })
         );
-        assert_eq!(wrapper.discovery_schema(), wrapper.parameters_schema());
+        // Discovery retains the full schema
+        assert_eq!(wrapper.discovery_schema(), discovery_schema);
 
-        // With typed schema, schema() should NOT include tool_info hint
+        // Compacted schema has typed properties, so no tool_info hint needed
         let schema = wrapper.schema();
         assert!(
             !schema.description.contains("tool_info"),
-            "schema().description should not contain tool_info hint when typed: {}",
+            "schema().description should not contain tool_info hint when auto-compacted: {}",
             schema.description
         );
+    }
+
+    #[test]
+    fn test_compact_schema_keeps_required_and_enum_properties() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["list", "get", "create"],
+                    "description": "The operation"
+                },
+                "query": { "type": "string" },
+                "limit": { "type": "integer" },
+                "format": {
+                    "type": "string",
+                    "enum": ["json", "csv"]
+                }
+            },
+            "required": ["action"]
+        });
+
+        let compacted = super::WasmToolSchemas::compact_schema(&schema);
+        let props = compacted["properties"].as_object().unwrap();
+
+        // action: required + enum → kept
+        assert!(props.contains_key("action"));
+        // format: has enum → kept
+        assert!(props.contains_key("format"));
+        // query: not required, no enum → dropped
+        assert!(!props.contains_key("query"));
+        // limit: not required, no enum → dropped
+        assert!(!props.contains_key("limit"));
+        // additionalProperties lets the LLM still pass dropped props
+        assert_eq!(compacted["additionalProperties"], true);
+        assert_eq!(compacted["required"], serde_json::json!(["action"]));
+    }
+
+    #[test]
+    fn test_compact_schema_falls_back_to_permissive_when_empty() {
+        // No required, no enum → permissive fallback
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "query": { "type": "string" },
+                "limit": { "type": "integer" }
+            }
+        });
+
+        let compacted = super::WasmToolSchemas::compact_schema(&schema);
+        assert!(compacted["properties"].as_object().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_compact_schema_handles_no_properties() {
+        let schema = serde_json::json!({ "type": "object" });
+        let compacted = super::WasmToolSchemas::compact_schema(&schema);
+        assert!(compacted["properties"].as_object().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_compact_schema_handles_oneof_variants() {
+        // GitHub-style schema: oneOf with no top-level properties, const per variant
+        let schema = serde_json::json!({
+            "type": "object",
+            "required": ["action"],
+            "oneOf": [
+                {
+                    "properties": {
+                        "action": { "const": "get_repo" },
+                        "owner": { "type": "string" },
+                        "repo": { "type": "string" }
+                    },
+                    "required": ["action", "owner", "repo"]
+                },
+                {
+                    "properties": {
+                        "action": { "const": "list_issues" },
+                        "owner": { "type": "string" },
+                        "repo": { "type": "string" },
+                        "state": { "type": "string", "enum": ["open", "closed", "all"] }
+                    },
+                    "required": ["action", "owner", "repo"]
+                }
+            ]
+        });
+
+        let compacted = super::WasmToolSchemas::compact_schema(&schema);
+        let props = compacted["properties"].as_object().unwrap();
+
+        // action: required + const values merged into enum → kept
+        let action = &props["action"];
+        assert!(
+            action.get("enum").is_some(),
+            "action const values should be merged into enum: {action}"
+        );
+        let action_enum = action["enum"].as_array().unwrap();
+        assert!(
+            action_enum.contains(&serde_json::json!("get_repo")),
+            "enum should contain get_repo"
+        );
+        assert!(
+            action_enum.contains(&serde_json::json!("list_issues")),
+            "enum should contain list_issues"
+        );
+        assert!(
+            action.get("const").is_none(),
+            "const should be removed after merging into enum"
+        );
+
+        // state: has enum → kept
+        assert!(
+            props.contains_key("state"),
+            "state should be kept (has enum)"
+        );
+        // owner/repo: not in top-level required, no enum → intentionally dropped
+        // (variant-level required is omitted; discoverable via tool_info)
+        assert!(!props.contains_key("owner"), "owner should be dropped");
+        assert!(!props.contains_key("repo"), "repo should be dropped");
+        assert_eq!(compacted["additionalProperties"], true);
+        assert_eq!(compacted["required"], serde_json::json!(["action"]));
     }
 
     #[test]
@@ -1893,8 +2266,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_resolve_host_credentials_bearer() {
-        use std::collections::HashMap;
-
         use crate::secrets::{
             CreateSecretParams, CredentialLocation, CredentialMapping, SecretsStore,
         };
@@ -1940,8 +2311,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_resolve_host_credentials_owner_scope_bearer() {
-        use std::collections::HashMap;
-
         use crate::secrets::{
             CreateSecretParams, CredentialLocation, CredentialMapping, SecretsStore,
         };
@@ -1987,8 +2356,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_resolves_host_credentials_from_owner_scope_context() {
-        use std::collections::HashMap;
-
         use crate::secrets::{CredentialLocation, CredentialMapping};
         use crate::tools::wasm::capabilities::HttpCapability;
 
@@ -2038,8 +2405,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_resolve_host_credentials_missing_secret() {
-        use std::collections::HashMap;
-
         use crate::secrets::{CredentialLocation, CredentialMapping};
         use crate::tools::wasm::capabilities::HttpCapability;
         use crate::tools::wasm::wrapper::resolve_host_credentials;
@@ -2071,8 +2436,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_resolve_host_credentials_skips_refresh_when_not_expired() {
-        use std::collections::HashMap;
-
         use crate::secrets::{
             CreateSecretParams, CredentialLocation, CredentialMapping, SecretsStore,
         };
@@ -2114,6 +2477,8 @@ mod tests {
             token_url: "https://oauth2.googleapis.com/token".to_string(),
             client_id: TEST_OAUTH_CLIENT_ID.to_string(),
             client_secret: Some(TEST_OAUTH_CLIENT_SECRET.to_string()),
+            exchange_proxy_url: None,
+            gateway_token: None,
             secret_name: "google_oauth_token".to_string(),
             provider: Some("google".to_string()),
         };
@@ -2130,8 +2495,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_resolve_host_credentials_skips_refresh_no_config() {
-        use std::collections::HashMap;
-
         use crate::secrets::{
             CreateSecretParams, CredentialLocation, CredentialMapping, SecretsStore,
         };
@@ -2175,8 +2538,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_resolve_host_credentials_skips_refresh_no_expires_at() {
-        use std::collections::HashMap;
-
         use crate::secrets::{
             CreateSecretParams, CredentialLocation, CredentialMapping, SecretsStore,
         };
@@ -2216,6 +2577,8 @@ mod tests {
             token_url: "https://oauth2.googleapis.com/token".to_string(),
             client_id: TEST_OAUTH_CLIENT_ID.to_string(),
             client_secret: Some(TEST_OAUTH_CLIENT_SECRET.to_string()),
+            exchange_proxy_url: None,
+            gateway_token: None,
             secret_name: "google_oauth_token".to_string(),
             provider: Some("google".to_string()),
         };
@@ -2228,6 +2591,249 @@ mod tests {
             result[0].headers.get("Authorization"),
             Some(&format!("Bearer {TEST_GOOGLE_OAUTH_LEGACY}"))
         );
+    }
+
+    #[tokio::test]
+    async fn test_resolve_host_credentials_refreshes_via_proxy_without_direct_token_url_validation()
+    {
+        use crate::secrets::{
+            CreateSecretParams, CredentialLocation, CredentialMapping, SecretsStore,
+        };
+        use crate::tools::wasm::capabilities::HttpCapability;
+        use crate::tools::wasm::wrapper::{OAuthRefreshConfig, resolve_host_credentials};
+
+        let proxy = MockProxyServer::start().await;
+        let store = test_secrets_store();
+
+        store
+            .create(
+                "user1",
+                CreateSecretParams::new("google_oauth_token", "expired-access-token")
+                    .with_expiry(chrono::Utc::now() - chrono::Duration::hours(1)),
+            )
+            .await
+            .unwrap();
+        store
+            .create(
+                "user1",
+                CreateSecretParams::new("google_oauth_token_refresh_token", "stored-refresh-token"),
+            )
+            .await
+            .unwrap();
+
+        let mut credentials = HashMap::new();
+        credentials.insert(
+            "google_oauth_token".to_string(),
+            CredentialMapping {
+                secret_name: "google_oauth_token".to_string(),
+                location: CredentialLocation::AuthorizationBearer,
+                host_patterns: vec!["www.googleapis.com".to_string()],
+            },
+        );
+
+        let caps = Capabilities {
+            http: Some(HttpCapability {
+                credentials,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let oauth_config = OAuthRefreshConfig {
+            token_url: "http://127.0.0.1:9/provider-token-endpoint".to_string(),
+            client_id: "hosted-google-client-id".to_string(),
+            client_secret: None,
+            exchange_proxy_url: Some(proxy.base_url()),
+            gateway_token: Some("gateway-test-token".to_string()),
+            secret_name: "google_oauth_token".to_string(),
+            provider: Some("google".to_string()),
+        };
+
+        let resolved =
+            resolve_host_credentials(&caps, Some(&store), "user1", Some(&oauth_config)).await;
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(
+            resolved[0].headers.get("Authorization"),
+            Some(&"Bearer mock-refreshed-access-token".to_string())
+        );
+
+        let access_secret = store.get("user1", "google_oauth_token").await.unwrap();
+        assert!(
+            access_secret
+                .expires_at
+                .expect("refreshed access token expiry")
+                > chrono::Utc::now()
+        );
+        let access_value = store
+            .get_decrypted("user1", "google_oauth_token")
+            .await
+            .unwrap();
+        assert_eq!(access_value.expose(), "mock-refreshed-access-token");
+
+        let refresh_value = store
+            .get_decrypted("user1", "google_oauth_token_refresh_token")
+            .await
+            .unwrap();
+        assert_eq!(refresh_value.expose(), "mock-rotated-refresh-token");
+
+        let requests = proxy.requests().await;
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0].authorization.as_deref(),
+            Some("Bearer gateway-test-token")
+        );
+        assert_eq!(
+            requests[0].form.get("client_id").map(String::as_str),
+            Some("hosted-google-client-id")
+        );
+        assert_eq!(
+            requests[0].form.get("token_url").map(String::as_str),
+            Some("http://127.0.0.1:9/provider-token-endpoint")
+        );
+        assert_eq!(
+            requests[0].form.get("refresh_token").map(String::as_str),
+            Some("stored-refresh-token")
+        );
+        assert_eq!(
+            requests[0].form.get("provider").map(String::as_str),
+            Some("google")
+        );
+        assert!(!requests[0].form.contains_key("client_secret"));
+
+        proxy.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn test_resolve_host_credentials_skips_refresh_token_lookup_without_gateway_token() {
+        use crate::secrets::{
+            CreateSecretParams, CredentialLocation, CredentialMapping, SecretsStore,
+        };
+        use crate::tools::wasm::capabilities::HttpCapability;
+        use crate::tools::wasm::wrapper::{OAuthRefreshConfig, resolve_host_credentials};
+
+        let store = RecordingSecretsStore::new();
+
+        store
+            .create(
+                "user1",
+                CreateSecretParams::new("google_oauth_token", "expired-access-token")
+                    .with_expiry(chrono::Utc::now() - chrono::Duration::hours(1)),
+            )
+            .await
+            .unwrap();
+        store
+            .create(
+                "user1",
+                CreateSecretParams::new("google_oauth_token_refresh_token", "stored-refresh-token"),
+            )
+            .await
+            .unwrap();
+
+        let mut credentials = HashMap::new();
+        credentials.insert(
+            "google_oauth_token".to_string(),
+            CredentialMapping {
+                secret_name: "google_oauth_token".to_string(),
+                location: CredentialLocation::AuthorizationBearer,
+                host_patterns: vec!["www.googleapis.com".to_string()],
+            },
+        );
+
+        let caps = Capabilities {
+            http: Some(HttpCapability {
+                credentials,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let oauth_config = OAuthRefreshConfig {
+            token_url: "https://oauth2.googleapis.com/token".to_string(),
+            client_id: "hosted-google-client-id".to_string(),
+            client_secret: None,
+            exchange_proxy_url: Some("https://compose-api.example.com".to_string()),
+            gateway_token: None,
+            secret_name: "google_oauth_token".to_string(),
+            provider: Some("google".to_string()),
+        };
+
+        let resolved =
+            resolve_host_credentials(&caps, Some(&store), "user1", Some(&oauth_config)).await;
+        assert!(resolved.is_empty());
+
+        let lookups = store.decrypted_lookups();
+        assert!(lookups.contains(&("user1".to_string(), "google_oauth_token".to_string())));
+        assert!(!lookups.contains(&(
+            "user1".to_string(),
+            "google_oauth_token_refresh_token".to_string(),
+        )));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_host_credentials_skips_refresh_token_lookup_for_invalid_direct_token_url()
+    {
+        use crate::secrets::{
+            CreateSecretParams, CredentialLocation, CredentialMapping, SecretsStore,
+        };
+        use crate::tools::wasm::capabilities::HttpCapability;
+        use crate::tools::wasm::wrapper::{OAuthRefreshConfig, resolve_host_credentials};
+
+        let store = RecordingSecretsStore::new();
+
+        store
+            .create(
+                "user1",
+                CreateSecretParams::new("google_oauth_token", "expired-access-token")
+                    .with_expiry(chrono::Utc::now() - chrono::Duration::hours(1)),
+            )
+            .await
+            .unwrap();
+        store
+            .create(
+                "user1",
+                CreateSecretParams::new("google_oauth_token_refresh_token", "stored-refresh-token"),
+            )
+            .await
+            .unwrap();
+
+        let mut credentials = HashMap::new();
+        credentials.insert(
+            "google_oauth_token".to_string(),
+            CredentialMapping {
+                secret_name: "google_oauth_token".to_string(),
+                location: CredentialLocation::AuthorizationBearer,
+                host_patterns: vec!["www.googleapis.com".to_string()],
+            },
+        );
+
+        let caps = Capabilities {
+            http: Some(HttpCapability {
+                credentials,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let oauth_config = OAuthRefreshConfig {
+            token_url: "http://127.0.0.1:9/provider-token-endpoint".to_string(),
+            client_id: TEST_OAUTH_CLIENT_ID.to_string(),
+            client_secret: Some(TEST_OAUTH_CLIENT_SECRET.to_string()),
+            exchange_proxy_url: None,
+            gateway_token: None,
+            secret_name: "google_oauth_token".to_string(),
+            provider: Some("google".to_string()),
+        };
+
+        let resolved =
+            resolve_host_credentials(&caps, Some(&store), "user1", Some(&oauth_config)).await;
+        assert!(resolved.is_empty());
+
+        let lookups = store.decrypted_lookups();
+        assert!(lookups.contains(&("user1".to_string(), "google_oauth_token".to_string())));
+        assert!(!lookups.contains(&(
+            "user1".to_string(),
+            "google_oauth_token_refresh_token".to_string(),
+        )));
     }
 
     #[test]

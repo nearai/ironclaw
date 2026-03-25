@@ -205,11 +205,11 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Test 5: routine_manual_create
+    // Test 5: routine_manual_create_defaults_to_tools_enabled
     // -----------------------------------------------------------------------
 
     #[tokio::test]
-    async fn routine_manual_create() {
+    async fn routine_manual_create_defaults_to_tools_enabled() {
         let trace = LlmTrace::from_file(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/tests/fixtures/llm_traces/tools/routine_manual_create.json"
@@ -237,8 +237,8 @@ mod tests {
 
         assert!(matches!(routine.trigger, Trigger::Manual));
         assert!(
-            matches!(&routine.action, RoutineAction::Lightweight { use_tools, .. } if !*use_tools),
-            "manual routine should default to lightweight without tools: {:?}",
+            matches!(&routine.action, RoutineAction::Lightweight { use_tools, .. } if *use_tools),
+            "manual routine should default to lightweight with tools enabled: {:?}",
             routine.action
         );
 
@@ -246,7 +246,48 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Test 6: routine_history
+    // Test 6: routine_manual_create_explicit_no_tools
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn routine_manual_create_explicit_no_tools() {
+        let trace = LlmTrace::from_file(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/llm_traces/tools/routine_manual_create_no_tools.json"
+        ))
+        .expect("failed to load routine_manual_create_no_tools.json");
+
+        let rig = TestRigBuilder::new()
+            .with_trace(trace.clone())
+            .with_auto_approve_tools(true)
+            .build()
+            .await;
+
+        rig.send_message("Create a manual routine for quiet text-only bug triage")
+            .await;
+        let responses = rig.wait_for_responses(1, Duration::from_secs(15)).await;
+
+        rig.verify_trace_expects(&trace, &responses);
+
+        let routine = rig
+            .database()
+            .get_routine_by_name("test-user", "manual-triage-no-tools")
+            .await
+            .expect("get_routine_by_name")
+            .expect("manual-triage-no-tools should exist");
+
+        assert!(matches!(routine.trigger, Trigger::Manual));
+        assert!(
+            matches!(&routine.action, RoutineAction::Lightweight { use_tools, .. } if !*use_tools),
+            "manual routine should preserve explicit use_tools=false: {:?}",
+            routine.action
+        );
+
+        rig.shutdown();
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 7: routine_history
     // -----------------------------------------------------------------------
 
     #[tokio::test]
@@ -283,7 +324,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Test 7: routine_system_event_emit
+    // Test 8: routine_system_event_emit
     // -----------------------------------------------------------------------
 
     #[tokio::test]
@@ -398,7 +439,7 @@ mod tests {
 
         match &routine.trigger {
             Trigger::Cron { schedule, timezone } => {
-                assert_eq!(schedule, "0 0 9 * * MON-FRI");
+                assert_eq!(schedule, "0 0 9 * * MON-FRI *");
                 assert_eq!(timezone.as_deref(), Some("UTC"));
             }
             other => panic!("expected cron trigger, got {other:?}"),

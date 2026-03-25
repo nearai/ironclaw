@@ -312,25 +312,58 @@ impl AppBuilder {
             .create_provider(&self.config.llm.nearai.base_url, self.session.clone());
 
         // Register memory tools if database is available
-        let workspace_user_id = self
-            .config
-            .channels
-            .gateway
-            .as_ref()
-            .map(|gw| gw.user_id.as_str())
-            .unwrap_or("default");
+        let workspace_user_id = self.config.owner_id.as_str();
         let workspace = if let Some(ref db) = self.db {
             let emb_cache_config = EmbeddingCacheConfig {
                 max_entries: self.config.embeddings.cache_size,
             };
             let mut ws = Workspace::new_with_db(workspace_user_id, db.clone())
                 .with_search_config(&self.config.search);
+
             if let Some(ref emb) = embeddings {
-                ws = ws.with_embeddings_cached(emb.clone(), emb_cache_config);
+                ws = ws.with_embeddings_cached(emb.clone(), emb_cache_config.clone());
+            }
+
+            // Wire workspace-level settings (read scopes, memory layers)
+            if !self.config.workspace.read_scopes.is_empty() {
+                ws = ws.with_additional_read_scopes(self.config.workspace.read_scopes.clone());
+                tracing::info!(
+                    user_id = workspace_user_id,
+                    read_scopes = ?ws.read_user_ids(),
+                    "Workspace configured with multi-scope reads"
+                );
             }
             ws = ws.with_memory_layers(self.config.workspace.memory_layers.clone());
             let ws = Arc::new(ws);
-            tools.register_memory_tools(Arc::clone(&ws));
+
+            // Detect multi-tenant mode: when GATEWAY_USER_TOKENS is configured,
+            // each authenticated user needs their own workspace scope. Use
+            // WorkspacePool (which implements WorkspaceResolver) to create
+            // per-user workspaces on demand instead of sharing the startup
+            // workspace across all users.
+            let is_multi_tenant = self
+                .config
+                .channels
+                .gateway
+                .as_ref()
+                .is_some_and(|gw| gw.user_tokens.is_some());
+
+            if is_multi_tenant {
+                let pool = Arc::new(crate::channels::web::server::WorkspacePool::new(
+                    Arc::clone(db),
+                    embeddings.clone(),
+                    emb_cache_config,
+                    self.config.search.clone(),
+                    self.config.workspace.clone(),
+                ));
+                tools.register_memory_tools_with_resolver(pool);
+                tracing::info!(
+                    "Memory tools configured with per-user workspace resolver (multi-tenant mode)"
+                );
+            } else {
+                tools.register_memory_tools(Arc::clone(&ws));
+            }
+
             Some(ws)
         } else {
             None
