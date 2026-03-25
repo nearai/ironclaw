@@ -175,8 +175,6 @@ pub struct AgentDeps {
     pub transcription: Option<Arc<crate::llm::transcription::TranscriptionMiddleware>>,
     /// Document text extraction middleware for PDF, DOCX, PPTX, etc.
     pub document_extraction: Option<Arc<crate::document_extraction::DocumentExtractionMiddleware>>,
-    /// Sandbox readiness state for full-job routine dispatch.
-    pub sandbox_readiness: crate::agent::routine_engine::SandboxReadiness,
     /// Software builder for self-repair tool rebuilding.
     pub builder: Option<Arc<dyn crate::tools::SoftwareBuilder>>,
     /// Resolved LLM backend identifier (e.g., "nearai", "openai", "groq").
@@ -719,7 +717,6 @@ impl Agent {
                         self.deps.extension_manager.clone(),
                         self.tools().clone(),
                         self.safety().clone(),
-                        self.deps.sandbox_readiness,
                     ));
 
                     // Register routine tools

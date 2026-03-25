@@ -22,7 +22,7 @@ mod tests {
     };
     use ironclaw::agent::routine_engine::RoutineEngine;
     use ironclaw::agent::{
-        HeartbeatConfig, HeartbeatRunner, SandboxReadiness, Scheduler, SchedulerDeps,
+        HeartbeatConfig, HeartbeatRunner, Scheduler, SchedulerDeps,
     };
     use ironclaw::channels::IncomingMessage;
     use ironclaw::config::{AgentConfig, RoutineConfig, SafetyConfig};
@@ -352,7 +352,6 @@ mod tests {
             extension_manager,
             registry,
             safety,
-            SandboxReadiness::Available,
         ))
     }
 
@@ -456,7 +455,6 @@ mod tests {
             None,
             tools,
             safety,
-            SandboxReadiness::DisabledByConfig,
         ));
 
         // Insert a cron routine with next_fire_at in the past.
@@ -535,7 +533,6 @@ mod tests {
             None,
             tools,
             safety,
-            SandboxReadiness::DisabledByConfig,
         ));
 
         // Insert an event routine matching "deploy.*production".
@@ -622,7 +619,6 @@ mod tests {
             None,
             tools,
             safety,
-            SandboxReadiness::DisabledByConfig,
         ));
 
         let routine = make_routine(
@@ -731,7 +727,6 @@ mod tests {
             None,
             tools,
             safety,
-            SandboxReadiness::DisabledByConfig,
         ));
 
         let mut filters = std::collections::HashMap::new();
@@ -874,7 +869,6 @@ mod tests {
             None,
             tools,
             safety,
-            SandboxReadiness::DisabledByConfig,
         ));
 
         // Insert an event routine with 1-hour cooldown.
@@ -1057,7 +1051,6 @@ mod tests {
             None,
             tools,
             safety,
-            SandboxReadiness::DisabledByConfig,
         ));
 
         (engine, db, dir)
@@ -1179,7 +1172,6 @@ mod tests {
             None,
             tools,
             safety,
-            SandboxReadiness::DisabledByConfig,
         ));
 
         // Create a full_job routine with max_concurrent = 1
@@ -1287,7 +1279,6 @@ mod tests {
             None,
             tools,
             safety,
-            SandboxReadiness::DisabledByConfig,
         ));
 
         // Insert a due cron routine

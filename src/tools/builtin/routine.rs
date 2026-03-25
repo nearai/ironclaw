@@ -1544,6 +1544,7 @@ impl Tool for RoutineFireTool {
             "name": name,
             "run_id": run_id.to_string(),
             "status": "fired",
+            "note": "Routine is executing asynchronously. Use routine_history to check the result.",
         });
 
         Ok(ToolOutput::success(result, start.elapsed()))
@@ -1642,10 +1643,42 @@ impl Tool for RoutineHistoryTool {
             })
             .collect();
 
+        // Look up the routine's conversation thread and fetch recent messages
+        // so the user can see the full output of routine runs.
+        let (conversation_id, recent_output) =
+            match self
+                .store
+                .get_or_create_routine_conversation(routine.id, name, &ctx.user_id)
+                .await
+            {
+                Ok(conv_id) => {
+                    let messages = self
+                        .store
+                        .list_conversation_messages_paginated(conv_id, None, limit)
+                        .await
+                        .map(|(msgs, _)| msgs)
+                        .unwrap_or_default();
+                    let msg_list: Vec<serde_json::Value> = messages
+                        .iter()
+                        .map(|m| {
+                            serde_json::json!({
+                                "role": m.role,
+                                "content": m.content,
+                                "timestamp": m.created_at.to_rfc3339(),
+                            })
+                        })
+                        .collect();
+                    (Some(conv_id.to_string()), msg_list)
+                }
+                Err(_) => (None, Vec::new()),
+            };
+
         let result = serde_json::json!({
             "routine": name,
             "total_runs": routine.run_count,
+            "conversation_id": conversation_id,
             "runs": run_list,
+            "recent_output": recent_output,
         });
 
         Ok(ToolOutput::success(result, start.elapsed()))

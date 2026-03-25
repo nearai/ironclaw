@@ -122,6 +122,12 @@ pub async fn routines_detail_handler(
         .collect();
     let routine_info = RoutineInfo::from_routine(&routine);
 
+    // Look up the routine's conversation thread so the UI can link to full output.
+    let conversation_id = store
+        .get_or_create_routine_conversation(routine.id, &routine.name, &routine.user_id)
+        .await
+        .ok();
+
     Ok(Json(RoutineDetailResponse {
         id: routine.id,
         name: routine.name.clone(),
@@ -139,6 +145,7 @@ pub async fn routines_detail_handler(
         run_count: routine.run_count,
         consecutive_failures: routine.consecutive_failures,
         created_at: routine.created_at.to_rfc3339(),
+        conversation_id,
         recent_runs,
     }))
 }
