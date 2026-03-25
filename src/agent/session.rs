@@ -717,6 +717,11 @@ impl Turn {
             .iter_mut()
             .find(|c| c.result.is_none() && c.error.is_none())
         {
+            tracing::debug!(
+                tool_call_id = %tool_call_id,
+                fallback_tool = %call.name,
+                "tool_call_id not found, falling back to first pending call"
+            );
             call.result = Some(result);
         } else {
             tracing::warn!(
@@ -739,6 +744,11 @@ impl Turn {
             .iter_mut()
             .find(|c| c.result.is_none() && c.error.is_none())
         {
+            tracing::debug!(
+                tool_call_id = %tool_call_id,
+                fallback_tool = %call.name,
+                "tool_call_id not found, falling back to first pending call"
+            );
             call.error = Some(error.into());
         } else {
             tracing::warn!(

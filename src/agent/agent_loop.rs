@@ -1246,7 +1246,9 @@ impl Agent {
                     command,
                     message.channel
                 );
-                // /reasoning needs session access, handle it here.
+                // /reasoning is special-cased here (not in handle_system_command)
+                // because it needs the session + thread_id to read turn reasoning
+                // data, which handle_system_command's signature doesn't provide.
                 if command == "reasoning" {
                     let result = self
                         .handle_reasoning_command(&args, &session, thread_id)
