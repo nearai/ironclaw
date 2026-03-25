@@ -37,6 +37,7 @@ Set via `LLM_BACKEND` env var:
 | `nearai` (default) | NEAR AI Chat Completions | `NEARAI_SESSION_TOKEN` or `NEARAI_API_KEY` |
 | `openai` | OpenAI | `OPENAI_API_KEY` |
 | `anthropic` | Anthropic | `ANTHROPIC_API_KEY` |
+| `github_copilot` | GitHub Copilot Chat API | `GITHUB_COPILOT_TOKEN`, `GITHUB_COPILOT_MODEL` |
 | `ollama` | Ollama local | `OLLAMA_BASE_URL` |
 | `openai_compatible` | Any OpenAI-compatible endpoint | `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL` |
 | `tinfoil` | Tinfoil TEE inference | `TINFOIL_API_KEY`, `TINFOIL_MODEL` |
@@ -59,6 +60,27 @@ Uses the native Converse API via `aws-sdk-bedrockruntime` (`bedrock.rs`). Requir
 - `BEDROCK_REGION` — AWS region (default: `us-east-1`)
 - `BEDROCK_MODEL` — Required model ID (e.g., `anthropic.claude-opus-4-6-v1`)
 - `BEDROCK_CROSS_REGION` — Optional cross-region inference prefix (`us`, `eu`, `apac`, `global`)
+
+## GitHub Copilot Provider Notes
+
+`github_copilot` uses a dedicated `GithubCopilotProvider` (`github_copilot.rs`) with
+direct HTTP via `reqwest::Client`. It cannot use `RigAdapter` because the Copilot API
+requires a two-step authentication flow: a long-lived GitHub OAuth token is exchanged
+for a short-lived Copilot session token via `api.github.com/copilot_internal/v2/token`.
+The session token is cached and auto-refreshed before expiry by `CopilotTokenManager`
+in `github_copilot_auth.rs`.
+
+The API endpoint is `https://api.githubcopilot.com/chat/completions` (OpenAI Chat
+Completions format). Token source: `GITHUB_COPILOT_TOKEN` env var, or the
+`oauth_token` from your IDE sign-in flow (`~/.config/github-copilot/apps.json`).
+The setup wizard supports GitHub device login or manual token paste.
+
+**Known risk:** The device login flow uses the VS Code Copilot OAuth client ID
+(`Iv1.b507a08c87ecfe98`) and injects VS Code identity headers (`User-Agent`,
+`Editor-Version`, `Editor-Plugin-Version`, `Copilot-Integration-Id`). GitHub could
+rotate this client ID at any time. If GitHub publishes an official third-party client
+ID, migrate to it immediately. Advanced users can override headers via
+`GITHUB_COPILOT_EXTRA_HEADERS`.
 
 ## NEAR AI Provider Gotchas
 

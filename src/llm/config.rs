@@ -165,6 +165,8 @@ pub struct LlmConfig {
     pub provider: Option<RegistryProviderConfig>,
     /// AWS Bedrock config (populated when backend=bedrock, requires --features bedrock).
     pub bedrock: Option<BedrockConfig>,
+    /// Gemini OAuth config (populated when backend=gemini_oauth).
+    pub gemini_oauth: Option<GeminiOauthConfig>,
     /// OpenAI Codex config (populated when backend=openai_codex).
     pub openai_codex: Option<OpenAiCodexConfig>,
     /// HTTP request timeout in seconds for LLM API calls.
@@ -265,5 +267,36 @@ impl NearAiConfig {
             failover_cooldown_threshold: 3,
             smart_routing_cascade: true,
         }
+    }
+}
+
+/// Configuration for Gemini OAuth integration.
+///
+/// Extended generation config parameters (topP, topK, seed, etc.) are read from
+/// environment variables at request time:
+/// - `GEMINI_TOP_P` — nucleus sampling (0.0–1.0)
+/// - `GEMINI_TOP_K` — top-k sampling (integer)
+/// - `GEMINI_SEED` — deterministic generation seed
+/// - `GEMINI_PRESENCE_PENALTY` — presence penalty (-2.0–2.0)
+/// - `GEMINI_FREQUENCY_PENALTY` — frequency penalty (-2.0–2.0)
+/// - `GEMINI_RESPONSE_MIME_TYPE` — e.g. "application/json"
+/// - `GEMINI_RESPONSE_JSON_SCHEMA` — JSON schema string for structured output
+/// - `GEMINI_CACHED_CONTENT` — cached content resource name
+/// - `GEMINI_CLI_CUSTOM_HEADERS` — custom headers (key:value,key:value)
+/// - `GOOGLE_GENAI_API_VERSION` — API version (default: v1beta)
+/// - `GEMINI_API_KEY` — optional API key for non-OAuth auth mode
+/// - `GEMINI_API_KEY_AUTH_MECHANISM` — "x-goog-api-key" (default) or "bearer"
+#[derive(Debug, Clone)]
+pub struct GeminiOauthConfig {
+    pub model: String,
+    pub credentials_path: PathBuf,
+}
+
+impl GeminiOauthConfig {
+    pub fn default_credentials_path() -> PathBuf {
+        dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".gemini")
+            .join("oauth_creds.json")
     }
 }
