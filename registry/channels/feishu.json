@@ -2,7 +2,7 @@
   "name": "feishu",
   "display_name": "Feishu / Lark Channel",
   "kind": "channel",
-  "version": "0.1.1",
+  "version": "0.1.3",
   "wit_version": "0.3.0",
   "description": "Talk to your agent through a Feishu or Lark bot",
   "keywords": [
