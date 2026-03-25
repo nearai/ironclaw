@@ -463,8 +463,7 @@ impl LlmProvider for NearAiChatProvider {
         let model = req.model.unwrap_or_else(|| self.active_model_name());
         let mut raw_messages = req.messages;
         crate::llm::provider::sanitize_tool_messages(&mut raw_messages);
-        let raw: Vec<ChatCompletionMessage> =
-            raw_messages.into_iter().map(|m| m.into()).collect();
+        let raw: Vec<ChatCompletionMessage> = raw_messages.into_iter().map(|m| m.into()).collect();
 
         // NEAR AI rejects `role:"tool"` messages even on text-only completion paths.
         // Apply the same flattening used by complete_with_tools().
@@ -2226,7 +2225,11 @@ mod tests {
         let flattened = flatten_tool_messages(messages);
         assert_eq!(flattened.len(), 2);
         assert_eq!(flattened[1].role, "user");
-        let text = flattened[1].content.as_ref().and_then(|c| c.as_text()).unwrap();
+        let text = flattened[1]
+            .content
+            .as_ref()
+            .and_then(|c| c.as_text())
+            .unwrap();
         assert!(text.contains("run_cmd"), "should reference tool name");
         assert!(text.contains("ok"), "should include tool result");
     }
