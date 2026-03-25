@@ -465,6 +465,94 @@ impl Agent {
         }
     }
 
+    /// Handle `/reasoning [N|all]` — show reasoning history for the active thread.
+    pub(super) async fn handle_reasoning_command(
+        &self,
+        args: &[String],
+        session: &Arc<Mutex<Session>>,
+        thread_id: Uuid,
+    ) -> SubmissionResult {
+        // Clone the turn data we need, then drop the session lock.
+        let turns_snapshot: Vec<(
+            usize,
+            Option<String>,
+            Vec<crate::agent::session::TurnToolCall>,
+        )>;
+        {
+            let sess = session.lock().await;
+            let thread = match sess.threads.get(&thread_id) {
+                Some(t) => t,
+                None => return SubmissionResult::error("No active thread."),
+            };
+
+            if thread.turns.is_empty() {
+                return SubmissionResult::ok_with_message("No turns yet.");
+            }
+
+            // Parse argument: default=last turn, "all"=all turns, N=specific turn (1-based).
+            let selected: Vec<&crate::agent::session::Turn> = match args.first().map(|s| s.as_str())
+            {
+                Some("all") => thread.turns.iter().collect(),
+                Some(n) => match n.parse::<usize>() {
+                    Ok(0) => return SubmissionResult::error("Turn numbers start at 1."),
+                    Ok(num) if num > thread.turns.len() => {
+                        return SubmissionResult::error(format!(
+                            "Turn {} does not exist (max: {}).",
+                            num,
+                            thread.turns.len()
+                        ));
+                    }
+                    Ok(num) => vec![&thread.turns[num - 1]],
+                    Err(_) => return SubmissionResult::error("Usage: /reasoning [N|all]"),
+                },
+                None => {
+                    // Default: last turn that has tool calls
+                    match thread.turns.iter().rev().find(|t| !t.tool_calls.is_empty()) {
+                        Some(t) => vec![t],
+                        None => {
+                            return SubmissionResult::ok_with_message("No turns with tool calls.");
+                        }
+                    }
+                }
+            };
+
+            turns_snapshot = selected
+                .into_iter()
+                .map(|t| (t.turn_number, t.narrative.clone(), t.tool_calls.clone()))
+                .collect();
+        }
+        // Session lock is now dropped — format output without holding it.
+
+        let mut output = String::new();
+        for (turn_number, narrative, tool_calls) in &turns_snapshot {
+            output.push_str(&format!("--- Turn {} ---\n", turn_number + 1));
+            if let Some(narrative) = narrative {
+                output.push_str(&format!("Reasoning: {}\n", narrative));
+            }
+            if tool_calls.is_empty() {
+                output.push_str("  (no tool calls)\n");
+            } else {
+                for tc in tool_calls {
+                    let status = if tc.error.is_some() {
+                        "error"
+                    } else if tc.result.is_some() {
+                        "ok"
+                    } else {
+                        "pending"
+                    };
+                    output.push_str(&format!("  {} [{}]", tc.name, status));
+                    if let Some(ref rationale) = tc.rationale {
+                        output.push_str(&format!(" — {}", rationale));
+                    }
+                    output.push('\n');
+                }
+            }
+            output.push('\n');
+        }
+
+        SubmissionResult::response(output.trim_end())
+    }
+
     /// Handle system commands that bypass thread-state checks entirely.
     pub(super) async fn handle_system_command(
         &self,
@@ -480,6 +568,7 @@ impl Agent {
                 "  /version          Show version info\n",
                 "  /tools            List available tools\n",
                 "  /debug            Toggle debug mode\n",
+                "  /reasoning [N|all] Show agent reasoning for turns\n",
                 "  /ping             Connectivity check\n",
                 "\n",
                 "Jobs:\n",
@@ -841,12 +930,50 @@ impl Agent {
                 .await
             {
                 tracing::warn!("Failed to persist model to DB: {}", e);
+            } else {
+                tracing::debug!("Persisted selected_model to DB: {}", model);
             }
+        } else {
+            tracing::warn!("No database store available — model choice will not persist to DB");
         }
 
-        // 2. Update TOML config file if it exists (sync I/O in spawn_blocking).
+        // 2. Update .env and TOML config file (sync I/O in spawn_blocking).
         let model_owned = model.to_string();
+        let backend = self.deps.llm_backend.clone();
         if let Err(e) = tokio::task::spawn_blocking(move || {
+            // 2a. Update the backend-specific model env var in ~/.ironclaw/.env.
+            //
+            // Env vars have the HIGHEST priority in LlmConfig::resolve_model()
+            // (env var > TOML > DB > default). If the .env file has e.g.
+            // NEARAI_MODEL=old-model, it shadows everything else. We must
+            // update this var or the /model change is invisible on restart.
+            let registry = crate::llm::ProviderRegistry::load();
+            let model_env = registry.model_env_var(&backend);
+            let env_var_prefix = format!("{}=", model_env);
+
+            // Only update the .env file if the var is actually set there
+            // (avoid injecting new vars the user never configured).
+            let env_path = crate::bootstrap::ironclaw_env_path();
+            let env_has_var = std::fs::read_to_string(&env_path)
+                .ok()
+                .is_some_and(|content| {
+                    content.lines().any(|line| {
+                        let trimmed = line.trim_start();
+                        !trimmed.starts_with('#') && trimmed.starts_with(&env_var_prefix)
+                    })
+                });
+            if env_has_var {
+                if let Err(e) = crate::bootstrap::upsert_bootstrap_var(model_env, &model_owned) {
+                    tracing::warn!("Failed to update {} in .env: {}", model_env, e);
+                } else {
+                    tracing::debug!("Updated {} in .env to {}", model_env, model_owned);
+                }
+            }
+
+            // 2b. Update (or create) the TOML config file.
+            //
+            // The TOML overlay has higher priority than DB settings on
+            // startup, so it MUST stay in sync with the DB.
             let toml_path = crate::settings::Settings::default_toml_path();
             match crate::settings::Settings::load_toml(&toml_path) {
                 Ok(Some(mut settings)) => {
@@ -856,7 +983,15 @@ impl Agent {
                     }
                 }
                 Ok(None) => {
-                    // No config file on disk; nothing to update.
+                    // No config file yet — create one so the model choice
+                    // survives restarts even when the DB is unavailable.
+                    let settings = crate::settings::Settings {
+                        selected_model: Some(model_owned),
+                        ..Default::default()
+                    };
+                    if let Err(e) = settings.save_toml(&toml_path) {
+                        tracing::warn!("Failed to create config.toml for model persistence: {}", e);
+                    }
                 }
                 Err(e) => {
                     tracing::warn!("Failed to load config.toml for model persistence: {}", e);
@@ -865,7 +1000,7 @@ impl Agent {
         })
         .await
         {
-            tracing::warn!("Model TOML persistence task failed: {}", e);
+            tracing::warn!("Model persistence task failed: {}", e);
         }
     }
 }

@@ -22,6 +22,8 @@ Commands:
   pairing     Manage DM pairing
   service     Manage OS service
   skills      Manage skills
+  hooks       Manage lifecycle hooks
+  models      Manage LLM providers and models
   doctor      Run diagnostics
   logs        View and manage gateway logs
   status      Show system status

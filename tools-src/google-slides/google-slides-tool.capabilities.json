@@ -1,6 +1,7 @@
 {
   "version": "0.2.0",
   "wit_version": "0.3.0",
+  "description": "Create, read, edit, and format Google Slides presentations. Supports slide management, text operations, shapes, images, text formatting, and paragraph alignment.",
   "http": {
     "allowlist": [
       {
@@ -52,7 +53,7 @@
       },
       {
         "name": "google_oauth_client_secret",
-        "prompt": "Google OAuth Client Secret"
+        "prompt": "Google OAuth Client Secret (from console.cloud.google.com/apis/credentials)"
       }
     ]
   }
