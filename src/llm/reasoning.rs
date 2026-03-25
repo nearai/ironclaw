@@ -1293,6 +1293,44 @@ fn is_inside_code(pos: usize, regions: &[CodeRegion]) -> bool {
     regions.iter().any(|r| pos >= r.start && pos < r.end)
 }
 
+/// Check whether a byte range overlaps any code region.
+fn overlaps_code_region(start: usize, end: usize, regions: &[CodeRegion]) -> bool {
+    regions.iter().any(|r| start < r.end && end > r.start)
+}
+
+/// Return the byte bounds of the line containing `pos`, excluding the trailing newline.
+fn line_bounds(text: &str, pos: usize) -> (usize, usize) {
+    let start = text[..pos].rfind('\n').map_or(0, |idx| idx + 1);
+    let end = text[pos..].find('\n').map_or(text.len(), |idx| pos + idx);
+    (start, end)
+}
+
+/// Only recover XML-style tool calls when they are isolated content outside
+/// markdown code and quote contexts. This avoids converting code examples or
+/// quoted snippets into executable tool calls.
+fn is_recoverable_tool_call_segment(
+    text: &str,
+    start: usize,
+    end: usize,
+    code_regions: &[CodeRegion],
+) -> bool {
+    if overlaps_code_region(start, end, code_regions) {
+        return false;
+    }
+
+    let (first_line_start, first_line_end) = line_bounds(text, start);
+    let (_, last_line_end) = line_bounds(text, end.saturating_sub(1));
+    let first_line_prefix = &text[first_line_start..start];
+    let last_line_suffix = &text[end..last_line_end];
+    let first_line = &text[first_line_start..first_line_end];
+
+    if !first_line_prefix.trim().is_empty() || !last_line_suffix.trim().is_empty() {
+        return false;
+    }
+
+    !first_line.trim_start().starts_with('>')
+}
+
 /// Clean up LLM response by stripping model-internal tags and reasoning patterns.
 ///
 /// Some models (GLM-4.7, etc.) emit XML-tagged internal state like
@@ -1312,6 +1350,7 @@ fn recover_tool_calls_from_content(
 ) -> Vec<ToolCall> {
     let tool_names: std::collections::HashSet<&str> =
         available_tools.iter().map(|t| t.name.as_str()).collect();
+    let code_regions = find_code_regions(content);
     let mut calls = Vec::new();
 
     for (open, close) in &[
@@ -1320,15 +1359,23 @@ fn recover_tool_calls_from_content(
         ("<function_call>", "</function_call>"),
         ("<|function_call|>", "<|/function_call|>"),
     ] {
-        let mut remaining = content;
-        while let Some(start) = remaining.find(open) {
+        let mut search_from = 0;
+        while let Some(offset) = content[search_from..].find(open) {
+            let start = search_from + offset;
             let inner_start = start + open.len();
-            let after = &remaining[inner_start..];
-            let Some(end) = after.find(close) else {
+            let after = &content[inner_start..];
+            let Some(end_offset) = after.find(close) else {
                 break;
             };
-            let inner = after[..end].trim();
-            remaining = &after[end + close.len()..];
+            let end = inner_start + end_offset;
+            let segment_end = end + close.len();
+            search_from = segment_end;
+
+            if !is_recoverable_tool_call_segment(content, start, segment_end, &code_regions) {
+                continue;
+            }
+
+            let inner = content[inner_start..end].trim();
 
             if inner.is_empty() {
                 continue;
@@ -2255,6 +2302,40 @@ That's my plan."#;
         let calls = recover_tool_calls_from_content(content, &tools);
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].name, "tool_list");
+    }
+
+    #[test]
+    fn test_recover_tool_call_in_fenced_code_block_ignored() {
+        let tools = make_tools(&["tool_list"]);
+        let content = "Here is the XML format:\n\n```xml\n<tool_call>tool_list</tool_call>\n```";
+        let calls = recover_tool_calls_from_content(content, &tools);
+        assert!(calls.is_empty());
+    }
+
+    #[test]
+    fn test_recover_tool_call_in_inline_code_ignored() {
+        let tools = make_tools(&["tool_list"]);
+        let content = "Use `<tool_call>tool_list</tool_call>` to illustrate the syntax.";
+        let calls = recover_tool_calls_from_content(content, &tools);
+        assert!(calls.is_empty());
+    }
+
+    #[test]
+    fn test_recover_tool_call_in_blockquote_ignored() {
+        let tools = make_tools(&["tool_list"]);
+        let content = "The page replied:\n> <tool_call>tool_list</tool_call>";
+        let calls = recover_tool_calls_from_content(content, &tools);
+        assert!(calls.is_empty());
+    }
+
+    #[test]
+    fn test_recover_multiline_json_tool_call_on_own_line() {
+        let tools = make_tools(&["memory_search"]);
+        let content = "Let me check.\n\n<tool_call>\n{\"name\": \"memory_search\", \"arguments\": {\"query\": \"test\"}}\n</tool_call>\n\nDone.";
+        let calls = recover_tool_calls_from_content(content, &tools);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "memory_search");
+        assert_eq!(calls[0].arguments, serde_json::json!({"query": "test"}));
     }
 
     // ---- System prompt building tests (issue #565) ----
