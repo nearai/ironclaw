@@ -312,13 +312,11 @@ impl Config {
         let tunnel = TunnelConfig::resolve(settings)?;
         let channels = ChannelsConfig::resolve(settings, &owner_id)?;
 
-        // Resolve workspace config using the gateway user_id for default layers.
-        let workspace_user_id = channels
-            .gateway
-            .as_ref()
-            .map(|gw| gw.user_id.as_str())
-            .unwrap_or("default");
-        let workspace = WorkspaceConfig::resolve(workspace_user_id)?;
+        // Resolve the startup workspace against the durable owner scope. The
+        // gateway may expose a distinct sender identity, but the base runtime
+        // workspace stays owner-scoped and per-user gateway workspaces are
+        // handled separately by WorkspacePool.
+        let workspace = WorkspaceConfig::resolve(&owner_id)?;
 
         Ok(Self {
             owner_id: owner_id.clone(),

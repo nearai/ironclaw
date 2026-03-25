@@ -140,7 +140,8 @@ fn execution_properties() -> Value {
         },
         "use_tools": {
             "type": "boolean",
-            "description": "Only applies to lightweight mode. When true, safe non-approval tools are available."
+            "default": true,
+            "description": "Only applies to lightweight mode. New lightweight routines default this to true; when enabled, the routine can use the owner's live autonomous tool scope."
         },
         "max_tool_rounds": {
             "type": "integer",
@@ -290,7 +291,7 @@ fn routine_request_discovery_schema() -> Value {
 fn lightweight_execution_variant() -> Value {
     serde_json::json!({
         "type": "object",
-        "description": "Default lightweight execution. Applies when execution is omitted or execution.mode='lightweight'.",
+        "description": "Default lightweight execution. Applies when execution is omitted or execution.mode='lightweight'. New lightweight routines default to tools enabled unless execution.use_tools=false is set.",
         "properties": {
             "mode": {
                 "type": "string",
@@ -304,7 +305,8 @@ fn lightweight_execution_variant() -> Value {
             },
             "use_tools": {
                 "type": "boolean",
-                "description": "When true, safe non-approval tools are available."
+                "default": true,
+                "description": "Defaults to true for new lightweight routines. When enabled, the routine can use the owner's live autonomous tool scope."
             },
             "max_tool_rounds": {
                 "type": "integer",
@@ -335,7 +337,7 @@ fn full_job_execution_variant() -> Value {
 fn execution_discovery_schema() -> Value {
     serde_json::json!({
         "type": "object",
-        "description": "Optional execution settings. Omit this block for the default lightweight mode.",
+        "description": "Optional execution settings. Omit this block for the default lightweight mode with tools enabled.",
         "properties": execution_properties(),
         "oneOf": [
             lightweight_execution_variant(),
@@ -408,7 +410,8 @@ fn routine_create_tool_summary() -> ToolDiscoverySummary {
             "execution.mode='full_job' uses the owner's live autonomous tool scope and ignores use_tools, max_tool_rounds, and context_paths.".into(),
         ],
         notes: vec![
-            "Omitting execution defaults to lightweight mode.".into(),
+            "Omitting execution defaults to lightweight mode with tools enabled.".into(),
+            "Set execution.use_tools=false to keep a new lightweight routine text-only.".into(),
             "Omitting delivery.user falls back to the owner's last-seen notification target.".into(),
             "advanced.cooldown_secs defaults to 300.".into(),
             "Legacy flat aliases are still accepted for compatibility, but grouped fields are preferred.".into(),
@@ -605,7 +608,8 @@ fn routine_create_schema(include_compatibility_aliases: bool) -> Value {
 }
 
 pub(crate) fn routine_create_parameters_schema() -> Value {
-    routine_create_schema(false)
+    static CACHE: OnceLock<Value> = OnceLock::new();
+    CACHE.get_or_init(|| routine_create_schema(false)).clone()
 }
 
 fn routine_create_discovery_schema() -> Value {
@@ -852,11 +856,15 @@ fn parse_execution_mode(value: Option<String>) -> Result<NormalizedExecutionMode
     }
 }
 
-fn parse_routine_execution(params: &Value) -> Result<NormalizedExecutionRequest, ToolError> {
+fn parse_routine_execution(
+    params: &Value,
+    default_use_tools: bool,
+) -> Result<NormalizedExecutionRequest, ToolError> {
     let mode = parse_execution_mode(string_field(params, "execution", "mode", &["action_type"]))?;
     let context_paths =
         string_array_field(params, "execution", "context_paths", &["context_paths"]);
-    let use_tools = bool_field(params, "execution", "use_tools", &["use_tools"]).unwrap_or(false);
+    let use_tools =
+        bool_field(params, "execution", "use_tools", &["use_tools"]).unwrap_or(default_use_tools);
     let max_tool_rounds = u64_field(params, "execution", "max_tool_rounds", &["max_tool_rounds"])
         .unwrap_or(3)
         .clamp(1, crate::agent::routine::MAX_TOOL_ROUNDS_LIMIT as u64)
@@ -888,7 +896,7 @@ fn parse_routine_create_request(
         .unwrap_or("")
         .to_string();
     let trigger = parse_routine_trigger(params)?;
-    let execution = parse_routine_execution(params)?;
+    let execution = parse_routine_execution(params, true)?;
     let delivery = parse_routine_delivery(params);
     let cooldown_secs =
         u64_field(params, "advanced", "cooldown_secs", &["cooldown_secs"]).unwrap_or(300);
@@ -1007,7 +1015,8 @@ fn event_emit_schema(include_source_alias: bool) -> Value {
 }
 
 pub(crate) fn event_emit_parameters_schema() -> Value {
-    event_emit_schema(false)
+    static CACHE: OnceLock<Value> = OnceLock::new();
+    CACHE.get_or_init(|| event_emit_schema(false)).clone()
 }
 
 fn event_emit_discovery_schema() -> Value {
@@ -1864,6 +1873,56 @@ mod tests {
     }
 
     #[test]
+    fn parses_lightweight_create_with_tools_enabled_by_default() {
+        let params = serde_json::json!({
+            "name": "manual-check",
+            "prompt": "Inspect the repo for issues.",
+            "request": {
+                "kind": "manual"
+            }
+        });
+
+        let parsed = parse_routine_create_request(&params).expect("parse default lightweight");
+
+        assert!(
+            matches!(parsed.execution.mode, NormalizedExecutionMode::Lightweight),
+            "expected lightweight execution mode",
+        );
+        assert!(
+            parsed.execution.use_tools,
+            "new lightweight routines should default use_tools=true",
+        );
+        assert_eq!(parsed.execution.max_tool_rounds, 3);
+    }
+
+    #[test]
+    fn parses_lightweight_create_with_explicit_tools_disabled() {
+        let params = serde_json::json!({
+            "name": "manual-check",
+            "prompt": "Inspect the repo for issues.",
+            "request": {
+                "kind": "manual"
+            },
+            "execution": {
+                "use_tools": false
+            }
+        });
+
+        let parsed =
+            parse_routine_create_request(&params).expect("parse lightweight with tools disabled");
+
+        assert!(
+            matches!(parsed.execution.mode, NormalizedExecutionMode::Lightweight),
+            "expected lightweight execution mode",
+        );
+        assert!(
+            !parsed.execution.use_tools,
+            "explicit use_tools=false should be preserved",
+        );
+        assert_eq!(parsed.execution.max_tool_rounds, 3);
+    }
+
+    #[test]
     fn parses_context_paths_with_trim_drop_empty_and_stable_dedupe() {
         let params = serde_json::json!({
             "name": "deploy-watch",
@@ -2200,6 +2259,20 @@ mod tests {
                 .iter()
                 .any(|rule| rule.contains("request.kind='cron'")),
             "summary should explain cron requirement",
+        );
+        assert!(
+            summary
+                .notes
+                .iter()
+                .any(|note| note.contains("lightweight mode with tools enabled")),
+            "summary should mention the new lightweight default",
+        );
+        assert!(
+            summary
+                .notes
+                .iter()
+                .any(|note| note.contains("execution.use_tools=false")),
+            "summary should mention the text-only opt-out",
         );
         assert!(
             summary

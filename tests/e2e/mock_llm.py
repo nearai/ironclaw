@@ -34,6 +34,15 @@ TOOL_CALL_PATTERNS = [
             "body": {"label": m.group("label")},
         },
     ),
+    (
+        re.compile(r"check gmail unread|gmail unread", re.IGNORECASE),
+        "gmail",
+        lambda _: {
+            "action": "list_messages",
+            "query": "is:unread",
+            "max_results": 1,
+        },
+    ),
     (re.compile(r"what time|current time", re.IGNORECASE), "time", lambda _: {"operation": "now"}),
     (
         re.compile(
@@ -89,6 +98,15 @@ TOOL_CALL_PATTERNS = [
         lambda _: {},
     ),
 ]
+
+
+def _new_oauth_state() -> dict:
+    return {
+        "exchange_count": 0,
+        "refresh_count": 0,
+        "last_exchange": None,
+        "last_refresh": None,
+    }
 
 
 def _last_user_content(messages: list[dict]) -> str:
@@ -272,6 +290,12 @@ async def oauth_exchange(request: web.Request) -> web.Response:
     specific token params such as RFC 8707 `resource` are forwarded here.
     """
     data = await request.post()
+    oauth_state = request.app["oauth_state"]
+    oauth_state["exchange_count"] += 1
+    oauth_state["last_exchange"] = {
+        "authorization": request.headers.get("Authorization"),
+        "form": dict(data),
+    }
     code = data.get("code", "")
     access_token_field = data.get("access_token_field", "access_token")
 
@@ -288,6 +312,39 @@ async def oauth_exchange(request: web.Request) -> web.Response:
         "refresh_token": "mock-refresh-token",
         "expires_in": 3600,
     })
+
+
+async def oauth_refresh(request: web.Request) -> web.Response:
+    """Mock OAuth token refresh proxy for hosted refresh E2E tests."""
+    data = await request.post()
+    oauth_state = request.app["oauth_state"]
+    oauth_state["refresh_count"] += 1
+    oauth_state["last_refresh"] = {
+        "authorization": request.headers.get("Authorization"),
+        "form": dict(data),
+    }
+
+    if request.headers.get("Authorization") != "Bearer e2e-test-token":
+        return web.json_response({"error": "invalid_gateway_auth"}, status=401)
+    if data.get("client_id") != "hosted-google-client-id":
+        return web.json_response({"error": "invalid_client_id"}, status=400)
+    if "client_secret" in data:
+        return web.json_response({"error": "unexpected_client_secret"}, status=400)
+
+    return web.json_response({
+        "access_token": "mock-refreshed-access-token",
+        "refresh_token": "mock-rotated-refresh-token",
+        "expires_in": 3600,
+    })
+
+
+async def oauth_state_handler(request: web.Request) -> web.Response:
+    return web.json_response(request.app["oauth_state"])
+
+
+async def oauth_reset(request: web.Request) -> web.Response:
+    request.app["oauth_state"] = _new_oauth_state()
+    return web.json_response({"ok": True})
 
 
 async def models(_request: web.Request) -> web.Response:
@@ -424,12 +481,16 @@ def main():
     parser.add_argument("--port", type=int, default=0)
     args = parser.parse_args()
     app = web.Application()
+    app["oauth_state"] = _new_oauth_state()
     # Register both /v1/ and non-/v1/ paths (rig-core omits the /v1/ prefix)
     app.router.add_post("/v1/chat/completions", chat_completions)
     app.router.add_post("/chat/completions", chat_completions)
     app.router.add_get("/v1/models", models)
     app.router.add_get("/models", models)
     app.router.add_post("/oauth/exchange", oauth_exchange)
+    app.router.add_post("/oauth/refresh", oauth_refresh)
+    app.router.add_get("/__mock/oauth/state", oauth_state_handler)
+    app.router.add_post("/__mock/oauth/reset", oauth_reset)
     # Mock MCP server endpoints
     app.router.add_post("/mcp", mcp_endpoint)
     app.router.add_post("/mcp-400", mcp_endpoint_400)

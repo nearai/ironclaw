@@ -1098,15 +1098,23 @@ pub(crate) fn extract_suggestions(text: &str) -> (String, Vec<String>) {
         Regex::new(r"(?s)<suggestions>\s*(.*?)\s*</suggestions>").expect("valid regex") // safety: constant pattern
     });
 
-    // Find the position of the last closing code fence to avoid matching inside code blocks
-    let last_code_fence = text.rfind("```").unwrap_or(0);
+    // Build a sorted list of code fence positions to determine open/close pairing.
+    // A position is "inside" a fenced block when it falls between an odd-numbered
+    // fence (opening) and the next even-numbered fence (closing).
+    let fence_positions: Vec<usize> = text.match_indices("```").map(|(pos, _)| pos).collect();
 
-    // Find all matches, take the last one that's after the last code fence
+    let is_inside_fence = |pos: usize| -> bool {
+        // Count how many fences appear before `pos`. If odd, we're inside a fence.
+        let count = fence_positions.iter().take_while(|&&fp| fp <= pos).count();
+        count % 2 == 1
+    };
+
+    // Find all matches, take the last one that's outside any code fence
     let mut best_match: Option<regex::Match<'_>> = None;
     let mut best_capture: Option<String> = None;
     for caps in RE.captures_iter(text) {
         if let (Some(full), Some(inner)) = (caps.get(0), caps.get(1))
-            && full.start() >= last_code_fence
+            && !is_inside_fence(full.start())
         {
             best_match = Some(full);
             best_capture = Some(inner.as_str().to_string());
@@ -1225,6 +1233,7 @@ mod tests {
             document_extraction: None,
             sandbox_readiness: crate::agent::routine_engine::SandboxReadiness::DisabledByConfig,
             builder: None,
+            llm_backend: "nearai".to_string(),
         };
 
         Agent::new(
@@ -2092,6 +2101,7 @@ mod tests {
             document_extraction: None,
             sandbox_readiness: crate::agent::routine_engine::SandboxReadiness::DisabledByConfig,
             builder: None,
+            llm_backend: "nearai".to_string(),
         };
 
         Agent::new(
@@ -2212,6 +2222,7 @@ mod tests {
                 document_extraction: None,
                 sandbox_readiness: crate::agent::routine_engine::SandboxReadiness::DisabledByConfig,
                 builder: None,
+                llm_backend: "nearai".to_string(),
             };
 
             Agent::new(
@@ -2341,6 +2352,16 @@ mod tests {
         let input = "```\n<suggestions>[\"foo\"]</suggestions>\n```";
         let (text, suggestions) = super::extract_suggestions(input);
         // The tag is inside a code fence, so it should not be extracted
+        assert_eq!(text, input); // safety: test
+        assert!(suggestions.is_empty()); // safety: test
+    }
+
+    #[test]
+    fn test_extract_suggestions_inside_unclosed_code_fence() {
+        // Regression: odd number of fences (unclosed fence) must still be
+        // treated as "inside a code block".
+        let input = "```\ncode\n<suggestions>[\"bar\"]</suggestions>";
+        let (text, suggestions) = super::extract_suggestions(input);
         assert_eq!(text, input); // safety: test
         assert!(suggestions.is_empty()); // safety: test
     }
