@@ -91,6 +91,11 @@ Browser-facing HTTP API and SSE/WebSocket real-time streaming. Axum-based, singl
 | DELETE | `/api/routines/{id}` | Delete a routine |
 | GET | `/api/routines/{id}/runs` | List runs for a specific routine |
 
+### Webhooks
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/api/webhooks/{path}` | Public routine webhook trigger; prefers `X-Hub-Signature-256` HMAC validation and falls back to `X-Webhook-Secret` for compatibility |
+
 ### Settings
 | Method | Path | Description |
 |--------|------|-------------|
