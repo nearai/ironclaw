@@ -409,7 +409,15 @@ pub trait JobStore: Send + Sync {
     async fn mark_job_stuck(&self, id: Uuid) -> Result<(), DatabaseError>;
     async fn get_stuck_jobs(&self) -> Result<Vec<Uuid>, DatabaseError>;
     async fn list_agent_jobs(&self) -> Result<Vec<AgentJobRecord>, DatabaseError>;
+    async fn list_agent_jobs_for_user(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<AgentJobRecord>, DatabaseError>;
     async fn agent_job_summary(&self) -> Result<AgentJobSummary, DatabaseError>;
+    async fn agent_job_summary_for_user(
+        &self,
+        user_id: &str,
+    ) -> Result<AgentJobSummary, DatabaseError>;
     /// Get the failure reason for a single agent job (O(1) lookup).
     async fn get_agent_job_failure_reason(&self, id: Uuid)
     -> Result<Option<String>, DatabaseError>;
@@ -520,6 +528,15 @@ pub trait RoutineStore: Send + Sync {
         &self,
         routine_ids: &[Uuid],
     ) -> Result<HashMap<Uuid, i64>, DatabaseError>;
+
+    /// Fetch the last run status for multiple routines in a single query.
+    /// Returns a map from routine_id to its most recent RunStatus.
+    /// Routines with no runs are omitted from the result.
+    async fn batch_get_last_run_status(
+        &self,
+        routine_ids: &[Uuid],
+    ) -> Result<HashMap<Uuid, RunStatus>, DatabaseError>;
+
     async fn link_routine_run_to_job(
         &self,
         run_id: Uuid,
