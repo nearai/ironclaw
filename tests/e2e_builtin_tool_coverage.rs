@@ -439,7 +439,7 @@ mod tests {
 
         match &routine.trigger {
             Trigger::Cron { schedule, timezone } => {
-                assert_eq!(schedule, "0 0 9 * * MON-FRI");
+                assert_eq!(schedule, "0 0 9 * * MON-FRI *");
                 assert_eq!(timezone.as_deref(), Some("UTC"));
             }
             other => panic!("expected cron trigger, got {other:?}"),
