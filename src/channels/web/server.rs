@@ -726,7 +726,7 @@ pub async fn start_server(
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     *state.shutdown_tx.write().await = Some(shutdown_tx);
 
-    let server_handle = tokio::spawn(async move {
+    tokio::spawn(async move {
         if let Err(e) = axum::serve(listener, app)
             .with_graceful_shutdown(async {
                 let _ = shutdown_rx.await;
@@ -738,7 +738,7 @@ pub async fn start_server(
         }
     });
 
-    Ok((bound_addr, server_handle))
+    Ok(bound_addr)
 }
 
 // --- Static file handlers ---
