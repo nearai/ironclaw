@@ -21,9 +21,7 @@ mod tests {
         NotifyConfig, Routine, RoutineAction, RoutineGuardrails, RoutineRun, RunStatus, Trigger,
     };
     use ironclaw::agent::routine_engine::RoutineEngine;
-    use ironclaw::agent::{
-        HeartbeatConfig, HeartbeatRunner, Scheduler, SchedulerDeps,
-    };
+    use ironclaw::agent::{HeartbeatConfig, HeartbeatRunner, Scheduler, SchedulerDeps};
     use ironclaw::channels::IncomingMessage;
     use ironclaw::config::{AgentConfig, RoutineConfig, SafetyConfig};
     use ironclaw::context::{ContextManager, JobContext};
