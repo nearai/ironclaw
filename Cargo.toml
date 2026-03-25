@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/ironclaw_safety"]
+members = [".", "crates/ironclaw_common", "crates/ironclaw_safety"]
 exclude = [
     "channels-src/discord",
     "channels-src/telegram",
@@ -88,7 +88,7 @@ async-trait = "0.1"
 clap = { version = "4", features = ["derive", "env"] }
 
 # Terminal
-crossterm = "0.28"
+crossterm = "0.29"
 rustyline = { version = "17", features = ["custom-bindings", "derive", "with-file-history"] }
 termimad = "0.34"
 
@@ -99,6 +99,9 @@ tower-http = { version = "0.6", features = ["trace", "cors", "set-header"] }
 
 # Cron scheduling for routines
 cron = "0.13"
+
+# Shared types
+ironclaw_common = { path = "crates/ironclaw_common", version = "0.1.0" }
 
 # Safety/sanitization
 ironclaw_safety = { path = "crates/ironclaw_safety", version = "0.1.0" }

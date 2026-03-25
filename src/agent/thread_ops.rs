@@ -16,12 +16,12 @@ use crate::agent::dispatcher::{
 };
 use crate::agent::session::{MAX_PENDING_MESSAGES, PendingApproval, Session, ThreadState};
 use crate::agent::submission::SubmissionResult;
-use crate::channels::web::util::truncate_preview;
 use crate::channels::{IncomingMessage, StatusUpdate};
 use crate::context::JobContext;
 use crate::error::Error;
 use crate::llm::{ChatMessage, ToolCall};
 use crate::tools::redact_params;
+use ironclaw_common::truncate_preview;
 
 const FORGED_THREAD_ID_ERROR: &str = "Invalid or unauthorized thread ID.";
 
@@ -513,10 +513,10 @@ impl Agent {
                 };
 
                 thread.complete_turn(&response);
-                let (turn_number, tool_calls) = thread
+                let (turn_number, tool_calls, narrative) = thread
                     .turns
                     .last()
-                    .map(|t| (t.turn_number, t.tool_calls.clone()))
+                    .map(|t| (t.turn_number, t.tool_calls.clone(), t.narrative.clone()))
                     .unwrap_or_default();
                 let _ = self
                     .channels
@@ -534,6 +534,7 @@ impl Agent {
                     &message.user_id,
                     turn_number,
                     &tool_calls,
+                    narrative.as_deref(),
                 )
                 .await;
                 self.persist_assistant_response(
@@ -551,6 +552,33 @@ impl Agent {
                         .send_status(
                             &message.channel,
                             StatusUpdate::Suggestions { suggestions },
+                            &message.metadata,
+                        )
+                        .await;
+                }
+
+                // Emit per-turn cost summary
+                {
+                    let usage = self.cost_guard().model_usage().await;
+                    let (total_in, total_out, total_cost) =
+                        usage
+                            .values()
+                            .fold((0u64, 0u64, rust_decimal::Decimal::ZERO), |acc, m| {
+                                (
+                                    acc.0 + m.input_tokens,
+                                    acc.1 + m.output_tokens,
+                                    acc.2 + m.cost,
+                                )
+                            });
+                    let _ = self
+                        .channels
+                        .send_status(
+                            &message.channel,
+                            StatusUpdate::TurnCost {
+                                input_tokens: total_in,
+                                output_tokens: total_out,
+                                cost_usd: format!("${:.4}", total_cost),
+                            },
                             &message.metadata,
                         )
                         .await;
@@ -698,7 +726,9 @@ impl Agent {
     ///
     /// Stored between the user and assistant messages so that
     /// `build_turns_from_db_messages` can reconstruct the tool call history.
-    /// Content is a JSON array of tool call summaries.
+    /// Content is a JSON object: `{ "calls": [...], "narrative": "..." }`.
+    /// The `calls` array contains tool call summaries with optional `rationale`
+    /// and `tool_call_id` fields. Legacy rows may be plain JSON arrays.
     pub(super) async fn persist_tool_calls(
         &self,
         thread_id: Uuid,
@@ -706,6 +736,7 @@ impl Agent {
         user_id: &str,
         turn_number: usize,
         tool_calls: &[crate::agent::session::TurnToolCall],
+        narrative: Option<&str>,
     ) {
         if tool_calls.is_empty() {
             return;
@@ -740,11 +771,30 @@ impl Agent {
                 if let Some(ref error) = tc.error {
                     obj["error"] = serde_json::Value::String(truncate_preview(error, 200));
                 }
+                if let Some(ref rationale) = tc.rationale {
+                    obj["rationale"] = serde_json::Value::String(truncate_preview(rationale, 500));
+                }
+                if let Some(ref tool_call_id) = tc.tool_call_id {
+                    obj["tool_call_id"] =
+                        serde_json::Value::String(truncate_preview(tool_call_id, 128));
+                }
                 obj
             })
             .collect();
 
-        let content = match serde_json::to_string(&summaries) {
+        // Wrap in an object with optional narrative so it can be reconstructed.
+        // safety: no byte-index slicing here; comment describes JSON shape
+        let wrapper = if let Some(n) = narrative {
+            serde_json::json!({
+                "narrative": truncate_preview(n, 1000),
+                "calls": summaries,
+            })
+        } else {
+            serde_json::json!({
+                "calls": summaries,
+            })
+        };
+        let content = match serde_json::to_string(&wrapper) {
             Ok(c) => c,
             Err(e) => {
                 tracing::warn!("Failed to serialize tool calls: {}", e);
@@ -1077,9 +1127,12 @@ impl Agent {
                     && let Some(turn) = thread.last_turn_mut()
                 {
                     if is_tool_error {
-                        turn.record_tool_error(result_content.clone());
+                        turn.record_tool_error_for(&pending.tool_call_id, result_content.clone());
                     } else {
-                        turn.record_tool_result(serde_json::json!(result_content));
+                        turn.record_tool_result_for(
+                            &pending.tool_call_id,
+                            serde_json::json!(result_content),
+                        );
                     }
                 }
             }
@@ -1331,9 +1384,12 @@ impl Agent {
                         && let Some(turn) = thread.last_turn_mut()
                     {
                         if is_deferred_error {
-                            turn.record_tool_error(deferred_content.clone());
+                            turn.record_tool_error_for(&tc.id, deferred_content.clone());
                         } else {
-                            turn.record_tool_result(serde_json::json!(deferred_content));
+                            turn.record_tool_result_for(
+                                &tc.id,
+                                serde_json::json!(deferred_content),
+                            );
                         }
                     }
                 }
@@ -1432,10 +1488,10 @@ impl Agent {
                     let (response, suggestions) =
                         crate::agent::dispatcher::extract_suggestions(&response);
                     thread.complete_turn(&response);
-                    let (turn_number, tool_calls) = thread
+                    let (turn_number, tool_calls, narrative) = thread
                         .turns
                         .last()
-                        .map(|t| (t.turn_number, t.tool_calls.clone()))
+                        .map(|t| (t.turn_number, t.tool_calls.clone(), t.narrative.clone()))
                         .unwrap_or_default();
                     // User message already persisted at turn start; save tool calls then assistant response
                     self.persist_tool_calls(
@@ -1444,6 +1500,7 @@ impl Agent {
                         &message.user_id,
                         turn_number,
                         &tool_calls,
+                        narrative.as_deref(),
                     )
                     .await;
                     self.persist_assistant_response(
@@ -1619,7 +1676,7 @@ impl Agent {
         };
 
         match ext_mgr
-            .configure_token(&pending.extension_name, token)
+            .configure_token(&pending.extension_name, token, &message.user_id)
             .await
         {
             Ok(result) if result.activated => {
@@ -1789,7 +1846,20 @@ fn rebuild_chat_messages_from_db(
             "assistant" => result.push(ChatMessage::assistant(&msg.content)),
             "tool_calls" => {
                 // Try to parse the enriched JSON and rebuild tool messages.
-                if let Ok(calls) = serde_json::from_str::<Vec<serde_json::Value>>(&msg.content) {
+                // Supports two formats:
+                // - Old: plain JSON array of tool call summaries
+                // - New: wrapped object { "calls": [...], "narrative": "..." }
+                let calls: Vec<serde_json::Value> =
+                    match serde_json::from_str::<serde_json::Value>(&msg.content) {
+                        Ok(serde_json::Value::Array(arr)) => arr,
+                        Ok(serde_json::Value::Object(obj)) => obj
+                            .get("calls")
+                            .and_then(|v| v.as_array())
+                            .cloned()
+                            .unwrap_or_default(),
+                        _ => Vec::new(),
+                    };
+                {
                     if calls.is_empty() {
                         continue;
                     }
@@ -1812,6 +1882,10 @@ fn rebuild_chat_messages_from_db(
                                     .get("parameters")
                                     .cloned()
                                     .unwrap_or(serde_json::json!({})),
+                                reasoning: c
+                                    .get("rationale")
+                                    .and_then(|v| v.as_str())
+                                    .map(String::from),
                             })
                             .collect();
 

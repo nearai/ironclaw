@@ -587,6 +587,7 @@ mod advanced {
     async fn mcp_extension_lifecycle() {
         use crate::support::mock_mcp_server::{MockToolResponse, start_mock_mcp_server};
         use ironclaw::extensions::{AuthHint, ExtensionKind, ExtensionSource, RegistryEntry};
+        const TEST_USER_ID: &str = "test-user";
 
         // 1. Start mock MCP server with pre-configured tool responses.
         let mock_server = start_mock_mcp_server(vec![
@@ -654,14 +655,14 @@ mod advanced {
         ext_mgr
             .secrets()
             .create(
-                "default",
+                TEST_USER_ID,
                 ironclaw::secrets::CreateSecretParams::new(secret_name, "mock-access-token")
                     .with_provider("mcp:mock-notion".to_string()),
             )
             .await
             .expect("failed to inject test token");
 
-        let activate_result = ext_mgr.activate("mock-notion").await;
+        let activate_result = ext_mgr.activate("mock-notion", TEST_USER_ID).await;
         assert!(
             activate_result.is_ok(),
             "activation failed: {:?}",

@@ -701,7 +701,7 @@ impl TestRigBuilder {
                     let wasm_bytes = tokio::fs::read(&spec.wasm_path)
                         .await
                         .unwrap_or_else(|e| panic!("read {}: {e}", spec.wasm_path.display()));
-                    let (capabilities, description, schema) =
+                    let (capabilities, description) =
                         if let Some(cap_path) = &spec.capabilities_path {
                             if cap_path.exists() {
                                 let cap_bytes = tokio::fs::read(cap_path)
@@ -709,16 +709,12 @@ impl TestRigBuilder {
                                     .unwrap_or_else(|e| panic!("read {}: {e}", cap_path.display()));
                                 let cap_file = CapabilitiesFile::from_bytes(&cap_bytes)
                                     .expect("parse capabilities.json");
-                                (
-                                    cap_file.to_capabilities(),
-                                    cap_file.description.clone(),
-                                    cap_file.parameters.clone(),
-                                )
+                                (cap_file.to_capabilities(), cap_file.description.clone())
                             } else {
-                                (Capabilities::default(), None, None)
+                                (Capabilities::default(), None)
                             }
                         } else {
-                            (Capabilities::default(), None, None)
+                            (Capabilities::default(), None)
                         };
 
                     let prepared = runtime
@@ -729,9 +725,6 @@ impl TestRigBuilder {
                         WasmToolWrapper::new(Arc::clone(&runtime), prepared, capabilities);
                     if let Some(desc) = description {
                         wrapper = wrapper.with_description(desc);
-                    }
-                    if let Some(s) = schema {
-                        wrapper = wrapper.with_schema(s);
                     }
                     if let Some(interceptor) = &http_interceptor {
                         wrapper = wrapper.with_http_interceptor(Arc::clone(interceptor));
@@ -768,12 +761,13 @@ impl TestRigBuilder {
             document_extraction: None,
             sandbox_readiness: ironclaw::agent::SandboxReadiness::Available, // tests don't use real Docker
             builder: None,
+            llm_backend: "nearai".to_string(),
         };
 
         // 7. Create TestChannel and ChannelManager.
         // When testing bootstrap, the channel must be named "gateway" because
         // the bootstrap greeting targets only the gateway channel.
-        let test_channel = if keep_bootstrap {
+        let test_channel = if self.keep_bootstrap {
             Arc::new(TestChannel::new().with_name("gateway"))
         } else {
             Arc::new(TestChannel::new())

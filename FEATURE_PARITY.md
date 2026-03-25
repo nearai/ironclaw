@@ -3,6 +3,7 @@
 This document tracks feature parity between IronClaw (Rust implementation) and OpenClaw (TypeScript reference implementation). Use this to coordinate work across developers.
 
 **Legend:**
+
 - ✅ Implemented
 - 🚧 Partial (in progress or incomplete)
 - ❌ Not implemented
@@ -160,7 +161,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | `config` | ✅ | ✅ | - | Read/write config plus validate/path helpers |
 | `backup` | ✅ | ❌ | P3 | Create/verify local backup archives |
 | `channels` | ✅ | 🚧 | P2 | `list` implemented; `enable`/`disable`/`status` deferred pending config source unification |
-| `models` | ✅ | 🚧 | - | Model selector in TUI |
+| `models` | ✅ | 🚧 | P1 | `models list [<provider>]` (`--verbose`, `--json`; fetches live model list when provider specified), `models status` (`--json`), `models set <model>`, `models set-provider <provider> [--model model]` (alias normalization, config.toml + .env persistence). Remaining: `set` doesn't validate model against live list. |
 | `status` | ✅ | ✅ | - | System status (enriched session details) |
 | `agents` | ✅ | ❌ | P3 | Multi-agent management |
 | `sessions` | ✅ | ❌ | P3 | Session listing (shows subagent models) |
@@ -204,7 +205,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Skills (modular capabilities) | ✅ | ✅ | Prompt-based skills with trust gating, attenuation, activation criteria, catalog, selector |
 | Skill routing blocks | ✅ | 🚧 | ActivationCriteria (keywords, patterns, tags) but no "Use when / Don't use when" blocks |
 | Skill path compaction | ✅ | ❌ | ~ prefix to reduce prompt tokens |
-| Thinking modes (off/minimal/low/medium/high/xhigh/adaptive) | ✅ | ❌ | Configurable reasoning depth |
+| Thinking modes (off/minimal/low/medium/high/xhigh/adaptive) | ✅ | 🚧 | thinkingConfig for Gemini models (thinkingBudget/thinkingLevel); no per-level control yet |
 | Per-model thinkingDefault override | ✅ | ❌ | Override thinking level per model; Anthropic Claude 4.6 defaults to adaptive |
 | Block-level streaming | ✅ | ❌ | |
 | Tool-level streaming | ✅ | ❌ | |
@@ -236,9 +237,13 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | NEAR AI | ✅ | ✅ | - | Primary provider |
 | Anthropic (Claude) | ✅ | 🚧 | - | Via NEAR AI proxy; Opus 4.5, Sonnet 4, Sonnet 4.6, adaptive thinking default |
 | OpenAI | ✅ | 🚧 | - | Via NEAR AI proxy; GPT-5.4 + Codex OAuth |
-| AWS Bedrock | ✅ | ❌ | P3 | |
-| Google Gemini | ✅ | ❌ | P3 | |
-| NVIDIA API | ✅ | ❌ | P3 | New provider |
+| AWS Bedrock | ✅ | ✅ | - | Native Converse API via aws-sdk-bedrockruntime (requires `--features bedrock`) |
+| Google Gemini | ✅ | ✅ | - | OAuth (PKCE + S256), function calling, thinkingConfig, generationConfig |
+| io.net | ✅ | ✅ | P3 | Via `ionet` adapter |
+| Mistral | ✅ | ✅ | P3 | Via `mistral` adapter |
+| Yandex AI Studio | ✅ | ✅ | P3 | Via `yandex` adapter |
+| Cloudflare Workers AI | ✅ | ✅ | P3 | Via `cloudflare` adapter |
+| NVIDIA API | ✅ | ✅ | P3 | Via `nvidia` adapter and `providers.json` |
 | OpenRouter | ✅ | ✅ | - | Via OpenAI-compatible provider (RigAdapter) |
 | Tinfoil | ❌ | ✅ | - | Private inference provider (IronClaw-only) |
 | OpenAI-compatible | ❌ | ✅ | - | Generic OpenAI-compatible endpoint (RigAdapter) |
@@ -466,7 +471,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Device pairing | ✅ | ❌ | |
 | Tailscale identity | ✅ | ❌ | |
 | Trusted-proxy auth | ✅ | ❌ | Header-based reverse proxy auth |
-| OAuth flows | ✅ | 🚧 | NEAR AI OAuth plus hosted extension/MCP OAuth broker; external auth-proxy rollout still pending |
+| OAuth flows | ✅ | 🚧 | NEAR AI OAuth + Gemini OAuth (PKCE, S256) + hosted extension/MCP OAuth broker; external auth-proxy rollout still pending |
 | DM pairing verification | ✅ | ✅ | ironclaw pairing approve, host APIs |
 | Allowlist/blocklist | ✅ | 🚧 | allow_from + pairing store |
 | Per-group tool policies | ✅ | ❌ | |
@@ -523,6 +528,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 ## Implementation Priorities
 
 ### P0 - Core (Already Done)
+
 - ✅ TUI channel with approval overlays
 - ✅ HTTP webhook channel
 - ✅ DM pairing (ironclaw pairing list/approve, host APIs)
@@ -550,6 +556,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 - ✅ OpenAI-compatible / OpenRouter provider support
 
 ### P1 - High Priority
+
 - ❌ Slack channel (real implementation)
 - ✅ Telegram channel (WASM, DM pairing, caption, /start)
 - ❌ WhatsApp channel
@@ -557,6 +564,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 - ✅ Hooks system (core lifecycle hooks + bundled/plugin/workspace hooks + outbound webhooks)
 
 ### P2 - Medium Priority
+
 - ❌ Media handling (images, PDFs)
 - ✅ Ollama/local model support (via rig::providers::ollama)
 - ❌ Configuration hot-reload
@@ -565,6 +573,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 - ❌ Partial output preservation on abort
 
 ### P3 - Lower Priority
+
 - ❌ Discord channel
 - ❌ Matrix channel
 - ❌ Other messaging platforms
