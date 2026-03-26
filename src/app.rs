@@ -880,6 +880,7 @@ impl AppBuilder {
             crate::agent::cost_guard::CostGuardConfig {
                 max_cost_per_day_cents: self.config.agent.max_cost_per_day_cents,
                 max_actions_per_hour: self.config.agent.max_actions_per_hour,
+                max_cost_per_user_per_day_cents: self.config.agent.max_cost_per_user_per_day_cents,
             },
         ));
 

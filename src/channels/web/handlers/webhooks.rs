@@ -54,10 +54,37 @@ fn validate_webhook_secret(
 ///
 /// This endpoint is **public** (no gateway auth token required) but protected
 /// by the per-routine webhook secret sent via the `X-Webhook-Secret` header.
+///
+/// **Single-user/backward-compatible**: looks up routines by path across all
+/// users. For multi-tenant isolation, use the user-scoped endpoint at
+/// `/api/webhooks/u/{user_id}/{path}` instead.
 pub async fn webhook_trigger_handler(
     State(state): State<Arc<GatewayState>>,
     Path(path): Path<String>,
     headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    fire_webhook_inner(state, &path, None, &headers).await
+}
+
+/// Handle incoming webhook POST to `/api/webhooks/u/{user_id}/{path}`.
+///
+/// User-scoped variant for multi-tenant deployments. The `user_id` in the URL
+/// restricts the routine lookup to that user only, preventing cross-user
+/// webhook triggering even when paths collide.
+pub async fn webhook_trigger_user_scoped_handler(
+    State(state): State<Arc<GatewayState>>,
+    Path((user_id, path)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    fire_webhook_inner(state, &path, Some(&user_id), &headers).await
+}
+
+/// Shared webhook logic for both scoped and unscoped endpoints.
+async fn fire_webhook_inner(
+    state: Arc<GatewayState>,
+    path: &str,
+    user_id: Option<&str>,
+    headers: &HeaderMap,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     // Rate limit check
     if !state.webhook_rate_limiter.check() {
@@ -72,9 +99,9 @@ pub async fn webhook_trigger_handler(
         "Database not available".to_string(),
     ))?;
 
-    // Targeted query instead of loading all routines
+    // Targeted query — when user_id is provided, restrict to that user's routines
     let routine = store
-        .get_webhook_routine_by_path(&path)
+        .get_webhook_routine_by_path(path, user_id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((
@@ -99,7 +126,7 @@ pub async fn webhook_trigger_handler(
         ))?
     };
 
-    let run_id = engine.fire_webhook(routine.id, &path).await.map_err(|e| {
+    let run_id = engine.fire_webhook(routine.id, path).await.map_err(|e| {
         let status = match &e {
             crate::error::RoutineError::NotFound { .. } => StatusCode::NOT_FOUND,
             crate::error::RoutineError::Disabled { .. }

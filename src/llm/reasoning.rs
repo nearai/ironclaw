@@ -199,6 +199,10 @@ pub struct ReasoningContext {
     /// instead of calling `build_system_prompt_with_tools`. Allows callers to build
     /// the prompt once and reuse it across iterations.
     pub system_prompt: Option<String>,
+    /// Per-user model override. When set, completion requests use this model
+    /// instead of the provider's default. Only effective with providers that
+    /// support per-request model overrides (e.g. NearAI).
+    pub model_override: Option<String>,
 }
 
 impl ReasoningContext {
@@ -212,6 +216,7 @@ impl ReasoningContext {
             metadata: std::collections::HashMap::new(),
             force_text: false,
             system_prompt: None,
+            model_override: None,
         }
     }
 
@@ -671,6 +676,9 @@ Respond in JSON format:
                 .with_temperature(0.7)
                 .with_tool_choice("auto");
             request.metadata = context.metadata.clone();
+            if let Some(ref model) = context.model_override {
+                request.model = Some(model.clone());
+            }
 
             let response = self.llm.complete_with_tools(request).await?;
             let usage = TokenUsage {
@@ -773,6 +781,9 @@ Respond in JSON format:
                 .with_max_tokens(4096)
                 .with_temperature(0.7);
             request.metadata = context.metadata.clone();
+            if let Some(ref model) = context.model_override {
+                request.model = Some(model.clone());
+            }
 
             let response = self.llm.complete(request).await?;
             let pre_truncated = truncate_at_tool_tags(&response.content);
