@@ -1022,6 +1022,37 @@ mod tests {
         }
     }
 
+    struct EnvVarGuard {
+        key: &'static str,
+        original: Option<String>,
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            // SAFETY: Under ENV_MUTEX, no concurrent env access.
+            unsafe {
+                if let Some(ref value) = self.original {
+                    std::env::set_var(self.key, value);
+                } else {
+                    std::env::remove_var(self.key);
+                }
+            }
+        }
+    }
+
+    fn set_env_var(key: &'static str, value: Option<&str>) -> EnvVarGuard {
+        let original = std::env::var(key).ok();
+        // SAFETY: Under ENV_MUTEX, no concurrent env access.
+        unsafe {
+            if let Some(value) = value {
+                std::env::set_var(key, value);
+            } else {
+                std::env::remove_var(key);
+            }
+        }
+        EnvVarGuard { key, original }
+    }
+
     #[test]
     fn test_hosted_proxy_client_secret_suppresses_builtin_secret() {
         let builtin = builtin_credentials("google_oauth_token").expect("google builtin creds");
@@ -1623,85 +1654,37 @@ mod tests {
     #[test]
     fn test_oauth_proxy_auth_token_prefers_dedicated_env() {
         let _guard = lock_env();
-        let original_proxy = std::env::var("IRONCLAW_OAUTH_PROXY_AUTH_TOKEN").ok();
-        let original_gateway = std::env::var("GATEWAY_AUTH_TOKEN").ok();
-        unsafe {
-            std::env::set_var("IRONCLAW_OAUTH_PROXY_AUTH_TOKEN", "shared-proxy-secret");
-            std::env::set_var("GATEWAY_AUTH_TOKEN", "gateway-token");
-        }
+        let _proxy_guard = set_env_var(
+            "IRONCLAW_OAUTH_PROXY_AUTH_TOKEN",
+            Some("shared-proxy-secret"),
+        );
+        let _gateway_guard = set_env_var("GATEWAY_AUTH_TOKEN", Some("gateway-token"));
 
         assert_eq!(
             crate::cli::oauth_defaults::oauth_proxy_auth_token().as_deref(),
             Some("shared-proxy-secret")
         );
-
-        unsafe {
-            if let Some(val) = original_proxy {
-                std::env::set_var("IRONCLAW_OAUTH_PROXY_AUTH_TOKEN", val);
-            } else {
-                std::env::remove_var("IRONCLAW_OAUTH_PROXY_AUTH_TOKEN");
-            }
-            if let Some(val) = original_gateway {
-                std::env::set_var("GATEWAY_AUTH_TOKEN", val);
-            } else {
-                std::env::remove_var("GATEWAY_AUTH_TOKEN");
-            }
-        }
     }
 
     #[test]
     fn test_oauth_proxy_auth_token_falls_back_to_gateway_token() {
         let _guard = lock_env();
-        let original_proxy = std::env::var("IRONCLAW_OAUTH_PROXY_AUTH_TOKEN").ok();
-        let original_gateway = std::env::var("GATEWAY_AUTH_TOKEN").ok();
-        unsafe {
-            std::env::remove_var("IRONCLAW_OAUTH_PROXY_AUTH_TOKEN");
-            std::env::set_var("GATEWAY_AUTH_TOKEN", "gateway-token");
-        }
+        let _proxy_guard = set_env_var("IRONCLAW_OAUTH_PROXY_AUTH_TOKEN", None);
+        let _gateway_guard = set_env_var("GATEWAY_AUTH_TOKEN", Some("gateway-token"));
 
         assert_eq!(
             crate::cli::oauth_defaults::oauth_proxy_auth_token().as_deref(),
             Some("gateway-token")
         );
-
-        unsafe {
-            if let Some(val) = original_proxy {
-                std::env::set_var("IRONCLAW_OAUTH_PROXY_AUTH_TOKEN", val);
-            } else {
-                std::env::remove_var("IRONCLAW_OAUTH_PROXY_AUTH_TOKEN");
-            }
-            if let Some(val) = original_gateway {
-                std::env::set_var("GATEWAY_AUTH_TOKEN", val);
-            } else {
-                std::env::remove_var("GATEWAY_AUTH_TOKEN");
-            }
-        }
     }
 
     #[test]
     fn test_oauth_proxy_auth_token_returns_none_when_unset() {
         let _guard = lock_env();
-        let original_proxy = std::env::var("IRONCLAW_OAUTH_PROXY_AUTH_TOKEN").ok();
-        let original_gateway = std::env::var("GATEWAY_AUTH_TOKEN").ok();
-        unsafe {
-            std::env::remove_var("IRONCLAW_OAUTH_PROXY_AUTH_TOKEN");
-            std::env::remove_var("GATEWAY_AUTH_TOKEN");
-        }
+        let _proxy_guard = set_env_var("IRONCLAW_OAUTH_PROXY_AUTH_TOKEN", None);
+        let _gateway_guard = set_env_var("GATEWAY_AUTH_TOKEN", None);
 
         assert_eq!(crate::cli::oauth_defaults::oauth_proxy_auth_token(), None);
-
-        unsafe {
-            if let Some(val) = original_proxy {
-                std::env::set_var("IRONCLAW_OAUTH_PROXY_AUTH_TOKEN", val);
-            } else {
-                std::env::remove_var("IRONCLAW_OAUTH_PROXY_AUTH_TOKEN");
-            }
-            if let Some(val) = original_gateway {
-                std::env::set_var("GATEWAY_AUTH_TOKEN", val);
-            } else {
-                std::env::remove_var("GATEWAY_AUTH_TOKEN");
-            }
-        }
     }
 
     #[test]
