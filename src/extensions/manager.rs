@@ -662,11 +662,7 @@ impl ExtensionManager {
     /// Resolve the effective relay URL for an extension, checking the
     /// per-extension `relay_url` override in settings before falling back to
     /// the env-level `RelayConfig`.
-    async fn effective_relay_url(
-        &self,
-        name: &str,
-        user_id: &str,
-    ) -> Option<String> {
+    async fn effective_relay_url(&self, name: &str, user_id: &str) -> Option<String> {
         if let Some(ref store) = self.store {
             let key = format!("extensions.{name}.relay_url");
             if let Ok(Some(v)) = store.get_setting(user_id, &key).await {
@@ -4508,17 +4504,14 @@ impl ExtensionManager {
             ExtensionError::ActivationFailed("Channel manager not initialized".to_string())
         })?;
 
-        channel_mgr
-            .hot_add(Box::new(channel))
-            .await
-            .map_err(|e| {
-                tracing::warn!(
-                    extension = %name,
-                    error = %e,
-                    "activate_channel_relay: hot_add to channel manager failed"
-                );
-                ExtensionError::ActivationFailed(e.to_string())
-            })?;
+        channel_mgr.hot_add(Box::new(channel)).await.map_err(|e| {
+            tracing::warn!(
+                extension = %name,
+                error = %e,
+                "activate_channel_relay: hot_add to channel manager failed"
+            );
+            ExtensionError::ActivationFailed(e.to_string())
+        })?;
 
         if let Ok(mut cache) = self.relay_signing_secret_cache.lock() {
             *cache = Some(signing_secret);
@@ -4830,8 +4823,7 @@ impl ExtensionManager {
                 Ok(ExtensionSetupSchema { secrets, fields })
             }
             ExtensionKind::ChannelRelay => {
-                let relay_url_key =
-                    format!("extensions.{name}.relay_url");
+                let relay_url_key = format!("extensions.{name}.relay_url");
                 let current_url = if let Some(ref store) = self.store {
                     store
                         .get_setting(user_id, &relay_url_key)
@@ -4846,19 +4838,16 @@ impl ExtensionManager {
                 let env_url = self.relay_config.as_ref().map(|c| c.url.as_str());
                 Ok(ExtensionSetupSchema {
                     secrets: Vec::new(),
-                    fields: vec![
-                        crate::channels::web::types::SetupFieldInfo {
-                            name: "relay_url".to_string(),
-                            prompt: format!(
-                                "Channel-relay service URL (leave empty to use env default{})",
-                                env_url.map(|u| format!(": {u}")).unwrap_or_default()
-                            ),
-                            optional: true,
-                            provided: current_url.is_some(),
-                            input_type:
-                                crate::tools::wasm::ToolSetupFieldInputType::Text,
-                        },
-                    ],
+                    fields: vec![crate::channels::web::types::SetupFieldInfo {
+                        name: "relay_url".to_string(),
+                        prompt: format!(
+                            "Channel-relay service URL (leave empty to use env default{})",
+                            env_url.map(|u| format!(": {u}")).unwrap_or_default()
+                        ),
+                        optional: true,
+                        provided: current_url.is_some(),
+                        input_type: crate::tools::wasm::ToolSetupFieldInputType::Text,
+                    }],
                 })
             }
             _ => Ok(ExtensionSetupSchema {
