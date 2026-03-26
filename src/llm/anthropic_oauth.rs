@@ -27,7 +27,8 @@ const ANTHROPIC_API_URL: &str = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_API_VERSION: &str = "2023-06-01";
 /// Required beta flag to enable OAuth Bearer auth on api.anthropic.com.
 /// Without this header, the API returns 401 "OAuth authentication is currently not supported."
-const ANTHROPIC_OAUTH_BETA: &str = "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14";
+const ANTHROPIC_OAUTH_BETA: &str =
+    "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14";
 const CLAUDE_CLI_USER_AGENT: &str = "claude-cli/2.1.2 (external, cli)";
 const CLAUDE_CLI_X_APP: &str = "cli";
 const CLAUDE_CODE_SYSTEM_PREFIX: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
@@ -293,7 +294,9 @@ impl LlmProvider for AnthropicOAuthProvider {
             temperature: Self::validate_temperature(req.temperature),
             tools: None,
             tool_choice: None,
-            thinking: Some(ThinkingConfig { thinking_type: "adaptive".to_string() }),
+            thinking: Some(ThinkingConfig {
+                thinking_type: "adaptive".to_string(),
+            }),
             stream: false,
         };
 
@@ -363,7 +366,9 @@ impl LlmProvider for AnthropicOAuthProvider {
             temperature: Self::validate_temperature(req.temperature),
             tools: if tools.is_empty() { None } else { Some(tools) },
             tool_choice,
-            thinking: Some(ThinkingConfig { thinking_type: "adaptive".to_string() }),
+            thinking: Some(ThinkingConfig {
+                thinking_type: "adaptive".to_string(),
+            }),
             stream: false,
         };
 
@@ -784,7 +789,8 @@ mod tests {
 
     #[test]
     fn test_build_system_blocks_with_existing_system() {
-        let blocks = AnthropicOAuthProvider::build_system_blocks(Some("Custom prompt.".to_string()));
+        let blocks =
+            AnthropicOAuthProvider::build_system_blocks(Some("Custom prompt.".to_string()));
         let blocks = blocks.unwrap();
         assert_eq!(blocks.len(), 2);
         assert_eq!(blocks[0].text, CLAUDE_CODE_SYSTEM_PREFIX);
@@ -802,9 +808,15 @@ mod tests {
     #[test]
     fn test_validate_temperature() {
         assert_eq!(AnthropicOAuthProvider::validate_temperature(None), None);
-        assert_eq!(AnthropicOAuthProvider::validate_temperature(Some(1.0)), Some(1.0));
+        assert_eq!(
+            AnthropicOAuthProvider::validate_temperature(Some(1.0)),
+            Some(1.0)
+        );
         // Non-1.0 values should be rejected (returns None)
-        assert_eq!(AnthropicOAuthProvider::validate_temperature(Some(0.7)), None);
+        assert_eq!(
+            AnthropicOAuthProvider::validate_temperature(Some(0.7)),
+            None
+        );
     }
 
     /// Regression test for #1136: token field must be mutable via RwLock
