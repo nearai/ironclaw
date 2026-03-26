@@ -927,17 +927,30 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
 
-        // Plan completed, check with LLM if job is done
+        // Plan completed — ask the LLM whether the job is done.
         reason_ctx.messages.push(ChatMessage::user(
-            "All planned actions have been executed. Is the job complete? If not, what else needs to be done?",
+            "All planned actions have been executed. Assess the results: \
+             if the job is fully complete, state that the job is complete. \
+             Otherwise, briefly list what remains.",
         ));
 
         let response = reasoning.respond(reason_ctx).await?;
-        reason_ctx.messages.push(ChatMessage::assistant(&response));
+        let response = crate::agent::strip_suggestions(&response);
 
         if crate::util::llm_signals_completion(&response) {
+            reason_ctx.messages.push(ChatMessage::assistant(&response));
             self.mark_completed().await?;
         } else {
+            // Replace the completion-check exchange with an action-oriented
+            // continuation prompt. Leaving the "Is the job complete?" / "No"
+            // dialogue in context causes the agentic loop to repeat the same
+            // analysis instead of calling tools (self-dialogue loop).
+            reason_ctx.messages.pop(); // remove "All planned actions…"
+            reason_ctx.messages.push(ChatMessage::user(format!(
+                "The planned actions are done but the job is not yet complete. \
+                 Remaining work:\n\n{response}\n\n\
+                 Continue executing now — use tools to finish the job."
+            )));
             tracing::info!(
                 "Job {} plan completed but work remains, falling back to direct selection",
                 self.job_id
@@ -1417,8 +1430,12 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
             return TextAction::Continue;
         }
 
+        // Jobs run autonomously — strip <suggestions> tags that are only
+        // meaningful for interactive chat sessions.
+        let text = crate::agent::strip_suggestions(text);
+
         // Check for explicit completion
-        if crate::util::llm_signals_completion(text) {
+        if crate::util::llm_signals_completion(&text) {
             if let Err(e) = self.worker.mark_completed().await {
                 tracing::warn!(
                     "Failed to mark job {} as completed: {}",
@@ -1426,7 +1443,7 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
                     e
                 );
             }
-            return TextAction::Return(LoopOutcome::Response(text.to_string()));
+            return TextAction::Return(LoopOutcome::Response(text));
         }
 
         // Track that a substantive response has been produced.
@@ -1434,7 +1451,7 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
             .store(true, std::sync::atomic::Ordering::Relaxed);
 
         // Add assistant response to context
-        reason_ctx.messages.push(ChatMessage::assistant(text));
+        reason_ctx.messages.push(ChatMessage::assistant(&text));
 
         self.worker.log_event(
             "message",
@@ -1453,6 +1470,9 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
         content: Option<String>,
         reason_ctx: &mut ReasoningContext,
     ) -> Result<Option<LoopOutcome>, crate::error::Error> {
+        // Strip suggestions from accompanying text (not useful in job context).
+        let content = content.map(|c| crate::agent::strip_suggestions(&c));
+
         if let Some(ref text) = content {
             self.worker.log_event(
                 "message",
