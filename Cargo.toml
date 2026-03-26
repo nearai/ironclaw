@@ -104,7 +104,7 @@ cron = "0.13"
 ironclaw_common = { path = "crates/ironclaw_common", version = "0.1.0" }
 
 # Safety/sanitization
-ironclaw_safety = { path = "crates/ironclaw_safety", version = "0.1.0" }
+ironclaw_safety = { path = "crates/ironclaw_safety", version = "0.2.0" }
 regex = "1"
 aho-corasick = "1"
 
