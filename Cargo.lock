@@ -2323,7 +2323,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3390,7 +3390,7 @@ dependencies = [
 
 [[package]]
 name = "ironclaw"
-version = "0.19.0"
+version = "0.22.0"
 dependencies = [
  "aes-gcm",
  "aho-corasick",
@@ -3496,7 +3496,7 @@ dependencies = [
 
 [[package]]
 name = "ironclaw_safety"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aho-corasick",
  "regex",
@@ -5481,7 +5481,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -6388,7 +6388,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
