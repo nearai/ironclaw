@@ -25,52 +25,99 @@
       "href": "https://agent.near.ai/"
     }
   },
-  "i18n": {
+  "navigation": {
     "languages": [
       {
         "language": "en",
-        "name": "English"
-      },
-      {
-        "language": "zh",
-        "name": "中文"
-      }
-    ]
-  },
-  "navigation": {
-    "tabs": [
-      {
-        "tab": " ",
-        "groups": [
+        "tabs": [
           {
-            "group": "Getting started",
-            "pages": [
-              "index",
-              "quickstart",
-              "onboard"
-            ]
-          },
-          {
-            "group": "Channels",
-            "pages": [
-              "tunnel",
+            "tab": " ",
+            "groups": [
               {
-                "group": "Available Channels",
-                "icon": "message",
+                "group": "Getting started",
                 "pages": [
-                  "channels/local",
-                  "channels/signal",
-                  "channels/telegram",
-                  "channels/webhook"
+                  "index",
+                  "quickstart",
+                  "onboard"
+                ]
+              },
+              {
+                "group": "Channels",
+                "pages": [
+                  "tunnel",
+                  {
+                    "group": "Available Channels",
+                    "icon": "message",
+                    "pages": [
+                      "channels/local",
+                      "channels/signal",
+                      "channels/telegram",
+                      "channels/webhook"
+                    ]
+                  }
+                ]
+              },
+              {
+                "group": "Extensions (Tools)",
+                "pages": [
+                  "extensions/web-search",
+                  "extensions/github"
                 ]
               }
             ]
-          },
+          }
+        ]
+      },
+      {
+        "language": "zh",
+        "navbar": {
+          "links": [
+            {
+              "label": "支持",
+              "href": "https://t.me/ironclawAI"
+            }
+          ],
+          "primary": {
+            "type": "button",
+            "label": "立即部署",
+            "href": "https://agent.near.ai/"
+          }
+        },
+        "tabs": [
           {
-            "group": "Extensions (Tools)",
-            "pages": [
-              "extensions/web-search",
-              "extensions/github"
+            "tab": " ",
+            "groups": [
+              {
+                "group": "快速开始",
+                "pages": [
+                  "zh/index",
+                  "zh/quickstart",
+                  "zh/onboard"
+                ]
+              },
+              {
+                "group": "渠道",
+                "pages": [
+                  "zh/tunnel",
+                  {
+                    "group": "可用渠道",
+                    "icon": "message",
+                    "pages": [
+                      "zh/channels/local",
+                      "zh/channels/signal",
+                      "zh/channels/telegram",
+                      "zh/channels/webhook"
+                    ]
+                  }
+                ]
+              },
+              {
+                "group": "扩展（工具）",
+                "pages": [
+                  "zh/extensions/web-search",
+                  "zh/extensions/github"
+                ]
+              }
             ]
           }
         ]
