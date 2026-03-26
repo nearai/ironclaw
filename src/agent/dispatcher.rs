@@ -306,6 +306,8 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
 
         // Update context for this iteration
         reason_ctx.available_tools = tool_defs;
+        // Preserve force_text if already set (e.g. by truncation escalation).
+        let force_text = force_text || reason_ctx.force_text;
         reason_ctx.system_prompt = Some(if force_text {
             self.cached_prompt_no_tools.clone()
         } else {

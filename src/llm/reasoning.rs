@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 use crate::llm::error::LlmError;
 
 use crate::llm::{
-    ChatMessage, CompletionRequest, LlmProvider, Role, ToolCall, ToolCompletionRequest,
-    ToolDefinition,
+    ChatMessage, CompletionRequest, FinishReason, LlmProvider, Role, ToolCall,
+    ToolCompletionRequest, ToolDefinition,
 };
 
 /// Token the agent returns when it has nothing to say (e.g. in group chats).
@@ -22,6 +22,13 @@ pub const TOOL_INTENT_NUDGE: &str = "\
 You said you would perform an action, but you did not include any tool calls.\n\
 Do NOT describe what you intend to do — actually call the tool now.\n\
 Use the tool_calls mechanism to invoke the appropriate tool.";
+
+/// Notice injected when the LLM's response was truncated mid-tool-call,
+/// causing incomplete parameters. Tells the LLM to try a different approach.
+pub const TRUNCATED_TOOL_CALL_NOTICE: &str = "\
+Your previous response was truncated while generating tool call parameters. \
+The tool calls were discarded. Please try a different approach — \
+summarize or transform the data instead of echoing it verbatim in a tool call.";
 
 /// Seed value used as the second argument to `generate_tool_call_id` when
 /// recovering tool calls from malformed LLM text responses. This must differ
@@ -194,6 +201,8 @@ pub struct ReasoningContext {
     pub metadata: std::collections::HashMap<String, String>,
     /// When true, force a text-only response (ignore available tools).
     /// Used by the agentic loop to guarantee termination near the iteration limit.
+    /// Sticky: once set, never cleared within a loop invocation. Callers must
+    /// create a fresh `ReasoningContext` per `run_agentic_loop()` call.
     pub force_text: bool,
     /// Pre-built system prompt. When set, `respond_with_tools` uses this directly
     /// instead of calling `build_system_prompt_with_tools`. Allows callers to build
@@ -349,6 +358,7 @@ pub enum RespondResult {
 pub struct RespondOutput {
     pub result: RespondResult,
     pub usage: TokenUsage,
+    pub finish_reason: FinishReason,
 }
 
 /// Reasoning engine for the agent.
@@ -529,6 +539,17 @@ impl Reasoning {
         request.metadata = context.metadata.clone();
 
         let response = self.llm.complete_with_tools(request).await?;
+
+        // If the response was truncated, tool call parameters are likely incomplete.
+        // Return empty so the caller can fall through to respond_with_tools() which
+        // has a larger output token budget.
+        if response.finish_reason == FinishReason::Length {
+            tracing::warn!(
+                "select_tools response truncated (finish_reason=Length), \
+                 discarding potentially incomplete tool selections"
+            );
+            return Ok(vec![]);
+        }
 
         let shared_reasoning = response
             .content
@@ -722,6 +743,7 @@ Respond in JSON format:
                         content: narrative,
                     },
                     usage,
+                    finish_reason: response.finish_reason,
                 });
             }
 
@@ -749,6 +771,7 @@ Respond in JSON format:
                         },
                     },
                     usage,
+                    finish_reason: response.finish_reason,
                 });
             }
 
@@ -774,6 +797,7 @@ Respond in JSON format:
             Ok(RespondOutput {
                 result: RespondResult::Text(final_text),
                 usage,
+                finish_reason: response.finish_reason,
             })
         } else {
             // No tools, use simple completion
@@ -805,6 +829,7 @@ Respond in JSON format:
                     cache_read_input_tokens: response.cache_read_input_tokens,
                     cache_creation_input_tokens: response.cache_creation_input_tokens,
                 },
+                finish_reason: response.finish_reason,
             })
         }
     }
@@ -3314,5 +3339,86 @@ That's my plan."#;
         let pre_truncated = truncate_at_tool_tags(raw);
         let cleaned = clean_response(&pre_truncated);
         assert!(cleaned.trim().is_empty());
+    }
+
+    // ---- select_tools truncation guard ----
+
+    /// Mock provider that returns tool calls with a configurable finish_reason.
+    struct TruncatingLlm {
+        finish_reason: crate::llm::FinishReason,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::llm::LlmProvider for TruncatingLlm {
+        fn model_name(&self) -> &str {
+            "truncating-stub"
+        }
+        fn cost_per_token(&self) -> (rust_decimal::Decimal, rust_decimal::Decimal) {
+            (rust_decimal::Decimal::ZERO, rust_decimal::Decimal::ZERO)
+        }
+        async fn complete(
+            &self,
+            _request: crate::llm::CompletionRequest,
+        ) -> Result<crate::llm::CompletionResponse, crate::llm::error::LlmError> {
+            unimplemented!()
+        }
+        async fn complete_with_tools(
+            &self,
+            _request: crate::llm::ToolCompletionRequest,
+        ) -> Result<crate::llm::ToolCompletionResponse, crate::llm::error::LlmError> {
+            Ok(crate::llm::ToolCompletionResponse {
+                content: Some("I'll write the report.".to_string()),
+                tool_calls: vec![ToolCall {
+                    id: "call_1".to_string(),
+                    name: "memory_write".to_string(),
+                    arguments: serde_json::json!({}),
+                    reasoning: None,
+                }],
+                input_tokens: 5000,
+                output_tokens: 1024,
+                finish_reason: self.finish_reason,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn test_select_tools_returns_empty_on_truncation() {
+        let llm = Arc::new(TruncatingLlm {
+            finish_reason: FinishReason::Length,
+        });
+        let reasoning = Reasoning::new(llm);
+        let mut ctx = ReasoningContext::new().with_message(ChatMessage::user("Write a report"));
+        ctx.available_tools.push(ToolDefinition {
+            name: "memory_write".to_string(),
+            description: "Write to memory".to_string(),
+            parameters: serde_json::json!({"type": "object"}),
+        });
+
+        let selections = reasoning.select_tools(&ctx).await.unwrap();
+        assert!(
+            selections.is_empty(),
+            "Truncated tool selections should be discarded (got {} selections)",
+            selections.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_select_tools_returns_selections_when_not_truncated() {
+        let llm = Arc::new(TruncatingLlm {
+            finish_reason: FinishReason::ToolUse,
+        });
+        let reasoning = Reasoning::new(llm);
+        let mut ctx = ReasoningContext::new().with_message(ChatMessage::user("Write a report"));
+        ctx.available_tools.push(ToolDefinition {
+            name: "memory_write".to_string(),
+            description: "Write to memory".to_string(),
+            parameters: serde_json::json!({"type": "object"}),
+        });
+
+        let selections = reasoning.select_tools(&ctx).await.unwrap();
+        assert_eq!(selections.len(), 1);
+        assert_eq!(selections[0].tool_name, "memory_write");
     }
 }
