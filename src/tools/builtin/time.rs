@@ -5,7 +5,7 @@ use chrono::{DateTime, LocalResult, NaiveDate, NaiveDateTime, TimeZone, Utc};
 use chrono_tz::Tz;
 
 use crate::context::JobContext;
-use crate::tools::tool::{Tool, ToolError, ToolOutput, require_str};
+use crate::tools::tool::{Tool, ToolError, ToolOutput};
 
 /// Tool for getting current time and date operations.
 pub struct TimeTool;
@@ -73,7 +73,10 @@ impl Tool for TimeTool {
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
 
-        let operation = require_str(&params, "operation")?;
+        let operation = params
+            .get("operation")
+            .and_then(|v| v.as_str())
+            .unwrap_or("now");
 
         let result = match operation {
             "now" => execute_now(&params, ctx)?,
