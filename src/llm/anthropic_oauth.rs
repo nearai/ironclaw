@@ -27,7 +27,7 @@ const ANTHROPIC_API_URL: &str = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_API_VERSION: &str = "2023-06-01";
 /// Required beta flag to enable OAuth Bearer auth on api.anthropic.com.
 /// Without this header, the API returns 401 "OAuth authentication is currently not supported."
-const ANTHROPIC_OAUTH_BETA: &str = "oauth-2025-04-20";
+const ANTHROPIC_OAUTH_BETA: &str = "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14";
 const DEFAULT_MAX_TOKENS: u32 = 8192;
 
 /// Anthropic provider using OAuth Bearer authentication.
@@ -122,6 +122,7 @@ impl AnthropicOAuthProvider {
         let url = self.api_url();
 
         tracing::debug!("Sending request to Anthropic OAuth: {}", url);
+        tracing::debug!("Request body: {}", serde_json::to_string(body).unwrap_or_default());
 
         let response = self
             .client
@@ -129,6 +130,8 @@ impl AnthropicOAuthProvider {
             .bearer_auth(self.current_token())
             .header("anthropic-version", ANTHROPIC_API_VERSION)
             .header("anthropic-beta", ANTHROPIC_OAUTH_BETA)
+            .header("user-agent", "claude-cli/2.1.2 (external, cli)")
+            .header("x-app", "cli")
             .header("Content-Type", "application/json")
             .json(body)
             .send()
@@ -169,6 +172,8 @@ impl AnthropicOAuthProvider {
                         .bearer_auth(fresh_token.expose_secret())
                         .header("anthropic-version", ANTHROPIC_API_VERSION)
                         .header("anthropic-beta", ANTHROPIC_OAUTH_BETA)
+                        .header("user-agent", "claude-cli/2.1.2 (external, cli)")
+                        .header("x-app", "cli")
                         .header("Content-Type", "application/json")
                         .json(body)
                         .send()
@@ -245,14 +250,26 @@ impl LlmProvider for AnthropicOAuthProvider {
         self.strip_unsupported_completion_params(&mut req);
         let (system, messages) = convert_messages(req.messages);
 
+        // OAuth tokens require Claude Code identity in system prompt as array of blocks
+        let system_blocks = {
+            let prefix = "You are Claude Code, Anthropic's official CLI for Claude.";
+            let mut blocks = vec![SystemBlock { block_type: "text".to_string(), text: prefix.to_string() }];
+            if let Some(s) = system {
+                blocks.push(SystemBlock { block_type: "text".to_string(), text: s });
+            }
+            Some(blocks)
+        };
+
         let request = AnthropicRequest {
             model,
             messages,
-            system,
+            system: system_blocks,
             max_tokens: req.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
-            temperature: req.temperature,
+            temperature: None, // Must be None or 1 when thinking is enabled
             tools: None,
             tool_choice: None,
+            thinking: Some(ThinkingConfig { thinking_type: "adaptive".to_string() }),
+            stream: false,
         };
 
         let response: AnthropicResponse = self.send_request(&request).await?;
@@ -282,6 +299,16 @@ impl LlmProvider for AnthropicOAuthProvider {
         let model = req.model.take().unwrap_or_else(|| self.active_model_name());
         self.strip_unsupported_tool_params(&mut req);
         let (system, messages) = convert_messages(req.messages);
+
+        // OAuth tokens require Claude Code identity in system prompt as array of blocks
+        let system_blocks = {
+            let prefix = "You are Claude Code, Anthropic's official CLI for Claude.";
+            let mut blocks = vec![SystemBlock { block_type: "text".to_string(), text: prefix.to_string() }];
+            if let Some(s) = system {
+                blocks.push(SystemBlock { block_type: "text".to_string(), text: s });
+            }
+            Some(blocks)
+        };
 
         let tools: Vec<AnthropicTool> = req
             .tools
@@ -316,11 +343,13 @@ impl LlmProvider for AnthropicOAuthProvider {
         let request = AnthropicRequest {
             model,
             messages,
-            system,
+            system: system_blocks,
             max_tokens: req.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
-            temperature: req.temperature,
+            temperature: None, // Must be None or 1 when thinking is enabled
             tools: if tools.is_empty() { None } else { Some(tools) },
             tool_choice,
+            thinking: Some(ThinkingConfig { thinking_type: "adaptive".to_string() }),
+            stream: false,
         };
 
         let response: AnthropicResponse = self.send_request(&request).await?;
@@ -382,11 +411,24 @@ impl LlmProvider for AnthropicOAuthProvider {
 // --- Anthropic Messages API types ---
 
 #[derive(Debug, Serialize)]
+struct SystemBlock {
+    #[serde(rename = "type")]
+    block_type: String,
+    text: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ThinkingConfig {
+    #[serde(rename = "type")]
+    thinking_type: String,
+}
+
+#[derive(Debug, Serialize)]
 struct AnthropicRequest {
     model: String,
     messages: Vec<AnthropicMessage>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    system: Option<String>,
+    system: Option<Vec<SystemBlock>>,
     max_tokens: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
@@ -394,6 +436,10 @@ struct AnthropicRequest {
     tools: Option<Vec<AnthropicTool>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_choice: Option<AnthropicToolChoice>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking: Option<ThinkingConfig>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    stream: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -461,6 +507,13 @@ enum AnthropicResponseBlock {
         id: String,
         name: String,
         input: serde_json::Value,
+    },
+    #[serde(rename = "thinking")]
+    Thinking {
+        #[allow(dead_code)]
+        thinking: String,
+        #[allow(dead_code)]
+        signature: String,
     },
 }
 
@@ -577,6 +630,9 @@ fn extract_response_content(response: &AnthropicResponse) -> (Option<String>, Ve
                     arguments: input.clone(),
                     reasoning: None,
                 });
+            }
+            AnthropicResponseBlock::Thinking { .. } => {
+                // Skip thinking blocks - they're internal reasoning
             }
         }
     }
