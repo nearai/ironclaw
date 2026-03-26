@@ -134,7 +134,7 @@ mod tests {
 
         match &routine.trigger {
             Trigger::Cron { schedule, timezone } => {
-                assert_eq!(schedule, "0 0 9 * * *");
+                assert_eq!(schedule, "0 0 9 * * * *");
                 assert_eq!(timezone.as_deref(), Some("America/New_York"));
             }
             other => panic!("expected cron trigger, got {other:?}"),
@@ -142,20 +142,22 @@ mod tests {
 
         match &routine.action {
             RoutineAction::Lightweight {
+                prompt,
                 context_paths,
                 use_tools,
                 max_tool_rounds,
                 ..
             } => {
+                assert!(prompt.contains("Check system status"));
                 assert_eq!(context_paths, &vec!["context/priorities.md".to_string()]);
                 assert!(*use_tools, "lightweight routine should keep use_tools=true");
                 assert_eq!(*max_tool_rounds, 2);
             }
-            other => panic!("expected lightweight action, got {other:?}"),
+            other => panic!("expected lightweight routine action, got {other:?}"),
         }
 
         assert_eq!(routine.notify.channel.as_deref(), Some("telegram"));
-        assert_eq!(routine.notify.user, "ops-team");
+        assert_eq!(routine.notify.user.as_deref(), Some("ops-team"));
         assert_eq!(routine.guardrails.cooldown.as_secs(), 600);
 
         rig.shutdown();
@@ -240,11 +242,11 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Test 6: routine_manual_create
+    // Test 6: routine_manual_create_defaults_to_tools_enabled
     // -----------------------------------------------------------------------
 
     #[tokio::test]
-    async fn routine_manual_create() {
+    async fn routine_manual_create_defaults_to_tools_enabled() {
         let trace = LlmTrace::from_file(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/tests/fixtures/llm_traces/tools/routine_manual_create.json"
@@ -272,8 +274,8 @@ mod tests {
 
         assert!(matches!(routine.trigger, Trigger::Manual));
         assert!(
-            matches!(&routine.action, RoutineAction::Lightweight { use_tools, .. } if !*use_tools),
-            "manual routine should default to lightweight without tools: {:?}",
+            matches!(&routine.action, RoutineAction::Lightweight { use_tools, .. } if *use_tools),
+            "manual routine should default to lightweight with tools enabled: {:?}",
             routine.action
         );
 
@@ -281,7 +283,48 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Test 7: routine_history
+    // Test 7: routine_manual_create_explicit_no_tools
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn routine_manual_create_explicit_no_tools() {
+        let trace = LlmTrace::from_file(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/llm_traces/tools/routine_manual_create_no_tools.json"
+        ))
+        .expect("failed to load routine_manual_create_no_tools.json");
+
+        let rig = TestRigBuilder::new()
+            .with_trace(trace.clone())
+            .with_auto_approve_tools(true)
+            .build()
+            .await;
+
+        rig.send_message("Create a manual routine for quiet text-only bug triage")
+            .await;
+        let responses = rig.wait_for_responses(1, Duration::from_secs(15)).await;
+
+        rig.verify_trace_expects(&trace, &responses);
+
+        let routine = rig
+            .database()
+            .get_routine_by_name("test-user", "manual-triage-no-tools")
+            .await
+            .expect("get_routine_by_name")
+            .expect("manual-triage-no-tools should exist");
+
+        assert!(matches!(routine.trigger, Trigger::Manual));
+        assert!(
+            matches!(&routine.action, RoutineAction::Lightweight { use_tools, .. } if !*use_tools),
+            "manual routine should preserve explicit use_tools=false: {:?}",
+            routine.action
+        );
+
+        rig.shutdown();
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 8: routine_history
     // -----------------------------------------------------------------------
 
     #[tokio::test]
@@ -391,13 +434,8 @@ mod tests {
         }
 
         match &routine.action {
-            RoutineAction::FullJob {
-                description,
-                tool_permissions,
-                ..
-            } => {
+            RoutineAction::FullJob { description, .. } => {
                 assert!(description.contains("Summarize the new issue"));
-                assert_eq!(tool_permissions, &vec!["shell".to_string()]);
             }
             other => panic!("expected full_job action, got {other:?}"),
         }
@@ -406,7 +444,124 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Test 8: skill_install_routine_webhook_sim
+    // Test 8: routine_create_grouped
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn routine_create_grouped() {
+        let trace = LlmTrace::from_file(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/llm_traces/tools/routine_create_grouped.json"
+        ))
+        .expect("failed to load routine_create_grouped.json");
+
+        let rig = TestRigBuilder::new()
+            .with_trace(trace.clone())
+            .with_auto_approve_tools(true)
+            .build()
+            .await;
+
+        rig.send_message("Create a grouped cron routine with delivery settings")
+            .await;
+        let responses = rig.wait_for_responses(1, Duration::from_secs(15)).await;
+
+        rig.verify_trace_expects(&trace, &responses);
+
+        let routine = rig
+            .database()
+            .get_routine_by_name("test-user", "weekday-digest")
+            .await
+            .expect("get_routine_by_name")
+            .expect("weekday-digest should exist");
+
+        match &routine.trigger {
+            Trigger::Cron { schedule, timezone } => {
+                assert_eq!(schedule, "0 0 9 * * MON-FRI *");
+                assert_eq!(timezone.as_deref(), Some("UTC"));
+            }
+            other => panic!("expected cron trigger, got {other:?}"),
+        }
+
+        match &routine.action {
+            RoutineAction::FullJob { description, .. } => {
+                assert!(description.contains("Prepare the morning digest"));
+            }
+            other => panic!("expected full_job action, got {other:?}"),
+        }
+
+        assert_eq!(routine.notify.channel.as_deref(), Some("telegram"));
+        assert_eq!(routine.notify.user.as_deref(), Some("ops-team"));
+        assert_eq!(routine.guardrails.cooldown.as_secs(), 30);
+
+        rig.shutdown();
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 9: routine_system_event_emit_grouped
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn routine_system_event_emit_grouped() {
+        let trace = LlmTrace::from_file(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/llm_traces/tools/routine_system_event_emit_grouped.json"
+        ))
+        .expect("failed to load routine_system_event_emit_grouped.json");
+
+        let rig = TestRigBuilder::new()
+            .with_trace(trace.clone())
+            .with_auto_approve_tools(true)
+            .build()
+            .await;
+
+        rig.send_message("Create a grouped system-event routine and emit a matching event")
+            .await;
+        let responses = rig.wait_for_responses(1, Duration::from_secs(15)).await;
+
+        rig.verify_trace_expects(&trace, &responses);
+
+        let routine = rig
+            .database()
+            .get_routine_by_name("test-user", "grouped-gh-issue-watch")
+            .await
+            .expect("get_routine_by_name")
+            .expect("grouped-gh-issue-watch should exist");
+
+        match &routine.trigger {
+            Trigger::SystemEvent {
+                source,
+                event_type,
+                filters,
+            } => {
+                assert_eq!(source, "github");
+                assert_eq!(event_type, "issue.opened");
+                assert_eq!(
+                    filters.get("repository").map(String::as_str),
+                    Some("nearai/ironclaw")
+                );
+                assert_eq!(filters.get("priority").map(String::as_str), Some("p1"));
+            }
+            other => panic!("expected system_event trigger, got {other:?}"),
+        }
+
+        let results = rig.tool_results();
+        let emit_result = results
+            .iter()
+            .find(|(n, _)| n == "event_emit")
+            .expect("event_emit result missing");
+        let emit_json: serde_json::Value =
+            serde_json::from_str(&emit_result.1).expect("event_emit result should be valid JSON");
+        assert!(
+            emit_json["fired_routines"].as_u64().unwrap_or(0) > 0,
+            "event_emit should have fired at least one grouped routine: {:?}",
+            emit_result.1
+        );
+
+        rig.shutdown();
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 10: skill_install_routine_webhook_sim
     // -----------------------------------------------------------------------
 
     #[tokio::test]
@@ -608,10 +763,11 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Test: tool_info_discovery (two-level detail)
+    // Test: tool_info_discovery (three-level detail)
     // -----------------------------------------------------------------------
     // Verifies the tool_info built-in returns:
     // - Default (no include_schema): name, description, parameter names array
+    // - `detail: "summary"`: curated summary guidance
     // - With include_schema: true: adds full typed JSON Schema
 
     #[tokio::test]
@@ -634,13 +790,13 @@ mod tests {
 
         rig.verify_trace_expects(&trace, &responses);
 
-        // tool_info should have been called twice (echo + time), both succeeding.
+        // tool_info should have been called three times (echo + routine_create + time), all succeeding.
         let completed = rig.tool_calls_completed();
         let tool_info_calls: Vec<_> = completed.iter().filter(|(n, _)| n == "tool_info").collect();
         assert_eq!(
             tool_info_calls.len(),
-            2,
-            "Expected 2 tool_info calls, got {tool_info_calls:?}"
+            3,
+            "Expected 3 tool_info calls, got {tool_info_calls:?}"
         );
         assert!(
             tool_info_calls.iter().all(|(_, ok)| *ok),
@@ -650,44 +806,71 @@ mod tests {
         // Verify the results contain expected fields.
         let results = rig.tool_results();
         let info_results: Vec<_> = results.iter().filter(|(n, _)| n == "tool_info").collect();
+        let info_json: Vec<serde_json::Value> = info_results
+            .iter()
+            .map(|(_, preview)| {
+                serde_json::from_str(preview)
+                    .expect("tool_info result preview should be valid JSON")
+            })
+            .collect();
 
         // First call was for "echo" (default, no include_schema) — result should
         // contain "echo" and "parameters" as an array of names (not full schema).
-        let echo_result = info_results
+        let echo_json = info_json
             .iter()
-            .find(|(_, preview)| preview.contains("echo"))
+            .find(|info| info["name"] == "echo")
             .expect("tool_info result should contain 'echo'");
         assert!(
-            echo_result.1.contains("message"),
+            echo_json["parameters"]
+                .as_array()
+                .is_some_and(|params| params.iter().any(|param| param == "message")),
             "echo default result should list 'message' parameter name: {:?}",
-            echo_result.1
+            echo_json
         );
         // Default mode should NOT include the full "schema" key
-        let echo_json: serde_json::Value = serde_json::from_str(&echo_result.1)
-            .expect("echo tool_info result should be valid JSON");
         assert!(
             echo_json.get("schema").is_none(),
             "Default tool_info should not include schema field: {:?}",
-            echo_result.1
+            echo_json
         );
 
-        // Second call was for "time" with include_schema: true — result should
-        // contain "time", "schema" field with full object.
-        let time_result = info_results
+        // Second call was for "routine_create" with detail: "summary" — result
+        // should contain a summary object with rules/examples.
+        let routine_json = info_json
             .iter()
-            .find(|(_, preview)| preview.contains("time"))
+            .find(|info| info["name"] == "routine_create")
+            .expect("tool_info result should contain 'routine_create'");
+        assert!(
+            routine_json.get("summary").is_some(),
+            "detail: summary should include summary field: {:?}",
+            routine_json
+        );
+        assert!(
+            routine_json["summary"]["conditional_requirements"]
+                .as_array()
+                .is_some_and(|rules| rules.iter().any(|rule| {
+                    rule.as_str()
+                        .is_some_and(|rule| rule.contains("request.kind='cron'"))
+                })),
+            "routine_create summary should mention cron requirement: {:?}",
+            routine_json
+        );
+
+        // Third call was for "time" with include_schema: true — result should
+        // contain "time", "schema" field with full object.
+        let time_json = info_json
+            .iter()
+            .find(|info| info["name"] == "time")
             .expect("tool_info result should contain 'time'");
-        let time_json: serde_json::Value = serde_json::from_str(&time_result.1)
-            .expect("time tool_info result should be valid JSON");
         assert!(
             time_json.get("schema").is_some(),
             "include_schema: true should include schema field: {:?}",
-            time_result.1
+            time_json
         );
         assert!(
             time_json["schema"]["properties"].is_object(),
             "schema should have properties: {:?}",
-            time_result.1
+            time_json
         );
 
         rig.shutdown();

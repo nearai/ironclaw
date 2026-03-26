@@ -518,7 +518,7 @@ pub async fn setup_http(secrets: &SecretsContext) -> Result<HttpSetupResult, Cha
             .save_secret("http_webhook_secret", &SecretString::from(secret))
             .await?;
         print_success("Webhook secret generated and saved to database");
-        print_info("Retrieve it later with: ironclaw secret get http_webhook_secret");
+        print_info(http_webhook_secret_hint());
     }
 
     print_success(&format!("HTTP webhook will listen on {}:{}", host, port));
@@ -533,6 +533,10 @@ pub async fn setup_http(secrets: &SecretsContext) -> Result<HttpSetupResult, Cha
 /// Generate a random webhook secret.
 pub fn generate_webhook_secret() -> String {
     generate_secret_with_length(32)
+}
+
+fn http_webhook_secret_hint() -> &'static str {
+    "The secret is stored in the encrypted secrets database and will be loaded automatically on startup."
 }
 
 fn validate_e164(account: &str) -> Result<(), String> {
@@ -1016,7 +1020,7 @@ fn validation_placeholder_regex() -> &'static regex::Regex {
     static PLACEHOLDER_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     PLACEHOLDER_RE.get_or_init(|| {
         regex::Regex::new(r"\{([A-Za-z0-9_]+)\}")
-            .expect("validation placeholder regex must compile")
+            .expect("validation placeholder regex must compile") // safety: hardcoded literal
     })
 }
 
@@ -1136,8 +1140,9 @@ mod tests {
 
     use crate::secrets::{InMemorySecretsStore, SecretsCrypto, SecretsStore};
     use crate::setup::channels::{
-        SecretsContext, generate_webhook_secret, substitute_validation_placeholders,
-        validate_cloudflare_token_format, validate_public_https_url,
+        SecretsContext, generate_webhook_secret, http_webhook_secret_hint,
+        substitute_validation_placeholders, validate_cloudflare_token_format,
+        validate_public_https_url,
     };
 
     fn test_secrets_context() -> SecretsContext {
@@ -1336,5 +1341,13 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("DNS resolution failed"));
+    }
+
+    #[test]
+    fn test_http_webhook_secret_hint_reflects_current_behavior() {
+        let hint = http_webhook_secret_hint();
+        assert!(hint.contains("encrypted secrets database"));
+        assert!(hint.contains("loaded automatically on startup"));
+        assert!(!hint.contains("ironclaw secret get"));
     }
 }

@@ -33,6 +33,7 @@ impl Agent {
         &self,
         intent: MessageIntent,
         message: &IncomingMessage,
+        tenant: &crate::tenant::TenantCtx,
     ) -> Result<SubmissionResult, Error> {
         // Send thinking status for non-trivial operations
         if let MessageIntent::CreateJob { .. } = &intent {
@@ -52,24 +53,18 @@ impl Agent {
                 description,
                 category,
             } => {
-                self.handle_create_job(&message.user_id, title, description, category)
+                self.handle_create_job(tenant, title, description, category)
                     .await?
             }
             MessageIntent::CheckJobStatus { job_id } => {
-                self.handle_check_status(&message.user_id, job_id).await?
+                self.handle_check_status(tenant, job_id).await?
             }
-            MessageIntent::CancelJob { job_id } => {
-                self.handle_cancel_job(&message.user_id, &job_id).await?
-            }
-            MessageIntent::ListJobs { filter } => {
-                self.handle_list_jobs(&message.user_id, filter).await?
-            }
-            MessageIntent::HelpJob { job_id } => {
-                self.handle_help_job(&message.user_id, &job_id).await?
-            }
+            MessageIntent::CancelJob { job_id } => self.handle_cancel_job(tenant, &job_id).await?,
+            MessageIntent::ListJobs { filter } => self.handle_list_jobs(tenant, filter).await?,
+            MessageIntent::HelpJob { job_id } => self.handle_help_job(tenant, &job_id).await?,
             MessageIntent::Command { command, args } => {
                 match self
-                    .handle_command(&command, &args, &message.channel)
+                    .handle_command(&command, &args, &message.channel, tenant)
                     .await?
                 {
                     Some(s) => s,
@@ -83,14 +78,14 @@ impl Agent {
 
     async fn handle_create_job(
         &self,
-        user_id: &str,
+        tenant: &crate::tenant::TenantCtx,
         title: String,
         description: String,
         category: Option<String>,
     ) -> Result<String, Error> {
         let job_id = self
             .scheduler
-            .dispatch_job(user_id, &title, &description, None)
+            .dispatch_job(tenant.user_id(), &title, &description, None)
             .await?;
 
         // Set the dedicated category field (not stored in metadata)
@@ -113,7 +108,7 @@ impl Agent {
 
     async fn handle_check_status(
         &self,
-        user_id: &str,
+        tenant: &crate::tenant::TenantCtx,
         job_id: Option<String>,
     ) -> Result<String, Error> {
         match job_id {
@@ -122,7 +117,8 @@ impl Agent {
                     .map_err(|_| crate::error::JobError::NotFound { id: Uuid::nil() })?;
 
                 // Try DB first for persistent state, fall back to ContextManager.
-                if let Some(store) = self.store()
+                // TenantScope.get_job() auto-filters by ownership — no manual check needed.
+                if let Some(store) = tenant.store()
                     && let Ok(Some(ctx)) = store.get_job(uuid).await
                 {
                     return Ok(format!(
@@ -138,7 +134,7 @@ impl Agent {
                 }
 
                 let ctx = self.context_manager.get_context(uuid).await?;
-                if ctx.user_id != user_id {
+                if ctx.user_id != tenant.user_id() {
                     return Err(crate::error::JobError::NotFound { id: uuid }.into());
                 }
 
@@ -155,7 +151,8 @@ impl Agent {
             }
             None => {
                 // Show summary from DB for consistency with Jobs tab.
-                if let Some(store) = self.store() {
+                // TenantScope methods auto-scope to user — no user_id parameter needed.
+                if let Some(store) = tenant.store() {
                     let mut total = 0;
                     let mut in_progress = 0;
                     let mut completed = 0;
@@ -183,7 +180,7 @@ impl Agent {
                 }
 
                 // Fallback to ContextManager if no DB.
-                let summary = self.context_manager.summary_for(user_id).await;
+                let summary = self.context_manager.summary_for(tenant.user_id()).await;
                 Ok(format!(
                     "Jobs summary: Total: {} In Progress: {} Completed: {} Failed: {} Stuck: {}",
                     summary.total,
@@ -196,19 +193,24 @@ impl Agent {
         }
     }
 
-    async fn handle_cancel_job(&self, user_id: &str, job_id: &str) -> Result<String, Error> {
+    async fn handle_cancel_job(
+        &self,
+        tenant: &crate::tenant::TenantCtx,
+        job_id: &str,
+    ) -> Result<String, Error> {
         let uuid = Uuid::parse_str(job_id)
             .map_err(|_| crate::error::JobError::NotFound { id: Uuid::nil() })?;
 
         let ctx = self.context_manager.get_context(uuid).await?;
-        if ctx.user_id != user_id {
+        if ctx.user_id != tenant.user_id() {
             return Err(crate::error::JobError::NotFound { id: uuid }.into());
         }
 
         self.scheduler.stop(uuid).await?;
 
         // Also update DB so the Jobs tab reflects cancellation immediately.
-        if let Some(store) = self.store()
+        // Use TenantScope — ownership already verified above.
+        if let Some(store) = tenant.store()
             && let Err(e) = store
                 .update_job_status(uuid, JobState::Cancelled, Some("Cancelled by user"))
                 .await
@@ -221,11 +223,12 @@ impl Agent {
 
     async fn handle_list_jobs(
         &self,
-        user_id: &str,
+        tenant: &crate::tenant::TenantCtx,
         _filter: Option<String>,
     ) -> Result<String, Error> {
         // List from DB for consistency with Jobs tab.
-        if let Some(store) = self.store() {
+        // TenantScope methods auto-scope to user.
+        if let Some(store) = tenant.store() {
             let agent_jobs = match store.list_agent_jobs().await {
                 Ok(jobs) => jobs,
                 Err(e) => {
@@ -256,7 +259,7 @@ impl Agent {
         }
 
         // Fallback to ContextManager if no DB.
-        let jobs = self.context_manager.all_jobs_for(user_id).await;
+        let jobs = self.context_manager.all_jobs_for(tenant.user_id()).await;
         if jobs.is_empty() {
             return Ok("No jobs found.".to_string());
         }
@@ -270,12 +273,16 @@ impl Agent {
         Ok(output)
     }
 
-    async fn handle_help_job(&self, user_id: &str, job_id: &str) -> Result<String, Error> {
+    async fn handle_help_job(
+        &self,
+        tenant: &crate::tenant::TenantCtx,
+        job_id: &str,
+    ) -> Result<String, Error> {
         let uuid = Uuid::parse_str(job_id)
             .map_err(|_| crate::error::JobError::NotFound { id: Uuid::nil() })?;
 
         let ctx = self.context_manager.get_context(uuid).await?;
-        if ctx.user_id != user_id {
+        if ctx.user_id != tenant.user_id() {
             return Err(crate::error::JobError::NotFound { id: uuid }.into());
         }
 
@@ -308,11 +315,11 @@ impl Agent {
     /// Show job status inline — either all jobs (no id) or a specific job.
     pub(super) async fn process_job_status(
         &self,
-        user_id: &str,
+        tenant: &crate::tenant::TenantCtx,
         job_id: Option<&str>,
     ) -> Result<SubmissionResult, Error> {
         match self
-            .handle_check_status(user_id, job_id.map(|s| s.to_string()))
+            .handle_check_status(tenant, job_id.map(|s| s.to_string()))
             .await
         {
             Ok(text) => Ok(SubmissionResult::response(text)),
@@ -323,10 +330,10 @@ impl Agent {
     /// Cancel a job by ID.
     pub(super) async fn process_job_cancel(
         &self,
-        user_id: &str,
+        tenant: &crate::tenant::TenantCtx,
         job_id: &str,
     ) -> Result<SubmissionResult, Error> {
-        match self.handle_cancel_job(user_id, job_id).await {
+        match self.handle_cancel_job(tenant, job_id).await {
             Ok(text) => Ok(SubmissionResult::response(text)),
             Err(e) => Ok(SubmissionResult::error(format!("Cancel error: {}", e))),
         }
@@ -465,12 +472,101 @@ impl Agent {
         }
     }
 
+    /// Handle `/reasoning [N|all]` — show reasoning history for the active thread.
+    pub(super) async fn handle_reasoning_command(
+        &self,
+        args: &[String],
+        session: &Arc<Mutex<Session>>,
+        thread_id: Uuid,
+    ) -> SubmissionResult {
+        // Clone the turn data we need, then drop the session lock.
+        let turns_snapshot: Vec<(
+            usize,
+            Option<String>,
+            Vec<crate::agent::session::TurnToolCall>,
+        )>;
+        {
+            let sess = session.lock().await;
+            let thread = match sess.threads.get(&thread_id) {
+                Some(t) => t,
+                None => return SubmissionResult::error("No active thread."),
+            };
+
+            if thread.turns.is_empty() {
+                return SubmissionResult::ok_with_message("No turns yet.");
+            }
+
+            // Parse argument: default=last turn, "all"=all turns, N=specific turn (1-based).
+            let selected: Vec<&crate::agent::session::Turn> = match args.first().map(|s| s.as_str())
+            {
+                Some("all") => thread.turns.iter().collect(),
+                Some(n) => match n.parse::<usize>() {
+                    Ok(0) => return SubmissionResult::error("Turn numbers start at 1."),
+                    Ok(num) if num > thread.turns.len() => {
+                        return SubmissionResult::error(format!(
+                            "Turn {} does not exist (max: {}).",
+                            num,
+                            thread.turns.len()
+                        ));
+                    }
+                    Ok(num) => vec![&thread.turns[num - 1]],
+                    Err(_) => return SubmissionResult::error("Usage: /reasoning [N|all]"),
+                },
+                None => {
+                    // Default: last turn that has tool calls
+                    match thread.turns.iter().rev().find(|t| !t.tool_calls.is_empty()) {
+                        Some(t) => vec![t],
+                        None => {
+                            return SubmissionResult::ok_with_message("No turns with tool calls.");
+                        }
+                    }
+                }
+            };
+
+            turns_snapshot = selected
+                .into_iter()
+                .map(|t| (t.turn_number, t.narrative.clone(), t.tool_calls.clone()))
+                .collect();
+        }
+        // Session lock is now dropped — format output without holding it.
+
+        let mut output = String::new();
+        for (turn_number, narrative, tool_calls) in &turns_snapshot {
+            output.push_str(&format!("--- Turn {} ---\n", turn_number + 1));
+            if let Some(narrative) = narrative {
+                output.push_str(&format!("Reasoning: {}\n", narrative));
+            }
+            if tool_calls.is_empty() {
+                output.push_str("  (no tool calls)\n");
+            } else {
+                for tc in tool_calls {
+                    let status = if tc.error.is_some() {
+                        "error"
+                    } else if tc.result.is_some() {
+                        "ok"
+                    } else {
+                        "pending"
+                    };
+                    output.push_str(&format!("  {} [{}]", tc.name, status));
+                    if let Some(ref rationale) = tc.rationale {
+                        output.push_str(&format!(" — {}", rationale));
+                    }
+                    output.push('\n');
+                }
+            }
+            output.push('\n');
+        }
+
+        SubmissionResult::response(output.trim_end())
+    }
+
     /// Handle system commands that bypass thread-state checks entirely.
     pub(super) async fn handle_system_command(
         &self,
         command: &str,
         args: &[String],
         channel: &str,
+        tenant: &crate::tenant::TenantCtx,
     ) -> Result<SubmissionResult, Error> {
         match command {
             "help" => Ok(SubmissionResult::response(concat!(
@@ -480,6 +576,7 @@ impl Agent {
                 "  /version          Show version info\n",
                 "  /tools            List available tools\n",
                 "  /debug            Toggle debug mode\n",
+                "  /reasoning [N|all] Show agent reasoning for turns\n",
                 "  /ping             Connectivity check\n",
                 "\n",
                 "Jobs:\n",
@@ -663,19 +760,32 @@ impl Agent {
                         }
                     }
 
-                    match self.llm().set_model(requested) {
-                        Ok(()) => {
-                            // Persist the model choice so it survives restarts.
-                            self.persist_selected_model(requested).await;
-                            Ok(SubmissionResult::response(format!(
-                                "Switched model to: {}",
-                                requested
-                            )))
+                    if self.config.multi_tenant {
+                        // Multi-tenant: only persist to per-user DB settings.
+                        // Do NOT call set_model() on the shared provider — that
+                        // would change the default for all users. The per-request
+                        // model_override in the dispatcher reads from the same
+                        // "selected_model" setting and applies it per-user.
+                        self.persist_selected_model(tenant, requested).await;
+                        Ok(SubmissionResult::response(format!(
+                            "Model preference set to: {} (per-user)",
+                            requested
+                        )))
+                    } else {
+                        match self.llm().set_model(requested) {
+                            Ok(()) => {
+                                // Persist the model choice so it survives restarts.
+                                self.persist_selected_model(tenant, requested).await;
+                                Ok(SubmissionResult::response(format!(
+                                    "Switched model to: {}",
+                                    requested
+                                )))
+                            }
+                            Err(e) => Ok(SubmissionResult::error(format!(
+                                "Failed to switch model: {}",
+                                e
+                            ))),
                         }
-                        Err(e) => Ok(SubmissionResult::error(format!(
-                            "Failed to switch model: {}",
-                            e
-                        ))),
                     }
                 }
             }
@@ -817,10 +927,14 @@ impl Agent {
         command: &str,
         args: &[String],
         channel: &str,
+        tenant: &crate::tenant::TenantCtx,
     ) -> Result<Option<String>, Error> {
         // System commands are now handled directly via Submission::SystemCommand,
         // but the router may still send us unknown /commands.
-        match self.handle_system_command(command, args, channel).await? {
+        match self
+            .handle_system_command(command, args, channel, tenant)
+            .await?
+        {
             SubmissionResult::Response { content } => Ok(Some(content)),
             SubmissionResult::Ok { message } => Ok(message),
             SubmissionResult::Error { message } => Ok(Some(format!("Error: {}", message))),
@@ -832,18 +946,69 @@ impl Agent {
     ///
     /// Best-effort: logs warnings on failure but does not propagate errors,
     /// since the in-memory model switch already succeeded.
-    async fn persist_selected_model(&self, model: &str) {
-        // 1. Persist to DB if available.
-        if let Some(store) = self.store() {
+    ///
+    /// In multi-tenant mode, only the per-user DB setting is written — global
+    /// .env and TOML files are shared across users and must not be mutated.
+    async fn persist_selected_model(&self, tenant: &crate::tenant::TenantCtx, model: &str) {
+        // 1. Persist to DB if available (per-user scoped via TenantScope).
+        if let Some(store) = tenant.store() {
             let value = serde_json::Value::String(model.to_string());
-            if let Err(e) = store.set_setting("default", "selected_model", &value).await {
+            if let Err(e) = store.set_setting("selected_model", &value).await {
                 tracing::warn!("Failed to persist model to DB: {}", e);
+            } else {
+                tracing::debug!(
+                    user_id = tenant.user_id(),
+                    "Persisted selected_model to DB: {}",
+                    model
+                );
             }
+        } else {
+            tracing::warn!("No database store available — model choice will not persist to DB");
         }
 
-        // 2. Update TOML config file if it exists (sync I/O in spawn_blocking).
+        // 2. In multi-tenant mode, skip .env/TOML writes — these are global
+        // files shared by all users. The per-user DB setting is sufficient.
+        if self.config.multi_tenant {
+            return;
+        }
+
+        // 3. Update .env and TOML config file (sync I/O in spawn_blocking).
         let model_owned = model.to_string();
+        let backend = self.deps.llm_backend.clone();
         if let Err(e) = tokio::task::spawn_blocking(move || {
+            // 2a. Update the backend-specific model env var in ~/.ironclaw/.env.
+            //
+            // Env vars have the HIGHEST priority in LlmConfig::resolve_model()
+            // (env var > TOML > DB > default). If the .env file has e.g.
+            // NEARAI_MODEL=old-model, it shadows everything else. We must
+            // update this var or the /model change is invisible on restart.
+            let registry = crate::llm::ProviderRegistry::load();
+            let model_env = registry.model_env_var(&backend);
+            let env_var_prefix = format!("{}=", model_env);
+
+            // Only update the .env file if the var is actually set there
+            // (avoid injecting new vars the user never configured).
+            let env_path = crate::bootstrap::ironclaw_env_path();
+            let env_has_var = std::fs::read_to_string(&env_path)
+                .ok()
+                .is_some_and(|content| {
+                    content.lines().any(|line| {
+                        let trimmed = line.trim_start();
+                        !trimmed.starts_with('#') && trimmed.starts_with(&env_var_prefix)
+                    })
+                });
+            if env_has_var {
+                if let Err(e) = crate::bootstrap::upsert_bootstrap_var(model_env, &model_owned) {
+                    tracing::warn!("Failed to update {} in .env: {}", model_env, e);
+                } else {
+                    tracing::debug!("Updated {} in .env to {}", model_env, model_owned);
+                }
+            }
+
+            // 2b. Update (or create) the TOML config file.
+            //
+            // The TOML overlay has higher priority than DB settings on
+            // startup, so it MUST stay in sync with the DB.
             let toml_path = crate::settings::Settings::default_toml_path();
             match crate::settings::Settings::load_toml(&toml_path) {
                 Ok(Some(mut settings)) => {
@@ -853,7 +1018,15 @@ impl Agent {
                     }
                 }
                 Ok(None) => {
-                    // No config file on disk; nothing to update.
+                    // No config file yet — create one so the model choice
+                    // survives restarts even when the DB is unavailable.
+                    let settings = crate::settings::Settings {
+                        selected_model: Some(model_owned),
+                        ..Default::default()
+                    };
+                    if let Err(e) = settings.save_toml(&toml_path) {
+                        tracing::warn!("Failed to create config.toml for model persistence: {}", e);
+                    }
                 }
                 Err(e) => {
                     tracing::warn!("Failed to load config.toml for model persistence: {}", e);
@@ -862,7 +1035,7 @@ impl Agent {
         })
         .await
         {
-            tracing::warn!("Model TOML persistence task failed: {}", e);
+            tracing::warn!("Model persistence task failed: {}", e);
         }
     }
 }

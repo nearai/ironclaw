@@ -92,6 +92,17 @@ impl SubmissionParser {
                 args: vec![],
             };
         }
+        if lower == "/reasoning" || lower.starts_with("/reasoning ") {
+            let args: Vec<String> = trimmed
+                .split_whitespace()
+                .skip(1)
+                .map(|s| s.to_string())
+                .collect();
+            return Submission::SystemCommand {
+                command: "reasoning".to_string(),
+                args,
+            };
+        }
         if lower == "/restart" {
             tracing::debug!("[SubmissionParser::parse] Recognized /restart command");
             return Submission::SystemCommand {
@@ -382,6 +393,8 @@ pub enum SubmissionResult {
         description: String,
         /// Parameters being passed.
         parameters: serde_json::Value,
+        /// Whether "always" auto-approve should be offered to the user.
+        allow_always: bool,
     },
 
     /// Successfully processed (for control commands).
@@ -425,6 +438,14 @@ impl SubmissionResult {
     pub fn error(message: impl Into<String>) -> Self {
         Self::Error {
             message: message.into(),
+        }
+    }
+
+    /// Create a non-error status message (e.g., for blocking states like approval waiting).
+    /// Uses Ok variant to avoid "Error:" prefix in rendering.
+    pub fn pending(message: impl Into<String>) -> Self {
+        Self::Ok {
+            message: Some(message.into()),
         }
     }
 }

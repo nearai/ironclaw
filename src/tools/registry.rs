@@ -13,7 +13,9 @@ use crate::orchestrator::job_manager::ContainerJobManager;
 use crate::secrets::SecretsStore;
 use crate::skills::catalog::SkillCatalog;
 use crate::skills::registry::SkillRegistry;
-use crate::tools::builder::{BuildSoftwareTool, BuilderConfig, LlmSoftwareBuilder};
+use crate::tools::builder::{
+    BuildSoftwareTool, BuilderConfig, LlmSoftwareBuilder, SoftwareBuilder,
+};
 use crate::tools::builtin::{
     ApplyPatchTool, CancelJobTool, CreateJobTool, EchoTool, ExtensionInfoTool, HttpTool,
     JobEventsTool, JobPromptTool, JobStatusTool, JsonTool, ListDirTool, ListJobsTool,
@@ -81,7 +83,7 @@ const PROTECTED_TOOL_NAMES: &[&str] = &[
 /// Registry of available tools.
 pub struct ToolRegistry {
     tools: RwLock<HashMap<String, Arc<dyn Tool>>>,
-    /// Tracks which names were registered as built-in (protected from shadowing).
+    /// Tracks which names were registered via the built-in startup path.
     builtin_names: RwLock<std::collections::HashSet<String>>,
     /// Shared credential registry populated by WASM tools, consumed by HTTP tool.
     credential_registry: Option<Arc<SharedCredentialRegistry>>,
@@ -94,6 +96,15 @@ pub struct ToolRegistry {
 }
 
 impl ToolRegistry {
+    fn tool_definition(tool: &Arc<dyn Tool>) -> ToolDefinition {
+        let schema = tool.schema();
+        ToolDefinition {
+            name: schema.name,
+            description: schema.description,
+            parameters: schema.parameters,
+        }
+    }
+
     /// Create a new empty registry.
     pub fn new() -> Self {
         Self {
@@ -127,10 +138,12 @@ impl ToolRegistry {
         &self.rate_limiter
     }
 
-    /// Register a tool. Rejects dynamic tools that try to shadow a built-in name.
+    /// Register a tool. Rejects dynamic tools that try to shadow a protected built-in name.
     pub async fn register(&self, tool: Arc<dyn Tool>) {
         let name = tool.name().to_string();
-        if self.builtin_names.read().await.contains(&name) {
+        if PROTECTED_TOOL_NAMES.contains(&name.as_str())
+            && self.builtin_names.read().await.contains(&name)
+        {
             tracing::warn!(
                 tool = %name,
                 "Rejected tool registration: would shadow a built-in tool"
@@ -146,10 +159,7 @@ impl ToolRegistry {
         let name = tool.name().to_string();
         if let Ok(mut tools) = self.tools.try_write() {
             tools.insert(name.clone(), tool);
-            // Mark as built-in so it can't be shadowed later
-            if PROTECTED_TOOL_NAMES.contains(&name.as_str())
-                && let Ok(mut builtins) = self.builtin_names.try_write()
-            {
+            if let Ok(mut builtins) = self.builtin_names.try_write() {
                 builtins.insert(name.clone());
             }
             tracing::debug!("Registered tool: {}", name);
@@ -199,6 +209,11 @@ impl ToolRegistry {
         self.tools.read().await.values().cloned().collect()
     }
 
+    /// Get the set of built-in tool names currently registered.
+    pub async fn builtin_tool_names(&self) -> std::collections::HashSet<String> {
+        self.builtin_names.read().await.clone()
+    }
+
     /// Get tool definitions for LLM function calling.
     pub async fn tool_definitions(&self) -> Vec<ToolDefinition> {
         let mut defs: Vec<ToolDefinition> = self
@@ -206,11 +221,7 @@ impl ToolRegistry {
             .read()
             .await
             .values()
-            .map(|tool| ToolDefinition {
-                name: tool.name().to_string(),
-                description: tool.description().to_string(),
-                parameters: tool.parameters_schema(),
-            })
+            .map(Self::tool_definition)
             .collect();
         defs.sort_unstable_by(|a, b| a.name.cmp(&b.name));
         defs
@@ -221,13 +232,7 @@ impl ToolRegistry {
         let tools = self.tools.read().await;
         names
             .iter()
-            .filter_map(|name| {
-                tools.get(*name).map(|tool| ToolDefinition {
-                    name: tool.name().to_string(),
-                    description: tool.description().to_string(),
-                    parameters: tool.parameters_schema(),
-                })
-            })
+            .filter_map(|name| tools.get(*name).map(Self::tool_definition))
             .collect()
     }
 
@@ -282,11 +287,7 @@ impl ToolRegistry {
             .await
             .values()
             .filter(|tool| tool.domain() == domain)
-            .map(|tool| ToolDefinition {
-                name: tool.name().to_string(),
-                description: tool.description().to_string(),
-                parameters: tool.parameters_schema(),
-            })
+            .map(Self::tool_definition)
             .collect()
     }
 
@@ -312,11 +313,7 @@ impl ToolRegistry {
                     ApprovalRequirement::Never
                 )
             })
-            .map(|tool| ToolDefinition {
-                name: tool.name().to_string(),
-                description: tool.description().to_string(),
-                parameters: tool.parameters_schema(),
-            })
+            .map(Self::tool_definition)
             .collect();
         defs.sort_unstable_by(|a, b| a.name.cmp(&b.name));
         defs
@@ -337,15 +334,37 @@ impl ToolRegistry {
         tracing::debug!("Registered 5 development tools");
     }
 
-    /// Register memory tools with a workspace.
+    /// Register memory tools with a workspace resolver.
+    ///
+    /// Memory tools require a workspace resolver for persistence. Call this after
+    /// `register_builtin_tools()` if you have a workspace available.
+    pub fn register_memory_tools_with_resolver(
+        &self,
+        resolver: Arc<dyn crate::tools::builtin::memory::WorkspaceResolver>,
+    ) {
+        self.register_sync(Arc::new(MemorySearchTool::new(Arc::clone(&resolver))));
+        self.register_sync(Arc::new(MemoryWriteTool::new(Arc::clone(&resolver))));
+        self.register_sync(Arc::new(MemoryReadTool::new(Arc::clone(&resolver))));
+        self.register_sync(Arc::new(MemoryTreeTool::new(resolver)));
+
+        tracing::debug!("Registered 4 memory tools");
+    }
+
+    /// Register memory tools with a fixed workspace (backward compatibility).
     ///
     /// Memory tools require a workspace for persistence. Call this after
     /// `register_builtin_tools()` if you have a workspace available.
     pub fn register_memory_tools(&self, workspace: Arc<Workspace>) {
-        self.register_sync(Arc::new(MemorySearchTool::new(Arc::clone(&workspace))));
-        self.register_sync(Arc::new(MemoryWriteTool::new(Arc::clone(&workspace))));
-        self.register_sync(Arc::new(MemoryReadTool::new(Arc::clone(&workspace))));
-        self.register_sync(Arc::new(MemoryTreeTool::new(workspace)));
+        self.register_sync(Arc::new(MemorySearchTool::from_workspace(Arc::clone(
+            &workspace,
+        ))));
+        self.register_sync(Arc::new(MemoryWriteTool::from_workspace(Arc::clone(
+            &workspace,
+        ))));
+        self.register_sync(Arc::new(MemoryReadTool::from_workspace(Arc::clone(
+            &workspace,
+        ))));
+        self.register_sync(Arc::new(MemoryTreeTool::from_workspace(workspace)));
 
         tracing::debug!("Registered 4 memory tools");
     }
@@ -364,7 +383,7 @@ impl ToolRegistry {
         job_manager: Option<Arc<ContainerJobManager>>,
         store: Option<Arc<dyn Database>>,
         job_event_tx: Option<
-            tokio::sync::broadcast::Sender<(uuid::Uuid, crate::channels::web::types::SseEvent)>,
+            tokio::sync::broadcast::Sender<(uuid::Uuid, String, ironclaw_common::AppEvent)>,
         >,
         inject_tx: Option<tokio::sync::mpsc::Sender<crate::channels::IncomingMessage>>,
         prompt_queue: Option<PromptQueue>,
@@ -374,6 +393,9 @@ impl ToolRegistry {
         if let Some(slot) = scheduler_slot {
             create_tool = create_tool.with_scheduler_slot(slot);
         }
+        // Clone before moving into create_tool so cancel_job can also use them.
+        let jm_for_cancel = job_manager.clone();
+        let store_for_cancel = store.clone();
         if let Some(jm) = job_manager {
             create_tool = create_tool.with_sandbox(jm, store.clone());
         }
@@ -386,7 +408,11 @@ impl ToolRegistry {
         self.register_sync(Arc::new(create_tool));
         self.register_sync(Arc::new(ListJobsTool::new(Arc::clone(&context_manager))));
         self.register_sync(Arc::new(JobStatusTool::new(Arc::clone(&context_manager))));
-        self.register_sync(Arc::new(CancelJobTool::new(Arc::clone(&context_manager))));
+        let mut cancel_tool = CancelJobTool::new(Arc::clone(&context_manager));
+        if let Some(jm) = jm_for_cancel {
+            cancel_tool = cancel_tool.with_sandbox(jm, store_for_cancel);
+        }
+        self.register_sync(Arc::new(cancel_tool));
 
         // Base tools: create, list, status, cancel
         let mut job_tool_count = 4;
@@ -501,9 +527,14 @@ impl ToolRegistry {
     pub async fn register_message_tools(
         &self,
         channel_manager: Arc<crate::channels::ChannelManager>,
+        extension_manager: Option<Arc<crate::extensions::ExtensionManager>>,
     ) {
         use crate::tools::builtin::MessageTool;
-        let tool = Arc::new(MessageTool::new(channel_manager));
+        let mut tool = MessageTool::new(channel_manager);
+        if let Some(extension_manager) = extension_manager {
+            tool = tool.with_extension_manager(extension_manager);
+        }
+        let tool = Arc::new(tool);
         *self.message_tool.write().await = Some(Arc::clone(&tool));
         self.tools
             .write()
@@ -580,22 +611,23 @@ impl ToolRegistry {
         self: &Arc<Self>,
         llm: Arc<dyn LlmProvider>,
         config: Option<BuilderConfig>,
-    ) {
+    ) -> Arc<dyn SoftwareBuilder> {
         // First register dev tools needed by the builder
         self.register_dev_tools();
 
         // Create the builder (arg order: config, llm, tools)
-        let builder = Arc::new(LlmSoftwareBuilder::new(
+        let builder: Arc<dyn SoftwareBuilder> = Arc::new(LlmSoftwareBuilder::new(
             config.unwrap_or_default(),
             llm,
             Arc::clone(self),
         ));
 
         // Register the build_software tool
-        self.register(Arc::new(BuildSoftwareTool::new(builder)))
+        self.register(Arc::new(BuildSoftwareTool::new(Arc::clone(&builder))))
             .await;
 
         tracing::debug!("Registered software builder tool");
+        builder
     }
 
     /// Register a WASM tool from bytes.
@@ -783,6 +815,7 @@ impl std::fmt::Debug for ToolRegistry {
 mod tests {
     use super::*;
     use crate::tools::registry::EchoTool;
+    use crate::tools::tool::ToolDiscoverySummary;
 
     #[tokio::test]
     async fn test_register_and_get() {
@@ -814,9 +847,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_tool_definitions_use_tool_schema() {
+        struct DiscoveryTool;
+
+        #[async_trait::async_trait]
+        impl Tool for DiscoveryTool {
+            fn name(&self) -> &str {
+                "discovery_tool"
+            }
+
+            fn description(&self) -> &str {
+                "Discovery test tool"
+            }
+
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string" }
+                    }
+                })
+            }
+
+            fn discovery_schema(&self) -> serde_json::Value {
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string" },
+                        "extra": { "type": "string" }
+                    }
+                })
+            }
+
+            fn discovery_summary(&self) -> Option<ToolDiscoverySummary> {
+                Some(ToolDiscoverySummary {
+                    notes: vec!["extra guidance".into()],
+                    ..ToolDiscoverySummary::default()
+                })
+            }
+
+            async fn execute(
+                &self,
+                _params: serde_json::Value,
+                _ctx: &crate::context::JobContext,
+            ) -> Result<crate::tools::tool::ToolOutput, crate::tools::tool::ToolError> {
+                unreachable!()
+            }
+        }
+
+        let registry = ToolRegistry::new();
+        registry.register(Arc::new(DiscoveryTool)).await;
+
+        let defs = registry.tool_definitions().await;
+        let def = defs
+            .iter()
+            .find(|def| def.name == "discovery_tool")
+            .expect("tool definition should be present");
+        assert!(
+            def.description.contains("tool_info"),
+            "live tool definition should include schema hint: {}",
+            def.description
+        );
+        assert!(def.parameters.get("extra").is_none());
+    }
+
+    #[tokio::test]
     async fn test_builtin_tool_cannot_be_shadowed() {
         let registry = ToolRegistry::new();
-        // Register echo as built-in (uses register_sync which marks protected names)
+        // Register echo as built-in (uses register_sync and echo is protected).
         registry.register_sync(Arc::new(EchoTool));
         assert!(registry.has("echo").await);
 
@@ -861,6 +959,37 @@ mod tests {
             .to_string();
         assert_eq!(desc, original_desc);
         assert_ne!(desc, "EVIL SHADOW");
+    }
+
+    #[tokio::test]
+    async fn test_builtin_tool_names_include_non_protected_sync_tools() {
+        struct NonProtectedBuiltin;
+
+        #[async_trait::async_trait]
+        impl Tool for NonProtectedBuiltin {
+            fn name(&self) -> &str {
+                "owner_gate"
+            }
+            fn description(&self) -> &str {
+                "test builtin"
+            }
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({})
+            }
+            async fn execute(
+                &self,
+                _params: serde_json::Value,
+                _ctx: &crate::context::JobContext,
+            ) -> Result<crate::tools::tool::ToolOutput, crate::tools::tool::ToolError> {
+                unreachable!()
+            }
+        }
+
+        let registry = ToolRegistry::new();
+        registry.register_sync(Arc::new(NonProtectedBuiltin));
+
+        let builtins = registry.builtin_tool_names().await;
+        assert!(builtins.contains("owner_gate"));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

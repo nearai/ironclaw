@@ -46,15 +46,24 @@ use std::sync::Arc;
 use tokio::sync::{Mutex, broadcast};
 use uuid::Uuid;
 
-use crate::channels::web::types::SseEvent;
 use crate::db::Database;
 use crate::llm::LlmProvider;
 use crate::secrets::SecretsStore;
+use ironclaw_common::AppEvent;
+
+/// Resolve the orchestrator port from the `ORCHESTRATOR_PORT` environment
+/// variable, falling back to 50051.
+fn resolve_orchestrator_port() -> u16 {
+    std::env::var("ORCHESTRATOR_PORT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(50051)
+}
 
 /// Result of orchestrator setup, containing all handles needed by the agent.
 pub struct OrchestratorSetup {
     pub container_job_manager: Option<Arc<ContainerJobManager>>,
-    pub job_event_tx: Option<broadcast::Sender<(Uuid, SseEvent)>>,
+    pub job_event_tx: Option<broadcast::Sender<(Uuid, String, AppEvent)>>,
     pub prompt_queue: Arc<Mutex<HashMap<Uuid, VecDeque<api::PendingPrompt>>>>,
     pub docker_status: crate::sandbox::DockerStatus,
 }
@@ -101,11 +110,12 @@ pub async fn setup_orchestrator(
         let job_event_tx = Some(tx);
 
         let token_store = TokenStore::new();
+        let orchestrator_port = resolve_orchestrator_port();
         let job_config = ContainerJobConfig {
             image: config.sandbox.image.clone(),
             memory_limit_mb: config.sandbox.memory_limit_mb,
             cpu_shares: config.sandbox.cpu_shares,
-            orchestrator_port: 50051,
+            orchestrator_port,
             claude_code_api_key: std::env::var("ANTHROPIC_API_KEY").ok(),
             claude_code_oauth_token: crate::config::ClaudeCodeConfig::extract_oauth_token(),
             claude_code_model: config.claude_code.model.clone(),
@@ -124,10 +134,11 @@ pub async fn setup_orchestrator(
             store: db.cloned(),
             secrets_store: secrets_store.cloned(),
             user_id: "default".to_string(),
+            job_owner_cache: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
         };
 
         tokio::spawn(async move {
-            if let Err(e) = OrchestratorApi::start(orchestrator_state, 50051).await {
+            if let Err(e) = OrchestratorApi::start(orchestrator_state, orchestrator_port).await {
                 tracing::error!("Orchestrator API failed: {}", e);
             }
         });
@@ -149,5 +160,38 @@ pub async fn setup_orchestrator(
         job_event_tx,
         prompt_queue,
         docker_status,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::helpers::lock_env;
+
+    #[test]
+    fn resolve_orchestrator_port_from_env() {
+        let _guard = lock_env();
+
+        // Safety: env-var mutation requires unsafe in edition 2024;
+        // lock_env() serializes concurrent access from other test threads.
+
+        // Absent env var → default 50051
+        unsafe { std::env::remove_var("ORCHESTRATOR_PORT") };
+        assert_eq!(resolve_orchestrator_port(), 50051);
+
+        // Valid custom port
+        unsafe { std::env::set_var("ORCHESTRATOR_PORT", "50052") };
+        assert_eq!(resolve_orchestrator_port(), 50052);
+
+        // Non-numeric value → fallback to default
+        unsafe { std::env::set_var("ORCHESTRATOR_PORT", "not_a_port") };
+        assert_eq!(resolve_orchestrator_port(), 50051);
+
+        // Out of u16 range → fallback to default
+        unsafe { std::env::set_var("ORCHESTRATOR_PORT", "99999") };
+        assert_eq!(resolve_orchestrator_port(), 50051);
+
+        // Cleanup
+        unsafe { std::env::remove_var("ORCHESTRATOR_PORT") };
     }
 }

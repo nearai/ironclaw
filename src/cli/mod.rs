@@ -11,16 +11,21 @@
 //! - Managing OS service (`service install`, `service start`, `service stop`)
 //! - Listing configured channels (`channels list`)
 //! - Active health diagnostics (`doctor`)
+//! - Viewing gateway logs (`logs`)
 //! - Checking system health (`status`)
 
 mod channels;
 mod completion;
 mod config;
 mod doctor;
+pub mod fmt;
+mod hooks;
 #[cfg(feature = "import")]
 pub mod import;
+mod logs;
 mod mcp;
 pub mod memory;
+mod models;
 pub mod oauth_defaults;
 mod pairing;
 mod registry;
@@ -34,11 +39,14 @@ pub use channels::{ChannelsCommand, run_channels_command};
 pub use completion::Completion;
 pub use config::{ConfigCommand, run_config_command};
 pub use doctor::run_doctor_command;
+pub use hooks::{HooksCommand, run_hooks_command};
 #[cfg(feature = "import")]
 pub use import::{ImportCommand, run_import_command};
+pub use logs::{LogsCommand, run_logs_command};
 pub use mcp::{McpCommand, run_mcp_command};
 pub use memory::MemoryCommand;
 pub use memory::run_memory_command_with_db;
+pub use models::{ModelsCommand, run_models_command};
 pub use pairing::{PairingCommand, run_pairing_command, run_pairing_command_with_store};
 pub use registry::{RegistryCommand, run_registry_command};
 pub use routines::{RoutinesCommand, run_routines_command};
@@ -106,16 +114,20 @@ pub enum Command {
         skip_auth: bool,
 
         /// Reconfigure channels only
-        #[arg(long, conflicts_with_all = ["provider_only", "quick"])]
+        #[arg(long, conflicts_with_all = ["provider_only", "quick", "step"], help = "Deprecated: use --step channels")]
         channels_only: bool,
 
         /// Reconfigure LLM provider and model only
-        #[arg(long, conflicts_with_all = ["channels_only", "quick"])]
+        #[arg(long, conflicts_with_all = ["channels_only", "quick", "step"], help = "Deprecated: use --step provider")]
         provider_only: bool,
 
         /// Quick setup: auto-defaults everything except LLM provider and model
-        #[arg(long, conflicts_with_all = ["channels_only", "provider_only"])]
+        #[arg(long, conflicts_with_all = ["channels_only", "provider_only", "step"])]
         quick: bool,
+
+        /// Run only specific setup steps (comma-separated: provider, channels, model, database, security)
+        #[arg(long, value_delimiter = ',', conflicts_with_all = ["channels_only", "provider_only", "quick"])]
+        step: Vec<String>,
     },
 
     /// Manage configuration settings
@@ -199,12 +211,35 @@ pub enum Command {
     )]
     Skills(SkillsCommand),
 
+    /// Manage lifecycle hooks
+    #[command(
+        subcommand,
+        about = "Manage lifecycle hooks",
+        long_about = "List and inspect lifecycle hooks (bundled, plugin, workspace).\nExamples:\n  ironclaw hooks list\n  ironclaw hooks list --verbose\n  ironclaw hooks list --json"
+    )]
+    Hooks(HooksCommand),
+
+    /// Manage LLM providers and models
+    #[command(
+        subcommand,
+        about = "Manage LLM providers and models",
+        long_about = "List providers, view current configuration, and set active provider/model.\nExamples:\n  ironclaw models list\n  ironclaw models list openai --verbose\n  ironclaw models status\n  ironclaw models set gpt-4o\n  ironclaw models set-provider anthropic --model claude-sonnet-4-6-20250514"
+    )]
+    Models(ModelsCommand),
+
     /// Probe external dependencies and validate configuration
     #[command(
         about = "Run diagnostics",
         long_about = "Checks dependencies and config validity.\nExample: ironclaw doctor"
     )]
     Doctor,
+
+    /// View and manage gateway logs
+    #[command(
+        about = "View and manage gateway logs",
+        long_about = "Tail gateway logs, stream live output, or adjust log level.\nExamples:\n  ironclaw logs                 # Show last 200 lines from gateway.log\n  ironclaw logs --follow        # Stream live logs via SSE\n  ironclaw logs --level         # Show current log level\n  ironclaw logs --level debug   # Set log level to debug"
+    )]
+    Logs(LogsCommand),
 
     /// Show system health and diagnostics
     #[command(
@@ -228,6 +263,17 @@ pub enum Command {
         long_about = "Migrate data from other AI assistants like OpenClaw.\nExample: ironclaw import openclaw"
     )]
     Import(ImportCommand),
+
+    /// Authenticate with a provider (re-login)
+    #[command(
+        about = "Authenticate with a provider",
+        long_about = "Re-authenticate with an LLM provider.\nExample: ironclaw login --openai-codex"
+    )]
+    Login {
+        /// Authenticate with OpenAI Codex (ChatGPT subscription)
+        #[arg(long)]
+        openai_codex: bool,
+    },
 
     /// Run as a sandboxed worker inside a Docker container (internal use).
     /// This is invoked automatically by the orchestrator, not by users directly.
@@ -326,7 +372,10 @@ pub async fn run_memory_command(mem_cmd: &MemoryCommand) -> anyhow::Result<()> {
         .await
         .map_err(|e| anyhow::anyhow!("{}", e))?;
 
-    run_memory_command_with_db(mem_cmd.clone(), db, embeddings).await
+    let cache_config = crate::workspace::EmbeddingCacheConfig {
+        max_entries: config.embeddings.cache_size,
+    };
+    run_memory_command_with_db(mem_cmd.clone(), db, embeddings, cache_config).await
 }
 
 #[cfg(test)]

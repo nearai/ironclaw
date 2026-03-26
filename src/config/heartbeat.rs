@@ -7,18 +7,23 @@ use crate::settings::Settings;
 pub struct HeartbeatConfig {
     /// Whether heartbeat is enabled.
     pub enabled: bool,
-    /// Interval between heartbeat checks in seconds.
+    /// Interval between heartbeat checks in seconds (used when fire_at is not set).
     pub interval_secs: u64,
     /// Channel to notify on heartbeat findings.
     pub notify_channel: Option<String>,
     /// User ID to notify on heartbeat findings.
     pub notify_user: Option<String>,
+    /// Fixed time-of-day to fire (HH:MM, 24h). When set, interval_secs is ignored.
+    pub fire_at: Option<chrono::NaiveTime>,
     /// Hour (0-23) when quiet hours start.
     pub quiet_hours_start: Option<u32>,
     /// Hour (0-23) when quiet hours end.
     pub quiet_hours_end: Option<u32>,
-    /// Timezone for quiet hours evaluation (IANA name).
+    /// Timezone for fire_at and quiet hours evaluation (IANA name).
     pub timezone: Option<String>,
+    /// When true, cycle through all users with routines. Auto-detected from
+    /// GATEWAY_USER_TOKENS or set explicitly via HEARTBEAT_MULTI_TENANT.
+    pub multi_tenant: bool,
 }
 
 impl Default for HeartbeatConfig {
@@ -28,15 +33,30 @@ impl Default for HeartbeatConfig {
             interval_secs: 1800, // 30 minutes
             notify_channel: None,
             notify_user: None,
+            fire_at: None,
             quiet_hours_start: None,
             quiet_hours_end: None,
             timezone: None,
+            multi_tenant: false,
         }
     }
 }
 
 impl HeartbeatConfig {
     pub(crate) fn resolve(settings: &Settings) -> Result<Self, ConfigError> {
+        let fire_at_str =
+            optional_env("HEARTBEAT_FIRE_AT")?.or_else(|| settings.heartbeat.fire_at.clone());
+        let fire_at = fire_at_str
+            .map(|s| {
+                chrono::NaiveTime::parse_from_str(&s, "%H:%M").map_err(|e| {
+                    ConfigError::InvalidValue {
+                        key: "HEARTBEAT_FIRE_AT".to_string(),
+                        message: format!("must be HH:MM (24h), e.g. '14:00': {e}"),
+                    }
+                })
+            })
+            .transpose()?;
+
         Ok(Self {
             enabled: parse_bool_env("HEARTBEAT_ENABLED", settings.heartbeat.enabled)?,
             interval_secs: parse_optional_env(
@@ -47,6 +67,7 @@ impl HeartbeatConfig {
                 .or_else(|| settings.heartbeat.notify_channel.clone()),
             notify_user: optional_env("HEARTBEAT_NOTIFY_USER")?
                 .or_else(|| settings.heartbeat.notify_user.clone()),
+            fire_at,
             quiet_hours_start: parse_option_env::<u32>("HEARTBEAT_QUIET_START")?
                 .or(settings.heartbeat.quiet_hours_start)
                 .map(|h| {
@@ -84,6 +105,12 @@ impl HeartbeatConfig {
                 }
                 tz
             },
+            // Auto-detect multi-tenant mode from GATEWAY_USER_TOKENS presence,
+            // or allow explicit override via HEARTBEAT_MULTI_TENANT.
+            multi_tenant: parse_bool_env(
+                "HEARTBEAT_MULTI_TENANT",
+                optional_env("GATEWAY_USER_TOKENS")?.is_some(),
+            )?,
         })
     }
 }

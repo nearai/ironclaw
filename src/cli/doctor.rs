@@ -7,12 +7,13 @@
 use std::path::PathBuf;
 
 use crate::bootstrap::ironclaw_base_dir;
+use crate::cli::fmt;
 use crate::settings::Settings;
 
 /// Run all diagnostic checks and print results.
 pub async fn run_doctor_command() -> anyhow::Result<()> {
-    println!("IronClaw Doctor");
-    println!("===============\n");
+    println!();
+    println!("  {}IronClaw Doctor{}", fmt::bold(), fmt::reset());
 
     let mut passed = 0u32;
     let mut failed = 0u32;
@@ -21,7 +22,9 @@ pub async fn run_doctor_command() -> anyhow::Result<()> {
     // Load settings once for checks that need them.
     let settings = Settings::load();
 
-    // ── Settings & core config ─────────────────────────────────
+    // ── Core ─────────────────────────────────────────────────
+
+    section_header("Core");
 
     check(
         "Settings file",
@@ -33,7 +36,7 @@ pub async fn run_doctor_command() -> anyhow::Result<()> {
 
     check(
         "NEAR AI session",
-        check_nearai_session().await,
+        check_nearai_session(&settings).await,
         &mut passed,
         &mut failed,
         &mut skipped,
@@ -63,7 +66,9 @@ pub async fn run_doctor_command() -> anyhow::Result<()> {
         &mut skipped,
     );
 
-    // ── Subsystem configuration checks ─────────────────────────
+    // ── Features ─────────────────────────────────────────────
+
+    section_header("Features");
 
     check(
         "Embeddings",
@@ -121,7 +126,9 @@ pub async fn run_doctor_command() -> anyhow::Result<()> {
         &mut skipped,
     );
 
-    // ── External binary checks ────────────────────────────────
+    // ── External ─────────────────────────────────────────────
+
+    section_header("External");
 
     check(
         "Docker daemon",
@@ -158,7 +165,18 @@ pub async fn run_doctor_command() -> anyhow::Result<()> {
     // ── Summary ───────────────────────────────────────────────
 
     println!();
-    println!("  {passed} passed, {failed} failed, {skipped} skipped");
+    println!(
+        "  {}{} passed{}, {}{} failed{}, {}{} skipped{}",
+        fmt::success(),
+        passed,
+        fmt::reset(),
+        if failed > 0 { fmt::error() } else { fmt::dim() },
+        failed,
+        fmt::reset(),
+        fmt::dim(),
+        skipped,
+        fmt::reset(),
+    );
 
     if failed > 0 {
         println!("\n  Some checks failed. This is normal if you don't use those features.");
@@ -167,21 +185,38 @@ pub async fn run_doctor_command() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Print a section header with a separator and bold group name.
+fn section_header(name: &str) {
+    println!();
+    println!("  {}", fmt::separator(36));
+    println!("  {}{}{}", fmt::bold(), name, fmt::reset());
+    println!();
+}
+
 // ── Individual checks ───────────────────────────────────────
 
 fn check(name: &str, result: CheckResult, passed: &mut u32, failed: &mut u32, skipped: &mut u32) {
     match result {
         CheckResult::Pass(detail) => {
             *passed += 1;
-            println!("  [pass] {name}: {detail}");
+            println!(
+                "{}",
+                fmt::check_line(fmt::StatusKind::Pass, name, &detail, 18)
+            );
         }
         CheckResult::Fail(detail) => {
             *failed += 1;
-            println!("  [FAIL] {name}: {detail}");
+            println!(
+                "{}",
+                fmt::check_line(fmt::StatusKind::Fail, name, &detail, 18)
+            );
         }
         CheckResult::Skip(reason) => {
             *skipped += 1;
-            println!("  [skip] {name}: {reason}");
+            println!(
+                "{}",
+                fmt::check_line(fmt::StatusKind::Skip, name, &reason, 18)
+            );
         }
     }
 }
@@ -215,7 +250,22 @@ fn check_settings_file() -> CheckResult {
 
 // ── NEAR AI session ─────────────────────────────────────────
 
-async fn check_nearai_session() -> CheckResult {
+async fn check_nearai_session(settings: &Settings) -> CheckResult {
+    // Skip entirely when the configured backend is not NEAR AI.
+    let llm_config = match crate::config::LlmConfig::resolve(settings) {
+        Ok(config) => config,
+        Err(e) => {
+            // check_llm_config will report the full error; just skip here.
+            return CheckResult::Skip(format!("LLM config error: {e}"));
+        }
+    };
+    if llm_config.backend != "nearai" {
+        return CheckResult::Skip(format!(
+            "not using NEAR AI backend (backend={})",
+            llm_config.backend
+        ));
+    }
+
     // Check if session file exists
     let session_path = crate::config::llm::default_session_path();
     if !session_path.exists() {
@@ -405,7 +455,11 @@ fn check_routines_config() -> CheckResult {
 fn check_gateway_config(settings: &Settings) -> CheckResult {
     // Use the same resolve() path as runtime so invalid env values
     // (e.g. GATEWAY_PORT=abc) are caught here too.
-    match crate::config::ChannelsConfig::resolve(settings) {
+    let owner_id = match crate::config::resolve_owner_id(settings) {
+        Ok(owner_id) => owner_id,
+        Err(e) => return CheckResult::Fail(format!("config error: {e}")),
+    };
+    match crate::config::ChannelsConfig::resolve(settings, &owner_id) {
         Ok(channels) => match channels.gateway {
             Some(gw) => {
                 if gw.auth_token.is_some() {
@@ -616,9 +670,50 @@ mod tests {
 
     #[tokio::test]
     async fn check_nearai_session_does_not_panic() {
-        let result = check_nearai_session().await;
+        let settings = Settings::default();
+        let result = check_nearai_session(&settings).await;
         match result {
             CheckResult::Pass(_) | CheckResult::Fail(_) | CheckResult::Skip(_) => {}
+        }
+    }
+
+    #[test]
+    fn check_nearai_session_skips_for_non_nearai_backend() {
+        struct EnvGuard(&'static str, Option<String>);
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                // SAFETY: Under ENV_MUTEX.
+                unsafe {
+                    match &self.1 {
+                        Some(val) => std::env::set_var(self.0, val),
+                        None => std::env::remove_var(self.0),
+                    }
+                }
+            }
+        }
+
+        let _mutex = crate::config::helpers::lock_env();
+        let prev = std::env::var("LLM_BACKEND").ok();
+        // SAFETY: Under ENV_MUTEX, no concurrent env access.
+        unsafe {
+            std::env::set_var("LLM_BACKEND", "anthropic");
+        }
+        let _env_guard = EnvGuard("LLM_BACKEND", prev);
+
+        let settings = Settings::default();
+        let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+        let result = rt.block_on(check_nearai_session(&settings));
+        match result {
+            CheckResult::Skip(msg) => {
+                assert!(
+                    msg.contains("backend=anthropic"),
+                    "expected backend name in skip message, got: {msg}"
+                );
+            }
+            other => panic!(
+                "expected Skip for non-nearai backend, got: {}",
+                format_result(&other)
+            ),
         }
     }
 
@@ -717,7 +812,7 @@ mod tests {
 
     #[test]
     fn check_llm_config_shows_nearai_model_for_nearai_backend() {
-        let _guard = crate::config::helpers::ENV_MUTEX.lock().expect("env mutex");
+        let _guard = crate::config::helpers::lock_env();
         // SAFETY: Under ENV_MUTEX, no concurrent env access.
         unsafe {
             std::env::remove_var("LLM_BACKEND");
@@ -744,7 +839,7 @@ mod tests {
 
     #[test]
     fn check_embeddings_disabled_by_default_returns_skip() {
-        let _guard = crate::config::helpers::ENV_MUTEX.lock().expect("env mutex");
+        let _guard = crate::config::helpers::lock_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("EMBEDDING_ENABLED");
@@ -766,7 +861,7 @@ mod tests {
 
     #[test]
     fn check_routines_enabled_by_default() {
-        let _guard = crate::config::helpers::ENV_MUTEX.lock().expect("env mutex");
+        let _guard = crate::config::helpers::lock_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("ROUTINES_ENABLED");

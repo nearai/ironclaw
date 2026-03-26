@@ -26,18 +26,20 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use chrono::TimeZone as _;
+use chrono_tz::Tz;
 use tokio::sync::mpsc;
 
 use crate::channels::OutgoingResponse;
-use crate::db::Database;
 use crate::llm::{ChatMessage, CompletionRequest, LlmProvider, Reasoning};
+use crate::tenant::AdminScope;
 use crate::workspace::Workspace;
 use crate::workspace::hygiene::HygieneConfig;
 
 /// Configuration for the heartbeat runner.
 #[derive(Debug, Clone)]
 pub struct HeartbeatConfig {
-    /// Interval between heartbeat checks.
+    /// Interval between heartbeat checks (used when fire_at is not set).
     pub interval: Duration,
     /// Whether heartbeat is enabled.
     pub enabled: bool,
@@ -47,12 +49,17 @@ pub struct HeartbeatConfig {
     pub notify_user_id: Option<String>,
     /// Channel to notify on heartbeat findings.
     pub notify_channel: Option<String>,
+    /// Fixed time-of-day to fire (24h). When set, interval is ignored.
+    pub fire_at: Option<chrono::NaiveTime>,
     /// Hour (0-23) when quiet hours start.
     pub quiet_hours_start: Option<u32>,
     /// Hour (0-23) when quiet hours end.
     pub quiet_hours_end: Option<u32>,
-    /// Timezone for quiet hours evaluation (IANA name).
+    /// Timezone for fire_at and quiet hours evaluation (IANA name).
     pub timezone: Option<String>,
+    /// When true, cycle through all users with routines instead of
+    /// running heartbeat for a single user. Requires a database store.
+    pub multi_tenant: bool,
 }
 
 impl Default for HeartbeatConfig {
@@ -63,9 +70,11 @@ impl Default for HeartbeatConfig {
             max_failures: 3,
             notify_user_id: None,
             notify_channel: None,
+            fire_at: None,
             quiet_hours_start: None,
             quiet_hours_end: None,
             timezone: None,
+            multi_tenant: false,
         }
     }
 }
@@ -109,6 +118,21 @@ impl HeartbeatConfig {
         self.notify_channel = Some(channel.into());
         self
     }
+
+    /// Set a fixed time-of-day to fire (overrides interval).
+    pub fn with_fire_at(mut self, time: chrono::NaiveTime, tz: Option<String>) -> Self {
+        self.fire_at = Some(time);
+        self.timezone = tz;
+        self
+    }
+
+    /// Resolve timezone string to chrono_tz::Tz (defaults to UTC).
+    fn resolved_tz(&self) -> Tz {
+        self.timezone
+            .as_deref()
+            .and_then(crate::timezone::parse_timezone)
+            .unwrap_or(chrono_tz::UTC)
+    }
 }
 
 /// Result of a heartbeat check.
@@ -124,6 +148,33 @@ pub enum HeartbeatResult {
     Failed(String),
 }
 
+/// Compute how long to sleep until the next occurrence of `fire_at` in `tz`.
+///
+/// If the target time today is still in the future, sleep until then.
+/// Otherwise sleep until the same time tomorrow.
+fn duration_until_next_fire(fire_at: chrono::NaiveTime, tz: Tz) -> Duration {
+    let now = chrono::Utc::now().with_timezone(&tz);
+    let today = now.date_naive();
+
+    // Try to build today's target datetime in the given timezone.
+    // `.earliest()` picks the first occurrence if DST creates ambiguity.
+    let candidate = tz.from_local_datetime(&today.and_time(fire_at)).earliest();
+
+    let target = match candidate {
+        Some(t) if t > now => t,
+        _ => {
+            // Already past (or ambiguous) — schedule for tomorrow
+            let tomorrow = today + chrono::Duration::days(1);
+            tz.from_local_datetime(&tomorrow.and_time(fire_at))
+                .earliest()
+                .unwrap_or_else(|| now + chrono::Duration::days(1))
+        }
+    };
+
+    let secs = (target - now).num_seconds().max(1) as u64;
+    Duration::from_secs(secs)
+}
+
 /// Heartbeat runner for proactive periodic execution.
 pub struct HeartbeatRunner {
     config: HeartbeatConfig,
@@ -131,7 +182,7 @@ pub struct HeartbeatRunner {
     workspace: Arc<Workspace>,
     llm: Arc<dyn LlmProvider>,
     response_tx: Option<mpsc::Sender<OutgoingResponse>>,
-    store: Option<Arc<dyn Database>>,
+    store: Option<AdminScope>,
     consecutive_failures: u32,
 }
 
@@ -160,8 +211,8 @@ impl HeartbeatRunner {
         self
     }
 
-    /// Set the database store for persistent heartbeat conversations.
-    pub fn with_store(mut self, store: Arc<dyn Database>) -> Self {
+    /// Set the admin-scoped database store for persistent heartbeat conversations.
+    pub fn with_store(mut self, store: AdminScope) -> Self {
         self.store = Some(store);
         self
     }
@@ -175,17 +226,39 @@ impl HeartbeatRunner {
             return;
         }
 
-        tracing::info!(
-            "Starting heartbeat loop with interval {:?}",
-            self.config.interval
-        );
+        // Two scheduling modes:
+        //   fire_at → sleep until the next occurrence (recalculated each iteration)
+        //   interval → tokio::time::interval (drift-free, accounts for loop body time)
+        let mut tick_interval = if self.config.fire_at.is_none() {
+            let mut iv = tokio::time::interval(self.config.interval);
+            // Don't fire immediately on startup.
+            iv.tick().await;
+            Some(iv)
+        } else {
+            None
+        };
 
-        let mut interval = tokio::time::interval(self.config.interval);
-        // Don't run immediately on startup
-        interval.tick().await;
+        if let Some(fire_at) = self.config.fire_at {
+            tracing::info!(
+                "Starting heartbeat loop: fire daily at {:?} {:?}",
+                fire_at,
+                self.config.timezone
+            );
+        } else {
+            tracing::info!(
+                "Starting heartbeat loop with interval {:?}",
+                self.config.interval
+            );
+        }
 
         loop {
-            interval.tick().await;
+            if let Some(fire_at) = self.config.fire_at {
+                let sleep_dur = duration_until_next_fire(fire_at, self.config.resolved_tz());
+                tracing::info!("Next heartbeat in {:.1}h", sleep_dur.as_secs_f64() / 3600.0);
+                tokio::time::sleep(sleep_dur).await;
+            } else if let Some(ref mut iv) = tick_interval {
+                iv.tick().await;
+            }
 
             // Skip during quiet hours
             if self.config.is_quiet_hours() {
@@ -327,13 +400,17 @@ impl HeartbeatRunner {
     }
 
     /// Send a notification about heartbeat findings.
-    async fn send_notification(&self, message: &str) {
+    pub(crate) async fn send_notification(&self, message: &str) {
         let Some(ref tx) = self.response_tx else {
             tracing::debug!("No response channel configured for heartbeat notifications");
             return;
         };
 
-        let user_id = self.config.notify_user_id.as_deref().unwrap_or("default");
+        let user_id = self
+            .config
+            .notify_user_id
+            .as_deref()
+            .unwrap_or_else(|| self.workspace.user_id());
 
         // Persist to heartbeat conversation and get thread_id
         let thread_id = if let Some(ref store) = self.store {
@@ -362,6 +439,7 @@ impl HeartbeatRunner {
             attachments: Vec::new(),
             metadata: serde_json::json!({
                 "source": "heartbeat",
+                "owner_id": self.workspace.user_id(),
             }),
         };
 
@@ -419,7 +497,7 @@ pub fn spawn_heartbeat(
     workspace: Arc<Workspace>,
     llm: Arc<dyn LlmProvider>,
     response_tx: Option<mpsc::Sender<OutgoingResponse>>,
-    store: Option<Arc<dyn Database>>,
+    store: Option<AdminScope>,
 ) -> tokio::task::JoinHandle<()> {
     let mut runner = HeartbeatRunner::new(config, hygiene_config, workspace, llm);
     if let Some(tx) = response_tx {
@@ -432,6 +510,179 @@ pub fn spawn_heartbeat(
     tokio::spawn(async move {
         runner.run().await;
     })
+}
+
+/// Spawn a multi-user heartbeat runner that cycles through all users that
+/// own routines (enabled or not). Each tick, it queries the DB for distinct
+/// user_ids, creates a per-user workspace, and runs a heartbeat check for
+/// each user concurrently. Per-user failure counts are tracked independently.
+pub fn spawn_multi_user_heartbeat(
+    config: HeartbeatConfig,
+    hygiene_config: HygieneConfig,
+    llm: Arc<dyn LlmProvider>,
+    response_tx: Option<mpsc::Sender<OutgoingResponse>>,
+    store: AdminScope,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        if !config.enabled {
+            tracing::info!("Multi-user heartbeat is disabled");
+            return;
+        }
+
+        let mut tick_interval = if config.fire_at.is_none() {
+            let mut iv = tokio::time::interval(config.interval);
+            iv.tick().await; // skip immediate tick
+            Some(iv)
+        } else {
+            None
+        };
+
+        // Track consecutive failures per user so we can disable heartbeat
+        // for persistently-failing users (same semantics as single-user mode).
+        let mut user_failures: std::collections::HashMap<String, u32> =
+            std::collections::HashMap::new();
+
+        tracing::info!("Starting multi-user heartbeat loop");
+
+        loop {
+            if let Some(fire_at) = config.fire_at {
+                let sleep_dur = duration_until_next_fire(fire_at, config.resolved_tz());
+                tokio::time::sleep(sleep_dur).await;
+            } else if let Some(ref mut iv) = tick_interval {
+                iv.tick().await;
+            }
+
+            if config.is_quiet_hours() {
+                continue;
+            }
+
+            // Get distinct user_ids from routines
+            let user_ids = match store.list_all_routines().await {
+                Ok(routines) => {
+                    let mut ids: Vec<String> = routines
+                        .iter()
+                        .map(|r| r.user_id.clone())
+                        .collect::<std::collections::HashSet<_>>()
+                        .into_iter()
+                        .collect();
+                    ids.sort();
+                    ids
+                }
+                Err(e) => {
+                    tracing::error!("Multi-user heartbeat: failed to list routines: {}", e);
+                    continue;
+                }
+            };
+
+            // Run user heartbeats concurrently so one slow LLM call doesn't
+            // block others. Cap concurrency to avoid flooding the LLM provider.
+            const MAX_CONCURRENT_HEARTBEATS: usize = 8;
+            let mut join_set = tokio::task::JoinSet::new();
+
+            for user_id in &user_ids {
+                // Skip users that have exceeded max_failures
+                let failures = user_failures.get(user_id).copied().unwrap_or(0);
+                if failures >= config.max_failures {
+                    continue;
+                }
+
+                let workspace = Arc::new(Workspace::new_with_db(user_id, Arc::clone(store.db())));
+
+                // Run memory hygiene per user (same as single-user heartbeat).
+                let hygiene_ws = Arc::clone(&workspace);
+                let hygiene_cfg = hygiene_config.clone();
+                let hygiene_user = user_id.clone();
+                tokio::spawn(async move {
+                    let report =
+                        crate::workspace::hygiene::run_if_due(&hygiene_ws, &hygiene_cfg).await;
+                    if report.had_work() {
+                        tracing::info!(
+                            user_id = hygiene_user,
+                            daily_logs_deleted = report.daily_logs_deleted,
+                            conversation_docs_deleted = report.conversation_docs_deleted,
+                            "multi-user heartbeat: memory hygiene deleted stale documents"
+                        );
+                    }
+                });
+
+                // Drain completed tasks to stay within the concurrency cap.
+                while join_set.len() >= MAX_CONCURRENT_HEARTBEATS {
+                    if let Some(join_result) = join_set.join_next().await {
+                        collect_heartbeat_result(join_result, &mut user_failures, &config);
+                    }
+                }
+
+                let uid = user_id.clone();
+                let cfg = config.clone();
+                let hyg = hygiene_config.clone();
+                let llm_clone = llm.clone();
+                let tx = response_tx.clone();
+                let admin = store.clone();
+
+                join_set.spawn(async move {
+                    let mut runner = HeartbeatRunner::new(cfg, hyg, workspace, llm_clone);
+                    if let Some(tx) = tx {
+                        runner = runner.with_response_channel(tx);
+                    }
+                    runner = runner.with_store(admin);
+
+                    let result = runner.check_heartbeat().await;
+                    if let HeartbeatResult::NeedsAttention(msg) = &result {
+                        runner.send_notification(msg).await;
+                    }
+                    (uid, result)
+                });
+            }
+
+            // Collect remaining results and update failure counts
+            while let Some(join_result) = join_set.join_next().await {
+                collect_heartbeat_result(join_result, &mut user_failures, &config);
+            }
+        }
+    })
+}
+
+/// Process a single JoinSet result from the multi-user heartbeat loop.
+fn collect_heartbeat_result(
+    join_result: Result<(String, HeartbeatResult), tokio::task::JoinError>,
+    user_failures: &mut std::collections::HashMap<String, u32>,
+    config: &HeartbeatConfig,
+) {
+    let (uid, result) = match join_result {
+        Ok(pair) => pair,
+        Err(e) => {
+            tracing::error!("Multi-user heartbeat task panicked: {}", e);
+            return;
+        }
+    };
+    match result {
+        HeartbeatResult::Ok => {
+            tracing::trace!(user_id = uid, "Multi-user heartbeat OK");
+            user_failures.remove(&uid);
+        }
+        HeartbeatResult::NeedsAttention(_) => {
+            tracing::info!(user_id = uid, "Multi-user heartbeat needs attention");
+            user_failures.remove(&uid);
+        }
+        HeartbeatResult::Skipped => {}
+        HeartbeatResult::Failed(err) => {
+            let count = user_failures.entry(uid.clone()).or_insert(0);
+            *count += 1;
+            tracing::error!(
+                user_id = uid,
+                consecutive_failures = *count,
+                "Multi-user heartbeat failed: {}",
+                err
+            );
+            if *count >= config.max_failures {
+                tracing::error!(
+                    user_id = uid,
+                    "Multi-user heartbeat disabled for user after {} consecutive failures",
+                    count
+                );
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -652,8 +903,67 @@ mod tests {
             Arc<crate::workspace::Workspace>,
             Arc<dyn crate::llm::LlmProvider>,
             Option<tokio::sync::mpsc::Sender<crate::channels::OutgoingResponse>>,
-            Option<Arc<dyn crate::db::Database>>,
+            Option<AdminScope>,
         ) -> tokio::task::JoinHandle<()> = spawn_heartbeat;
         let _ = _fn_ptr;
+    }
+
+    // ==================== fire_at scheduling ====================
+
+    #[test]
+    fn test_default_config_has_no_fire_at() {
+        let config = HeartbeatConfig::default();
+        assert!(config.fire_at.is_none());
+        // Interval-based scheduling should be the default
+        assert_eq!(config.interval, Duration::from_secs(30 * 60));
+    }
+
+    #[test]
+    fn test_with_fire_at_builder() {
+        let time = chrono::NaiveTime::from_hms_opt(9, 0, 0).unwrap();
+        let config =
+            HeartbeatConfig::default().with_fire_at(time, Some("Pacific/Auckland".to_string()));
+        assert_eq!(config.fire_at, Some(time));
+        assert_eq!(config.timezone, Some("Pacific/Auckland".to_string()));
+    }
+
+    #[test]
+    fn test_duration_until_next_fire_is_bounded() {
+        // Result must always be between 1 second and ~24 hours
+        let time = chrono::NaiveTime::from_hms_opt(14, 0, 0).unwrap();
+        let dur = duration_until_next_fire(time, chrono_tz::UTC);
+        assert!(dur.as_secs() >= 1, "duration must be at least 1 second");
+        assert!(
+            dur.as_secs() <= 86_401,
+            "duration must be at most ~24 hours, got {}s",
+            dur.as_secs()
+        );
+    }
+
+    #[test]
+    fn test_duration_until_next_fire_dst_timezone_no_panic() {
+        // Use a timezone with DST (US Eastern) — should never panic
+        let tz: Tz = "America/New_York".parse().unwrap();
+        // Test a range of times including midnight boundaries
+        for hour in [0, 2, 3, 12, 23] {
+            let time = chrono::NaiveTime::from_hms_opt(hour, 30, 0).unwrap();
+            let dur = duration_until_next_fire(time, tz);
+            assert!(dur.as_secs() >= 1);
+            assert!(dur.as_secs() <= 86_401);
+        }
+    }
+
+    #[test]
+    fn test_resolved_tz_defaults_to_utc() {
+        let config = HeartbeatConfig::default();
+        assert_eq!(config.resolved_tz(), chrono_tz::UTC);
+    }
+
+    #[test]
+    fn test_resolved_tz_parses_iana() {
+        let time = chrono::NaiveTime::from_hms_opt(9, 0, 0).unwrap();
+        let config =
+            HeartbeatConfig::default().with_fire_at(time, Some("Europe/London".to_string()));
+        assert_eq!(config.resolved_tz(), chrono_tz::Europe::London);
     }
 }

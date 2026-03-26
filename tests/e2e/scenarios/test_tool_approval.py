@@ -130,3 +130,59 @@ async def test_approval_params_toggle(page):
     await toggle.click()
     await page.wait_for_timeout(300)
     assert await params.is_hidden(), "Parameters should be hidden after second toggle"
+
+
+async def test_waiting_for_approval_message_no_error_prefix(page):
+    """Verify that input submitted while awaiting approval shows non-error status with tool context.
+
+    Trigger a real approval-needed tool call, then attempt to send another message while
+    approval is pending. The backend should reject the second input with a non-error
+    status that includes the pending tool context.
+    """
+    assistant_messages = page.locator(SEL["message_assistant"])
+    chat_input = page.locator(SEL["chat_input"])
+    await chat_input.wait_for(state="visible", timeout=5000)
+
+    # Trigger a real HTTP tool call that pauses for approval in the default E2E harness.
+    await chat_input.fill("make approval post approval-required")
+    await chat_input.press("Enter")
+
+    card = page.locator(SEL["approval_card"]).last
+    await card.wait_for(state="visible", timeout=10000)
+
+    tool_name = await card.locator(".approval-tool-name").text_content()
+    desc_text = await card.locator(".approval-description").text_content()
+    assert tool_name == "http"
+    assert desc_text is not None and "HTTP requests to external APIs" in desc_text
+
+    # With the thread now genuinely awaiting approval, the next message should be rejected
+    # as a non-error pending status.
+    initial_count = await assistant_messages.count()
+    await chat_input.fill("send another message now")
+    await chat_input.press("Enter")
+
+    await page.wait_for_function(
+        f"() => document.querySelectorAll('{SEL['message_assistant']}').length > {initial_count}",
+        timeout=10000,
+    )
+
+    last_msg = assistant_messages.last.locator(".message-content")
+    msg_text = await last_msg.inner_text()
+
+    # Verify no "Error:" prefix
+    assert not msg_text.lower().startswith("error:"), (
+        f"Approval rejection must NOT have 'Error:' prefix. Got: {msg_text!r}"
+    )
+
+    # Verify it contains "waiting for approval"
+    assert "waiting for approval" in msg_text.lower(), (
+        f"Expected 'Waiting for approval' text. Got: {msg_text!r}"
+    )
+
+    # Verify it contains the tool name and description
+    assert "http" in msg_text.lower(), (
+        f"Expected tool name 'http' in message. Got: {msg_text!r}"
+    )
+    assert "HTTP requests to external APIs" in msg_text, (
+        f"Expected tool description in message. Got: {msg_text!r}"
+    )

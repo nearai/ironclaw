@@ -231,6 +231,7 @@ pub fn convert_messages(messages: &[OpenAiMessage]) -> Result<Vec<ChatMessage>, 
                                 name: tc.function.name.clone(),
                                 arguments: serde_json::from_str(&tc.function.arguments)
                                     .unwrap_or(serde_json::Value::Object(Default::default())),
+                                reasoning: None,
                             })
                             .collect();
                         Ok(ChatMessage::assistant_with_tool_calls(
@@ -419,15 +420,54 @@ fn parse_stop(val: &serde_json::Value) -> Option<Vec<String>> {
     }
 }
 
+fn build_completion_request(
+    req: &OpenAiChatRequest,
+    messages: Vec<ChatMessage>,
+) -> CompletionRequest {
+    let mut comp_req = CompletionRequest::new(messages).with_model(req.model.clone());
+    if let Some(t) = req.temperature {
+        comp_req = comp_req.with_temperature(t);
+    }
+    if let Some(mt) = req.max_tokens {
+        comp_req = comp_req.with_max_tokens(mt);
+    }
+    if let Some(stops) = req.stop.as_ref().and_then(parse_stop) {
+        comp_req.stop_sequences = Some(stops);
+    }
+    comp_req
+}
+
+fn build_tool_request(
+    req: &OpenAiChatRequest,
+    messages: Vec<ChatMessage>,
+) -> ToolCompletionRequest {
+    let tools = convert_tools(req.tools.as_deref().unwrap_or(&[]));
+    let mut tool_req = ToolCompletionRequest::new(messages, tools).with_model(req.model.clone());
+    if let Some(t) = req.temperature {
+        tool_req = tool_req.with_temperature(t);
+    }
+    if let Some(mt) = req.max_tokens {
+        tool_req = tool_req.with_max_tokens(mt);
+    }
+    if let Some(stops) = req.stop.as_ref().and_then(parse_stop) {
+        tool_req = tool_req.with_stop_sequences(stops);
+    }
+    if let Some(choice) = req.tool_choice.as_ref().and_then(normalize_tool_choice) {
+        tool_req = tool_req.with_tool_choice(choice);
+    }
+    tool_req
+}
+
 // ---------------------------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------------------------
 
 pub async fn chat_completions_handler(
     State(state): State<Arc<GatewayState>>,
+    super::auth::AuthenticatedUser(user): super::auth::AuthenticatedUser,
     Json(req): Json<OpenAiChatRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<OpenAiErrorResponse>)> {
-    if !state.chat_rate_limiter.check() {
+    if !state.chat_rate_limiter.check(&user.user_id) {
         return Err(openai_error(
             StatusCode::TOO_MANY_REQUESTS,
             "Rate limit exceeded. Please try again later.",
@@ -476,19 +516,7 @@ pub async fn chat_completions_handler(
     let created = unix_timestamp();
 
     if has_tools {
-        let tools = convert_tools(req.tools.as_deref().unwrap_or(&[]));
-        let mut tool_req = ToolCompletionRequest::new(messages, tools).with_model(req.model);
-        if let Some(t) = req.temperature {
-            tool_req = tool_req.with_temperature(t);
-        }
-        if let Some(mt) = req.max_tokens {
-            tool_req = tool_req.with_max_tokens(mt);
-        }
-        if let Some(ref tc) = req.tool_choice
-            && let Some(choice) = normalize_tool_choice(tc)
-        {
-            tool_req = tool_req.with_tool_choice(choice);
-        }
+        let tool_req = build_tool_request(&req, messages);
 
         let resp = llm
             .complete_with_tools(tool_req)
@@ -527,16 +555,7 @@ pub async fn chat_completions_handler(
 
         Ok(Json(response).into_response())
     } else {
-        let mut comp_req = CompletionRequest::new(messages).with_model(req.model);
-        if let Some(t) = req.temperature {
-            comp_req = comp_req.with_temperature(t);
-        }
-        if let Some(mt) = req.max_tokens {
-            comp_req = comp_req.with_max_tokens(mt);
-        }
-        if let Some(ref stop_val) = req.stop {
-            comp_req.stop_sequences = parse_stop(stop_val);
-        }
+        let comp_req = build_completion_request(&req, messages);
 
         let resp = llm.complete(comp_req).await.map_err(map_llm_error)?;
         let model_name = llm.effective_model_name(Some(requested_model.as_str()));
@@ -596,35 +615,14 @@ async fn handle_streaming(
     }
 
     let llm_result = if has_tools {
-        let tools = convert_tools(req.tools.as_deref().unwrap_or(&[]));
-        let mut tool_req = ToolCompletionRequest::new(messages, tools).with_model(req.model);
-        if let Some(t) = req.temperature {
-            tool_req = tool_req.with_temperature(t);
-        }
-        if let Some(mt) = req.max_tokens {
-            tool_req = tool_req.with_max_tokens(mt);
-        }
-        if let Some(ref tc) = req.tool_choice
-            && let Some(choice) = normalize_tool_choice(tc)
-        {
-            tool_req = tool_req.with_tool_choice(choice);
-        }
+        let tool_req = build_tool_request(&req, messages);
         LlmResult::WithTools(
             llm.complete_with_tools(tool_req)
                 .await
                 .map_err(map_llm_error)?,
         )
     } else {
-        let mut comp_req = CompletionRequest::new(messages).with_model(req.model);
-        if let Some(t) = req.temperature {
-            comp_req = comp_req.with_temperature(t);
-        }
-        if let Some(mt) = req.max_tokens {
-            comp_req = comp_req.with_max_tokens(mt);
-        }
-        if let Some(ref stop_val) = req.stop {
-            comp_req.stop_sequences = parse_stop(stop_val);
-        }
+        let comp_req = build_completion_request(&req, messages);
         LlmResult::Simple(llm.complete(comp_req).await.map_err(map_llm_error)?)
     };
     let model_name = llm.effective_model_name(Some(requested_model.as_str()));
@@ -957,6 +955,7 @@ mod tests {
             id: "call_abc".to_string(),
             name: "search".to_string(),
             arguments: serde_json::json!({"query": "rust"}),
+            reasoning: None,
         }];
 
         let converted = convert_tool_calls_to_openai(&calls);

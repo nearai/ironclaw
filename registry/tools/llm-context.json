@@ -2,7 +2,7 @@
   "name": "llm-context",
   "display_name": "LLM Context",
   "kind": "tool",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "wit_version": "0.3.0",
   "description": "Fetch pre-extracted web content from Brave Search for grounding LLM answers (RAG, fact-checking)",
   "keywords": [
@@ -21,8 +21,8 @@
   },
   "artifacts": {
     "wasm32-wasip2": {
-      "url": "https://github.com/nearai/ironclaw/releases/latest/download/llm-context-wasm32-wasip2.tar.gz",
-      "sha256": "581cc5867ef3b75116b7ddc8161e63dd92befe2b53e6ad8213c007639aa243c3"
+      "url": "https://github.com/nearai/ironclaw/releases/download/ironclaw-v0.22.0/tool-llm-context-0.1.1-wasm32-wasip2.tar.gz",
+      "sha256": "9b19e2fd05dbbbe3c8bd55309a91db09124e8415eb0f767828b6e10b55771e63"
     }
   },
   "auth_summary": {

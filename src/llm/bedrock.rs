@@ -176,8 +176,11 @@ impl LlmProvider for BedrockProvider {
             builder = builder.tool_config(tc);
         }
 
-        if let Some(config) = build_inference_config(request.temperature, request.max_tokens, None)
-        {
+        if let Some(config) = build_inference_config(
+            request.temperature,
+            request.max_tokens,
+            request.stop_sequences.as_deref(),
+        ) {
             builder = builder.inference_config(config);
         }
 
@@ -519,6 +522,7 @@ fn extract_content_blocks(
                     id: tu.tool_use_id().to_string(),
                     name: tu.name().to_string(),
                     arguments: document_to_json(tu.input()),
+                    reasoning: None,
                 });
             }
             // Ignore reasoning, citations, images, etc.
@@ -756,11 +760,13 @@ mod tests {
             id: "call_1".to_string(),
             name: "echo".to_string(),
             arguments: serde_json::json!({"text": "hi"}),
+            reasoning: None,
         };
         let tc2 = crate::llm::provider::ToolCall {
             id: "call_2".to_string(),
             name: "time".to_string(),
             arguments: serde_json::json!({}),
+            reasoning: None,
         };
 
         let messages = vec![
@@ -799,6 +805,7 @@ mod tests {
             id: "call_1".to_string(),
             name: "search".to_string(),
             arguments: serde_json::json!({"query": "test"}),
+            reasoning: None,
         };
 
         let messages = vec![
@@ -822,6 +829,7 @@ mod tests {
             id: "call_1".to_string(),
             name: "echo".to_string(),
             arguments: serde_json::json!({}),
+            reasoning: None,
         };
 
         let messages = vec![
@@ -986,11 +994,13 @@ mod tests {
             id: "call_abc".to_string(),
             name: "get_weather".to_string(),
             arguments: serde_json::json!({"city": "NYC"}),
+            reasoning: None,
         };
         let tc2 = crate::llm::provider::ToolCall {
             id: "call_def".to_string(),
             name: "get_time".to_string(),
             arguments: serde_json::json!({"tz": "EST"}),
+            reasoning: None,
         };
 
         let messages = vec![

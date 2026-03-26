@@ -10,7 +10,7 @@ use clap::Subcommand;
 use uuid::Uuid;
 
 use crate::agent::routine::{
-    NotifyConfig, Routine, RoutineAction, RoutineGuardrails, Trigger, next_cron_fire,
+    NotifyConfig, Routine, RoutineAction, RoutineGuardrails, RunStatus, Trigger, next_cron_fire,
 };
 use crate::db::Database;
 
@@ -251,15 +251,26 @@ async fn list(
     );
     println!("{}", "-".repeat(130));
 
+    // Fetch last-run status for all routines in a single batch query
+    let routine_ids: Vec<Uuid> = filtered.iter().map(|r| r.id).collect();
+    let last_run_results = db
+        .batch_get_last_run_status(&routine_ids)
+        .await
+        .unwrap_or_default();
+
     for r in &filtered {
-        let status = if r.enabled {
-            if r.consecutive_failures > 0 {
-                format!("err({})", r.consecutive_failures)
-            } else {
-                "active".to_string()
-            }
-        } else {
+        let last_run_status = last_run_results.get(&r.id).copied();
+
+        let status = if !r.enabled {
             "disabled".to_string()
+        } else if last_run_status == Some(RunStatus::Running) {
+            "running".to_string()
+        } else if r.consecutive_failures > 0 {
+            format!("err({})", r.consecutive_failures)
+        } else if last_run_status == Some(RunStatus::Attention) {
+            "attention".to_string()
+        } else {
+            "active".to_string()
         };
 
         let next_fire = r
@@ -291,6 +302,16 @@ async fn list(
 }
 
 // ── Create ──────────────────────────────────────────────────
+
+fn cli_notify_config(notify_channel: Option<String>) -> NotifyConfig {
+    NotifyConfig {
+        channel: notify_channel,
+        user: None,
+        on_attention: true,
+        on_failure: true,
+        on_success: false,
+    }
+}
 
 #[allow(clippy::too_many_arguments)]
 async fn create(
@@ -330,21 +351,15 @@ async fn create(
             prompt: prompt.to_string(),
             context_paths: Vec::new(),
             max_tokens: 4096,
-            use_tools: false,
-            max_tool_rounds: 0,
+            use_tools: true,
+            max_tool_rounds: 3,
         },
         guardrails: RoutineGuardrails {
             cooldown: std::time::Duration::from_secs(cooldown_secs),
             max_concurrent: 1,
             dedup_window: None,
         },
-        notify: NotifyConfig {
-            channel: notify_channel,
-            user: user_id.to_string(),
-            on_attention: true,
-            on_failure: true,
-            on_success: false,
-        },
+        notify: cli_notify_config(notify_channel),
         last_run_at: None,
         next_fire_at: next_fire,
         run_count: 0,
@@ -681,6 +696,7 @@ fn truncate(s: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::routine::RoutineAction;
 
     #[test]
     fn format_relative_future() {
@@ -728,5 +744,59 @@ mod tests {
         assert!(result.ends_with(".."), "got: {result}");
         // Must be valid UTF-8 (would have panicked otherwise).
         assert!(result.is_char_boundary(result.len()));
+    }
+
+    #[test]
+    fn cli_notify_config_defaults_to_runtime_target_resolution() {
+        let notify = cli_notify_config(Some("telegram".to_string()));
+        assert_eq!(notify.channel.as_deref(), Some("telegram")); // safety: test-only assertion
+        assert_eq!(notify.user, None); // safety: test-only assertion
+        assert!(notify.on_attention); // safety: test-only assertion
+        assert!(notify.on_failure); // safety: test-only assertion
+        assert!(!notify.on_success); // safety: test-only assertion
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn cli_create_defaults_lightweight_routines_to_tools_enabled() {
+        let harness = crate::testing::TestHarnessBuilder::new().build().await;
+        let db = harness.db.clone();
+
+        run_routines_command(
+            RoutinesCommand::Create {
+                name: "cli-digest".to_string(),
+                schedule: "0 0 9 * * *".to_string(),
+                prompt: "Prepare the morning digest.".to_string(),
+                description: "CLI created routine".to_string(),
+                timezone: Some("UTC".to_string()),
+                cooldown: 300,
+                notify_channel: None,
+            },
+            db.clone(),
+            "user1",
+        )
+        .await
+        .expect("create routine");
+
+        let routine = db
+            .get_routine_by_name("user1", "cli-digest")
+            .await
+            .expect("get routine by name")
+            .expect("cli-digest should exist");
+
+        match routine.action {
+            RoutineAction::Lightweight {
+                use_tools,
+                max_tool_rounds,
+                ..
+            } => {
+                assert!(
+                    use_tools,
+                    "CLI-created lightweight routines should default to tools"
+                );
+                assert_eq!(max_tool_rounds, 3);
+            }
+            other => panic!("expected lightweight action, got {other:?}"),
+        }
     }
 }

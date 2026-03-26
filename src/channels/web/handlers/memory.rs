@@ -9,8 +9,27 @@ use axum::{
 };
 use serde::Deserialize;
 
+use crate::channels::web::auth::{AuthenticatedUser, UserIdentity};
 use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::*;
+use crate::workspace::Workspace;
+
+/// Resolve the workspace for the authenticated user.
+///
+/// Prefers `workspace_pool` (multi-user mode) when available, falling back
+/// to the single-user `state.workspace`.
+pub(crate) async fn resolve_workspace(
+    state: &GatewayState,
+    user: &UserIdentity,
+) -> Result<Arc<Workspace>, (StatusCode, String)> {
+    if let Some(ref pool) = state.workspace_pool {
+        return Ok(pool.get_or_create(user).await);
+    }
+    state.workspace.as_ref().cloned().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Workspace not available".to_string(),
+    ))
+}
 
 #[derive(Deserialize)]
 pub struct TreeQuery {
@@ -20,12 +39,10 @@ pub struct TreeQuery {
 
 pub async fn memory_tree_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
     Query(_query): Query<TreeQuery>,
 ) -> Result<Json<MemoryTreeResponse>, (StatusCode, String)> {
-    let workspace = state.workspace.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Workspace not available".to_string(),
-    ))?;
+    let workspace = resolve_workspace(&state, &user).await?;
 
     // Build tree from list_all (flat list of all paths)
     let all_paths = workspace
@@ -68,12 +85,10 @@ pub struct ListQuery {
 
 pub async fn memory_list_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
     Query(query): Query<ListQuery>,
 ) -> Result<Json<MemoryListResponse>, (StatusCode, String)> {
-    let workspace = state.workspace.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Workspace not available".to_string(),
-    ))?;
+    let workspace = resolve_workspace(&state, &user).await?;
 
     let path = query.path.as_deref().unwrap_or("");
     let entries = workspace
@@ -104,12 +119,10 @@ pub struct ReadQuery {
 
 pub async fn memory_read_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
     Query(query): Query<ReadQuery>,
 ) -> Result<Json<MemoryReadResponse>, (StatusCode, String)> {
-    let workspace = state.workspace.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Workspace not available".to_string(),
-    ))?;
+    let workspace = resolve_workspace(&state, &user).await?;
 
     let doc = workspace
         .read(&query.path)
@@ -125,32 +138,73 @@ pub async fn memory_read_handler(
 
 pub async fn memory_write_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
     Json(req): Json<MemoryWriteRequest>,
 ) -> Result<Json<MemoryWriteResponse>, (StatusCode, String)> {
-    let workspace = state.workspace.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Workspace not available".to_string(),
-    ))?;
+    let workspace = resolve_workspace(&state, &user).await?;
 
-    workspace
-        .write(&req.path, &req.content)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    // Route through layer-aware methods when a layer is specified.
+    //
+    // Note: unlike MemoryWriteTool, this endpoint does NOT block writes to
+    // identity files (IDENTITY.md, SOUL.md, etc.). The HTTP API is an
+    // authenticated admin interface; the supervisor uses it to seed identity
+    // files at startup. Identity-file protection is enforced at the tool
+    // layer (LLM-facing) where the write originates from an untrusted agent.
+    if let Some(ref layer_name) = req.layer {
+        let result = if req.append {
+            workspace
+                .append_to_layer(layer_name, &req.path, &req.content, req.force)
+                .await
+        } else {
+            workspace
+                .write_to_layer(layer_name, &req.path, &req.content, req.force)
+                .await
+        }
+        .map_err(|e| {
+            use crate::error::WorkspaceError;
+            let status = match &e {
+                WorkspaceError::LayerNotFound { .. } => StatusCode::BAD_REQUEST,
+                WorkspaceError::LayerReadOnly { .. } => StatusCode::FORBIDDEN,
+                WorkspaceError::PrivacyRedirectFailed => StatusCode::UNPROCESSABLE_ENTITY,
+                _ => StatusCode::INTERNAL_SERVER_ERROR,
+            };
+            (status, e.to_string())
+        })?;
+        return Ok(Json(MemoryWriteResponse {
+            path: req.path,
+            status: "written",
+            redirected: Some(result.redirected),
+            actual_layer: Some(result.actual_layer),
+        }));
+    }
+
+    // Non-layer path: honor the append field
+    if req.append {
+        workspace
+            .append(&req.path, &req.content)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    } else {
+        workspace
+            .write(&req.path, &req.content)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    }
 
     Ok(Json(MemoryWriteResponse {
         path: req.path,
         status: "written",
+        redirected: None,
+        actual_layer: None,
     }))
 }
 
 pub async fn memory_search_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
     Json(req): Json<MemorySearchRequest>,
 ) -> Result<Json<MemorySearchResponse>, (StatusCode, String)> {
-    let workspace = state.workspace.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Workspace not available".to_string(),
-    ))?;
+    let workspace = resolve_workspace(&state, &user).await?;
 
     let limit = req.limit.unwrap_or(10);
     let results = workspace
@@ -159,10 +213,10 @@ pub async fn memory_search_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     let hits: Vec<SearchHit> = results
-        .into_iter()
+        .iter()
         .map(|r| SearchHit {
-            path: r.document_path,
-            content: r.content,
+            path: r.document_id.to_string(),
+            content: r.content.clone(),
             score: r.score as f64,
         })
         .collect();

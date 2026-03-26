@@ -301,7 +301,11 @@ impl Tool for SkillInstallTool {
         let content = if let Some(raw) = params.get("content").and_then(|v| v.as_str()) {
             // Direct content provided
             raw.to_string()
-        } else if let Some(url) = params.get("url").and_then(|v| v.as_str()) {
+        } else if let Some(url) = params
+            .get("url")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+        {
             // Fetch from explicit URL
             fetch_skill_content(url).await?
         } else {
@@ -1296,5 +1300,24 @@ mod tests {
                 url
             );
         }
+    }
+
+    #[test]
+    fn test_empty_url_param_is_treated_as_absent() {
+        // LLMs sometimes pass "" for optional parameters instead of omitting them.
+        // Before the fix, url: "" would match Some("") and attempt to fetch from an
+        // empty URL (failing with an invalid URL error) instead of falling through to
+        // the catalog lookup. The full execute path cannot be tested here without a
+        // real catalog and database, so this test verifies the parameter filtering
+        // behaviour directly.
+        let params = serde_json::json!({"name": "my-skill", "url": ""});
+        let url = params
+            .get("url")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty());
+        assert!(
+            url.is_none(),
+            "empty url string should be treated as absent"
+        );
     }
 }
