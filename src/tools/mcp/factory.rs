@@ -79,45 +79,37 @@ pub async fn create_client_from_config(
             Err(McpFactoryError::UnixNotSupported { name: server_name })
         }
         EffectiveTransport::Http => {
+            // Authenticated (OAuth) path: tokens exist or server requires auth.
             if let Some(ref secrets) = secrets {
                 let has_tokens =
                     crate::tools::mcp::is_authenticated(&server, secrets, user_id).await;
 
                 if has_tokens || server.requires_auth() {
-                    Ok(McpClient::new_authenticated(
+                    return Ok(McpClient::new_authenticated(
                         server,
                         Arc::clone(session_manager),
                         Arc::clone(secrets),
                         user_id,
-                    ))
-                } else {
-                    let transport = Arc::new(
-                        HttpMcpTransport::new(server.url.clone(), server.name.clone())
-                            .with_session_manager(Arc::clone(session_manager)),
-                    );
-                    Ok(McpClient::new_with_transport(
-                        server.name.clone(),
-                        transport,
-                        Some(Arc::clone(session_manager)),
-                        Some(Arc::clone(secrets)),
-                        user_id,
-                        Some(server),
-                    ))
+                    ));
                 }
-            } else {
-                let transport = Arc::new(
-                    HttpMcpTransport::new(server.url.clone(), server.name.clone())
-                        .with_session_manager(Arc::clone(session_manager)),
-                );
-                Ok(McpClient::new_with_transport(
-                    server.name.clone(),
-                    transport,
-                    Some(Arc::clone(session_manager)),
-                    None,
-                    user_id,
-                    Some(server),
-                ))
             }
+
+            // Non-OAuth HTTP: wire the session manager into the *transport* so
+            // it captures `Mcp-Session-Id` from responses. Passing it only to
+            // the client (via `with_session_manager`) is not enough — the
+            // transport must know about it to read/write the header.
+            let transport = Arc::new(
+                HttpMcpTransport::new(server.url.clone(), server.name.clone())
+                    .with_session_manager(Arc::clone(session_manager)),
+            );
+            Ok(McpClient::new_with_transport(
+                server.name.clone(),
+                transport,
+                Some(Arc::clone(session_manager)),
+                secrets,
+                user_id,
+                Some(server),
+            ))
         }
     }
 }
@@ -202,9 +194,7 @@ mod tests {
 
         // Pre-create a session entry so that update_session_id has something to update.
         // In production, the MCP initialize handshake calls get_or_create before responses arrive.
-        session_manager
-            .get_or_create("session-test", &url)
-            .await;
+        session_manager.get_or_create("session-test", &url).await;
 
         // Send a request through the client's transport to trigger session capture.
         use crate::tools::mcp::protocol::McpRequest;

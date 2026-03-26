@@ -117,6 +117,11 @@ impl McpClient {
     /// The config must use HTTP transport (the default); for stdio/UDS use `new_with_transport`.
     ///
     /// Returns an error if the config uses a non-HTTP transport.
+    ///
+    /// **Note:** The session manager is NOT wired into the transport. For
+    /// production use, prefer `create_client_from_config()` which constructs
+    /// the transport with session tracking.
+    #[cfg(test)]
     pub fn new_with_config(config: McpServerConfig) -> Result<Self, ToolError> {
         if !matches!(
             config.effective_transport(),
@@ -214,7 +219,14 @@ impl McpClient {
         }
     }
 
-    /// Attach a session manager for Streamable HTTP session tracking.
+    /// Attach a session manager to the **client** only.
+    ///
+    /// **Warning:** This does NOT wire the session manager into the underlying
+    /// `HttpMcpTransport`, so the transport will not capture `Mcp-Session-Id`
+    /// from responses. For production use, construct the transport with
+    /// `HttpMcpTransport::with_session_manager()` and pass it to
+    /// `new_with_transport()` instead. See `create_client_from_config()`.
+    #[cfg(test)]
     pub fn with_session_manager(mut self, session_manager: Arc<McpSessionManager>) -> Self {
         self.session_manager = Some(session_manager);
         self
