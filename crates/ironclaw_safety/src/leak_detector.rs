@@ -529,7 +529,7 @@ fn default_patterns() -> Vec<LeakPattern> {
         // Anthropic OAuth tokens (sk-ant-oat<NN>-<base64url, 50+ chars>)
         LeakPattern {
             name: "anthropic_oauth_token".to_string(),
-            regex: Regex::new(r"sk-ant-oat\d{2}-[a-zA-Z0-9_-]{50,}").unwrap(), // safety: hardcoded literal
+            regex: Regex::new(r"\bsk-ant-oat\d{2}-[a-zA-Z0-9_-]{50,}").unwrap(), // safety: hardcoded literal
             severity: LeakSeverity::Critical,
             action: LeakAction::Block,
         },
