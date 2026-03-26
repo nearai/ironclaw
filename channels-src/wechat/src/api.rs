@@ -2,9 +2,9 @@ use base64::Engine as _;
 
 use crate::near::agent::channel_host;
 use crate::types::{
-    BaseInfo, GetUpdatesRequest, GetUpdatesResponse, MessageItem, OutboundWechatMessage,
-    SendMessageRequest, TextItem, WechatConfig, MESSAGE_ITEM_TEXT, MESSAGE_STATE_FINISH,
-    MESSAGE_TYPE_BOT,
+    BaseInfo, GetConfigRequest, GetConfigResponse, GetUpdatesRequest, GetUpdatesResponse,
+    MessageItem, OutboundWechatMessage, SendMessageRequest, SendTypingRequest, SendTypingResponse,
+    TextItem, WechatConfig, MESSAGE_ITEM_TEXT, MESSAGE_STATE_FINISH, MESSAGE_TYPE_BOT,
 };
 
 fn base_info() -> BaseInfo {
@@ -109,6 +109,79 @@ pub fn send_text_message(
         return Err(format!(
             "sendMessage returned {}: {}",
             response.status, body
+        ));
+    }
+
+    Ok(())
+}
+
+pub fn get_config(
+    config: &WechatConfig,
+    ilink_user_id: &str,
+    context_token: Option<&str>,
+) -> Result<GetConfigResponse, String> {
+    let body = serde_json::to_vec(&GetConfigRequest {
+        ilink_user_id: ilink_user_id.to_string(),
+        context_token: context_token.map(str::to_string),
+        base_info: base_info(),
+    })
+    .map_err(|e| format!("Failed to encode getConfig request: {e}"))?;
+    let headers = request_headers(&body);
+    let url = format!(
+        "{}ilink/bot/getconfig",
+        ensure_trailing_slash(&config.base_url)
+    );
+
+    let response = channel_host::http_request("POST", &url, &headers, Some(&body), Some(10_000))
+        .map_err(|e| format!("getConfig request failed: {e}"))?;
+
+    if response.status != 200 {
+        let body = String::from_utf8_lossy(&response.body);
+        return Err(format!("getConfig returned {}: {}", response.status, body));
+    }
+
+    serde_json::from_slice(&response.body)
+        .map_err(|e| format!("Failed to parse getConfig response: {e}"))
+}
+
+pub fn send_typing(
+    config: &WechatConfig,
+    ilink_user_id: &str,
+    typing_ticket: &str,
+    status: i32,
+) -> Result<(), String> {
+    let body = serde_json::to_vec(&SendTypingRequest {
+        ilink_user_id: ilink_user_id.to_string(),
+        typing_ticket: typing_ticket.to_string(),
+        status,
+        base_info: base_info(),
+    })
+    .map_err(|e| format!("Failed to encode sendTyping request: {e}"))?;
+    let headers = request_headers(&body);
+    let url = format!(
+        "{}ilink/bot/sendtyping",
+        ensure_trailing_slash(&config.base_url)
+    );
+
+    let response = channel_host::http_request("POST", &url, &headers, Some(&body), Some(10_000))
+        .map_err(|e| format!("sendTyping request failed: {e}"))?;
+
+    if response.status != 200 {
+        let body = String::from_utf8_lossy(&response.body);
+        return Err(format!("sendTyping returned {}: {}", response.status, body));
+    }
+
+    let parsed: SendTypingResponse = serde_json::from_slice(&response.body)
+        .map_err(|e| format!("Failed to parse sendTyping response: {e}"))?;
+
+    if parsed.ret.unwrap_or(0) != 0 {
+        let errmsg = parsed
+            .errmsg
+            .as_deref()
+            .unwrap_or("unknown WeChat sendTyping error");
+        return Err(format!(
+            "sendTyping returned ret={} errmsg={errmsg}",
+            parsed.ret.unwrap_or(-1)
         ));
     }
 

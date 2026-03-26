@@ -596,7 +596,7 @@ pub async fn start_server(
                  style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; \
                  font-src https://fonts.gstatic.com; \
                  connect-src 'self'; \
-                 img-src 'self' data:; \
+                 img-src 'self' data: https://liteapp.weixin.qq.com; \
                  object-src 'none'; \
                  frame-ancestors 'none'; \
                  base-uri 'self'; \
@@ -3011,6 +3011,35 @@ mod tests {
     }
 
     #[test]
+    fn test_wechat_active_channel_does_not_require_pairing_status() -> Result<(), String> {
+        let ext = InstalledExtension {
+            name: "wechat".to_string(),
+            kind: ExtensionKind::WasmChannel,
+            display_name: Some("WeChat".to_string()),
+            description: None,
+            url: None,
+            authenticated: true,
+            active: true,
+            tools: Vec::new(),
+            needs_setup: true,
+            has_auth: false,
+            installed: true,
+            activation_error: None,
+            version: None,
+        };
+
+        let status = classify_wasm_channel_activation(&ext, false, false);
+        if status != Some(ExtensionActivationStatus::Active) {
+            return Err(format!(
+                "wechat should be active after QR login, got {:?}",
+                status
+            ));
+        }
+
+        Ok(())
+    }
+
+    #[test]
     fn test_channel_relay_activation_status_is_preserved() -> Result<(), String> {
         let relay = InstalledExtension {
             name: "signal".to_string(),
@@ -3242,7 +3271,7 @@ mod tests {
                     crate::extensions::InteractiveLoginStartResult {
                         session_id: "wechat-session-42".to_string(),
                         status: "pending".to_string(),
-                        message: "Scan the QR code in WeChat to finish connecting.".to_string(),
+                        message: "Open the WeChat QR page to continue.".to_string(),
                         qr_code_url: Some("https://qr.example/42".to_string()),
                         instructions: Some(
                             "Keep this window open while you scan and confirm on your phone."
@@ -3604,6 +3633,10 @@ mod tests {
         assert!(
             csp_str.contains("object-src 'none'"),
             "CSP must contain object-src 'none'"
+        );
+        assert!(
+            csp_str.contains("img-src 'self' data: https://liteapp.weixin.qq.com"),
+            "CSP must allow WeChat QR images from liteapp.weixin.qq.com"
         );
         assert!(
             csp_str.contains("frame-ancestors 'none'"),

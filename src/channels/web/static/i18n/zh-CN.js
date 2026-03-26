@@ -54,7 +54,9 @@ I18n.register('zh-CN', {
   'status.restart': '重启',
   'status.active': '已激活',
   'status.installed': '已安装',
+  'status.configured': '已配置',
   'status.awaitingPairing': '等待配对',
+  'status.pairingShort': '配对中',
   
   // 仪表盘
   'dashboard.connections': '连接数',

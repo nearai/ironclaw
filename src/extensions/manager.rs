@@ -7062,7 +7062,7 @@ mod tests {
                     InteractiveLoginStartResult {
                         session_id: "wechat-session-1".to_string(),
                         status: "pending".to_string(),
-                        message: "Scan the QR code in WeChat to finish connecting.".to_string(),
+                        message: "Open the WeChat QR page to continue.".to_string(),
                         qr_code_url: Some("https://qr.example/one".to_string()),
                         instructions: Some(
                             "Keep this window open while you scan and confirm on your phone."

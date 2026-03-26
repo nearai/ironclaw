@@ -76,6 +76,7 @@ The point of this phase is to keep the channel aligned with upstream behavior wh
 - direct-message text receive/send
 - `getupdates` long-poll loop
 - `sendmessage` outbound replies
+- typing indicators via `getconfig` and `sendtyping`
 - `context_token` persistence
 - `get_updates_buf` persistence
 - login persistence across restart
@@ -89,7 +90,6 @@ The point of this phase is to keep the channel aligned with upstream behavior wh
 
 These are upstream features, so they belong on the roadmap, but they do not need to block the first implementation cut:
 
-- typing indicators via `getconfig` and `sendtyping`
 - media upload/send via `getuploadurl`
 
 We should not spend time listing non-goals that come from outside the upstream capability boundary.
@@ -257,5 +257,4 @@ Use a mock iLink server to cover:
 After Phase 1 is stable, add the upstream features we intentionally deferred:
 
 - multi-account support
-- typing indicators
 - media upload/send

@@ -54,7 +54,9 @@ I18n.register('en', {
   'status.restart': 'Restart',
   'status.active': 'Active',
   'status.installed': 'Installed',
+  'status.configured': 'Configured',
   'status.awaitingPairing': 'Awaiting Pairing',
+  'status.pairingShort': 'Pairing',
   
   // Dashboard
   'dashboard.connections': 'Connections',

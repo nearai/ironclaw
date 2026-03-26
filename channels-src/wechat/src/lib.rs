@@ -9,7 +9,7 @@ mod state;
 mod types;
 
 use exports::near::agent::channel::{
-    AgentResponse, ChannelConfig, Guest, PollConfig, StatusUpdate,
+    AgentResponse, ChannelConfig, Guest, PollConfig, StatusType, StatusUpdate,
 };
 use near::agent::channel_host::{self, EmittedMessage};
 use serde_json::json;
@@ -17,12 +17,21 @@ use serde_json::json;
 use crate::auth::TOKEN_SECRET_NAME;
 use crate::state::{
     clear_session_expired, load_config, load_context_tokens, load_get_updates_buf,
-    mark_session_expired, persist_config, persist_context_tokens, persist_get_updates_buf,
-    session_expired,
+    load_typing_tickets, mark_session_expired, persist_config, persist_context_tokens,
+    persist_get_updates_buf, persist_typing_tickets, session_expired, TypingTicketEntry,
 };
 use crate::types::{
     OutboundMetadata, WechatConfig, WechatMessage, MESSAGE_ITEM_TEXT, MESSAGE_TYPE_USER,
+    TYPING_STATUS_CANCEL, TYPING_STATUS_TYPING,
 };
+
+const TYPING_TICKET_TTL_MS: u64 = 24 * 60 * 60 * 1000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WechatStatusAction {
+    Typing,
+    Cancel,
+}
 
 struct WechatChannel;
 
@@ -151,6 +160,18 @@ impl Guest for WechatChannel {
             .context_token
             .clone()
             .or_else(|| context_tokens.get(&metadata.from_user_id).cloned());
+        if let Err(error) = send_typing_indicator(
+            &config,
+            &metadata,
+            context_token.as_deref(),
+            TYPING_STATUS_CANCEL,
+            false,
+        ) {
+            channel_host::log(
+                channel_host::LogLevel::Debug,
+                &format!("Failed to cancel WeChat typing indicator before reply: {error}"),
+            );
+        }
 
         api::send_text_message(
             &config,
@@ -160,7 +181,42 @@ impl Guest for WechatChannel {
         )
     }
 
-    fn on_status(_update: StatusUpdate) {}
+    fn on_status(update: StatusUpdate) {
+        let Some(action) = classify_status_update(&update) else {
+            return;
+        };
+        let metadata = match serde_json::from_str::<OutboundMetadata>(&update.metadata_json) {
+            Ok(metadata) => metadata,
+            Err(_) => {
+                channel_host::log(
+                    channel_host::LogLevel::Debug,
+                    "on_status: no valid WeChat metadata, skipping typing update",
+                );
+                return;
+            }
+        };
+        let config = load_config();
+        let context_tokens = load_context_tokens();
+        let context_token = resolve_context_token(&metadata, &context_tokens);
+
+        let (typing_status, allow_ticket_fetch) = match action {
+            WechatStatusAction::Typing => (TYPING_STATUS_TYPING, true),
+            WechatStatusAction::Cancel => (TYPING_STATUS_CANCEL, false),
+        };
+
+        if let Err(error) = send_typing_indicator(
+            &config,
+            &metadata,
+            context_token.as_deref(),
+            typing_status,
+            allow_ticket_fetch,
+        ) {
+            channel_host::log(
+                channel_host::LogLevel::Debug,
+                &format!("WeChat typing update failed: {error}"),
+            );
+        }
+    }
 
     fn on_broadcast(_user_id: String, _response: AgentResponse) -> Result<(), String> {
         Ok(())
@@ -215,4 +271,226 @@ fn extract_text(message: &WechatMessage) -> String {
         .unwrap_or_default()
 }
 
+fn is_terminal_text_status(message: &str) -> bool {
+    let trimmed = message.trim();
+    trimmed.eq_ignore_ascii_case("done")
+        || trimmed.eq_ignore_ascii_case("interrupted")
+        || trimmed.eq_ignore_ascii_case("awaiting approval")
+        || trimmed.eq_ignore_ascii_case("rejected")
+}
+
+fn classify_status_update(update: &StatusUpdate) -> Option<WechatStatusAction> {
+    match update.status {
+        StatusType::Thinking => Some(WechatStatusAction::Typing),
+        StatusType::Done
+        | StatusType::Interrupted
+        | StatusType::ApprovalNeeded
+        | StatusType::AuthRequired => Some(WechatStatusAction::Cancel),
+        StatusType::Status if is_terminal_text_status(&update.message) => {
+            Some(WechatStatusAction::Cancel)
+        }
+        StatusType::ToolStarted
+        | StatusType::ToolCompleted
+        | StatusType::ToolResult
+        | StatusType::Status
+        | StatusType::JobStarted
+        | StatusType::AuthCompleted => None,
+    }
+}
+
+fn resolve_context_token(
+    metadata: &OutboundMetadata,
+    context_tokens: &std::collections::HashMap<String, String>,
+) -> Option<String> {
+    metadata
+        .context_token
+        .clone()
+        .or_else(|| context_tokens.get(&metadata.from_user_id).cloned())
+}
+
+fn cached_typing_ticket(user_id: &str) -> Option<String> {
+    let tickets = load_typing_tickets();
+    let ticket = tickets.get(user_id)?;
+    let trimmed = ticket.ticket.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let age_ms = channel_host::now_millis().saturating_sub(ticket.fetched_at_ms);
+    if age_ms >= TYPING_TICKET_TTL_MS {
+        return None;
+    }
+
+    Some(trimmed.to_string())
+}
+
+fn persist_typing_ticket(user_id: &str, ticket: &str) -> Result<(), String> {
+    let mut tickets = load_typing_tickets();
+    tickets.insert(
+        user_id.to_string(),
+        TypingTicketEntry {
+            ticket: ticket.to_string(),
+            fetched_at_ms: channel_host::now_millis(),
+        },
+    );
+    persist_typing_tickets(&tickets)
+}
+
+fn clear_typing_ticket(user_id: &str) -> Result<(), String> {
+    let mut tickets = load_typing_tickets();
+    if tickets.remove(user_id).is_some() {
+        persist_typing_tickets(&tickets)?;
+    }
+    Ok(())
+}
+
+fn resolve_typing_ticket(
+    config: &WechatConfig,
+    user_id: &str,
+    context_token: Option<&str>,
+) -> Result<Option<String>, String> {
+    if let Some(ticket) = cached_typing_ticket(user_id) {
+        return Ok(Some(ticket));
+    }
+
+    let response = api::get_config(config, user_id, context_token)?;
+    if response.ret.unwrap_or(0) != 0 {
+        let errmsg = response
+            .errmsg
+            .as_deref()
+            .unwrap_or("unknown WeChat getConfig error");
+        return Err(format!(
+            "WeChat getConfig returned ret={} errmsg={errmsg}",
+            response.ret.unwrap_or(-1)
+        ));
+    }
+
+    let Some(ticket) = response
+        .typing_ticket
+        .as_deref()
+        .map(str::trim)
+        .filter(|ticket| !ticket.is_empty())
+    else {
+        return Ok(None);
+    };
+
+    if let Err(error) = persist_typing_ticket(user_id, ticket) {
+        channel_host::log(
+            channel_host::LogLevel::Warn,
+            &format!("Failed to persist WeChat typing ticket: {error}"),
+        );
+    }
+
+    Ok(Some(ticket.to_string()))
+}
+
+fn send_typing_indicator(
+    config: &WechatConfig,
+    metadata: &OutboundMetadata,
+    context_token: Option<&str>,
+    status: i32,
+    allow_ticket_fetch: bool,
+) -> Result<(), String> {
+    let ticket = if allow_ticket_fetch {
+        resolve_typing_ticket(config, &metadata.from_user_id, context_token)?
+    } else {
+        cached_typing_ticket(&metadata.from_user_id)
+    };
+
+    let Some(ticket) = ticket else {
+        return Ok(());
+    };
+
+    if let Err(error) = api::send_typing(config, &metadata.from_user_id, &ticket, status) {
+        let _ = clear_typing_ticket(&metadata.from_user_id);
+        return Err(error);
+    }
+
+    Ok(())
+}
+
 export!(WechatChannel);
+
+#[cfg(test)]
+mod tests {
+    use super::{classify_status_update, WechatStatusAction};
+    use crate::exports::near::agent::channel::{StatusType, StatusUpdate};
+
+    #[test]
+    fn test_classify_status_update_thinking_starts_typing() {
+        let update = StatusUpdate {
+            status: StatusType::Thinking,
+            message: "Thinking...".to_string(),
+            metadata_json: "{}".to_string(),
+        };
+
+        assert_eq!(
+            classify_status_update(&update),
+            Some(WechatStatusAction::Typing)
+        );
+    }
+
+    #[test]
+    fn test_classify_status_update_done_cancels_typing() {
+        let update = StatusUpdate {
+            status: StatusType::Done,
+            message: "Done".to_string(),
+            metadata_json: "{}".to_string(),
+        };
+
+        assert_eq!(
+            classify_status_update(&update),
+            Some(WechatStatusAction::Cancel)
+        );
+    }
+
+    #[test]
+    fn test_classify_status_update_approval_needed_cancels_typing() {
+        let update = StatusUpdate {
+            status: StatusType::ApprovalNeeded,
+            message: "Approval needed".to_string(),
+            metadata_json: "{}".to_string(),
+        };
+
+        assert_eq!(
+            classify_status_update(&update),
+            Some(WechatStatusAction::Cancel)
+        );
+    }
+
+    #[test]
+    fn test_classify_status_update_tool_started_is_ignored() {
+        let update = StatusUpdate {
+            status: StatusType::ToolStarted,
+            message: "Tool started".to_string(),
+            metadata_json: "{}".to_string(),
+        };
+
+        assert_eq!(classify_status_update(&update), None);
+    }
+
+    #[test]
+    fn test_classify_status_update_terminal_text_status_cancels_typing() {
+        let update = StatusUpdate {
+            status: StatusType::Status,
+            message: "Awaiting approval".to_string(),
+            metadata_json: "{}".to_string(),
+        };
+
+        assert_eq!(
+            classify_status_update(&update),
+            Some(WechatStatusAction::Cancel)
+        );
+    }
+
+    #[test]
+    fn test_classify_status_update_progress_status_is_ignored() {
+        let update = StatusUpdate {
+            status: StatusType::Status,
+            message: "Context compaction started".to_string(),
+            metadata_json: "{}".to_string(),
+        };
+
+        assert_eq!(classify_status_update(&update), None);
+    }
+}

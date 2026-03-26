@@ -50,6 +50,14 @@ pub struct GetUpdatesRequest {
     pub base_info: BaseInfo,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct GetConfigRequest {
+    pub ilink_user_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_token: Option<String>,
+    pub base_info: BaseInfo,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct GetUpdatesResponse {
     #[serde(default)]
@@ -67,6 +75,14 @@ pub struct GetUpdatesResponse {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SendMessageRequest {
     pub msg: OutboundWechatMessage,
+    pub base_info: BaseInfo,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SendTypingRequest {
+    pub ilink_user_id: String,
+    pub typing_ticket: String,
+    pub status: i32,
     pub base_info: BaseInfo,
 }
 
@@ -100,6 +116,24 @@ pub struct WechatMessage {
     pub item_list: Vec<MessageItem>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct GetConfigResponse {
+    #[serde(default)]
+    pub ret: Option<i32>,
+    #[serde(default)]
+    pub errmsg: Option<String>,
+    #[serde(default)]
+    pub typing_ticket: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SendTypingResponse {
+    #[serde(default)]
+    pub ret: Option<i32>,
+    #[serde(default)]
+    pub errmsg: Option<String>,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct MessageItem {
     #[serde(default)]
@@ -130,3 +164,5 @@ pub const MESSAGE_TYPE_USER: i32 = 1;
 pub const MESSAGE_TYPE_BOT: i32 = 2;
 pub const MESSAGE_STATE_FINISH: i32 = 2;
 pub const MESSAGE_ITEM_TEXT: i32 = 1;
+pub const TYPING_STATUS_TYPING: i32 = 1;
+pub const TYPING_STATUS_CANCEL: i32 = 2;

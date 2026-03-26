@@ -3251,25 +3251,18 @@ function renderInteractiveLoginPanel() {
 
   const title = document.createElement('div');
   title.className = 'configure-verification-title';
-  title.textContent = 'WeChat QR Login';
+  title.textContent = 'Open WeChat QR Page';
   panel.appendChild(title);
 
   const status = document.createElement('div');
   status.className = 'configure-verification-instructions';
-  status.textContent = 'Generate a QR code to connect this channel.';
+  status.textContent = 'The QR flow opens in a separate tab.';
   status.dataset.qrStatus = 'true';
   panel.appendChild(status);
 
-  const img = document.createElement('img');
-  img.className = 'configure-qr-image';
-  img.alt = 'WeChat QR code';
-  img.style.display = 'none';
-  img.dataset.qrImage = 'true';
-  panel.appendChild(img);
-
   const link = document.createElement('a');
   link.className = 'configure-verification-link';
-  link.textContent = 'Open QR code in a new tab';
+  link.textContent = 'Open QR Page';
   link.target = '_blank';
   link.rel = 'noreferrer noopener';
   link.style.display = 'none';
@@ -3291,17 +3284,13 @@ function updateInteractiveLoginPanel(overlay, res) {
   const panel = getInteractiveLoginPanel(overlay);
   if (!panel) return;
   const status = panel.querySelector('[data-qr-status="true"]');
-  const img = panel.querySelector('[data-qr-image="true"]');
   const link = panel.querySelector('[data-qr-link="true"]');
 
   panel.style.display = '';
   if (status) {
-    status.textContent = res.message || '';
-  }
-
-  if (img && res.qr_code_url) {
-    img.src = res.qr_code_url;
-    img.style.display = '';
+    status.textContent = res.status === 'refreshed'
+      ? 'The QR page was refreshed. Open it again if needed.'
+      : 'The QR flow opens in a separate tab.';
   }
 
   if (link && res.qr_code_url) {
@@ -3322,7 +3311,7 @@ function setInteractiveLoginBusy(overlay, busy, label) {
 function startInteractiveLogin(name, overlay) {
   if (!overlay || !document.body.contains(overlay)) return;
   clearConfigureInlineError(overlay);
-  setConfigureInlineStatus(overlay, 'Generating WeChat QR code...');
+  setConfigureInlineStatus(overlay, 'Preparing WeChat QR page...');
   setInteractiveLoginBusy(overlay, true, 'Waiting for scan...');
 
   apiFetch('/api/extensions/' + encodeURIComponent(name) + '/login/start', {
@@ -3703,9 +3692,9 @@ function renderWasmChannelStepper(ext) {
   var status = ext.activation_status || 'installed';
 
   var steps = [
-    { label: 'Installed', key: 'installed' },
-    { label: 'Configured', key: 'configured' },
-    { label: status === 'pairing' ? 'Awaiting Pairing' : 'Active', key: 'active' },
+    { label: I18n.t('status.installed'), key: 'installed' },
+    { label: I18n.t('status.configured'), key: 'configured' },
+    { label: status === 'pairing' ? I18n.t('status.pairingShort') : I18n.t('status.active'), key: 'active' },
   ];
 
   var reachedIdx;

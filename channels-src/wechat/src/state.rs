@@ -1,8 +1,19 @@
 use std::collections::HashMap;
 
-use crate::auth::{CONFIG_PATH, CONTEXT_TOKENS_PATH, GET_UPDATES_BUF_PATH, SESSION_EXPIRED_PATH};
+use serde::{Deserialize, Serialize};
+
+use crate::auth::{
+    CONFIG_PATH, CONTEXT_TOKENS_PATH, GET_UPDATES_BUF_PATH, SESSION_EXPIRED_PATH,
+    TYPING_TICKETS_PATH,
+};
 use crate::near::agent::channel_host;
 use crate::types::WechatConfig;
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct TypingTicketEntry {
+    pub ticket: String,
+    pub fetched_at_ms: u64,
+}
 
 pub fn load_config() -> WechatConfig {
     channel_host::workspace_read(CONFIG_PATH)
@@ -38,6 +49,18 @@ pub fn persist_context_tokens(tokens: &HashMap<String, String>) -> Result<(), St
     let serialized =
         serde_json::to_string(tokens).map_err(|e| format!("Failed to serialize tokens: {e}"))?;
     channel_host::workspace_write(CONTEXT_TOKENS_PATH, &serialized).map_err(|e| e.to_string())
+}
+
+pub fn load_typing_tickets() -> HashMap<String, TypingTicketEntry> {
+    channel_host::workspace_read(TYPING_TICKETS_PATH)
+        .and_then(|raw| serde_json::from_str::<HashMap<String, TypingTicketEntry>>(&raw).ok())
+        .unwrap_or_default()
+}
+
+pub fn persist_typing_tickets(tickets: &HashMap<String, TypingTicketEntry>) -> Result<(), String> {
+    let serialized =
+        serde_json::to_string(tickets).map_err(|e| format!("Failed to serialize tickets: {e}"))?;
+    channel_host::workspace_write(TYPING_TICKETS_PATH, &serialized).map_err(|e| e.to_string())
 }
 
 pub fn session_expired() -> bool {

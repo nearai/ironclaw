@@ -466,7 +466,12 @@ pub fn classify_wasm_channel_activation(
     } else if !ext.authenticated {
         ExtensionActivationStatus::Installed
     } else if ext.active {
-        if has_paired || has_owner_binding {
+        // WeChat QR login already proves channel ownership and does not have a
+        // separate owner-binding/pairing phase like Telegram DM verification.
+        if ext.name == crate::extensions::wechat_login::WECHAT_CHANNEL_NAME
+            || has_paired
+            || has_owner_binding
+        {
             ExtensionActivationStatus::Active
         } else {
             ExtensionActivationStatus::Pairing

@@ -135,7 +135,7 @@ fn build_pending_login(
     let result = InteractiveLoginStartResult {
         session_id,
         status: "pending".to_string(),
-        message: "Scan the QR code in WeChat to finish connecting.".to_string(),
+        message: "Open the WeChat QR page to continue.".to_string(),
         qr_code_url: Some(qr.qrcode_img_content),
         instructions: Some(
             "Keep this window open while you scan and confirm on your phone.".to_string(),
