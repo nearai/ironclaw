@@ -142,15 +142,16 @@ impl DbAuthenticator {
     /// Cache TTL — how long a successful auth is cached before re-querying the DB.
     const CACHE_TTL_SECS: u64 = 60;
     /// Maximum cache entries to prevent unbounded growth.
-    const MAX_CACHE_ENTRIES: usize = 1024;
+    // SAFETY: 1024 is non-zero, so the unwrap in `new()` is infallible.
+    const MAX_CACHE_ENTRIES: NonZeroUsize = match NonZeroUsize::new(1024) {
+        Some(v) => v,
+        None => unreachable!(),
+    };
 
     pub fn new(store: Arc<dyn Database>) -> Self {
         Self {
             store,
-            cache: Arc::new(RwLock::new(lru::LruCache::new(
-                NonZeroUsize::new(Self::MAX_CACHE_ENTRIES)
-                    .expect("MAX_CACHE_ENTRIES must be non-zero"),
-            ))),
+            cache: Arc::new(RwLock::new(lru::LruCache::new(Self::MAX_CACHE_ENTRIES))),
         }
     }
 

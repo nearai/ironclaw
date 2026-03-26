@@ -856,8 +856,8 @@ mod auth_enforcement {
 mod admin_role_enforcement {
     use super::*;
     use crate::channels::web::handlers::users::{
-        users_activate_handler, users_detail_handler, users_list_handler,
-        users_suspend_handler, users_update_handler,
+        users_activate_handler, users_detail_handler, users_list_handler, users_suspend_handler,
+        users_update_handler,
     };
     use axum::routing::patch;
 
@@ -888,10 +888,7 @@ mod admin_role_enforcement {
             .route("/api/admin/users", get(users_list_handler))
             .route("/api/admin/users/{id}", get(users_detail_handler))
             .route("/api/admin/users/{id}", patch(users_update_handler))
-            .route(
-                "/api/admin/users/{id}/suspend",
-                post(users_suspend_handler),
-            )
+            .route("/api/admin/users/{id}/suspend", post(users_suspend_handler))
             .route(
                 "/api/admin/users/{id}/activate",
                 post(users_activate_handler),
@@ -926,18 +923,8 @@ mod admin_role_enforcement {
 
         assert_forbidden_for_member(&app, Method::GET, "/api/admin/users").await;
         assert_forbidden_for_member(&app, Method::GET, "/api/admin/users/some-id").await;
-        assert_forbidden_for_member(
-            &app,
-            Method::POST,
-            "/api/admin/users/some-id/suspend",
-        )
-        .await;
-        assert_forbidden_for_member(
-            &app,
-            Method::POST,
-            "/api/admin/users/some-id/activate",
-        )
-        .await;
+        assert_forbidden_for_member(&app, Method::POST, "/api/admin/users/some-id/suspend").await;
+        assert_forbidden_for_member(&app, Method::POST, "/api/admin/users/some-id/activate").await;
     }
 
     #[tokio::test]
@@ -972,7 +959,7 @@ mod db_auth_cache {
         // Access the internal cache and verify LRU eviction.
         // We can't easily test through `authenticate()` since it hits the DB,
         // so we test the LRU cache directly.
-        let cap = std::num::NonZeroUsize::new(4).unwrap();
+        let cap = std::num::NonZeroUsize::new(4).unwrap(); // safety: test-only, 4 is non-zero
         let cache: lru::LruCache<[u8; 32], (UserIdentity, Instant)> = lru::LruCache::new(cap);
         let cache = Arc::new(tokio::sync::RwLock::new(cache));
 
@@ -994,7 +981,7 @@ mod db_auth_cache {
                 );
             }
             // Cache must be bounded at capacity, not grown to 10.
-            assert_eq!(c.len(), 4, "cache should be bounded to capacity");
+            assert_eq!(c.len(), 4, "cache should be bounded to capacity"); // safety: test assertion
         }
     }
 }
