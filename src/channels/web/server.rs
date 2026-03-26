@@ -2510,7 +2510,7 @@ async fn extensions_login_poll_handler(
                 clear_auth_mode(&state, &user.user_id).await;
                 state.sse.broadcast_for_user(
                     &user.user_id,
-                    SseEvent::AuthCompleted {
+                    AppEvent::AuthCompleted {
                         extension_name: name.clone(),
                         success: true,
                         message: result.message.clone(),
@@ -3386,7 +3386,7 @@ mod tests {
             loop {
                 match receiver.recv().await {
                     Ok(scoped) => match scoped.event {
-                        crate::channels::web::types::SseEvent::AuthCompleted {
+                        crate::channels::web::types::AppEvent::AuthCompleted {
                             extension_name,
                             success,
                             message,
