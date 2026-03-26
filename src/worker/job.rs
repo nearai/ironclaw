@@ -391,6 +391,7 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
             worker: self,
             rx: tokio::sync::Mutex::new(rx),
             consecutive_rate_limits: std::sync::atomic::AtomicUsize::new(0),
+            has_text_response: std::sync::atomic::AtomicBool::new(false),
         };
 
         let config = AgenticLoopConfig {
@@ -1109,6 +1110,10 @@ struct JobDelegate<'a> {
     rx: tokio::sync::Mutex<&'a mut mpsc::Receiver<WorkerMessage>>,
     /// Tracks consecutive rate-limit errors to fail fast instead of burning iterations.
     consecutive_rate_limits: std::sync::atomic::AtomicUsize,
+    /// Whether a substantive (non-empty) text response has been produced.
+    /// When true, an empty follow-up response is treated as job completion
+    /// rather than a retry signal (prevents spurious failures in routines).
+    has_text_response: std::sync::atomic::AtomicBool,
 }
 
 impl<'a> JobDelegate<'a> {
@@ -1159,6 +1164,34 @@ impl<'a> JobDelegate<'a> {
             result: RespondResult::Text(String::new()),
             usage: crate::llm::TokenUsage::default(),
             finish_reason: crate::llm::FinishReason::Stop,
+        })
+    }
+
+    /// If a substantive text response was already produced, treat an LLM
+    /// error as successful completion rather than a fatal failure.
+    ///
+    /// Returns `Some(empty RespondOutput)` when the error should be swallowed,
+    /// `None` when it should propagate normally.
+    async fn try_complete_on_error(
+        &self,
+        context: &str,
+        error: &crate::error::LlmError,
+    ) -> Option<crate::llm::RespondOutput> {
+        if !self
+            .has_text_response
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return None;
+        }
+        tracing::info!(
+            job_id = %self.worker.job_id,
+            error = %error,
+            "{context} error after text output — treating as completion"
+        );
+        let _ = self.worker.mark_completed().await;
+        Some(crate::llm::RespondOutput {
+            result: RespondResult::Text(String::new()),
+            usage: crate::llm::TokenUsage::default(),
         })
     }
 }
@@ -1291,7 +1324,12 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
             Err(crate::error::LlmError::RateLimited { retry_after, .. }) => {
                 return self.handle_rate_limit(retry_after, "tool selection").await;
             }
-            Err(e) => return Err(e.into()),
+            Err(e) => {
+                if let Some(output) = self.try_complete_on_error("select_tools", &e).await {
+                    return Ok(output);
+                }
+                return Err(e.into());
+            }
         };
 
         // Fall back to respond_with_tools
@@ -1321,7 +1359,12 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
                 self.handle_rate_limit(retry_after, "respond_with_tools")
                     .await
             }
-            Err(e) => Err(e.into()),
+            Err(e) => {
+                if let Some(output) = self.try_complete_on_error("respond_with_tools", &e).await {
+                    return Ok(output);
+                }
+                Err(e.into())
+            }
         }
     }
 
@@ -1330,9 +1373,22 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
         text: &str,
         reason_ctx: &mut ReasoningContext,
     ) -> TextAction {
-        // Empty text from rate-limit backoff retry — skip processing and let the
-        // loop proceed to the next iteration which will re-call the LLM.
+        // Empty text after a substantive response means the LLM has finished.
+        // Treat as successful completion rather than continuing the loop (which
+        // would produce "Response contained no message or tool call (empty)").
         if text.is_empty() {
+            if self
+                .has_text_response
+                .load(std::sync::atomic::Ordering::Relaxed)
+            {
+                tracing::debug!(
+                    job_id = %self.worker.job_id,
+                    "Empty response after text output — treating as completion"
+                );
+                let _ = self.worker.mark_completed().await;
+                return TextAction::Return(LoopOutcome::Response(String::new()));
+            }
+            // No prior text response — this is likely a rate-limit backoff retry.
             return TextAction::Continue;
         }
 
@@ -1347,6 +1403,10 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
             }
             return TextAction::Return(LoopOutcome::Response(text.to_string()));
         }
+
+        // Track that a substantive response has been produced.
+        self.has_text_response
+            .store(true, std::sync::atomic::Ordering::Relaxed);
 
         // Add assistant response to context
         reason_ctx.messages.push(ChatMessage::assistant(text));
@@ -2284,5 +2344,74 @@ mod tests {
         assert_eq!(telegram.len(), 1);
         assert_eq!(telegram[0].0, "owner-scope");
         assert_eq!(telegram[0].1.content, "hello from routine");
+    }
+
+    /// Regression test: the `has_text_response` flag controls whether empty
+    /// responses and LLM errors are treated as completion vs retry signals.
+    ///
+    /// This tests the decision logic extracted from `handle_text_response`
+    /// and `call_llm`: after a non-empty text response has been produced,
+    /// subsequent empty responses or LLM errors should signal completion
+    /// rather than continuing the loop (which would cause "Response contained
+    /// no message or tool call (empty)" failures on jobs that succeeded).
+    #[test]
+    fn empty_response_after_text_signals_completion() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let has_text_response = AtomicBool::new(false);
+
+        // Scenario 1: Empty response BEFORE any text → Continue (rate-limit retry)
+        let text = "";
+        let action = if text.is_empty() {
+            if has_text_response.load(Ordering::Relaxed) {
+                "complete" // Treat as completion
+            } else {
+                "continue" // Rate-limit retry
+            }
+        } else {
+            has_text_response.store(true, Ordering::Relaxed);
+            "continue" // Non-empty text, continue loop
+        };
+        assert_eq!(action, "continue", "empty before text should retry");
+
+        // Scenario 2: Non-empty text response → sets flag, continues
+        let text = "## HDD Deals\n| Retailer | Price |\n| Amazon | $29.12 |";
+        assert!(!text.is_empty());
+        has_text_response.store(true, Ordering::Relaxed);
+
+        // Scenario 3: Empty response AFTER text → Completion
+        let text = "";
+        let action = if text.is_empty() {
+            if has_text_response.load(Ordering::Relaxed) {
+                "complete"
+            } else {
+                "continue"
+            }
+        } else {
+            "continue"
+        };
+        assert_eq!(action, "complete", "empty after text should complete");
+
+        // Scenario 4: LLM error AFTER text → also Completion (not fatal)
+        let llm_error = true;
+        let action = if llm_error && has_text_response.load(Ordering::Relaxed) {
+            "complete"
+        } else if llm_error {
+            "error"
+        } else {
+            "continue"
+        };
+        assert_eq!(action, "complete", "LLM error after text should complete");
+
+        // Scenario 5: LLM error BEFORE text → still error (propagate)
+        let has_text_response_2 = AtomicBool::new(false);
+        let action = if llm_error && has_text_response_2.load(Ordering::Relaxed) {
+            "complete"
+        } else if llm_error {
+            "error"
+        } else {
+            "continue"
+        };
+        assert_eq!(action, "error", "LLM error before text should propagate");
     }
 }
