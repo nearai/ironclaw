@@ -98,7 +98,7 @@ pub async fn users_create_handler(
 /// GET /api/admin/users — list all users.
 pub async fn users_list_handler(
     State(state): State<Arc<GatewayState>>,
-    AuthenticatedUser(_user): AuthenticatedUser,
+    AdminUser(_user): AdminUser,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let store = state.store.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
@@ -133,7 +133,7 @@ pub async fn users_list_handler(
 /// GET /api/admin/users/{id} — get a single user.
 pub async fn users_detail_handler(
     State(state): State<Arc<GatewayState>>,
-    AuthenticatedUser(_user): AuthenticatedUser,
+    AdminUser(_user): AdminUser,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let store = state.store.as_ref().ok_or((
@@ -164,7 +164,7 @@ pub async fn users_detail_handler(
 /// PATCH /api/admin/users/{id} — update a user's profile.
 pub async fn users_update_handler(
     State(state): State<Arc<GatewayState>>,
-    AuthenticatedUser(_user): AuthenticatedUser,
+    AdminUser(_user): AdminUser,
     Path(id): Path<String>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
@@ -214,7 +214,7 @@ pub async fn users_update_handler(
 /// POST /api/admin/users/{id}/suspend — suspend a user.
 pub async fn users_suspend_handler(
     State(state): State<Arc<GatewayState>>,
-    AuthenticatedUser(_user): AuthenticatedUser,
+    AdminUser(_user): AdminUser,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let store = state.store.as_ref().ok_or((
@@ -243,7 +243,7 @@ pub async fn users_suspend_handler(
 /// POST /api/admin/users/{id}/activate — activate a user.
 pub async fn users_activate_handler(
     State(state): State<Arc<GatewayState>>,
-    AuthenticatedUser(_user): AuthenticatedUser,
+    AdminUser(_user): AdminUser,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let store = state.store.as_ref().ok_or((

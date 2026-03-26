@@ -405,6 +405,7 @@ impl UserStore for LibSqlBackend {
             "memory_documents",
             "agent_jobs",
             "conversations",
+            "api_tokens",
         ] {
             conn.execute(
                 &format!("DELETE FROM {} WHERE user_id = ?1", table),
@@ -420,7 +421,6 @@ impl UserStore for LibSqlBackend {
         )
         .await
         .map_err(|e| DatabaseError::Query(e.to_string()))?;
-        // api_tokens cascade automatically via FK
         let rows = conn
             .execute("DELETE FROM users WHERE id = ?1", params![id])
             .await
@@ -696,5 +696,31 @@ mod tests {
 
         let tokens = db.list_api_tokens("alice").await.unwrap();
         assert!(tokens[0].last_used_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_delete_user_removes_api_tokens() {
+        let (db, _dir) = setup().await;
+        db.create_user(&test_user("alice")).await.unwrap();
+
+        let token_hash = hash("alice-tok");
+        db.create_api_token("alice", "primary", &token_hash, "alice-to", None)
+            .await
+            .unwrap();
+
+        // Verify token exists before deletion.
+        let tokens = db.list_api_tokens("alice").await.unwrap();
+        assert_eq!(tokens.len(), 1);
+
+        // Delete user — should also remove their api_tokens.
+        assert!(db.delete_user("alice").await.unwrap());
+
+        // api_tokens must be gone (not orphaned).
+        let tokens = db.list_api_tokens("alice").await.unwrap();
+        assert!(
+            tokens.is_empty(),
+            "expected api_tokens to be deleted with user, found {}",
+            tokens.len()
+        );
     }
 }

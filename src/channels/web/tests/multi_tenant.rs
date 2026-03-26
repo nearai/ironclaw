@@ -848,3 +848,153 @@ mod auth_enforcement {
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// Admin Endpoint Role Enforcement Tests
+// ═══════════════════════════════════════════════════════════════════════
+
+mod admin_role_enforcement {
+    use super::*;
+    use crate::channels::web::handlers::users::{
+        users_activate_handler, users_detail_handler, users_list_handler,
+        users_suspend_handler, users_update_handler,
+    };
+    use axum::routing::patch;
+
+    /// Build a router with admin user endpoints behind multi-user auth.
+    /// Uses a member-role token and an admin-role token.
+    fn admin_router() -> Router {
+        let mut tokens = HashMap::new();
+        tokens.insert(
+            "tok-admin".to_string(),
+            UserIdentity {
+                user_id: "admin-user".to_string(),
+                role: "admin".to_string(),
+                workspace_read_scopes: vec![],
+            },
+        );
+        tokens.insert(
+            "tok-member".to_string(),
+            UserIdentity {
+                user_id: "member-user".to_string(),
+                role: "member".to_string(),
+                workspace_read_scopes: vec![],
+            },
+        );
+        let auth = MultiAuthState::multi(tokens);
+        let state = build_state(None, None);
+
+        Router::new()
+            .route("/api/admin/users", get(users_list_handler))
+            .route("/api/admin/users/{id}", get(users_detail_handler))
+            .route("/api/admin/users/{id}", patch(users_update_handler))
+            .route(
+                "/api/admin/users/{id}/suspend",
+                post(users_suspend_handler),
+            )
+            .route(
+                "/api/admin/users/{id}/activate",
+                post(users_activate_handler),
+            )
+            .layer(middleware::from_fn_with_state(
+                crate::channels::web::auth::CombinedAuthState::from(auth),
+                auth_middleware,
+            ))
+            .with_state(state)
+    }
+
+    /// Assert a request returns FORBIDDEN for a member token.
+    async fn assert_forbidden_for_member(app: &Router, method: Method, uri: &str) {
+        let req = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("Authorization", "Bearer tok-member")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "expected 403 for member on {}",
+            uri
+        );
+    }
+
+    #[tokio::test]
+    async fn test_admin_user_endpoints_reject_member_role() {
+        let app = admin_router();
+
+        assert_forbidden_for_member(&app, Method::GET, "/api/admin/users").await;
+        assert_forbidden_for_member(&app, Method::GET, "/api/admin/users/some-id").await;
+        assert_forbidden_for_member(
+            &app,
+            Method::POST,
+            "/api/admin/users/some-id/suspend",
+        )
+        .await;
+        assert_forbidden_for_member(
+            &app,
+            Method::POST,
+            "/api/admin/users/some-id/activate",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_admin_user_endpoints_accept_admin_role() {
+        let app = admin_router();
+
+        // Admin token should pass auth (will get 503 since no DB, but not 403).
+        let req = Request::builder()
+            .uri("/api/admin/users")
+            .header("Authorization", "Bearer tok-admin")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_ne!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "admin should not get 403"
+        );
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// DbAuthenticator Cache Bounded Tests
+// ═══════════════════════════════════════════════════════════════════════
+
+mod db_auth_cache {
+    use super::*;
+    use std::time::Instant;
+
+    #[tokio::test]
+    async fn test_cache_bounded_by_max_entries() {
+        // Access the internal cache and verify LRU eviction.
+        // We can't easily test through `authenticate()` since it hits the DB,
+        // so we test the LRU cache directly.
+        let cap = std::num::NonZeroUsize::new(4).unwrap();
+        let cache: lru::LruCache<[u8; 32], (UserIdentity, Instant)> = lru::LruCache::new(cap);
+        let cache = Arc::new(tokio::sync::RwLock::new(cache));
+
+        {
+            let mut c = cache.write().await;
+            for i in 0..10u8 {
+                let mut hash = [0u8; 32];
+                hash[0] = i;
+                c.put(
+                    hash,
+                    (
+                        UserIdentity {
+                            user_id: format!("user-{i}"),
+                            role: "member".to_string(),
+                            workspace_read_scopes: vec![],
+                        },
+                        Instant::now(),
+                    ),
+                );
+            }
+            // Cache must be bounded at capacity, not grown to 10.
+            assert_eq!(c.len(), 4, "cache should be bounded to capacity");
+        }
+    }
+}

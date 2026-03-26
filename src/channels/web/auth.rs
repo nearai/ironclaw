@@ -5,6 +5,7 @@
 //! handlers can extract it via `AuthenticatedUser`.
 
 use std::collections::HashMap;
+use std::num::NonZeroUsize;
 
 use axum::{
     extract::{FromRequestParts, Request, State},
@@ -121,17 +122,20 @@ impl MultiAuthState {
     }
 }
 
-/// DB-backed token authenticator with an in-memory LRU cache.
+/// DB-backed token authenticator with a bounded LRU cache.
 ///
 /// Checks an LRU cache first (TTL 60s), then falls back to a DB query.
-/// Cache entries expire naturally — revoking a token or suspending a user
-/// has at most 60s of stale authentication before the cache entry expires.
+/// The cache is bounded to `MAX_CACHE_ENTRIES` — when full, the least
+/// recently used entry is evicted regardless of TTL.
+///
+/// Revoking a token or suspending a user has at most 60s of stale
+/// authentication before the cache entry expires.
 #[derive(Clone)]
 #[allow(clippy::type_complexity)]
 pub struct DbAuthenticator {
     store: Arc<dyn Database>,
-    /// LRU cache: token_hash → (identity, inserted_at).
-    cache: Arc<RwLock<HashMap<[u8; 32], (UserIdentity, Instant)>>>,
+    /// Bounded LRU cache: token_hash → (identity, inserted_at).
+    cache: Arc<RwLock<lru::LruCache<[u8; 32], (UserIdentity, Instant)>>>,
 }
 
 impl DbAuthenticator {
@@ -143,7 +147,10 @@ impl DbAuthenticator {
     pub fn new(store: Arc<dyn Database>) -> Self {
         Self {
             store,
-            cache: Arc::new(RwLock::new(HashMap::new())),
+            cache: Arc::new(RwLock::new(lru::LruCache::new(
+                NonZeroUsize::new(Self::MAX_CACHE_ENTRIES)
+                    .expect("MAX_CACHE_ENTRIES must be non-zero"),
+            ))),
         }
     }
 
@@ -151,13 +158,15 @@ impl DbAuthenticator {
     pub async fn authenticate(&self, candidate: &str) -> Option<UserIdentity> {
         let hash = hash_token(candidate);
 
-        // Check cache first
+        // Check cache first (promotes to most-recent on hit)
         {
-            let cache = self.cache.read().await;
-            if let Some((identity, inserted_at)) = cache.get(&hash)
-                && inserted_at.elapsed().as_secs() < Self::CACHE_TTL_SECS
-            {
-                return Some(identity.clone());
+            let mut cache = self.cache.write().await;
+            if let Some((identity, inserted_at)) = cache.get(&hash) {
+                if inserted_at.elapsed().as_secs() < Self::CACHE_TTL_SECS {
+                    return Some(identity.clone());
+                }
+                // Expired — remove stale entry
+                cache.pop(&hash);
             }
         }
 
@@ -179,15 +188,10 @@ impl DbAuthenticator {
             let _ = store.record_login(&user_id).await;
         });
 
-        // Update cache
+        // Insert into bounded LRU — if full, least-recently-used entry is evicted
         {
             let mut cache = self.cache.write().await;
-            // Evict stale entries if cache is full
-            if cache.len() >= Self::MAX_CACHE_ENTRIES {
-                let now = Instant::now();
-                cache.retain(|_, (_, ts)| now.duration_since(*ts).as_secs() < Self::CACHE_TTL_SECS);
-            }
-            cache.insert(hash, (identity.clone(), Instant::now()));
+            cache.put(hash, (identity.clone(), Instant::now()));
         }
 
         Some(identity)
