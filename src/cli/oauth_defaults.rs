@@ -542,10 +542,14 @@ pub fn exchange_proxy_url() -> Option<String> {
 /// `IRONCLAW_OAUTH_PROXY_AUTH_TOKEN`. Existing hosted instances continue to
 /// work by falling back to `GATEWAY_AUTH_TOKEN`.
 pub fn oauth_proxy_auth_token() -> Option<String> {
-    crate::config::helpers::env_or_override("IRONCLAW_OAUTH_PROXY_AUTH_TOKEN")
-        .or_else(|| crate::config::helpers::env_or_override("GATEWAY_AUTH_TOKEN"))
-        .map(|token| token.trim().to_string())
-        .filter(|token| !token.is_empty())
+    fn normalized_env_value(key: &str) -> Option<String> {
+        crate::config::helpers::env_or_override(key)
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    }
+
+    normalized_env_value("IRONCLAW_OAUTH_PROXY_AUTH_TOKEN")
+        .or_else(|| normalized_env_value("GATEWAY_AUTH_TOKEN"))
 }
 
 /// Maximum age for pending OAuth flows (5 minutes, matching TCP listener timeout).
@@ -1681,6 +1685,18 @@ mod tests {
     fn test_oauth_proxy_auth_token_falls_back_to_gateway_token() {
         let _guard = lock_env();
         let _proxy_guard = set_env_var("IRONCLAW_OAUTH_PROXY_AUTH_TOKEN", None);
+        let _gateway_guard = set_env_var("GATEWAY_AUTH_TOKEN", Some("gateway-token"));
+
+        assert_eq!(
+            crate::cli::oauth_defaults::oauth_proxy_auth_token().as_deref(),
+            Some("gateway-token")
+        );
+    }
+
+    #[test]
+    fn test_oauth_proxy_auth_token_whitespace_dedicated_env_falls_back_to_gateway_token() {
+        let _guard = lock_env();
+        let _proxy_guard = set_env_var("IRONCLAW_OAUTH_PROXY_AUTH_TOKEN", Some("   "));
         let _gateway_guard = set_env_var("GATEWAY_AUTH_TOKEN", Some("gateway-token"));
 
         assert_eq!(
