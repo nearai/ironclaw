@@ -527,6 +527,62 @@ pub struct AgentSettings {
     /// Maximum tokens per job (0 = unlimited).
     #[serde(default)]
     pub max_tokens_per_job: u64,
+
+    /// Drift monitor configuration.
+    #[serde(default)]
+    pub drift: DriftSettings,
+}
+
+/// Drift monitor settings (persisted in settings.json).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DriftSettings {
+    /// Enable drift detection. Default: true.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Repetition threshold (identical calls to trigger). Default: 3.
+    #[serde(default = "default_drift_repetition_threshold")]
+    pub repetition_threshold: usize,
+    /// Repetition sliding window size. Default: 10.
+    #[serde(default = "default_drift_repetition_window")]
+    pub repetition_window: usize,
+    /// Consecutive failures to trigger failure spiral. Default: 4.
+    #[serde(default = "default_drift_failure_threshold")]
+    pub failure_spiral_threshold: usize,
+    /// Window size for A-B-A-B cycling detection. Default: 6.
+    #[serde(default = "default_drift_cycling_window")]
+    pub cycling_window: usize,
+    /// Silent iterations before nudge. Default: 15.
+    #[serde(default = "default_drift_silence_threshold")]
+    pub silence_threshold: usize,
+}
+
+impl Default for DriftSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            repetition_threshold: default_drift_repetition_threshold(),
+            repetition_window: default_drift_repetition_window(),
+            failure_spiral_threshold: default_drift_failure_threshold(),
+            cycling_window: default_drift_cycling_window(),
+            silence_threshold: default_drift_silence_threshold(),
+        }
+    }
+}
+
+fn default_drift_repetition_threshold() -> usize {
+    3
+}
+fn default_drift_repetition_window() -> usize {
+    10
+}
+fn default_drift_failure_threshold() -> usize {
+    4
+}
+fn default_drift_cycling_window() -> usize {
+    6
+}
+fn default_drift_silence_threshold() -> usize {
+    15
 }
 
 fn default_agent_name() -> String {
@@ -584,6 +640,7 @@ impl Default for AgentSettings {
             auto_approve_tools: false,
             default_timezone: default_timezone(),
             max_tokens_per_job: 0,
+            drift: DriftSettings::default(),
         }
     }
 }

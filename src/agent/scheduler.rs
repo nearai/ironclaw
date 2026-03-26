@@ -311,6 +311,7 @@ impl Scheduler {
                 sse_tx: self.sse_tx.clone(),
                 approval_context,
                 http_interceptor: self.http_interceptor.clone(),
+                drift_config: self.config.drift.clone(),
             };
             let worker = Worker::new(job_id, deps);
 
@@ -803,6 +804,7 @@ mod tests {
             multi_tenant: false,
             max_llm_concurrent_per_user: None,
             max_jobs_concurrent_per_user: None,
+            drift: crate::agent::drift_monitor::DriftConfig::default(),
         };
         let cm = Arc::new(ContextManager::new(5));
         let llm: Arc<dyn LlmProvider> = Arc::new(StubLlm);

@@ -61,6 +61,8 @@ pub struct WorkerDeps {
     pub approval_context: Option<ApprovalContext>,
     /// HTTP interceptor for trace recording/replay (propagated to JobContext).
     pub http_interceptor: Option<Arc<dyn crate::llm::recording::HttpInterceptor>>,
+    /// Drift monitor configuration (propagated from AgentConfig).
+    pub drift_config: crate::agent::drift_monitor::DriftConfig,
 }
 
 /// Worker that executes a single job.
@@ -397,6 +399,10 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
             consecutive_rate_limits: std::sync::atomic::AtomicUsize::new(0),
             recovery_state: tokio::sync::Mutex::new(AutonomousRecoveryState::default()),
             has_text_response: std::sync::atomic::AtomicBool::new(false),
+            drift_monitor: tokio::sync::Mutex::new(crate::agent::drift_monitor::DriftMonitor::new(
+                self.deps.drift_config.clone(),
+            )),
+            current_iteration: std::sync::atomic::AtomicUsize::new(0),
         };
 
         let config = AgenticLoopConfig {
@@ -1143,6 +1149,8 @@ struct JobDelegate<'a> {
     /// When true, an empty follow-up response is treated as job completion
     /// rather than a retry signal (prevents spurious failures in routines).
     has_text_response: std::sync::atomic::AtomicBool,
+    drift_monitor: tokio::sync::Mutex<crate::agent::drift_monitor::DriftMonitor>,
+    current_iteration: std::sync::atomic::AtomicUsize,
 }
 
 impl<'a> JobDelegate<'a> {
@@ -1331,8 +1339,24 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
     async fn before_llm_call(
         &self,
         reason_ctx: &mut ReasoningContext,
-        _iteration: usize,
+        iteration: usize,
     ) -> Option<LoopOutcome> {
+        // Check for drift patterns
+        {
+            let mut monitor = self.drift_monitor.lock().await;
+            monitor.set_iteration(iteration);
+            if let Some(correction) = monitor.check_and_mark() {
+                tracing::info!(
+                    job_id = %self.worker.job_id,
+                    kind = ?correction.kind(),
+                    "Drift detected in job, injecting correction"
+                );
+                reason_ctx
+                    .messages
+                    .push(ChatMessage::system(correction.message()));
+            }
+        }
+
         let force_text_recovery = {
             let mut recovery = self.recovery_state.lock().await;
             recovery.begin_iteration()
@@ -1491,7 +1515,8 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
         // Empty text after a substantive response means the LLM has finished.
         // Treat as successful completion rather than continuing the loop (which
         // would produce "Response contained no message or tool call (empty)").
-        if text.is_empty() {
+        // G1: Do NOT record communication for empty/whitespace backoff responses.
+        if text.trim().is_empty() {
             if self
                 .has_text_response
                 .load(std::sync::atomic::Ordering::Relaxed)
@@ -1507,6 +1532,12 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
             return TextAction::Continue;
         }
 
+        // Record communication for drift monitor (non-empty trimmed text only)
+        {
+            let mut monitor = self.drift_monitor.lock().await;
+            monitor.record_communication();
+        }
+
         // Jobs run autonomously — strip <suggestions> tags that are only
         // meaningful for interactive chat sessions.
         let text = crate::agent::strip_suggestions(text);
@@ -1515,13 +1546,7 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
         // by the agentic loop's nudge mechanism) is the LLM's final answer.
         // Mark the job complete and stop the loop. Without this, the LLM
         // restates its summary every iteration until the cap is hit.
-        if let Err(e) = self.worker.mark_completed().await {
-            tracing::warn!(
-                "Failed to mark job {} as completed: {}",
-                self.worker.job_id,
-                e
-            );
-        }
+        self.mark_completed_or_warn("text response").await;
 
         // Track that a substantive response has been produced.
         self.has_text_response
@@ -1554,6 +1579,11 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
 
         // Strip suggestions from accompanying text (not useful in job context).
         let content = content.map(|c| crate::agent::strip_suggestions(&c));
+        // G4: check content before it's moved
+        let has_nonempty_content = content
+            .as_deref()
+            .filter(|t| !t.trim().is_empty())
+            .is_some();
 
         if let Some(ref text) = content {
             self.worker.log_event(
@@ -1628,21 +1658,48 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
             .collect();
 
         // Execute tools (parallel for multiple, direct for single)
+        let mut drift_records: Vec<(String, u64, bool)> = Vec::with_capacity(selections.len());
+
         if selections.len() == 1 {
             let selection = &selections[0];
             let result = self
                 .worker
                 .execute_tool(&selection.tool_name, &selection.parameters)
                 .await;
+            let succeeded = result.is_ok();
             self.worker
                 .process_tool_result_job(reason_ctx, selection, result)
                 .await?;
+            drift_records.push((
+                selection.tool_name.clone(),
+                crate::agent::drift_monitor::hash_arguments(&selection.parameters),
+                succeeded,
+            ));
         } else {
             let results = self.worker.execute_tools_parallel(&selections).await;
             for (selection, result) in selections.iter().zip(results) {
+                let succeeded = result.result.is_ok();
                 self.worker
                     .process_tool_result_job(reason_ctx, selection, result.result)
                     .await?;
+                drift_records.push((
+                    selection.tool_name.clone(),
+                    crate::agent::drift_monitor::hash_arguments(&selection.parameters),
+                    succeeded,
+                ));
+            }
+        }
+
+        // Record tool calls in drift monitor
+        {
+            let iteration = self
+                .current_iteration
+                .load(std::sync::atomic::Ordering::Relaxed);
+            let mut monitor = self.drift_monitor.lock().await;
+            monitor.record_tool_calls(&drift_records, iteration);
+            // G4: content-as-communication uses non-empty-trimmed check
+            if has_nonempty_content {
+                monitor.record_communication();
             }
         }
 
@@ -1799,6 +1856,7 @@ mod tests {
             sse_tx: None,
             approval_context: None,
             http_interceptor: None,
+            drift_config: crate::agent::drift_monitor::DriftConfig::default(),
         };
 
         Worker::new(job_id, deps)
@@ -2018,6 +2076,7 @@ mod tests {
             sse_tx: None,
             approval_context,
             http_interceptor: None,
+            drift_config: crate::agent::drift_monitor::DriftConfig::default(),
         };
 
         Worker::new(job_id, deps)

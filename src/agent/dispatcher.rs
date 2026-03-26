@@ -180,6 +180,10 @@ impl Agent {
             nudge_at,
             force_text_at,
             user_tz,
+            drift_monitor: tokio::sync::Mutex::new(crate::agent::drift_monitor::DriftMonitor::new(
+                self.config.drift.clone(),
+            )),
+            current_iteration: std::sync::atomic::AtomicUsize::new(0),
         };
 
         let mut reason_ctx = ReasoningContext::new()
@@ -258,6 +262,8 @@ struct ChatDelegate<'a> {
     nudge_at: usize,
     force_text_at: usize,
     user_tz: chrono_tz::Tz,
+    drift_monitor: tokio::sync::Mutex<crate::agent::drift_monitor::DriftMonitor>,
+    current_iteration: std::sync::atomic::AtomicUsize,
 }
 
 #[async_trait]
@@ -277,6 +283,24 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
         reason_ctx: &mut ReasoningContext,
         iteration: usize,
     ) -> Option<LoopOutcome> {
+        // Track current iteration for use in execute_tool_calls / handle_text_response
+        self.current_iteration
+            .store(iteration, std::sync::atomic::Ordering::Relaxed);
+
+        // Check for drift patterns and inject corrective system message
+        {
+            let mut monitor = self.drift_monitor.lock().await;
+            if let Some(correction) = monitor.check_and_mark() {
+                tracing::info!(
+                    kind = ?correction.kind(),
+                    "Drift detected, injecting correction"
+                );
+                reason_ctx
+                    .messages
+                    .push(ChatMessage::system(correction.message()));
+            }
+        }
+
         // Inject a nudge message when approaching the iteration limit so the
         // LLM is aware it should produce a final answer on the next turn.
         if iteration == self.nudge_at {
@@ -474,6 +498,14 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
         // provider flattening (e.g. NEAR AI) converts tool_calls to
         // plain text and the LLM echoes it back.
         let sanitized = strip_internal_tool_call_text(text);
+
+        // Record communication for drift monitor only if the sanitized
+        // text is non-empty (leaked internal tool text doesn't count).
+        if !sanitized.trim().is_empty() {
+            let mut monitor = self.drift_monitor.lock().await;
+            monitor.record_communication();
+        }
+
         TextAction::Return(LoopOutcome::Response(sanitized))
     }
 
@@ -483,6 +515,12 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
         content: Option<String>,
         reason_ctx: &mut ReasoningContext,
     ) -> Result<Option<LoopOutcome>, Error> {
+        // G4: check content before it's moved into assistant_with_tool_calls
+        let has_nonempty_content = content
+            .as_deref()
+            .filter(|t| !t.trim().is_empty())
+            .is_some();
+
         // Extract and sanitize the narrative before consuming `content`.
         let narrative = content
             .as_deref()
@@ -839,10 +877,13 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
 
         // === Phase 3: Post-flight (sequential, in original order) ===
         let mut deferred_auth: Option<String> = None;
+        let mut drift_records: Vec<(String, u64, bool)> = Vec::new();
 
         for (pf_idx, (tc, outcome)) in preflight.into_iter().enumerate() {
             match outcome {
                 PreflightOutcome::Rejected(error_msg) => {
+                    // Preflight rejections (hook/policy denials) are NOT recorded
+                    // in drift monitor — they are not executed tool failures.
                     let (result_content, tool_message) = preflight_rejection_tool_message(
                         self.agent.safety(),
                         &tc.name,
@@ -966,6 +1007,11 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                     }
 
                     let is_tool_error = tool_result.is_err();
+                    drift_records.push((
+                        tc.name.clone(),
+                        crate::agent::drift_monitor::hash_arguments(&tc.arguments),
+                        !is_tool_error,
+                    ));
                     let (result_content, tool_message) = crate::tools::execute::process_tool_result(
                         self.agent.safety(),
                         &tc.name,
@@ -992,6 +1038,20 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
 
                     reason_ctx.messages.push(tool_message);
                 }
+            }
+        }
+
+        // Record tool calls in drift monitor
+        if !drift_records.is_empty() {
+            let iteration = self
+                .current_iteration
+                .load(std::sync::atomic::Ordering::Relaxed);
+            let mut monitor = self.drift_monitor.lock().await;
+            monitor.record_tool_calls(&drift_records, iteration);
+            // G4: content-as-communication uses non-empty-trimmed check
+            // (narrative was extracted from content before the move)
+            if has_nonempty_content {
+                monitor.record_communication();
             }
         }
 
@@ -1402,6 +1462,7 @@ mod tests {
                 multi_tenant: false,
                 max_llm_concurrent_per_user: None,
                 max_jobs_concurrent_per_user: None,
+                drift: crate::agent::drift_monitor::DriftConfig::default(),
             },
             deps,
             Arc::new(ChannelManager::new()),
@@ -2284,6 +2345,7 @@ mod tests {
                 multi_tenant: false,
                 max_llm_concurrent_per_user: None,
                 max_jobs_concurrent_per_user: None,
+                drift: crate::agent::drift_monitor::DriftConfig::default(),
             },
             deps,
             Arc::new(ChannelManager::new()),
@@ -2412,6 +2474,7 @@ mod tests {
                     multi_tenant: false,
                     max_llm_concurrent_per_user: None,
                     max_jobs_concurrent_per_user: None,
+                    drift: crate::agent::drift_monitor::DriftConfig::default(),
                 },
                 deps,
                 Arc::new(ChannelManager::new()),
