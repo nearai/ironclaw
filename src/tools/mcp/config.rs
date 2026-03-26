@@ -250,8 +250,11 @@ impl McpServerConfig {
     }
 
     /// Get the secret name used to store the refresh token.
+    ///
+    /// Matches the convention used by the hosted OAuth flow in
+    /// `store_oauth_tokens`: `{token_secret_name}_refresh_token`.
     pub fn refresh_token_secret_name(&self) -> String {
-        format!("mcp_{}_refresh_token", self.name)
+        format!("{}_refresh_token", self.token_secret_name())
     }
 
     /// Get the secret name used to store the DCR client ID.
@@ -750,9 +753,11 @@ mod tests {
     fn test_token_secret_names() {
         let config = McpServerConfig::new("notion", "https://mcp.notion.com");
         assert_eq!(config.token_secret_name(), "mcp_notion_access_token");
+        // Refresh token name follows the hosted OAuth convention:
+        // {token_secret_name}_refresh_token
         assert_eq!(
             config.refresh_token_secret_name(),
-            "mcp_notion_refresh_token"
+            "mcp_notion_access_token_refresh_token"
         );
     }
 
