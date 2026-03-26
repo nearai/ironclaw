@@ -451,7 +451,7 @@ impl NearAiChatProvider {
             provider: "nearai_chat".to_string(),
             reason: format!(
                 "No model names found in response: {}",
-                &response_text[..response_text.len().min(300)]
+                &response_text[..crate::util::floor_char_boundary(&response_text, 300)]
             ),
         })
     }

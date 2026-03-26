@@ -256,7 +256,8 @@ fn truncate_content(s: &str, max_len: usize) -> String {
     if s.len() <= max_len {
         s.to_string()
     } else {
-        format!("{}...", &s[..max_len])
+        let end = crate::util::floor_char_boundary(s, max_len);
+        format!("{}...", &s[..end])
     }
 }
 
@@ -291,5 +292,20 @@ mod tests {
     fn test_truncate_content() {
         assert_eq!(truncate_content("hello", 10), "hello");
         assert_eq!(truncate_content("hello world", 5), "hello...");
+    }
+
+    #[test]
+    fn test_truncate_content_multibyte_does_not_panic() {
+        // "cafe\u{0301}" = "café" where é is e + combining accent (2 bytes for accent)
+        // Slicing at byte 5 would land inside the combining character
+        let s = "caf\u{00e9} au lait"; // café = 5 bytes (é is 2 bytes)
+        let result = truncate_content(s, 4); // byte 4 is inside é
+        assert!(result.ends_with("..."));
+        assert!(!result.is_empty());
+
+        // 4-byte emoji: slicing mid-emoji must not panic
+        let emoji = "Hi \u{1F600} there"; // 😀 is 4 bytes
+        let result = truncate_content(emoji, 4); // byte 4 is inside 😀
+        assert!(result.ends_with("..."));
     }
 }
