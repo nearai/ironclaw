@@ -15,6 +15,7 @@ use tokio::sync::{Mutex, broadcast};
 use uuid::Uuid;
 
 use crate::channels::web::types::ToolDecisionDto;
+use crate::common::AppEvent;
 use crate::db::Database;
 use crate::llm::{CompletionRequest, LlmProvider, ToolCompletionRequest};
 use crate::orchestrator::auth::{TokenStore, worker_auth_middleware};
@@ -25,7 +26,6 @@ use crate::worker::api::{
     CompletionReport, CredentialResponse, JobDescription, ProxyCompletionRequest,
     ProxyCompletionResponse, ProxyToolCompletionRequest, ProxyToolCompletionResponse, StatusUpdate,
 };
-use ironclaw_common::AppEvent;
 
 /// A follow-up prompt queued for a Claude Code bridge.
 #[derive(Debug, Clone, Serialize, Deserialize)]

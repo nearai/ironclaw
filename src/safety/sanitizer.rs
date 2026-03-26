@@ -5,7 +5,7 @@ use std::ops::Range;
 use aho_corasick::AhoCorasick;
 use regex::Regex;
 
-use crate::Severity;
+use super::Severity;
 
 /// Result of sanitizing external content.
 #[derive(Debug, Clone)]

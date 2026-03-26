@@ -3428,8 +3428,6 @@ dependencies = [
  "hyper-util",
  "iana-time-zone",
  "insta",
- "ironclaw_common",
- "ironclaw_safety",
  "json5",
  "libsql",
  "lru",

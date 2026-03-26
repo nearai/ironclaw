@@ -2,7 +2,7 @@
 
 use crate::channels::web::types::{ToolCallInfo, TurnInfo};
 
-pub use ironclaw_common::truncate_preview;
+pub use crate::common::truncate_preview;
 
 /// Parse tool call summary JSON objects into `ToolCallInfo` structs.
 fn parse_tool_call_infos(calls: &[serde_json::Value]) -> Vec<ToolCallInfo> {

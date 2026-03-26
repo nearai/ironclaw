@@ -307,7 +307,7 @@ fn per_user_rate_limiter_single_user_mode() {
 
 #[tokio::test]
 async fn sse_scoped_event_only_delivered_to_target_user() {
-    use ironclaw_common::AppEvent;
+    use ironclaw::AppEvent;
     use tokio_stream::StreamExt;
 
     let manager = SseManager::new();
@@ -352,7 +352,7 @@ async fn sse_scoped_event_only_delivered_to_target_user() {
 
 #[tokio::test]
 async fn sse_global_event_delivered_to_all_users() {
-    use ironclaw_common::AppEvent;
+    use ironclaw::AppEvent;
     use tokio_stream::StreamExt;
 
     let manager = SseManager::new();
@@ -385,7 +385,7 @@ async fn sse_global_event_delivered_to_all_users() {
 
 #[tokio::test]
 async fn sse_user_b_event_not_visible_to_user_a() {
-    use ironclaw_common::AppEvent;
+    use ironclaw::AppEvent;
     use tokio_stream::StreamExt;
 
     let manager = SseManager::new();
@@ -418,7 +418,7 @@ async fn sse_user_b_event_not_visible_to_user_a() {
 
 #[tokio::test]
 async fn sse_unscoped_subscriber_receives_all_events() {
-    use ironclaw_common::AppEvent;
+    use ironclaw::AppEvent;
     use tokio_stream::StreamExt;
 
     let manager = SseManager::new();
@@ -881,7 +881,7 @@ async fn full_server_jobs_endpoint_rejected_without_auth() {
 #[tokio::test]
 async fn full_server_ws_multi_user_event_isolation() {
     use futures::StreamExt;
-    use ironclaw_common::AppEvent;
+    use ironclaw::AppEvent;
     use tokio_tungstenite::tungstenite::Message;
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 

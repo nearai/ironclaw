@@ -21,8 +21,8 @@ use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 use crate::channels::IncomingMessage;
+use crate::common::AppEvent;
 use crate::context::{ContextManager, JobState};
-use ironclaw_common::AppEvent;
 
 /// Route context for forwarding job monitor events back to the user's channel.
 #[derive(Debug, Clone)]

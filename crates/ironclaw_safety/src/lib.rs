@@ -7,10 +7,15 @@
 //! - Enforcing safety policies
 //! - Detecting secret leakage in outputs
 
+#[path = "../../../src/safety/credential_detect.rs"]
 mod credential_detect;
+#[path = "../../../src/safety/leak_detector.rs"]
 mod leak_detector;
+#[path = "../../../src/safety/policy.rs"]
 mod policy;
+#[path = "../../../src/safety/sanitizer.rs"]
 mod sanitizer;
+#[path = "../../../src/safety/validator.rs"]
 mod validator;
 
 pub use credential_detect::params_contain_manual_credentials;

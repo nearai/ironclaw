@@ -431,7 +431,7 @@ impl TraceLlm {
     /// Strip `<tool_output name="...">...\n</tool_output>` wrapper from
     /// safety-layer output and reverse the targeted `</tool_output` escape.
     fn unwrap_tool_output(content: &str) -> std::borrow::Cow<'_, str> {
-        if let Some(body) = ironclaw_safety::SafetyLayer::unwrap_tool_output(content) {
+        if let Some(body) = ironclaw::safety::SafetyLayer::unwrap_tool_output(content) {
             return std::borrow::Cow::Owned(body);
         }
         std::borrow::Cow::Borrowed(content)

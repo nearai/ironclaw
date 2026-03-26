@@ -17,6 +17,7 @@ use uuid::Uuid;
 
 use crate::bootstrap::ironclaw_base_dir;
 use crate::channels::IncomingMessage;
+use crate::common::AppEvent;
 use crate::context::{ContextManager, JobContext, JobState};
 use crate::db::Database;
 use crate::history::SandboxJobRecord;
@@ -24,7 +25,6 @@ use crate::orchestrator::auth::CredentialGrant;
 use crate::orchestrator::job_manager::{ContainerJobManager, JobMode};
 use crate::secrets::SecretsStore;
 use crate::tools::tool::{ApprovalRequirement, Tool, ToolError, ToolOutput, require_str};
-use ironclaw_common::AppEvent;
 
 /// Lazy scheduler reference, filled after Agent::new creates the Scheduler.
 ///

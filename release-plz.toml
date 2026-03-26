@@ -1,2 +1,12 @@
 [workspace]
 git_release_enable = false
+
+[[package]]
+name = "ironclaw_common"
+publish = false
+release = false
+
+[[package]]
+name = "ironclaw_safety"
+publish = false
+release = false

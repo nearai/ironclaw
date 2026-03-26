@@ -46,10 +46,10 @@ use std::sync::Arc;
 use tokio::sync::{Mutex, broadcast};
 use uuid::Uuid;
 
+use crate::common::AppEvent;
 use crate::db::Database;
 use crate::llm::LlmProvider;
 use crate::secrets::SecretsStore;
-use ironclaw_common::AppEvent;
 
 /// Resolve the orchestrator port from the `ORCHESTRATOR_PORT` environment
 /// variable, falling back to 50051.

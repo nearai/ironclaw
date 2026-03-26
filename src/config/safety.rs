@@ -1,7 +1,7 @@
 use crate::config::helpers::{parse_bool_env, parse_optional_env};
 use crate::error::ConfigError;
 
-pub use ironclaw_safety::SafetyConfig;
+pub use crate::safety::SafetyConfig;
 
 pub(crate) fn resolve_safety_config(
     settings: &crate::settings::Settings,

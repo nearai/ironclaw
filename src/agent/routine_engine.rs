@@ -33,13 +33,13 @@ use crate::extensions::ExtensionManager;
 use crate::llm::{
     ChatMessage, CompletionRequest, FinishReason, LlmProvider, ToolCall, ToolCompletionRequest,
 };
+use crate::safety::SafetyLayer;
 use crate::tenant::AdminScope;
 use crate::tools::{
     ToolError, ToolRegistry, autonomous_allowed_tool_names, autonomous_unavailable_message,
     prepare_tool_params,
 };
 use crate::workspace::Workspace;
-use ironclaw_safety::SafetyLayer;
 
 enum EventMatcher {
     Message { routine: Routine, regex: Regex },

@@ -1,8 +1,6 @@
 //! Shared types and utilities for the IronClaw workspace.
 
-#[path = "../../../src/common/event.rs"]
 mod event;
-#[path = "../../../src/common/util.rs"]
 mod util;
 
 pub use event::{AppEvent, ToolDecisionDto};

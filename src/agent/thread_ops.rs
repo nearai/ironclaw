@@ -17,11 +17,11 @@ use crate::agent::dispatcher::{
 use crate::agent::session::{MAX_PENDING_MESSAGES, PendingApproval, Session, ThreadState};
 use crate::agent::submission::SubmissionResult;
 use crate::channels::{IncomingMessage, StatusUpdate};
+use crate::common::truncate_preview;
 use crate::context::JobContext;
 use crate::error::Error;
 use crate::llm::{ChatMessage, ToolCall};
 use crate::tools::redact_params;
-use ironclaw_common::truncate_preview;
 
 const FORGED_THREAD_ID_ERROR: &str = "Invalid or unauthorized thread ID.";
 

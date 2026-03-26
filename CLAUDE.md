@@ -33,15 +33,22 @@ Key traits for extensibility: `Database`, `Channel`, `Tool`, `LlmProvider`, `Suc
 
 All I/O is async with tokio. Use `Arc<T>` for shared state, `RwLock` for concurrent access.
 
-## Extracted Crates
+## Internal Shared Sources
 
-Safety logic lives in `crates/ironclaw_safety/`. The `src/safety/mod.rs` shim re-exports everything for backward compatibility, but **new code should import from `ironclaw_safety` directly** (e.g. `use ironclaw_safety::SafetyLayer`). When touching a file that still uses `crate::safety::*`, migrate its imports to `ironclaw_safety::*`.
+The main `ironclaw` crate owns its shared event types and safety layer under `src/common/` and `src/safety/`. The unpublished `ironclaw_common` and `ironclaw_safety` helper crates are internal wrappers around those same source files for workspace-only uses such as fuzzing.
+
+When working inside the main crate, import from the in-crate modules:
+- use `crate::common::{AppEvent, ToolDecisionDto, truncate_preview}`
+- use `crate::safety::*` (for example `use crate::safety::SafetyLayer`)
+
+The standalone helper crates remain for internal workspace uses such as fuzzing, not as the primary import path for the main crate.
 
 ## Project Structure
 
 ```
 crates/
-└── ironclaw_safety/    # Extracted: prompt injection, validation, leak detection, policy
+├── ironclaw_common/    # Internal wrapper crate over src/common for workspace-only use
+└── ironclaw_safety/    # Internal wrapper crate over src/safety for workspace-only use
 
 src/
 ├── lib.rs              # Library root, module declarations
@@ -111,7 +118,8 @@ src/
 │   ├── claude_bridge.rs # Claude Code bridge (spawns claude CLI)
 │   └── proxy_llm.rs    # LlmProvider that proxies through orchestrator
 │
-├── safety/             # Re-export shim for crates/ironclaw_safety (see Extracted Crates)
+├── common/             # Shared event types and preview helpers packaged with ironclaw
+├── safety/             # Shared safety layer packaged with ironclaw
 │
 ├── llm/                # Multi-provider LLM integration — see src/llm/CLAUDE.md
 │

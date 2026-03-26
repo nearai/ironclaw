@@ -19,6 +19,7 @@ use crate::agent::agentic_loop::{
 use crate::agent::scheduler::WorkerMessage;
 use crate::agent::task::TaskOutput;
 use crate::channels::web::types::ToolDecisionDto;
+use crate::common::AppEvent;
 use crate::context::{ContextManager, JobState};
 use crate::error::Error;
 use crate::hooks::HookRegistry;
@@ -33,7 +34,6 @@ use crate::tools::rate_limiter::RateLimitResult;
 use crate::tools::{
     ApprovalContext, ToolRegistry, autonomous_unavailable_error, prepare_tool_params, redact_params,
 };
-use ironclaw_common::AppEvent;
 
 /// Shared dependencies for worker execution.
 ///

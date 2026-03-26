@@ -1118,7 +1118,7 @@ impl ExtensionManager {
     /// Broadcast an extension status change to the web UI via SSE.
     async fn broadcast_extension_status(&self, name: &str, status: &str, message: Option<&str>) {
         if let Some(ref sse) = *self.sse_manager.read().await {
-            sse.broadcast(ironclaw_common::AppEvent::ExtensionStatus {
+            sse.broadcast(crate::common::AppEvent::ExtensionStatus {
                 extension_name: name.to_string(),
                 status: status.to_string(),
                 message: message.map(|m| m.to_string()),
@@ -3314,7 +3314,7 @@ impl ExtensionManager {
                 }
 
                 if let Some(ref sse) = sse_manager {
-                    sse.broadcast(ironclaw_common::AppEvent::AuthCompleted {
+                    sse.broadcast(crate::common::AppEvent::AuthCompleted {
                         extension_name: ext_name,
                         success,
                         message,

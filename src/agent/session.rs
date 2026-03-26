@@ -16,8 +16,8 @@ use chrono::{DateTime, TimeDelta, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::common::truncate_preview;
 use crate::llm::{ChatMessage, ToolCall, generate_tool_call_id};
-use ironclaw_common::truncate_preview;
 
 /// A session containing one or more threads.
 #[derive(Debug, Clone, Serialize, Deserialize)]

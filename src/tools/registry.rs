@@ -383,7 +383,7 @@ impl ToolRegistry {
         job_manager: Option<Arc<ContainerJobManager>>,
         store: Option<Arc<dyn Database>>,
         job_event_tx: Option<
-            tokio::sync::broadcast::Sender<(uuid::Uuid, String, ironclaw_common::AppEvent)>,
+            tokio::sync::broadcast::Sender<(uuid::Uuid, String, crate::common::AppEvent)>,
         >,
         inject_tx: Option<tokio::sync::mpsc::Sender<crate::channels::IncomingMessage>>,
         prompt_queue: Option<PromptQueue>,

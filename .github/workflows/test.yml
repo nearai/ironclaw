@@ -155,6 +155,20 @@ jobs:
       - name: Compile benchmarks
         run: cargo bench --all-features --no-run
 
+  package-verification:
+    name: Package Verification
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: package-verification
+      - name: Verify cargo package for ironclaw
+        run: cargo package -p ironclaw --locked
+
   docker-build:
     name: Docker Build
     if: >
@@ -186,7 +200,7 @@ jobs:
     name: Run Tests
     runs-on: ubuntu-latest
     if: always()
-    needs: [tests, heavy-integration-tests, telegram-tests, wasm-wit-compat, docker-build, windows-build, version-check, bench-compile]
+    needs: [tests, heavy-integration-tests, telegram-tests, wasm-wit-compat, docker-build, windows-build, version-check, bench-compile, package-verification]
     steps:
       - run: |
           # Unit tests must always pass
@@ -199,7 +213,7 @@ jobs:
             exit 1
           fi
           # Gated jobs: must pass on promotion PRs / push, skipped on developer PRs
-          for job in telegram-tests wasm-wit-compat docker-build windows-build version-check bench-compile; do
+          for job in telegram-tests wasm-wit-compat docker-build windows-build version-check bench-compile package-verification; do
             case "$job" in
               telegram-tests) result="${{ needs.telegram-tests.result }}" ;;
               wasm-wit-compat) result="${{ needs.wasm-wit-compat.result }}" ;;
@@ -207,6 +221,7 @@ jobs:
               windows-build) result="${{ needs.windows-build.result }}" ;;
               version-check) result="${{ needs.version-check.result }}" ;;
               bench-compile) result="${{ needs.bench-compile.result }}" ;;
+              package-verification) result="${{ needs.package-verification.result }}" ;;
             esac
             if [[ "$result" == "failure" || "$result" == "cancelled" ]]; then
               echo "$job failed"

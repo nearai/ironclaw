@@ -533,7 +533,7 @@ fn default_patterns() -> Vec<LeakPattern> {
 
 #[cfg(test)]
 mod tests {
-    use crate::leak_detector::{LeakDetector, LeakSeverity};
+    use super::{LeakDetector, LeakSeverity};
 
     #[test]
     fn test_detect_openai_key() {
@@ -641,7 +641,7 @@ mod tests {
 
     #[test]
     fn test_mask_secret() {
-        use crate::leak_detector::mask_secret;
+        use super::mask_secret;
 
         assert_eq!(mask_secret("short"), "*****");
         assert_eq!(mask_secret("sk-test1234567890abcdef"), "sk-t********cdef");
@@ -808,7 +808,7 @@ mod tests {
 
     #[test]
     fn test_mask_secret_short_value() {
-        use crate::leak_detector::mask_secret;
+        use super::mask_secret;
         // Short secrets (<= 8 chars) should be fully masked
         assert_eq!(mask_secret("abc"), "***");
         assert_eq!(mask_secret(""), "");
@@ -838,7 +838,7 @@ mod tests {
     /// Adversarial tests for leak detector regex patterns and masking.
     /// See <https://github.com/nearai/ironclaw/issues/1025>.
     mod adversarial {
-        use crate::leak_detector::{LeakDetector, mask_secret};
+        use super::super::{LeakDetector, mask_secret};
 
         // ── A. Regex backtracking / performance guards ───────────────
 

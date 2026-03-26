@@ -19,11 +19,11 @@ use tokio::time::timeout;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
+use ironclaw::AppEvent;
 use ironclaw::channels::IncomingMessage;
 use ironclaw::channels::web::server::{GatewayState, start_server};
 use ironclaw::channels::web::sse::SseManager;
 use ironclaw::channels::web::ws::WsConnectionTracker;
-use ironclaw_common::AppEvent;
 
 const AUTH_TOKEN: &str = "test-token-12345";
 const TIMEOUT: Duration = Duration::from_secs(5);
