@@ -545,6 +545,7 @@ pub trait RoutineStore: Send + Sync {
     async fn get_webhook_routine_by_path(
         &self,
         path: &str,
+        user_id: Option<&str>,
     ) -> Result<Option<Routine>, DatabaseError>;
 
     /// List routine runs that were dispatched as full_job but have not yet

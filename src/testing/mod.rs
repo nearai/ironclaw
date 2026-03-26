@@ -532,6 +532,7 @@ impl TestHarnessBuilder {
         let cost_guard = Arc::new(CostGuard::new(CostGuardConfig {
             max_cost_per_day_cents: None,
             max_actions_per_hour: None,
+            max_cost_per_user_per_day_cents: None,
         }));
 
         let channel = if self.stub_channel {
@@ -564,6 +565,7 @@ impl TestHarnessBuilder {
             sandbox_readiness: crate::agent::routine_engine::SandboxReadiness::DisabledByConfig,
             builder: None,
             llm_backend: "nearai".to_string(),
+            tenant_rates: std::sync::Arc::new(crate::tenant::TenantRateRegistry::new(4, 3)),
         };
 
         TestHarness {
