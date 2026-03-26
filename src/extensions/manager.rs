@@ -659,23 +659,60 @@ impl ExtensionManager {
         })
     }
 
-    /// Resolve the effective relay URL for an extension, checking the
-    /// per-extension `relay_url` override in settings before falling back to
-    /// the env-level `RelayConfig`.
-    async fn effective_relay_url(&self, name: &str, user_id: &str) -> Option<String> {
+    /// Resolve the relay URL override for an extension from settings.
+    ///
+    /// Returns `Some(url)` if a non-empty per-extension `relay_url` override is
+    /// set for the given extension; otherwise returns `None` and callers should
+    /// fall back to the env-level `RelayConfig`.
+    ///
+    /// Uses `self.user_id` (owner scope) for consistency with `configure()`,
+    /// which also writes setting_path fields under the owner scope.
+    ///
+    /// The override is validated: only `http` / `https` schemes are accepted
+    /// and the URL must not contain userinfo (embedded credentials).  This
+    /// prevents a malicious override from exfiltrating the instance-wide relay
+    /// API key to an attacker-controlled host.
+    async fn effective_relay_url(&self, name: &str) -> Option<String> {
         if let Some(ref store) = self.store {
             let key = format!("extensions.{name}.relay_url");
-            if let Ok(Some(v)) = store.get_setting(user_id, &key).await {
+            if let Ok(Some(v)) = store.get_setting(&self.user_id, &key).await {
                 let url = v
                     .as_str()
                     .map(|s| s.trim().to_string())
                     .filter(|s| !s.is_empty());
-                if url.is_some() {
-                    tracing::debug!(
-                        extension = %name,
-                        "effective_relay_url: using per-extension override from settings"
-                    );
-                    return url;
+                if let Some(ref u) = url {
+                    // Validate the override to prevent API-key exfiltration:
+                    // only allow http(s) with no embedded credentials.
+                    match url::Url::parse(u) {
+                        Ok(parsed)
+                            if (parsed.scheme() == "http" || parsed.scheme() == "https")
+                                && parsed.username().is_empty()
+                                && parsed.password().is_none() =>
+                        {
+                            tracing::debug!(
+                                extension = %name,
+                                relay_url_host = %parsed.host_str().unwrap_or("unknown"),
+                                "effective_relay_url: using per-extension override from settings"
+                            );
+                            return url;
+                        }
+                        Ok(parsed) => {
+                            tracing::warn!(
+                                extension = %name,
+                                scheme = %parsed.scheme(),
+                                has_userinfo = !parsed.username().is_empty() || parsed.password().is_some(),
+                                "effective_relay_url: rejecting override — \
+                                 only http/https without embedded credentials is allowed"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                extension = %name,
+                                error = %e,
+                                "effective_relay_url: rejecting override — invalid URL"
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -922,10 +959,12 @@ impl ExtensionManager {
     /// store.  This distinction matters for `auth_channel_relay`: an extension can
     /// be *installed* (present in the in-memory set) but not yet *authenticated*
     /// (no OAuth completed, no team_id stored).
-    async fn has_stored_team_id(&self, name: &str, user_id: &str) -> bool {
+    async fn has_stored_team_id(&self, name: &str, _user_id: &str) -> bool {
         if let Some(ref store) = self.store {
             let key = format!("relay:{}:team_id", name);
-            match store.get_setting(user_id, &key).await {
+            // Use owner scope (self.user_id) for consistency: the OAuth callback
+            // stores team_id under state.owner_id which maps to self.user_id.
+            match store.get_setting(&self.user_id, &key).await {
                 Ok(Some(v)) => {
                     let has_id = v.as_str().is_some_and(|s| !s.is_empty());
                     tracing::debug!(
@@ -4291,7 +4330,7 @@ impl ExtensionManager {
 
         // Allow per-extension URL override from settings
         let effective_url = self
-            .effective_relay_url(name, user_id)
+            .effective_relay_url(name)
             .await
             .unwrap_or_else(|| relay_config.url.clone());
 
@@ -4438,7 +4477,7 @@ impl ExtensionManager {
 
         // Allow per-extension URL override from settings
         let effective_url = self
-            .effective_relay_url(name, user_id)
+            .effective_relay_url(name)
             .await
             .unwrap_or_else(|| relay_config.url.clone());
 
@@ -4825,13 +4864,20 @@ impl ExtensionManager {
             ExtensionKind::ChannelRelay => {
                 let relay_url_key = format!("extensions.{name}.relay_url");
                 let current_url = if let Some(ref store) = self.store {
-                    store
-                        .get_setting(user_id, &relay_url_key)
-                        .await
-                        .ok()
-                        .flatten()
-                        .and_then(|v| v.as_str().map(|s| s.to_string()))
-                        .filter(|s| !s.is_empty())
+                    match store.get_setting(&self.user_id, &relay_url_key).await {
+                        Ok(value_opt) => value_opt
+                            .and_then(|v| v.as_str().map(|s| s.to_string()))
+                            .filter(|s| !s.is_empty()),
+                        Err(e) => {
+                            tracing::warn!(
+                                extension = %name,
+                                setting_key = %relay_url_key,
+                                error = %e,
+                                "get_setup_schema: failed to read relay_url from settings"
+                            );
+                            None
+                        }
+                    }
                 } else {
                     None
                 };

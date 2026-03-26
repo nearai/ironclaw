@@ -1183,19 +1183,18 @@ async fn slack_relay_oauth_callback_handler(
             team_id_key = %team_id_key,
             "relay OAuth callback: storing team_id in settings"
         );
-        if let Err(e) = store
+        store
             .set_setting(&state.owner_id, &team_id_key, &serde_json::json!(team_id))
             .await
-        {
-            tracing::error!(
-                relay = DEFAULT_RELAY_NAME,
-                owner_id = %state.owner_id,
-                error = %e,
-                "relay OAuth callback: failed to persist team_id to settings store — \
-                 the relay channel will work for this session but will not \
-                 reconnect automatically after a restart"
-            );
-        }
+            .map_err(|e| {
+                tracing::error!(
+                    relay = DEFAULT_RELAY_NAME,
+                    owner_id = %state.owner_id,
+                    error = %e,
+                    "relay OAuth callback: failed to persist team_id to settings store"
+                );
+                format!("Failed to persist relay team_id: {e}")
+            })?;
 
         // Activate the relay channel
         tracing::info!(
