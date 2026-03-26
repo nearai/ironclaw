@@ -286,37 +286,96 @@ impl Guest for FeishuChannel {
             .map_err(|e| format!("Failed to parse config: {}", e))?;
 
         channel_host::log(channel_host::LogLevel::Info, "Feishu channel starting");
+        channel_host::log(
+            channel_host::LogLevel::Info,
+            &format!(
+                "on_start config snapshot: has_app_id={}, has_app_secret={}, has_owner_id={}, dm_policy={}",
+                config.app_id.as_ref().map(|s| !s.is_empty()).unwrap_or(false),
+                config
+                    .app_secret
+                    .as_ref()
+                    .map(|s| !s.is_empty())
+                    .unwrap_or(false),
+                config.owner_id.as_ref().map(|s| !s.is_empty()).unwrap_or(false),
+                config.dm_policy.as_deref().unwrap_or("pairing")
+            ),
+        );
 
         // Persist config for cross-callback access.
         let api_base = config.api_base.trim_end_matches('/').to_string();
-        let _ = channel_host::workspace_write(API_BASE_PATH, &api_base);
+        if let Err(e) = channel_host::workspace_write(API_BASE_PATH, &api_base) {
+            channel_host::log(
+                channel_host::LogLevel::Warn,
+                &format!("workspace_write failed for {}: {}", API_BASE_PATH, e),
+            );
+        }
 
         // Persist app credentials for token exchange in later callbacks.
         // These are injected by the host from the secrets store into the
         // config JSON (see setup.rs inject_channel_secrets_into_config).
         if let Some(ref app_id) = config.app_id {
-            let _ = channel_host::workspace_write(APP_ID_PATH, app_id);
+            if let Err(e) = channel_host::workspace_write(APP_ID_PATH, app_id) {
+                channel_host::log(
+                    channel_host::LogLevel::Warn,
+                    &format!("workspace_write failed for {}: {}", APP_ID_PATH, e),
+                );
+            }
+        } else {
+            channel_host::log(
+                channel_host::LogLevel::Warn,
+                "on_start missing app_id in config_json",
+            );
         }
         if let Some(ref app_secret) = config.app_secret {
-            let _ = channel_host::workspace_write(APP_SECRET_PATH, app_secret);
+            if let Err(e) = channel_host::workspace_write(APP_SECRET_PATH, app_secret) {
+                channel_host::log(
+                    channel_host::LogLevel::Warn,
+                    &format!("workspace_write failed for {}: {}", APP_SECRET_PATH, e),
+                );
+            }
+        } else {
+            channel_host::log(
+                channel_host::LogLevel::Warn,
+                "on_start missing app_secret in config_json",
+            );
         }
 
         if let Some(owner_id) = &config.owner_id {
-            let _ = channel_host::workspace_write(OWNER_ID_PATH, owner_id);
+            if let Err(e) = channel_host::workspace_write(OWNER_ID_PATH, owner_id) {
+                channel_host::log(
+                    channel_host::LogLevel::Warn,
+                    &format!("workspace_write failed for {}: {}", OWNER_ID_PATH, e),
+                );
+            }
             channel_host::log(
                 channel_host::LogLevel::Info,
                 &format!("Owner restriction enabled: user {}", owner_id),
             );
         } else {
-            let _ = channel_host::workspace_write(OWNER_ID_PATH, "");
+            if let Err(e) = channel_host::workspace_write(OWNER_ID_PATH, "") {
+                channel_host::log(
+                    channel_host::LogLevel::Warn,
+                    &format!("workspace_write failed for {}: {}", OWNER_ID_PATH, e),
+                );
+            }
         }
 
         let dm_policy = config.dm_policy.as_deref().unwrap_or("pairing").to_string();
-        let _ = channel_host::workspace_write(DM_POLICY_PATH, &dm_policy);
+        if let Err(e) = channel_host::workspace_write(DM_POLICY_PATH, &dm_policy) {
+            channel_host::log(
+                channel_host::LogLevel::Warn,
+                &format!("workspace_write failed for {}: {}", DM_POLICY_PATH, e),
+            );
+        }
 
         let allow_from_json = serde_json::to_string(&config.allow_from.unwrap_or_default())
             .unwrap_or_else(|_| "[]".to_string());
-        let _ = channel_host::workspace_write(ALLOW_FROM_PATH, &allow_from_json);
+        if let Err(e) = channel_host::workspace_write(ALLOW_FROM_PATH, &allow_from_json) {
+            channel_host::log(
+                channel_host::LogLevel::Warn,
+                &format!("workspace_write failed for {}: {}", ALLOW_FROM_PATH, e),
+            );
+        }
 
         // Obtain initial tenant access token if credentials are available.
         let has_credentials = config.app_id.is_some() && config.app_secret.is_some();
@@ -415,6 +474,21 @@ impl Guest for FeishuChannel {
     fn on_respond(response: AgentResponse) -> Result<(), String> {
         let metadata: FeishuMessageMetadata = serde_json::from_str(&response.metadata_json)
             .map_err(|e| format!("Failed to parse metadata: {}", e))?;
+        channel_host::log(
+            channel_host::LogLevel::Debug,
+            &format!(
+                "on_respond workspace snapshot: has_app_id={}, has_app_secret={}, has_api_base={}",
+                channel_host::workspace_read(APP_ID_PATH)
+                    .map(|s| !s.is_empty())
+                    .unwrap_or(false),
+                channel_host::workspace_read(APP_SECRET_PATH)
+                    .map(|s| !s.is_empty())
+                    .unwrap_or(false),
+                channel_host::workspace_read(API_BASE_PATH)
+                    .map(|s| !s.is_empty())
+                    .unwrap_or(false)
+            ),
+        );
 
         send_reply(&metadata.message_id, &response.content)
     }
@@ -740,6 +814,22 @@ fn get_valid_token(api_base: &str) -> Result<String, String> {
 /// Reads credentials from workspace storage (persisted during `on_start`
 /// from config JSON injected by the host).
 fn obtain_tenant_token(api_base: &str) -> Result<String, String> {
+    let has_app_id = channel_host::workspace_read(APP_ID_PATH)
+        .map(|s| !s.is_empty())
+        .unwrap_or(false);
+    let has_app_secret = channel_host::workspace_read(APP_SECRET_PATH)
+        .map(|s| !s.is_empty())
+        .unwrap_or(false);
+    let has_owner_id = channel_host::workspace_read(OWNER_ID_PATH)
+        .map(|s| !s.is_empty())
+        .unwrap_or(false);
+    channel_host::log(
+        channel_host::LogLevel::Debug,
+        &format!(
+            "obtain_tenant_token workspace snapshot: has_app_id={}, has_app_secret={}, has_owner_id={}, api_base={}",
+            has_app_id, has_app_secret, has_owner_id, api_base
+        ),
+    );
     let app_id = channel_host::workspace_read(APP_ID_PATH)
         .filter(|s| !s.is_empty())
         .ok_or_else(|| "app_id not configured (missing from workspace)".to_string())?;
