@@ -290,6 +290,17 @@ impl WorkspacePool {
         }
 
         let ws = Arc::new(ws);
+
+        // Seed identity files on first workspace creation so new users get
+        // BOOTSTRAP.md, SOUL.md, AGENTS.md, etc.
+        let seed_ws = Arc::clone(&ws);
+        let seed_user = identity.user_id.clone();
+        tokio::spawn(async move {
+            if let Err(e) = seed_ws.seed_if_empty().await {
+                tracing::warn!(user_id = seed_user, "Failed to seed workspace: {}", e);
+            }
+        });
+
         cache.insert(identity.user_id.clone(), Arc::clone(&ws));
         ws
     }
