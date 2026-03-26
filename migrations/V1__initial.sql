@@ -184,6 +184,7 @@ CREATE INDEX idx_memory_documents_user ON memory_documents(user_id);
 CREATE INDEX idx_memory_documents_path ON memory_documents(user_id, path);
 CREATE INDEX idx_memory_documents_path_prefix ON memory_documents(user_id, path text_pattern_ops);
 CREATE INDEX idx_memory_documents_updated ON memory_documents(updated_at DESC);
+CREATE INDEX idx_memory_documents_metadata ON memory_documents USING GIN(metadata);
 
 -- ==================== Workspace: Memory Chunks ====================
 -- Documents are chunked for hybrid search (FTS + vector)

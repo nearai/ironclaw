@@ -657,6 +657,14 @@ impl WorkspaceStore for PgBackend {
         self.repo.update_document(id, content).await
     }
 
+    async fn update_document_metadata(
+        &self,
+        id: Uuid,
+        metadata: &serde_json::Value,
+    ) -> Result<(), WorkspaceError> {
+        self.repo.update_document_metadata(id, metadata).await
+    }
+
     async fn delete_document_by_path(
         &self,
         user_id: &str,
@@ -691,6 +699,18 @@ impl WorkspaceStore for PgBackend {
         agent_id: Option<Uuid>,
     ) -> Result<Vec<MemoryDocument>, WorkspaceError> {
         self.repo.list_documents(user_id, agent_id).await
+    }
+
+    async fn list_documents_by_metadata(
+        &self,
+        user_id: &str,
+        agent_id: Option<Uuid>,
+        key: &str,
+        value: &str,
+    ) -> Result<Vec<MemoryDocument>, WorkspaceError> {
+        self.repo
+            .list_documents_by_metadata(user_id, agent_id, key, value)
+            .await
     }
 
     async fn delete_chunks(&self, document_id: Uuid) -> Result<(), WorkspaceError> {
