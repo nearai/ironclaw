@@ -47,6 +47,61 @@ fn is_workspace_path(path: &str) -> bool {
 /// Maximum file size for reading (1MB).
 const MAX_READ_SIZE: u64 = 1024 * 1024;
 
+/// Path suffixes/segments that indicate credential-bearing files.
+/// Checked against the canonicalized path (symlinks resolved) using
+/// case-insensitive comparison.
+const SENSITIVE_PATH_PATTERNS: &[&str] = &[
+    "/.ssh/",
+    "/.aws/credentials",
+    "/.aws/config",
+    "/.netrc",
+    "/.pgpass",
+    "/.npmrc",
+    "/.pypirc",
+    "/.docker/config.json",
+    "/.kube/config",
+    "/.git-credentials",
+    "/.gcloud/",
+    "/.config/gcloud/",
+    "/.gnupg/",
+    "/.vault-token",
+    "/.ironclaw/secrets/",
+];
+
+/// Safe `.env` file suffixes that should NOT be blocked.
+const ENV_SAFE_SUFFIXES: &[&str] = &[".example", ".template", ".sample"];
+
+/// Check if a path points to a sensitive file that should not be accessed.
+///
+/// Uses case-insensitive matching. Resolves symlinks via `canonicalize()`
+/// when the target exists on disk to prevent symlink bypass.
+///
+/// The `.env` check blocks `.env`, `.env.local`, `.env.production`, etc.
+/// but allows `.env.example`, `.env.template`, `.env.sample`.
+fn is_sensitive_path(path: &Path) -> bool {
+    // Resolve symlinks when the target exists
+    let resolved = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let path_str = resolved.to_string_lossy().to_ascii_lowercase();
+
+    // Check .env files: block .env and .env.* except safe suffixes
+    if let Some(filename) = resolved.file_name().and_then(|f| f.to_str()) {
+        let filename_lower = filename.to_ascii_lowercase();
+        if filename_lower == ".env" || filename_lower.starts_with(".env.") {
+            let is_safe = ENV_SAFE_SUFFIXES
+                .iter()
+                .any(|suffix| filename_lower.ends_with(suffix));
+            if !is_safe {
+                return true;
+            }
+        }
+    }
+
+    // Check other sensitive path patterns
+    SENSITIVE_PATH_PATTERNS
+        .iter()
+        .any(|p| path_str.contains(&p.to_ascii_lowercase()))
+}
+
 /// Maximum file size for writing (5MB).
 const MAX_WRITE_SIZE: usize = 5 * 1024 * 1024;
 
@@ -116,6 +171,15 @@ impl Tool for ReadFileTool {
         let start = std::time::Instant::now();
 
         let path = validate_path(path_str, self.base_dir.as_deref())?;
+
+        // Check sensitive path blocklist (after canonicalization in validate_path)
+        if is_sensitive_path(&path) {
+            return Err(ToolError::ExecutionFailed(
+                "Access denied: this file may contain credentials. \
+                 Use the appropriate configuration tools instead."
+                    .to_string(),
+            ));
+        }
 
         // Check file size
         let metadata = fs::metadata(&path)
@@ -255,6 +319,15 @@ impl Tool for WriteFileTool {
         }
 
         let path = validate_path(path_str, self.base_dir.as_deref())?;
+
+        // Block writes to sensitive credential files
+        if is_sensitive_path(&path) {
+            return Err(ToolError::ExecutionFailed(
+                "Access denied: cannot write to credential files. \
+                 Use the appropriate configuration tools instead."
+                    .to_string(),
+            ));
+        }
 
         // Create parent directories
         if let Some(parent) = path.parent() {
@@ -561,6 +634,15 @@ impl Tool for ApplyPatchTool {
 
         let path = validate_path(path_str, self.base_dir.as_deref())?;
 
+        // Block patches to sensitive credential files
+        if is_sensitive_path(&path) {
+            return Err(ToolError::ExecutionFailed(
+                "Access denied: cannot modify credential files. \
+                 Use the appropriate configuration tools instead."
+                    .to_string(),
+            ));
+        }
+
         // Read current content
         let content = fs::read_to_string(&path)
             .await
@@ -864,5 +946,90 @@ mod tests {
             "Should allow .. that stays within sandbox: {:?}",
             result
         );
+    }
+
+    // ── Sensitive path blocklist tests ──────────────────────────────
+
+    #[test]
+    fn sensitive_path_blocks_dotenv() {
+        assert!(is_sensitive_path(Path::new("/home/user/.env")));
+        assert!(is_sensitive_path(Path::new("/app/.env")));
+        assert!(is_sensitive_path(Path::new("/home/user/.ironclaw/.env")));
+    }
+
+    #[test]
+    fn sensitive_path_blocks_ssh() {
+        assert!(is_sensitive_path(Path::new("/home/user/.ssh/id_rsa")));
+        assert!(is_sensitive_path(Path::new("/home/user/.ssh/id_ed25519")));
+        assert!(is_sensitive_path(Path::new("/home/user/.ssh/config")));
+    }
+
+    #[test]
+    fn sensitive_path_blocks_aws() {
+        assert!(is_sensitive_path(Path::new("/home/user/.aws/credentials")));
+        assert!(is_sensitive_path(Path::new("/home/user/.aws/config")));
+    }
+
+    #[test]
+    fn sensitive_path_blocks_env_variants() {
+        // .env.local, .env.production etc. contain real secrets
+        assert!(is_sensitive_path(Path::new("/app/.env.local")));
+        assert!(is_sensitive_path(Path::new("/app/.env.production")));
+        assert!(is_sensitive_path(Path::new("/app/.env.staging")));
+        assert!(is_sensitive_path(Path::new("/app/.env.development")));
+    }
+
+    #[test]
+    fn sensitive_path_blocks_other_credential_stores() {
+        assert!(is_sensitive_path(Path::new("/home/user/.netrc")));
+        assert!(is_sensitive_path(Path::new("/home/user/.pgpass")));
+        assert!(is_sensitive_path(Path::new("/home/user/.npmrc")));
+        assert!(is_sensitive_path(Path::new("/home/user/.pypirc")));
+        assert!(is_sensitive_path(Path::new("/home/user/.kube/config")));
+        assert!(is_sensitive_path(Path::new("/home/user/.git-credentials")));
+        assert!(is_sensitive_path(Path::new(
+            "/home/user/.docker/config.json"
+        )));
+        assert!(is_sensitive_path(Path::new(
+            "/home/user/.gcloud/credentials"
+        )));
+        assert!(is_sensitive_path(Path::new(
+            "/home/user/.config/gcloud/credentials"
+        )));
+        assert!(is_sensitive_path(Path::new(
+            "/home/user/.gnupg/secring.gpg"
+        )));
+        assert!(is_sensitive_path(Path::new("/home/user/.vault-token")));
+        assert!(is_sensitive_path(Path::new(
+            "/home/user/.ironclaw/secrets/api_key"
+        )));
+    }
+
+    #[test]
+    fn sensitive_path_allows_env_safe_suffixes() {
+        assert!(!is_sensitive_path(Path::new("/app/.env.example")));
+        assert!(!is_sensitive_path(Path::new("/app/.env.template")));
+        assert!(!is_sensitive_path(Path::new("/app/.env.sample")));
+    }
+
+    #[test]
+    fn sensitive_path_allows_normal_files() {
+        assert!(!is_sensitive_path(Path::new("/home/user/notes.txt")));
+        assert!(!is_sensitive_path(Path::new("/tmp/test.py")));
+        assert!(!is_sensitive_path(Path::new(
+            "/home/user/.ironclaw/workspace/README.md"
+        )));
+        assert!(!is_sensitive_path(Path::new(
+            "/home/user/envoy/config.yaml"
+        )));
+        assert!(!is_sensitive_path(Path::new(
+            "/home/user/project/src/main.rs"
+        )));
+    }
+
+    #[test]
+    fn sensitive_path_case_insensitive() {
+        assert!(is_sensitive_path(Path::new("/home/user/.ENV")));
+        assert!(is_sensitive_path(Path::new("/home/user/.Ssh/id_rsa")));
     }
 }

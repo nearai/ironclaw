@@ -519,6 +519,35 @@ fn default_patterns() -> Vec<LeakPattern> {
             severity: LeakSeverity::High,
             action: LeakAction::Redact,
         },
+        // OpenRouter API keys (sk-or-v1-<hex, 40+ chars>)
+        LeakPattern {
+            name: "openrouter_api_key".to_string(),
+            regex: Regex::new(r"sk-or-v1-[a-fA-F0-9]{40,}").unwrap(), // safety: hardcoded literal
+            severity: LeakSeverity::Critical,
+            action: LeakAction::Block,
+        },
+        // Anthropic OAuth tokens (sk-ant-oat<NN>-<base64url, 50+ chars>)
+        LeakPattern {
+            name: "anthropic_oauth_token".to_string(),
+            regex: Regex::new(r"sk-ant-oat\d{2}-[a-zA-Z0-9_-]{50,}").unwrap(), // safety: hardcoded literal
+            severity: LeakSeverity::Critical,
+            action: LeakAction::Block,
+        },
+        // Telegram bot tokens (<8-12 digit bot_id>:AA<base64url, 30+ chars>)
+        // Word boundary prevents false positives on timestamp-keyed log entries.
+        LeakPattern {
+            name: "telegram_bot_token".to_string(),
+            regex: Regex::new(r"\b\d{8,12}:AA[A-Za-z0-9_-]{30,}").unwrap(), // safety: hardcoded literal
+            severity: LeakSeverity::Critical,
+            action: LeakAction::Block,
+        },
+        // Groq API keys (gsk_<alphanumeric, 30+ chars>)
+        LeakPattern {
+            name: "groq_api_key".to_string(),
+            regex: Regex::new(r"gsk_[A-Za-z0-9]{30,}").unwrap(), // safety: hardcoded literal
+            severity: LeakSeverity::Critical,
+            action: LeakAction::Block,
+        },
         // High entropy hex (potential secrets, warn only)
         // Uses word boundary since look-around isn't supported in the regex crate.
         // This catches standalone 64-char hex strings (like SHA256 hashes used as secrets).
@@ -833,6 +862,138 @@ mod tests {
             // Should not block (may warn on some patterns, but not block)
             assert!(!result.should_block, "clean text falsely blocked: {text}");
         }
+    }
+
+    // ── OpenRouter, Anthropic OAuth, Telegram, Groq patterns ────────
+
+    #[test]
+    fn test_detect_openrouter_key() {
+        let detector = LeakDetector::new();
+        // Synthetic key — 64 hex chars after prefix
+        let content =
+            "LLM_API_KEY=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";
+        let result = detector.scan(content);
+        assert!(result.should_block, "OpenRouter key not detected");
+        assert!(
+            result
+                .matches
+                .iter()
+                .any(|m| m.pattern_name == "openrouter_api_key")
+        );
+    }
+
+    #[test]
+    fn test_detect_openrouter_key_in_json() {
+        let detector = LeakDetector::new();
+        let content =
+            r#"{"api_key": "sk-or-v1-aabbccdd00112233445566778899aabbccdd00112233445566"}"#;
+        let result = detector.scan(content);
+        assert!(result.should_block, "OpenRouter key in JSON not detected");
+    }
+
+    #[test]
+    fn test_openrouter_short_key_passes() {
+        let detector = LeakDetector::new();
+        let content = "sk-or-v1-abc123";
+        let result = detector.scan(content);
+        assert!(
+            !result.should_block,
+            "Short OpenRouter-like string falsely blocked"
+        );
+    }
+
+    #[test]
+    fn test_detect_anthropic_oauth() {
+        let detector = LeakDetector::new();
+        // Synthetic token — 90+ base64url chars after prefix
+        let content = "token=sk-ant-oat01-aaaBBBcccDDDeeeFFF111222333444555666777888999000aaaBBBcccDDDeeeFFF111222333444555666";
+        let result = detector.scan(content);
+        assert!(result.should_block, "Anthropic OAuth token not detected");
+        assert!(
+            result
+                .matches
+                .iter()
+                .any(|m| m.pattern_name == "anthropic_oauth_token")
+        );
+    }
+
+    #[test]
+    fn test_detect_telegram_bot_token() {
+        let detector = LeakDetector::new();
+        // Synthetic token — fake bot ID and token
+        let content = "TELEGRAM_BOT_TOKEN=12345678901:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw";
+        let result = detector.scan(content);
+        assert!(result.should_block, "Telegram bot token not detected");
+        assert!(
+            result
+                .matches
+                .iter()
+                .any(|m| m.pattern_name == "telegram_bot_token")
+        );
+    }
+
+    #[test]
+    fn test_telegram_short_id_passes() {
+        let detector = LeakDetector::new();
+        let content = "123:AAFoo";
+        let result = detector.scan(content);
+        assert!(
+            !result
+                .matches
+                .iter()
+                .any(|m| m.pattern_name == "telegram_bot_token"),
+            "Short bot ID falsely matched Telegram pattern"
+        );
+    }
+
+    #[test]
+    fn test_detect_groq_key() {
+        let detector = LeakDetector::new();
+        // Synthetic key — 56 alphanumeric chars after prefix
+        let content = "GROQ_API_KEY=gsk_aaaBBBcccDDDeeeFFF111222333444555666777888999000aaaBBBcc";
+        let result = detector.scan(content);
+        assert!(result.should_block, "Groq API key not detected");
+        assert!(
+            result
+                .matches
+                .iter()
+                .any(|m| m.pattern_name == "groq_api_key")
+        );
+    }
+
+    #[test]
+    fn test_groq_short_key_passes() {
+        let detector = LeakDetector::new();
+        let content = "gsk_abc";
+        let result = detector.scan(content);
+        assert!(
+            !result
+                .matches
+                .iter()
+                .any(|m| m.pattern_name == "groq_api_key"),
+            "Short Groq-like string falsely matched"
+        );
+    }
+
+    #[test]
+    fn test_scan_and_clean_blocks_openrouter() {
+        let detector = LeakDetector::new();
+        let content =
+            "key=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";
+        assert!(
+            detector.scan_and_clean(content).is_err(),
+            "scan_and_clean should block OpenRouter key"
+        );
+    }
+
+    #[test]
+    fn test_scan_and_clean_blocks_telegram() {
+        let detector = LeakDetector::new();
+        let content = "12345678901:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw";
+        assert!(
+            detector.scan_and_clean(content).is_err(),
+            "scan_and_clean should block Telegram token"
+        );
     }
 
     /// Adversarial tests for leak detector regex patterns and masking.
