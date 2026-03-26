@@ -6,6 +6,8 @@ use crate::security::outbound_trust::{
 };
 use crate::tools::mcp::config::{McpServerConfig, is_localhost_url};
 
+pub(crate) use crate::security::outbound_trust::is_dangerous_ip;
+
 pub(crate) fn resolve_mcp_outbound_trust_decision(
     resolver: &OutboundTrustResolver,
     server_config: &McpServerConfig,
@@ -87,32 +89,6 @@ pub(crate) async fn validate_mcp_url(url: &str, allow_private_network: bool) -> 
     }
 
     Ok(())
-}
-
-pub(crate) fn is_dangerous_ip(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(v4) => {
-            v4.is_loopback()
-                || v4.is_private()
-                || v4.is_link_local()
-                || v4.is_broadcast()
-                || v4.is_unspecified()
-                || (v4.octets()[0] == 169 && v4.octets()[1] == 254)
-                || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xC0) == 64)
-        }
-        IpAddr::V6(v6) => {
-            let segs = v6.segments();
-            v6.is_loopback()
-                || v6.is_unspecified()
-                || (segs[0] & 0xffc0) == 0xfe80
-                || (segs[0] & 0xffc0) == 0xfec0
-                || (segs[0] & 0xfe00) == 0xfc00
-                || (segs[0] == 0x2001 && segs[1] == 0x0db8)
-                || v6
-                    .to_ipv4_mapped()
-                    .is_some_and(|v4| is_dangerous_ip(IpAddr::V4(v4)))
-        }
-    }
 }
 
 #[cfg(test)]

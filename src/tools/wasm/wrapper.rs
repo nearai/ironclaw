@@ -22,7 +22,7 @@ use crate::safety::LeakDetector;
 use crate::secrets::SecretsStore;
 use crate::security::outbound_trust::{
     OutboundTrustConfig, OutboundTrustDecision, OutboundTrustRequestContext, OutboundTrustResolver,
-    OutboundTrustSurface,
+    OutboundTrustSurface, is_dangerous_ip,
 };
 use crate::tools::tool::{Tool, ToolError, ToolOutput};
 use crate::tools::wasm::capabilities::Capabilities;
@@ -1567,6 +1567,7 @@ fn build_wasm_http_client(allow_invalid_tls: bool) -> Result<reqwest::Client, St
 /// Resolve the URL's hostname and reject connections to private/internal IP addresses.
 /// This prevents DNS rebinding attacks where an attacker's domain resolves to an
 /// internal IP after passing the allowlist check.
+/// Performs blocking DNS resolution and must only run on a blocking thread.
 fn reject_private_ip(url: &str) -> Result<(), String> {
     let parsed = url::Url::parse(url).map_err(|e| format!("Failed to parse URL: {e}"))?;
     if !matches!(parsed.scheme(), "http" | "https") {
@@ -1587,7 +1588,7 @@ fn reject_private_ip(url: &str) -> Result<(), String> {
 
     // If the host is already an IP, check it directly
     if let Ok(ip) = host.parse::<std::net::IpAddr>() {
-        return if is_private_ip(ip) {
+        return if is_dangerous_ip(ip) {
             Err(format!(
                 "HTTP request to private/internal IP {} is not allowed",
                 ip
@@ -1611,7 +1612,7 @@ fn reject_private_ip(url: &str) -> Result<(), String> {
     }
 
     for addr in &addrs {
-        if is_private_ip(addr.ip()) {
+        if is_dangerous_ip(addr.ip()) {
             return Err(format!(
                 "DNS rebinding detected: {} resolved to private IP {}",
                 host,
@@ -1621,27 +1622,6 @@ fn reject_private_ip(url: &str) -> Result<(), String> {
     }
 
     Ok(())
-}
-
-/// Check if an IP address belongs to a private/internal range.
-fn is_private_ip(ip: std::net::IpAddr) -> bool {
-    match ip {
-        std::net::IpAddr::V4(v4) => {
-            v4.is_loopback()           // 127.0.0.0/8
-            || v4.is_private()         // 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
-            || v4.is_link_local()      // 169.254.0.0/16
-            || v4.is_unspecified()     // 0.0.0.0
-            || v4.octets()[0] == 100 && (v4.octets()[1] & 0xC0) == 64 // 100.64.0.0/10 (CGNAT)
-        }
-        std::net::IpAddr::V6(v6) => {
-            v6.is_loopback()           // ::1
-            || v6.is_unspecified()     // ::
-            // fc00::/7 (unique local)
-            || (v6.segments()[0] & 0xFE00) == 0xFC00
-            // fe80::/10 (link-local)
-            || (v6.segments()[0] & 0xFFC0) == 0xFE80
-        }
-    }
 }
 
 fn schema_contains_container_properties(schema: &serde_json::Value) -> bool {
@@ -2503,44 +2483,55 @@ mod tests {
     }
 
     #[test]
-    fn test_is_private_ip_v4() {
+    fn test_is_dangerous_ip_v4() {
         use std::net::IpAddr;
         // Private ranges
-        assert!(super::is_private_ip("127.0.0.1".parse::<IpAddr>().unwrap()));
-        assert!(super::is_private_ip("10.0.0.1".parse::<IpAddr>().unwrap()));
-        assert!(super::is_private_ip(
+        assert!(super::is_dangerous_ip(
+            "127.0.0.1".parse::<IpAddr>().unwrap()
+        ));
+        assert!(super::is_dangerous_ip(
+            "10.0.0.1".parse::<IpAddr>().unwrap()
+        ));
+        assert!(super::is_dangerous_ip(
             "172.16.0.1".parse::<IpAddr>().unwrap()
         ));
-        assert!(super::is_private_ip(
+        assert!(super::is_dangerous_ip(
             "192.168.1.1".parse::<IpAddr>().unwrap()
         ));
-        assert!(super::is_private_ip(
+        assert!(super::is_dangerous_ip(
             "169.254.1.1".parse::<IpAddr>().unwrap()
         ));
-        assert!(super::is_private_ip("0.0.0.0".parse::<IpAddr>().unwrap()));
+        assert!(super::is_dangerous_ip("0.0.0.0".parse::<IpAddr>().unwrap()));
         // CGNAT
-        assert!(super::is_private_ip(
+        assert!(super::is_dangerous_ip(
             "100.64.0.1".parse::<IpAddr>().unwrap()
         ));
 
         // Public IPs
-        assert!(!super::is_private_ip("8.8.8.8".parse::<IpAddr>().unwrap()));
-        assert!(!super::is_private_ip("1.1.1.1".parse::<IpAddr>().unwrap()));
-        assert!(!super::is_private_ip(
+        assert!(!super::is_dangerous_ip(
+            "8.8.8.8".parse::<IpAddr>().unwrap()
+        ));
+        assert!(!super::is_dangerous_ip(
+            "1.1.1.1".parse::<IpAddr>().unwrap()
+        ));
+        assert!(!super::is_dangerous_ip(
             "93.184.216.34".parse::<IpAddr>().unwrap()
         ));
     }
 
     #[test]
-    fn test_is_private_ip_v6() {
+    fn test_is_dangerous_ip_v6() {
         use std::net::IpAddr;
-        assert!(super::is_private_ip("::1".parse::<IpAddr>().unwrap()));
-        assert!(super::is_private_ip("::".parse::<IpAddr>().unwrap()));
-        assert!(super::is_private_ip("fc00::1".parse::<IpAddr>().unwrap()));
-        assert!(super::is_private_ip("fe80::1".parse::<IpAddr>().unwrap()));
+        assert!(super::is_dangerous_ip("::1".parse::<IpAddr>().unwrap()));
+        assert!(super::is_dangerous_ip("::".parse::<IpAddr>().unwrap()));
+        assert!(super::is_dangerous_ip("fc00::1".parse::<IpAddr>().unwrap()));
+        assert!(super::is_dangerous_ip("fe80::1".parse::<IpAddr>().unwrap()));
+        assert!(super::is_dangerous_ip(
+            "::ffff:10.0.0.1".parse::<IpAddr>().unwrap()
+        ));
 
         // Public
-        assert!(!super::is_private_ip(
+        assert!(!super::is_dangerous_ip(
             "2606:4700::1111".parse::<IpAddr>().unwrap()
         ));
     }
@@ -2555,6 +2546,12 @@ mod tests {
     #[test]
     fn test_reject_private_ip_internal() {
         let result = super::reject_private_ip("https://192.168.1.1/admin");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_reject_private_ip_ipv4_mapped_v6_internal() {
+        let result = super::reject_private_ip("https://[::ffff:10.0.0.1]/admin");
         assert!(result.is_err());
     }
 

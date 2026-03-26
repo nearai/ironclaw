@@ -55,7 +55,7 @@ use crate::safety::LeakDetector;
 use crate::secrets::SecretsStore;
 use crate::security::outbound_trust::{
     OutboundTrustConfig, OutboundTrustDecision, OutboundTrustRequestContext, OutboundTrustResolver,
-    OutboundTrustSurface,
+    OutboundTrustSurface, is_dangerous_ip,
 };
 use crate::tools::wasm::LogLevel;
 use crate::tools::wasm::WasmResourceLimiter;
@@ -3242,6 +3242,7 @@ fn should_skip_response_leak_scan(url: &str) -> bool {
 }
 
 /// Resolve the URL's hostname and reject connections to private/internal IPs.
+/// Performs blocking DNS resolution and must only run on a blocking thread.
 fn reject_private_ip(url: &str) -> Result<(), String> {
     let parsed = url::Url::parse(url).map_err(|e| format!("Failed to parse URL: {e}"))?;
     if !matches!(parsed.scheme(), "http" | "https") {
@@ -3261,7 +3262,7 @@ fn reject_private_ip(url: &str) -> Result<(), String> {
         .ok_or_else(|| "Failed to parse host from URL".to_string())?;
 
     if let Ok(ip) = host.parse::<std::net::IpAddr>() {
-        return if is_private_ip(ip) {
+        return if is_dangerous_ip(ip) {
             Err(format!(
                 "HTTP request to private/internal IP {} is not allowed",
                 ip
@@ -3282,7 +3283,7 @@ fn reject_private_ip(url: &str) -> Result<(), String> {
     }
 
     for addr in &addrs {
-        if is_private_ip(addr.ip()) {
+        if is_dangerous_ip(addr.ip()) {
             return Err(format!(
                 "DNS rebinding detected: {} resolved to private IP {}",
                 host,
@@ -3292,24 +3293,6 @@ fn reject_private_ip(url: &str) -> Result<(), String> {
     }
 
     Ok(())
-}
-
-fn is_private_ip(ip: std::net::IpAddr) -> bool {
-    match ip {
-        std::net::IpAddr::V4(v4) => {
-            v4.is_loopback()
-                || v4.is_private()
-                || v4.is_link_local()
-                || v4.is_unspecified()
-                || v4.octets()[0] == 100 && (v4.octets()[1] & 0xC0) == 64
-        }
-        std::net::IpAddr::V6(v6) => {
-            v6.is_loopback()
-                || v6.is_unspecified()
-                || (v6.segments()[0] & 0xFE00) == 0xFC00
-                || (v6.segments()[0] & 0xFFC0) == 0xFE80
-        }
-    }
 }
 
 /// Pre-resolve host credentials for all HTTP capability mappings.

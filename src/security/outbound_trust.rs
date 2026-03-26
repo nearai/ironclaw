@@ -1,3 +1,5 @@
+use std::net::IpAddr;
+
 use serde::{Deserialize, Serialize};
 
 /// Runtime configuration for outbound trust policy evaluation.
@@ -153,6 +155,32 @@ impl OutboundTrustResolver {
     }
 }
 
+pub(crate) fn is_dangerous_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_broadcast()
+                || v4.is_unspecified()
+                || (v4.octets()[0] == 169 && v4.octets()[1] == 254)
+                || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xC0) == 64)
+        }
+        IpAddr::V6(v6) => {
+            let segs = v6.segments();
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || (segs[0] & 0xffc0) == 0xfe80
+                || (segs[0] & 0xffc0) == 0xfec0
+                || (segs[0] & 0xfe00) == 0xfc00
+                || (segs[0] == 0x2001 && segs[1] == 0x0db8)
+                || v6
+                    .to_ipv4_mapped()
+                    .is_some_and(|v4| is_dangerous_ip(IpAddr::V4(v4)))
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct NormalizedRequestTarget {
     host: String,
@@ -198,6 +226,8 @@ impl NormalizedRequestTarget {
 
 #[cfg(test)]
 mod tests {
+    use std::net::IpAddr;
+
     use super::{
         OutboundTrustConfig, OutboundTrustPolicy, OutboundTrustRequestContext,
         OutboundTrustResolver, OutboundTrustRisk, OutboundTrustSurface, OutboundTrustTarget,
@@ -240,6 +270,18 @@ mod tests {
             url,
             declared_policy_ids,
         })
+    }
+
+    #[test]
+    fn dangerous_ip_blocks_ipv4_mapped_private_ipv6() {
+        let ip: IpAddr = "::ffff:10.0.0.1".parse().unwrap();
+        assert!(super::is_dangerous_ip(ip));
+    }
+
+    #[test]
+    fn dangerous_ip_allows_public_ipv6() {
+        let ip: IpAddr = "2606:4700::1111".parse().unwrap();
+        assert!(!super::is_dangerous_ip(ip));
     }
 
     #[test]
