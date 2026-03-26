@@ -4389,6 +4389,9 @@ function renderUsersList(users) {
       + '<td>' + escapeHtml(u.email || '—') + '</td>'
       + '<td>' + roleLabel + '</td>'
       + '<td><span class="status-badge ' + statusClass + '">' + escapeHtml(u.status) + '</span></td>'
+      + '<td>' + (u.job_count || 0) + '</td>'
+      + '<td>' + formatCost(u.total_cost) + '</td>'
+      + '<td>' + (u.last_active_at ? formatRelativeTime(u.last_active_at) : '—') + '</td>'
       + '<td>' + formatRelativeTime(u.created_at) + '</td>'
       + '<td>' + actions + '</td>'
       + '</tr>';

@@ -98,7 +98,7 @@ pub async fn users_create_handler(
     })))
 }
 
-/// GET /api/admin/users — list all users.
+/// GET /api/admin/users — list all users with inline usage stats.
 pub async fn users_list_handler(
     State(state): State<Arc<GatewayState>>,
     AdminUser(_user): AdminUser,
@@ -113,9 +113,18 @@ pub async fn users_list_handler(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
+    // Fetch per-user summary stats in a single batch query.
+    let summary_stats = store.user_summary_stats(None).await.unwrap_or_default();
+
+    let stats_map: std::collections::HashMap<String, _> = summary_stats
+        .into_iter()
+        .map(|s| (s.user_id.clone(), s))
+        .collect();
+
     let users_json: Vec<serde_json::Value> = users
         .into_iter()
         .map(|u| {
+            let stats = stats_map.get(&u.id);
             serde_json::json!({
                 "id": u.id,
                 "email": u.email,
@@ -126,6 +135,9 @@ pub async fn users_list_handler(
                 "updated_at": u.updated_at.to_rfc3339(),
                 "last_login_at": u.last_login_at.map(|dt| dt.to_rfc3339()),
                 "created_by": u.created_by,
+                "job_count": stats.map_or(0, |s| s.job_count),
+                "total_cost": stats.map_or("0".to_string(), |s| s.total_cost.to_string()),
+                "last_active_at": stats.and_then(|s| s.last_active_at.map(|dt| dt.to_rfc3339())),
             })
         })
         .collect();

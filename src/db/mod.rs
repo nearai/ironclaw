@@ -860,6 +860,13 @@ pub trait UserStore: Send + Sync {
         user_id: Option<&str>,
         since: DateTime<Utc>,
     ) -> Result<Vec<UserUsageStats>, DatabaseError>;
+
+    /// Lightweight per-user summary stats (job count, total cost, last active).
+    /// Used by the admin users list to show inline stats.
+    async fn user_summary_stats(
+        &self,
+        user_id: Option<&str>,
+    ) -> Result<Vec<UserSummaryStats>, DatabaseError>;
 }
 
 /// Per-user LLM usage statistics.
@@ -871,6 +878,18 @@ pub struct UserUsageStats {
     pub input_tokens: i64,
     pub output_tokens: i64,
     pub total_cost: Decimal,
+}
+
+/// Lightweight per-user summary for the admin users list.
+#[derive(Debug, Clone)]
+pub struct UserSummaryStats {
+    pub user_id: String,
+    /// Total agent jobs created by this user.
+    pub job_count: i64,
+    /// Total LLM spend across all jobs (all-time).
+    pub total_cost: Decimal,
+    /// Most recent activity (latest job or LLM call timestamp).
+    pub last_active_at: Option<DateTime<Utc>>,
 }
 
 /// Backend-agnostic database supertrait.

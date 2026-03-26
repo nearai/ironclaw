@@ -2651,6 +2651,60 @@ impl Store {
         }
         Ok(stats)
     }
+
+    /// Lightweight per-user summary stats (job count, total cost, last active).
+    pub async fn user_summary_stats(
+        &self,
+        user_id: Option<&str>,
+    ) -> Result<Vec<crate::db::UserSummaryStats>, DatabaseError> {
+        let conn = self.conn().await?;
+        let rows = if let Some(uid) = user_id {
+            conn.query(
+                r#"
+                SELECT
+                    j.user_id,
+                    COUNT(DISTINCT j.id) AS job_count,
+                    COALESCE(SUM(l.cost), 0) AS total_cost,
+                    CASE WHEN MAX(l.created_at) > MAX(j.created_at)
+                         THEN MAX(l.created_at)
+                         ELSE MAX(j.created_at) END AS last_active_at
+                FROM agent_jobs j
+                LEFT JOIN llm_calls l ON l.job_id = j.id
+                WHERE j.user_id = $1
+                GROUP BY j.user_id
+                "#,
+                &[&uid],
+            )
+            .await?
+        } else {
+            conn.query(
+                r#"
+                SELECT
+                    j.user_id,
+                    COUNT(DISTINCT j.id) AS job_count,
+                    COALESCE(SUM(l.cost), 0) AS total_cost,
+                    CASE WHEN MAX(l.created_at) > MAX(j.created_at)
+                         THEN MAX(l.created_at)
+                         ELSE MAX(j.created_at) END AS last_active_at
+                FROM agent_jobs j
+                LEFT JOIN llm_calls l ON l.job_id = j.id
+                GROUP BY j.user_id
+                "#,
+                &[],
+            )
+            .await?
+        };
+        let mut stats = Vec::with_capacity(rows.len());
+        for row in &rows {
+            stats.push(crate::db::UserSummaryStats {
+                user_id: row.get("user_id"),
+                job_count: row.get("job_count"),
+                total_cost: row.get("total_cost"),
+                last_active_at: row.get("last_active_at"),
+            });
+        }
+        Ok(stats)
+    }
 }
 
 #[cfg(feature = "postgres")]

@@ -505,6 +505,68 @@ impl UserStore for LibSqlBackend {
         }
         Ok(stats)
     }
+    async fn user_summary_stats(
+        &self,
+        user_id: Option<&str>,
+    ) -> Result<Vec<crate::db::UserSummaryStats>, DatabaseError> {
+        let conn = self.connect().await?;
+        let mut rows = if let Some(uid) = user_id {
+            conn.query(
+                r#"
+                SELECT
+                    j.user_id,
+                    COUNT(DISTINCT j.id) AS job_count,
+                    COALESCE(SUM(l.cost), 0) AS total_cost,
+                    CASE WHEN MAX(l.created_at) > MAX(j.created_at)
+                         THEN MAX(l.created_at)
+                         ELSE MAX(j.created_at) END AS last_active_at
+                FROM agent_jobs j
+                LEFT JOIN llm_calls l ON l.job_id = j.id
+                WHERE j.user_id = ?1
+                GROUP BY j.user_id
+                "#,
+                params![uid],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        } else {
+            conn.query(
+                r#"
+                SELECT
+                    j.user_id,
+                    COUNT(DISTINCT j.id) AS job_count,
+                    COALESCE(SUM(l.cost), 0) AS total_cost,
+                    CASE WHEN MAX(l.created_at) > MAX(j.created_at)
+                         THEN MAX(l.created_at)
+                         ELSE MAX(j.created_at) END AS last_active_at
+                FROM agent_jobs j
+                LEFT JOIN llm_calls l ON l.job_id = j.id
+                GROUP BY j.user_id
+                "#,
+                (),
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        };
+        let mut stats = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        {
+            let cost_str = get_text(&row, 2);
+            let total_cost = rust_decimal::Decimal::from_str_exact(&cost_str).unwrap_or_default();
+            stats.push(crate::db::UserSummaryStats {
+                user_id: get_text(&row, 0),
+                job_count: row
+                    .get::<i64>(1)
+                    .map_err(|e| DatabaseError::Query(e.to_string()))?,
+                total_cost,
+                last_active_at: get_opt_ts(&row, 3),
+            });
+        }
+        Ok(stats)
+    }
 }
 
 #[cfg(test)]

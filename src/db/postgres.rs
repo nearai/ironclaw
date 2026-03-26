@@ -873,4 +873,11 @@ impl UserStore for PgBackend {
     ) -> Result<Vec<crate::db::UserUsageStats>, DatabaseError> {
         self.store.user_usage_stats(user_id, since).await
     }
+
+    async fn user_summary_stats(
+        &self,
+        user_id: Option<&str>,
+    ) -> Result<Vec<crate::db::UserSummaryStats>, DatabaseError> {
+        self.store.user_summary_stats(user_id).await
+    }
 }
