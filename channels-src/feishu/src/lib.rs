@@ -310,8 +310,9 @@ impl Guest for FeishuChannel {
         if let Some(ref app_secret) = config.app_secret {
             let _ = channel_host::workspace_write(APP_SECRET_PATH, app_secret);
         }
-        let verification_token = config.verification_token.as_deref().unwrap_or("");
-        let _ = channel_host::workspace_write(VERIFICATION_TOKEN_PATH, verification_token);
+        if let Some(ref verification_token) = config.verification_token {
+            let _ = channel_host::workspace_write(VERIFICATION_TOKEN_PATH, verification_token);
+        }
 
         if let Some(owner_id) = &config.owner_id {
             let _ = channel_host::workspace_write(OWNER_ID_PATH, owner_id);
