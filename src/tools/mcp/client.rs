@@ -117,7 +117,10 @@ impl McpClient {
     /// The config must use HTTP transport (the default); for stdio/UDS use `new_with_transport`.
     ///
     /// Returns an error if the config uses a non-HTTP transport.
-    pub fn new_with_config(config: McpServerConfig) -> Result<Self, ToolError> {
+    pub fn new_with_config(
+        config: McpServerConfig,
+        session_manager: Arc<McpSessionManager>,
+    ) -> Result<Self, ToolError> {
         if !matches!(
             config.effective_transport(),
             crate::tools::mcp::config::EffectiveTransport::Http
@@ -127,10 +130,10 @@ impl McpClient {
                     .to_string(),
             ));
         }
-        let transport = Arc::new(HttpMcpTransport::new(
-            config.url.clone(),
-            config.name.clone(),
-        ));
+        let transport = Arc::new(
+            HttpMcpTransport::new(config.url.clone(), config.name.clone())
+                .with_session_manager(session_manager.clone()),
+        );
 
         Ok(Self {
             transport,
@@ -138,7 +141,7 @@ impl McpClient {
             server_name: config.name.clone(),
             next_id: AtomicU64::new(1),
             tools_cache: RwLock::new(None),
-            session_manager: None,
+            session_manager: Some(session_manager),
             secrets: None,
             user_id: "default".to_string(),
             custom_headers: config.headers.clone(),
@@ -212,12 +215,6 @@ impl McpClient {
             custom_headers,
             initialized: tokio::sync::OnceCell::new(),
         }
-    }
-
-    /// Attach a session manager for Streamable HTTP session tracking.
-    pub fn with_session_manager(mut self, session_manager: Arc<McpSessionManager>) -> Self {
-        self.session_manager = Some(session_manager);
-        self
     }
 
     /// Get the server name.
@@ -774,7 +771,8 @@ mod tests {
         headers.insert("X-Custom".to_string(), "value".to_string());
 
         let config = McpServerConfig::new("test", "http://localhost:8080").with_headers(headers);
-        let client = McpClient::new_with_config(config.clone()).expect("HTTP config should work");
+        let client = McpClient::new_with_config(config.clone(), Arc::new(McpSessionManager::new()))
+            .expect("HTTP config should work");
 
         assert_eq!(client.server_name(), "test");
         assert_eq!(client.server_url(), "http://localhost:8080");
@@ -786,23 +784,12 @@ mod tests {
     #[test]
     fn test_new_with_config_no_headers() {
         let config = McpServerConfig::new("bare", "http://localhost:9090");
-        let client = McpClient::new_with_config(config).expect("HTTP config should work");
+        let client = McpClient::new_with_config(config, Arc::new(McpSessionManager::new()))
+            .expect("HTTP config should work");
 
         assert_eq!(client.server_name(), "bare");
         assert!(client.custom_headers.is_empty());
         assert!(client.secrets.is_none());
-        assert!(client.session_manager.is_none());
-    }
-
-    #[test]
-    fn test_with_session_manager() {
-        let client = McpClient::new("http://localhost:8080");
-        assert!(!client.has_session_manager());
-
-        let session_manager = Arc::new(McpSessionManager::new());
-        let client = client.with_session_manager(session_manager);
-
-        assert!(client.has_session_manager());
     }
 
     #[test]
@@ -1174,7 +1161,7 @@ mod tests {
             vec!["hello".to_string()],
             HashMap::new(),
         );
-        let result = McpClient::new_with_config(config);
+        let result = McpClient::new_with_config(config, Arc::new(McpSessionManager::new()));
         let err = result
             .err()
             .expect("stdio config must be rejected")
