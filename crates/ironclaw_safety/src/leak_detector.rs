@@ -522,7 +522,7 @@ fn default_patterns() -> Vec<LeakPattern> {
         // OpenRouter API keys (sk-or-v1-<hex, 40+ chars>)
         LeakPattern {
             name: "openrouter_api_key".to_string(),
-            regex: Regex::new(r"sk-or-v1-[a-fA-F0-9]{40,}").unwrap(), // safety: hardcoded literal
+            regex: Regex::new(r"\bsk-or-v1-[a-fA-F0-9]{40,}").unwrap(), // safety: hardcoded literal
             severity: LeakSeverity::Critical,
             action: LeakAction::Block,
         },
