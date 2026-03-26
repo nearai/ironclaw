@@ -266,7 +266,7 @@ fn default_max_tokens() -> u32 {
 }
 
 fn default_max_iterations() -> u32 {
-    10
+    25
 }
 
 fn default_max_tool_rounds() -> u32 {
