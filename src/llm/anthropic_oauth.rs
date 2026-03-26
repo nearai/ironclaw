@@ -45,6 +45,9 @@ pub struct AnthropicOAuthProvider {
     active_model: std::sync::RwLock<String>,
     /// Parameter names that this provider does not support.
     unsupported_params: HashSet<String>,
+    /// Whether adaptive thinking is enabled. Disable by adding "thinking" to
+    /// `unsupported_params` for latency/cost-sensitive use cases.
+    thinking_enabled: bool,
 }
 
 impl AnthropicOAuthProvider {
@@ -73,6 +76,7 @@ impl AnthropicOAuthProvider {
 
         let unsupported_params: HashSet<String> =
             config.unsupported_params.iter().cloned().collect();
+        let thinking_enabled = !unsupported_params.contains("thinking");
 
         Ok(Self {
             client,
@@ -81,6 +85,7 @@ impl AnthropicOAuthProvider {
             base_url,
             active_model,
             unsupported_params,
+            thinking_enabled,
         })
     }
 
@@ -135,15 +140,21 @@ impl AnthropicOAuthProvider {
         Some(blocks)
     }
 
-    /// Validate temperature for thinking-enabled requests.
-    /// When thinking is enabled, temperature must be None or 1.0.
-    fn validate_temperature(temperature: Option<f32>) -> Option<f32> {
+    /// Validate temperature for the request.
+    /// When thinking is enabled, Anthropic requires temperature to be None or 1.0;
+    /// non-conforming values are dropped with a warning.
+    /// When thinking is disabled, any temperature is passed through as-is.
+    fn validate_temperature(temperature: Option<f32>, thinking_enabled: bool) -> Option<f32> {
+        if !thinking_enabled {
+            return temperature;
+        }
         match temperature {
             Some(t) if (t - 1.0).abs() < f32::EPSILON => Some(1.0),
             Some(t) => {
                 tracing::warn!(
-                    "Temperature {} is not supported when thinking is enabled, defaulting to None. \
-                     Only None or 1.0 are allowed.",
+                    requested_temperature = t,
+                    "temperature {} is not supported when thinking is enabled, defaulting to None \
+                     (only None or 1.0 are allowed)",
                     t
                 );
                 None
@@ -286,18 +297,23 @@ impl LlmProvider for AnthropicOAuthProvider {
         self.strip_unsupported_completion_params(&mut req);
         let (system, messages) = convert_messages(req.messages);
 
+        let thinking = if self.thinking_enabled {
+            Some(ThinkingConfig {
+                thinking_type: "adaptive".to_string(),
+            })
+        } else {
+            None
+        };
+
         let request = AnthropicRequest {
             model,
             messages,
             system: Self::build_system_blocks(system),
             max_tokens: req.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
-            temperature: Self::validate_temperature(req.temperature),
+            temperature: Self::validate_temperature(req.temperature, self.thinking_enabled),
             tools: None,
             tool_choice: None,
-            thinking: Some(ThinkingConfig {
-                thinking_type: "adaptive".to_string(),
-            }),
-            stream: false,
+            thinking,
         };
 
         let response: AnthropicResponse = self.send_request(&request).await?;
@@ -358,18 +374,23 @@ impl LlmProvider for AnthropicOAuthProvider {
             },
         });
 
+        let thinking = if self.thinking_enabled {
+            Some(ThinkingConfig {
+                thinking_type: "adaptive".to_string(),
+            })
+        } else {
+            None
+        };
+
         let request = AnthropicRequest {
             model,
             messages,
             system: Self::build_system_blocks(system),
             max_tokens: req.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
-            temperature: Self::validate_temperature(req.temperature),
+            temperature: Self::validate_temperature(req.temperature, self.thinking_enabled),
             tools: if tools.is_empty() { None } else { Some(tools) },
             tool_choice,
-            thinking: Some(ThinkingConfig {
-                thinking_type: "adaptive".to_string(),
-            }),
-            stream: false,
+            thinking,
         };
 
         let response: AnthropicResponse = self.send_request(&request).await?;
@@ -458,8 +479,6 @@ struct AnthropicRequest {
     tool_choice: Option<AnthropicToolChoice>,
     #[serde(skip_serializing_if = "Option::is_none")]
     thinking: Option<ThinkingConfig>,
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    stream: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -806,17 +825,102 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_temperature() {
-        assert_eq!(AnthropicOAuthProvider::validate_temperature(None), None);
+    fn test_validate_temperature_with_thinking_enabled() {
         assert_eq!(
-            AnthropicOAuthProvider::validate_temperature(Some(1.0)),
-            Some(1.0)
-        );
-        // Non-1.0 values should be rejected (returns None)
-        assert_eq!(
-            AnthropicOAuthProvider::validate_temperature(Some(0.7)),
+            AnthropicOAuthProvider::validate_temperature(None, true),
             None
         );
+        assert_eq!(
+            AnthropicOAuthProvider::validate_temperature(Some(1.0), true),
+            Some(1.0)
+        );
+        // non-1.0 values should be rejected when thinking is enabled
+        assert_eq!(
+            AnthropicOAuthProvider::validate_temperature(Some(0.7), true),
+            None
+        );
+    }
+
+    #[test]
+    fn test_validate_temperature_with_thinking_disabled() {
+        // when thinking is disabled, any temperature passes through
+        assert_eq!(
+            AnthropicOAuthProvider::validate_temperature(None, false),
+            None
+        );
+        assert_eq!(
+            AnthropicOAuthProvider::validate_temperature(Some(0.7), false),
+            Some(0.7)
+        );
+        assert_eq!(
+            AnthropicOAuthProvider::validate_temperature(Some(1.0), false),
+            Some(1.0)
+        );
+        assert_eq!(
+            AnthropicOAuthProvider::validate_temperature(Some(0.0), false),
+            Some(0.0)
+        );
+    }
+
+    #[test]
+    fn test_request_serialization_with_thinking() {
+        let request = AnthropicRequest {
+            model: "claude-sonnet-4-6".to_string(),
+            messages: vec![AnthropicMessage {
+                role: "user".to_string(),
+                content: AnthropicContent::Text("Hello".to_string()),
+            }],
+            system: AnthropicOAuthProvider::build_system_blocks(None),
+            max_tokens: DEFAULT_MAX_TOKENS,
+            temperature: None,
+            tools: None,
+            tool_choice: None,
+            thinking: Some(ThinkingConfig {
+                thinking_type: "adaptive".to_string(),
+            }),
+        };
+
+        let json = serde_json::to_value(&request).unwrap();
+        assert_eq!(json["model"], "claude-sonnet-4-6");
+        assert_eq!(json["max_tokens"], DEFAULT_MAX_TOKENS);
+        assert_eq!(json["thinking"]["type"], "adaptive");
+        assert!(json.get("temperature").is_none());
+        assert!(json.get("tools").is_none());
+        assert!(json.get("tool_choice").is_none());
+
+        let system = json["system"].as_array().unwrap();
+        assert_eq!(system.len(), 1);
+        assert_eq!(system[0]["type"], "text");
+        assert_eq!(system[0]["text"], CLAUDE_CODE_SYSTEM_PREFIX);
+    }
+
+    #[test]
+    fn test_request_serialization_without_thinking() {
+        let request = AnthropicRequest {
+            model: "claude-haiku-4-5-20251001".to_string(),
+            messages: vec![AnthropicMessage {
+                role: "user".to_string(),
+                content: AnthropicContent::Text("Hello".to_string()),
+            }],
+            system: AnthropicOAuthProvider::build_system_blocks(Some("Be helpful.".to_string())),
+            max_tokens: 1024,
+            temperature: Some(0.7),
+            tools: None,
+            tool_choice: None,
+            thinking: None,
+        };
+
+        let json = serde_json::to_value(&request).unwrap();
+        assert_eq!(json["model"], "claude-haiku-4-5-20251001");
+        assert_eq!(json["max_tokens"], 1024);
+        let temp = json["temperature"].as_f64().unwrap();
+        assert!((temp - 0.7).abs() < 0.001);
+        // thinking should be absent when None
+        assert!(json.get("thinking").is_none());
+
+        let system = json["system"].as_array().unwrap();
+        assert_eq!(system.len(), 2);
+        assert_eq!(system[1]["text"], "Be helpful.");
     }
 
     /// Regression test for #1136: token field must be mutable via RwLock
