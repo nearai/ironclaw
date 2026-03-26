@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use secrecy::{ExposeSecret, SecretString};
 
-use crate::config::helpers::{optional_env, parse_bool_env, parse_optional_env};
+use crate::config::helpers::{optional_env, parse_bool_env, parse_optional_env, validate_base_url};
 use crate::error::ConfigError;
 use crate::llm::SessionManager;
 use crate::settings::Settings;
@@ -57,7 +57,7 @@ impl Default for EmbeddingsConfig {
 /// Infer the embedding dimension from a well-known model name.
 ///
 /// Falls back to 1536 (OpenAI text-embedding-3-small default) for unknown models.
-fn default_dimension_for_model(model: &str) -> usize {
+pub(crate) fn default_dimension_for_model(model: &str) -> usize {
     match model {
         "text-embedding-3-small" => 1536,
         "text-embedding-3-large" => 3072,
@@ -89,6 +89,12 @@ impl EmbeddingsConfig {
         let enabled = parse_bool_env("EMBEDDING_ENABLED", settings.embeddings.enabled)?;
 
         let openai_base_url = optional_env("EMBEDDING_BASE_URL")?;
+
+        // Validate base URLs to prevent SSRF attacks (#1103).
+        validate_base_url(&ollama_base_url, "OLLAMA_BASE_URL")?;
+        if let Some(ref url) = openai_base_url {
+            validate_base_url(url, "EMBEDDING_BASE_URL")?;
+        }
 
         let cache_size = parse_optional_env("EMBEDDING_CACHE_SIZE", DEFAULT_EMBEDDING_CACHE_SIZE)?;
 
@@ -190,7 +196,7 @@ impl EmbeddingsConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::helpers::ENV_MUTEX;
+    use crate::config::helpers::lock_env;
     use crate::settings::{EmbeddingsSettings, Settings};
     use crate::testing::credentials::*;
 
@@ -209,7 +215,7 @@ mod tests {
 
     #[test]
     fn embeddings_disabled_not_overridden_by_openai_key() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = lock_env();
         clear_embedding_env();
         // SAFETY: Under ENV_MUTEX, no concurrent env access.
         unsafe {
@@ -239,7 +245,7 @@ mod tests {
 
     #[test]
     fn embeddings_enabled_from_settings() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = lock_env();
         clear_embedding_env();
 
         let settings = Settings {
@@ -259,7 +265,7 @@ mod tests {
 
     #[test]
     fn embeddings_env_override_takes_precedence() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = lock_env();
         clear_embedding_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
@@ -288,20 +294,17 @@ mod tests {
 
     #[test]
     fn embedding_base_url_parsed_from_env() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = lock_env();
         clear_embedding_env();
 
         // SAFETY: Under ENV_MUTEX, no concurrent env access.
         unsafe {
-            std::env::set_var("EMBEDDING_BASE_URL", "https://custom.example.com");
+            std::env::set_var("EMBEDDING_BASE_URL", "https://8.8.8.8");
         }
 
         let settings = Settings::default();
         let config = EmbeddingsConfig::resolve(&settings).expect("resolve should succeed");
-        assert_eq!(
-            config.openai_base_url.as_deref(),
-            Some("https://custom.example.com")
-        );
+        assert_eq!(config.openai_base_url.as_deref(), Some("https://8.8.8.8"));
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("EMBEDDING_BASE_URL");
@@ -310,7 +313,7 @@ mod tests {
 
     #[test]
     fn embedding_base_url_defaults_to_none() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = lock_env();
         clear_embedding_env();
 
         let settings = Settings::default();
@@ -323,7 +326,7 @@ mod tests {
 
     #[test]
     fn cache_size_zero_rejected() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = lock_env();
         clear_embedding_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {

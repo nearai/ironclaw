@@ -24,6 +24,12 @@ I18n.register('en', {
   'restart.progressSubtitle': 'Please wait for the process to restart...',
   'restart.checkLogs': 'Check the Logs tab for details after restart completes.',
   
+  // Theme
+  'theme.tooltipDark': 'Theme: Dark (click for Light)',
+  'theme.tooltipLight': 'Theme: Light (click for System)',
+  'theme.tooltipSystem': 'Theme: System (click for Dark)',
+  'theme.announce': 'Theme: {mode}',
+
   // Tabs
   'tab.chat': 'Chat',
   'tab.memory': 'Memory',
@@ -515,4 +521,29 @@ I18n.register('en', {
   'channels.replDesc': 'Simple read-eval-print loop for testing',
   'channels.configureVia': 'Configure via {env}',
   'channels.runWith': 'Run with: {cmd}',
+
+  // Welcome Card
+  'welcome.heading': 'What can I help you with?',
+  'welcome.description': 'IronClaw is your secure AI assistant. Choose a suggestion below or type your own message.',
+  'welcome.runTool': 'Run a tool',
+  'welcome.checkJobs': 'Check job status',
+  'welcome.searchMemory': 'Search memory',
+  'welcome.manageRoutines': 'Manage routines',
+  'welcome.systemStatus': 'System status',
+  'welcome.writeCode': 'Write code',
+
+  // Connection
+  'connection.disconnected': 'Disconnected — attempting to reconnect',
+  'connection.reconnecting': 'Reconnecting (attempt {count})...',
+  'connection.reconnected': 'Reconnected',
+
+  // Messages
+  'message.you': 'You',
+  'message.assistant': 'IronClaw',
+  'message.system': 'System',
+  'message.copy': 'Copy',
+  'message.copied': 'Copied!',
+
+  // Approval
+  'approval.pressY': 'Press Y to approve, N to deny',
 });

@@ -10,14 +10,16 @@
 use std::sync::Arc;
 
 use futures::StreamExt;
+use uuid::Uuid;
 
 use crate::agent::context_monitor::ContextMonitor;
 use crate::agent::heartbeat::spawn_heartbeat;
 use crate::agent::routine_engine::{RoutineEngine, spawn_cron_ticker};
 use crate::agent::self_repair::{DefaultSelfRepair, RepairResult, SelfRepair};
+use crate::agent::session::ThreadState;
 use crate::agent::session_manager::SessionManager;
 use crate::agent::submission::{Submission, SubmissionParser, SubmissionResult};
-use crate::agent::{HeartbeatConfig as AgentHeartbeatConfig, Router, Scheduler};
+use crate::agent::{HeartbeatConfig as AgentHeartbeatConfig, Router, Scheduler, SchedulerDeps};
 use crate::channels::{ChannelManager, IncomingMessage, OutgoingResponse};
 use crate::config::{AgentConfig, HeartbeatConfig, RoutineConfig, SkillsConfig};
 use crate::context::ContextManager;
@@ -30,6 +32,13 @@ use crate::safety::SafetyLayer;
 use crate::skills::SkillRegistry;
 use crate::tools::ToolRegistry;
 use crate::workspace::Workspace;
+
+/// Static greeting persisted to DB and broadcast on first launch.
+///
+/// Sent before the LLM is involved so the user sees something immediately.
+/// The conversational onboarding (profile building, channel setup) happens
+/// organically in the subsequent turns driven by BOOTSTRAP.md.
+const BOOTSTRAP_GREETING: &str = include_str!("../workspace/seeds/GREETING.md");
 
 /// Collapse a tool output string into a single-line preview for display.
 pub(crate) fn truncate_for_preview(output: &str, max_chars: usize) -> String {
@@ -76,6 +85,15 @@ fn resolve_owner_scope_notification_user(
     trimmed_option(explicit_user).or_else(|| trimmed_option(owner_fallback))
 }
 
+fn is_single_message_repl(message: &IncomingMessage) -> bool {
+    message.channel == "repl"
+        && message
+            .metadata
+            .get("single_message_mode")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false)
+}
+
 async fn resolve_channel_notification_user(
     extension_manager: Option<&Arc<ExtensionManager>>,
     channel: Option<&str>,
@@ -113,6 +131,17 @@ async fn resolve_routine_notification_target(
     .await
 }
 
+pub(crate) fn chat_tool_execution_metadata(message: &IncomingMessage) -> serde_json::Value {
+    serde_json::json!({
+        "notify_channel": message.channel,
+        "notify_user": message
+            .routing_target()
+            .unwrap_or_else(|| message.user_id.clone()),
+        "notify_thread_id": message.thread_id,
+        "notify_metadata": message.metadata,
+    })
+}
+
 fn should_fallback_routine_notification(error: &ChannelError) -> bool {
     !matches!(error, ChannelError::MissingRoutingTarget { .. })
 }
@@ -138,16 +167,21 @@ pub struct AgentDeps {
     pub hooks: Arc<HookRegistry>,
     /// Cost enforcement guardrails (daily budget, hourly rate limits).
     pub cost_guard: Arc<crate::agent::cost_guard::CostGuard>,
-    /// SSE broadcast sender for live job event streaming to the web gateway.
-    pub sse_tx: Option<tokio::sync::broadcast::Sender<crate::channels::web::types::SseEvent>>,
+    /// SSE manager for live job event streaming to the web gateway.
+    pub sse_tx: Option<Arc<crate::channels::web::sse::SseManager>>,
     /// HTTP interceptor for trace recording/replay.
     pub http_interceptor: Option<Arc<dyn crate::llm::recording::HttpInterceptor>>,
     /// Audio transcription middleware for voice messages.
-    pub transcription: Option<Arc<crate::transcription::TranscriptionMiddleware>>,
+    pub transcription: Option<Arc<crate::llm::transcription::TranscriptionMiddleware>>,
     /// Document text extraction middleware for PDF, DOCX, PPTX, etc.
     pub document_extraction: Option<Arc<crate::document_extraction::DocumentExtractionMiddleware>>,
+    /// Sandbox readiness state for full-job routine dispatch.
+    pub sandbox_readiness: crate::agent::routine_engine::SandboxReadiness,
     /// Software builder for self-repair tool rebuilding.
     pub builder: Option<Arc<dyn crate::tools::SoftwareBuilder>>,
+    /// Resolved LLM backend identifier (e.g., "nearai", "openai", "groq").
+    /// Used by `/model` persistence to determine which env var to update.
+    pub llm_backend: String,
 }
 
 /// The main agent that coordinates all components.
@@ -207,12 +241,15 @@ impl Agent {
             context_manager.clone(),
             deps.llm.clone(),
             deps.safety.clone(),
-            deps.tools.clone(),
-            deps.store.clone(),
-            deps.hooks.clone(),
+            SchedulerDeps {
+                tools: deps.tools.clone(),
+                extension_manager: deps.extension_manager.clone(),
+                store: deps.store.clone(),
+                hooks: deps.hooks.clone(),
+            },
         );
-        if let Some(ref tx) = deps.sse_tx {
-            scheduler.set_sse_sender(tx.clone());
+        if let Some(ref sse) = deps.sse_tx {
+            scheduler.set_sse_sender(Arc::clone(sse));
         }
         if let Some(ref interceptor) = deps.http_interceptor {
             scheduler.set_http_interceptor(Arc::clone(interceptor));
@@ -338,6 +375,32 @@ impl Agent {
 
     /// Run the agent main loop.
     pub async fn run(self) -> Result<(), Error> {
+        // Proactive bootstrap: persist the static greeting to DB *before*
+        // starting channels so the first web client sees it via history.
+        let bootstrap_thread_id = if self
+            .workspace()
+            .is_some_and(|ws| ws.take_bootstrap_pending())
+        {
+            tracing::debug!(
+                "Fresh workspace detected — persisting static bootstrap greeting to DB"
+            );
+            if let Some(store) = self.store() {
+                let thread_id = store
+                    .get_or_create_assistant_conversation("default", "gateway")
+                    .await
+                    .ok();
+                if let Some(id) = thread_id {
+                    self.persist_assistant_response(id, "gateway", "default", BOOTSTRAP_GREETING)
+                        .await;
+                }
+                thread_id
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         // Start channels
         let mut message_stream = self.channels.start_all().await?;
 
@@ -554,8 +617,10 @@ impl Agent {
                         Arc::clone(workspace),
                         notify_tx,
                         Some(self.scheduler.clone()),
+                        self.deps.extension_manager.clone(),
                         self.tools().clone(),
                         self.safety().clone(),
+                        self.deps.sandbox_readiness,
                     ));
 
                     // Register routine tools
@@ -667,6 +732,30 @@ impl Agent {
         } else {
             None
         };
+
+        // Bootstrap phase 2: register the thread in session manager and
+        // broadcast the greeting via SSE for any clients already connected.
+        // The greeting was already persisted to DB before start_all(), so
+        // clients that connect after this point will see it via history.
+        if let Some(id) = bootstrap_thread_id {
+            // Use get_or_create_session (not resolve_thread) to avoid creating
+            // an orphan thread. Then insert the DB-sourced thread directly.
+            let session = self.session_manager.get_or_create_session("default").await;
+            {
+                use crate::agent::session::Thread;
+                let mut sess = session.lock().await;
+                let thread = Thread::with_id(id, sess.id);
+                sess.active_thread = Some(id);
+                sess.threads.entry(id).or_insert(thread);
+            }
+            self.session_manager
+                .register_thread("default", "gateway", id, session)
+                .await;
+
+            let mut out = OutgoingResponse::text(BOOTSTRAP_GREETING.to_string());
+            out.thread_id = Some(id.to_string());
+            let _ = self.channels.broadcast("gateway", "default", out).await;
+        }
 
         // Main message loop
         tracing::debug!("Agent {} ready and listening", self.config.name);
@@ -861,9 +950,6 @@ impl Agent {
     }
 
     async fn handle_message(&self, message: &IncomingMessage) -> Result<Option<String>, Error> {
-        // Log at info level only for tracking without exposing PII (user_id can be a phone number)
-        tracing::info!(message_id = %message.id, "Processing message");
-
         // Log sensitive details at debug level for troubleshooting
         tracing::debug!(
             message_id = %message.id,
@@ -942,19 +1028,60 @@ impl Agent {
             }
         }
 
-        // Resolve session and thread
-        tracing::debug!(
-            message_id = %message.id,
-            "Resolving session and thread"
-        );
-        let (session, thread_id) = self
-            .session_manager
-            .resolve_thread(
-                &message.user_id,
-                &message.channel,
-                message.conversation_scope(),
-            )
-            .await;
+        // Resolve session and thread. Approval submissions are allowed to
+        // target an already-loaded owned thread by UUID across channels so the
+        // web approval UI can approve work that originated from HTTP/other
+        // owner-scoped channels.
+        let approval_thread_uuid = if matches!(
+            submission,
+            Submission::ExecApproval { .. } | Submission::ApprovalResponse { .. }
+        ) {
+            message
+                .conversation_scope()
+                .and_then(|thread_id| Uuid::parse_str(thread_id).ok())
+        } else {
+            None
+        };
+
+        let (session, thread_id) = if let Some(target_thread_id) = approval_thread_uuid {
+            let session = self
+                .session_manager
+                .get_or_create_session(&message.user_id)
+                .await;
+            let mut sess = session.lock().await;
+            if sess.threads.contains_key(&target_thread_id) {
+                sess.active_thread = Some(target_thread_id);
+                sess.last_active_at = chrono::Utc::now();
+                drop(sess);
+                self.session_manager
+                    .register_thread(
+                        &message.user_id,
+                        &message.channel,
+                        target_thread_id,
+                        Arc::clone(&session),
+                    )
+                    .await;
+                (session, target_thread_id)
+            } else {
+                drop(sess);
+                self.session_manager
+                    .resolve_thread_with_parsed_uuid(
+                        &message.user_id,
+                        &message.channel,
+                        message.conversation_scope(),
+                        approval_thread_uuid,
+                    )
+                    .await
+            }
+        } else {
+            self.session_manager
+                .resolve_thread(
+                    &message.user_id,
+                    &message.channel,
+                    message.conversation_scope(),
+                )
+                .await
+        };
         tracing::debug!(
             message_id = %message.id,
             thread_id = %thread_id,
@@ -1023,9 +1150,14 @@ impl Agent {
             && let Submission::UserInput { ref content } = submission
             && let Some(engine) = self.routine_engine().await
         {
-            let fired = engine
-                .check_event_triggers(&message.user_id, &message.channel, content)
-                .await;
+            let single_message_repl = is_single_message_repl(message);
+            // Use post-hook content so that BeforeInbound hooks that rewrite
+            // input are respected by event trigger matching.
+            let fired = if single_message_repl {
+                engine.check_event_triggers_and_wait(message, content).await
+            } else {
+                engine.check_event_triggers(message, content).await
+            };
             if fired > 0 {
                 tracing::debug!(
                     channel = %message.channel,
@@ -1033,15 +1165,105 @@ impl Agent {
                     fired,
                     "Consumed inbound user message with matching event-triggered routine(s)"
                 );
-                return Ok(Some(String::new()));
+                return if single_message_repl {
+                    Ok(None)
+                } else {
+                    Ok(Some(String::new()))
+                };
             }
         }
+
+        let session_for_empty_exit = Arc::clone(&session);
 
         // Process based on submission type
         let result = match submission {
             Submission::UserInput { content } => {
-                self.process_user_input(message, session, thread_id, &content)
-                    .await
+                let mut result = self
+                    .process_user_input(message, session.clone(), thread_id, &content)
+                    .await;
+
+                // Drain any messages queued during processing.
+                // Messages are merged (newline-separated) so the LLM receives
+                // full context from rapid consecutive inputs instead of
+                // processing each as a separate turn with partial context (#259).
+                //
+                // Only `Response` continues the drain — the user got a normal
+                // reply and there may be more queued messages to process.
+                //
+                // Everything else stops the loop:
+                // - `NeedApproval`: thread is blocked on user approval
+                // - `Interrupted`: turn was cancelled
+                // - `Ok`: control-command acknowledgment (including the "queued"
+                //    ack returned when a message arrives during Processing)
+                // - `Error`: soft error — draining more messages after an error
+                //    would produce confusing interleaved output
+                // - `Err(_)`: hard error
+                while let Ok(SubmissionResult::Response { content: outgoing }) = &result {
+                    let merged = {
+                        let mut sess = session.lock().await;
+                        sess.threads
+                            .get_mut(&thread_id)
+                            .and_then(|t| t.drain_pending_messages())
+                    };
+                    let Some(next_content) = merged else {
+                        break;
+                    };
+
+                    tracing::debug!(
+                        thread_id = %thread_id,
+                        merged_len = next_content.len(),
+                        "Drain loop: processing merged queued messages"
+                    );
+
+                    // Send the completed turn's response before starting the next.
+                    //
+                    // Known limitations:
+                    // - One-shot channels (HttpChannel) consume the response
+                    //   sender on the first respond() call keyed by msg.id.
+                    //   Subsequent calls (including the outer handler's final
+                    //   respond) are silently dropped. For one-shot channels
+                    //   only this intermediate response is delivered.
+                    // - All drain-loop responses are routed via the original
+                    //   `message`, so channels that key routing on message
+                    //   identity will attribute every response to the first
+                    //   message. This is acceptable for the current
+                    //   single-user-per-thread model.
+                    if let Err(e) = self
+                        .channels
+                        .respond(message, OutgoingResponse::text(outgoing.clone()))
+                        .await
+                    {
+                        tracing::warn!(
+                            thread_id = %thread_id,
+                            "Failed to send intermediate drain-loop response: {e}"
+                        );
+                    }
+
+                    // Process merged queued messages as a single turn.
+                    // Use a message clone with cleared attachments so
+                    // augment_with_attachments doesn't re-apply the original
+                    // message's attachments to unrelated queued text.
+                    let mut queued_msg = message.clone();
+                    queued_msg.attachments.clear();
+                    result = self
+                        .process_user_input(&queued_msg, session.clone(), thread_id, &next_content)
+                        .await;
+
+                    // If processing failed, re-queue the drained content so it
+                    // isn't lost. It will be picked up on the next successful turn.
+                    if !matches!(&result, Ok(SubmissionResult::Response { .. })) {
+                        let mut sess = session.lock().await;
+                        if let Some(thread) = sess.threads.get_mut(&thread_id) {
+                            thread.requeue_drained(next_content);
+                            tracing::debug!(
+                                thread_id = %thread_id,
+                                "Re-queued drained content after non-Response result"
+                            );
+                        }
+                    }
+                }
+
+                result
             }
             Submission::SystemCommand { command, args } => {
                 tracing::debug!(
@@ -1049,6 +1271,28 @@ impl Agent {
                     command,
                     message.channel
                 );
+                // /reasoning is special-cased here (not in handle_system_command)
+                // because it needs the session + thread_id to read turn reasoning
+                // data, which handle_system_command's signature doesn't provide.
+                if command == "reasoning" {
+                    let result = self
+                        .handle_reasoning_command(&args, &session, thread_id)
+                        .await;
+                    return match result {
+                        SubmissionResult::Response { content } => Ok(Some(content)),
+                        SubmissionResult::Ok { message } => Ok(message),
+                        SubmissionResult::Error { message } => {
+                            Ok(Some(format!("Error: {}", message)))
+                        }
+                        _ => {
+                            if is_single_message_repl(message) {
+                                Ok(None)
+                            } else {
+                                Ok(Some(String::new()))
+                            }
+                        }
+                    };
+                }
                 // Authorization checks (including restart channel check) are enforced in handle_system_command
                 self.handle_system_command(&command, &args, &message.channel)
                     .await
@@ -1108,7 +1352,26 @@ impl Agent {
                     Ok(Some(content))
                 }
             }
-            SubmissionResult::Ok { message } => Ok(message),
+            SubmissionResult::Ok {
+                message: output_message,
+            } => {
+                let should_exit =
+                    if output_message.as_deref() == Some("") && is_single_message_repl(message) {
+                        let sess = session_for_empty_exit.lock().await;
+                        sess.threads
+                            .get(&thread_id)
+                            .map(|thread| thread.state != ThreadState::AwaitingApproval)
+                            .unwrap_or(true)
+                    } else {
+                        false
+                    };
+
+                if should_exit {
+                    Ok(None)
+                } else {
+                    Ok(output_message)
+                }
+            }
             SubmissionResult::Error { message } => Ok(Some(format!("Error: {}", message))),
             SubmissionResult::Interrupted => Ok(Some("Interrupted.".into())),
             SubmissionResult::NeedApproval { .. } => {
@@ -1124,9 +1387,10 @@ impl Agent {
 #[cfg(test)]
 mod tests {
     use super::{
-        resolve_routine_notification_user, should_fallback_routine_notification,
-        truncate_for_preview,
+        chat_tool_execution_metadata, is_single_message_repl, resolve_routine_notification_user,
+        should_fallback_routine_notification, truncate_for_preview,
     };
+    use crate::channels::IncomingMessage;
     use crate::error::ChannelError;
 
     #[test]
@@ -1223,6 +1487,50 @@ mod tests {
     }
 
     #[test]
+    fn chat_tool_execution_metadata_prefers_message_routing_target() {
+        let message = IncomingMessage::new("telegram", "owner-scope", "hello")
+            .with_sender_id("telegram-user")
+            .with_thread("thread-7")
+            .with_metadata(serde_json::json!({
+                "chat_id": 424242,
+                "chat_type": "private",
+            }));
+
+        let metadata = chat_tool_execution_metadata(&message);
+        assert_eq!(
+            metadata.get("notify_channel").and_then(|v| v.as_str()),
+            Some("telegram")
+        ); // safety: test-only assertion
+        assert_eq!(
+            metadata.get("notify_user").and_then(|v| v.as_str()),
+            Some("424242")
+        ); // safety: test-only assertion
+        assert_eq!(
+            metadata.get("notify_thread_id").and_then(|v| v.as_str()),
+            Some("thread-7")
+        ); // safety: test-only assertion
+    }
+
+    #[test]
+    fn chat_tool_execution_metadata_falls_back_to_user_scope_without_route() {
+        let message = IncomingMessage::new("gateway", "owner-scope", "hello").with_sender_id("");
+
+        let metadata = chat_tool_execution_metadata(&message);
+        assert_eq!(
+            metadata.get("notify_channel").and_then(|v| v.as_str()),
+            Some("gateway")
+        ); // safety: test-only assertion
+        assert_eq!(
+            metadata.get("notify_user").and_then(|v| v.as_str()),
+            Some("owner-scope")
+        ); // safety: test-only assertion
+        assert_eq!(
+            metadata.get("notify_thread_id"),
+            Some(&serde_json::Value::Null)
+        ); // safety: test-only assertion
+    }
+
+    #[test]
     fn targeted_routine_notifications_do_not_fallback_without_owner_route() {
         let error = ChannelError::MissingRoutingTarget {
             name: "telegram".to_string(),
@@ -1240,5 +1548,18 @@ mod tests {
         };
 
         assert!(should_fallback_routine_notification(&error)); // safety: test-only assertion
+    }
+
+    #[test]
+    fn single_message_repl_detection_requires_repl_channel_and_metadata_flag() {
+        let repl = IncomingMessage::new("repl", "owner-scope", "hello")
+            .with_metadata(serde_json::json!({ "single_message_mode": true }));
+        let gateway = IncomingMessage::new("gateway", "owner-scope", "hello")
+            .with_metadata(serde_json::json!({ "single_message_mode": true }));
+        let plain_repl = IncomingMessage::new("repl", "owner-scope", "hello");
+
+        assert!(is_single_message_repl(&repl)); // safety: test-only assertion
+        assert!(!is_single_message_repl(&gateway)); // safety: test-only assertion
+        assert!(!is_single_message_repl(&plain_repl)); // safety: test-only assertion
     }
 }

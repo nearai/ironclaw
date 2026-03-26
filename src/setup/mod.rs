@@ -10,6 +10,9 @@
 //! 7. Extensions (tool installation from registry)
 //! 8. Heartbeat (background tasks)
 //!
+//! Personal onboarding happens conversationally during the user's first
+//! assistant interaction (see `workspace/mod.rs` bootstrap block).
+//!
 //! # Example
 //!
 //! ```ignore
@@ -20,6 +23,7 @@
 //! ```
 
 mod channels;
+pub mod profile_evolution;
 mod prompts;
 #[cfg(any(feature = "postgres", feature = "libsql"))]
 mod wizard;
@@ -30,7 +34,7 @@ pub use prompts::{
     print_success, secret_input, select_many, select_one,
 };
 #[cfg(any(feature = "postgres", feature = "libsql"))]
-pub use wizard::{SetupConfig, SetupWizard};
+pub use wizard::{SetupConfig, SetupError, SetupWizard};
 
 /// Check if onboarding is needed and return the reason.
 ///

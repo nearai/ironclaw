@@ -3,14 +3,13 @@
 //! Avoids redundant HTTP calls for identical texts by caching embeddings
 //! in memory keyed by `SHA-256(model_name + "\0" + text)`.
 //!
-//! Follows the same cache pattern as `llm::response_cache::CachedProvider`:
-//! `HashMap` + `last_accessed` tracking + manual LRU eviction.
+//! Uses `lru::LruCache` for O(1) insertion, lookup, and eviction.
 
-use std::collections::HashMap;
+use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
 
 use async_trait::async_trait;
+use lru::LruCache;
 use sha2::{Digest, Sha256};
 
 use crate::workspace::embeddings::{EmbeddingError, EmbeddingProvider};
@@ -22,8 +21,7 @@ pub struct EmbeddingCacheConfig {
     ///
     /// Approximate raw embedding payload: `max_entries × dimension × 4 bytes`.
     /// At 10,000 entries × 1536 floats ≈ 58 MB (payload only; actual memory
-    /// is higher due to HashMap buckets, `[u8; 32]` hash keys, `Vec`/`Instant`
-    /// per-entry overhead).
+    /// is higher due to per-entry overhead in the linked-list LRU).
     pub max_entries: usize,
 }
 
@@ -35,11 +33,6 @@ impl Default for EmbeddingCacheConfig {
     }
 }
 
-struct CacheEntry {
-    embedding: Vec<f32>,
-    last_accessed: Instant,
-}
-
 /// Embedding provider wrapper that caches results in memory.
 ///
 /// Thread-safe via `std::sync::Mutex`. The lock is **never held**
@@ -47,8 +40,7 @@ struct CacheEntry {
 /// so a synchronous mutex is cheaper than `tokio::sync::Mutex`.
 pub struct CachedEmbeddingProvider {
     inner: Arc<dyn EmbeddingProvider>,
-    cache: Mutex<HashMap<[u8; 32], CacheEntry>>,
-    config: EmbeddingCacheConfig,
+    cache: Mutex<LruCache<[u8; 32], Vec<f32>>>,
 }
 
 impl CachedEmbeddingProvider {
@@ -56,19 +48,18 @@ impl CachedEmbeddingProvider {
     ///
     /// `config.max_entries` is clamped to at least 1.
     pub fn new(inner: Arc<dyn EmbeddingProvider>, config: EmbeddingCacheConfig) -> Self {
-        let config = EmbeddingCacheConfig {
-            max_entries: config.max_entries.max(1),
-        };
-        if config.max_entries > 100_000 {
+        let max_entries = config.max_entries.max(1);
+        if max_entries > 100_000 {
             tracing::warn!(
-                max_entries = config.max_entries,
+                max_entries,
                 "Embedding cache size exceeds 100,000 entries; memory usage may be significant"
             );
         }
+        // safety: max_entries >= 1 due to .max(1) above
+        let cap = NonZeroUsize::new(max_entries).expect("clamped to >= 1"); // safety: always >= 1
         Self {
             inner,
-            cache: Mutex::new(HashMap::with_capacity(config.max_entries.min(1024))),
-            config,
+            cache: Mutex::new(LruCache::new(cap)),
         }
     }
 
@@ -100,49 +91,6 @@ impl CachedEmbeddingProvider {
         hasher.update(text.as_bytes());
         hasher.finalize().into()
     }
-
-    /// Evict the least-recently-used entry if at capacity (single-entry path).
-    // TODO: O(n) scan per eviction. If max_entries grows large, switch to
-    // an ordered data structure (e.g. `IndexMap` with swap_remove, or a
-    // linked-list LRU like the `lru` crate).
-    fn evict_lru(cache: &mut HashMap<[u8; 32], CacheEntry>, max_entries: usize) {
-        while cache.len() >= max_entries {
-            let oldest_key = cache
-                .iter()
-                .min_by_key(|(_, entry)| entry.last_accessed)
-                .map(|(k, _)| *k);
-
-            if let Some(k) = oldest_key {
-                cache.remove(&k);
-            } else {
-                break;
-            }
-        }
-    }
-
-    /// Evict the `k` oldest entries in O(n) average time via partial selection.
-    ///
-    /// Used by `embed_batch` to avoid the O(n×m) cost of calling
-    /// `evict_lru` per insert.
-    fn evict_k_oldest(cache: &mut HashMap<[u8; 32], CacheEntry>, k: usize) {
-        if k == 0 || cache.is_empty() {
-            return;
-        }
-        if k >= cache.len() {
-            cache.clear();
-            return;
-        }
-        // Partial selection: find the k oldest in O(n) average via
-        // select_nth_unstable_by_key, then remove the first k entries.
-        let mut entries: Vec<([u8; 32], Instant)> = cache
-            .iter()
-            .map(|(key, entry)| (*key, entry.last_accessed))
-            .collect();
-        entries.select_nth_unstable_by_key(k - 1, |(_, t)| *t);
-        for (key, _) in entries.into_iter().take(k) {
-            cache.remove(&key);
-        }
-    }
 }
 
 #[async_trait]
@@ -162,39 +110,32 @@ impl EmbeddingProvider for CachedEmbeddingProvider {
     async fn embed(&self, text: &str) -> Result<Vec<f32>, EmbeddingError> {
         let key = self.cache_key(text);
 
-        // Check cache (short critical section)
+        // Check cache (short critical section). LruCache::get promotes the
+        // entry to most-recently-used automatically.
         {
             let mut guard = self.cache.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(entry) = guard.get_mut(&key) {
-                entry.last_accessed = Instant::now();
+            if let Some(embedding) = guard.get(&key) {
                 tracing::trace!("embedding cache hit");
-                return Ok(entry.embedding.clone());
+                return Ok(embedding.clone());
             }
         }
         // Lock released before HTTP call.
         // NOTE: Thundering herd — multiple concurrent callers with the same
         // uncached key will each call the inner provider. This is acceptable:
-        // embeddings are idempotent and the last writer wins in the HashMap.
+        // embeddings are idempotent and the last writer wins in the LruCache.
 
         let embedding = self.inner.embed(text).await?;
 
-        // Store result. Re-check under lock: another concurrent caller may
-        // have inserted this key while the lock was released for the HTTP call.
+        // Store result under lock. Re-check first: another concurrent caller
+        // may have already cached this key while the lock was released.
         {
             let mut guard = self.cache.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(entry) = guard.get_mut(&key) {
-                // Key already present (thundering herd) — just update, no eviction needed.
-                entry.embedding = embedding.clone();
-                entry.last_accessed = Instant::now();
+            if guard.get(&key).is_some() {
+                // Thundering herd — another caller beat us. LruCache::get
+                // already promoted it to most-recently-used; skip the clone.
+                tracing::trace!("embedding cache: concurrent insert, skipping clone");
             } else {
-                Self::evict_lru(&mut guard, self.config.max_entries);
-                guard.insert(
-                    key,
-                    CacheEntry {
-                        embedding: embedding.clone(),
-                        last_accessed: Instant::now(),
-                    },
-                );
+                guard.push(key, embedding.clone());
             }
         }
 
@@ -214,11 +155,9 @@ impl EmbeddingProvider for CachedEmbeddingProvider {
 
         {
             let mut guard = self.cache.lock().unwrap_or_else(|e| e.into_inner());
-            let now = Instant::now();
             for (i, key) in keys.iter().enumerate() {
-                if let Some(entry) = guard.get_mut(key) {
-                    entry.last_accessed = now;
-                    results[i] = Some(entry.embedding.clone());
+                if let Some(embedding) = guard.get(key) {
+                    results[i] = Some(embedding.clone());
                 } else {
                     miss_indices.push(i);
                 }
@@ -228,7 +167,6 @@ impl EmbeddingProvider for CachedEmbeddingProvider {
 
         if miss_indices.is_empty() {
             tracing::trace!(count = texts.len(), "embedding batch: all cache hits");
-            // All slots populated from cache hits
             return results
                 .into_iter()
                 .enumerate()
@@ -260,31 +198,20 @@ impl EmbeddingProvider for CachedEmbeddingProvider {
             "embedding batch: partial cache"
         );
 
-        // Assemble results first (all misses, regardless of cache capacity).
-        for (orig_idx, emb) in miss_indices.iter().copied().zip(&new_embeddings) {
-            results[orig_idx] = Some(emb.clone());
-        }
-
-        // Cache the new embeddings, respecting max_entries.
+        // Cache only the last `cap` new embeddings — caching more than the
+        // cache capacity wastes clone work on entries that are immediately evicted.
         {
             let mut guard = self.cache.lock().unwrap_or_else(|e| e.into_inner());
-            // When misses exceed capacity, clear and only cache the tail.
-            let cacheable = miss_indices.len().min(self.config.max_entries);
-            let skip = miss_indices.len() - cacheable;
-            let need_to_evict = (guard.len() + cacheable).saturating_sub(self.config.max_entries);
-            if need_to_evict > 0 {
-                Self::evict_k_oldest(&mut guard, need_to_evict);
-            }
-            let now = Instant::now();
+            let cap = guard.cap().get();
+            let skip = miss_indices.len().saturating_sub(cap);
             for (&orig_idx, emb) in miss_indices[skip..].iter().zip(&new_embeddings[skip..]) {
-                guard.insert(
-                    keys[orig_idx],
-                    CacheEntry {
-                        embedding: emb.clone(),
-                        last_accessed: now,
-                    },
-                );
+                guard.push(keys[orig_idx], emb.clone());
             }
+        }
+
+        // Move originals into results (zero-copy).
+        for (orig_idx, emb) in miss_indices.iter().copied().zip(new_embeddings) {
+            results[orig_idx] = Some(emb);
         }
 
         results
