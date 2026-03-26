@@ -18,8 +18,8 @@
   },
   "artifacts": {
     "wasm32-wasip2": {
-      "url": "https://github.com/nearai/ironclaw/releases/download/v0.18.0/google-drive-0.2.0-wasm32-wasip2.tar.gz",
-      "sha256": "002a341a1d58125563a7c69561b26fbc2629b04ea723cade744102bdc0fbb71f"
+      "url": "https://github.com/nearai/ironclaw/releases/download/ironclaw-v0.22.0/tool-google-drive-0.2.1-wasm32-wasip2.tar.gz",
+      "sha256": "6e9a700fab93865c852af718666af64c5b534ad6a419fb4b736e07740188f494"
     }
   },
   "auth_summary": {

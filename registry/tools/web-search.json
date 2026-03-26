@@ -18,8 +18,8 @@
   },
   "artifacts": {
     "wasm32-wasip2": {
-      "url": "https://github.com/nearai/ironclaw/releases/download/v0.19.0/tool-web-search-0.2.1-wasm32-wasip2.tar.gz",
-      "sha256": "bad275ca4ec314adea5241d6b92c44ccf9cebcbca8e30ba2493cc0bcb4b57218"
+      "url": "https://github.com/nearai/ironclaw/releases/download/ironclaw-v0.22.0/tool-web-search-0.2.2-wasm32-wasip2.tar.gz",
+      "sha256": "47382b50c1ea7525b20d59dc02fab04e336d018665826c2f24710bdf460779ae"
     }
   },
   "auth_summary": {

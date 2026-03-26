@@ -21,8 +21,8 @@
   },
   "artifacts": {
     "wasm32-wasip2": {
-      "url": "https://github.com/nearai/ironclaw/releases/download/v0.19.0/tool-llm-context-0.1.0-wasm32-wasip2.tar.gz",
-      "sha256": "d9ced2b1226b879135891e0ee40e072c7c95412e1b2462925a23853e1f92497e"
+      "url": "https://github.com/nearai/ironclaw/releases/download/ironclaw-v0.22.0/tool-llm-context-0.1.1-wasm32-wasip2.tar.gz",
+      "sha256": "9b19e2fd05dbbbe3c8bd55309a91db09124e8415eb0f767828b6e10b55771e63"
     }
   },
   "auth_summary": {
