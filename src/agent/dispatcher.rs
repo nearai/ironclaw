@@ -398,16 +398,21 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
         };
 
         // Record cost and track token usage (global + per-user).
-        // When a model override is active, use the override name for attribution
-        // and let CostGuard look up pricing via costs::model_cost() instead of
-        // using the default provider's cost_per_token (which reflects the wrong model).
-        let (model_name, cost_per_token) = if let Some(ref ovr) = reason_ctx.model_override {
-            (ovr.clone(), None)
+        // Use the provider's effective_model_name so cost attribution matches
+        // the model that actually served the request. When the override is
+        // honoured (e.g. NearAI), this returns the override name; when the
+        // provider ignores overrides (e.g. Rig-based), it returns the active
+        // model, keeping attribution accurate in both cases.
+        let model_name = self
+            .agent
+            .llm()
+            .effective_model_name(reason_ctx.model_override.as_deref());
+        let cost_per_token = if reason_ctx.model_override.is_some() {
+            // Override may use different pricing; let CostGuard fall back to
+            // costs::model_cost() for the effective model.
+            None
         } else {
-            (
-                self.agent.llm().active_model_name(),
-                Some(self.agent.llm().cost_per_token()),
-            )
+            Some(self.agent.llm().cost_per_token())
         };
         let read_discount = self.agent.llm().cache_read_discount();
         let write_multiplier = self.agent.llm().cache_write_multiplier();
