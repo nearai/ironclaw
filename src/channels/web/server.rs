@@ -1177,11 +1177,31 @@ async fn slack_relay_oauth_callback_handler(
 
         // Store team_id in settings
         let team_id_key = format!("relay:{}:team_id", DEFAULT_RELAY_NAME);
-        let _ = store
+        tracing::info!(
+            relay = DEFAULT_RELAY_NAME,
+            owner_id = %state.owner_id,
+            team_id_key = %team_id_key,
+            "relay OAuth callback: storing team_id in settings"
+        );
+        if let Err(e) = store
             .set_setting(&state.owner_id, &team_id_key, &serde_json::json!(team_id))
-            .await;
+            .await
+        {
+            tracing::error!(
+                relay = DEFAULT_RELAY_NAME,
+                owner_id = %state.owner_id,
+                error = %e,
+                "relay OAuth callback: FAILED to persist team_id — \
+                 activation may succeed now but will break on restart"
+            );
+        }
 
         // Activate the relay channel
+        tracing::info!(
+            relay = DEFAULT_RELAY_NAME,
+            owner_id = %state.owner_id,
+            "relay OAuth callback: activating relay channel"
+        );
         ext_mgr
             .activate_stored_relay(DEFAULT_RELAY_NAME, &state.owner_id)
             .await
@@ -2181,6 +2201,11 @@ async fn extensions_activate_handler(
     AuthenticatedUser(user): AuthenticatedUser,
     Path(name): Path<String>,
 ) -> Result<Json<ActionResponse>, (StatusCode, String)> {
+    tracing::debug!(
+        extension = %name,
+        user_id = %user.user_id,
+        "extensions_activate_handler: received activate request"
+    );
     let ext_mgr = state.extension_manager.as_ref().ok_or((
         StatusCode::NOT_IMPLEMENTED,
         "Extension manager not available (secrets store required)".to_string(),
@@ -2188,6 +2213,10 @@ async fn extensions_activate_handler(
 
     match ext_mgr.activate(&name, &user.user_id).await {
         Ok(result) => {
+            tracing::info!(
+                extension = %name,
+                "extensions_activate_handler: activation succeeded"
+            );
             // Activation loaded the WASM module. Check if the tool needs
             // OAuth scope expansion (e.g., adding google-docs when gmail
             // already has a token but missing the documents scope).
@@ -2206,6 +2235,13 @@ async fn extensions_activate_handler(
                 crate::extensions::ExtensionError::AuthRequired
             );
 
+            tracing::debug!(
+                extension = %name,
+                error = %activate_err,
+                needs_auth = needs_auth,
+                "extensions_activate_handler: activation failed, attempting auth fallback"
+            );
+
             if !needs_auth {
                 return Ok(Json(ActionResponse::fail(activate_err.to_string())));
             }
@@ -2213,10 +2249,21 @@ async fn extensions_activate_handler(
             // Activation failed due to auth; try authenticating first.
             match ext_mgr.auth(&name, &user.user_id).await {
                 Ok(auth_result) if auth_result.is_authenticated() => {
+                    tracing::debug!(
+                        extension = %name,
+                        "extensions_activate_handler: auth reports authenticated, retrying activate"
+                    );
                     // Auth succeeded, retry activation.
                     match ext_mgr.activate(&name, &user.user_id).await {
                         Ok(result) => Ok(Json(ActionResponse::ok(result.message))),
-                        Err(e) => Ok(Json(ActionResponse::fail(e.to_string()))),
+                        Err(e) => {
+                            tracing::warn!(
+                                extension = %name,
+                                error = %e,
+                                "extensions_activate_handler: retry after auth still failed"
+                            );
+                            Ok(Json(ActionResponse::fail(e.to_string())))
+                        }
                     }
                 }
                 Ok(auth_result) => {
