@@ -9,8 +9,6 @@ I18n.register('zh-CN', {
   'auth.connect': '连接',
   'auth.errorRequired': '请输入令牌',
   'auth.errorInvalid': '令牌无效',
-  'auth.hint': '输入 .env 配置文件中的 GATEWAY_AUTH_TOKEN',
-  
   // 聊天
   'chat.inputPlaceholder': '输入消息或 / 以使用命令...',
   

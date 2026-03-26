@@ -186,6 +186,13 @@ function authenticate() {
       connectSSE();
       connectLogSSE();
       startGatewayStatusPolling();
+      // Hide the Users settings tab for non-admin users.
+      apiFetch('/api/profile').then(function(profile) {
+        if (profile && profile.role !== 'admin') {
+          var usersTab = document.querySelector('[data-settings-subtab="users"]');
+          if (usersTab) usersTab.style.display = 'none';
+        }
+      }).catch(function() {});
       checkTeeStatus();
       loadThreads();
       loadMemoryTree();
