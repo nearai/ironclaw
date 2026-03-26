@@ -71,6 +71,8 @@ async fn run_bridge(
 
     let mut shutdown = std::pin::pin!(shutdown_rx);
     let mut reconnect_attempt: u32 = 0;
+    // Reuse a single HTTP client across reconnects to avoid repeated TLS session setup.
+    let http_client = reqwest::Client::new();
 
     loop {
         // Check for shutdown before connecting
@@ -80,7 +82,7 @@ async fn run_bridge(
         }
 
         // Obtain a WebSocket URL via apps.connections.open
-        let wss_url = match open_connection(&config.open_url, &app_token).await {
+        let wss_url = match open_connection(&http_client, &config.open_url, &app_token).await {
             Ok(url) => {
                 reconnect_attempt = 0; // Reset backoff on successful auth
                 url
@@ -315,7 +317,7 @@ async fn event_loop(
                         let has_thread_ts = envelope
                             .pointer("/payload/event/thread_ts")
                             .is_some();
-                        tracing::info!(
+                        tracing::debug!(
                             channel = %channel_name,
                             event_type = event_type,
                             event_channel = event_channel,
@@ -333,7 +335,7 @@ async fn event_loop(
                         }
                     }
                     other => {
-                        tracing::info!(
+                        tracing::debug!(
                             channel = %channel_name,
                             envelope_type = other,
                             "Ignoring unhandled Socket Mode envelope type"
@@ -387,12 +389,15 @@ async fn forward_event_to_wasm(
     let query = HashMap::new();
 
     let path = format!("/webhook/{}", channel_name);
+    // `secret_validated: true` — Socket Mode events arrive over an authenticated WSS
+    // connection (app token was verified during `open_connection`), so there is no
+    // HMAC signature to verify. The WASM module can skip webhook secret validation.
     match channel
         .call_on_http_request("POST", &path, &headers, &query, &body, true)
         .await
     {
         Ok(_response) => {
-            tracing::info!(
+            tracing::debug!(
                 channel = %channel_name,
                 "Socket Mode event forwarded to WASM successfully"
             );
@@ -430,10 +435,11 @@ async fn resolve_app_token(
     let env_name = config.app_token_secret.to_uppercase();
     match std::env::var(&env_name) {
         Ok(val) if !val.is_empty() => {
-            tracing::info!(
+            tracing::warn!(
                 channel = %channel_name,
                 env_var = %env_name,
-                "App token not in secrets store, using environment variable"
+                "App token not in secrets store, falling back to environment variable — \
+                 env vars are readable by any process in the same user context"
             );
             Ok(val)
         }
@@ -448,9 +454,11 @@ async fn resolve_app_token(
 }
 
 /// POST to `apps.connections.open` with the app token to get a WebSocket URL.
-async fn open_connection(open_url: &str, app_token: &str) -> Result<String, WasmChannelError> {
-    let client = reqwest::Client::new();
-
+async fn open_connection(
+    client: &reqwest::Client,
+    open_url: &str,
+    app_token: &str,
+) -> Result<String, WasmChannelError> {
     let response = client
         .post(open_url)
         .header("Authorization", format!("Bearer {}", app_token))
@@ -509,24 +517,45 @@ fn is_auth_error(err: &WasmChannelError) -> bool {
 fn backoff_delay(base_ms: u64, attempt: u32) -> Duration {
     let exponent = (attempt - 1).min(6); // Cap at 2^6 = 64 → max ~5min with 5s base
     let delay_ms = base_ms.saturating_mul(1u64 << exponent);
-    Duration::from_millis(delay_ms.min(320_000)) // Hard cap at ~5 minutes
+    let capped = delay_ms.min(320_000); // Hard cap at ~5 minutes
+
+    // Apply ±25% jitter to prevent thundering herd on reconnect storms.
+    let jitter_range = capped / 4;
+    if jitter_range == 0 {
+        return Duration::from_millis(capped);
+    }
+    let jitter = rand::random::<u64>() % (jitter_range * 2 + 1);
+    let jittered = capped.saturating_sub(jitter_range).saturating_add(jitter);
+    Duration::from_millis(jittered)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Helper: assert delay is within ±25% of the nominal value.
+    fn assert_backoff_in_range(base_ms: u64, attempt: u32, nominal_ms: u64) {
+        let delay = backoff_delay(base_ms, attempt);
+        let lo = nominal_ms * 3 / 4; // -25%
+        let hi = nominal_ms * 5 / 4; // +25%
+        let ms = delay.as_millis() as u64;
+        assert!(
+            ms >= lo && ms <= hi,
+            "backoff_delay({base_ms}, {attempt}) = {ms}ms, expected {lo}..={hi} (nominal {nominal_ms})"
+        );
+    }
+
     #[test]
     fn test_backoff_delay() {
-        // base = 5000ms
-        assert_eq!(backoff_delay(5000, 1), Duration::from_millis(5000)); // 5s
-        assert_eq!(backoff_delay(5000, 2), Duration::from_millis(10_000)); // 10s
-        assert_eq!(backoff_delay(5000, 3), Duration::from_millis(20_000)); // 20s
-        assert_eq!(backoff_delay(5000, 4), Duration::from_millis(40_000)); // 40s
-        assert_eq!(backoff_delay(5000, 5), Duration::from_millis(80_000)); // 80s
-        assert_eq!(backoff_delay(5000, 6), Duration::from_millis(160_000)); // 160s
-        assert_eq!(backoff_delay(5000, 7), Duration::from_millis(320_000)); // 320s (cap)
-        assert_eq!(backoff_delay(5000, 10), Duration::from_millis(320_000)); // still capped
+        // base = 5000ms — with jitter, assert within ±25% of nominal
+        assert_backoff_in_range(5000, 1, 5000); // ~5s
+        assert_backoff_in_range(5000, 2, 10_000); // ~10s
+        assert_backoff_in_range(5000, 3, 20_000); // ~20s
+        assert_backoff_in_range(5000, 4, 40_000); // ~40s
+        assert_backoff_in_range(5000, 5, 80_000); // ~80s
+        assert_backoff_in_range(5000, 6, 160_000); // ~160s
+        assert_backoff_in_range(5000, 7, 320_000); // ~320s (cap)
+        assert_backoff_in_range(5000, 10, 320_000); // still capped
     }
 
     #[test]
@@ -550,12 +579,9 @@ mod tests {
 
     #[test]
     fn test_backoff_delay_capped() {
-        // At very high attempt counts the delay should still be capped at 320_000ms
-        assert_eq!(backoff_delay(5000, 100), Duration::from_millis(320_000));
-        assert_eq!(
-            backoff_delay(5000, u32::MAX),
-            Duration::from_millis(320_000)
-        );
+        // At very high attempt counts the delay should still be capped near 320_000ms (±25%)
+        assert_backoff_in_range(5000, 100, 320_000);
+        assert_backoff_in_range(5000, u32::MAX, 320_000);
     }
 
     #[test]

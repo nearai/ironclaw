@@ -990,7 +990,9 @@ impl Agent {
             match target_state {
                 Some(ThreadState::AwaitingApproval) => {
                     // Target thread is awaiting approval — take it directly.
-                    let thread = sess.threads.get_mut(&thread_id).unwrap();
+                    let thread = sess.threads.get_mut(&thread_id).ok_or_else(|| {
+                        Error::from(crate::error::JobError::NotFound { id: thread_id })
+                    })?;
                     let p = thread.take_pending_approval();
                     if p.is_some() {
                         (p, thread_id)
@@ -1032,7 +1034,9 @@ impl Agent {
                     awaiting.sort();
                     let target_tid = awaiting[0];
 
-                    let t = sess.threads.get_mut(&target_tid).unwrap();
+                    let t = sess.threads.get_mut(&target_tid).ok_or_else(|| {
+                        Error::from(crate::error::JobError::NotFound { id: target_tid })
+                    })?;
                     let p = t.take_pending_approval();
                     match p {
                         Some(pending) => (Some(pending), target_tid),
@@ -1881,7 +1885,6 @@ impl Agent {
     }
 }
 
-/// Rebuild full LLM-compatible `ChatMessage` sequence from DB messages.
 /// Rebuild full LLM-compatible `ChatMessage` sequence from DB messages.
 ///
 /// Parses `role="tool_calls"` rows to reconstruct `assistant_with_tool_calls`
