@@ -18,6 +18,7 @@ use std::time::Duration;
 use chrono::Utc;
 use regex::Regex;
 use tokio::sync::{RwLock, mpsc};
+use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 use crate::agent::Scheduler;
@@ -27,12 +28,12 @@ use crate::agent::routine::{
 use crate::channels::{IncomingMessage, OutgoingResponse};
 use crate::config::RoutineConfig;
 use crate::context::{JobContext, JobState};
-use crate::db::Database;
 use crate::error::RoutineError;
 use crate::extensions::ExtensionManager;
 use crate::llm::{
     ChatMessage, CompletionRequest, FinishReason, LlmProvider, ToolCall, ToolCompletionRequest,
 };
+use crate::tenant::AdminScope;
 use crate::tools::{
     ToolError, ToolRegistry, autonomous_allowed_tool_names, autonomous_unavailable_message,
     prepare_tool_params,
@@ -43,6 +44,11 @@ use ironclaw_safety::SafetyLayer;
 enum EventMatcher {
     Message { routine: Routine, regex: Regex },
     System { routine: Routine },
+}
+
+struct TriggeredRoutine {
+    routine: Routine,
+    detail: String,
 }
 
 /// Distinguishes why sandbox is unavailable so error messages are accurate.
@@ -93,7 +99,7 @@ pub(crate) fn routine_matches_message(routine: &Routine, message: &IncomingMessa
 /// The routine execution engine.
 pub struct RoutineEngine {
     config: RoutineConfig,
-    store: Arc<dyn Database>,
+    store: AdminScope,
     llm: Arc<dyn LlmProvider>,
     workspace: Arc<Workspace>,
     /// Sender for notifications (routed to channel manager).
@@ -122,7 +128,7 @@ impl RoutineEngine {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         config: RoutineConfig,
-        store: Arc<dyn Database>,
+        store: AdminScope,
         llm: Arc<dyn LlmProvider>,
         workspace: Arc<Workspace>,
         notify_tx: mpsc::Sender<OutgoingResponse>,
@@ -202,6 +208,44 @@ impl RoutineEngine {
 
     /// Check incoming message against event triggers. Returns number of routines fired.
     pub async fn check_event_triggers(&self, message: &IncomingMessage, content: &str) -> usize {
+        let triggered = self.matching_event_triggers(message, content).await;
+        let fired = triggered.len();
+        for triggered in triggered {
+            std::mem::drop(self.spawn_fire(triggered.routine, "event", Some(triggered.detail)));
+        }
+        fired
+    }
+
+    /// Fire matching event-triggered routines and wait for them to complete.
+    ///
+    /// Used by single-message REPL mode so the process does not exit before
+    /// background event-triggered routines finish.
+    pub async fn check_event_triggers_and_wait(
+        &self,
+        message: &IncomingMessage,
+        content: &str,
+    ) -> usize {
+        let triggered = self.matching_event_triggers(message, content).await;
+        let fired = triggered.len();
+        let handles: Vec<JoinHandle<()>> = triggered
+            .into_iter()
+            .map(|triggered| self.spawn_fire(triggered.routine, "event", Some(triggered.detail)))
+            .collect();
+
+        for handle in handles {
+            if let Err(e) = handle.await {
+                tracing::warn!(error = %e, "Event-triggered routine task failed");
+            }
+        }
+
+        fired
+    }
+
+    async fn matching_event_triggers(
+        &self,
+        message: &IncomingMessage,
+        content: &str,
+    ) -> Vec<TriggeredRoutine> {
         let cache = self.event_cache.read().await;
 
         // Early return if there are no message matchers at all.
@@ -209,10 +253,9 @@ impl RoutineEngine {
             .iter()
             .any(|m| matches!(m, EventMatcher::Message { .. }))
         {
-            return 0;
+            return Vec::new();
         }
-
-        let mut fired = 0;
+        let mut triggered = Vec::new();
 
         // Collect routine IDs for batch query
         let routine_ids: Vec<Uuid> = cache
@@ -224,13 +267,13 @@ impl RoutineEngine {
             .collect();
 
         if routine_ids.is_empty() {
-            return 0;
+            return Vec::new();
         }
 
         // Single batch query instead of N queries
         let concurrent_counts = match self.batch_concurrent_counts(&routine_ids).await {
             Some(counts) => counts,
-            None => return 0,
+            None => return Vec::new(),
         };
 
         for matcher in cache.iter() {
@@ -285,11 +328,13 @@ impl RoutineEngine {
             }
 
             let detail = truncate(content, 200);
-            self.spawn_fire(routine.clone(), "event", Some(detail));
-            fired += 1;
+            triggered.push(TriggeredRoutine {
+                routine: routine.clone(),
+                detail,
+            });
         }
 
-        fired
+        triggered
     }
 
     /// Emit a structured event to system-event routines.
@@ -737,12 +782,22 @@ impl RoutineEngine {
             });
         }
 
+        // Per-user workspace (same pattern as spawn_fire).
+        let routine_workspace = if routine.user_id == self.workspace.user_id() {
+            self.workspace.clone()
+        } else {
+            Arc::new(Workspace::new_with_db(
+                &routine.user_id,
+                Arc::clone(self.store.db()),
+            ))
+        };
+
         // Execute inline for manual triggers (caller wants to wait)
         let engine = EngineContext {
             config: self.config.clone(),
             store: self.store.clone(),
             llm: self.llm.clone(),
-            workspace: self.workspace.clone(),
+            workspace: routine_workspace,
             notify_tx: self.notify_tx.clone(),
             running_count: self.running_count.clone(),
             scheduler: self.scheduler.clone(),
@@ -845,7 +900,12 @@ impl RoutineEngine {
     }
 
     /// Spawn a fire in a background task.
-    fn spawn_fire(&self, routine: Routine, trigger_type: &str, trigger_detail: Option<String>) {
+    fn spawn_fire(
+        &self,
+        routine: Routine,
+        trigger_type: &str,
+        trigger_detail: Option<String>,
+    ) -> JoinHandle<()> {
         let run = RoutineRun {
             id: Uuid::new_v4(),
             routine_id: routine.id,
@@ -860,11 +920,23 @@ impl RoutineEngine {
             created_at: Utc::now(),
         };
 
+        // Use per-user workspace so each routine executes in the correct
+        // user's context. Fall back to the engine-wide workspace when the
+        // routine belongs to the same user (avoids unnecessary allocation).
+        let routine_workspace = if routine.user_id == self.workspace.user_id() {
+            self.workspace.clone()
+        } else {
+            Arc::new(Workspace::new_with_db(
+                &routine.user_id,
+                Arc::clone(self.store.db()),
+            ))
+        };
+
         let engine = EngineContext {
             config: self.config.clone(),
             store: self.store.clone(),
             llm: self.llm.clone(),
-            workspace: self.workspace.clone(),
+            workspace: routine_workspace,
             notify_tx: self.notify_tx.clone(),
             running_count: self.running_count.clone(),
             scheduler: self.scheduler.clone(),
@@ -882,7 +954,7 @@ impl RoutineEngine {
                 return;
             }
             execute_routine(engine, routine, run).await;
-        });
+        })
     }
 
     fn check_cooldown(&self, routine: &Routine) -> bool {
@@ -917,7 +989,7 @@ impl RoutineEngine {
 /// an active state (Pending/InProgress/Stuck). Maps the final `JobState` to
 /// a `RunStatus` for the routine run.
 struct FullJobWatcher {
-    store: Arc<dyn Database>,
+    store: AdminScope,
     job_id: Uuid,
     routine_name: String,
 }
@@ -928,7 +1000,7 @@ impl FullJobWatcher {
     /// Safety ceiling: 24 hours, derived from POLL_INTERVAL.
     const MAX_POLLS: u32 = (24 * 60 * 60) / Self::POLL_INTERVAL.as_secs() as u32;
 
-    fn new(store: Arc<dyn Database>, job_id: Uuid, routine_name: String) -> Self {
+    fn new(store: AdminScope, job_id: Uuid, routine_name: String) -> Self {
         Self {
             store,
             job_id,
@@ -1000,7 +1072,7 @@ impl FullJobWatcher {
 /// Shared context passed to the execution function.
 struct EngineContext {
     config: RoutineConfig,
-    store: Arc<dyn Database>,
+    store: AdminScope,
     llm: Arc<dyn LlmProvider>,
     workspace: Arc<Workspace>,
     notify_tx: mpsc::Sender<OutgoingResponse>,
@@ -1541,7 +1613,10 @@ async fn execute_lightweight_with_tools(
         let force_text = iteration >= max_iterations;
 
         if force_text {
-            // Final iteration: no tools, just get text response
+            // Final iteration: no tools, just get text response.
+            // Claude 4.6 rejects assistant prefill; NEAR AI rejects any non-user-ending
+            // conversation. Ensure the last message is user-role.
+            crate::util::ensure_ends_with_user_message(&mut messages);
             let request = CompletionRequest::new(messages)
                 .with_max_tokens(effective_max_tokens)
                 .with_temperature(0.3);

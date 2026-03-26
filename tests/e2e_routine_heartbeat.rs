@@ -337,14 +337,14 @@ mod tests {
             SchedulerDeps {
                 tools: registry.clone(),
                 extension_manager: extension_manager.clone(),
-                store: Some(db.clone()),
+                store: Some(ironclaw::tenant::AdminScope::new(db.clone())),
                 hooks: Arc::new(HookRegistry::new()),
             },
         ));
 
         Arc::new(RoutineEngine::new(
             RoutineConfig::default(),
-            db,
+            ironclaw::tenant::AdminScope::new(db),
             llm,
             ws,
             notify_tx,
@@ -448,7 +448,7 @@ mod tests {
 
         let engine = Arc::new(RoutineEngine::new(
             RoutineConfig::default(),
-            db.clone(),
+            ironclaw::tenant::AdminScope::new(db.clone()),
             llm,
             ws,
             notify_tx,
@@ -527,7 +527,7 @@ mod tests {
 
         let engine = Arc::new(RoutineEngine::new(
             RoutineConfig::default(),
-            db.clone(),
+            ironclaw::tenant::AdminScope::new(db.clone()),
             llm,
             ws,
             notify_tx,
@@ -614,7 +614,7 @@ mod tests {
 
         let engine = Arc::new(RoutineEngine::new(
             RoutineConfig::default(),
-            db.clone(),
+            ironclaw::tenant::AdminScope::new(db.clone()),
             llm,
             ws,
             notify_tx,
@@ -723,7 +723,7 @@ mod tests {
 
         let engine = Arc::new(RoutineEngine::new(
             RoutineConfig::default(),
-            db.clone(),
+            ironclaw::tenant::AdminScope::new(db.clone()),
             llm,
             ws,
             notify_tx,
@@ -866,7 +866,7 @@ mod tests {
 
         let engine = Arc::new(RoutineEngine::new(
             RoutineConfig::default(),
-            db.clone(),
+            ironclaw::tenant::AdminScope::new(db.clone()),
             llm,
             ws,
             notify_tx,
@@ -1049,7 +1049,7 @@ mod tests {
 
         let engine = Arc::new(RoutineEngine::new(
             RoutineConfig::default(),
-            Arc::clone(&db),
+            ironclaw::tenant::AdminScope::new(Arc::clone(&db)),
             llm,
             ws,
             notify_tx,
@@ -1171,7 +1171,7 @@ mod tests {
 
         let engine = Arc::new(RoutineEngine::new(
             RoutineConfig::default(),
-            db.clone(),
+            ironclaw::tenant::AdminScope::new(db.clone()),
             llm,
             ws,
             notify_tx,
@@ -1279,7 +1279,7 @@ mod tests {
 
         let engine = Arc::new(RoutineEngine::new(
             config,
-            db.clone(),
+            ironclaw::tenant::AdminScope::new(db.clone()),
             llm,
             ws,
             notify_tx,

@@ -63,6 +63,9 @@ pub struct TurnInfo {
     pub started_at: String,
     pub completed_at: Option<String>,
     pub tool_calls: Vec<ToolCallInfo>,
+    /// Agent's reasoning narrative for this turn.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub narrative: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -74,6 +77,9 @@ pub struct ToolCallInfo {
     pub result_preview: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Agent's reasoning for choosing this tool.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rationale: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -116,7 +122,7 @@ pub struct ApprovalRequest {
 
 // --- App Event (re-exported from ironclaw_common) ---
 
-pub use ironclaw_common::AppEvent;
+pub use ironclaw_common::{AppEvent, ToolDecisionDto};
 
 // --- Memory ---
 

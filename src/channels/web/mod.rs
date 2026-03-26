@@ -489,6 +489,20 @@ impl Channel for GatewayChannel {
             },
             StatusUpdate::Suggestions { suggestions } => AppEvent::Suggestions {
                 suggestions,
+                thread_id: thread_id.clone(),
+            },
+            StatusUpdate::ReasoningUpdate {
+                narrative,
+                decisions,
+            } => AppEvent::ReasoningUpdate {
+                narrative,
+                decisions: decisions
+                    .into_iter()
+                    .map(|d| crate::channels::web::types::ToolDecisionDto {
+                        tool_name: d.tool_name,
+                        rationale: d.rationale,
+                    })
+                    .collect(),
                 thread_id,
             },
             StatusUpdate::TurnCost {

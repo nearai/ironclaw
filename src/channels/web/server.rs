@@ -414,6 +414,11 @@ pub async fn start_server(
         .route(
             "/api/webhooks/{path}",
             post(crate::channels::web::handlers::webhooks::webhook_trigger_handler),
+        )
+        // User-scoped webhook endpoint for multi-tenant isolation
+        .route(
+            "/api/webhooks/u/{user_id}/{path}",
+            post(crate::channels::web::handlers::webhooks::webhook_trigger_user_scoped_handler),
         );
 
     // Protected routes (require auth)
@@ -1725,8 +1730,10 @@ async fn chat_history_handler(
                             truncate_preview(&s, 500)
                         }),
                         error: tc.error.clone(),
+                        rationale: tc.rationale.clone(),
                     })
                     .collect(),
+                narrative: t.narrative.clone(),
             })
             .collect();
 

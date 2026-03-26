@@ -69,6 +69,7 @@ pub mod service;
 pub mod settings;
 pub mod setup;
 pub mod skills;
+pub mod tenant;
 pub mod timezone;
 pub mod tools;
 pub mod tracing_fmt;

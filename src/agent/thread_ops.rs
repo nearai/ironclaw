@@ -175,6 +175,7 @@ impl Agent {
     pub(super) async fn process_user_input(
         &self,
         message: &IncomingMessage,
+        tenant: crate::tenant::TenantCtx,
         session: Arc<Mutex<Session>>,
         thread_id: Uuid,
         content: &str,
@@ -351,7 +352,7 @@ impl Agent {
 
         if let Some(intent) = self.router.route_command(&temp_message) {
             // Explicit command like /status, /job, /list - handle directly
-            return self.handle_job_or_command(intent, message).await;
+            return self.handle_job_or_command(intent, message, &tenant).await;
         }
 
         // Natural language goes through the agentic loop
@@ -462,7 +463,7 @@ impl Agent {
 
         // Run the agentic tool execution loop
         let result = self
-            .run_agentic_loop(message, session.clone(), thread_id, turn_messages)
+            .run_agentic_loop(message, tenant, session.clone(), thread_id, turn_messages)
             .await;
 
         // Re-acquire lock and check if interrupted
@@ -513,10 +514,10 @@ impl Agent {
                 };
 
                 thread.complete_turn(&response);
-                let (turn_number, tool_calls) = thread
+                let (turn_number, tool_calls, narrative) = thread
                     .turns
                     .last()
-                    .map(|t| (t.turn_number, t.tool_calls.clone()))
+                    .map(|t| (t.turn_number, t.tool_calls.clone(), t.narrative.clone()))
                     .unwrap_or_default();
                 let _ = self
                     .channels
@@ -534,6 +535,7 @@ impl Agent {
                     &message.user_id,
                     turn_number,
                     &tool_calls,
+                    narrative.as_deref(),
                 )
                 .await;
                 self.persist_assistant_response(
@@ -725,7 +727,9 @@ impl Agent {
     ///
     /// Stored between the user and assistant messages so that
     /// `build_turns_from_db_messages` can reconstruct the tool call history.
-    /// Content is a JSON array of tool call summaries.
+    /// Content is a JSON object: `{ "calls": [...], "narrative": "..." }`.
+    /// The `calls` array contains tool call summaries with optional `rationale`
+    /// and `tool_call_id` fields. Legacy rows may be plain JSON arrays.
     pub(super) async fn persist_tool_calls(
         &self,
         thread_id: Uuid,
@@ -733,6 +737,7 @@ impl Agent {
         user_id: &str,
         turn_number: usize,
         tool_calls: &[crate::agent::session::TurnToolCall],
+        narrative: Option<&str>,
     ) {
         if tool_calls.is_empty() {
             return;
@@ -767,11 +772,30 @@ impl Agent {
                 if let Some(ref error) = tc.error {
                     obj["error"] = serde_json::Value::String(truncate_preview(error, 200));
                 }
+                if let Some(ref rationale) = tc.rationale {
+                    obj["rationale"] = serde_json::Value::String(truncate_preview(rationale, 500));
+                }
+                if let Some(ref tool_call_id) = tc.tool_call_id {
+                    obj["tool_call_id"] =
+                        serde_json::Value::String(truncate_preview(tool_call_id, 128));
+                }
                 obj
             })
             .collect();
 
-        let content = match serde_json::to_string(&summaries) {
+        // Wrap in an object with optional narrative so it can be reconstructed.
+        // safety: no byte-index slicing here; comment describes JSON shape
+        let wrapper = if let Some(n) = narrative {
+            serde_json::json!({
+                "narrative": truncate_preview(n, 1000),
+                "calls": summaries,
+            })
+        } else {
+            serde_json::json!({
+                "calls": summaries,
+            })
+        };
+        let content = match serde_json::to_string(&wrapper) {
             Ok(c) => c,
             Err(e) => {
                 tracing::warn!("Failed to serialize tool calls: {}", e);
@@ -1104,9 +1128,12 @@ impl Agent {
                     && let Some(turn) = thread.last_turn_mut()
                 {
                     if is_tool_error {
-                        turn.record_tool_error(result_content.clone());
+                        turn.record_tool_error_for(&pending.tool_call_id, result_content.clone());
                     } else {
-                        turn.record_tool_result(serde_json::json!(result_content));
+                        turn.record_tool_result_for(
+                            &pending.tool_call_id,
+                            serde_json::json!(result_content),
+                        );
                     }
                 }
             }
@@ -1358,9 +1385,12 @@ impl Agent {
                         && let Some(turn) = thread.last_turn_mut()
                     {
                         if is_deferred_error {
-                            turn.record_tool_error(deferred_content.clone());
+                            turn.record_tool_error_for(&tc.id, deferred_content.clone());
                         } else {
-                            turn.record_tool_result(serde_json::json!(deferred_content));
+                            turn.record_tool_result_for(
+                                &tc.id,
+                                serde_json::json!(deferred_content),
+                            );
                         }
                     }
                 }
@@ -1444,7 +1474,13 @@ impl Agent {
 
             // Continue the agentic loop (a tool was already executed this turn)
             let result = self
-                .run_agentic_loop(message, session.clone(), thread_id, context_messages)
+                .run_agentic_loop(
+                    message,
+                    self.tenant_ctx(&message.user_id).await,
+                    session.clone(),
+                    thread_id,
+                    context_messages,
+                )
                 .await;
 
             // Handle the result
@@ -1459,10 +1495,10 @@ impl Agent {
                     let (response, suggestions) =
                         crate::agent::dispatcher::extract_suggestions(&response);
                     thread.complete_turn(&response);
-                    let (turn_number, tool_calls) = thread
+                    let (turn_number, tool_calls, narrative) = thread
                         .turns
                         .last()
-                        .map(|t| (t.turn_number, t.tool_calls.clone()))
+                        .map(|t| (t.turn_number, t.tool_calls.clone(), t.narrative.clone()))
                         .unwrap_or_default();
                     // User message already persisted at turn start; save tool calls then assistant response
                     self.persist_tool_calls(
@@ -1471,6 +1507,7 @@ impl Agent {
                         &message.user_id,
                         turn_number,
                         &tool_calls,
+                        narrative.as_deref(),
                     )
                     .await;
                     self.persist_assistant_response(
@@ -1816,7 +1853,20 @@ fn rebuild_chat_messages_from_db(
             "assistant" => result.push(ChatMessage::assistant(&msg.content)),
             "tool_calls" => {
                 // Try to parse the enriched JSON and rebuild tool messages.
-                if let Ok(calls) = serde_json::from_str::<Vec<serde_json::Value>>(&msg.content) {
+                // Supports two formats:
+                // - Old: plain JSON array of tool call summaries
+                // - New: wrapped object { "calls": [...], "narrative": "..." }
+                let calls: Vec<serde_json::Value> =
+                    match serde_json::from_str::<serde_json::Value>(&msg.content) {
+                        Ok(serde_json::Value::Array(arr)) => arr,
+                        Ok(serde_json::Value::Object(obj)) => obj
+                            .get("calls")
+                            .and_then(|v| v.as_array())
+                            .cloned()
+                            .unwrap_or_default(),
+                        _ => Vec::new(),
+                    };
+                {
                     if calls.is_empty() {
                         continue;
                     }
@@ -1839,6 +1889,10 @@ fn rebuild_chat_messages_from_db(
                                     .get("parameters")
                                     .cloned()
                                     .unwrap_or(serde_json::json!({})),
+                                reasoning: c
+                                    .get("rationale")
+                                    .and_then(|v| v.as_str())
+                                    .map(String::from),
                             })
                             .collect();
 

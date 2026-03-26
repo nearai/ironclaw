@@ -7,6 +7,32 @@
 
 use serde::{Deserialize, Serialize};
 
+/// A single tool decision in a reasoning update (SSE DTO).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolDecisionDto {
+    pub tool_name: String,
+    pub rationale: String,
+}
+
+impl ToolDecisionDto {
+    /// Parse a list of tool decisions from a JSON array value.
+    pub fn from_json_array(value: &serde_json::Value) -> Vec<Self> {
+        value
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|d| {
+                        Some(Self {
+                            tool_name: d.get("tool_name")?.as_str()?.to_string(),
+                            rationale: d.get("rationale")?.as_str()?.to_string(),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum AppEvent {
@@ -163,6 +189,23 @@ pub enum AppEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         message: Option<String>,
     },
+
+    /// Agent reasoning update (why it chose specific tools).
+    #[serde(rename = "reasoning_update")]
+    ReasoningUpdate {
+        narrative: String,
+        decisions: Vec<ToolDecisionDto>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
+    },
+
+    /// Reasoning update for a sandbox job.
+    #[serde(rename = "job_reasoning")]
+    JobReasoning {
+        job_id: String,
+        narrative: String,
+        decisions: Vec<ToolDecisionDto>,
+    },
 }
 
 impl AppEvent {
@@ -191,6 +234,8 @@ impl AppEvent {
             Self::Suggestions { .. } => "suggestions",
             Self::TurnCost { .. } => "turn_cost",
             Self::ExtensionStatus { .. } => "extension_status",
+            Self::ReasoningUpdate { .. } => "reasoning_update",
+            Self::JobReasoning { .. } => "job_reasoning",
         }
     }
 }
@@ -310,6 +355,16 @@ mod tests {
                 extension_name: String::new(),
                 status: String::new(),
                 message: None,
+            },
+            AppEvent::ReasoningUpdate {
+                narrative: String::new(),
+                decisions: vec![],
+                thread_id: None,
+            },
+            AppEvent::JobReasoning {
+                job_id: String::new(),
+                narrative: String::new(),
+                decisions: vec![],
             },
         ];
 
