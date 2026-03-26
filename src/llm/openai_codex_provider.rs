@@ -421,7 +421,7 @@ fn convert_message(msg: &ChatMessage, index: usize) -> Vec<serde_json::Value> {
                         serde_json::json!({
                             "type": "function_call",
                             "call_id": tc.id,
-                            "name": tc.name,
+                            "name": sanitize_tool_name(&tc.name),
                             "arguments": args_str,
                         })
                     })
@@ -452,6 +452,20 @@ fn convert_message(msg: &ChatMessage, index: usize) -> Vec<serde_json::Value> {
     }
 }
 
+/// Sanitize a tool name to match the OpenAI Responses API pattern `^[a-zA-Z0-9_-]+$`.
+/// Replaces any invalid character (e.g. dots in MCP tool names) with underscores.
+fn sanitize_tool_name(name: &str) -> String {
+    name.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
 /// Convert a `ToolDefinition` to Responses API tool format.
 ///
 /// Applies strict-mode schema normalization (same as OpenAI Chat Completions):
@@ -461,7 +475,7 @@ fn convert_tool_definition(tool: &ToolDefinition) -> serde_json::Value {
 
     serde_json::json!({
         "type": "function",
-        "name": tool.name,
+        "name": sanitize_tool_name(&tool.name),
         "description": tool.description,
         "parameters": normalize_schema_strict(&tool.parameters),
     })
@@ -1092,5 +1106,43 @@ data: {"type":"response.completed","response":{"status":"completed","usage":{"in
         assert_eq!(parsed.tool_calls[1].id, "call_2");
         assert_eq!(parsed.tool_calls[1].name, "read_file");
         assert_eq!(parsed.finish_reason, FinishReason::ToolUse);
+    }
+
+    /// Regression test: tool names with dots (e.g. MCP tools) must be sanitized
+    /// to match OpenAI's `^[a-zA-Z0-9_-]+$` pattern.
+    #[test]
+    fn test_sanitize_tool_name_replaces_dots() {
+        assert_eq!(super::sanitize_tool_name("memory_search"), "memory_search");
+        assert_eq!(
+            super::sanitize_tool_name("mcp.server.tool"),
+            "mcp_server_tool"
+        );
+        assert_eq!(super::sanitize_tool_name("tool@v2"), "tool_v2");
+        assert_eq!(super::sanitize_tool_name("my-tool"), "my-tool");
+    }
+
+    /// Regression test: convert_tool_definition sanitizes the name.
+    #[test]
+    fn test_convert_tool_definition_sanitizes_name() {
+        let tool = ToolDefinition {
+            name: "mcp.server.search".to_string(),
+            description: "Search".to_string(),
+            parameters: serde_json::json!({"type": "object", "properties": {}}),
+        };
+        let json = super::convert_tool_definition(&tool);
+        assert_eq!(json["name"], "mcp_server_search");
+    }
+
+    /// Regression test: function_call items sanitize tool names.
+    #[test]
+    fn test_convert_message_sanitizes_tool_call_name() {
+        let tool_calls = vec![ToolCall {
+            id: "call_1".to_string(),
+            name: "mcp.server.search".to_string(),
+            arguments: serde_json::json!({"q": "test"}),
+        }];
+        let msg = ChatMessage::assistant_with_tool_calls(None, tool_calls);
+        let items = super::convert_message(&msg, 0);
+        assert_eq!(items[0]["name"], "mcp_server_search");
     }
 }
