@@ -1191,8 +1191,9 @@ async fn slack_relay_oauth_callback_handler(
                 relay = DEFAULT_RELAY_NAME,
                 owner_id = %state.owner_id,
                 error = %e,
-                "relay OAuth callback: FAILED to persist team_id — \
-                 activation may succeed now but will break on restart"
+                "relay OAuth callback: failed to persist team_id to settings store — \
+                 the relay channel will work for this session but will not \
+                 reconnect automatically after a restart"
             );
         }
 

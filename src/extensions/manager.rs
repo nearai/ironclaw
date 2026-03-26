@@ -5353,13 +5353,28 @@ impl ExtensionManager {
                 )));
             }
             let trimmed = field_value.trim();
+            let field_def = setup_field_defs.get(field_name);
+
+            // Empty value on an optional field with a setting_path: clear the
+            // stored override so the system reverts to the env/default value.
             if trimmed.is_empty() {
+                if let Some(def) = field_def {
+                    if def.optional {
+                        stored_fields.remove(field_name);
+                        if let Some(setting_path) = &def.setting_path {
+                            Self::validate_setup_setting_path(name, setting_path)?;
+                            if let Some(store) = self.store.as_ref() {
+                                let _ = store.delete_setting(&self.user_id, setting_path).await;
+                            }
+                        }
+                    }
+                }
                 continue;
             }
 
             stored_fields.insert(field_name.clone(), trimmed.to_string());
 
-            if let Some(field_def) = setup_field_defs.get(field_name) {
+            if let Some(field_def) = field_def {
                 if field_def.restart_required {
                     restart_required = true;
                 }
