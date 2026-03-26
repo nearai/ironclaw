@@ -453,7 +453,7 @@ fn resolve_oauth_refresh_config(cap_file: &CapabilitiesFile) -> Option<OAuthRefr
         client_id,
         client_secret,
         exchange_proxy_url,
-        oauth_proxy_auth_token,
+        gateway_token: oauth_proxy_auth_token,
         secret_name: auth.secret_name.clone(),
         provider: auth.provider.clone(),
     })
@@ -921,7 +921,7 @@ mod tests {
             Some(TEST_OAUTH_CLIENT_SECRET.to_string())
         );
         assert_eq!(config.exchange_proxy_url, None);
-        assert_eq!(config.oauth_proxy_auth_token, None);
+        assert_eq!(config.gateway_token, None);
         assert_eq!(config.secret_name, "google_oauth_token");
         assert_eq!(config.provider, Some("google".to_string()));
     }
@@ -1009,7 +1009,7 @@ mod tests {
         assert!(!config.client_id.is_empty());
         assert!(config.client_secret.is_some());
         assert_eq!(config.exchange_proxy_url, None);
-        assert_eq!(config.oauth_proxy_auth_token, None);
+        assert_eq!(config.gateway_token, None);
     }
 
     #[test]
@@ -1051,10 +1051,7 @@ mod tests {
             config.exchange_proxy_url.as_deref(),
             Some("https://compose-api.example.com")
         );
-        assert_eq!(
-            config.oauth_proxy_auth_token.as_deref(),
-            Some("gateway-test-token")
-        );
+        assert_eq!(config.gateway_token.as_deref(), Some("gateway-test-token"));
     }
 
     #[test]
@@ -1101,10 +1098,7 @@ mod tests {
             config.exchange_proxy_url.as_deref(),
             Some("https://compose-api.example.com")
         );
-        assert_eq!(
-            config.oauth_proxy_auth_token.as_deref(),
-            Some("gateway-test-token")
-        );
+        assert_eq!(config.gateway_token.as_deref(), Some("gateway-test-token"));
     }
 
     #[test]
@@ -1143,7 +1137,7 @@ mod tests {
 
         let config = super::resolve_oauth_refresh_config(&caps).expect("hosted oauth config");
         assert_eq!(
-            config.oauth_proxy_auth_token.as_deref(),
+            config.gateway_token.as_deref(),
             Some("shared-oauth-proxy-secret")
         );
     }

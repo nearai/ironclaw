@@ -836,10 +836,10 @@ async fn oauth_callback_handler(
 
     let result: Result<(), String> = async {
         let token_response = if let Some(proxy_url) = &exchange_proxy_url {
-            let oauth_proxy_auth_token = flow.oauth_proxy_auth_token.as_deref().unwrap_or_default();
+            let oauth_proxy_auth_token = flow.oauth_proxy_auth_token().unwrap_or_default();
             oauth_defaults::exchange_via_proxy(oauth_defaults::ProxyTokenExchangeRequest {
                 proxy_url,
-                oauth_proxy_auth_token,
+                gateway_token: oauth_proxy_auth_token,
                 token_url: &flow.token_url,
                 client_id: &flow.client_id,
                 client_secret: flow.client_secret.as_deref(),
@@ -3157,7 +3157,7 @@ mod tests {
             user_id: "test".to_string(),
             secrets,
             sse_manager,
-            oauth_proxy_auth_token,
+            gateway_token: oauth_proxy_auth_token,
             token_exchange_extra_params: std::collections::HashMap::new(),
             client_id_secret_name: None,
             created_at: std::time::Instant::now(),
@@ -3517,7 +3517,7 @@ mod tests {
             user_id: "test".to_string(),
             secrets,
             sse_manager: None,
-            oauth_proxy_auth_token: None,
+            gateway_token: None,
             token_exchange_extra_params: std::collections::HashMap::new(),
             client_id_secret_name: None,
             created_at,
@@ -3586,7 +3586,7 @@ mod tests {
             user_id: "test".to_string(),
             secrets,
             sse_manager: Some(sse_mgr),
-            oauth_proxy_auth_token: None,
+            gateway_token: None,
             token_exchange_extra_params: std::collections::HashMap::new(),
             client_id_secret_name: None,
             created_at,
@@ -3689,7 +3689,7 @@ mod tests {
             user_id: "test".to_string(),
             secrets,
             sse_manager: None,
-            oauth_proxy_auth_token: None,
+            gateway_token: None,
             token_exchange_extra_params: std::collections::HashMap::new(),
             client_id_secret_name: None,
             // Expired — handler will reject after lookup (no network I/O)
@@ -3776,7 +3776,7 @@ mod tests {
             user_id: "test".to_string(),
             secrets,
             sse_manager: None,
-            oauth_proxy_auth_token: None,
+            gateway_token: None,
             token_exchange_extra_params: std::collections::HashMap::new(),
             client_id_secret_name: None,
             created_at,
@@ -3857,7 +3857,7 @@ mod tests {
             user_id: "test".to_string(),
             secrets,
             sse_manager: None,
-            oauth_proxy_auth_token: None,
+            gateway_token: None,
             token_exchange_extra_params: std::collections::HashMap::new(),
             client_id_secret_name: None,
             created_at,

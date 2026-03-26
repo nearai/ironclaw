@@ -474,7 +474,8 @@ pub struct PendingOAuthFlow {
     /// SSE broadcast manager for notifying the web UI.
     pub sse_manager: Option<Arc<crate::channels::web::sse::SseManager>>,
     /// OAuth proxy auth token for authenticating with the hosted token exchange proxy.
-    pub oauth_proxy_auth_token: Option<String>,
+    /// Kept as `gateway_token` for public API compatibility.
+    pub gateway_token: Option<String>,
     /// Additional form params for the token exchange request.
     /// Used for provider-specific requirements such as RFC 8707 `resource`.
     pub token_exchange_extra_params: HashMap<String, String>,
@@ -493,6 +494,12 @@ impl std::fmt::Debug for PendingOAuthFlow {
             .field("secret_name", &self.secret_name)
             .field("created_at", &self.created_at)
             .finish_non_exhaustive()
+    }
+}
+
+impl PendingOAuthFlow {
+    pub fn oauth_proxy_auth_token(&self) -> Option<&str> {
+        self.gateway_token.as_deref()
     }
 }
 
@@ -686,7 +693,9 @@ pub fn strip_instance_prefix(state: &str) -> &str {
 
 pub struct ProxyTokenExchangeRequest<'a> {
     pub proxy_url: &'a str,
-    pub oauth_proxy_auth_token: &'a str,
+    /// OAuth proxy auth token.
+    /// Kept as `gateway_token` for public API compatibility.
+    pub gateway_token: &'a str,
     pub token_url: &'a str,
     pub client_id: &'a str,
     pub client_secret: Option<&'a str>,
@@ -699,7 +708,9 @@ pub struct ProxyTokenExchangeRequest<'a> {
 
 pub struct ProxyRefreshTokenRequest<'a> {
     pub proxy_url: &'a str,
-    pub oauth_proxy_auth_token: &'a str,
+    /// OAuth proxy auth token.
+    /// Kept as `gateway_token` for public API compatibility.
+    pub gateway_token: &'a str,
     pub token_url: &'a str,
     pub client_id: &'a str,
     pub client_secret: Option<&'a str>,
@@ -751,7 +762,7 @@ fn oauth_token_response_from_json(
 pub async fn exchange_via_proxy(
     request: ProxyTokenExchangeRequest<'_>,
 ) -> Result<OAuthTokenResponse, OAuthCallbackError> {
-    if request.oauth_proxy_auth_token.is_empty() {
+    if request.gateway_token.is_empty() {
         return Err(OAuthCallbackError::Io(
             "OAuth proxy auth token is required for proxy token exchange".to_string(),
         ));
@@ -782,7 +793,7 @@ pub async fn exchange_via_proxy(
 
     let response = client
         .post(&exchange_url)
-        .bearer_auth(request.oauth_proxy_auth_token)
+        .bearer_auth(request.gateway_token)
         .form(&params)
         .send()
         .await
@@ -814,7 +825,7 @@ pub async fn exchange_via_proxy(
 pub async fn refresh_token_via_proxy(
     request: ProxyRefreshTokenRequest<'_>,
 ) -> Result<OAuthTokenResponse, OAuthCallbackError> {
-    if request.oauth_proxy_auth_token.is_empty() {
+    if request.gateway_token.is_empty() {
         return Err(OAuthCallbackError::Io(
             "OAuth proxy auth token is required for proxy token refresh".to_string(),
         ));
@@ -841,7 +852,7 @@ pub async fn refresh_token_via_proxy(
 
     let response = client
         .post(&refresh_url)
-        .bearer_auth(request.oauth_proxy_auth_token)
+        .bearer_auth(request.gateway_token)
         .form(&params)
         .send()
         .await
@@ -1081,7 +1092,7 @@ mod tests {
 
         let response = super::exchange_via_proxy(super::ProxyTokenExchangeRequest {
             proxy_url: &server.base_url(),
-            oauth_proxy_auth_token: "shared-oauth-proxy-secret",
+            gateway_token: "shared-oauth-proxy-secret",
             code: "auth-code-123",
             redirect_uri: "https://oauth.example.com/oauth/callback",
             token_url: "https://oauth2.googleapis.com/token",
@@ -1152,7 +1163,7 @@ mod tests {
 
         let response = super::refresh_token_via_proxy(super::ProxyRefreshTokenRequest {
             proxy_url: &server.base_url(),
-            oauth_proxy_auth_token: "gateway-test-token",
+            gateway_token: "gateway-test-token",
             token_url: "https://oauth2.googleapis.com/token",
             client_id: TEST_OAUTH_CLIENT_ID,
             client_secret: Some(TEST_OAUTH_CLIENT_SECRET),
@@ -1205,7 +1216,7 @@ mod tests {
 
         let error = match super::exchange_via_proxy(super::ProxyTokenExchangeRequest {
             proxy_url: &server.redirecting_base_url(),
-            oauth_proxy_auth_token: "gateway-test-token",
+            gateway_token: "gateway-test-token",
             code: "auth-code-123",
             redirect_uri: "http://localhost:3000/oauth/callback",
             token_url: "https://oauth2.googleapis.com/token",
@@ -1233,7 +1244,7 @@ mod tests {
 
         let error = match super::refresh_token_via_proxy(super::ProxyRefreshTokenRequest {
             proxy_url: &server.redirecting_base_url(),
-            oauth_proxy_auth_token: "gateway-test-token",
+            gateway_token: "gateway-test-token",
             token_url: "https://oauth2.googleapis.com/token",
             client_id: TEST_OAUTH_CLIENT_ID,
             client_secret: Some(TEST_OAUTH_CLIENT_SECRET),
