@@ -25,6 +25,18 @@
       "href": "https://agent.near.ai/"
     }
   },
+  "i18n": {
+    "languages": [
+      {
+        "language": "en",
+        "name": "English"
+      },
+      {
+        "language": "zh",
+        "name": "中文"
+      }
+    ]
+  },
   "navigation": {
     "tabs": [
       {
