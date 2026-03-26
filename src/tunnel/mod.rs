@@ -430,7 +430,7 @@ mod tests {
             auth_token: None,
             user_id: "test".to_string(),
             workspace_read_scopes: Vec::new(),
-            memory_layers: crate::workspace::layer::MemoryLayer::default_for_user("test"),
+            memory_layers: Vec::new(),
             user_tokens: None,
         });
         c
@@ -444,7 +444,7 @@ mod tests {
             auth_token: None,
             user_id: "test".to_string(),
             workspace_read_scopes: Vec::new(),
-            memory_layers: crate::workspace::layer::MemoryLayer::default_for_user("test"),
+            memory_layers: Vec::new(),
             user_tokens: None,
         });
         c
@@ -486,6 +486,25 @@ mod tests {
         // Should use HTTP config, not gateway's 127.0.0.1:3000
         assert_eq!(host, "192.168.1.1"); // safety: test-only
         assert_eq!(port, 9090); // safety: test-only
+    }
+
+    #[test]
+    fn tunnel_test_helpers_leave_gateway_memory_layers_empty() {
+        let with_http = channels_with_http("0.0.0.0", 8080);
+        let gateway_only = channels_gateway_only("127.0.0.1", 3000);
+
+        assert!(
+            with_http
+                .gateway
+                .as_ref()
+                .is_some_and(|gateway| gateway.memory_layers.is_empty())
+        );
+        assert!(
+            gateway_only
+                .gateway
+                .as_ref()
+                .is_some_and(|gateway| gateway.memory_layers.is_empty())
+        );
     }
 
     #[test]
