@@ -544,7 +544,7 @@ fn default_patterns() -> Vec<LeakPattern> {
         // Groq API keys (gsk_<alphanumeric, 30+ chars>)
         LeakPattern {
             name: "groq_api_key".to_string(),
-            regex: Regex::new(r"gsk_[A-Za-z0-9]{30,}").unwrap(), // safety: hardcoded literal
+            regex: Regex::new(r"\bgsk_[A-Za-z0-9]{30,}").unwrap(), // safety: hardcoded literal
             severity: LeakSeverity::Critical,
             action: LeakAction::Block,
         },
