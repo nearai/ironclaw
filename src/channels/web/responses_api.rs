@@ -35,8 +35,11 @@ use super::server::GatewayState;
 /// Maximum time to wait for the agent to finish a turn (non-streaming).
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// Prefix for response IDs that encode a thread UUID.
+/// Prefix for response IDs.
 const RESP_PREFIX: &str = "resp_";
+
+/// Length of a UUID in simple (no-hyphen) hex form.
+const UUID_HEX_LEN: usize = 32;
 
 // ---------------------------------------------------------------------------
 // Request types
@@ -105,6 +108,14 @@ pub struct ResponseObject {
     pub status: ResponseStatus,
     pub output: Vec<ResponseOutputItem>,
     pub usage: ResponseUsage,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<ResponseError>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ResponseError {
+    pub message: String,
+    pub code: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -113,7 +124,6 @@ pub enum ResponseStatus {
     InProgress,
     Completed,
     Failed,
-    Incomplete,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -234,17 +244,36 @@ fn api_error(status: StatusCode, message: impl Into<String>, error_type: &str) -
 // ID encoding/decoding
 // ---------------------------------------------------------------------------
 
-/// Encode a thread UUID as a response ID: `resp_{uuid_simple}`.
-fn encode_response_id(thread_id: &Uuid) -> String {
-    format!("{}{}", RESP_PREFIX, thread_id.simple())
+/// Encode a response ID: `resp_{response_uuid_hex}{thread_uuid_hex}`.
+///
+/// Each POST generates a unique `response_uuid` so that response IDs differ
+/// across turns even when the underlying thread (conversation) is the same.
+fn encode_response_id(response_uuid: &Uuid, thread_uuid: &Uuid) -> String {
+    format!(
+        "{}{}{}",
+        RESP_PREFIX,
+        response_uuid.simple(),
+        thread_uuid.simple()
+    )
 }
 
-/// Decode a response ID back to a thread UUID.
-fn decode_response_id(id: &str) -> Result<Uuid, String> {
+/// Decode a response ID back to `(response_uuid, thread_uuid)`.
+fn decode_response_id(id: &str) -> Result<(Uuid, Uuid), String> {
     let hex = id
         .strip_prefix(RESP_PREFIX)
         .ok_or_else(|| format!("response ID must start with '{RESP_PREFIX}'"))?;
-    Uuid::parse_str(hex).map_err(|e| format!("invalid UUID in response ID: {e}"))
+    if hex.len() != UUID_HEX_LEN * 2 {
+        return Err(format!(
+            "response ID must contain exactly {} hex characters after prefix",
+            UUID_HEX_LEN * 2
+        ));
+    }
+    let (resp_hex, thread_hex) = hex.split_at(UUID_HEX_LEN);
+    let response_uuid =
+        Uuid::parse_str(resp_hex).map_err(|e| format!("invalid response UUID: {e}"))?;
+    let thread_uuid =
+        Uuid::parse_str(thread_hex).map_err(|e| format!("invalid thread UUID: {e}"))?;
+    Ok((response_uuid, thread_uuid))
 }
 
 // ---------------------------------------------------------------------------
@@ -303,9 +332,7 @@ fn event_matches_thread(event: &AppEvent, target: &str) -> bool {
         | AppEvent::Suggestions { thread_id, .. }
         | AppEvent::ReasoningUpdate { thread_id, .. }
         | AppEvent::Status { thread_id, .. }
-        | AppEvent::ApprovalNeeded { thread_id, .. } => {
-            thread_id.as_deref() == Some(target)
-        }
+        | AppEvent::ApprovalNeeded { thread_id, .. } => thread_id.as_deref() == Some(target),
         // Global or job-scoped events are never matched.
         _ => false,
     }
@@ -321,15 +348,13 @@ fn in_progress_response(resp_id: &str, model: &str) -> ResponseObject {
         status: ResponseStatus::InProgress,
         output: Vec::new(),
         usage: ResponseUsage::default(),
+        error: None,
     }
 }
 
 /// Send an `IncomingMessage` to the agent loop, returning an error response on
 /// failure.
-async fn send_to_agent(
-    state: &GatewayState,
-    msg: IncomingMessage,
-) -> Result<(), ApiError> {
+async fn send_to_agent(state: &GatewayState, msg: IncomingMessage) -> Result<(), ApiError> {
     let tx = {
         let guard = state.msg_tx.read().await;
         guard.as_ref().cloned().ok_or_else(|| {
@@ -357,6 +382,7 @@ async fn send_to_agent(
 struct ResponseAccumulator {
     resp_id: String,
     model: String,
+    created_at: i64,
     output: Vec<ResponseOutputItem>,
     text_chunks: Vec<String>,
     usage: ResponseUsage,
@@ -369,6 +395,7 @@ impl ResponseAccumulator {
         Self {
             resp_id,
             model,
+            created_at: unix_timestamp(),
             output: Vec::new(),
             text_chunks: Vec::new(),
             usage: ResponseUsage::default(),
@@ -435,9 +462,7 @@ impl ResponseAccumulator {
                     }
                 }
                 // On failure, record a FunctionCallOutput with the error.
-                if !success
-                    && let Some(err) = error
-                {
+                if !success && let Some(err) = error {
                     let call_id = self.last_call_id_for(&name);
                     self.output.push(ResponseOutputItem::FunctionCallOutput {
                         id: make_item_id(),
@@ -492,9 +517,7 @@ impl ResponseAccumulator {
             .rev()
             .find_map(|item| match item {
                 ResponseOutputItem::FunctionCall {
-                    call_id,
-                    name: n,
-                    ..
+                    call_id, name: n, ..
                 } if n == name => Some(call_id.clone()),
                 _ => None,
             })
@@ -505,7 +528,7 @@ impl ResponseAccumulator {
         ResponseObject {
             id: self.resp_id,
             object: "response",
-            created_at: unix_timestamp(),
+            created_at: self.created_at,
             model: self.model,
             status: if self.failed {
                 ResponseStatus::Failed
@@ -514,6 +537,10 @@ impl ResponseAccumulator {
             },
             output: self.output,
             usage: self.usage,
+            error: self.error_message.map(|msg| ResponseError {
+                message: msg,
+                code: None,
+            }),
         }
     }
 }
@@ -535,29 +562,77 @@ pub async fn create_response_handler(
         ));
     }
 
-    let content =
-        extract_user_content(&req.input).map_err(|e| {
-            api_error(StatusCode::BAD_REQUEST, e, "invalid_request_error")
-        })?;
+    // Reject fields that are accepted but not yet wired into the agent loop.
+    if req.model != "default" {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "Model selection is not yet supported; omit 'model' or use \"default\"",
+            "invalid_request_error",
+        ));
+    }
+    if req.instructions.is_some() {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "The 'instructions' field is not yet supported",
+            "invalid_request_error",
+        ));
+    }
+    if req.tools.is_some() {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "The 'tools' field is not yet supported",
+            "invalid_request_error",
+        ));
+    }
+    if req.tool_choice.is_some() {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "The 'tool_choice' field is not yet supported",
+            "invalid_request_error",
+        ));
+    }
+    if req.temperature.is_some() {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "The 'temperature' field is not yet supported",
+            "invalid_request_error",
+        ));
+    }
+    if req.max_output_tokens.is_some() {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "The 'max_output_tokens' field is not yet supported",
+            "invalid_request_error",
+        ));
+    }
+
+    let content = extract_user_content(&req.input)
+        .map_err(|e| api_error(StatusCode::BAD_REQUEST, e, "invalid_request_error"))?;
 
     // Resolve or create thread.
     let thread_uuid = match &req.previous_response_id {
-        Some(prev_id) => decode_response_id(prev_id).map_err(|e| {
-            api_error(StatusCode::BAD_REQUEST, e, "invalid_request_error")
-        })?,
+        Some(prev_id) => {
+            let (_prev_resp, thread) = decode_response_id(prev_id)
+                .map_err(|e| api_error(StatusCode::BAD_REQUEST, e, "invalid_request_error"))?;
+            thread
+        }
         None => Uuid::new_v4(),
     };
     let thread_id_str = thread_uuid.to_string();
+
+    // Each POST gets its own unique response UUID.
+    let response_uuid = Uuid::new_v4();
 
     // Build the message for the agent loop.
     let msg = IncomingMessage::new("gateway", &user.user_id, &content)
         .with_thread(&thread_id_str)
         .with_metadata(serde_json::json!({
             "thread_id": &thread_id_str,
+            "user_id": &user.user_id,
             "source": "responses_api",
         }));
 
-    let resp_id = encode_response_id(&thread_uuid);
+    let resp_id = encode_response_id(&response_uuid, &thread_uuid);
     let model = req.model.clone();
     let stream = req.stream.unwrap_or(false);
     let user_id = user.user_id.clone();
@@ -625,16 +700,13 @@ async fn handle_streaming(
     thread_id: String,
     user_id: String,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>> + Send>, ApiError> {
-    let event_stream = state
-        .sse
-        .subscribe_raw(Some(user_id))
-        .ok_or_else(|| {
-            api_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "Too many concurrent connections",
-                "server_error",
-            )
-        })?;
+    let event_stream = state.sse.subscribe_raw(Some(user_id)).ok_or_else(|| {
+        api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Too many concurrent connections",
+            "server_error",
+        )
+    })?;
 
     send_to_agent(&state, msg).await?;
 
@@ -651,11 +723,7 @@ async fn handle_streaming(
 
     let stream = tokio_stream::wrappers::ReceiverStream::new(rx).map(Ok::<_, Infallible>);
 
-    Ok(Sse::new(stream).keep_alive(
-        KeepAlive::new()
-            .interval(Duration::from_secs(15))
-            .text(""),
-    ))
+    Ok(Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15)).text("")))
 }
 
 /// Background task that reads `AppEvent`s and sends SSE `Event`s to the client.
@@ -689,9 +757,7 @@ async fn streaming_worker(
     if !emit(
         &tx,
         "response.created",
-        &ResponseStreamEvent::ResponseCreated {
-            response: initial,
-        },
+        &ResponseStreamEvent::ResponseCreated { response: initial },
     ) {
         return;
     }
@@ -736,20 +802,28 @@ async fn streaming_worker(
                                 text: String::new(),
                             }],
                         };
-                        emit(&tx, "response.output_item.added", &ResponseStreamEvent::OutputItemAdded {
-                            output_index: i,
-                            item: item.clone(),
-                        });
+                        emit(
+                            &tx,
+                            "response.output_item.added",
+                            &ResponseStreamEvent::OutputItemAdded {
+                                output_index: i,
+                                item: item.clone(),
+                            },
+                        );
                         acc.output.push(item);
                         message_output_index = Some(i);
                         i
                     }
                 };
-                emit(&tx, "response.output_text.delta", &ResponseStreamEvent::OutputTextDelta {
-                    output_index: idx,
-                    content_index: 0,
-                    delta: content.clone(),
-                });
+                emit(
+                    &tx,
+                    "response.output_text.delta",
+                    &ResponseStreamEvent::OutputTextDelta {
+                        output_index: idx,
+                        content_index: 0,
+                        delta: content.clone(),
+                    },
+                );
                 acc.text_chunks.push(content.clone());
             }
             AppEvent::ToolStarted { name, .. } => {
@@ -761,14 +835,24 @@ async fn streaming_worker(
                     name: name.clone(),
                     arguments: String::new(),
                 };
-                emit(&tx, "response.output_item.added", &ResponseStreamEvent::OutputItemAdded {
-                    output_index: idx,
-                    item: item.clone(),
-                });
+                emit(
+                    &tx,
+                    "response.output_item.added",
+                    &ResponseStreamEvent::OutputItemAdded {
+                        output_index: idx,
+                        item: item.clone(),
+                    },
+                );
                 acc.output.push(item);
                 current_tool_index = Some(idx);
             }
-            AppEvent::ToolCompleted { name, parameters, .. } => {
+            AppEvent::ToolCompleted {
+                name,
+                success,
+                error,
+                parameters,
+                ..
+            } => {
                 if let Some(args) = parameters {
                     for item in acc.output.iter_mut().rev() {
                         if let ResponseOutputItem::FunctionCall {
@@ -787,10 +871,41 @@ async fn streaming_worker(
                 if let Some(idx) = current_tool_index.take()
                     && let Some(item) = acc.output.get(idx)
                 {
-                    emit(&tx, "response.output_item.done", &ResponseStreamEvent::OutputItemDone {
-                        output_index: idx,
-                        item: item.clone(),
-                    });
+                    emit(
+                        &tx,
+                        "response.output_item.done",
+                        &ResponseStreamEvent::OutputItemDone {
+                            output_index: idx,
+                            item: item.clone(),
+                        },
+                    );
+                }
+                // On failure, emit a FunctionCallOutput with the error.
+                if !*success && let Some(err) = error {
+                    let call_id = acc.last_call_id_for(name);
+                    let idx = acc.output.len();
+                    let item = ResponseOutputItem::FunctionCallOutput {
+                        id: make_item_id(),
+                        call_id,
+                        output: format!("Error: {err}"),
+                    };
+                    emit(
+                        &tx,
+                        "response.output_item.added",
+                        &ResponseStreamEvent::OutputItemAdded {
+                            output_index: idx,
+                            item: item.clone(),
+                        },
+                    );
+                    emit(
+                        &tx,
+                        "response.output_item.done",
+                        &ResponseStreamEvent::OutputItemDone {
+                            output_index: idx,
+                            item: item.clone(),
+                        },
+                    );
+                    acc.output.push(item);
                 }
             }
             AppEvent::ToolResult { name, preview, .. } => {
@@ -801,17 +916,29 @@ async fn streaming_worker(
                     call_id,
                     output: preview.clone(),
                 };
-                emit(&tx, "response.output_item.added", &ResponseStreamEvent::OutputItemAdded {
-                    output_index: idx,
-                    item: item.clone(),
-                });
-                emit(&tx, "response.output_item.done", &ResponseStreamEvent::OutputItemDone {
-                    output_index: idx,
-                    item: item.clone(),
-                });
+                emit(
+                    &tx,
+                    "response.output_item.added",
+                    &ResponseStreamEvent::OutputItemAdded {
+                        output_index: idx,
+                        item: item.clone(),
+                    },
+                );
+                emit(
+                    &tx,
+                    "response.output_item.done",
+                    &ResponseStreamEvent::OutputItemDone {
+                        output_index: idx,
+                        item: item.clone(),
+                    },
+                );
                 acc.output.push(item);
             }
-            AppEvent::TurnCost { input_tokens, output_tokens, .. } => {
+            AppEvent::TurnCost {
+                input_tokens,
+                output_tokens,
+                ..
+            } => {
                 acc.usage = ResponseUsage {
                     input_tokens: *input_tokens,
                     output_tokens: *output_tokens,
@@ -843,10 +970,14 @@ async fn streaming_worker(
                                 content: vec![MessageContent::OutputText { text }],
                             };
                             if let Some(item) = acc.output.get(idx) {
-                                emit(&tx, "response.output_item.done", &ResponseStreamEvent::OutputItemDone {
-                                    output_index: idx,
-                                    item: item.clone(),
-                                });
+                                emit(
+                                    &tx,
+                                    "response.output_item.done",
+                                    &ResponseStreamEvent::OutputItemDone {
+                                        output_index: idx,
+                                        item: item.clone(),
+                                    },
+                                );
                             }
                         }
                         None => {
@@ -856,29 +987,46 @@ async fn streaming_worker(
                                 role: "assistant".to_string(),
                                 content: vec![MessageContent::OutputText { text }],
                             };
-                            emit(&tx, "response.output_item.added", &ResponseStreamEvent::OutputItemAdded {
-                                output_index: idx,
-                                item: item.clone(),
-                            });
-                            emit(&tx, "response.output_item.done", &ResponseStreamEvent::OutputItemDone {
-                                output_index: idx,
-                                item: item.clone(),
-                            });
+                            emit(
+                                &tx,
+                                "response.output_item.added",
+                                &ResponseStreamEvent::OutputItemAdded {
+                                    output_index: idx,
+                                    item: item.clone(),
+                                },
+                            );
+                            emit(
+                                &tx,
+                                "response.output_item.done",
+                                &ResponseStreamEvent::OutputItemDone {
+                                    output_index: idx,
+                                    item: item.clone(),
+                                },
+                            );
                             acc.output.push(item);
                         }
                     }
                 }
             }
 
-            if matches!(&event, AppEvent::Error { .. } | AppEvent::ApprovalNeeded { .. }) {
+            if matches!(
+                &event,
+                AppEvent::Error { .. } | AppEvent::ApprovalNeeded { .. }
+            ) {
                 acc.process(event);
             }
 
             let resp = acc.finish();
             let (evt_type, evt) = if resp.status == ResponseStatus::Failed {
-                ("response.failed", ResponseStreamEvent::ResponseFailed { response: resp })
+                (
+                    "response.failed",
+                    ResponseStreamEvent::ResponseFailed { response: resp },
+                )
             } else {
-                ("response.completed", ResponseStreamEvent::ResponseCompleted { response: resp })
+                (
+                    "response.completed",
+                    ResponseStreamEvent::ResponseCompleted { response: resp },
+                )
             };
             let _ = emit(&tx, evt_type, &evt);
             return;
@@ -892,12 +1040,11 @@ async fn streaming_worker(
 
 pub async fn get_response_handler(
     State(state): State<Arc<GatewayState>>,
-    super::auth::AuthenticatedUser(_user): super::auth::AuthenticatedUser,
+    super::auth::AuthenticatedUser(user): super::auth::AuthenticatedUser,
     Path(id): Path<String>,
 ) -> Result<Json<ResponseObject>, ApiError> {
-    let thread_uuid = decode_response_id(&id).map_err(|e| {
-        api_error(StatusCode::BAD_REQUEST, e, "invalid_request_error")
-    })?;
+    let (_response_uuid, thread_uuid) = decode_response_id(&id)
+        .map_err(|e| api_error(StatusCode::BAD_REQUEST, e, "invalid_request_error"))?;
 
     let store = state.store.as_ref().ok_or_else(|| {
         api_error(
@@ -906,6 +1053,25 @@ pub async fn get_response_handler(
             "server_error",
         )
     })?;
+
+    // Verify the authenticated user owns this conversation.
+    let owns = store
+        .conversation_belongs_to_user(thread_uuid, &user.user_id)
+        .await
+        .map_err(|e| {
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to verify ownership: {e}"),
+                "server_error",
+            )
+        })?;
+    if !owns {
+        return Err(api_error(
+            StatusCode::NOT_FOUND,
+            format!("Response '{id}' not found"),
+            "invalid_request_error",
+        ));
+    }
 
     // Load messages for this conversation.
     let messages = store
@@ -943,45 +1109,75 @@ pub async fn get_response_handler(
                 }
             }
             "tool_calls" => {
-                // Tool calls are stored as JSON arrays.
-                if let Ok(calls) =
-                    serde_json::from_str::<Vec<serde_json::Value>>(&msg.content)
-                {
-                    for call in calls {
-                        let name = call
-                            .get("name")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("unknown")
-                            .to_string();
-                        let call_id = call
-                            .get("id")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string();
-                        let arguments = call
-                            .get("arguments")
-                            .map(|v| {
-                                if v.is_string() {
-                                    v.as_str().unwrap_or("{}").to_string()
-                                } else {
-                                    serde_json::to_string(v).unwrap_or_default()
-                                }
-                            })
-                            .unwrap_or_default();
-                        output.push(ResponseOutputItem::FunctionCall {
+                // Tool calls may be stored as a plain JSON array (legacy) or
+                // as an object wrapper: `{ "calls": [...], "narrative": "..." }`.
+                let calls = match serde_json::from_str::<serde_json::Value>(&msg.content) {
+                    Ok(serde_json::Value::Array(arr)) => arr,
+                    Ok(serde_json::Value::Object(ref obj)) => obj
+                        .get("calls")
+                        .and_then(|v| v.as_array())
+                        .cloned()
+                        .unwrap_or_default(),
+                    _ => Vec::new(),
+                };
+                for call in &calls {
+                    let name = call
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown")
+                        .to_string();
+                    // Prefer `call_id`, fall back to `tool_call_id`, then `id`.
+                    let call_id = call
+                        .get("call_id")
+                        .or_else(|| call.get("tool_call_id"))
+                        .or_else(|| call.get("id"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let arguments = call
+                        .get("parameters")
+                        .or_else(|| call.get("arguments"))
+                        .map(|v| {
+                            if v.is_string() {
+                                v.as_str().unwrap_or("{}").to_string()
+                            } else {
+                                serde_json::to_string(v).unwrap_or_default()
+                            }
+                        })
+                        .unwrap_or_default();
+                    output.push(ResponseOutputItem::FunctionCall {
+                        id: make_item_id(),
+                        call_id: call_id.clone(),
+                        name,
+                        arguments,
+                    });
+                    // If there's an inline result, emit a FunctionCallOutput too.
+                    if let Some(result) = call
+                        .get("result_preview")
+                        .or_else(|| call.get("result"))
+                        .and_then(|v| v.as_str())
+                    {
+                        output.push(ResponseOutputItem::FunctionCallOutput {
                             id: make_item_id(),
                             call_id,
-                            name,
-                            arguments,
+                            output: result.to_string(),
                         });
                     }
                 }
             }
             "tool" => {
-                // Tool results reference a call_id via the name field pattern.
+                // Tool results — try to correlate with the preceding FunctionCall.
+                let call_id = output
+                    .iter()
+                    .rev()
+                    .find_map(|item| match item {
+                        ResponseOutputItem::FunctionCall { call_id, .. } => Some(call_id.clone()),
+                        _ => None,
+                    })
+                    .unwrap_or_default();
                 output.push(ResponseOutputItem::FunctionCallOutput {
                     id: make_item_id(),
-                    call_id: String::new(),
+                    call_id,
                     output: msg.content.clone(),
                 });
             }
@@ -1000,6 +1196,7 @@ pub async fn get_response_handler(
         status: ResponseStatus::Completed,
         output,
         usage: ResponseUsage::default(), // Token usage is not persisted per-message.
+        error: None,
     }))
 }
 
@@ -1013,11 +1210,21 @@ mod tests {
 
     #[test]
     fn response_id_round_trip() {
-        let uuid = Uuid::new_v4();
-        let encoded = encode_response_id(&uuid);
+        let resp_uuid = Uuid::new_v4();
+        let thread_uuid = Uuid::new_v4();
+        let encoded = encode_response_id(&resp_uuid, &thread_uuid);
         assert!(encoded.starts_with(RESP_PREFIX));
-        let decoded = decode_response_id(&encoded).expect("should decode");
-        assert_eq!(uuid, decoded);
+        let (decoded_resp, decoded_thread) = decode_response_id(&encoded).expect("should decode");
+        assert_eq!(resp_uuid, decoded_resp);
+        assert_eq!(thread_uuid, decoded_thread);
+    }
+
+    #[test]
+    fn response_ids_differ_across_turns() {
+        let thread_uuid = Uuid::new_v4();
+        let id1 = encode_response_id(&Uuid::new_v4(), &thread_uuid);
+        let id2 = encode_response_id(&Uuid::new_v4(), &thread_uuid);
+        assert_ne!(id1, id2, "each turn must produce a distinct response ID");
     }
 
     #[test]
@@ -1102,7 +1309,9 @@ mod tests {
         assert_eq!(resp.output.len(), 1);
         match &resp.output[0] {
             ResponseOutputItem::Message { content, .. } => {
-                assert!(matches!(&content[0], MessageContent::OutputText { text } if text == "Hello world"));
+                assert!(
+                    matches!(&content[0], MessageContent::OutputText { text } if text == "Hello world")
+                );
             }
             _ => panic!("expected Message output item"),
         }
@@ -1127,7 +1336,9 @@ mod tests {
         let resp = acc.finish();
         match &resp.output[0] {
             ResponseOutputItem::Message { content, .. } => {
-                assert!(matches!(&content[0], MessageContent::OutputText { text } if text == "Hello world"));
+                assert!(
+                    matches!(&content[0], MessageContent::OutputText { text } if text == "Hello world")
+                );
             }
             _ => panic!("expected Message output item"),
         }
@@ -1152,9 +1363,16 @@ mod tests {
         let resp = acc.finish();
         // FunctionCall + FunctionCallOutput + Message = 3 items
         assert_eq!(resp.output.len(), 3);
-        assert!(matches!(&resp.output[0], ResponseOutputItem::FunctionCall { name, .. } if name == "memory_search"));
-        assert!(matches!(&resp.output[1], ResponseOutputItem::FunctionCallOutput { output, .. } if output == "found 3 results"));
-        assert!(matches!(&resp.output[2], ResponseOutputItem::Message { .. }));
+        assert!(
+            matches!(&resp.output[0], ResponseOutputItem::FunctionCall { name, .. } if name == "memory_search")
+        );
+        assert!(
+            matches!(&resp.output[1], ResponseOutputItem::FunctionCallOutput { output, .. } if output == "found 3 results")
+        );
+        assert!(matches!(
+            &resp.output[2],
+            ResponseOutputItem::Message { .. }
+        ));
     }
 
     #[test]
