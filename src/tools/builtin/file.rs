@@ -81,7 +81,7 @@ const ENV_SAFE_SUFFIXES: &[&str] = &[".example", ".template", ".sample"];
 fn is_sensitive_path(path: &Path) -> bool {
     // Resolve symlinks when the target exists
     let resolved = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    let path_str = resolved.to_string_lossy().to_ascii_lowercase();
+    let path_str = resolved.to_string_lossy().replace('\\', "/").to_ascii_lowercase();
 
     // Check .env files: block .env and .env.* except safe suffixes
     if let Some(filename) = resolved.file_name().and_then(|f| f.to_str()) {
