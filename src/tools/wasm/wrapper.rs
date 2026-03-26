@@ -62,8 +62,8 @@ pub struct OAuthRefreshConfig {
     pub client_secret: Option<String>,
     /// Hosted OAuth proxy base URL (e.g., "http://host.docker.internal:8080").
     pub exchange_proxy_url: Option<String>,
-    /// Gateway auth token for authenticating with the hosted OAuth proxy.
-    pub gateway_token: Option<String>,
+    /// OAuth proxy auth token for authenticating with the hosted OAuth proxy.
+    pub oauth_proxy_auth_token: Option<String>,
     /// Secret name of the access token (e.g., "google_oauth_token").
     /// The refresh token lives at `{secret_name}_refresh_token`.
     pub secret_name: String,
@@ -1218,9 +1218,9 @@ async fn refresh_oauth_token(
     let refresh_name = format!("{}_refresh_token", config.secret_name);
 
     if let Some(proxy_url) = config.exchange_proxy_url.as_deref() {
-        let Some(gateway_token) = config.gateway_token.as_deref() else {
+        let Some(oauth_proxy_auth_token) = config.oauth_proxy_auth_token.as_deref() else {
             tracing::warn!(
-                "OAuth refresh proxy is configured, but no gateway auth token is available"
+                "OAuth refresh proxy is configured, but no OAuth proxy auth token is available"
             );
             return false;
         };
@@ -1235,7 +1235,7 @@ async fn refresh_oauth_token(
         let token_response = match oauth_defaults::refresh_token_via_proxy(
             oauth_defaults::ProxyRefreshTokenRequest {
                 proxy_url,
-                gateway_token,
+                oauth_proxy_auth_token,
                 token_url: &config.token_url,
                 client_id: &config.client_id,
                 client_secret: config.client_secret.as_deref(),
@@ -2478,7 +2478,7 @@ mod tests {
             client_id: TEST_OAUTH_CLIENT_ID.to_string(),
             client_secret: Some(TEST_OAUTH_CLIENT_SECRET.to_string()),
             exchange_proxy_url: None,
-            gateway_token: None,
+            oauth_proxy_auth_token: None,
             secret_name: "google_oauth_token".to_string(),
             provider: Some("google".to_string()),
         };
@@ -2578,7 +2578,7 @@ mod tests {
             client_id: TEST_OAUTH_CLIENT_ID.to_string(),
             client_secret: Some(TEST_OAUTH_CLIENT_SECRET.to_string()),
             exchange_proxy_url: None,
-            gateway_token: None,
+            oauth_proxy_auth_token: None,
             secret_name: "google_oauth_token".to_string(),
             provider: Some("google".to_string()),
         };
@@ -2644,7 +2644,7 @@ mod tests {
             client_id: "hosted-google-client-id".to_string(),
             client_secret: None,
             exchange_proxy_url: Some(proxy.base_url()),
-            gateway_token: Some("gateway-test-token".to_string()),
+            oauth_proxy_auth_token: Some("gateway-test-token".to_string()),
             secret_name: "google_oauth_token".to_string(),
             provider: Some("google".to_string()),
         };
@@ -2704,7 +2704,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_resolve_host_credentials_skips_refresh_token_lookup_without_gateway_token() {
+    async fn test_resolve_host_credentials_skips_refresh_token_lookup_without_oauth_proxy_auth_token()
+     {
         use crate::secrets::{
             CreateSecretParams, CredentialLocation, CredentialMapping, SecretsStore,
         };
@@ -2752,7 +2753,7 @@ mod tests {
             client_id: "hosted-google-client-id".to_string(),
             client_secret: None,
             exchange_proxy_url: Some("https://compose-api.example.com".to_string()),
-            gateway_token: None,
+            oauth_proxy_auth_token: None,
             secret_name: "google_oauth_token".to_string(),
             provider: Some("google".to_string()),
         };
@@ -2819,7 +2820,7 @@ mod tests {
             client_id: TEST_OAUTH_CLIENT_ID.to_string(),
             client_secret: Some(TEST_OAUTH_CLIENT_SECRET.to_string()),
             exchange_proxy_url: None,
-            gateway_token: None,
+            oauth_proxy_auth_token: None,
             secret_name: "google_oauth_token".to_string(),
             provider: Some("google".to_string()),
         };

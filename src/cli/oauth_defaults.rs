@@ -473,8 +473,8 @@ pub struct PendingOAuthFlow {
     pub secrets: Arc<dyn SecretsStore + Send + Sync>,
     /// SSE broadcast manager for notifying the web UI.
     pub sse_manager: Option<Arc<crate::channels::web::sse::SseManager>>,
-    /// Gateway auth token for authenticating with the platform token exchange proxy.
-    pub gateway_token: Option<String>,
+    /// OAuth proxy auth token for authenticating with the hosted token exchange proxy.
+    pub oauth_proxy_auth_token: Option<String>,
     /// Additional form params for the token exchange request.
     /// Used for provider-specific requirements such as RFC 8707 `resource`.
     pub token_exchange_extra_params: HashMap<String, String>,
@@ -527,6 +527,18 @@ pub fn exchange_proxy_url() -> Option<String> {
     crate::config::helpers::env_or_override("IRONCLAW_OAUTH_EXCHANGE_URL")
         .map(|url| url.trim().to_string())
         .filter(|url| !url.is_empty())
+}
+
+/// Returns the configured OAuth proxy auth token, if any.
+///
+/// New hosted infra can inject a dedicated shared proxy secret via
+/// `IRONCLAW_OAUTH_PROXY_AUTH_TOKEN`. Existing hosted instances continue to
+/// work by falling back to `GATEWAY_AUTH_TOKEN`.
+pub fn oauth_proxy_auth_token() -> Option<String> {
+    crate::config::helpers::env_or_override("IRONCLAW_OAUTH_PROXY_AUTH_TOKEN")
+        .or_else(|| crate::config::helpers::env_or_override("GATEWAY_AUTH_TOKEN"))
+        .map(|token| token.trim().to_string())
+        .filter(|token| !token.is_empty())
 }
 
 /// Maximum age for pending OAuth flows (5 minutes, matching TCP listener timeout).
@@ -674,7 +686,7 @@ pub fn strip_instance_prefix(state: &str) -> &str {
 
 pub struct ProxyTokenExchangeRequest<'a> {
     pub proxy_url: &'a str,
-    pub gateway_token: &'a str,
+    pub oauth_proxy_auth_token: &'a str,
     pub token_url: &'a str,
     pub client_id: &'a str,
     pub client_secret: Option<&'a str>,
@@ -687,7 +699,7 @@ pub struct ProxyTokenExchangeRequest<'a> {
 
 pub struct ProxyRefreshTokenRequest<'a> {
     pub proxy_url: &'a str,
-    pub gateway_token: &'a str,
+    pub oauth_proxy_auth_token: &'a str,
     pub token_url: &'a str,
     pub client_id: &'a str,
     pub client_secret: Option<&'a str>,
@@ -729,7 +741,7 @@ fn oauth_token_response_from_json(
 
 /// Exchange an OAuth authorization code via the platform's token exchange proxy.
 ///
-/// Authenticated via the gateway auth token (Bearer header). The caller may
+/// Authenticated via an OAuth proxy auth token (Bearer header). The caller may
 /// either rely on proxy-side secret lookup or forward a `client_secret` when
 /// the provider requires it.
 ///
@@ -739,9 +751,9 @@ fn oauth_token_response_from_json(
 pub async fn exchange_via_proxy(
     request: ProxyTokenExchangeRequest<'_>,
 ) -> Result<OAuthTokenResponse, OAuthCallbackError> {
-    if request.gateway_token.is_empty() {
+    if request.oauth_proxy_auth_token.is_empty() {
         return Err(OAuthCallbackError::Io(
-            "Gateway auth token is required for proxy token exchange".to_string(),
+            "OAuth proxy auth token is required for proxy token exchange".to_string(),
         ));
     }
     let exchange_url = format!("{}/oauth/exchange", request.proxy_url.trim_end_matches('/'));
@@ -770,7 +782,7 @@ pub async fn exchange_via_proxy(
 
     let response = client
         .post(&exchange_url)
-        .bearer_auth(request.gateway_token)
+        .bearer_auth(request.oauth_proxy_auth_token)
         .form(&params)
         .send()
         .await
@@ -796,15 +808,15 @@ pub async fn exchange_via_proxy(
 
 /// Refresh an OAuth access token via the platform's token refresh proxy.
 ///
-/// Authenticated via the gateway auth token (Bearer header). The caller may
+/// Authenticated via an OAuth proxy auth token (Bearer header). The caller may
 /// either rely on proxy-side secret lookup or forward a `client_secret` when
 /// the provider requires it.
 pub async fn refresh_token_via_proxy(
     request: ProxyRefreshTokenRequest<'_>,
 ) -> Result<OAuthTokenResponse, OAuthCallbackError> {
-    if request.gateway_token.is_empty() {
+    if request.oauth_proxy_auth_token.is_empty() {
         return Err(OAuthCallbackError::Io(
-            "Gateway auth token is required for proxy token refresh".to_string(),
+            "OAuth proxy auth token is required for proxy token refresh".to_string(),
         ));
     }
 
@@ -829,7 +841,7 @@ pub async fn refresh_token_via_proxy(
 
     let response = client
         .post(&refresh_url)
-        .bearer_auth(request.gateway_token)
+        .bearer_auth(request.oauth_proxy_auth_token)
         .form(&params)
         .send()
         .await
@@ -1031,12 +1043,85 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_exchange_via_proxy_sends_auth_and_form() {
+        let server = MockProxyServer::start().await;
+        let mut extra_token_params = HashMap::new();
+        extra_token_params.insert("resource".to_string(), "https://mcp.notion.com".to_string());
+
+        let response = super::exchange_via_proxy(super::ProxyTokenExchangeRequest {
+            proxy_url: &server.base_url(),
+            oauth_proxy_auth_token: "shared-oauth-proxy-secret",
+            code: "auth-code-123",
+            redirect_uri: "https://oauth.example.com/oauth/callback",
+            token_url: "https://oauth2.googleapis.com/token",
+            client_id: TEST_OAUTH_CLIENT_ID,
+            client_secret: Some(TEST_OAUTH_CLIENT_SECRET),
+            access_token_field: "access_token",
+            code_verifier: Some("code-verifier-123"),
+            extra_token_params: &extra_token_params,
+        })
+        .await
+        .expect("proxy exchange succeeds");
+
+        assert_eq!(response.access_token, "proxy-access-token");
+        assert_eq!(
+            response.refresh_token.as_deref(),
+            Some("proxy-refresh-token")
+        );
+        assert_eq!(response.expires_in, Some(7200));
+
+        let requests = server.requests().await;
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0].authorization.as_deref(),
+            Some("Bearer shared-oauth-proxy-secret")
+        );
+        assert_eq!(
+            requests[0].form.get("code").map(String::as_str),
+            Some("auth-code-123")
+        );
+        assert_eq!(
+            requests[0].form.get("redirect_uri").map(String::as_str),
+            Some("https://oauth.example.com/oauth/callback")
+        );
+        assert_eq!(
+            requests[0].form.get("token_url").map(String::as_str),
+            Some("https://oauth2.googleapis.com/token")
+        );
+        assert_eq!(
+            requests[0].form.get("client_id").map(String::as_str),
+            Some(TEST_OAUTH_CLIENT_ID)
+        );
+        assert_eq!(
+            requests[0].form.get("client_secret").map(String::as_str),
+            Some(TEST_OAUTH_CLIENT_SECRET)
+        );
+        assert_eq!(
+            requests[0]
+                .form
+                .get("access_token_field")
+                .map(String::as_str),
+            Some("access_token")
+        );
+        assert_eq!(
+            requests[0].form.get("code_verifier").map(String::as_str),
+            Some("code-verifier-123")
+        );
+        assert_eq!(
+            requests[0].form.get("resource").map(String::as_str),
+            Some("https://mcp.notion.com")
+        );
+
+        server.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn test_refresh_token_via_proxy_sends_auth_and_form() {
         let server = MockProxyServer::start().await;
 
         let response = super::refresh_token_via_proxy(super::ProxyRefreshTokenRequest {
             proxy_url: &server.base_url(),
-            gateway_token: "gateway-test-token",
+            oauth_proxy_auth_token: "gateway-test-token",
             token_url: "https://oauth2.googleapis.com/token",
             client_id: TEST_OAUTH_CLIENT_ID,
             client_secret: Some(TEST_OAUTH_CLIENT_SECRET),
@@ -1089,7 +1174,7 @@ mod tests {
 
         let error = match super::exchange_via_proxy(super::ProxyTokenExchangeRequest {
             proxy_url: &server.redirecting_base_url(),
-            gateway_token: "gateway-test-token",
+            oauth_proxy_auth_token: "gateway-test-token",
             code: "auth-code-123",
             redirect_uri: "http://localhost:3000/oauth/callback",
             token_url: "https://oauth2.googleapis.com/token",
@@ -1117,7 +1202,7 @@ mod tests {
 
         let error = match super::refresh_token_via_proxy(super::ProxyRefreshTokenRequest {
             proxy_url: &server.redirecting_base_url(),
-            gateway_token: "gateway-test-token",
+            oauth_proxy_auth_token: "gateway-test-token",
             token_url: "https://oauth2.googleapis.com/token",
             client_id: TEST_OAUTH_CLIENT_ID,
             client_secret: Some(TEST_OAUTH_CLIENT_SECRET),
@@ -1531,6 +1616,90 @@ mod tests {
                 std::env::set_var("OPENCLAW_INSTANCE_NAME", val);
             } else {
                 std::env::remove_var("OPENCLAW_INSTANCE_NAME");
+            }
+        }
+    }
+
+    #[test]
+    fn test_oauth_proxy_auth_token_prefers_dedicated_env() {
+        let _guard = lock_env();
+        let original_proxy = std::env::var("IRONCLAW_OAUTH_PROXY_AUTH_TOKEN").ok();
+        let original_gateway = std::env::var("GATEWAY_AUTH_TOKEN").ok();
+        unsafe {
+            std::env::set_var("IRONCLAW_OAUTH_PROXY_AUTH_TOKEN", "shared-proxy-secret");
+            std::env::set_var("GATEWAY_AUTH_TOKEN", "gateway-token");
+        }
+
+        assert_eq!(
+            crate::cli::oauth_defaults::oauth_proxy_auth_token().as_deref(),
+            Some("shared-proxy-secret")
+        );
+
+        unsafe {
+            if let Some(val) = original_proxy {
+                std::env::set_var("IRONCLAW_OAUTH_PROXY_AUTH_TOKEN", val);
+            } else {
+                std::env::remove_var("IRONCLAW_OAUTH_PROXY_AUTH_TOKEN");
+            }
+            if let Some(val) = original_gateway {
+                std::env::set_var("GATEWAY_AUTH_TOKEN", val);
+            } else {
+                std::env::remove_var("GATEWAY_AUTH_TOKEN");
+            }
+        }
+    }
+
+    #[test]
+    fn test_oauth_proxy_auth_token_falls_back_to_gateway_token() {
+        let _guard = lock_env();
+        let original_proxy = std::env::var("IRONCLAW_OAUTH_PROXY_AUTH_TOKEN").ok();
+        let original_gateway = std::env::var("GATEWAY_AUTH_TOKEN").ok();
+        unsafe {
+            std::env::remove_var("IRONCLAW_OAUTH_PROXY_AUTH_TOKEN");
+            std::env::set_var("GATEWAY_AUTH_TOKEN", "gateway-token");
+        }
+
+        assert_eq!(
+            crate::cli::oauth_defaults::oauth_proxy_auth_token().as_deref(),
+            Some("gateway-token")
+        );
+
+        unsafe {
+            if let Some(val) = original_proxy {
+                std::env::set_var("IRONCLAW_OAUTH_PROXY_AUTH_TOKEN", val);
+            } else {
+                std::env::remove_var("IRONCLAW_OAUTH_PROXY_AUTH_TOKEN");
+            }
+            if let Some(val) = original_gateway {
+                std::env::set_var("GATEWAY_AUTH_TOKEN", val);
+            } else {
+                std::env::remove_var("GATEWAY_AUTH_TOKEN");
+            }
+        }
+    }
+
+    #[test]
+    fn test_oauth_proxy_auth_token_returns_none_when_unset() {
+        let _guard = lock_env();
+        let original_proxy = std::env::var("IRONCLAW_OAUTH_PROXY_AUTH_TOKEN").ok();
+        let original_gateway = std::env::var("GATEWAY_AUTH_TOKEN").ok();
+        unsafe {
+            std::env::remove_var("IRONCLAW_OAUTH_PROXY_AUTH_TOKEN");
+            std::env::remove_var("GATEWAY_AUTH_TOKEN");
+        }
+
+        assert_eq!(crate::cli::oauth_defaults::oauth_proxy_auth_token(), None);
+
+        unsafe {
+            if let Some(val) = original_proxy {
+                std::env::set_var("IRONCLAW_OAUTH_PROXY_AUTH_TOKEN", val);
+            } else {
+                std::env::remove_var("IRONCLAW_OAUTH_PROXY_AUTH_TOKEN");
+            }
+            if let Some(val) = original_gateway {
+                std::env::set_var("GATEWAY_AUTH_TOKEN", val);
+            } else {
+                std::env::remove_var("GATEWAY_AUTH_TOKEN");
             }
         }
     }
