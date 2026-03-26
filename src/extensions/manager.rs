@@ -403,9 +403,10 @@ pub struct ExtensionManager {
     /// when running in gateway mode, consumed by the web gateway's
     /// `/oauth/callback` handler.
     pending_oauth_flows: crate::cli::oauth_defaults::PendingOAuthRegistry,
-    /// Gateway auth token for authenticating with the platform token exchange proxy.
-    /// Read once at construction from `GATEWAY_AUTH_TOKEN` env var.
-    gateway_token: Option<String>,
+    /// OAuth proxy auth token for authenticating with the hosted token exchange proxy.
+    /// Resolved once at construction from `IRONCLAW_OAUTH_PROXY_AUTH_TOKEN`,
+    /// then `GATEWAY_AUTH_TOKEN` as a backward-compatible fallback.
+    oauth_proxy_auth_token: Option<String>,
     /// Relay config captured at startup. Used by `auth_channel_relay` and
     /// `activate_channel_relay` instead of re-reading env vars.
     relay_config: Option<crate::config::RelayConfig>,
@@ -535,7 +536,7 @@ impl ExtensionManager {
             activation_errors: RwLock::new(HashMap::new()),
             sse_manager: RwLock::new(None),
             pending_oauth_flows: crate::cli::oauth_defaults::new_pending_oauth_registry(),
-            gateway_token: std::env::var("GATEWAY_AUTH_TOKEN").ok(),
+            oauth_proxy_auth_token: crate::cli::oauth_defaults::oauth_proxy_auth_token(),
             relay_config: crate::config::RelayConfig::from_env(),
             relay_event_tx: Arc::new(tokio::sync::Mutex::new(None)),
             relay_signing_secret_cache: Arc::new(std::sync::Mutex::new(None)),
@@ -2788,7 +2789,7 @@ impl ExtensionManager {
                 user_id: user_id.to_string(),
                 secrets: Arc::clone(&self.secrets),
                 sse_manager: self.sse_manager.read().await.clone(),
-                gateway_token: self.gateway_token.clone(),
+                gateway_token: self.oauth_proxy_auth_token.clone(),
                 token_exchange_extra_params,
                 client_id_secret_name: if server.oauth.is_none() {
                     Some(server.client_id_secret_name())
@@ -3305,7 +3306,7 @@ impl ExtensionManager {
                 user_id: user_id.to_string(),
                 secrets: Arc::clone(&self.secrets),
                 sse_manager: self.sse_manager.read().await.clone(),
-                gateway_token: self.gateway_token.clone(),
+                gateway_token: self.oauth_proxy_auth_token.clone(),
                 token_exchange_extra_params: std::collections::HashMap::new(),
                 client_id_secret_name: None,
                 created_at: std::time::Instant::now(),
