@@ -15,7 +15,9 @@ use crate::channels::IncomingMessage;
 use crate::channels::web::auth::AuthenticatedUser;
 use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::*;
-use crate::channels::web::util::{build_turns_from_db_messages, truncate_preview};
+use crate::channels::web::util::{
+    build_turns_from_db_messages, tool_error_for_display, truncate_preview,
+};
 
 pub async fn chat_send_handler(
     State(state): State<Arc<GatewayState>>,
@@ -397,7 +399,7 @@ pub async fn chat_history_handler(
                                 };
                                 truncate_preview(&s, 500)
                             }),
-                            error: tc.error.clone(),
+                            error: tc.error.as_deref().map(tool_error_for_display),
                             rationale: tc.rationale.clone(),
                         })
                         .collect(),
