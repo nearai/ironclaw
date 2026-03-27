@@ -58,11 +58,17 @@ pub async fn secrets_put_handler(
         .and_then(|v| v.as_str())
         .map(String::from);
 
-    let expires_at = body
-        .get("expires_in_days")
-        .and_then(|v| v.as_u64())
-        .map(|d| d.min(36500))
-        .map(|days| chrono::Utc::now() + chrono::Duration::days(days as i64));
+    let expires_in_days = body.get("expires_in_days").and_then(|v| v.as_u64());
+    if let Some(days) = expires_in_days
+        && days > 36500
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "expires_in_days must be at most 36500".to_string(),
+        ));
+    }
+    let expires_at =
+        expires_in_days.map(|days| chrono::Utc::now() + chrono::Duration::days(days as i64));
 
     let mut params = CreateSecretParams::new(name.clone(), value);
     if let Some(p) = provider {

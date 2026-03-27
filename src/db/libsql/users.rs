@@ -471,7 +471,7 @@ impl UserStore for LibSqlBackend {
                 SELECT j.user_id, l.model, COUNT(*) as call_count,
                        COALESCE(SUM(l.input_tokens), 0) as input_tokens,
                        COALESCE(SUM(l.output_tokens), 0) as output_tokens,
-                       COALESCE(SUM(l.cost), 0) as total_cost
+                       CAST(COALESCE(SUM(l.cost), 0) AS TEXT) as total_cost
                 FROM llm_calls l
                 JOIN agent_jobs j ON l.job_id = j.id
                 WHERE l.created_at >= ?1
@@ -489,7 +489,7 @@ impl UserStore for LibSqlBackend {
                 SELECT j.user_id, l.model, COUNT(*) as call_count,
                        COALESCE(SUM(l.input_tokens), 0) as input_tokens,
                        COALESCE(SUM(l.output_tokens), 0) as output_tokens,
-                       COALESCE(SUM(l.cost), 0) as total_cost
+                       CAST(COALESCE(SUM(l.cost), 0) AS TEXT) as total_cost
                 FROM llm_calls l
                 JOIN agent_jobs j ON l.job_id = j.id
                 WHERE l.created_at >= ?1
@@ -623,7 +623,7 @@ impl UserStore for LibSqlBackend {
                 SELECT
                     j.user_id,
                     COUNT(DISTINCT j.id) AS job_count,
-                    COALESCE(SUM(l.cost), 0) AS total_cost,
+                    CAST(COALESCE(SUM(l.cost), 0) AS TEXT) AS total_cost,
                     CASE WHEN MAX(l.created_at) > MAX(j.created_at)
                          THEN MAX(l.created_at)
                          ELSE MAX(j.created_at) END AS last_active_at
@@ -642,7 +642,7 @@ impl UserStore for LibSqlBackend {
                 SELECT
                     j.user_id,
                     COUNT(DISTINCT j.id) AS job_count,
-                    COALESCE(SUM(l.cost), 0) AS total_cost,
+                    CAST(COALESCE(SUM(l.cost), 0) AS TEXT) AS total_cost,
                     CASE WHEN MAX(l.created_at) > MAX(j.created_at)
                          THEN MAX(l.created_at)
                          ELSE MAX(j.created_at) END AS last_active_at
@@ -902,5 +902,103 @@ mod tests {
             "expected api_tokens to be deleted with user, found {}",
             tokens.len()
         );
+    }
+
+    /// Helper: insert a minimal agent_job row for testing usage stats.
+    async fn insert_test_job(db: &LibSqlBackend, job_id: &str, user_id: &str) {
+        let conn = db.connect().await.unwrap();
+        conn.execute(
+            "INSERT INTO agent_jobs (id, title, description, status, source, user_id, created_at) \
+             VALUES (?1, 'test', 'test job', 'completed', 'test', ?2, datetime('now'))",
+            params![job_id, user_id],
+        )
+        .await
+        .unwrap();
+    }
+
+    /// Helper: insert a minimal llm_call row for testing usage stats.
+    async fn insert_test_llm_call(db: &LibSqlBackend, job_id: &str, model: &str, cost: &str) {
+        let conn = db.connect().await.unwrap();
+        let call_id = uuid::Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO llm_calls (id, job_id, provider, model, input_tokens, output_tokens, cost, created_at) \
+             VALUES (?1, ?2, 'test', ?3, 100, 50, ?4, datetime('now'))",
+            params![call_id, job_id, model, cost],
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_user_summary_stats_empty() {
+        let (db, _dir) = setup().await;
+        let stats = db.user_summary_stats(None).await.unwrap();
+        assert!(stats.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_user_summary_stats_with_jobs_and_costs() {
+        let (db, _dir) = setup().await;
+        db.create_user(&test_user("alice")).await.unwrap();
+        db.create_user(&test_user("bob")).await.unwrap();
+
+        // Alice: 2 jobs, 2 LLM calls
+        insert_test_job(&db, "job-a1", "alice").await;
+        insert_test_job(&db, "job-a2", "alice").await;
+        insert_test_llm_call(&db, "job-a1", "gpt-4", "0.05").await;
+        insert_test_llm_call(&db, "job-a2", "gpt-4", "0.10").await;
+
+        // Bob: 1 job, no LLM calls
+        insert_test_job(&db, "job-b1", "bob").await;
+
+        // All users
+        let stats = db.user_summary_stats(None).await.unwrap();
+        assert_eq!(stats.len(), 2);
+
+        let alice_stats = stats.iter().find(|s| s.user_id == "alice").unwrap();
+        assert_eq!(alice_stats.job_count, 2);
+        assert_eq!(
+            alice_stats.total_cost,
+            rust_decimal::Decimal::from_str_exact("0.15").unwrap()
+        );
+        assert!(alice_stats.last_active_at.is_some());
+
+        let bob_stats = stats.iter().find(|s| s.user_id == "bob").unwrap();
+        assert_eq!(bob_stats.job_count, 1);
+        assert_eq!(bob_stats.total_cost, rust_decimal::Decimal::ZERO);
+
+        // Filter to single user
+        let alice_only = db.user_summary_stats(Some("alice")).await.unwrap();
+        assert_eq!(alice_only.len(), 1);
+        assert_eq!(alice_only[0].job_count, 2);
+    }
+
+    #[tokio::test]
+    async fn test_user_usage_stats_with_calls() {
+        let (db, _dir) = setup().await;
+        db.create_user(&test_user("alice")).await.unwrap();
+
+        insert_test_job(&db, "job-a1", "alice").await;
+        insert_test_llm_call(&db, "job-a1", "gpt-4", "0.05").await;
+        insert_test_llm_call(&db, "job-a1", "gpt-4", "0.10").await;
+        insert_test_llm_call(&db, "job-a1", "gpt-3.5", "0.01").await;
+
+        let since = chrono::Utc::now() - chrono::Duration::hours(1);
+        let stats = db.user_usage_stats(None, since).await.unwrap();
+
+        // Two models used
+        assert_eq!(stats.len(), 2);
+
+        let gpt4 = stats.iter().find(|s| s.model == "gpt-4").unwrap();
+        assert_eq!(gpt4.call_count, 2);
+        assert_eq!(gpt4.input_tokens, 200);
+        assert_eq!(gpt4.output_tokens, 100);
+        assert_eq!(
+            gpt4.total_cost,
+            rust_decimal::Decimal::from_str_exact("0.15").unwrap()
+        );
+
+        let gpt35 = stats.iter().find(|s| s.model == "gpt-3.5").unwrap();
+        assert_eq!(gpt35.call_count, 1);
     }
 }
