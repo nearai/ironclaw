@@ -766,9 +766,7 @@ Respond in JSON format:
                 });
             }
 
-            let content = response
-                .content
-                .unwrap_or_else(|| "I'm not sure how to respond to that.".to_string());
+            let content = response.content.unwrap_or_default();
 
             // Some models (e.g. GLM-4.7) emit tool calls as XML tags in content
             // instead of using the structured tool_calls field. Try to recover
@@ -3154,6 +3152,70 @@ That's my plan."#;
         use crate::testing::StubLlm;
         let llm = Arc::new(StubLlm::new(""));
         let reasoning = Reasoning::new(llm);
+
+        let context = ReasoningContext::new()
+            .with_message(ChatMessage::user("list tools"))
+            .with_tools(vec![ToolDefinition {
+                name: "tool_list".to_string(),
+                description: "Lists tools".to_string(),
+                parameters: serde_json::json!({}),
+            }]);
+
+        let output = reasoning.respond_with_tools(&context).await.unwrap();
+        let metadata = output.metadata;
+        match output.result {
+            RespondResult::Text(text) => {
+                assert_eq!(text, "I'm not sure how to respond to that.");
+                assert_eq!(metadata.anomaly, Some(ResponseAnomaly::EmptyToolCompletion));
+            }
+            RespondResult::ToolCalls { .. } => {
+                panic!("Expected fallback text, not tool calls");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_respond_with_tools_flags_empty_tool_completion_when_content_is_none() {
+        use crate::llm::{FinishReason, LlmProvider, ToolCompletionRequest, ToolCompletionResponse};
+        use async_trait::async_trait;
+        use rust_decimal::Decimal;
+
+        struct NoneContentToolLlm;
+
+        #[async_trait]
+        impl LlmProvider for NoneContentToolLlm {
+            fn model_name(&self) -> &str {
+                "none-content-tool-llm"
+            }
+
+            fn cost_per_token(&self) -> (Decimal, Decimal) {
+                (Decimal::ZERO, Decimal::ZERO)
+            }
+
+            async fn complete(
+                &self,
+                _request: crate::llm::CompletionRequest,
+            ) -> Result<crate::llm::CompletionResponse, crate::llm::LlmError> {
+                unreachable!("tool-mode test should not call complete()")
+            }
+
+            async fn complete_with_tools(
+                &self,
+                _request: ToolCompletionRequest,
+            ) -> Result<ToolCompletionResponse, crate::llm::LlmError> {
+                Ok(ToolCompletionResponse {
+                    content: None,
+                    tool_calls: Vec::new(),
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    finish_reason: FinishReason::Stop,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                })
+            }
+        }
+
+        let reasoning = Reasoning::new(Arc::new(NoneContentToolLlm));
 
         let context = ReasoningContext::new()
             .with_message(ChatMessage::user("list tools"))

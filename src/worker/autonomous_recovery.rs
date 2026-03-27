@@ -11,11 +11,11 @@ Do not call any more tools in the next reply.\n\
 Instead, provide a concise final status based only on work already completed.\n\
 If the job is complete, say so explicitly. If not, explain what blocked you.";
 
-pub(crate) const EMPTY_TOOL_COMPLETION_FAILURE: &str = "Execution failed: the selected model repeatedly returned empty or malformed tool-completion responses and is not reliable for autonomous tool use.";
+pub(crate) const EMPTY_TOOL_COMPLETION_FAILURE: &str = "the selected model repeatedly returned empty or malformed tool-completion responses and is not reliable for autonomous tool use.";
 
 #[derive(Debug, Default, Clone, Copy)]
 pub(crate) struct AutonomousRecoveryState {
-    consecutive_empty_tool_completions: u8,
+    consecutive_empty_tool_completions: usize,
     force_text_recovery_pending: bool,
     force_text_recovery_active: bool,
 }
@@ -46,7 +46,8 @@ impl AutonomousRecoveryState {
     ) -> AutonomousRecoveryAction {
         match metadata.anomaly {
             Some(ResponseAnomaly::EmptyToolCompletion) => {
-                self.consecutive_empty_tool_completions += 1;
+                self.consecutive_empty_tool_completions =
+                    self.consecutive_empty_tool_completions.saturating_add(1);
                 self.force_text_recovery_active = false;
                 match self.consecutive_empty_tool_completions {
                     1 => AutonomousRecoveryAction::ToolModeNudge,
