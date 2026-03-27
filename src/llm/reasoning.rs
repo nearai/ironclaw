@@ -1376,9 +1376,20 @@ fn overlaps_code_region(start: usize, end: usize, regions: &[CodeRegion]) -> boo
 }
 
 /// Return the byte bounds of the line containing `pos`, excluding the trailing newline.
+///
+/// If `pos` falls in the middle of a multi-byte UTF-8 character, it is
+/// adjusted backward to the nearest char boundary to avoid panicking on
+/// string slicing.
 fn line_bounds(text: &str, pos: usize) -> (usize, usize) {
-    let start = text[..pos].rfind('\n').map_or(0, |idx| idx + 1);
-    let end = text[pos..].find('\n').map_or(text.len(), |idx| pos + idx);
+    let pos = pos.min(text.len());
+    // Walk backward to a valid char boundary to avoid slicing inside a
+    // multi-byte UTF-8 sequence.
+    let mut safe_pos = pos;
+    while safe_pos > 0 && !text.is_char_boundary(safe_pos) {
+        safe_pos -= 1;
+    }
+    let start = text[..safe_pos].rfind('\n').map_or(0, |idx| idx + 1);
+    let end = text[safe_pos..].find('\n').map_or(text.len(), |idx| safe_pos + idx);
     (start, end)
 }
 
@@ -3420,5 +3431,53 @@ That's my plan."#;
         let selections = reasoning.select_tools(&ctx).await.unwrap();
         assert_eq!(selections.len(), 1);
         assert_eq!(selections[0].tool_name, "memory_write");
+    }
+
+    #[test]
+    fn test_line_bounds_at_multibyte_char_boundary() {
+        // 🔥 is 4 bytes (U+1F525). Passing a pos in the middle of the emoji
+        // must not panic.
+        let text = "Result: 🔥\nnext line";
+        let emoji_start = "Result: ".len(); // byte 8
+        // pos inside the emoji (byte 9, 10, 11 are continuation bytes)
+        for mid in (emoji_start + 1)..=(emoji_start + 3) {
+            assert!(!text.is_char_boundary(mid));
+            // Must not panic
+            let (start, end) = line_bounds(text, mid);
+            assert_eq!(start, 0);
+            assert_eq!(&text[start..end], "Result: 🔥");
+        }
+    }
+
+    #[test]
+    fn test_line_bounds_at_valid_positions() {
+        let text = "hello\nworld";
+        assert_eq!(line_bounds(text, 0), (0, 5));
+        assert_eq!(line_bounds(text, 3), (0, 5));
+        assert_eq!(line_bounds(text, 6), (6, 11));
+    }
+
+    #[test]
+    fn test_line_bounds_pos_beyond_len() {
+        let text = "abc";
+        // pos beyond text length should be clamped
+        let (start, end) = line_bounds(text, 100);
+        assert_eq!(start, 0);
+        assert_eq!(end, 3);
+    }
+
+    #[test]
+    fn test_is_recoverable_with_emoji_before_tool_call() {
+        // Regression test for #1669: emoji right before newline + tool_call
+        // must not panic due to saturating_sub landing inside the emoji.
+        let text = "Result: 🔥\n<tool_call>{\"name\":\"echo\",\"arguments\":{\"text\":\"hi\"}}</tool_call>\n";
+        let open = "<tool_call>";
+        let close = "</tool_call>";
+        let start = text.find(open).unwrap();
+        let segment_end = text.find(close).unwrap() + close.len();
+
+        // Must not panic
+        let result = is_recoverable_tool_call_segment(text, start, segment_end, &[]);
+        assert!(result);
     }
 }
