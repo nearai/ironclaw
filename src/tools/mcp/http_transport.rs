@@ -494,6 +494,34 @@ mod tests {
         assert_eq!(echoed["authorization"], "Bearer oauth-token");
     }
 
+    /// Regression test for #1436: 202 Accepted responses for notifications
+    /// were parsed as JSON, causing "Failed to parse MCP response" errors
+    /// that broke the MCP session handshake.
+    #[tokio::test]
+    async fn test_wire_202_accepted_for_notification() {
+        use axum::{Router, http::StatusCode, routing::post};
+        use tokio::net::TcpListener;
+
+        async fn accept_notification() -> StatusCode {
+            StatusCode::ACCEPTED
+        }
+
+        let app = Router::new().route("/", post(accept_notification));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = format!("http://127.0.0.1:{}", addr.port());
+
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let transport = HttpMcpTransport::new(&url, "test-202");
+        let request = McpRequest::initialized_notification();
+        let response = transport.send(&request, &HashMap::new()).await.unwrap();
+        assert!(response.result.is_none());
+        assert!(response.error.is_none());
+    }
+
     #[tokio::test]
     async fn test_wire_custom_auth_preserved_when_no_per_request_auth() {
         let (url, _handle) = spawn_echo_server().await;

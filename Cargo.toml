@@ -20,7 +20,7 @@ exclude = [
 
 [package]
 name = "ironclaw"
-version = "0.19.0"
+version = "0.22.0"
 edition = "2024"
 rust-version = "1.92"
 description = "Secure personal AI assistant that protects your data and expands its capabilities on the fly"
@@ -104,7 +104,7 @@ cron = "0.13"
 ironclaw_common = { path = "crates/ironclaw_common", version = "0.1.0" }
 
 # Safety/sanitization
-ironclaw_safety = { path = "crates/ironclaw_safety", version = "0.1.0" }
+ironclaw_safety = { path = "crates/ironclaw_safety", version = "0.2.0" }
 regex = "1"
 aho-corasick = "1"
 
