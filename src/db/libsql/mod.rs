@@ -32,7 +32,6 @@ use crate::workspace::MemoryDocument;
 
 use crate::db::libsql_migrations;
 
-
 /// Explicit column list for routines table (matches positional access in `row_to_routine_libsql`).
 pub(crate) const ROUTINE_COLUMNS: &str = "\
     id, name, description, user_id, enabled, \
