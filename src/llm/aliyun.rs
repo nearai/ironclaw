@@ -396,7 +396,7 @@ impl AliyunProvider {
                                     id: id.to_string(),
                                     name: name.to_string(),
                                     arguments: input.clone(),
-                                        reasoning: None,
+                                    reasoning: None,
                                 });
                             }
                         }
@@ -466,7 +466,7 @@ impl AliyunProvider {
                                 id: tc.get("id")?.as_str()?.to_string(),
                                 name: tc.get("function")?.get("name")?.as_str()?.to_string(),
                                 arguments,
-                                    reasoning: None,
+                                reasoning: None,
                             })
                         })
                         .collect()
