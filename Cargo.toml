@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/ironclaw_common", "crates/ironclaw_safety", "crates/ironclaw_engine"]
+members = [".", "crates/ironclaw_common", "crates/ironclaw_safety", "crates/ironclaw_skills", "crates/ironclaw_engine"]
 exclude = [
     "channels-src/discord",
     "channels-src/telegram",
@@ -106,6 +106,7 @@ ironclaw_common = { path = "crates/ironclaw_common", version = "0.1.0" }
 # Safety/sanitization
 ironclaw_engine = { path = "crates/ironclaw_engine" }
 ironclaw_safety = { path = "crates/ironclaw_safety", version = "0.2.0" }
+ironclaw_skills = { path = "crates/ironclaw_skills", version = "0.1.0" }
 regex = "1"
 aho-corasick = "1"
 

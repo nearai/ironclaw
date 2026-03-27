@@ -12,7 +12,7 @@
 //! | Installed present  | Read-only tools ONLY                              |
 
 use crate::llm::ToolDefinition;
-use crate::skills::{LoadedSkill, SkillTrust};
+use ironclaw_skills::{LoadedSkill, SkillTrust};
 
 /// Tools that are always safe -- read-only, no side effects.
 ///
@@ -116,7 +116,7 @@ pub fn attenuate_tools(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::skills::{ActivationCriteria, SkillManifest, SkillSource};
+    use ironclaw_skills::{ActivationCriteria, SkillManifest, SkillSource};
     use std::path::PathBuf;
 
     fn make_tool(name: &str) -> ToolDefinition {

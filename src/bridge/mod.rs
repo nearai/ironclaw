@@ -7,6 +7,7 @@
 mod effect_adapter;
 mod llm_adapter;
 mod router;
+pub mod skill_migration;
 mod store_adapter;
 
 pub use router::{

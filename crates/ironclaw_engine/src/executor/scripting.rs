@@ -243,6 +243,38 @@ pub async fn execute_code(
     capability_policies: &[crate::types::capability::PolicyRule],
     persisted_state: &serde_json::Value,
 ) -> Result<CodeExecutionResult, EngineError> {
+    execute_code_with_skills(
+        code,
+        thread,
+        llm,
+        effects,
+        leases,
+        policy,
+        context,
+        capability_policies,
+        persisted_state,
+        &[],
+    )
+    .await
+}
+
+/// Execute a Python code block with optional skill code snippets.
+///
+/// `skill_snippet_names` are registered as additional known functions in the
+/// Monty NameLookup, alongside tool names from capability leases.
+#[allow(clippy::too_many_arguments)]
+pub async fn execute_code_with_skills(
+    code: &str,
+    thread: &Thread,
+    llm: &Arc<dyn LlmBackend>,
+    effects: &Arc<dyn EffectExecutor>,
+    leases: &LeaseManager,
+    policy: &PolicyEngine,
+    context: &ThreadExecutionContext,
+    capability_policies: &[crate::types::capability::PolicyRule],
+    persisted_state: &serde_json::Value,
+    skill_snippet_names: &[String],
+) -> Result<CodeExecutionResult, EngineError> {
     let mut stdout = String::new();
     let mut action_results = Vec::new();
     let mut events = Vec::new();
@@ -257,13 +289,19 @@ pub async fn execute_code(
     // Without this, `mission_list()` in code raises NameError because Monty
     // resolves the name before calling it, and Undefined → NameError.
     let active_leases = leases.active_for_thread(thread.id).await;
-    let known_actions: std::collections::HashSet<String> = effects
+    let mut known_actions: std::collections::HashSet<String> = effects
         .available_actions(&active_leases)
         .await
         .unwrap_or_default()
         .into_iter()
         .map(|a| a.name)
         .collect();
+
+    // Register skill code snippet function names as additional known actions.
+    // These resolve in NameLookup so the LLM can call them as Python functions.
+    for name in skill_snippet_names {
+        known_actions.insert(name.clone());
+    }
 
     // Parse and compile (wrap in catch_unwind — Monty 0.0.x can panic)
     let runner = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {

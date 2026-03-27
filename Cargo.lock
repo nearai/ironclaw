@@ -3628,6 +3628,7 @@ dependencies = [
  "ironclaw_common",
  "ironclaw_engine",
  "ironclaw_safety",
+ "ironclaw_skills",
  "json5",
  "libsql",
  "lru",
@@ -3698,6 +3699,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "ironclaw_skills",
  "monty",
  "pretty_assertions",
  "serde",
@@ -3718,6 +3720,25 @@ dependencies = [
  "thiserror 2.0.18",
  "tracing",
  "url",
+]
+
+[[package]]
+name = "ironclaw_skills"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "futures",
+ "regex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "serde_yml",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "urlencoding",
 ]
 
 [[package]]

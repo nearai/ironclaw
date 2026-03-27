@@ -182,7 +182,7 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
     }
 
     // Create mission manager and start cron ticker
-    let mission_manager = Arc::new(MissionManager::new(store_dyn, Arc::clone(&thread_manager)));
+    let mission_manager = Arc::new(MissionManager::new(store_dyn.clone(), Arc::clone(&thread_manager)));
     if let Err(e) = thread_manager.recover_project_threads(project_id).await {
         debug!("engine v2: recover_project_threads failed: {e}");
     }
@@ -207,6 +207,59 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
         .await
     {
         debug!("engine v2: failed to create learning missions: {e}");
+    }
+
+    // Migrate v1 skills and build SkillSelector for the engine
+    {
+        use ironclaw_engine::capability::skill_selector::SkillSelector;
+
+        if let Some(registry) = agent.deps.skill_registry.as_ref() {
+            // Clone skills out of the std::sync::RwLock guard before awaiting
+            // to avoid holding the lock across async points.
+            let skills_snapshot = {
+                let guard = registry.read().map_err(|e| {
+                    engine_err("skill registry", format!("lock poisoned: {e}"))
+                })?;
+                guard.skills().to_vec()
+            };
+            if !skills_snapshot.is_empty() {
+                match crate::bridge::skill_migration::migrate_v1_skill_list(
+                    &skills_snapshot,
+                    &store_dyn,
+                    project_id,
+                )
+                .await
+                {
+                    Ok(count) if count > 0 => {
+                        debug!("engine v2: migrated {count} v1 skill(s)");
+                    }
+                    Err(e) => {
+                        debug!("engine v2: skill migration failed: {e}");
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        let all_docs = store_dyn
+            .list_memory_docs(project_id)
+            .await
+            .unwrap_or_default();
+        match SkillSelector::from_docs(all_docs) {
+            Ok(selector) if !selector.is_empty() => {
+                debug!(
+                    "engine v2: loaded {} skill(s) into SkillSelector",
+                    selector.len()
+                );
+                thread_manager
+                    .set_skill_selector(Arc::new(selector))
+                    .await;
+            }
+            Err(e) => {
+                debug!("engine v2: failed to build SkillSelector: {e}");
+            }
+            _ => {}
+        }
     }
 
     // Wire mission manager into effect adapter for mission_* function calls

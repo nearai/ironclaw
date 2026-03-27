@@ -117,6 +117,7 @@ fn keyword_match_score(doc: &MemoryDoc, keywords: &[String]) -> f64 {
 fn doc_type_weight(doc_type: DocType) -> f64 {
     match doc_type {
         DocType::Spec => 0.5,     // Missing capability info is highest priority
+        DocType::Skill => 0.45,   // Skills with activation metadata and code snippets
         DocType::Lesson => 0.4,   // Lessons prevent repeating mistakes
         DocType::Playbook => 0.3, // Reusable procedures
         DocType::Issue => 0.2,    // Known problems

@@ -42,6 +42,8 @@ pub enum DocType {
     Spec,
     /// Working memory / scratch notes.
     Note,
+    /// Reusable skill with activation metadata and optional code snippets.
+    Skill,
 }
 
 /// A memory document — structured durable knowledge.

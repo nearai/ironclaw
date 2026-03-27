@@ -427,7 +427,7 @@ impl MissionManager {
                                 )
                                 .await
                             {
-                                warn!("event listener: failed to fire playbook extraction: {e}");
+                                warn!("event listener: failed to fire skill extraction: {e}");
                             }
                         }
 
@@ -574,17 +574,17 @@ impl MissionManager {
         // 1. Error diagnosis (self-improvement) — existing
         self.ensure_self_improvement_mission(project_id).await?;
 
-        // 2. Playbook extraction
+        // 2. Skill extraction (formerly playbook extraction)
         self.ensure_mission_by_metadata(
             project_id,
-            "playbook_extraction",
-            "playbook-extraction",
-            PLAYBOOK_EXTRACTION_GOAL,
+            "skill_extraction",
+            "skill-extraction",
+            SKILL_EXTRACTION_GOAL,
             MissionCadence::OnSystemEvent {
                 source: "engine".into(),
                 event_type: "thread_completed_with_learnings".into(),
             },
-            "Extract reusable playbooks from successful multi-step threads",
+            "Extract reusable skills from successful multi-step threads",
             3, // max 3/day
         )
         .await?;
@@ -1099,9 +1099,9 @@ pub const FIX_PATTERN_DB_TITLE: &str = "fix_pattern_database";
 /// Well-known tag for the fix pattern database.
 pub const FIX_PATTERN_DB_TAG: &str = "fix_patterns";
 
-/// The goal for the playbook extraction mission.
-const PLAYBOOK_EXTRACTION_GOAL: &str = "\
-You extract reusable playbooks from successfully completed multi-step threads.
+/// The goal for the skill extraction mission (replaces playbook extraction).
+const SKILL_EXTRACTION_GOAL: &str = "\
+You extract reusable skills from successfully completed multi-step threads.
 
 ## Input
 
@@ -1113,29 +1113,64 @@ You extract reusable playbooks from successfully completed multi-step threads.
 - `actions_used` — list of tool names used
 - `total_tokens` — tokens consumed
 
+## Output Format
+
+Save as a Skill memory doc via `memory_write(target=\"memory\", content=skill_prompt)` with:
+- title: `\"skill:<short-name>\"` (e.g., \"skill:github-issue-triage\")
+- doc_type: `\"skill\"`
+- metadata JSON:
+  ```json
+  {
+    \"name\": \"<short-name>\",
+    \"version\": 1,
+    \"description\": \"<one-line description>\",
+    \"activation\": {
+      \"keywords\": [\"<keyword1>\", \"<keyword2>\"],
+      \"patterns\": [\"<optional regex>\"],
+      \"tags\": [\"<domain-tag>\"],
+      \"exclude_keywords\": [],
+      \"max_context_tokens\": <estimated budget, e.g. 1000>
+    },
+    \"source\": \"extracted\",
+    \"trust\": \"trusted\",
+    \"code_snippets\": [
+      {
+        \"name\": \"<function_name>\",
+        \"code\": \"def <function_name>(...):\\n    ...\",
+        \"description\": \"<what it does>\"
+      }
+    ],
+    \"metrics\": {\"usage_count\": 0, \"success_count\": 0, \"failure_count\": 0},
+    \"content_hash\": \"\"
+  }
+  ```
+
 ## Process
 
-1. Search for the source thread's messages in memory: `memory_search(query=goal)`
-2. Check for existing playbooks that cover this procedure: `memory_search(query=\"playbook\")`
-3. If a similar playbook already exists, decide whether this thread adds new detail worth updating
-4. Extract the step-by-step procedure, noting specific tool names and parameter patterns
-5. Save as a Playbook memory doc via `memory_write(target=\"memory\", content=playbook_text)` \
-   with title format \"playbook:<short-name>\"
+1. Search for the source thread's context: `memory_search(query=goal)`
+2. Check for existing skills: `memory_search(query=\"skill:\")`
+3. If a similar skill exists, update it (increment version) rather than creating a duplicate
+4. Extract:
+   - Activation keywords from the goal + user messages (be specific, not generic)
+   - Step-by-step instructions as the prompt content
+   - Python code snippets for CodeAct (reusable functions using exact tool names)
+   - Domain tags (e.g., \"github\", \"api\", \"data\")
 
 ## Output (FINAL)
 
 Report what you did:
-- The playbook title and a one-line summary
-- Whether it is new or an update to an existing playbook
+- The skill title and a one-line summary
+- Whether it is new or an update to an existing skill
 - Next focus: what patterns to watch for
 
 ## Rules
 
-- Only extract playbooks from threads with 3+ distinct tool calls
-- Be specific about tool names and parameters — vague playbooks are useless
-- If the thread was a trivial query-response, call FINAL(\"No playbook needed — simple interaction\") \
+- Only extract skills from threads with 3+ distinct tool calls
+- Keywords must be specific (not generic words like \"help\", \"do\", \"make\")
+- Code snippets must use exact tool function names as they appear in the thread
+- If the thread was a trivial query-response, call FINAL(\"No skill needed — simple interaction\") \
   and stop immediately
-- One playbook per FINAL — do not combine unrelated procedures
+- One skill per FINAL — do not combine unrelated procedures
 ";
 
 /// The goal for the conversation insights mission.

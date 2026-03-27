@@ -55,6 +55,9 @@ pub enum EngineError {
         elapsed: std::time::Duration,
         limit: std::time::Duration,
     },
+
+    #[error("skill error: {reason}")]
+    Skill { reason: String },
 }
 
 use crate::types::project::ProjectId;

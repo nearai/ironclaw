@@ -206,6 +206,7 @@ fn doc_workspace_path(doc: &MemoryDoc) -> String {
         DocType::Issue => "issues",
         DocType::Spec => "specs",
         DocType::Note => "notes",
+        DocType::Skill => "skills",
     };
     format!("{ENGINE_DOCS_PREFIX}/{type_dir}/{}.json", doc.id.0)
 }

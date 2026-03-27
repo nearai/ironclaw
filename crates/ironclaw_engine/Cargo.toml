@@ -15,6 +15,7 @@ dist = false
 
 [dependencies]
 async-trait = "0.1"
+ironclaw_skills = { path = "../ironclaw_skills", default-features = false }
 chrono = { version = "0.4", features = ["serde"] }
 monty = { git = "https://github.com/pydantic/monty.git", branch = "main" }
 serde = { version = "1", features = ["derive"] }

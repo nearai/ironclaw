@@ -13,12 +13,12 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
-use crate::skills::gating;
-use crate::skills::parser::{SkillParseError, parse_skill_md};
-use crate::skills::{
+use crate::gating;
+use crate::parser::{SkillParseError, parse_skill_md};
+use crate::types::{
     GatingRequirements, LoadedSkill, MAX_PROMPT_FILE_SIZE, SkillSource, SkillTrust,
-    normalize_line_endings,
 };
+use crate::validation::normalize_line_endings;
 
 /// Maximum number of skills that can be discovered from a single directory.
 /// Prevents resource exhaustion from a directory with thousands of entries.
@@ -618,7 +618,7 @@ pub fn compute_hash(content: &str) -> String {
 /// don't have the full skill loaded yet.
 pub async fn check_gating(
     requirements: &GatingRequirements,
-) -> crate::skills::gating::GatingResult {
+) -> crate::gating::GatingResult {
     gating::check_requirements(requirements).await
 }
 
