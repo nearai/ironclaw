@@ -1102,6 +1102,15 @@ fn store_fallback_in_metadata(
 }
 
 /// Job delegate: implements `LoopDelegate` for the background job context.
+/// Whether an LLM error represents a completion-eligible empty response.
+///
+/// Only `EmptyResponse` (provider returned no choices/content) qualifies.
+/// Infrastructure errors (`AuthFailed`, `Http`, `Io`, etc.) never qualify —
+/// they must propagate even if prior text output was produced.
+fn is_completion_eligible_error(error: &crate::error::LlmError) -> bool {
+    matches!(error, crate::error::LlmError::EmptyResponse { .. })
+}
+
 ///
 /// Handles: signal channel (stop/ping/user messages), cancellation checks,
 /// rate-limit retry, parallel tool execution, DB persistence, SSE broadcasting.
@@ -1167,8 +1176,12 @@ impl<'a> JobDelegate<'a> {
         })
     }
 
-    /// If a substantive text response was already produced, treat an LLM
-    /// error as successful completion rather than a fatal failure.
+    /// If a substantive text response was already produced and the error
+    /// indicates the LLM simply returned nothing, treat it as successful
+    /// completion rather than a fatal failure.
+    ///
+    /// Only swallows `EmptyResponse` — infrastructure errors (`AuthFailed`,
+    /// `ContextLengthExceeded`, `Http`, `Io`, etc.) always propagate.
     ///
     /// Returns `Some(empty RespondOutput)` when the error should be swallowed,
     /// `None` when it should propagate normally.
@@ -1177,6 +1190,9 @@ impl<'a> JobDelegate<'a> {
         context: &str,
         error: &crate::error::LlmError,
     ) -> Option<crate::llm::RespondOutput> {
+        if !is_completion_eligible_error(error) {
+            return None;
+        }
         if !self
             .has_text_response
             .load(std::sync::atomic::Ordering::Relaxed)
@@ -1186,9 +1202,15 @@ impl<'a> JobDelegate<'a> {
         tracing::info!(
             job_id = %self.worker.job_id,
             error = %error,
-            "{context} error after text output — treating as completion"
+            "{context} empty response after text output — treating as completion"
         );
-        let _ = self.worker.mark_completed().await;
+        if let Err(e) = self.worker.mark_completed().await {
+            tracing::warn!(
+                job_id = %self.worker.job_id,
+                error = %e,
+                "Failed to mark job completed after {context} empty response"
+            );
+        }
         Some(crate::llm::RespondOutput {
             result: RespondResult::Text(String::new()),
             usage: crate::llm::TokenUsage::default(),
@@ -1385,7 +1407,13 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
                     job_id = %self.worker.job_id,
                     "Empty response after text output — treating as completion"
                 );
-                let _ = self.worker.mark_completed().await;
+                if let Err(e) = self.worker.mark_completed().await {
+                    tracing::warn!(
+                        job_id = %self.worker.job_id,
+                        error = %e,
+                        "Failed to mark job completed after empty text response"
+                    );
+                }
                 return TextAction::Return(LoopOutcome::Response(String::new()));
             }
             // No prior text response — this is likely a rate-limit backoff retry.
@@ -2346,72 +2374,59 @@ mod tests {
         assert_eq!(telegram[0].1.content, "hello from routine");
     }
 
-    /// Regression test: the `has_text_response` flag controls whether empty
-    /// responses and LLM errors are treated as completion vs retry signals.
-    ///
-    /// This tests the decision logic extracted from `handle_text_response`
-    /// and `call_llm`: after a non-empty text response has been produced,
-    /// subsequent empty responses or LLM errors should signal completion
-    /// rather than continuing the loop (which would cause "Response contained
-    /// no message or tool call (empty)" failures on jobs that succeeded).
+    /// Regression test: only `EmptyResponse` errors are eligible for
+    /// completion-swallowing. Infrastructure errors must always propagate.
     #[test]
-    fn empty_response_after_text_signals_completion() {
-        use std::sync::atomic::{AtomicBool, Ordering};
+    fn is_completion_eligible_only_matches_empty_response() {
+        use crate::error::LlmError;
 
-        let has_text_response = AtomicBool::new(false);
-
-        // Scenario 1: Empty response BEFORE any text → Continue (rate-limit retry)
-        let text = "";
-        let action = if text.is_empty() {
-            if has_text_response.load(Ordering::Relaxed) {
-                "complete" // Treat as completion
-            } else {
-                "continue" // Rate-limit retry
+        // EmptyResponse is eligible
+        assert!(super::is_completion_eligible_error(
+            &LlmError::EmptyResponse {
+                provider: "test".to_string(),
             }
-        } else {
-            has_text_response.store(true, Ordering::Relaxed);
-            "continue" // Non-empty text, continue loop
-        };
-        assert_eq!(action, "continue", "empty before text should retry");
+        ));
 
-        // Scenario 2: Non-empty text response → sets flag, continues
-        let text = "## HDD Deals\n| Retailer | Price |\n| Amazon | $29.12 |";
-        assert!(!text.is_empty());
-        has_text_response.store(true, Ordering::Relaxed);
-
-        // Scenario 3: Empty response AFTER text → Completion
-        let text = "";
-        let action = if text.is_empty() {
-            if has_text_response.load(Ordering::Relaxed) {
-                "complete"
-            } else {
-                "continue"
+        // All other variants are NOT eligible
+        assert!(!super::is_completion_eligible_error(
+            &LlmError::InvalidResponse {
+                provider: "test".to_string(),
+                reason: "parse error".to_string(),
             }
-        } else {
-            "continue"
-        };
-        assert_eq!(action, "complete", "empty after text should complete");
-
-        // Scenario 4: LLM error AFTER text → also Completion (not fatal)
-        let llm_error = true;
-        let action = if llm_error && has_text_response.load(Ordering::Relaxed) {
-            "complete"
-        } else if llm_error {
-            "error"
-        } else {
-            "continue"
-        };
-        assert_eq!(action, "complete", "LLM error after text should complete");
-
-        // Scenario 5: LLM error BEFORE text → still error (propagate)
-        let has_text_response_2 = AtomicBool::new(false);
-        let action = if llm_error && has_text_response_2.load(Ordering::Relaxed) {
-            "complete"
-        } else if llm_error {
-            "error"
-        } else {
-            "continue"
-        };
-        assert_eq!(action, "error", "LLM error before text should propagate");
+        ));
+        assert!(!super::is_completion_eligible_error(
+            &LlmError::AuthFailed {
+                provider: "test".to_string(),
+            }
+        ));
+        assert!(!super::is_completion_eligible_error(
+            &LlmError::ContextLengthExceeded {
+                used: 100_000,
+                limit: 50_000,
+            }
+        ));
+        assert!(!super::is_completion_eligible_error(
+            &LlmError::ModelNotAvailable {
+                provider: "test".to_string(),
+                model: "gpt-4".to_string(),
+            }
+        ));
+        assert!(!super::is_completion_eligible_error(
+            &LlmError::RequestFailed {
+                provider: "test".to_string(),
+                reason: "timeout".to_string(),
+            }
+        ));
+        assert!(!super::is_completion_eligible_error(
+            &LlmError::SessionExpired {
+                provider: "test".to_string(),
+            }
+        ));
+        assert!(!super::is_completion_eligible_error(
+            &LlmError::SessionRenewalFailed {
+                provider: "test".to_string(),
+                reason: "timeout".to_string(),
+            }
+        ));
     }
 }
