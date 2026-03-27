@@ -25,6 +25,7 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::error::RoutineError;
@@ -596,7 +597,7 @@ fn write_routine_verification_record(
 }
 
 pub fn routine_verification_fingerprint(routine: &Routine) -> String {
-    serde_json::json!({
+    let canonical = serde_json::json!({
         "trigger_type": routine.trigger.type_tag(),
         "trigger": routine.trigger.to_config_json(),
         "action_type": routine.action.type_tag(),
@@ -607,7 +608,10 @@ pub fn routine_verification_fingerprint(routine: &Routine) -> String {
             "dedup_window_secs": routine.guardrails.dedup_window.map(|d| d.as_secs()),
         },
     })
-    .to_string()
+    .to_string();
+    let mut hasher = Sha256::new();
+    hasher.update(canonical.as_bytes());
+    hex::encode(hasher.finalize())
 }
 
 pub fn reset_routine_verification_state(
@@ -1025,6 +1029,39 @@ mod tests {
 
         let h3 = content_hash("deploy staging");
         assert_ne!(h1, h3);
+    }
+
+    #[test]
+    fn test_verification_fingerprint_is_digest_not_prompt_content() {
+        let routine = Routine {
+            id: Uuid::new_v4(),
+            name: "hashed".to_string(),
+            description: "hash test".to_string(),
+            user_id: "test-user".to_string(),
+            enabled: true,
+            trigger: Trigger::Manual,
+            action: RoutineAction::Lightweight {
+                prompt: "super-secret-routine-prompt".to_string(),
+                context_paths: Vec::new(),
+                max_tokens: 256,
+                use_tools: false,
+                max_tool_rounds: 1,
+            },
+            guardrails: RoutineGuardrails::default(),
+            notify: NotifyConfig::default(),
+            last_run_at: None,
+            next_fire_at: None,
+            run_count: 0,
+            consecutive_failures: 0,
+            state: serde_json::json!({}),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+
+        let fingerprint = routine_verification_fingerprint(&routine);
+
+        assert_eq!(fingerprint.len(), 64);
+        assert!(!fingerprint.contains("super-secret-routine-prompt"));
     }
 
     #[test]
