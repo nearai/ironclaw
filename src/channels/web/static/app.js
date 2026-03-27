@@ -4385,6 +4385,11 @@ function renderUsersList(users) {
     } else {
       actions += '<button class="btn-small btn-primary" data-action="activate-user" data-user-id="' + escapeHtml(u.id) + '">' + I18n.t('users.activate') + '</button> ';
     }
+    if (u.role === 'member') {
+      actions += '<button class="btn-small" data-action="change-role" data-user-id="' + escapeHtml(u.id) + '" data-role="admin">' + I18n.t('users.makeAdmin') + '</button> ';
+    } else {
+      actions += '<button class="btn-small" data-action="change-role" data-user-id="' + escapeHtml(u.id) + '" data-role="member">' + I18n.t('users.makeMember') + '</button> ';
+    }
     actions += '<button class="btn-small" data-action="create-token" data-user-id="' + escapeHtml(u.id) + '" data-user-name="' + escapeHtml(u.display_name) + '">' + I18n.t('users.addToken') + '</button>';
     return '<tr>'
       + '<td class="user-id" title="' + escapeHtml(u.id) + '">' + escapeHtml(u.id.substring(0, 8)) + '…</td>'
@@ -4411,6 +4416,16 @@ function activateUser(userId) {
   apiFetch('/api/admin/users/' + userId + '/activate', { method: 'POST' })
     .then(function() { loadUsers(); })
     .catch(function(e) { alert(I18n.t('users.failedActivate') + ': ' + e.message); });
+}
+
+function changeUserRole(userId, newRole) {
+  apiFetch('/api/admin/users/' + userId, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ role: newRole })
+  })
+    .then(function() { loadUsers(); })
+    .catch(function(e) { alert(I18n.t('users.failedRoleChange') + ': ' + e.message); });
 }
 
 function createTokenForUser(userId, displayName) {
@@ -4450,6 +4465,7 @@ document.getElementById('users-table')?.addEventListener('click', function(e) {
   var userName = btn.getAttribute('data-user-name');
   if (action === 'suspend-user') suspendUser(userId);
   else if (action === 'activate-user') activateUser(userId);
+  else if (action === 'change-role') changeUserRole(userId, btn.getAttribute('data-role'));
   else if (action === 'create-token') createTokenForUser(userId, userName || '');
 });
 

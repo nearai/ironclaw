@@ -209,6 +209,22 @@ pub async fn users_update_handler(
 
     let metadata = body.get("metadata").unwrap_or(&existing.metadata);
 
+    // Update role if provided and valid.
+    if let Some(role) = body.get("role").and_then(|v| v.as_str()) {
+        if role != "admin" && role != "member" {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "role must be 'admin' or 'member'".to_string(),
+            ));
+        }
+        if role != existing.role {
+            store
+                .update_user_role(&id, role)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        }
+    }
+
     store
         .update_user_profile(&id, display_name, metadata)
         .await

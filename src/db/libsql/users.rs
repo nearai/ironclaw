@@ -174,6 +174,18 @@ impl UserStore for LibSqlBackend {
         Ok(())
     }
 
+    async fn update_user_role(&self, id: &str, role: &str) -> Result<(), DatabaseError> {
+        let conn = self.connect().await?;
+        let now = fmt_ts(&Utc::now());
+        conn.execute(
+            "UPDATE users SET role = ?2, updated_at = ?3 WHERE id = ?1",
+            params![id, role, now],
+        )
+        .await
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        Ok(())
+    }
+
     async fn update_user_profile(
         &self,
         id: &str,
@@ -909,8 +921,8 @@ mod tests {
         let conn = db.connect().await.unwrap();
         conn.execute(
             "INSERT INTO agent_jobs (id, title, description, status, source, user_id, created_at) \
-             VALUES (?1, 'test', 'test job', 'completed', 'test', ?2, datetime('now'))",
-            params![job_id, user_id],
+             VALUES (?1, 'test', 'test job', 'completed', 'test', ?2, ?3)",
+            params![job_id, user_id, fmt_ts(&Utc::now())],
         )
         .await
         .unwrap();
@@ -922,8 +934,8 @@ mod tests {
         let call_id = uuid::Uuid::new_v4().to_string();
         conn.execute(
             "INSERT INTO llm_calls (id, job_id, provider, model, input_tokens, output_tokens, cost, created_at) \
-             VALUES (?1, ?2, 'test', ?3, 100, 50, ?4, datetime('now'))",
-            params![call_id, job_id, model, cost],
+             VALUES (?1, ?2, 'test', ?3, 100, 50, ?4, ?5)",
+            params![call_id, job_id, model, cost, fmt_ts(&Utc::now())],
         )
         .await
         .unwrap();

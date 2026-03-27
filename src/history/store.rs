@@ -2362,6 +2362,17 @@ impl Store {
         Ok(())
     }
 
+    /// Update a user's role (admin/member).
+    pub async fn update_user_role(&self, id: &str, role: &str) -> Result<(), DatabaseError> {
+        let conn = self.conn().await?;
+        conn.execute(
+            "UPDATE users SET role = $1, updated_at = NOW() WHERE id = $2",
+            &[&role, &id],
+        )
+        .await?;
+        Ok(())
+    }
+
     /// Update a user's display name and metadata.
     pub async fn update_user_profile(
         &self,

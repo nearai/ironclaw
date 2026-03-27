@@ -812,6 +812,8 @@ pub trait UserStore: Send + Sync {
     async fn list_users(&self, status: Option<&str>) -> Result<Vec<UserRecord>, DatabaseError>;
     /// Update a user's status (active/suspended/deactivated).
     async fn update_user_status(&self, id: &str, status: &str) -> Result<(), DatabaseError>;
+    /// Update a user's role (admin/member).
+    async fn update_user_role(&self, id: &str, role: &str) -> Result<(), DatabaseError>;
     /// Update a user's display name and metadata.
     async fn update_user_profile(
         &self,

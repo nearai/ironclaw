@@ -141,6 +141,7 @@ Update a user's display name and/or metadata. Omitted fields are left unchanged.
 | Field | Type | Required | Notes |
 |-------|------|----------|-------|
 | `display_name` | string | no | |
+| `role` | string | no | `"admin"` or `"member"` |
 | `metadata` | object | no | Replaces entire metadata object (full replacement; keys not included are removed) |
 
 **Response:** `200 OK` — returns the full updated user record (same shape as GET detail, without `last_login_at`/`created_by`).

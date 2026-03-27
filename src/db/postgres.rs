@@ -811,6 +811,10 @@ impl UserStore for PgBackend {
         self.store.update_user_status(id, status).await
     }
 
+    async fn update_user_role(&self, id: &str, role: &str) -> Result<(), DatabaseError> {
+        self.store.update_user_role(id, role).await
+    }
+
     async fn update_user_profile(
         &self,
         id: &str,
