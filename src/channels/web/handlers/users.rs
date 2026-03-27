@@ -117,7 +117,7 @@ pub async fn users_list_handler(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    // Fetch per-user summary stats in a single batch query.
+    // Fetch per-user summary stats from DB (agent_jobs + llm_calls).
     let summary_stats = store
         .user_summary_stats(None)
         .await
@@ -128,26 +128,49 @@ pub async fn users_list_handler(
         .map(|s| (s.user_id.clone(), s))
         .collect();
 
-    let users_json: Vec<serde_json::Value> = users
-        .into_iter()
-        .map(|u| {
-            let stats = stats_map.get(&u.id);
-            serde_json::json!({
-                "id": u.id,
-                "email": u.email,
-                "display_name": u.display_name,
-                "status": u.status,
-                "role": u.role,
-                "created_at": u.created_at.to_rfc3339(),
-                "updated_at": u.updated_at.to_rfc3339(),
-                "last_login_at": u.last_login_at.map(|dt| dt.to_rfc3339()),
-                "created_by": u.created_by,
-                "job_count": stats.map_or(0, |s| s.job_count),
-                "total_cost": stats.map_or("0".to_string(), |s| s.total_cost.to_string()),
-                "last_active_at": stats.and_then(|s| s.last_active_at.map(|dt| dt.to_rfc3339())),
-            })
-        })
-        .collect();
+    // Supplement with in-memory per-user cost from CostGuard. This captures
+    // LLM spend from chat turns (which don't create agent_jobs/llm_calls DB
+    // rows) and is the same source shown in the status bar token counter.
+    let cost_guard = state.cost_guard.clone();
+
+    let mut users_json: Vec<serde_json::Value> = Vec::with_capacity(users.len());
+    for u in users {
+        let db_stats = stats_map.get(&u.id);
+
+        // Use CostGuard daily spend when DB has no recorded cost — this
+        // covers the common case where the user has been chatting (in-memory
+        // cost tracked) but hasn't dispatched background jobs (no DB rows).
+        let db_cost = db_stats.map_or(rust_decimal::Decimal::ZERO, |s| s.total_cost);
+        let live_cost = if let Some(ref cg) = cost_guard {
+            cg.daily_spend_for_user(&u.id).await
+        } else {
+            rust_decimal::Decimal::ZERO
+        };
+        // Show whichever is larger — DB has historical total, live has today's chat spend.
+        let display_cost = if live_cost > db_cost {
+            live_cost
+        } else {
+            db_cost
+        };
+
+        // Last active: prefer DB timestamp, fall back to last_login_at.
+        let last_active = db_stats.and_then(|s| s.last_active_at).or(u.last_login_at);
+
+        users_json.push(serde_json::json!({
+            "id": u.id,
+            "email": u.email,
+            "display_name": u.display_name,
+            "status": u.status,
+            "role": u.role,
+            "created_at": u.created_at.to_rfc3339(),
+            "updated_at": u.updated_at.to_rfc3339(),
+            "last_login_at": u.last_login_at.map(|dt| dt.to_rfc3339()),
+            "created_by": u.created_by,
+            "job_count": db_stats.map_or(0, |s| s.job_count),
+            "total_cost": display_cost.to_string(),
+            "last_active_at": last_active.map(|dt| dt.to_rfc3339()),
+        }));
+    }
 
     Ok(Json(serde_json::json!({ "users": users_json })))
 }
