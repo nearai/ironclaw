@@ -492,10 +492,12 @@ impl Channel for ReplChannel {
 
     async fn start(&self) -> Result<MessageStream, ChannelError> {
         let (tx, rx) = mpsc::channel(32);
-        // Approval prompts inject responses back through this sender.
-        // In single-message mode we keep it until the turn finishes, then
-        // drop it after enqueuing /quit so the receiver stream can close.
-        if let Ok(mut guard) = self.msg_tx.lock() {
+        // Store tx so send_status can inject approval responses directly.
+        // Skip for single-message mode — no interactive approval is needed
+        // and the extra sender would keep the stream open after /quit.
+        if self.single_message.is_none()
+            && let Ok(mut guard) = self.msg_tx.lock()
+        {
             *guard = Some(tx.clone());
         }
         let single_message = self.single_message.clone();
