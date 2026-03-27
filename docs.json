@@ -60,7 +60,13 @@
                       "capabilities/routines/reactive"
                     ]
                   },
-                  "capabilities/jobs",
+                  {
+                    "group": "Jobs",
+                    "pages": [
+                      "capabilities/jobs/jobs",
+                      "capabilities/jobs/self-repair"
+                    ]
+                  },
                   "capabilities/skills",
                   "capabilities/sandboxed-tools"
                 ]

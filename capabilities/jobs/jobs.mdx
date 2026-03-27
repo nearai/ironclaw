@@ -6,6 +6,19 @@ description: Parallel job scheduling and the job state machine
 
 Every unit of work in IronClaw is a **job**. Jobs run in parallel, each with isolated context, and each progressing through a defined state machine until they complete, fail, or get recovered.
 
+
+---
+
+## Configuration
+
+```bash
+# Maximum parallel jobs
+MAX_PARALLEL_JOBS=5
+
+# Sandbox timeout (affects when jobs are considered stuck)
+SANDBOX_TIMEOUT_SECS=1800
+```
+
 ---
 
 ## Job State Machine
@@ -64,71 +77,3 @@ Four built-in tools let the agent manage jobs at runtime:
 | `list_jobs`  | List all active jobs with their current state and metadata     |
 | `job_status` | Get detailed status for a specific job by ID                   |
 | `cancel_job` | Cancel an InProgress or Pending job                            |
-
-### create_job
-
-```
-Create a new job to run in parallel with the current conversation.
-
-Parameters:
-  description  (string, required)  What the job should do
-  context      (string, optional)  Additional context or data for the job
-```
-
-### list_jobs
-
-```
-Returns all jobs for the current session, including:
-  - Job ID
-  - Description
-  - Current state (Pending / InProgress / Completed / Failed / Stuck)
-  - Created and updated timestamps
-```
-
-### job_status
-
-```
-Get detailed information about a single job.
-
-Parameters:
-  job_id  (string, required)  The ID of the job to query
-```
-
-### cancel_job
-
-```
-Cancel an active job. Pending jobs are removed from the queue.
-InProgress jobs receive a cancellation signal and transition to Failed.
-
-Parameters:
-  job_id  (string, required)  The ID of the job to cancel
-```
-
----
-
-## Undo / Redo
-
-The agent tracks every turn as a checkpoint. These commands are intercepted by the submission parser — type them directly in any channel:
-
-| Command   | Effect                                           |
-|-----------|--------------------------------------------------|
-| `undo`    | Revert to the state before the last turn         |
-| `redo`    | Re-apply the most recently undone turn           |
-| `compact` | Summarize old turns to free context window space |
-| `clear`   | Reset the current thread entirely                |
-
-<Warning>
-`clear` resets the conversation thread. Job history in the database is preserved, but the in-memory conversation context is lost. Use `undo` for reversible changes.
-</Warning>
-
----
-
-## Configuration
-
-```bash
-# Maximum parallel jobs
-MAX_PARALLEL_JOBS=5
-
-# Sandbox timeout (affects when jobs are considered stuck)
-SANDBOX_TIMEOUT_SECS=1800
-```

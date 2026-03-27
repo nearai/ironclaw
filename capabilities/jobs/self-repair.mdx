@@ -6,6 +6,8 @@ description: Automatic detection and recovery of stuck jobs
 
 IronClaw monitors all running jobs and automatically recovers those that stop making progress — without requiring human intervention.
 
+---
+
 ## What Is a Stuck Job?
 
 A job is considered **stuck** when it has been in the **InProgress** state for longer than the configured timeout without producing any output, tool calls, or state updates.
@@ -15,6 +17,30 @@ Common causes:
 - Tool call hanging on an unresponsive external service
 - Container resource exhaustion (OOM, CPU throttle)
 - Network partition between the agent and a sandboxed worker
+
+---
+
+## Configuration
+
+```bash
+# Enable self-repair (default: true)
+SELF_REPAIR_ENABLED=true
+
+# How long before a job is considered stuck (seconds)
+SELF_REPAIR_TIMEOUT_SECS=300
+
+# Maximum recovery attempts before marking job as Failed
+SELF_REPAIR_MAX_RETRIES=3
+
+# How often the monitor checks for stuck jobs (seconds)
+SELF_REPAIR_CHECK_INTERVAL_SECS=60
+```
+
+<Note>
+`SELF_REPAIR_TIMEOUT_SECS` should be set lower than `SANDBOX_TIMEOUT_SECS`. The sandbox enforces a hard kill; self-repair is a soft recovery that runs before the hard kill triggers.
+</Note>
+
+---
 
 ## Detection
 
@@ -34,6 +60,8 @@ For each InProgress job:
 ```
 
 The `tool_failures` table accumulates failure records per job and per tool. This data is used to assess whether recovery is worth attempting again or whether the job should be moved directly to **Failed**.
+
+---
 
 ## Recovery Flow
 
@@ -57,6 +85,8 @@ When a stuck job is detected, the self-repair system attempts to restart it:
   </Step>
 </Steps>
 
+---
+
 ### State Diagram
 
 ```
@@ -69,38 +99,22 @@ InProgress
 Completed (or back to Stuck)
 ```
 
+---
+
 ## Tool Failure Tracking
 
 Every time a tool fails during job execution, the event is recorded:
 
-| Field | Description |
-|-------|-------------|
-| `job_id` | The job that experienced the failure |
-| `tool_name` | Which tool failed |
-| `error` | Error message or failure reason |
-| `occurred_at` | Timestamp of the failure |
+| Field         | Description                          |
+|---------------|--------------------------------------|
+| `job_id`      | The job that experienced the failure |
+| `tool_name`   | Which tool failed                    |
+| `error`       | Error message or failure reason      |
+| `occurred_at` | Timestamp of the failure             |
 
 This history is available to the worker on retry, allowing it to avoid repeating the same failing tool call or to select an alternative approach.
 
-## Configuration
-
-```bash
-# Enable self-repair (default: true)
-SELF_REPAIR_ENABLED=true
-
-# How long before a job is considered stuck (seconds)
-SELF_REPAIR_TIMEOUT_SECS=300
-
-# Maximum recovery attempts before marking job as Failed
-SELF_REPAIR_MAX_RETRIES=3
-
-# How often the monitor checks for stuck jobs (seconds)
-SELF_REPAIR_CHECK_INTERVAL_SECS=60
-```
-
-<Note>
-`SELF_REPAIR_TIMEOUT_SECS` should be set lower than `SANDBOX_TIMEOUT_SECS`. The sandbox enforces a hard kill; self-repair is a soft recovery that runs before the hard kill triggers.
-</Note>
+---
 
 ## Observability
 
@@ -132,15 +146,3 @@ Stuck and recovered jobs are visible in:
     - Confirm the self-repair monitor is running: look for `self_repair` in startup logs
   </Accordion>
 </AccordionGroup>
-
-## Next Steps
-
-<CardGroup cols={2}>
-  <Card title="Jobs & Parallel Execution" icon="layers" href="/agents/jobs">
-    State machine details and job management tools
-  </Card>
-
-  <Card title="Agent Overview" icon="cpu" href="/agents/index">
-    How the agent loop and scheduler work
-  </Card>
-</CardGroup>
