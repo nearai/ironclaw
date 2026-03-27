@@ -98,9 +98,12 @@ pub struct RegistryProviderConfig {
     /// Prompt cache retention (Anthropic-specific).
     pub cache_retention: CacheRetention,
     /// Parameter names that this provider does not support (e.g., `["temperature"]`).
-    /// Supported keys: `"temperature"`, `"max_tokens"`, `"stop_sequences"`, `"thinking"`.
+    /// Supported keys: `"temperature"`, `"max_tokens"`, `"stop_sequences"`.
     /// Listed parameters are stripped from requests before sending to avoid 400 errors.
     pub unsupported_params: Vec<String>,
+    /// Whether to enable adaptive thinking for providers that support it (Anthropic OAuth).
+    /// Defaults to `true`. Set to `false` for latency/cost-sensitive use cases.
+    pub enable_thinking: bool,
 }
 
 /// Configuration for OpenAI Codex (ChatGPT subscription OAuth).

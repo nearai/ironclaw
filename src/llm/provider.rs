@@ -502,7 +502,6 @@ pub enum UnsupportedParam {
     Temperature,
     MaxTokens,
     StopSequences,
-    Thinking,
 }
 
 impl UnsupportedParam {
@@ -512,7 +511,6 @@ impl UnsupportedParam {
             UnsupportedParam::Temperature => "temperature",
             UnsupportedParam::MaxTokens => "max_tokens",
             UnsupportedParam::StopSequences => "stop_sequences",
-            UnsupportedParam::Thinking => "thinking",
         }
     }
 }

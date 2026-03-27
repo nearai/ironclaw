@@ -19,8 +19,8 @@ use crate::llm::costs;
 use crate::llm::error::LlmError;
 use crate::llm::provider::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider, Role, ToolCall,
-    ToolCompletionRequest, ToolCompletionResponse, UnsupportedParam,
-    strip_unsupported_completion_params, strip_unsupported_tool_params,
+    ToolCompletionRequest, ToolCompletionResponse, strip_unsupported_completion_params,
+    strip_unsupported_tool_params,
 };
 const ANTHROPIC_API_URL: &str = "https://api.anthropic.com/v1/messages";
 /// OAuth beta requires 2023-06-01; the 2024-10-22 version is not valid with the beta flag.
@@ -45,8 +45,7 @@ pub struct AnthropicOAuthProvider {
     active_model: std::sync::RwLock<String>,
     /// Parameter names that this provider does not support.
     unsupported_params: HashSet<String>,
-    /// Whether adaptive thinking is enabled. Disable by adding "thinking" to
-    /// `unsupported_params` for latency/cost-sensitive use cases.
+    /// Whether adaptive thinking is enabled.
     thinking_enabled: bool,
 }
 
@@ -76,7 +75,7 @@ impl AnthropicOAuthProvider {
 
         let unsupported_params: HashSet<String> =
             config.unsupported_params.iter().cloned().collect();
-        let thinking_enabled = !unsupported_params.contains(UnsupportedParam::Thinking.name());
+        let thinking_enabled = config.enable_thinking;
 
         Ok(Self {
             client,
