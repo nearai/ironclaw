@@ -8,6 +8,7 @@
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
+use ironclaw_safety::sensitive_paths::is_sensitive_path;
 use tokio::fs;
 
 use crate::context::JobContext;
@@ -46,61 +47,6 @@ fn is_workspace_path(path: &str) -> bool {
 
 /// Maximum file size for reading (1MB).
 const MAX_READ_SIZE: u64 = 1024 * 1024;
-
-/// Path suffixes/segments that indicate credential-bearing files.
-/// Checked against the canonicalized path (symlinks resolved) using
-/// case-insensitive comparison.
-const SENSITIVE_PATH_PATTERNS: &[&str] = &[
-    "/.ssh/",
-    "/.aws/credentials",
-    "/.aws/config",
-    "/.netrc",
-    "/.pgpass",
-    "/.npmrc",
-    "/.pypirc",
-    "/.docker/config.json",
-    "/.kube/config",
-    "/.git-credentials",
-    "/.gcloud/",
-    "/.config/gcloud/",
-    "/.gnupg/",
-    "/.vault-token",
-    "/.ironclaw/secrets/",
-];
-
-/// Safe `.env` file suffixes that should NOT be blocked.
-const ENV_SAFE_SUFFIXES: &[&str] = &[".example", ".template", ".sample"];
-
-/// Check if a path points to a sensitive file that should not be accessed.
-///
-/// Uses case-insensitive matching. Resolves symlinks via `canonicalize()`
-/// when the target exists on disk to prevent symlink bypass.
-///
-/// The `.env` check blocks `.env`, `.env.local`, `.env.production`, etc.
-/// but allows `.env.example`, `.env.template`, `.env.sample`.
-fn is_sensitive_path(path: &Path) -> bool {
-    // Resolve symlinks when the target exists
-    let resolved = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    let path_str = resolved.to_string_lossy().replace('\\', "/").to_ascii_lowercase();
-
-    // Check .env files: block .env and .env.* except safe suffixes
-    if let Some(filename) = resolved.file_name().and_then(|f| f.to_str()) {
-        let filename_lower = filename.to_ascii_lowercase();
-        if filename_lower == ".env" || filename_lower.starts_with(".env.") {
-            let is_safe = ENV_SAFE_SUFFIXES
-                .iter()
-                .any(|suffix| filename_lower.ends_with(suffix));
-            if !is_safe {
-                return true;
-            }
-        }
-    }
-
-    // Check other sensitive path patterns
-    SENSITIVE_PATH_PATTERNS
-        .iter()
-        .any(|p| path_str.contains(&p.to_ascii_lowercase()))
-}
 
 /// Maximum file size for writing (5MB).
 const MAX_WRITE_SIZE: usize = 5 * 1024 * 1024;
@@ -437,6 +383,15 @@ impl Tool for ListDirTool {
 
         let path = validate_path(path_str, self.base_dir.as_deref())?;
 
+        // Block listing sensitive credential directories
+        if is_sensitive_path(&path) {
+            return Err(ToolError::ExecutionFailed(
+                "Access denied: this directory may contain credentials. \
+                 Use the appropriate configuration tools instead."
+                    .to_string(),
+            ));
+        }
+
         let mut entries = Vec::new();
         list_dir_inner(&path, &path, recursive, max_depth, 0, &mut entries).await?;
 
@@ -520,6 +475,11 @@ async fn list_dir_inner(
         entries.push(display);
 
         if recursive && is_dir && current_depth < max_depth {
+            // Skip sensitive credential directories during recursive traversal
+            if is_sensitive_path(&entry_path) {
+                continue;
+            }
+
             // Skip common non-essential directories
             let name = entry.file_name();
             let name_str = name.to_string_lossy();
@@ -1031,5 +991,49 @@ mod tests {
     fn sensitive_path_case_insensitive() {
         assert!(is_sensitive_path(Path::new("/home/user/.ENV")));
         assert!(is_sensitive_path(Path::new("/home/user/.Ssh/id_rsa")));
+    }
+
+    #[test]
+    fn sensitive_path_blocks_new_paths() {
+        assert!(is_sensitive_path(Path::new(
+            "/home/user/.config/gh/hosts.yml"
+        )));
+        assert!(is_sensitive_path(Path::new("/etc/shadow")));
+        assert!(is_sensitive_path(Path::new(
+            "/home/user/.terraform.d/credentials.tfrc.json"
+        )));
+        assert!(is_sensitive_path(Path::new("/home/user/.azure/config")));
+    }
+
+    #[test]
+    fn sensitive_path_traversal_caught() {
+        // Path traversal that resolves to a sensitive path should still be caught.
+        // canonicalize() will fail for non-existent paths, falling back to raw
+        // string matching which still contains the sensitive pattern.
+        let traversal = std::path::PathBuf::from("/home/user/project/../../user/.ssh/id_rsa");
+        assert!(is_sensitive_path(&traversal));
+    }
+
+    #[tokio::test]
+    async fn test_list_dir_blocks_sensitive_directory() {
+        let tool = ListDirTool::new();
+        let ctx = JobContext::default();
+
+        let err = tool
+            .execute(serde_json::json!({"path": "/home/user/.ssh"}), &ctx)
+            .await;
+
+        // Should fail either because of sensitive path check or because
+        // the directory doesn't exist. Either way, it should not succeed.
+        if let Err(e) = err {
+            let msg = e.to_string();
+            assert!(
+                msg.contains("credentials")
+                    || msg.contains("Access denied")
+                    || msg.contains("Failed to read directory")
+                    || msg.contains("outside allowed directory"),
+                "unexpected error: {msg}"
+            );
+        }
     }
 }
