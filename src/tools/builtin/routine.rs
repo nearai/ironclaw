@@ -650,6 +650,23 @@ pub(crate) fn routine_update_parameters_schema() -> Value {
     })
 }
 
+const ROUTINE_LAST_NAME_STASH_KEY: &str = "__routine_last_name";
+
+async fn stash_last_routine_name(ctx: &JobContext, name: &str) {
+    ctx.tool_output_stash
+        .write()
+        .await
+        .insert(ROUTINE_LAST_NAME_STASH_KEY.to_string(), name.to_string());
+}
+
+async fn restore_last_routine_name(ctx: &JobContext) -> Option<String> {
+    ctx.tool_output_stash
+        .read()
+        .await
+        .get(ROUTINE_LAST_NAME_STASH_KEY)
+        .cloned()
+}
+
 fn nested_object<'a>(params: &'a Value, field: &str) -> Option<&'a Map<String, Value>> {
     params.get(field).and_then(Value::as_object)
 }
@@ -915,7 +932,7 @@ fn parse_routine_create_request(
 fn build_routine_trigger(trigger: &NormalizedTriggerRequest) -> Trigger {
     match trigger {
         NormalizedTriggerRequest::Cron { schedule, timezone } => Trigger::Cron {
-            schedule: schedule.clone(),
+            schedule: normalize_cron_expression(schedule),
             timezone: timezone.clone(),
         },
         NormalizedTriggerRequest::Manual => Trigger::Manual,
@@ -1093,6 +1110,7 @@ impl Tool for RoutineCreateTool {
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
         let normalized = parse_routine_create_request(&params)?;
+        stash_last_routine_name(ctx, &normalized.name).await;
         let trigger = build_routine_trigger(&normalized.trigger);
         let action =
             build_routine_action(&normalized.name, &normalized.prompt, &normalized.execution);
@@ -1274,6 +1292,7 @@ impl Tool for RoutineUpdateTool {
         let start = std::time::Instant::now();
 
         let name = require_str(&params, "name")?;
+        stash_last_routine_name(ctx, name).await;
 
         let mut routine = self
             .store
@@ -1411,11 +1430,24 @@ impl Tool for RoutineDeleteTool {
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
 
-        let name = require_str(&params, "name")?;
+        let name = if let Some(name) = params.get("name").and_then(|v| v.as_str()) {
+            if name.trim().is_empty() {
+                return Err(ToolError::InvalidParameters(
+                    "'name' parameter cannot be empty".to_string(),
+                ));
+            }
+            name.to_string()
+        } else {
+            restore_last_routine_name(ctx).await.ok_or_else(|| {
+                ToolError::InvalidParameters(
+                    "missing 'name' parameter and no previous routine target to infer".to_string(),
+                )
+            })?
+        };
 
         let routine = self
             .store
-            .get_routine_by_name(&ctx.user_id, name)
+            .get_routine_by_name(&ctx.user_id, &name)
             .await
             .map_err(|e| ToolError::ExecutionFailed(format!("DB error: {e}")))?
             .ok_or_else(|| ToolError::ExecutionFailed(format!("routine '{}' not found", name)))?;
@@ -1430,7 +1462,7 @@ impl Tool for RoutineDeleteTool {
         self.engine.refresh_event_cache().await;
 
         let result = serde_json::json!({
-            "name": name,
+            "name": &name,
             "deleted": deleted,
         });
 
@@ -1834,6 +1866,20 @@ mod tests {
         assert_eq!(parsed.delivery.channel.as_deref(), Some("telegram"));
         assert_eq!(parsed.delivery.user.as_deref(), Some("ops-team"));
         assert_eq!(parsed.cooldown_secs, 30);
+    }
+
+    #[test]
+    fn build_routine_trigger_normalizes_cron_schedule() {
+        let trigger = build_routine_trigger(&NormalizedTriggerRequest::Cron {
+            schedule: "0 0 9 * * MON-FRI".to_string(),
+            timezone: Some("UTC".to_string()),
+        });
+
+        assert!(matches!(
+            trigger,
+            Trigger::Cron { schedule, timezone }
+                if schedule == "0 0 9 * * MON-FRI *" && timezone.as_deref() == Some("UTC")
+        ));
     }
 
     #[test]

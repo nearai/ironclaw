@@ -149,6 +149,7 @@ fn reject_if_injected(path: &str, content: &str) -> Result<(), WorkspaceError> {
 ///
 /// Allows Workspace to work with either a PostgreSQL `Repository` (the original
 /// path) or any `Database` trait implementation (e.g. libSQL backend).
+#[derive(Clone)]
 enum WorkspaceStorage {
     /// PostgreSQL-backed repository (uses connection pool directly).
     #[cfg(feature = "postgres")]
@@ -574,6 +575,60 @@ impl Workspace {
             }
         }
         self
+    }
+
+    /// Clone the workspace configuration for a different primary user scope.
+    ///
+    /// This preserves search config, embeddings, shared read scopes, memory
+    /// layers, and privacy classifier while switching the primary read/write
+    /// scope to `user_id`.
+    pub fn scoped_to_user(&self, user_id: impl Into<String>) -> Self {
+        let user_id = user_id.into();
+
+        let mut memory_layers = self.memory_layers.clone();
+        for layer in &mut memory_layers {
+            if layer.sensitivity == crate::workspace::layer::LayerSensitivity::Private
+                && layer.scope == self.user_id
+            {
+                layer.scope = user_id.clone();
+            }
+        }
+
+        let mut read_user_ids = vec![user_id.clone()];
+        for scope in &self.read_user_ids {
+            if scope != &self.user_id && !read_user_ids.contains(scope) {
+                read_user_ids.push(scope.clone());
+            }
+        }
+        for scope in crate::workspace::layer::MemoryLayer::read_scopes(&memory_layers) {
+            if !read_user_ids.contains(&scope) {
+                read_user_ids.push(scope);
+            }
+        }
+
+        let preserve_flags = user_id == self.user_id;
+        Self {
+            user_id,
+            read_user_ids,
+            agent_id: self.agent_id,
+            storage: self.storage.clone(),
+            embeddings: self.embeddings.clone(),
+            bootstrap_pending: std::sync::atomic::AtomicBool::new(if preserve_flags {
+                self.bootstrap_pending
+                    .load(std::sync::atomic::Ordering::Acquire)
+            } else {
+                false
+            }),
+            bootstrap_completed: std::sync::atomic::AtomicBool::new(if preserve_flags {
+                self.bootstrap_completed
+                    .load(std::sync::atomic::Ordering::Acquire)
+            } else {
+                false
+            }),
+            search_defaults: self.search_defaults.clone(),
+            memory_layers,
+            privacy_classifier: self.privacy_classifier.clone(),
+        }
     }
 
     /// Get the user ID (primary scope for writes).

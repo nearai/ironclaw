@@ -345,8 +345,10 @@ pub struct GatewayState {
     pub job_manager: Option<Arc<ContainerJobManager>>,
     /// Prompt queue for Claude Code follow-up prompts.
     pub prompt_queue: Option<PromptQueue>,
-    /// Default user ID (fallback for non-request contexts like heartbeat/routines).
-    pub default_user_id: String,
+    /// Durable owner scope for persistence and unauthenticated callback flows.
+    pub owner_id: String,
+    /// Default sender/routing identity for gateway-originated messages.
+    pub default_sender_id: String,
     /// Shutdown signal sender.
     pub shutdown_tx: tokio::sync::RwLock<Option<oneshot::Sender<()>>>,
     /// WebSocket connection tracker.
@@ -412,6 +414,11 @@ pub async fn start_server(
         .route(
             "/api/webhooks/{path}",
             post(crate::channels::web::handlers::webhooks::webhook_trigger_handler),
+        )
+        // User-scoped webhook endpoint for multi-tenant isolation
+        .route(
+            "/api/webhooks/u/{user_id}/{path}",
+            post(crate::channels::web::handlers::webhooks::webhook_trigger_user_scoped_handler),
         );
 
     // Protected routes (require auth)
@@ -775,7 +782,7 @@ async fn oauth_callback_handler(
                 error = %error,
                 "OAuth callback received with malformed state"
             );
-            clear_auth_mode(&state, &state.default_user_id).await;
+            clear_auth_mode(&state, &state.owner_id).await;
             return oauth_error_page("IronClaw");
         }
     };
@@ -811,7 +818,7 @@ async fn oauth_callback_handler(
         if let Some(ref sse) = flow.sse_manager {
             sse.broadcast_for_user(
                 &flow.user_id,
-                SseEvent::AuthCompleted {
+                AppEvent::AuthCompleted {
                     extension_name: flow.extension_name.clone(),
                     success: false,
                     message: "OAuth flow expired. Please try again.".to_string(),
@@ -829,10 +836,10 @@ async fn oauth_callback_handler(
 
     let result: Result<(), String> = async {
         let token_response = if let Some(proxy_url) = &exchange_proxy_url {
-            let gateway_token = flow.gateway_token.as_deref().unwrap_or_default();
+            let oauth_proxy_auth_token = flow.oauth_proxy_auth_token().unwrap_or_default();
             oauth_defaults::exchange_via_proxy(oauth_defaults::ProxyTokenExchangeRequest {
                 proxy_url,
-                gateway_token,
+                gateway_token: oauth_proxy_auth_token,
                 token_url: &flow.token_url,
                 client_id: &flow.client_id,
                 client_secret: flow.client_secret.as_deref(),
@@ -949,11 +956,11 @@ async fn oauth_callback_handler(
         message
     };
 
-    // Broadcast SSE event to notify the web UI
+    // Broadcast event to notify the web UI
     if let Some(ref sse) = flow.sse_manager {
         sse.broadcast_for_user(
             &flow.user_id,
-            SseEvent::AuthCompleted {
+            AppEvent::AuthCompleted {
                 extension_name: flow.extension_name,
                 success,
                 message: final_message.clone(),
@@ -1136,7 +1143,7 @@ async fn slack_relay_oauth_callback_handler(
     let state_key = format!("relay:{}:oauth_state", DEFAULT_RELAY_NAME);
     let stored_state = match ext_mgr
         .secrets()
-        .get_decrypted(&state.default_user_id, &state_key)
+        .get_decrypted(&state.owner_id, &state_key)
         .await
     {
         Ok(secret) => secret.expose().to_string(),
@@ -1160,10 +1167,7 @@ async fn slack_relay_oauth_callback_handler(
     }
 
     // Delete the nonce (one-time use)
-    let _ = ext_mgr
-        .secrets()
-        .delete(&state.default_user_id, &state_key)
-        .await;
+    let _ = ext_mgr.secrets().delete(&state.owner_id, &state_key).await;
 
     let result: Result<(), String> = async {
         let store = state.store.as_ref().ok_or_else(|| {
@@ -1173,17 +1177,33 @@ async fn slack_relay_oauth_callback_handler(
 
         // Store team_id in settings
         let team_id_key = format!("relay:{}:team_id", DEFAULT_RELAY_NAME);
-        let _ = store
-            .set_setting(
-                &state.default_user_id,
-                &team_id_key,
-                &serde_json::json!(team_id),
-            )
-            .await;
+        tracing::info!(
+            relay = DEFAULT_RELAY_NAME,
+            owner_id = %state.owner_id,
+            team_id_key = %team_id_key,
+            "relay OAuth callback: storing team_id in settings"
+        );
+        store
+            .set_setting(&state.owner_id, &team_id_key, &serde_json::json!(team_id))
+            .await
+            .map_err(|e| {
+                tracing::error!(
+                    relay = DEFAULT_RELAY_NAME,
+                    owner_id = %state.owner_id,
+                    error = %e,
+                    "relay OAuth callback: failed to persist team_id to settings store"
+                );
+                format!("Failed to persist relay team_id: {e}")
+            })?;
 
         // Activate the relay channel
+        tracing::info!(
+            relay = DEFAULT_RELAY_NAME,
+            owner_id = %state.owner_id,
+            "relay OAuth callback: activating relay channel"
+        );
         ext_mgr
-            .activate_stored_relay(DEFAULT_RELAY_NAME, &state.default_user_id)
+            .activate_stored_relay(DEFAULT_RELAY_NAME, &state.owner_id)
             .await
             .map_err(|e| format!("Failed to activate relay channel: {}", e))?;
 
@@ -1202,8 +1222,8 @@ async fn slack_relay_oauth_callback_handler(
         }
     };
 
-    // Broadcast SSE event to notify the web UI
-    state.sse.broadcast(SseEvent::AuthCompleted {
+    // Broadcast event to notify the web UI
+    state.sse.broadcast(AppEvent::AuthCompleted {
         extension_name: DEFAULT_RELAY_NAME.to_string(),
         success,
         message: message.clone(),
@@ -1303,6 +1323,9 @@ async fn chat_send_handler(
     }
 
     let mut msg = IncomingMessage::new("gateway", &user.user_id, &req.content);
+    if state.owner_id != state.default_sender_id && user.user_id == state.owner_id {
+        msg = msg.with_sender_id(&state.default_sender_id);
+    }
     // Prefer timezone from JSON body, fall back to X-Timezone header
     let tz = req
         .timezone
@@ -1404,6 +1427,9 @@ async fn chat_approval_handler(
     })?;
 
     let mut msg = IncomingMessage::new("gateway", &user.user_id, content);
+    if state.owner_id != state.default_sender_id && user.user_id == state.owner_id {
+        msg = msg.with_sender_id(&state.default_sender_id);
+    }
 
     if let Some(ref thread_id) = req.thread_id {
         msg = msg.with_thread(thread_id);
@@ -1470,7 +1496,7 @@ async fn chat_auth_token_handler(
             if result.verification.is_some() {
                 state.sse.broadcast_for_user(
                     &user.user_id,
-                    SseEvent::AuthRequired {
+                    AppEvent::AuthRequired {
                         extension_name: req.extension_name.clone(),
                         instructions: Some(result.message),
                         auth_url: None,
@@ -1483,7 +1509,7 @@ async fn chat_auth_token_handler(
 
                 state.sse.broadcast_for_user(
                     &user.user_id,
-                    SseEvent::AuthCompleted {
+                    AppEvent::AuthCompleted {
                         extension_name: req.extension_name.clone(),
                         success: true,
                         message: result.message,
@@ -1492,7 +1518,7 @@ async fn chat_auth_token_handler(
             } else {
                 state.sse.broadcast_for_user(
                     &user.user_id,
-                    SseEvent::AuthCompleted {
+                    AppEvent::AuthCompleted {
                         extension_name: req.extension_name.clone(),
                         success: false,
                         message: result.message,
@@ -1508,7 +1534,7 @@ async fn chat_auth_token_handler(
             if matches!(e, crate::extensions::ExtensionError::ValidationFailed(_)) {
                 state.sse.broadcast_for_user(
                     &user.user_id,
-                    SseEvent::AuthRequired {
+                    AppEvent::AuthRequired {
                         extension_name: req.extension_name.clone(),
                         instructions: Some(msg.clone()),
                         auth_url: None,
@@ -1724,8 +1750,10 @@ async fn chat_history_handler(
                             truncate_preview(&s, 500)
                         }),
                         error: tc.error.clone(),
+                        rationale: tc.rationale.clone(),
                     })
                     .collect(),
+                narrative: t.narrative.clone(),
             })
             .collect();
 
@@ -2174,6 +2202,11 @@ async fn extensions_activate_handler(
     AuthenticatedUser(user): AuthenticatedUser,
     Path(name): Path<String>,
 ) -> Result<Json<ActionResponse>, (StatusCode, String)> {
+    tracing::debug!(
+        extension = %name,
+        user_id = %user.user_id,
+        "extensions_activate_handler: received activate request"
+    );
     let ext_mgr = state.extension_manager.as_ref().ok_or((
         StatusCode::NOT_IMPLEMENTED,
         "Extension manager not available (secrets store required)".to_string(),
@@ -2181,6 +2214,10 @@ async fn extensions_activate_handler(
 
     match ext_mgr.activate(&name, &user.user_id).await {
         Ok(result) => {
+            tracing::info!(
+                extension = %name,
+                "extensions_activate_handler: activation succeeded"
+            );
             // Activation loaded the WASM module. Check if the tool needs
             // OAuth scope expansion (e.g., adding google-docs when gmail
             // already has a token but missing the documents scope).
@@ -2199,6 +2236,13 @@ async fn extensions_activate_handler(
                 crate::extensions::ExtensionError::AuthRequired
             );
 
+            tracing::debug!(
+                extension = %name,
+                error = %activate_err,
+                needs_auth = needs_auth,
+                "extensions_activate_handler: activation failed, attempting auth fallback"
+            );
+
             if !needs_auth {
                 return Ok(Json(ActionResponse::fail(activate_err.to_string())));
             }
@@ -2206,10 +2250,21 @@ async fn extensions_activate_handler(
             // Activation failed due to auth; try authenticating first.
             match ext_mgr.auth(&name, &user.user_id).await {
                 Ok(auth_result) if auth_result.is_authenticated() => {
+                    tracing::debug!(
+                        extension = %name,
+                        "extensions_activate_handler: auth reports authenticated, retrying activate"
+                    );
                     // Auth succeeded, retry activation.
                     match ext_mgr.activate(&name, &user.user_id).await {
                         Ok(result) => Ok(Json(ActionResponse::ok(result.message))),
-                        Err(e) => Ok(Json(ActionResponse::fail(e.to_string()))),
+                        Err(e) => {
+                            tracing::warn!(
+                                extension = %name,
+                                error = %e,
+                                "extensions_activate_handler: retry after auth still failed"
+                            );
+                            Ok(Json(ActionResponse::fail(e.to_string())))
+                        }
                     }
                 }
                 Ok(auth_result) => {
@@ -2477,7 +2532,7 @@ async fn extensions_setup_submit_handler(
                 // auth card or setup modal that was triggered by tool_auth/tool_activate.
                 state.sse.broadcast_for_user(
                     &user.user_id,
-                    SseEvent::AuthCompleted {
+                    AppEvent::AuthCompleted {
                         extension_name: name.clone(),
                         success: result.activated,
                         message: resp.message.clone(),
@@ -2979,7 +3034,8 @@ mod tests {
             store: None,
             job_manager: None,
             prompt_queue: None,
-            default_user_id: "test".to_string(),
+            owner_id: "test".to_string(),
+            default_sender_id: "test".to_string(),
             shutdown_tx: tokio::sync::RwLock::new(None),
             ws_tracker: None,
             llm_provider: None,
@@ -3002,6 +3058,160 @@ mod tests {
         Router::new()
             .route("/oauth/callback", get(oauth_callback_handler))
             .with_state(state)
+    }
+
+    #[derive(Clone, Debug)]
+    struct RecordedOauthProxyRequest {
+        authorization: Option<String>,
+        form: std::collections::HashMap<String, String>,
+    }
+
+    #[derive(Clone)]
+    struct MockOauthProxyState {
+        requests: Arc<tokio::sync::Mutex<Vec<RecordedOauthProxyRequest>>>,
+    }
+
+    struct MockOauthProxyServer {
+        addr: std::net::SocketAddr,
+        requests: Arc<tokio::sync::Mutex<Vec<RecordedOauthProxyRequest>>>,
+        shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
+        server_task: Option<tokio::task::JoinHandle<()>>,
+    }
+
+    impl MockOauthProxyServer {
+        async fn start() -> Self {
+            async fn exchange_handler(
+                State(state): State<MockOauthProxyState>,
+                headers: axum::http::HeaderMap,
+                axum::Form(form): axum::Form<std::collections::HashMap<String, String>>,
+            ) -> Json<serde_json::Value> {
+                state.requests.lock().await.push(RecordedOauthProxyRequest {
+                    authorization: headers
+                        .get(axum::http::header::AUTHORIZATION)
+                        .and_then(|value| value.to_str().ok())
+                        .map(str::to_string),
+                    form,
+                });
+                Json(serde_json::json!({
+                    "access_token": "proxy-access-token",
+                    "refresh_token": "proxy-refresh-token",
+                    "expires_in": 7200
+                }))
+            }
+
+            let requests = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind mock oauth proxy");
+            let addr = listener.local_addr().expect("mock oauth proxy addr");
+            let app = Router::new()
+                .route("/oauth/exchange", post(exchange_handler))
+                .with_state(MockOauthProxyState {
+                    requests: Arc::clone(&requests),
+                });
+            let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+            let server_task = tokio::spawn(async move {
+                let _ = axum::serve(listener, app)
+                    .with_graceful_shutdown(async {
+                        let _ = shutdown_rx.await;
+                    })
+                    .await;
+            });
+
+            Self {
+                addr,
+                requests,
+                shutdown_tx: Some(shutdown_tx),
+                server_task: Some(server_task),
+            }
+        }
+
+        fn base_url(&self) -> String {
+            format!("http://{}", self.addr)
+        }
+
+        async fn requests(&self) -> Vec<RecordedOauthProxyRequest> {
+            self.requests.lock().await.clone()
+        }
+
+        async fn shutdown(mut self) {
+            if let Some(tx) = self.shutdown_tx.take() {
+                let _ = tx.send(());
+            }
+            if let Some(task) = self.server_task.take() {
+                let _ = task.await;
+            }
+        }
+    }
+
+    impl Drop for MockOauthProxyServer {
+        fn drop(&mut self) {
+            if let Some(tx) = self.shutdown_tx.take() {
+                let _ = tx.send(());
+            }
+            if let Some(task) = self.server_task.take() {
+                task.abort();
+            }
+        }
+    }
+
+    struct EnvVarGuard {
+        key: &'static str,
+        original: Option<String>,
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            // SAFETY: Tests use lock_env() to serialize environment access.
+            unsafe {
+                if let Some(ref value) = self.original {
+                    std::env::set_var(self.key, value);
+                } else {
+                    std::env::remove_var(self.key);
+                }
+            }
+        }
+    }
+
+    fn set_env_var(key: &'static str, value: Option<&str>) -> EnvVarGuard {
+        let original = std::env::var(key).ok();
+        // SAFETY: Tests use lock_env() to serialize environment access.
+        unsafe {
+            if let Some(value) = value {
+                std::env::set_var(key, value);
+            } else {
+                std::env::remove_var(key);
+            }
+        }
+        EnvVarGuard { key, original }
+    }
+
+    fn fresh_pending_oauth_flow(
+        secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync>,
+        sse_manager: Option<Arc<SseManager>>,
+        oauth_proxy_auth_token: Option<String>,
+    ) -> crate::cli::oauth_defaults::PendingOAuthFlow {
+        crate::cli::oauth_defaults::PendingOAuthFlow {
+            extension_name: "test_tool".to_string(),
+            display_name: "Test Tool".to_string(),
+            token_url: "https://example.com/token".to_string(),
+            client_id: "client123".to_string(),
+            client_secret: None,
+            redirect_uri: "https://example.com/oauth/callback".to_string(),
+            code_verifier: Some("test-code-verifier".to_string()),
+            access_token_field: "access_token".to_string(),
+            secret_name: "test_token".to_string(),
+            provider: Some("google".to_string()),
+            validation_endpoint: None,
+            scopes: vec!["email".to_string()],
+            user_id: "test".to_string(),
+            secrets,
+            sse_manager,
+            gateway_token: oauth_proxy_auth_token,
+            token_exchange_extra_params: std::collections::HashMap::new(),
+            client_id_secret_name: None,
+            created_at: std::time::Instant::now(),
+        }
     }
 
     #[tokio::test]
@@ -3170,7 +3380,7 @@ mod tests {
                 Ok(Ok(scoped))
                     if matches!(
                         scoped.event,
-                        crate::channels::web::types::SseEvent::AuthRequired { .. }
+                        crate::channels::web::types::AppEvent::AuthRequired { .. }
                     ) =>
                 {
                     panic!("verification responses should not emit auth_required SSE events")
@@ -3452,7 +3662,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
 
         match receiver.recv().await.expect("auth_completed event").event {
-            crate::channels::web::types::SseEvent::AuthCompleted {
+            crate::channels::web::types::AppEvent::AuthCompleted {
                 extension_name,
                 success,
                 message,
@@ -3659,6 +3869,284 @@ mod tests {
                 .get("test_nonce")
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn test_oauth_callback_accepts_versioned_hosted_state_without_instance_name() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> =
+            Arc::new(crate::secrets::InMemorySecretsStore::new(Arc::new(
+                crate::secrets::SecretsCrypto::new(secrecy::SecretString::from(
+                    TEST_GATEWAY_CRYPTO_KEY.to_string(),
+                ))
+                .expect("crypto"),
+            )));
+        let (ext_mgr, _wasm_tools_dir, _wasm_channels_dir) = test_ext_mgr(secrets.clone());
+
+        let Some(created_at) = expired_flow_created_at() else {
+            eprintln!(
+                "Skipping versioned OAuth state without instance test: monotonic uptime below expiry window"
+            );
+            return;
+        };
+        let flow = crate::cli::oauth_defaults::PendingOAuthFlow {
+            extension_name: "test_tool".to_string(),
+            display_name: "Test Tool".to_string(),
+            token_url: "https://example.com/token".to_string(),
+            client_id: "client123".to_string(),
+            client_secret: None,
+            redirect_uri: "https://example.com/oauth/callback".to_string(),
+            code_verifier: None,
+            access_token_field: "access_token".to_string(),
+            secret_name: "test_token".to_string(),
+            provider: None,
+            validation_endpoint: None,
+            scopes: vec![],
+            user_id: "test".to_string(),
+            secrets,
+            sse_manager: None,
+            gateway_token: None,
+            token_exchange_extra_params: std::collections::HashMap::new(),
+            client_id_secret_name: None,
+            created_at,
+        };
+
+        ext_mgr
+            .pending_oauth_flows()
+            .write()
+            .await
+            .insert("test_nonce".to_string(), flow);
+
+        let state = test_gateway_state(Some(ext_mgr.clone()));
+        let app = test_oauth_router(state);
+        let versioned_state =
+            crate::cli::oauth_defaults::encode_hosted_oauth_state("test_nonce", None);
+
+        let req = axum::http::Request::builder()
+            .uri(format!(
+                "/oauth/callback?code=fake_code&state={}",
+                urlencoding::encode(&versioned_state)
+            ))
+            .body(Body::empty())
+            .expect("request");
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+            .await
+            .expect("body");
+        let html = String::from_utf8_lossy(&body);
+        assert!(html.contains("Authorization Failed"));
+        assert!(
+            ext_mgr
+                .pending_oauth_flows()
+                .read()
+                .await
+                .get("test_nonce")
+                .is_none()
+        );
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn test_oauth_callback_happy_path_with_gateway_token_fallback() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let proxy = MockOauthProxyServer::start().await;
+        // Keep the process-wide env locked for the full callback so the handler
+        // sees a stable proxy URL/token configuration throughout the test.
+        let _env_guard = crate::config::helpers::lock_env();
+        let _exchange_url_guard =
+            set_env_var("IRONCLAW_OAUTH_EXCHANGE_URL", Some(&proxy.base_url()));
+        let _proxy_auth_guard = set_env_var("IRONCLAW_OAUTH_PROXY_AUTH_TOKEN", None);
+        let _gateway_token_guard = set_env_var("GATEWAY_AUTH_TOKEN", Some("gateway-test-token"));
+
+        let secrets = test_secrets_store();
+        let (ext_mgr, _wasm_tools_dir, _wasm_channels_dir) = test_ext_mgr(Arc::clone(&secrets));
+        let sse_mgr = Arc::new(SseManager::new());
+        let mut receiver = sse_mgr.sender().subscribe();
+        let flow = fresh_pending_oauth_flow(
+            Arc::clone(&secrets),
+            Some(Arc::clone(&sse_mgr)),
+            crate::cli::oauth_defaults::oauth_proxy_auth_token(),
+        );
+
+        ext_mgr
+            .pending_oauth_flows()
+            .write()
+            .await
+            .insert("test_nonce".to_string(), flow);
+
+        let state = test_gateway_state(Some(ext_mgr.clone()));
+        let app = test_oauth_router(state);
+        let versioned_state =
+            crate::cli::oauth_defaults::encode_hosted_oauth_state("test_nonce", Some("myinstance"));
+
+        let req = axum::http::Request::builder()
+            .uri(format!(
+                "/oauth/callback?code=fake_code&state={}",
+                urlencoding::encode(&versioned_state)
+            ))
+            .body(Body::empty())
+            .expect("request");
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+            .await
+            .expect("body");
+        let html = String::from_utf8_lossy(&body);
+        assert!(html.contains("Test Tool Connected"));
+
+        let requests = proxy.requests().await;
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0].authorization.as_deref(),
+            Some("Bearer gateway-test-token")
+        );
+        assert_eq!(
+            requests[0].form.get("code").map(String::as_str),
+            Some("fake_code")
+        );
+        assert_eq!(
+            requests[0].form.get("code_verifier").map(String::as_str),
+            Some("test-code-verifier")
+        );
+
+        let access_token = secrets
+            .get_decrypted("test", "test_token")
+            .await
+            .expect("access token stored");
+        assert_eq!(access_token.expose(), "proxy-access-token");
+
+        let refresh_token = secrets
+            .get_decrypted("test", "test_token_refresh_token")
+            .await
+            .expect("refresh token stored");
+        assert_eq!(refresh_token.expose(), "proxy-refresh-token");
+
+        match receiver.recv().await.expect("auth_completed event").event {
+            crate::channels::web::types::AppEvent::AuthCompleted {
+                extension_name,
+                success,
+                ..
+            } => {
+                assert_eq!(extension_name, "test_tool");
+                assert!(success, "OAuth callback should broadcast success");
+            }
+            event => panic!("expected AuthCompleted event, got {event:?}"),
+        }
+
+        proxy.shutdown().await;
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn test_oauth_callback_happy_path_with_dedicated_proxy_auth_token() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let proxy = MockOauthProxyServer::start().await;
+        // Keep the process-wide env locked for the full callback so the handler
+        // sees a stable proxy URL/token configuration throughout the test.
+        let _env_guard = crate::config::helpers::lock_env();
+        let _exchange_url_guard =
+            set_env_var("IRONCLAW_OAUTH_EXCHANGE_URL", Some(&proxy.base_url()));
+        let _proxy_auth_guard = set_env_var(
+            "IRONCLAW_OAUTH_PROXY_AUTH_TOKEN",
+            Some("shared-oauth-proxy-secret"),
+        );
+        let _gateway_token_guard = set_env_var("GATEWAY_AUTH_TOKEN", None);
+
+        let secrets = test_secrets_store();
+        let (ext_mgr, _wasm_tools_dir, _wasm_channels_dir) = test_ext_mgr(Arc::clone(&secrets));
+        let sse_mgr = Arc::new(SseManager::new());
+        let mut receiver = sse_mgr.sender().subscribe();
+        let flow = fresh_pending_oauth_flow(
+            Arc::clone(&secrets),
+            Some(Arc::clone(&sse_mgr)),
+            crate::cli::oauth_defaults::oauth_proxy_auth_token(),
+        );
+
+        ext_mgr
+            .pending_oauth_flows()
+            .write()
+            .await
+            .insert("test_nonce".to_string(), flow);
+
+        let state = test_gateway_state(Some(ext_mgr.clone()));
+        let app = test_oauth_router(state);
+        let versioned_state =
+            crate::cli::oauth_defaults::encode_hosted_oauth_state("test_nonce", None);
+
+        let req = axum::http::Request::builder()
+            .uri(format!(
+                "/oauth/callback?code=fake_code&state={}",
+                urlencoding::encode(&versioned_state)
+            ))
+            .body(Body::empty())
+            .expect("request");
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+            .await
+            .expect("body");
+        let html = String::from_utf8_lossy(&body);
+        assert!(html.contains("Test Tool Connected"));
+
+        let requests = proxy.requests().await;
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0].authorization.as_deref(),
+            Some("Bearer shared-oauth-proxy-secret")
+        );
+        assert_eq!(
+            requests[0].form.get("code").map(String::as_str),
+            Some("fake_code")
+        );
+        assert_eq!(
+            requests[0].form.get("code_verifier").map(String::as_str),
+            Some("test-code-verifier")
+        );
+
+        let access_token = secrets
+            .get_decrypted("test", "test_token")
+            .await
+            .expect("access token stored");
+        assert_eq!(access_token.expose(), "proxy-access-token");
+
+        let refresh_token = secrets
+            .get_decrypted("test", "test_token_refresh_token")
+            .await
+            .expect("refresh token stored");
+        assert_eq!(refresh_token.expose(), "proxy-refresh-token");
+
+        match receiver.recv().await.expect("auth_completed event").event {
+            crate::channels::web::types::AppEvent::AuthCompleted {
+                extension_name,
+                success,
+                ..
+            } => {
+                assert_eq!(extension_name, "test_tool");
+                assert!(success, "OAuth callback should broadcast success");
+            }
+            event => panic!("expected AuthCompleted event, got {event:?}"),
+        }
+
+        proxy.shutdown().await;
     }
 
     // --- Slack relay OAuth CSRF tests ---

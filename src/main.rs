@@ -611,6 +611,7 @@ async fn async_main() -> anyhow::Result<()> {
         } else {
             GatewayChannel::new(gw_config.clone())
         };
+        gw = gw.with_owner_scope(config.owner_id.clone());
         gw = gw.with_llm_provider(Arc::clone(&components.llm));
         if let Some(ref ws) = components.workspace {
             gw = gw.with_workspace(Arc::clone(ws));
@@ -913,6 +914,10 @@ async fn async_main() -> anyhow::Result<()> {
         },
         builder: components.builder,
         llm_backend: config.llm.backend.clone(),
+        tenant_rates: Arc::new(ironclaw::tenant::TenantRateRegistry::new(
+            config.agent.max_llm_concurrent_per_user.unwrap_or(4),
+            config.agent.max_jobs_concurrent_per_user.unwrap_or(3),
+        )),
     };
 
     let channels_for_warnings = Arc::clone(&channels);

@@ -205,7 +205,44 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Test 5: routine_manual_create_defaults_to_tools_enabled
+    // Test 5: routine_update_fail_delete_fallback
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn routine_update_fail_delete_fallback() {
+        let trace = LlmTrace::from_file(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/llm_traces/tools/routine_update_fail_delete_fallback.json"
+        ))
+        .expect("failed to load routine_update_fail_delete_fallback.json");
+
+        let rig = TestRigBuilder::new()
+            .with_trace(trace.clone())
+            .with_auto_approve_tools(true)
+            .build()
+            .await;
+
+        rig.send_message("Try converting a routine trigger, then recover by deleting it")
+            .await;
+        let responses = rig.wait_for_responses(1, Duration::from_secs(15)).await;
+
+        rig.verify_trace_expects(&trace, &responses);
+
+        let completed = rig.tool_calls_completed();
+        assert!(
+            completed.iter().any(|(n, ok)| n == "routine_update" && !ok),
+            "routine_update should fail in this regression path: {completed:?}"
+        );
+        assert!(
+            completed.iter().any(|(n, ok)| n == "routine_delete" && *ok),
+            "routine_delete should recover successfully via preserved routine identity: {completed:?}"
+        );
+
+        rig.shutdown();
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 6: routine_manual_create_defaults_to_tools_enabled
     // -----------------------------------------------------------------------
 
     #[tokio::test]
@@ -246,7 +283,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Test 6: routine_manual_create_explicit_no_tools
+    // Test 7: routine_manual_create_explicit_no_tools
     // -----------------------------------------------------------------------
 
     #[tokio::test]
@@ -287,7 +324,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Test 7: routine_history
+    // Test 8: routine_history
     // -----------------------------------------------------------------------
 
     #[tokio::test]
@@ -439,7 +476,7 @@ mod tests {
 
         match &routine.trigger {
             Trigger::Cron { schedule, timezone } => {
-                assert_eq!(schedule, "0 0 9 * * MON-FRI");
+                assert_eq!(schedule, "0 0 9 * * MON-FRI *");
                 assert_eq!(timezone.as_deref(), Some("UTC"));
             }
             other => panic!("expected cron trigger, got {other:?}"),
