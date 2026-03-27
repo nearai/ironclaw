@@ -790,10 +790,21 @@ pub async fn handle_with_engine(
     // Reset the per-step call counter so each thread starts fresh
     state.effect_adapter.reset_call_count();
 
-    // Get or create conversation for this channel+user
+    // Scope the engine conversation by (channel, user, thread).
+    // When the frontend sends a thread_id (user created a new conversation),
+    // use it as part of the channel key so each v1 thread maps to a distinct
+    // engine conversation. Without this, all threads share one conversation
+    // and messages appear in the wrong place.
+    let scope = message.conversation_scope();
+    let channel_key = match scope {
+        Some(tid) => format!("{}:{}", message.channel, tid),
+        None => message.channel.clone(),
+    };
+
+    // Get or create conversation for this scoped channel+user
     let conv_id = state
         .conversation_manager
-        .get_or_create_conversation(&message.channel, &message.user_id)
+        .get_or_create_conversation(&channel_key, &message.user_id)
         .await
         .map_err(|e| engine_err("conversation error", e))?;
 
@@ -813,14 +824,26 @@ pub async fn handle_with_engine(
         .await
         .map_err(|e| engine_err("thread error", e))?;
 
-    if let Some(ref db) = state.db
-        && let Ok(conv_id_v1) = db
-            .get_or_create_assistant_conversation(&message.user_id, &message.channel)
-            .await
-    {
-        let _ = db
-            .add_conversation_message(conv_id_v1, "user", content)
-            .await;
+    // Dual-write to v1 database so the gateway history API shows messages.
+    // Use the thread-scoped conversation (from thread_id) when available,
+    // falling back to the default assistant conversation.
+    if let Some(ref db) = state.db {
+        let v1_conv_id = if let Some(tid) = scope
+            && let Ok(uuid) = uuid::Uuid::parse_str(tid)
+        {
+            // Ensure the v1 conversation exists for this thread
+            let _ = db
+                .ensure_conversation(uuid, &message.channel, &message.user_id, Some(tid))
+                .await;
+            Some(uuid)
+        } else {
+            db.get_or_create_assistant_conversation(&message.user_id, &message.channel)
+                .await
+                .ok()
+        };
+        if let Some(cid) = v1_conv_id {
+            let _ = db.add_conversation_message(cid, "user", content).await;
+        }
     }
 
     debug!(thread_id = %thread_id, "engine v2: thread spawned");
@@ -878,16 +901,26 @@ async fn await_thread_outcome(
         .map_err(|e| engine_err("conversation error", e))?;
 
     if let Some(ref db) = state.db
-        && let Ok(conv_id_v1) = db
-            .get_or_create_assistant_conversation(&message.user_id, &message.channel)
-            .await
         && let ThreadOutcome::Completed {
             response: Some(ref text),
         } = outcome
     {
-        let _ = db
-            .add_conversation_message(conv_id_v1, "assistant", text)
-            .await;
+        // Write response to the correct v1 conversation (thread-scoped or assistant)
+        let scope = message.conversation_scope();
+        let v1_conv_id = if let Some(tid) = scope
+            && let Ok(uuid) = uuid::Uuid::parse_str(tid)
+        {
+            Some(uuid)
+        } else {
+            db.get_or_create_assistant_conversation(&message.user_id, &message.channel)
+                .await
+                .ok()
+        };
+        if let Some(cid) = v1_conv_id {
+            let _ = db
+                .add_conversation_message(cid, "assistant", text)
+                .await;
+        }
     }
 
     if let Some(ref sse) = state.sse
