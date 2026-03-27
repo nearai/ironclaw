@@ -1112,7 +1112,34 @@ impl Agent {
                 Submission::ApprovalResponse { approved, always } => {
                     return crate::bridge::handle_approval(self, message, *approved, *always).await;
                 }
-                _ => {} // Other submissions fall through to v1
+                Submission::ExecApproval {
+                    request_id,
+                    approved,
+                    always,
+                } => {
+                    return crate::bridge::handle_exec_approval(
+                        self,
+                        message,
+                        *request_id,
+                        *approved,
+                        *always,
+                    )
+                    .await;
+                }
+                Submission::Interrupt => {
+                    return crate::bridge::handle_interrupt(self, message).await;
+                }
+                Submission::NewThread => {
+                    return crate::bridge::handle_new_thread(self, message).await;
+                }
+                Submission::Clear => {
+                    return crate::bridge::handle_clear(self, message).await;
+                }
+                // Undo/Redo/Resume/SwitchThread: v1-only (engine has no undo;
+                // thread switching is implicit via ConversationManager).
+                // Compact/Summarize/Suggest: orthogonal to engine (use workspace/LLM directly).
+                // Heartbeat/SystemCommand/JobStatus/JobCancel/Quit: v1 infrastructure.
+                _ => {}
             }
         }
 

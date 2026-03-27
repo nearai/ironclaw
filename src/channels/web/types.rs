@@ -820,6 +820,60 @@ pub struct HealthResponse {
     pub channel: &'static str,
 }
 
+// ── Engine v2 response types ────────────────────────────────
+
+#[derive(Debug, Serialize)]
+pub struct EngineThreadListResponse {
+    pub threads: Vec<crate::bridge::EngineThreadInfo>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct EngineThreadDetailResponse {
+    pub thread: crate::bridge::EngineThreadDetail,
+}
+
+#[derive(Debug, Serialize)]
+pub struct EngineStepListResponse {
+    pub steps: Vec<crate::bridge::EngineStepInfo>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct EngineEventListResponse {
+    pub events: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct EngineProjectListResponse {
+    pub projects: Vec<crate::bridge::EngineProjectInfo>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct EngineProjectDetailResponse {
+    pub project: crate::bridge::EngineProjectInfo,
+}
+
+#[derive(Debug, Serialize)]
+pub struct EngineMissionListResponse {
+    pub missions: Vec<crate::bridge::EngineMissionInfo>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct EngineMissionDetailResponse {
+    pub mission: crate::bridge::EngineMissionDetail,
+}
+
+#[derive(Debug, Serialize)]
+pub struct EngineMissionFireResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
+    pub fired: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct EngineActionResponse {
+    pub ok: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

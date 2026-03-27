@@ -255,6 +255,25 @@ impl ConversationManager {
         Ok(())
     }
 
+    /// Clear a conversation's entries and active threads.
+    ///
+    /// Stops tracking all threads and removes conversation history so the next
+    /// user message spawns a fresh thread with no prior context.
+    pub async fn clear_conversation(
+        &self,
+        conversation_id: ConversationId,
+    ) -> Result<(), EngineError> {
+        let mut convs = self.conversations.write().await;
+        if let Some(conv) = convs.get_mut(&conversation_id) {
+            conv.active_threads.clear();
+            conv.entries.clear();
+            conv.updated_at = chrono::Utc::now();
+            self.store.save_conversation(conv).await?;
+            debug!(conversation_id = %conversation_id, "cleared conversation");
+        }
+        Ok(())
+    }
+
     /// Get a snapshot of a conversation.
     pub async fn get_conversation(
         &self,
@@ -744,5 +763,42 @@ mod tests {
         let saved = cm.get_conversation(conv.id).await.unwrap();
         assert_eq!(saved.entries.len(), 1);
         assert_eq!(saved.entries[0].content, "persisted");
+    }
+
+    #[tokio::test]
+    async fn clear_conversation_resets_entries_and_threads() {
+        let (tm, cm) = make_conv_manager();
+        let conv_id = cm.get_or_create_conversation("web", "user1").await.unwrap();
+        let project = ProjectId::new();
+
+        // Spawn a thread so the conversation has entries and active threads
+        let tid = cm
+            .handle_user_message(conv_id, "Hello", project, "user1", ThreadConfig::default())
+            .await
+            .unwrap();
+
+        // Wait for thread to finish
+        let _ = tm.join_thread(tid).await.unwrap();
+
+        // Record outcome so there's an agent entry
+        cm.record_thread_outcome(
+            conv_id,
+            tid,
+            &ThreadOutcome::Completed {
+                response: Some("Hi there".into()),
+            },
+        )
+        .await
+        .unwrap();
+
+        let conv = cm.get_conversation(conv_id).await.unwrap();
+        assert!(!conv.entries.is_empty());
+
+        // Clear the conversation
+        cm.clear_conversation(conv_id).await.unwrap();
+
+        let conv = cm.get_conversation(conv_id).await.unwrap();
+        assert!(conv.entries.is_empty());
+        assert!(conv.active_threads.is_empty());
     }
 }

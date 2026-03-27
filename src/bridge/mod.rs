@@ -10,5 +10,32 @@ mod router;
 mod store_adapter;
 
 pub use router::{
-    handle_approval, handle_with_engine, is_engine_v2_enabled, pending_approval_for_user_thread,
+    // DTO types
+    EngineMissionDetail,
+    EngineMissionInfo,
+    EngineProjectInfo,
+    EngineStepInfo,
+    EngineThreadDetail,
+    EngineThreadInfo,
+    // Query functions
+    fire_engine_mission,
+    get_engine_mission,
+    get_engine_project,
+    get_engine_thread,
+    // Action handlers
+    handle_approval,
+    handle_clear,
+    handle_exec_approval,
+    handle_interrupt,
+    handle_new_thread,
+    handle_with_engine,
+    is_engine_v2_enabled,
+    list_engine_missions,
+    list_engine_projects,
+    list_engine_thread_events,
+    list_engine_thread_steps,
+    list_engine_threads,
+    pause_engine_mission,
+    pending_approval_for_user_thread,
+    resume_engine_mission,
 };

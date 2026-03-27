@@ -99,13 +99,19 @@ pub async fn load_orchestrator(
     // Find all orchestrator versions, sorted by version number descending
     let mut versions: Vec<_> = docs
         .iter()
-        .filter(|d| {
-            d.title == ORCHESTRATOR_TITLE && d.tags.contains(&ORCHESTRATOR_TAG.to_string())
-        })
+        .filter(|d| d.title == ORCHESTRATOR_TITLE && d.tags.contains(&ORCHESTRATOR_TAG.to_string()))
         .collect();
     versions.sort_by(|a, b| {
-        let va = a.metadata.get("version").and_then(|v| v.as_u64()).unwrap_or(0);
-        let vb = b.metadata.get("version").and_then(|v| v.as_u64()).unwrap_or(0);
+        let va = a
+            .metadata
+            .get("version")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let vb = b
+            .metadata
+            .get("version")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
         vb.cmp(&va) // descending
     });
 
@@ -125,7 +131,12 @@ pub async fn load_orchestrator(
             .unwrap_or(1);
 
         // Skip versions with too many failures (only check the latest)
-        if version == versions[0].metadata.get("version").and_then(|v| v.as_u64()).unwrap_or(1)
+        if version
+            == versions[0]
+                .metadata
+                .get("version")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(1)
             && failures >= MAX_FAILURES_BEFORE_ROLLBACK
         {
             warn!(
@@ -189,10 +200,7 @@ pub async fn record_orchestrator_failure(
 }
 
 /// Reset the failure counter (called after successful execution).
-pub async fn reset_orchestrator_failures(
-    store: &Arc<dyn Store>,
-    project_id: ProjectId,
-) {
+pub async fn reset_orchestrator_failures(store: &Arc<dyn Store>, project_id: ProjectId) {
     let docs = store.list_memory_docs(project_id).await.unwrap_or_default();
     let existing = docs.iter().find(|d| d.title == FAILURE_TRACKER_TITLE);
 
@@ -312,8 +320,16 @@ pub async fn execute_orchestrator(
 
                     // __llm_complete__(messages, actions, config)
                     "__llm_complete__" => {
-                        handle_llm_complete(args, kwargs, thread, llm, effects, leases, &mut total_tokens)
-                            .await
+                        handle_llm_complete(
+                            args,
+                            kwargs,
+                            thread,
+                            llm,
+                            effects,
+                            leases,
+                            &mut total_tokens,
+                        )
+                        .await
                     }
 
                     // __execute_code_step__(code, state)
@@ -512,7 +528,7 @@ async fn handle_execute_code_step(
             return ExtFunctionResult::Error(monty::MontyException::new(
                 monty::ExcType::TypeError,
                 Some("__execute_code_step__ requires a code string".into()),
-            ))
+            ));
         }
     };
 
@@ -531,7 +547,15 @@ async fn handle_execute_code_step(
 
     // Run user code in a nested Monty VM (same pattern as rlm_query)
     match Box::pin(execute_code(
-        &code, thread, llm, effects, leases, policy, &exec_ctx, &[], &state,
+        &code,
+        thread,
+        llm,
+        effects,
+        leases,
+        policy,
+        &exec_ctx,
+        &[],
+        &state,
     ))
     .await
     {
@@ -593,7 +617,7 @@ async fn handle_execute_action(
             return ExtFunctionResult::Error(monty::MontyException::new(
                 monty::ExcType::TypeError,
                 Some("__execute_action__ requires a name argument".into()),
-            ))
+            ));
         }
     };
 
@@ -770,9 +794,7 @@ fn handle_add_message(
 
     match role.as_str() {
         "user" => thread.add_message(ThreadMessage::user(&content)),
-        "assistant" | "assistant_actions" => {
-            thread.add_message(ThreadMessage::assistant(&content))
-        }
+        "assistant" | "assistant_actions" => thread.add_message(ThreadMessage::assistant(&content)),
         "system" => thread.add_message(ThreadMessage::system(&content)),
         "system_append" => {
             // Append to existing system message (for doc injection)
@@ -847,7 +869,7 @@ fn handle_transition_to(
             return ExtFunctionResult::Error(monty::MontyException::new(
                 monty::ExcType::ValueError,
                 Some(format!("Unknown thread state: {other}")),
-            ))
+            ));
         }
     };
 
@@ -1029,7 +1051,10 @@ fn parse_outcome(result: &serde_json::Value) -> ThreadOutcome {
 
     match outcome {
         "completed" => ThreadOutcome::Completed {
-            response: result.get("response").and_then(|v| v.as_str()).map(String::from),
+            response: result
+                .get("response")
+                .and_then(|v| v.as_str())
+                .map(String::from),
         },
         "stopped" => ThreadOutcome::Stopped,
         "max_iterations" => ThreadOutcome::MaxIterations,
@@ -1126,8 +1151,7 @@ mod tests {
         doc.metadata = serde_json::json!({"version": 1});
 
         let store = Arc::new(crate::tests::InMemoryStore::with_docs(vec![doc]));
-        let (code, version) =
-            load_orchestrator(Some(&(store as Arc<dyn Store>)), project_id).await;
+        let (code, version) = load_orchestrator(Some(&(store as Arc<dyn Store>)), project_id).await;
         assert_eq!(version, 1);
         assert!(code.contains("custom_orchestrator_code"));
     }
@@ -1135,37 +1159,22 @@ mod tests {
     #[tokio::test]
     async fn load_orchestrator_picks_highest_version() {
         let project_id = ProjectId::new();
-        let mut doc_v1 = MemoryDoc::new(
-            project_id,
-            DocType::Note,
-            ORCHESTRATOR_TITLE,
-            "v1_code()",
-        )
-        .with_tags(vec![ORCHESTRATOR_TAG.to_string()]);
+        let mut doc_v1 = MemoryDoc::new(project_id, DocType::Note, ORCHESTRATOR_TITLE, "v1_code()")
+            .with_tags(vec![ORCHESTRATOR_TAG.to_string()]);
         doc_v1.metadata = serde_json::json!({"version": 1});
 
-        let mut doc_v3 = MemoryDoc::new(
-            project_id,
-            DocType::Note,
-            ORCHESTRATOR_TITLE,
-            "v3_code()",
-        )
-        .with_tags(vec![ORCHESTRATOR_TAG.to_string()]);
+        let mut doc_v3 = MemoryDoc::new(project_id, DocType::Note, ORCHESTRATOR_TITLE, "v3_code()")
+            .with_tags(vec![ORCHESTRATOR_TAG.to_string()]);
         doc_v3.metadata = serde_json::json!({"version": 3});
 
-        let mut doc_v2 = MemoryDoc::new(
-            project_id,
-            DocType::Note,
-            ORCHESTRATOR_TITLE,
-            "v2_code()",
-        )
-        .with_tags(vec![ORCHESTRATOR_TAG.to_string()]);
+        let mut doc_v2 = MemoryDoc::new(project_id, DocType::Note, ORCHESTRATOR_TITLE, "v2_code()")
+            .with_tags(vec![ORCHESTRATOR_TAG.to_string()]);
         doc_v2.metadata = serde_json::json!({"version": 2});
 
-        let store =
-            Arc::new(crate::tests::InMemoryStore::with_docs(vec![doc_v1, doc_v3, doc_v2]));
-        let (code, version) =
-            load_orchestrator(Some(&(store as Arc<dyn Store>)), project_id).await;
+        let store = Arc::new(crate::tests::InMemoryStore::with_docs(vec![
+            doc_v1, doc_v3, doc_v2,
+        ]));
+        let (code, version) = load_orchestrator(Some(&(store as Arc<dyn Store>)), project_id).await;
         assert_eq!(version, 3);
         assert!(code.contains("v3_code"));
     }
@@ -1175,23 +1184,15 @@ mod tests {
         let project_id = ProjectId::new();
 
         // Create v2 orchestrator
-        let mut doc_v2 = MemoryDoc::new(
-            project_id,
-            DocType::Note,
-            ORCHESTRATOR_TITLE,
-            "v2_buggy()",
-        )
-        .with_tags(vec![ORCHESTRATOR_TAG.to_string()]);
+        let mut doc_v2 =
+            MemoryDoc::new(project_id, DocType::Note, ORCHESTRATOR_TITLE, "v2_buggy()")
+                .with_tags(vec![ORCHESTRATOR_TAG.to_string()]);
         doc_v2.metadata = serde_json::json!({"version": 2});
 
         // Create v1 orchestrator (fallback)
-        let mut doc_v1 = MemoryDoc::new(
-            project_id,
-            DocType::Note,
-            ORCHESTRATOR_TITLE,
-            "v1_stable()",
-        )
-        .with_tags(vec![ORCHESTRATOR_TAG.to_string()]);
+        let mut doc_v1 =
+            MemoryDoc::new(project_id, DocType::Note, ORCHESTRATOR_TITLE, "v1_stable()")
+                .with_tags(vec![ORCHESTRATOR_TAG.to_string()]);
         doc_v1.metadata = serde_json::json!({"version": 1});
 
         // Create failure tracker showing v2 has 3 failures
@@ -1206,8 +1207,7 @@ mod tests {
         let store = Arc::new(crate::tests::InMemoryStore::with_docs(vec![
             doc_v2, doc_v1, tracker,
         ]));
-        let (code, version) =
-            load_orchestrator(Some(&(store as Arc<dyn Store>)), project_id).await;
+        let (code, version) = load_orchestrator(Some(&(store as Arc<dyn Store>)), project_id).await;
 
         // Should skip v2 (too many failures) and load v1
         assert_eq!(version, 1);
@@ -1219,13 +1219,9 @@ mod tests {
         let project_id = ProjectId::new();
 
         // Single version with 3 failures
-        let mut doc_v1 = MemoryDoc::new(
-            project_id,
-            DocType::Note,
-            ORCHESTRATOR_TITLE,
-            "v1_broken()",
-        )
-        .with_tags(vec![ORCHESTRATOR_TAG.to_string()]);
+        let mut doc_v1 =
+            MemoryDoc::new(project_id, DocType::Note, ORCHESTRATOR_TITLE, "v1_broken()")
+                .with_tags(vec![ORCHESTRATOR_TAG.to_string()]);
         doc_v1.metadata = serde_json::json!({"version": 1});
 
         let tracker = MemoryDoc::new(
@@ -1236,10 +1232,10 @@ mod tests {
         )
         .with_tags(vec!["orchestrator_meta".to_string()]);
 
-        let store =
-            Arc::new(crate::tests::InMemoryStore::with_docs(vec![doc_v1, tracker]));
-        let (code, version) =
-            load_orchestrator(Some(&(store as Arc<dyn Store>)), project_id).await;
+        let store = Arc::new(crate::tests::InMemoryStore::with_docs(vec![
+            doc_v1, tracker,
+        ]));
+        let (code, version) = load_orchestrator(Some(&(store as Arc<dyn Store>)), project_id).await;
 
         // Should fall back to compiled-in default (v0)
         assert_eq!(version, 0);
@@ -1307,7 +1303,9 @@ mod tests {
             "parameters": {"cmd": "rm -rf /"}
         });
         let outcome = parse_outcome(&result);
-        assert!(matches!(outcome, ThreadOutcome::NeedApproval { action_name, .. } if action_name == "shell"));
+        assert!(
+            matches!(outcome, ThreadOutcome::NeedApproval { action_name, .. } if action_name == "shell")
+        );
     }
 
     #[test]

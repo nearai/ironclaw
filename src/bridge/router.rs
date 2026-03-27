@@ -29,6 +29,14 @@ pub fn is_engine_v2_enabled() -> bool {
         .unwrap_or(false)
 }
 
+/// Shorthand for building an `Error` from an engine-related failure.
+fn engine_err(context: &str, e: impl std::fmt::Display) -> Error {
+    Error::from(crate::error::JobError::ContextError {
+        id: uuid::Uuid::nil(),
+        reason: format!("engine v2 {context}: {e}"),
+    })
+}
+
 /// Pending approval info stored between the NeedApproval outcome and the user's response.
 #[derive(Clone)]
 struct PendingApproval {
@@ -146,12 +154,7 @@ async fn get_or_init_engine(agent: &Agent) -> Result<(), Error> {
     let project_id = match store
         .list_projects()
         .await
-        .map_err(|e| {
-            crate::error::Error::from(crate::error::JobError::ContextError {
-                id: uuid::Uuid::nil(),
-                reason: format!("engine v2 store error: {e}"),
-            })
-        })?
+        .map_err(|e| engine_err("store error", e))?
         .into_iter()
         .find(|project| project.name == "default")
     {
@@ -159,29 +162,39 @@ async fn get_or_init_engine(agent: &Agent) -> Result<(), Error> {
         None => {
             let project = Project::new("default", "Default project for engine v2");
             let project_id = project.id;
-            store.save_project(&project).await.map_err(|e| {
-                crate::error::Error::from(crate::error::JobError::ContextError {
-                    id: uuid::Uuid::nil(),
-                    reason: format!("engine v2 store error: {e}"),
-                })
-            })?;
+            store
+                .save_project(&project)
+                .await
+                .map_err(|e| engine_err("store error", e))?;
             project_id
         }
     };
 
     let conversation_manager = ConversationManager::new(Arc::clone(&thread_manager), store.clone());
-    let _ = conversation_manager
+    if let Err(e) = conversation_manager
         .bootstrap_user(&agent.deps.owner_id)
-        .await;
+        .await
+    {
+        debug!("engine v2: bootstrap_user failed: {e}");
+    }
 
     // Create mission manager and start cron ticker
     let mission_manager = Arc::new(MissionManager::new(store_dyn, Arc::clone(&thread_manager)));
-    let _ = thread_manager.recover_project_threads(project_id).await;
-    let _ = mission_manager.bootstrap_project(project_id).await;
-    let _ = mission_manager
+    if let Err(e) = thread_manager.recover_project_threads(project_id).await {
+        debug!("engine v2: recover_project_threads failed: {e}");
+    }
+    if let Err(e) = mission_manager.bootstrap_project(project_id).await {
+        debug!("engine v2: bootstrap_project failed: {e}");
+    }
+    if let Err(e) = mission_manager
         .resume_recoverable_threads(&agent.deps.owner_id)
-        .await;
-    let _ = thread_manager.resume_background_threads(project_id).await;
+        .await
+    {
+        debug!("engine v2: resume_recoverable_threads failed: {e}");
+    }
+    if let Err(e) = thread_manager.resume_background_threads(project_id).await {
+        debug!("engine v2: resume_background_threads failed: {e}");
+    }
     mission_manager.start_cron_ticker(agent.deps.owner_id.clone());
     mission_manager.start_event_listener(agent.deps.owner_id.clone());
 
@@ -219,25 +232,13 @@ async fn persist_pending_approval(
     let mut thread = store
         .load_thread(pending.thread_id)
         .await
-        .map_err(|e| {
-            crate::error::Error::from(crate::error::JobError::ContextError {
-                id: uuid::Uuid::nil(),
-                reason: format!("engine v2 store error: {e}"),
-            })
-        })?
-        .ok_or_else(|| {
-            crate::error::Error::from(crate::error::JobError::ContextError {
-                id: uuid::Uuid::nil(),
-                reason: format!("engine v2 thread {} not found", pending.thread_id),
-            })
-        })?;
+        .map_err(|e| engine_err("store error", e))?
+        .ok_or_else(|| engine_err("thread not found", pending.thread_id))?;
 
-    let metadata = thread.metadata.as_object_mut().ok_or_else(|| {
-        crate::error::Error::from(crate::error::JobError::ContextError {
-            id: uuid::Uuid::nil(),
-            reason: "engine v2 thread metadata must be an object".into(),
-        })
-    })?;
+    let metadata = thread
+        .metadata
+        .as_object_mut()
+        .ok_or_else(|| engine_err("thread metadata", "must be an object"))?;
     metadata.insert(
         PENDING_APPROVAL_METADATA_KEY.into(),
         serde_json::json!({
@@ -251,12 +252,10 @@ async fn persist_pending_approval(
         }),
     );
     thread.updated_at = chrono::Utc::now();
-    store.save_thread(&thread).await.map_err(|e| {
-        crate::error::Error::from(crate::error::JobError::ContextError {
-            id: uuid::Uuid::nil(),
-            reason: format!("engine v2 store error: {e}"),
-        })
-    })
+    store
+        .save_thread(&thread)
+        .await
+        .map_err(|e| engine_err("store error", e))
 }
 
 async fn load_pending_approval_from_thread(
@@ -264,12 +263,10 @@ async fn load_pending_approval_from_thread(
     conversation_id: ironclaw_engine::ConversationId,
     thread_id: ironclaw_engine::ThreadId,
 ) -> Result<Option<PendingApproval>, Error> {
-    let Some(thread) = store.load_thread(thread_id).await.map_err(|e| {
-        crate::error::Error::from(crate::error::JobError::ContextError {
-            id: uuid::Uuid::nil(),
-            reason: format!("engine v2 store error: {e}"),
-        })
-    })?
+    let Some(thread) = store
+        .load_thread(thread_id)
+        .await
+        .map_err(|e| engine_err("store error", e))?
     else {
         return Ok(None);
     };
@@ -321,12 +318,10 @@ async fn clear_pending_approval_metadata(
     store: &Arc<dyn Store>,
     thread_id: ironclaw_engine::ThreadId,
 ) -> Result<(), Error> {
-    let Some(mut thread) = store.load_thread(thread_id).await.map_err(|e| {
-        crate::error::Error::from(crate::error::JobError::ContextError {
-            id: uuid::Uuid::nil(),
-            reason: format!("engine v2 store error: {e}"),
-        })
-    })?
+    let Some(mut thread) = store
+        .load_thread(thread_id)
+        .await
+        .map_err(|e| engine_err("store error", e))?
     else {
         return Ok(());
     };
@@ -334,12 +329,10 @@ async fn clear_pending_approval_metadata(
     if let Some(metadata) = thread.metadata.as_object_mut() {
         metadata.remove(PENDING_APPROVAL_METADATA_KEY);
         thread.updated_at = chrono::Utc::now();
-        store.save_thread(&thread).await.map_err(|e| {
-            crate::error::Error::from(crate::error::JobError::ContextError {
-                id: uuid::Uuid::nil(),
-                reason: format!("engine v2 store error: {e}"),
-            })
-        })?;
+        store
+            .save_thread(&thread)
+            .await
+            .map_err(|e| engine_err("store error", e))?;
     }
 
     Ok(())
@@ -375,12 +368,10 @@ async fn resolve_pending_approval_for_thread(
         }
     }
 
-    let conversations = store.list_conversations(user_id).await.map_err(|e| {
-        crate::error::Error::from(crate::error::JobError::ContextError {
-            id: uuid::Uuid::nil(),
-            reason: format!("engine v2 store error: {e}"),
-        })
-    })?;
+    let conversations = store
+        .list_conversations(user_id)
+        .await
+        .map_err(|e| engine_err("store error", e))?;
 
     let mut candidates = Vec::new();
     for conversation in conversations {
@@ -389,12 +380,10 @@ async fn resolve_pending_approval_for_thread(
                 continue;
             }
 
-            let Some(thread) = store.load_thread(thread_id).await.map_err(|e| {
-                crate::error::Error::from(crate::error::JobError::ContextError {
-                    id: uuid::Uuid::nil(),
-                    reason: format!("engine v2 store error: {e}"),
-                })
-            })?
+            let Some(thread) = store
+                .load_thread(thread_id)
+                .await
+                .map_err(|e| engine_err("store error", e))?
             else {
                 continue;
             };
@@ -469,9 +458,13 @@ pub async fn handle_approval(
 ) -> Result<Option<String>, Error> {
     get_or_init_engine(agent).await?;
 
-    let lock = ENGINE_STATE.get().expect("engine initialized");
+    let lock = ENGINE_STATE
+        .get()
+        .ok_or_else(|| engine_err("init", "engine state not initialized"))?;
     let guard = lock.read().await;
-    let state = guard.as_ref().expect("engine initialized");
+    let state = guard
+        .as_ref()
+        .ok_or_else(|| engine_err("init", "engine state is empty"))?;
 
     let pending = match resolve_pending_approval_for_thread(
         &state.store,
@@ -493,6 +486,75 @@ pub async fn handle_approval(
         }
     };
 
+    process_resolved_approval(agent, state, message, pending, approved, always).await
+}
+
+/// Handle an `ExecApproval` submission (web gateway JSON approval with explicit request_id).
+pub async fn handle_exec_approval(
+    agent: &Agent,
+    message: &IncomingMessage,
+    request_id: uuid::Uuid,
+    approved: bool,
+    always: bool,
+) -> Result<Option<String>, Error> {
+    get_or_init_engine(agent).await?;
+
+    let lock = ENGINE_STATE
+        .get()
+        .ok_or_else(|| engine_err("init", "engine state not initialized"))?;
+    let guard = lock.read().await;
+    let state = guard
+        .as_ref()
+        .ok_or_else(|| engine_err("init", "engine state is empty"))?;
+
+    let request_id_str = request_id.to_string();
+
+    // First try the in-memory cache (keyed by user_id, but we match on request_id).
+    let cached = state
+        .pending_approvals
+        .read()
+        .await
+        .get(&message.user_id)
+        .filter(|p| p.request_id == request_id_str)
+        .cloned();
+
+    if let Some(pending) = cached {
+        return process_resolved_approval(agent, state, message, pending, approved, always).await;
+    }
+
+    // Fall back to scanning thread metadata for this user's conversations.
+    let resolution = resolve_pending_approval_for_thread(
+        &state.store,
+        &state.pending_approvals,
+        &message.user_id,
+        message.thread_id.as_deref(),
+    )
+    .await?;
+
+    match resolution {
+        PendingApprovalResolution::Resolved(pending) if pending.request_id == request_id_str => {
+            process_resolved_approval(agent, state, message, pending, approved, always).await
+        }
+        _ => {
+            debug!(
+                user_id = %message.user_id,
+                request_id = %request_id,
+                "engine v2: no matching pending approval for request_id"
+            );
+            Ok(Some("No matching pending approval found.".into()))
+        }
+    }
+}
+
+/// Shared logic for processing a resolved pending approval.
+async fn process_resolved_approval(
+    agent: &Agent,
+    state: &EngineState,
+    message: &IncomingMessage,
+    pending: PendingApproval,
+    approved: bool,
+    always: bool,
+) -> Result<Option<String>, Error> {
     if !approved {
         let _ = agent
             .channels
@@ -504,7 +566,6 @@ pub async fn handle_approval(
             .await;
     }
 
-    // Approved — persist auto-approval when user chose "always"
     debug!(
         tool = %pending.action_name,
         always,
@@ -556,12 +617,7 @@ pub async fn handle_approval(
             Some((pending.call_id.clone(), approved)),
         )
         .await
-        .map_err(|e| {
-            crate::error::Error::from(crate::error::JobError::ContextError {
-                id: uuid::Uuid::nil(),
-                reason: format!("engine v2 resume error: {e}"),
-            })
-        })?;
+        .map_err(|e| engine_err("resume error", e))?;
     clear_pending_approval_metadata(&state.store, pending.thread_id).await?;
     let mut approvals = state.pending_approvals.write().await;
     if approvals
@@ -581,6 +637,120 @@ pub async fn handle_approval(
     .await
 }
 
+/// Handle an interrupt submission — stop active engine threads.
+pub async fn handle_interrupt(
+    agent: &Agent,
+    message: &IncomingMessage,
+) -> Result<Option<String>, Error> {
+    get_or_init_engine(agent).await?;
+
+    let lock = ENGINE_STATE
+        .get()
+        .ok_or_else(|| engine_err("init", "engine state not initialized"))?;
+    let guard = lock.read().await;
+    let state = guard
+        .as_ref()
+        .ok_or_else(|| engine_err("init", "engine state is empty"))?;
+
+    let conv_id = state
+        .conversation_manager
+        .get_or_create_conversation(&message.channel, &message.user_id)
+        .await
+        .map_err(|e| engine_err("conversation error", e))?;
+
+    let conv = state.conversation_manager.get_conversation(conv_id).await;
+    let active_threads = conv
+        .as_ref()
+        .map(|c| c.active_threads.clone())
+        .unwrap_or_default();
+
+    let mut stopped = 0u32;
+    for tid in &active_threads {
+        if state.thread_manager.is_running(*tid).await {
+            if let Err(e) = state.thread_manager.stop_thread(*tid).await {
+                debug!(thread_id = %tid, error = %e, "engine v2: failed to stop thread");
+            } else {
+                stopped += 1;
+            }
+        }
+    }
+
+    if stopped > 0 {
+        debug!(stopped, "engine v2: interrupted running threads");
+        Ok(Some("Interrupted.".into()))
+    } else {
+        Ok(Some("Nothing to interrupt.".into()))
+    }
+}
+
+/// Handle a new-thread submission — clear conversation for a fresh start.
+pub async fn handle_new_thread(
+    agent: &Agent,
+    message: &IncomingMessage,
+) -> Result<Option<String>, Error> {
+    clear_engine_conversation(agent, message).await?;
+    Ok(Some("Started new conversation.".into()))
+}
+
+/// Handle a clear submission — stop threads and reset conversation.
+pub async fn handle_clear(
+    agent: &Agent,
+    message: &IncomingMessage,
+) -> Result<Option<String>, Error> {
+    clear_engine_conversation(agent, message).await?;
+    Ok(Some("Conversation cleared.".into()))
+}
+
+/// Stop all active threads and clear conversation entries.
+async fn clear_engine_conversation(agent: &Agent, message: &IncomingMessage) -> Result<(), Error> {
+    get_or_init_engine(agent).await?;
+
+    let lock = ENGINE_STATE
+        .get()
+        .ok_or_else(|| engine_err("init", "engine state not initialized"))?;
+    let guard = lock.read().await;
+    let state = guard
+        .as_ref()
+        .ok_or_else(|| engine_err("init", "engine state is empty"))?;
+
+    let conv_id = state
+        .conversation_manager
+        .get_or_create_conversation(&message.channel, &message.user_id)
+        .await
+        .map_err(|e| engine_err("conversation error", e))?;
+
+    // Stop all active threads first
+    if let Some(conv) = state.conversation_manager.get_conversation(conv_id).await {
+        for tid in &conv.active_threads {
+            if state.thread_manager.is_running(*tid).await {
+                let _ = state.thread_manager.stop_thread(*tid).await;
+            }
+        }
+    }
+
+    // Clear the conversation entries and active thread list
+    state
+        .conversation_manager
+        .clear_conversation(conv_id)
+        .await
+        .map_err(|e| engine_err("clear conversation error", e))?;
+
+    // Also clear any pending approvals for this user
+    state
+        .pending_approvals
+        .write()
+        .await
+        .remove(&message.user_id);
+
+    debug!(
+        user_id = %message.user_id,
+        conversation_id = %conv_id,
+        "engine v2: conversation cleared"
+    );
+
+    Ok(())
+}
+
 /// Handle a user message through the engine v2 pipeline.
 pub async fn handle_with_engine(
     agent: &Agent,
@@ -590,9 +760,13 @@ pub async fn handle_with_engine(
     // Ensure engine is initialized
     get_or_init_engine(agent).await?;
 
-    let lock = ENGINE_STATE.get().expect("engine initialized");
+    let lock = ENGINE_STATE
+        .get()
+        .ok_or_else(|| engine_err("init", "engine state not initialized"))?;
     let guard = lock.read().await;
-    let state = guard.as_ref().expect("engine initialized");
+    let state = guard
+        .as_ref()
+        .ok_or_else(|| engine_err("init", "engine state is empty"))?;
 
     debug!(
         user_id = %message.user_id,
@@ -618,12 +792,7 @@ pub async fn handle_with_engine(
         .conversation_manager
         .get_or_create_conversation(&message.channel, &message.user_id)
         .await
-        .map_err(|e| {
-            crate::error::Error::from(crate::error::JobError::ContextError {
-                id: uuid::Uuid::nil(),
-                reason: format!("engine v2 conversation error: {e}"),
-            })
-        })?;
+        .map_err(|e| engine_err("conversation error", e))?;
 
     // Handle the message — spawns a new thread or injects into active one
     let thread_id = state
@@ -639,12 +808,7 @@ pub async fn handle_with_engine(
             },
         )
         .await
-        .map_err(|e| {
-            crate::error::Error::from(crate::error::JobError::ContextError {
-                id: uuid::Uuid::nil(),
-                reason: format!("engine v2 error: {e}"),
-            })
-        })?;
+        .map_err(|e| engine_err("thread error", e))?;
 
     if let Some(ref db) = state.db
         && let Ok(conv_id_v1) = db
@@ -702,23 +866,13 @@ async fn await_thread_outcome(
         .thread_manager
         .join_thread(thread_id)
         .await
-        .map_err(|e| {
-            crate::error::Error::from(crate::error::JobError::ContextError {
-                id: uuid::Uuid::nil(),
-                reason: format!("engine v2 join error: {e}"),
-            })
-        })?;
+        .map_err(|e| engine_err("join error", e))?;
 
     state
         .conversation_manager
         .record_thread_outcome(conv_id, thread_id, &outcome)
         .await
-        .map_err(|e| {
-            crate::error::Error::from(crate::error::JobError::ContextError {
-                id: uuid::Uuid::nil(),
-                reason: format!("engine v2 conversation error: {e}"),
-            })
-        })?;
+        .map_err(|e| engine_err("conversation error", e))?;
 
     if let Some(ref db) = state.db
         && let Ok(conv_id_v1) = db
@@ -898,8 +1052,465 @@ fn thread_event_to_app_event(
             message: "Processing results...".into(),
             thread_id: Some(thread_id.into()),
         }),
+        EventKind::StateChanged { from, to, reason } => Some(AppEvent::ThreadStateChanged {
+            thread_id: thread_id.into(),
+            from_state: format!("{from:?}"),
+            to_state: format!("{to:?}"),
+            reason: reason.clone(),
+        }),
+        EventKind::ChildSpawned { child_id, goal } => Some(AppEvent::ChildThreadSpawned {
+            parent_thread_id: thread_id.into(),
+            child_thread_id: child_id.to_string(),
+            goal: goal.clone(),
+        }),
         _ => None,
     }
+}
+
+// ── Engine query DTOs ────────────────────────────────────────
+
+/// Lightweight thread summary for list views.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct EngineThreadInfo {
+    pub id: String,
+    pub goal: String,
+    pub thread_type: String,
+    pub state: String,
+    pub project_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
+    pub step_count: usize,
+    pub total_tokens: u64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Thread detail with messages and config.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct EngineThreadDetail {
+    #[serde(flatten)]
+    pub info: EngineThreadInfo,
+    pub messages: Vec<serde_json::Value>,
+    pub max_iterations: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<String>,
+    pub total_cost_usd: f64,
+}
+
+/// Step summary for thread detail views.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct EngineStepInfo {
+    pub id: String,
+    pub sequence: usize,
+    pub status: String,
+    pub tier: String,
+    pub action_results_count: usize,
+    pub tokens_input: u64,
+    pub tokens_output: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<String>,
+}
+
+/// Project summary.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct EngineProjectInfo {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub created_at: String,
+}
+
+/// Mission summary for list views.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct EngineMissionInfo {
+    pub id: String,
+    pub name: String,
+    pub goal: String,
+    pub status: String,
+    pub cadence_type: String,
+    pub thread_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_focus: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Mission detail with full strategy and budget info.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct EngineMissionDetail {
+    #[serde(flatten)]
+    pub info: EngineMissionInfo,
+    pub cadence: serde_json::Value,
+    pub approach_history: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub success_criteria: Option<String>,
+    pub threads_today: u32,
+    pub max_threads_per_day: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_fire_at: Option<String>,
+    pub thread_ids: Vec<String>,
+}
+
+// ── Engine query functions ───────────────────────────────────
+
+fn cadence_type_label(cadence: &ironclaw_engine::types::mission::MissionCadence) -> &'static str {
+    use ironclaw_engine::types::mission::MissionCadence;
+    match cadence {
+        MissionCadence::Cron { .. } => "cron",
+        MissionCadence::OnEvent { .. } => "event",
+        MissionCadence::OnSystemEvent { .. } => "system_event",
+        MissionCadence::Webhook { .. } => "webhook",
+        MissionCadence::Manual => "manual",
+    }
+}
+
+fn thread_to_info(t: &ironclaw_engine::Thread) -> EngineThreadInfo {
+    EngineThreadInfo {
+        id: t.id.to_string(),
+        goal: t.goal.clone(),
+        thread_type: format!("{:?}", t.thread_type),
+        state: format!("{:?}", t.state),
+        project_id: t.project_id.to_string(),
+        parent_id: t.parent_id.map(|id| id.to_string()),
+        step_count: t.step_count,
+        total_tokens: t.total_tokens_used,
+        created_at: t.created_at.to_rfc3339(),
+        updated_at: t.updated_at.to_rfc3339(),
+    }
+}
+
+/// List engine threads, optionally filtered by project.
+pub async fn list_engine_threads(project_id: Option<&str>) -> Result<Vec<EngineThreadInfo>, Error> {
+    let Some(lock) = ENGINE_STATE.get() else {
+        return Ok(Vec::new());
+    };
+    let guard = lock.read().await;
+    let Some(state) = guard.as_ref() else {
+        return Ok(Vec::new());
+    };
+
+    let pid = match project_id {
+        Some(id) => {
+            let uuid = uuid::Uuid::parse_str(id).map_err(|e| engine_err("parse project_id", e))?;
+            ironclaw_engine::ProjectId(uuid)
+        }
+        None => state.default_project_id,
+    };
+
+    let threads = state
+        .store
+        .list_threads(pid)
+        .await
+        .map_err(|e| engine_err("list threads", e))?;
+
+    Ok(threads.iter().map(thread_to_info).collect())
+}
+
+/// Get a single engine thread by ID.
+pub async fn get_engine_thread(thread_id: &str) -> Result<Option<EngineThreadDetail>, Error> {
+    let Some(lock) = ENGINE_STATE.get() else {
+        return Ok(None);
+    };
+    let guard = lock.read().await;
+    let Some(state) = guard.as_ref() else {
+        return Ok(None);
+    };
+
+    let tid = uuid::Uuid::parse_str(thread_id).map_err(|e| engine_err("parse thread_id", e))?;
+    let tid = ironclaw_engine::ThreadId(tid);
+
+    let Some(thread) = state
+        .store
+        .load_thread(tid)
+        .await
+        .map_err(|e| engine_err("load thread", e))?
+    else {
+        return Ok(None);
+    };
+
+    let messages: Vec<serde_json::Value> = thread
+        .messages
+        .iter()
+        .map(|m| {
+            serde_json::json!({
+                "role": format!("{:?}", m.role),
+                "content": m.content,
+                "timestamp": m.timestamp.to_rfc3339(),
+            })
+        })
+        .collect();
+
+    Ok(Some(EngineThreadDetail {
+        info: thread_to_info(&thread),
+        messages,
+        max_iterations: thread.config.max_iterations,
+        completed_at: thread.completed_at.map(|dt| dt.to_rfc3339()),
+        total_cost_usd: thread.total_cost_usd,
+    }))
+}
+
+/// List steps for a thread.
+pub async fn list_engine_thread_steps(thread_id: &str) -> Result<Vec<EngineStepInfo>, Error> {
+    let Some(lock) = ENGINE_STATE.get() else {
+        return Ok(Vec::new());
+    };
+    let guard = lock.read().await;
+    let Some(state) = guard.as_ref() else {
+        return Ok(Vec::new());
+    };
+
+    let tid = uuid::Uuid::parse_str(thread_id).map_err(|e| engine_err("parse thread_id", e))?;
+    let steps = state
+        .store
+        .load_steps(ironclaw_engine::ThreadId(tid))
+        .await
+        .map_err(|e| engine_err("load steps", e))?;
+
+    Ok(steps
+        .iter()
+        .map(|s| EngineStepInfo {
+            id: s.id.0.to_string(),
+            sequence: s.sequence,
+            status: format!("{:?}", s.status),
+            tier: format!("{:?}", s.tier),
+            action_results_count: s.action_results.len(),
+            tokens_input: s.tokens_used.input_tokens,
+            tokens_output: s.tokens_used.output_tokens,
+            started_at: Some(s.started_at.to_rfc3339()),
+            completed_at: s.completed_at.map(|dt| dt.to_rfc3339()),
+        })
+        .collect())
+}
+
+/// List events for a thread as raw JSON values.
+pub async fn list_engine_thread_events(thread_id: &str) -> Result<Vec<serde_json::Value>, Error> {
+    let Some(lock) = ENGINE_STATE.get() else {
+        return Ok(Vec::new());
+    };
+    let guard = lock.read().await;
+    let Some(state) = guard.as_ref() else {
+        return Ok(Vec::new());
+    };
+
+    let tid = uuid::Uuid::parse_str(thread_id).map_err(|e| engine_err("parse thread_id", e))?;
+    let events = state
+        .store
+        .load_events(ironclaw_engine::ThreadId(tid))
+        .await
+        .map_err(|e| engine_err("load events", e))?;
+
+    Ok(events
+        .iter()
+        .filter_map(|e| serde_json::to_value(e).ok())
+        .collect())
+}
+
+/// List all projects.
+pub async fn list_engine_projects() -> Result<Vec<EngineProjectInfo>, Error> {
+    let Some(lock) = ENGINE_STATE.get() else {
+        return Ok(Vec::new());
+    };
+    let guard = lock.read().await;
+    let Some(state) = guard.as_ref() else {
+        return Ok(Vec::new());
+    };
+
+    let projects = state
+        .store
+        .list_projects()
+        .await
+        .map_err(|e| engine_err("list projects", e))?;
+
+    Ok(projects
+        .iter()
+        .map(|p| EngineProjectInfo {
+            id: p.id.to_string(),
+            name: p.name.clone(),
+            description: p.description.clone(),
+            created_at: p.created_at.to_rfc3339(),
+        })
+        .collect())
+}
+
+/// Get a single project by ID.
+pub async fn get_engine_project(project_id: &str) -> Result<Option<EngineProjectInfo>, Error> {
+    let Some(lock) = ENGINE_STATE.get() else {
+        return Ok(None);
+    };
+    let guard = lock.read().await;
+    let Some(state) = guard.as_ref() else {
+        return Ok(None);
+    };
+
+    let pid = uuid::Uuid::parse_str(project_id).map_err(|e| engine_err("parse project_id", e))?;
+    let project = state
+        .store
+        .load_project(ironclaw_engine::ProjectId(pid))
+        .await
+        .map_err(|e| engine_err("load project", e))?;
+
+    Ok(project.map(|p| EngineProjectInfo {
+        id: p.id.to_string(),
+        name: p.name,
+        description: p.description,
+        created_at: p.created_at.to_rfc3339(),
+    }))
+}
+
+/// List missions, optionally filtered by project.
+pub async fn list_engine_missions(
+    project_id: Option<&str>,
+) -> Result<Vec<EngineMissionInfo>, Error> {
+    let Some(lock) = ENGINE_STATE.get() else {
+        return Ok(Vec::new());
+    };
+    let guard = lock.read().await;
+    let Some(state) = guard.as_ref() else {
+        return Ok(Vec::new());
+    };
+
+    let pid = match project_id {
+        Some(id) => {
+            let uuid = uuid::Uuid::parse_str(id).map_err(|e| engine_err("parse project_id", e))?;
+            ironclaw_engine::ProjectId(uuid)
+        }
+        None => state.default_project_id,
+    };
+
+    let missions = state
+        .store
+        .list_missions(pid)
+        .await
+        .map_err(|e| engine_err("list missions", e))?;
+
+    Ok(missions
+        .iter()
+        .map(|m| EngineMissionInfo {
+            id: m.id.to_string(),
+            name: m.name.clone(),
+            goal: m.goal.clone(),
+            status: format!("{:?}", m.status),
+            cadence_type: cadence_type_label(&m.cadence).to_string(),
+            thread_count: m.thread_history.len(),
+            current_focus: m.current_focus.clone(),
+            created_at: m.created_at.to_rfc3339(),
+            updated_at: m.updated_at.to_rfc3339(),
+        })
+        .collect())
+}
+
+/// Get a single mission by ID.
+pub async fn get_engine_mission(mission_id: &str) -> Result<Option<EngineMissionDetail>, Error> {
+    let Some(lock) = ENGINE_STATE.get() else {
+        return Ok(None);
+    };
+    let guard = lock.read().await;
+    let Some(state) = guard.as_ref() else {
+        return Ok(None);
+    };
+
+    let mid = uuid::Uuid::parse_str(mission_id).map_err(|e| engine_err("parse mission_id", e))?;
+    let mission = state
+        .store
+        .load_mission(ironclaw_engine::MissionId(mid))
+        .await
+        .map_err(|e| engine_err("load mission", e))?;
+
+    let Some(m) = mission else {
+        return Ok(None);
+    };
+
+    let cadence_json = serde_json::to_value(&m.cadence).unwrap_or(serde_json::Value::Null);
+
+    Ok(Some(EngineMissionDetail {
+        info: EngineMissionInfo {
+            id: m.id.to_string(),
+            name: m.name.clone(),
+            goal: m.goal.clone(),
+            status: format!("{:?}", m.status),
+            cadence_type: cadence_type_label(&m.cadence).to_string(),
+            thread_count: m.thread_history.len(),
+            current_focus: m.current_focus.clone(),
+            created_at: m.created_at.to_rfc3339(),
+            updated_at: m.updated_at.to_rfc3339(),
+        },
+        cadence: cadence_json,
+        approach_history: m.approach_history.clone(),
+        success_criteria: m.success_criteria.clone(),
+        threads_today: m.threads_today,
+        max_threads_per_day: m.max_threads_per_day,
+        next_fire_at: m.next_fire_at.map(|dt| dt.to_rfc3339()),
+        thread_ids: m.thread_history.iter().map(|t| t.to_string()).collect(),
+    }))
+}
+
+/// Manually fire a mission (spawn a new thread).
+pub async fn fire_engine_mission(mission_id: &str, user_id: &str) -> Result<Option<String>, Error> {
+    let Some(lock) = ENGINE_STATE.get() else {
+        return Err(engine_err("not initialized", "engine v2 is not running"));
+    };
+    let guard = lock.read().await;
+    let Some(state) = guard.as_ref() else {
+        return Err(engine_err("not initialized", "engine v2 is not running"));
+    };
+
+    let mid = uuid::Uuid::parse_str(mission_id).map_err(|e| engine_err("parse mission_id", e))?;
+    let mid = ironclaw_engine::MissionId(mid);
+
+    let result = state
+        .effect_adapter
+        .mission_manager()
+        .await
+        .ok_or_else(|| engine_err("mission", "mission manager not available"))?
+        .fire_mission(mid, user_id, None)
+        .await
+        .map_err(|e| engine_err("fire mission", e))?;
+
+    Ok(result.map(|tid| tid.to_string()))
+}
+
+/// Pause a mission.
+pub async fn pause_engine_mission(mission_id: &str) -> Result<(), Error> {
+    let Some(lock) = ENGINE_STATE.get() else {
+        return Err(engine_err("not initialized", "engine v2 is not running"));
+    };
+    let guard = lock.read().await;
+    let Some(state) = guard.as_ref() else {
+        return Err(engine_err("not initialized", "engine v2 is not running"));
+    };
+
+    let mid = uuid::Uuid::parse_str(mission_id).map_err(|e| engine_err("parse mission_id", e))?;
+    state
+        .effect_adapter
+        .mission_manager()
+        .await
+        .ok_or_else(|| engine_err("mission", "mission manager not available"))?
+        .pause_mission(ironclaw_engine::MissionId(mid))
+        .await
+        .map_err(|e| engine_err("pause mission", e))
+}
+
+/// Resume a paused mission.
+pub async fn resume_engine_mission(mission_id: &str) -> Result<(), Error> {
+    let Some(lock) = ENGINE_STATE.get() else {
+        return Err(engine_err("not initialized", "engine v2 is not running"));
+    };
+    let guard = lock.read().await;
+    let Some(state) = guard.as_ref() else {
+        return Err(engine_err("not initialized", "engine v2 is not running"));
+    };
+
+    let mid = uuid::Uuid::parse_str(mission_id).map_err(|e| engine_err("parse mission_id", e))?;
+    state
+        .effect_adapter
+        .mission_manager()
+        .await
+        .ok_or_else(|| engine_err("mission", "mission manager not available"))?
+        .resume_mission(ironclaw_engine::MissionId(mid))
+        .await
+        .map_err(|e| engine_err("resume mission", e))
 }
 
 #[cfg(test)]

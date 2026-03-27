@@ -444,8 +444,8 @@ mod tests {
     use crate::traits::effect::ThreadExecutionContext;
     use crate::traits::llm::{LlmCallConfig, LlmOutput};
     use crate::types::capability::{ActionDef, CapabilityLease, EffectType};
-    use crate::types::step::LlmResponse;
     use crate::types::project::ProjectId;
+    use crate::types::step::LlmResponse;
     use crate::types::step::{ActionResult, TokenUsage};
     use crate::types::thread::{ThreadConfig, ThreadType};
 

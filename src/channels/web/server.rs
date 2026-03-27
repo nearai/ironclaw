@@ -33,6 +33,12 @@ use crate::channels::relay::DEFAULT_RELAY_NAME;
 use crate::channels::web::auth::{
     AuthenticatedUser, MultiAuthState, UserIdentity, auth_middleware,
 };
+use crate::channels::web::handlers::engine::{
+    engine_mission_detail_handler, engine_mission_fire_handler, engine_mission_pause_handler,
+    engine_mission_resume_handler, engine_missions_handler, engine_project_detail_handler,
+    engine_projects_handler, engine_thread_detail_handler, engine_thread_events_handler,
+    engine_thread_steps_handler, engine_threads_handler,
+};
 use crate::channels::web::handlers::jobs::{
     job_files_list_handler, job_files_read_handler, jobs_cancel_handler, jobs_detail_handler,
     jobs_events_handler, jobs_list_handler, jobs_prompt_handler, jobs_restart_handler,
@@ -491,6 +497,42 @@ pub async fn start_server(
             axum::routing::delete(routines_delete_handler),
         )
         .route("/api/routines/{id}/runs", get(routines_runs_handler))
+        // Engine v2
+        .route("/api/engine/threads", get(engine_threads_handler))
+        .route(
+            "/api/engine/threads/{id}",
+            get(engine_thread_detail_handler),
+        )
+        .route(
+            "/api/engine/threads/{id}/steps",
+            get(engine_thread_steps_handler),
+        )
+        .route(
+            "/api/engine/threads/{id}/events",
+            get(engine_thread_events_handler),
+        )
+        .route("/api/engine/projects", get(engine_projects_handler))
+        .route(
+            "/api/engine/projects/{id}",
+            get(engine_project_detail_handler),
+        )
+        .route("/api/engine/missions", get(engine_missions_handler))
+        .route(
+            "/api/engine/missions/{id}",
+            get(engine_mission_detail_handler),
+        )
+        .route(
+            "/api/engine/missions/{id}/fire",
+            post(engine_mission_fire_handler),
+        )
+        .route(
+            "/api/engine/missions/{id}/pause",
+            post(engine_mission_pause_handler),
+        )
+        .route(
+            "/api/engine/missions/{id}/resume",
+            post(engine_mission_resume_handler),
+        )
         // Skills
         .route("/api/skills", get(skills_list_handler))
         .route("/api/skills/search", post(skills_search_handler))

@@ -73,6 +73,11 @@ impl EffectBridgeAdapter {
         *self.mission_manager.write().await = Some(mgr);
     }
 
+    /// Get the mission manager if available.
+    pub async fn mission_manager(&self) -> Option<Arc<ironclaw_engine::MissionManager>> {
+        self.mission_manager.read().await.clone()
+    }
+
     /// Handle mission_* function calls. Returns None if not a mission call.
     async fn handle_mission_call(
         &self,
@@ -501,7 +506,6 @@ fn parse_cadence(s: &str) -> ironclaw_engine::types::mission::MissionCadence {
 
 /// Tools that depend on v1 runtime components (RoutineEngine, Scheduler,
 /// ContainerJobManager) and cannot work in engine v2's minimal JobContext.
-/// Tools that depend on v1 runtime components and can't work in engine v2.
 /// Note: routine_* tools are NOT blocked — they map to mission operations.
 fn is_v1_only_tool(name: &str) -> bool {
     matches!(
