@@ -23,8 +23,8 @@ use crate::context::{ContextManager, JobState};
 use crate::error::Error;
 use crate::hooks::HookRegistry;
 use crate::llm::{
-    ActionPlan, ChatMessage, LlmProvider, Reasoning, ReasoningContext, RespondResult, ToolCall,
-    ToolSelection,
+    ActionPlan, ChatMessage, LlmProvider, Reasoning, ReasoningContext, RespondResult,
+    ResponseMetadata, ToolCall, ToolSelection,
 };
 use crate::safety::SafetyLayer;
 use crate::tenant::AdminScope;
@@ -32,6 +32,10 @@ use crate::tools::execute::process_tool_result;
 use crate::tools::rate_limiter::RateLimitResult;
 use crate::tools::{
     ApprovalContext, ToolRegistry, autonomous_unavailable_error, prepare_tool_params, redact_params,
+};
+use crate::worker::autonomous_recovery::{
+    AutonomousRecoveryAction, AutonomousRecoveryState, EMPTY_TOOL_COMPLETION_FAILURE,
+    EMPTY_TOOL_COMPLETION_NUDGE, FORCE_TEXT_RECOVERY_PROMPT,
 };
 use ironclaw_common::AppEvent;
 
@@ -391,6 +395,7 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
             worker: self,
             rx: tokio::sync::Mutex::new(rx),
             consecutive_rate_limits: std::sync::atomic::AtomicUsize::new(0),
+            recovery_state: tokio::sync::Mutex::new(AutonomousRecoveryState::default()),
         };
 
         let config = AgenticLoopConfig {
@@ -408,6 +413,9 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
             LoopOutcome::MaxIterations => {
                 self.mark_failed("Maximum iterations exceeded: job hit the iteration cap")
                     .await?;
+            }
+            LoopOutcome::Failure(reason) => {
+                self.mark_failed(&reason).await?;
             }
             LoopOutcome::Stopped => {
                 // Stop signal handled — nothing more to do
@@ -1109,6 +1117,7 @@ struct JobDelegate<'a> {
     rx: tokio::sync::Mutex<&'a mut mpsc::Receiver<WorkerMessage>>,
     /// Tracks consecutive rate-limit errors to fail fast instead of burning iterations.
     consecutive_rate_limits: std::sync::atomic::AtomicUsize,
+    recovery_state: tokio::sync::Mutex<AutonomousRecoveryState>,
 }
 
 impl<'a> JobDelegate<'a> {
@@ -1159,6 +1168,7 @@ impl<'a> JobDelegate<'a> {
             result: RespondResult::Text(String::new()),
             usage: crate::llm::TokenUsage::default(),
             finish_reason: crate::llm::FinishReason::Stop,
+            metadata: ResponseMetadata::default(),
         })
     }
 }
@@ -1250,8 +1260,21 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
         reason_ctx: &mut ReasoningContext,
         _iteration: usize,
     ) -> Option<LoopOutcome> {
-        // Refresh tool definitions so newly built tools become visible
-        reason_ctx.available_tools = self.worker.tools().tool_definitions().await;
+        let force_text_recovery = {
+            let mut recovery = self.recovery_state.lock().await;
+            recovery.begin_iteration()
+        };
+
+        if force_text_recovery {
+            tracing::warn!(
+                job_id = %self.worker.job_id,
+                "Switching to text-only recovery after malformed tool completions"
+            );
+            reason_ctx.available_tools.clear();
+        } else {
+            // Refresh tool definitions so newly built tools become visible
+            reason_ctx.available_tools = self.worker.tools().tool_definitions().await;
+        }
 
         // Claude 4.6 rejects assistant prefill; NEAR AI rejects any non-user-ending
         // conversation. Ensure the last message is user-role before calling the LLM.
@@ -1285,6 +1308,7 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
                     },
                     usage: crate::llm::TokenUsage::default(),
                     finish_reason: crate::llm::FinishReason::ToolUse,
+                    metadata: ResponseMetadata::default(),
                 });
             }
             Ok(_) => {} // empty selections, fall through
@@ -1328,8 +1352,59 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
     async fn handle_text_response(
         &self,
         text: &str,
+        metadata: ResponseMetadata,
         reason_ctx: &mut ReasoningContext,
     ) -> TextAction {
+        let action = {
+            let mut recovery = self.recovery_state.lock().await;
+            recovery.on_text_response(metadata, text)
+        };
+
+        match action {
+            AutonomousRecoveryAction::ToolModeNudge => {
+                tracing::warn!(
+                    job_id = %self.worker.job_id,
+                    "Malformed empty tool completion detected; retrying in tool mode"
+                );
+                self.worker.log_event(
+                    "status",
+                    serde_json::json!({
+                        "message": "Model returned an empty tool-completion response; retrying with a stronger tool-use nudge.",
+                    }),
+                );
+                reason_ctx
+                    .messages
+                    .push(ChatMessage::user(EMPTY_TOOL_COMPLETION_NUDGE));
+                return TextAction::Continue;
+            }
+            AutonomousRecoveryAction::ForceTextRecovery => {
+                tracing::warn!(
+                    job_id = %self.worker.job_id,
+                    "Repeated malformed tool completions detected; switching to text-only recovery"
+                );
+                self.worker.log_event(
+                    "status",
+                    serde_json::json!({
+                        "message": "Model returned repeated empty tool-completion responses; requesting a final status update without tools.",
+                    }),
+                );
+                reason_ctx
+                    .messages
+                    .push(ChatMessage::user(FORCE_TEXT_RECOVERY_PROMPT));
+                return TextAction::Continue;
+            }
+            AutonomousRecoveryAction::Fail => {
+                tracing::warn!(
+                    job_id = %self.worker.job_id,
+                    "Failing fast after repeated malformed autonomous responses"
+                );
+                return TextAction::Return(LoopOutcome::Failure(
+                    EMPTY_TOOL_COMPLETION_FAILURE.to_string(),
+                ));
+            }
+            AutonomousRecoveryAction::Continue => {}
+        }
+
         // Empty text from rate-limit backoff retry — skip processing and let the
         // loop proceed to the next iteration which will re-call the LLM.
         if text.is_empty() {
@@ -1368,6 +1443,11 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
         content: Option<String>,
         reason_ctx: &mut ReasoningContext,
     ) -> Result<Option<LoopOutcome>, crate::error::Error> {
+        {
+            let mut recovery = self.recovery_state.lock().await;
+            recovery.on_valid_tool_call();
+        }
+
         if let Some(ref text) = content {
             self.worker.log_event(
                 "message",
