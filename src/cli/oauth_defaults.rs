@@ -665,7 +665,11 @@ pub fn decode_hosted_oauth_state(state: &str) -> Result<DecodedHostedOAuthState,
                 "Legacy OAuth instance name contains invalid characters or exceeds max length ({LEGACY_STATE_MAX_LEN})"
             ));
         }
-        tracing::debug!(flow_id, instance_name, "Decoded legacy prefixed OAuth state");
+        tracing::debug!(
+            flow_id,
+            instance_name,
+            "Decoded legacy prefixed OAuth state"
+        );
         return Ok(DecodedHostedOAuthState {
             flow_id: flow_id.to_string(),
             instance_name: if instance_name.is_empty() {
@@ -1594,8 +1598,7 @@ mod tests {
     fn test_decode_hosted_oauth_state_accepts_legacy_formats() {
         use crate::cli::oauth_defaults::decode_hosted_oauth_state;
 
-        let decoded =
-            decode_hosted_oauth_state("kind-deer:abc12345").expect("legacy prefixed");
+        let decoded = decode_hosted_oauth_state("kind-deer:abc12345").expect("legacy prefixed");
         assert_eq!(decoded.flow_id, "abc12345");
         assert_eq!(decoded.instance_name.as_deref(), Some("kind-deer"));
         assert!(decoded.is_legacy);
@@ -1743,8 +1746,7 @@ mod tests {
     fn test_legacy_state_rejects_invalid_characters() {
         use crate::cli::oauth_defaults::decode_hosted_oauth_state;
 
-        let err =
-            decode_hosted_oauth_state("flow id with spaces!").expect_err("spaces in flow_id");
+        let err = decode_hosted_oauth_state("flow id with spaces!").expect_err("spaces in flow_id");
         assert!(
             err.contains("invalid characters"),
             "unexpected error: {err}"
@@ -1765,10 +1767,7 @@ mod tests {
 
         let err = decode_hosted_oauth_state("bad instance!:valid-flow-id-12345")
             .expect_err("invalid instance name");
-        assert!(
-            err.contains("instance name"),
-            "unexpected error: {err}"
-        );
+        assert!(err.contains("instance name"), "unexpected error: {err}");
     }
 
     /// Excessively long legacy flow IDs must be rejected (#1443).
