@@ -1821,7 +1821,13 @@ async fn chat_history_handler(
         let (messages, has_more) = store
             .list_conversation_messages_paginated(thread_id, before_cursor, limit as i64)
             .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            .map_err(|e| {
+                tracing::error!(error = %e, "DB error listing paginated messages");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Database error".to_string(),
+                )
+            })?;
 
         let oldest_timestamp = messages.first().map(|m| m.created_at.to_rfc3339());
         let turns = build_turns_from_db_messages(&messages);
@@ -1894,7 +1900,13 @@ async fn chat_history_handler(
         let (messages, has_more) = store
             .list_conversation_messages_paginated(thread_id, None, limit as i64)
             .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            .map_err(|e| {
+                tracing::error!(error = %e, "DB error listing messages");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Database error".to_string(),
+                )
+            })?;
 
         if !messages.is_empty() {
             let oldest_timestamp = messages.first().map(|m| m.created_at.to_rfc3339());
@@ -1937,7 +1949,13 @@ async fn chat_threads_handler(
         let assistant_id = store
             .get_or_create_assistant_conversation(&user.user_id, "gateway")
             .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            .map_err(|e| {
+                tracing::error!(error = %e, "DB error getting assistant conversation");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Database error".to_string(),
+                )
+            })?;
 
         match store
             .list_conversations_all_channels(&user.user_id, 50)
@@ -2159,7 +2177,13 @@ async fn extensions_list_handler(
     let installed = ext_mgr
         .list(None, false, &user.user_id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|e| {
+            tracing::error!(error = %e, "Error listing extensions");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Internal error".to_string(),
+            )
+        })?;
 
     let pairing_store = crate::pairing::PairingStore::new();
     let mut owner_bound_channels = std::collections::HashSet::new();
@@ -2574,7 +2598,13 @@ async fn extensions_setup_handler(
     let setup = ext_mgr
         .get_setup_schema(&name, &user.user_id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|e| {
+            tracing::error!(error = %e, "Error getting extension setup schema");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Internal error".to_string(),
+            )
+        })?;
 
     let kind = ext_mgr
         .list(None, false, &user.user_id)
@@ -2648,9 +2678,13 @@ async fn pairing_list_handler(
     Path(channel): Path<String>,
 ) -> Result<Json<PairingListResponse>, (StatusCode, String)> {
     let store = crate::pairing::PairingStore::new();
-    let requests = store
-        .list_pending(&channel)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let requests = store.list_pending(&channel).map_err(|e| {
+        tracing::error!(error = %e, "Error listing pairing requests");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Internal error".to_string(),
+        )
+    })?;
 
     let infos = requests
         .into_iter()
@@ -2706,17 +2740,26 @@ async fn routines_runs_handler(
     let routine = store
         .get_routine(routine_id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map_err(|e| {
+            tracing::error!(error = %e, "DB error getting routine");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Database error".to_string(),
+            )
+        })?
         .ok_or((StatusCode::NOT_FOUND, "Routine not found".to_string()))?;
 
     if routine.user_id != user.user_id {
         return Err((StatusCode::NOT_FOUND, "Routine not found".to_string()));
     }
 
-    let runs = store
-        .list_routine_runs(routine_id, 50)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let runs = store.list_routine_runs(routine_id, 50).await.map_err(|e| {
+        tracing::error!(error = %e, "DB error listing routine runs");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Database error".to_string(),
+        )
+    })?;
 
     let run_infos: Vec<RoutineRunInfo> = runs
         .iter()
