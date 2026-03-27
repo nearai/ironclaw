@@ -434,8 +434,7 @@ fn verification_result_payload(routine: &Routine, verification_reset: bool) -> V
             "The current routine configuration has already been verified with a successful run."
         } else {
             "The routine has been saved, but it has not been verified yet. Offer to test it now."
-        },
-        "verification_fingerprint": routine_verification_fingerprint(routine),
+        }
     })
 }
 
