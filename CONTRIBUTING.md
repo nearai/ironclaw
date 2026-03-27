@@ -57,7 +57,7 @@ cargo test --features integration                            # + PostgreSQL test
 
 ## Before You Open a PR
 
-Run the local validation needed to match CI expectations and confirm the binary still builds:
+Run the local validation checks required before requesting a review. These are stricter than the commands for iterative development:
 
 ```bash
 cargo fmt --all -- --check
