@@ -11,6 +11,7 @@
 //! - Managing OS service (`service install`, `service start`, `service stop`)
 //! - Listing configured channels (`channels list`)
 //! - Active health diagnostics (`doctor`)
+//! - Checking for core IronClaw updates (`update`)
 //! - Viewing gateway logs (`logs`)
 //! - Checking system health (`status`)
 
@@ -34,6 +35,7 @@ mod service;
 mod skills;
 pub mod status;
 mod tool;
+mod update;
 
 pub use channels::{ChannelsCommand, run_channels_command};
 pub use completion::Completion;
@@ -54,6 +56,7 @@ pub use service::{ServiceCommand, run_service_command};
 pub use skills::{SkillsCommand, run_skills_command};
 pub use status::run_status_command;
 pub use tool::{ToolCommand, run_tool_command};
+pub use update::run_update_command;
 
 use std::sync::Arc;
 
@@ -233,6 +236,13 @@ pub enum Command {
         long_about = "Checks dependencies and config validity.\nExample: ironclaw doctor"
     )]
     Doctor,
+
+    /// Check whether a newer IronClaw release is available
+    #[command(
+        about = "Check for a newer IronClaw release",
+        long_about = "Queries GitHub Releases for the latest stable IronClaw version and compares it to the running binary.\nExample: ironclaw update"
+    )]
+    Update,
 
     /// View and manage gateway logs
     #[command(

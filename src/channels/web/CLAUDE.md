@@ -109,6 +109,7 @@ Browser-facing HTTP API and SSE/WebSocket real-time streaming. Axum-based, singl
 | GET | `/api/pairing/{channel}` | List pending pairing requests |
 | POST | `/api/pairing/{channel}/approve` | Approve a pairing request |
 | GET | `/api/gateway/status` | Server uptime, connected clients, config |
+| GET | `/api/gateway/update` | Read-only latest stable IronClaw release check |
 | POST | `/v1/chat/completions` | OpenAI-compatible LLM proxy |
 | GET | `/v1/models` | OpenAI-compatible model list |
 
