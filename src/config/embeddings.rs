@@ -16,18 +16,20 @@ pub const DEFAULT_EMBEDDING_CACHE_SIZE: usize = 10_000;
 pub struct EmbeddingsConfig {
     /// Whether embeddings are enabled.
     pub enabled: bool,
-    /// Provider to use: "openai", "nearai", or "ollama"
+    /// Provider to use: "openai", "gemini", "nearai", or "ollama"
     pub provider: String,
     /// OpenAI API key (for OpenAI provider).
     pub openai_api_key: Option<SecretString>,
+    /// Gemini API key (for Gemini provider).
+    pub gemini_api_key: Option<SecretString>,
     /// Model to use for embeddings.
     pub model: String,
     /// Ollama base URL (for Ollama provider). Defaults to http://localhost:11434.
     pub ollama_base_url: String,
     /// Embedding vector dimension. Inferred from the model name when not set explicitly.
     pub dimension: usize,
-    /// Custom base URL for OpenAI-compatible embedding providers.
-    /// When set, overrides the default `https://api.openai.com`.
+    /// Custom base URL for remote embedding providers from `EMBEDDING_BASE_URL`.
+    /// Legacy field name retained for compatibility; prefer [`Self::embedding_base_url`].
     pub openai_base_url: Option<String>,
     /// Maximum entries in the embedding LRU cache (default 10,000).
     ///
@@ -45,6 +47,7 @@ impl Default for EmbeddingsConfig {
             enabled: false,
             provider: "openai".to_string(),
             openai_api_key: None,
+            gemini_api_key: None,
             model,
             ollama_base_url: "http://localhost:11434".to_string(),
             dimension,
@@ -62,6 +65,8 @@ pub(crate) fn default_dimension_for_model(model: &str) -> usize {
         "text-embedding-3-small" => 1536,
         "text-embedding-3-large" => 3072,
         "text-embedding-ada-002" => 1536,
+        "gemini-embedding-001" => 3072,
+        "gemini-embedding-2-preview" => 3072,
         "nomic-embed-text" => 768,
         "mxbai-embed-large" => 1024,
         "all-minilm" => 384,
@@ -72,6 +77,7 @@ pub(crate) fn default_dimension_for_model(model: &str) -> usize {
 impl EmbeddingsConfig {
     pub(crate) fn resolve(settings: &Settings) -> Result<Self, ConfigError> {
         let openai_api_key = optional_env("OPENAI_API_KEY")?.map(SecretString::from);
+        let gemini_api_key = optional_env("GEMINI_API_KEY")?.map(SecretString::from);
 
         let provider = optional_env("EMBEDDING_PROVIDER")?
             .unwrap_or_else(|| settings.embeddings.provider.clone());
@@ -88,11 +94,11 @@ impl EmbeddingsConfig {
 
         let enabled = parse_bool_env("EMBEDDING_ENABLED", settings.embeddings.enabled)?;
 
-        let openai_base_url = optional_env("EMBEDDING_BASE_URL")?;
+        let embedding_base_url = optional_env("EMBEDDING_BASE_URL")?;
 
         // Validate base URLs to prevent SSRF attacks (#1103).
         validate_base_url(&ollama_base_url, "OLLAMA_BASE_URL")?;
-        if let Some(ref url) = openai_base_url {
+        if let Some(ref url) = embedding_base_url {
             validate_base_url(url, "EMBEDDING_BASE_URL")?;
         }
 
@@ -109,10 +115,11 @@ impl EmbeddingsConfig {
             enabled,
             provider,
             openai_api_key,
+            gemini_api_key,
             model,
             ollama_base_url,
             dimension,
-            openai_base_url,
+            openai_base_url: embedding_base_url,
             cache_size,
         })
     }
@@ -120,6 +127,16 @@ impl EmbeddingsConfig {
     /// Get the OpenAI API key if configured.
     pub fn openai_api_key(&self) -> Option<&str> {
         self.openai_api_key.as_ref().map(|s| s.expose_secret())
+    }
+
+    /// Get the Gemini API key if configured.
+    pub fn gemini_api_key(&self) -> Option<&str> {
+        self.gemini_api_key.as_ref().map(|s| s.expose_secret())
+    }
+
+    /// Get the custom base URL for remote embedding providers.
+    pub fn embedding_base_url(&self) -> Option<&str> {
+        self.openai_base_url.as_deref()
     }
 
     /// Create the appropriate embedding provider based on configuration.
@@ -161,6 +178,34 @@ impl EmbeddingsConfig {
                         .with_model(&self.model, self.dimension),
                 ))
             }
+            "gemini" => {
+                if let Some(api_key) = self.gemini_api_key() {
+                    let mut provider = crate::workspace::GeminiEmbeddings::with_model(
+                        api_key,
+                        &self.model,
+                        self.dimension,
+                    );
+                    if let Some(base_url) = self.embedding_base_url() {
+                        tracing::debug!(
+                            "Embeddings enabled via Gemini (model: {}, base_url: {}, dim: {})",
+                            self.model,
+                            base_url,
+                            self.dimension,
+                        );
+                        provider = provider.with_base_url(base_url);
+                    } else {
+                        tracing::debug!(
+                            "Embeddings enabled via Gemini (model: {}, dim: {})",
+                            self.model,
+                            self.dimension,
+                        );
+                    }
+                    Some(Arc::new(provider))
+                } else {
+                    tracing::warn!("Embeddings configured but GEMINI_API_KEY not set");
+                    None
+                }
+            }
             _ => {
                 if let Some(api_key) = self.openai_api_key() {
                     let mut provider = crate::workspace::OpenAiEmbeddings::with_model(
@@ -168,7 +213,7 @@ impl EmbeddingsConfig {
                         &self.model,
                         self.dimension,
                     );
-                    if let Some(ref base_url) = self.openai_base_url {
+                    if let Some(base_url) = self.embedding_base_url() {
                         tracing::debug!(
                             "Embeddings enabled via OpenAI (model: {}, base_url: {}, dim: {})",
                             self.model,
@@ -208,6 +253,7 @@ mod tests {
             std::env::remove_var("EMBEDDING_PROVIDER");
             std::env::remove_var("EMBEDDING_MODEL");
             std::env::remove_var("OPENAI_API_KEY");
+            std::env::remove_var("GEMINI_API_KEY");
             std::env::remove_var("EMBEDDING_BASE_URL");
             std::env::remove_var("EMBEDDING_CACHE_SIZE");
         }
@@ -319,9 +365,47 @@ mod tests {
         let settings = Settings::default();
         let config = EmbeddingsConfig::resolve(&settings).expect("resolve should succeed");
         assert!(
-            config.openai_base_url.is_none(),
-            "openai_base_url should be None when EMBEDDING_BASE_URL is not set"
+            config.embedding_base_url().is_none(),
+            "embedding_base_url should be None when EMBEDDING_BASE_URL is not set"
         );
+    }
+
+    #[test]
+    fn embedding_base_url_accessor_uses_legacy_field() {
+        let mut config = EmbeddingsConfig::default();
+        config.openai_base_url = Some("https://8.8.8.8".to_string());
+
+        assert_eq!(config.embedding_base_url(), Some("https://8.8.8.8"));
+    }
+
+    #[test]
+    fn gemini_dimension_inferred_from_model() {
+        assert_eq!(default_dimension_for_model("gemini-embedding-001"), 3072);
+    }
+
+    #[test]
+    fn gemini_provider_uses_gemini_api_key() {
+        let config = EmbeddingsConfig {
+            enabled: true,
+            provider: "gemini".to_string(),
+            openai_api_key: None,
+            gemini_api_key: Some(SecretString::from(TEST_API_KEY.to_string())),
+            model: "gemini-embedding-001".to_string(),
+            ollama_base_url: "http://localhost:11434".to_string(),
+            dimension: 3072,
+            openai_base_url: None,
+            cache_size: DEFAULT_EMBEDDING_CACHE_SIZE,
+        };
+
+        let session = Arc::new(crate::llm::SessionManager::new(
+            crate::llm::SessionConfig::default(),
+        ));
+        let provider = config
+            .create_provider("https://cloud-api.near.ai", session)
+            .expect("provider should be created");
+
+        assert_eq!(provider.model_name(), "gemini-embedding-001");
+        assert_eq!(provider.dimension(), 3072);
     }
 
     #[test]

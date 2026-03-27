@@ -58,7 +58,8 @@ pub use document::{
 };
 pub use embedding_cache::{CachedEmbeddingProvider, EmbeddingCacheConfig};
 pub use embeddings::{
-    EmbeddingProvider, MockEmbeddings, NearAiEmbeddings, OllamaEmbeddings, OpenAiEmbeddings,
+    EmbeddingProvider, GeminiEmbeddings, MockEmbeddings, NearAiEmbeddings, OllamaEmbeddings,
+    OpenAiEmbeddings,
 };
 #[cfg(feature = "postgres")]
 pub use repository::Repository;
@@ -1808,7 +1809,7 @@ impl Workspace {
                         chunk.id,
                         e,
                         if matches!(e, embeddings::EmbeddingError::AuthFailed) {
-                            ". Check OPENAI_API_KEY or set EMBEDDING_PROVIDER=ollama for local embeddings"
+                            ". Check provider credentials (OPENAI_API_KEY, GEMINI_API_KEY, or NEAR AI session) or set EMBEDDING_PROVIDER=ollama for local embeddings"
                         } else {
                             ""
                         }
