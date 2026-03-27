@@ -15,6 +15,14 @@ use crate::channels::web::auth::AuthenticatedUser;
 use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::*;
 
+fn db_error(context: &str, e: impl std::fmt::Display) -> (StatusCode, String) {
+    tracing::error!(%e, context, "Database error in jobs handler");
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "Internal database error".to_string(),
+    )
+}
+
 pub async fn jobs_list_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
@@ -213,10 +221,7 @@ pub async fn jobs_detail_handler(
         }
         Ok(None) => {}
         Err(e) => {
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Database error: {}", e),
-            ));
+            return Err(db_error("jobs_handler", e));
         }
     }
 
@@ -257,10 +262,7 @@ pub async fn jobs_detail_handler(
             }))
         }
         Ok(None) => Err((StatusCode::NOT_FOUND, "Job not found".to_string())),
-        Err(e) => Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Database error: {}", e),
-        )),
+        Err(e) => Err(db_error("jobs_handler", e)),
     }
 }
 
@@ -304,10 +306,7 @@ pub async fn jobs_cancel_handler(
             }
             Ok(None) => {}
             Err(e) => {
-                return Err((
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("Database error: {}", e),
-                ));
+                return Err(db_error("jobs_handler", e));
             }
         }
     }
@@ -350,10 +349,7 @@ pub async fn jobs_cancel_handler(
             }
             Ok(None) => {}
             Err(e) => {
-                return Err((
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("Database error: {}", e),
-                ));
+                return Err(db_error("jobs_handler", e));
             }
         }
     }
@@ -471,10 +467,7 @@ pub async fn jobs_restart_handler(
         }
         Ok(None) => {}
         Err(e) => {
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Database error: {}", e),
-            ));
+            return Err(db_error("jobs_handler", e));
         }
     }
 
@@ -530,10 +523,7 @@ pub async fn jobs_restart_handler(
             })))
         }
         Ok(None) => Err((StatusCode::NOT_FOUND, "Job not found".to_string())),
-        Err(e) => Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Database error: {}", e),
-        )),
+        Err(e) => Err(db_error("jobs_handler", e)),
     }
 }
 
@@ -609,10 +599,7 @@ pub async fn jobs_prompt_handler(
                 return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
             }
             Err(e) => {
-                return Err((
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("Database error: {}", e),
-                ));
+                return Err(db_error("jobs_handler", e));
             }
         }
     }
@@ -667,10 +654,7 @@ pub async fn jobs_events_handler(
             return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
         }
         Err(e) => {
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Database error: {}", e),
-            ));
+            return Err(db_error("jobs_handler", e));
         }
     }
 
@@ -822,4 +806,18 @@ pub async fn job_files_read_handler(
         path: path.to_string(),
         content,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_db_error_does_not_leak_details() {
+        let (status, body) = db_error("test_context", "relation \"jobs\" does not exist");
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body, "Internal database error");
+        assert!(!body.contains("relation"));
+        assert!(!body.contains("does not exist"));
+    }
 }
