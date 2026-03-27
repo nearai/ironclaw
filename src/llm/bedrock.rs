@@ -98,7 +98,10 @@ impl LlmProvider for BedrockProvider {
         let mut messages = request.messages;
         crate::llm::provider::sanitize_tool_messages(&mut messages);
 
-        let (system_blocks, bedrock_messages) = convert_messages(&messages)?;
+        // Strip tool blocks from message history: `complete()` never sets
+        // toolConfig, so any ToolUse/ToolResult blocks would cause a Bedrock
+        // validation error.
+        let (system_blocks, bedrock_messages) = convert_messages(&messages, true)?;
 
         if bedrock_messages.is_empty() {
             return Err(LlmError::RequestFailed {
@@ -150,7 +153,9 @@ impl LlmProvider for BedrockProvider {
         let mut messages = request.messages;
         crate::llm::provider::sanitize_tool_messages(&mut messages);
 
-        let (system_blocks, bedrock_messages) = convert_messages(&messages)?;
+        let has_tool_config =
+            !request.tools.is_empty() && request.tool_choice.as_deref() != Some("none");
+        let (system_blocks, bedrock_messages) = convert_messages(&messages, !has_tool_config)?;
 
         if bedrock_messages.is_empty() {
             return Err(LlmError::RequestFailed {
@@ -279,8 +284,17 @@ fn build_inference_config(
 /// 2. Tool results (role=Tool) become `ContentBlock::ToolResult` inside User messages.
 /// 3. Consecutive tool results are merged into a single User message.
 /// 4. Bedrock requires strict user/assistant alternation.
+/// Convert messages, optionally stripping tool blocks to plain text.
+///
+/// When `strip_tool_blocks` is true, assistant tool-call blocks and tool-result
+/// messages are converted to plain text descriptions instead of native Bedrock
+/// `ToolUse`/`ToolResult` content blocks.  This is required when the request
+/// will not include a `toolConfig` (e.g. `complete()` or `tool_choice="none"`),
+/// because Bedrock's Converse API rejects tool blocks without a matching
+/// `toolConfig`.
 fn convert_messages(
     messages: &[crate::llm::provider::ChatMessage],
+    strip_tool_blocks: bool,
 ) -> Result<(Vec<SystemContentBlock>, Vec<Message>), LlmError> {
     use crate::llm::provider::Role;
 
@@ -315,18 +329,27 @@ fn convert_messages(
 
                 // Add tool use blocks if present
                 if let Some(ref tool_calls) = msg.tool_calls {
-                    for tc in tool_calls {
-                        let input_doc = json_to_document(&tc.arguments);
-                        let tool_use = ToolUseBlock::builder()
-                            .tool_use_id(&tc.id)
-                            .name(&tc.name)
-                            .input(input_doc)
-                            .build()
-                            .map_err(|e| LlmError::RequestFailed {
-                                provider: "bedrock".to_string(),
-                                reason: format!("Failed to build ToolUseBlock: {}", e),
-                            })?;
-                        content.push(ContentBlock::ToolUse(tool_use));
+                    if strip_tool_blocks {
+                        for tc in tool_calls {
+                            content.push(ContentBlock::Text(format!(
+                                "[Tool call: {} ({})]",
+                                tc.name, tc.arguments
+                            )));
+                        }
+                    } else {
+                        for tc in tool_calls {
+                            let input_doc = json_to_document(&tc.arguments);
+                            let tool_use = ToolUseBlock::builder()
+                                .tool_use_id(&tc.id)
+                                .name(&tc.name)
+                                .input(input_doc)
+                                .build()
+                                .map_err(|e| LlmError::RequestFailed {
+                                    provider: "bedrock".to_string(),
+                                    reason: format!("Failed to build ToolUseBlock: {}", e),
+                                })?;
+                            content.push(ContentBlock::ToolUse(tool_use));
+                        }
                     }
                 }
 
@@ -335,35 +358,48 @@ fn convert_messages(
                 }
             }
             Role::Tool => {
-                // Accumulate tool results — they'll be flushed as a User message
-                let tool_call_id = msg.tool_call_id.as_deref().unwrap_or("unknown");
+                if strip_tool_blocks {
+                    // Convert tool result to a plain-text user message
+                    let tool_name = msg.tool_call_id.as_deref().unwrap_or("unknown");
+                    let text = format!("[Tool result from {}]: {}", tool_name, msg.content);
+                    // Flush any pending tool results first
+                    flush_tool_results(&mut pending_tool_results, &mut bedrock_messages)?;
+                    push_message(
+                        &mut bedrock_messages,
+                        ConversationRole::User,
+                        vec![ContentBlock::Text(text)],
+                    )?;
+                } else {
+                    // Accumulate tool results — they'll be flushed as a User message
+                    let tool_call_id = msg.tool_call_id.as_deref().unwrap_or("unknown");
 
-                let status =
-                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&msg.content) {
-                        if json
-                            .get("is_error")
-                            .and_then(|v| v.as_bool())
-                            .unwrap_or(false)
-                        {
-                            Some(ToolResultStatus::Error)
+                    let status =
+                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&msg.content) {
+                            if json
+                                .get("is_error")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false)
+                            {
+                                Some(ToolResultStatus::Error)
+                            } else {
+                                Some(ToolResultStatus::Success)
+                            }
                         } else {
                             Some(ToolResultStatus::Success)
-                        }
-                    } else {
-                        Some(ToolResultStatus::Success)
-                    };
+                        };
 
-                let tool_result = ToolResultBlock::builder()
-                    .tool_use_id(tool_call_id)
-                    .content(ToolResultContentBlock::Text(msg.content.clone()))
-                    .set_status(status)
-                    .build()
-                    .map_err(|e| LlmError::RequestFailed {
-                        provider: "bedrock".to_string(),
-                        reason: format!("Failed to build ToolResultBlock: {}", e),
-                    })?;
+                    let tool_result = ToolResultBlock::builder()
+                        .tool_use_id(tool_call_id)
+                        .content(ToolResultContentBlock::Text(msg.content.clone()))
+                        .set_status(status)
+                        .build()
+                        .map_err(|e| LlmError::RequestFailed {
+                            provider: "bedrock".to_string(),
+                            reason: format!("Failed to build ToolResultBlock: {}", e),
+                        })?;
 
-                pending_tool_results.push(ContentBlock::ToolResult(tool_result));
+                    pending_tool_results.push(ContentBlock::ToolResult(tool_result));
+                }
             }
         }
     }
@@ -730,7 +766,7 @@ mod tests {
             ChatMessage::user("Hello"),
         ];
 
-        let (system, msgs) = convert_messages(&messages).unwrap();
+        let (system, msgs) = convert_messages(&messages, false).unwrap();
 
         assert_eq!(system.len(), 2);
         assert_eq!(msgs.len(), 1);
@@ -745,7 +781,7 @@ mod tests {
             ChatMessage::user("How are you?"),
         ];
 
-        let (system, msgs) = convert_messages(&messages).unwrap();
+        let (system, msgs) = convert_messages(&messages, false).unwrap();
 
         assert!(system.is_empty());
         assert_eq!(msgs.len(), 3);
@@ -776,7 +812,7 @@ mod tests {
             ChatMessage::tool_result("call_2", "time", "12:00"),
         ];
 
-        let (_, msgs) = convert_messages(&messages).unwrap();
+        let (_, msgs) = convert_messages(&messages, false).unwrap();
 
         // user, assistant (with tool_use), user (with merged tool_results)
         assert_eq!(msgs.len(), 3);
@@ -791,7 +827,7 @@ mod tests {
     fn test_convert_messages_consecutive_users_merge() {
         let messages = vec![ChatMessage::user("First"), ChatMessage::user("Second")];
 
-        let (_, msgs) = convert_messages(&messages).unwrap();
+        let (_, msgs) = convert_messages(&messages, false).unwrap();
 
         // Should merge into a single User message with 2 text blocks
         assert_eq!(msgs.len(), 1);
@@ -813,7 +849,7 @@ mod tests {
             ChatMessage::assistant_with_tool_calls(Some("Let me search.".to_string()), vec![tc]),
         ];
 
-        let (_, msgs) = convert_messages(&messages).unwrap();
+        let (_, msgs) = convert_messages(&messages, false).unwrap();
 
         assert_eq!(msgs.len(), 2);
         assert_eq!(*msgs[1].role(), ConversationRole::Assistant);
@@ -837,7 +873,7 @@ mod tests {
             ChatMessage::assistant_with_tool_calls(None, vec![tc]),
         ];
 
-        let (_, msgs) = convert_messages(&messages).unwrap();
+        let (_, msgs) = convert_messages(&messages, false).unwrap();
 
         assert_eq!(msgs.len(), 2);
         // Empty text should not add a Text block
@@ -926,7 +962,7 @@ mod tests {
             },
         ];
 
-        let (_, msgs) = convert_messages(&messages).unwrap();
+        let (_, msgs) = convert_messages(&messages, false).unwrap();
 
         // User + tool result (as user) = should merge into one User message
         assert_eq!(msgs.len(), 1);
@@ -1015,7 +1051,7 @@ mod tests {
             ChatMessage::user("Thanks! What about tomorrow?"),
         ];
 
-        let (system, msgs) = convert_messages(&messages).unwrap();
+        let (system, msgs) = convert_messages(&messages, false).unwrap();
 
         // 1 system block
         assert_eq!(system.len(), 1);
@@ -1067,7 +1103,7 @@ mod tests {
 
     #[test]
     fn test_convert_messages_empty_input() {
-        let (system, msgs) = convert_messages(&[]).unwrap();
+        let (system, msgs) = convert_messages(&[], false).unwrap();
         assert!(system.is_empty());
         assert!(msgs.is_empty());
     }
@@ -1075,7 +1111,7 @@ mod tests {
     #[test]
     fn test_convert_messages_system_only() {
         let messages = vec![ChatMessage::system("You are helpful.")];
-        let (system, msgs) = convert_messages(&messages).unwrap();
+        let (system, msgs) = convert_messages(&messages, false).unwrap();
         assert_eq!(system.len(), 1);
         assert!(msgs.is_empty());
     }
@@ -1152,7 +1188,58 @@ mod tests {
     #[test]
     fn test_empty_messages_returns_error() {
         let messages = vec![ChatMessage::system("System only, no user messages")];
-        let (_, bedrock_msgs) = convert_messages(&messages).unwrap();
+        let (_, bedrock_msgs) = convert_messages(&messages, false).unwrap();
         assert!(bedrock_msgs.is_empty());
+    }
+
+    /// Regression test for #1629: when strip_tool_blocks is true, tool calls
+    /// and tool results must be converted to plain text — no ToolUse or
+    /// ToolResult content blocks should remain.
+    #[test]
+    fn test_strip_tool_blocks_converts_to_text() {
+        let tc = crate::llm::provider::ToolCall {
+            id: "call_1".to_string(),
+            name: "echo".to_string(),
+            arguments: serde_json::json!({"text": "hi"}),
+            reasoning: None,
+        };
+
+        let messages = vec![
+            ChatMessage::user("Do things"),
+            ChatMessage::assistant_with_tool_calls(Some("Let me help.".to_string()), vec![tc]),
+            ChatMessage::tool_result("call_1", "echo", "hi back"),
+            ChatMessage::user("Thanks"),
+        ];
+
+        let (_, msgs) = convert_messages(&messages, true).unwrap();
+
+        // No content block should be ToolUse or ToolResult
+        for msg in &msgs {
+            for block in msg.content() {
+                assert!(
+                    !block.is_tool_use(),
+                    "Found ToolUse block when strip_tool_blocks=true"
+                );
+                assert!(
+                    !block.is_tool_result(),
+                    "Found ToolResult block when strip_tool_blocks=true"
+                );
+            }
+        }
+
+        // Assistant message should have 2 text blocks (original text + tool call description)
+        let assistant_msg = &msgs[1];
+        assert_eq!(*assistant_msg.role(), ConversationRole::Assistant);
+        assert_eq!(assistant_msg.content().len(), 2);
+        assert!(assistant_msg.content()[0].is_text());
+        assert!(assistant_msg.content()[1].is_text());
+
+        // Tool result (as text) and following "Thanks" are both User role,
+        // so push_message merges them into a single User message with 2 text blocks.
+        let user_msg = &msgs[2];
+        assert_eq!(*user_msg.role(), ConversationRole::User);
+        assert_eq!(user_msg.content().len(), 2);
+        assert!(user_msg.content()[0].is_text());
+        assert!(user_msg.content()[1].is_text());
     }
 }
