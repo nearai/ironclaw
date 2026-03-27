@@ -1078,7 +1078,12 @@ fn preflight_rejection_tool_message(
     tool_call_id: &str,
     error_msg: &str,
 ) -> (String, ChatMessage) {
-    let result: Result<String, &str> = Err(error_msg);
+    let result: Result<String, crate::error::Error> =
+        Err(crate::error::ToolError::ExecutionFailed {
+            name: tool_name.to_string(),
+            reason: error_msg.to_string(),
+        }
+        .into());
     crate::tools::execute::process_tool_result(safety, tool_name, tool_call_id, &result)
 }
 
@@ -2524,7 +2529,7 @@ mod tests {
             max_output_length: 1000,
             injection_check_enabled: true,
         });
-        let result: Result<String, _> = Err(err);
+        let result: Result<String, crate::error::Error> = Err(err.into());
         let (formatted, message) =
             crate::tools::execute::process_tool_result(&safety, tool_name, "call_1", &result);
 

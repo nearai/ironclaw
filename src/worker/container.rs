@@ -492,8 +492,12 @@ impl LoopDelegate for ContainerDelegate {
                 *self.last_output.lock().await = output.clone();
             }
 
-            // Use shared result processing
-            let (_, message) = process_tool_result(&self.safety, &tc.name, &tc.id, &result);
+            let typed_result: Result<String, crate::error::Error> =
+                result.map_err(|e| crate::error::ToolError::ExecutionFailed {
+                    name: tc.name.clone(),
+                    reason: e,
+                }.into());
+            let (_, message) = process_tool_result(&self.safety, &tc.name, &tc.id, &typed_result);
             reason_ctx.messages.push(message);
         }
 
