@@ -1376,9 +1376,18 @@ fn overlaps_code_region(start: usize, end: usize, regions: &[CodeRegion]) -> boo
 }
 
 /// Return the byte bounds of the line containing `pos`, excluding the trailing newline.
+///
+/// `pos` is clamped to `text.len()` and adjusted to the nearest char boundary,
+/// so callers need not guarantee that `pos` falls on a boundary.
 fn line_bounds(text: &str, pos: usize) -> (usize, usize) {
-    let start = text[..pos].rfind('\n').map_or(0, |idx| idx + 1);
-    let end = text[pos..].find('\n').map_or(text.len(), |idx| pos + idx);
+    let pos = pos.min(text.len());
+    // Walk backward to find a valid char boundary (at most 3 bytes for UTF-8).
+    let mut safe = pos;
+    while safe > 0 && !text.is_char_boundary(safe) {
+        safe -= 1;
+    }
+    let start = text[..safe].rfind('\n').map_or(0, |idx| idx + 1);
+    let end = text[safe..].find('\n').map_or(text.len(), |idx| safe + idx);
     (start, end)
 }
 
@@ -2300,6 +2309,51 @@ That's my plan."#;
         assert_eq!(regions.len(), 1);
         // Unclosed fence extends to EOF
         assert_eq!(regions[0].end, text.len());
+    }
+
+    // ---- line_bounds UTF-8 safety (issue #1669) ----
+
+    #[test]
+    fn test_line_bounds_ascii() {
+        let text = "hello\nworld\n";
+        assert_eq!(line_bounds(text, 0), (0, 5));
+        assert_eq!(line_bounds(text, 6), (6, 11));
+    }
+
+    #[test]
+    fn test_line_bounds_at_text_len() {
+        let text = "abc";
+        assert_eq!(line_bounds(text, 3), (0, 3));
+    }
+
+    #[test]
+    fn test_line_bounds_mid_multibyte_char() {
+        // '🔥' is 4 bytes (F0 9F 94 A5). Passing pos=1 lands inside the char.
+        // line_bounds must not panic — it should snap to a valid boundary.
+        let text = "🔥\n<tool_call>";
+        // All mid-char positions should snap back to byte 0 (start of '🔥'),
+        // so line bounds cover the first line: "🔥" = bytes 0..4.
+        assert_eq!(line_bounds(text, 1), (0, 4)); // would panic before fix
+        assert_eq!(line_bounds(text, 2), (0, 4));
+        assert_eq!(line_bounds(text, 3), (0, 4));
+    }
+
+    #[test]
+    fn test_line_bounds_emoji_before_newline() {
+        // 'Result: 🔥\n<tool_call>' — end.saturating_sub(1) from the \n position
+        // should not panic even with multi-byte chars on the same line.
+        let text = "Result: 🔥\n<tool_call>";
+        let newline_pos = text.find('\n').unwrap();
+        // saturating_sub(1) lands inside '🔥' (byte 11 → 10, but char ends at 12).
+        // Snaps back to byte 8 (start of '🔥'), line covers "Result: 🔥" = bytes 0..12.
+        assert_eq!(line_bounds(text, newline_pos.saturating_sub(1)), (0, 12));
+    }
+
+    #[test]
+    fn test_line_bounds_pos_beyond_len() {
+        let text = "abc";
+        // pos > text.len() should be clamped, not panic
+        assert_eq!(line_bounds(text, 100), (0, 3));
     }
 
     // ---- recover_tool_calls_from_content tests ----
