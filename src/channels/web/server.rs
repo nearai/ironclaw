@@ -2240,7 +2240,7 @@ async fn extensions_activate_handler(
     AuthenticatedUser(user): AuthenticatedUser,
     Path(name): Path<String>,
 ) -> Result<Json<ActionResponse>, (StatusCode, String)> {
-    tracing::debug!(
+    tracing::trace!(
         extension = %name,
         user_id = %user.user_id,
         "extensions_activate_handler: received activate request"
@@ -2274,7 +2274,7 @@ async fn extensions_activate_handler(
                 crate::extensions::ExtensionError::AuthRequired
             );
 
-            tracing::debug!(
+            tracing::trace!(
                 extension = %name,
                 error = %activate_err,
                 needs_auth = needs_auth,
@@ -2288,7 +2288,7 @@ async fn extensions_activate_handler(
             // Activation failed due to auth; try authenticating first.
             match ext_mgr.auth(&name, &user.user_id).await {
                 Ok(auth_result) if auth_result.is_authenticated() => {
-                    tracing::debug!(
+                    tracing::trace!(
                         extension = %name,
                         "extensions_activate_handler: auth reports authenticated, retrying activate"
                     );

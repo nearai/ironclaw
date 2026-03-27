@@ -690,7 +690,7 @@ impl ExtensionManager {
                                 && parsed.username().is_empty()
                                 && parsed.password().is_none() =>
                         {
-                            tracing::debug!(
+                            tracing::trace!(
                                 extension = %name,
                                 relay_url_host = %parsed.host_str().unwrap_or("unknown"),
                                 "effective_relay_url: using per-extension override from settings"
@@ -968,7 +968,7 @@ impl ExtensionManager {
             match store.get_setting(&self.user_id, &key).await {
                 Ok(Some(v)) => {
                     let has_id = v.as_str().is_some_and(|s| !s.is_empty());
-                    tracing::debug!(
+                    tracing::trace!(
                         extension = %name,
                         has_team_id = has_id,
                         "has_stored_team_id: checked store"
@@ -976,7 +976,7 @@ impl ExtensionManager {
                     return has_id;
                 }
                 Ok(None) => {
-                    tracing::debug!(
+                    tracing::trace!(
                         extension = %name,
                         "has_stored_team_id: no team_id setting found"
                     );
@@ -4292,7 +4292,7 @@ impl ExtensionManager {
         name: &str,
         user_id: &str,
     ) -> Result<AuthResult, ExtensionError> {
-        tracing::debug!(
+        tracing::trace!(
             extension = %name,
             user_id = %user_id,
             "auth_channel_relay: starting"
@@ -4306,14 +4306,14 @@ impl ExtensionManager {
         // to "authenticated" even when no team_id exists, preventing the OAuth
         // flow from being offered to the user.
         if self.has_stored_team_id(name, user_id).await {
-            tracing::debug!(
+            tracing::trace!(
                 extension = %name,
                 "auth_channel_relay: already authenticated (team_id in store)"
             );
             return Ok(AuthResult::authenticated(name, ExtensionKind::ChannelRelay));
         }
 
-        tracing::debug!(
+        tracing::trace!(
             extension = %name,
             "auth_channel_relay: no stored team_id, initiating OAuth"
         );
@@ -4335,7 +4335,7 @@ impl ExtensionManager {
             .await
             .unwrap_or_else(|| relay_config.url.clone());
 
-        tracing::debug!(
+        tracing::trace!(
             extension = %name,
             relay_url = %effective_url,
             "auth_channel_relay: creating relay client for OAuth"
@@ -4377,7 +4377,7 @@ impl ExtensionManager {
 
         // Channel-relay derives all URLs from trusted instance_url in chat-api.
         // We only pass the nonce for CSRF validation on the callback.
-        tracing::debug!(
+        tracing::trace!(
             extension = %name,
             relay_url = %effective_url,
             "auth_channel_relay: calling initiate_oauth on channel-relay"
@@ -4413,7 +4413,7 @@ impl ExtensionManager {
         name: &str,
         user_id: &str,
     ) -> Result<ActivateResult, ExtensionError> {
-        tracing::debug!(
+        tracing::trace!(
             extension = %name,
             user_id = %user_id,
             "activate_channel_relay: starting"
@@ -4426,7 +4426,7 @@ impl ExtensionManager {
             match store.get_setting(user_id, &team_id_key).await {
                 Ok(Some(v)) => {
                     let id = v.as_str().map(|s| s.to_string()).unwrap_or_default();
-                    tracing::debug!(
+                    tracing::trace!(
                         extension = %name,
                         team_id_empty = id.is_empty(),
                         "activate_channel_relay: loaded team_id from store"
@@ -4434,7 +4434,7 @@ impl ExtensionManager {
                     id
                 }
                 Ok(None) => {
-                    tracing::debug!(
+                    tracing::trace!(
                         extension = %name,
                         setting_key = %team_id_key,
                         "activate_channel_relay: no team_id in settings store"
@@ -4451,7 +4451,7 @@ impl ExtensionManager {
                 }
             }
         } else {
-            tracing::debug!(
+            tracing::trace!(
                 extension = %name,
                 "activate_channel_relay: no settings store available"
             );
@@ -4459,7 +4459,7 @@ impl ExtensionManager {
         };
 
         if team_id.is_empty() {
-            tracing::debug!(
+            tracing::trace!(
                 extension = %name,
                 "activate_channel_relay: team_id is empty, returning AuthRequired"
             );
@@ -4482,7 +4482,7 @@ impl ExtensionManager {
             .await
             .unwrap_or_else(|| relay_config.url.clone());
 
-        tracing::debug!(
+        tracing::trace!(
             extension = %name,
             relay_url = %effective_url,
             "activate_channel_relay: relay config loaded"
@@ -4507,7 +4507,7 @@ impl ExtensionManager {
 
         // Fetch the per-instance signing secret from channel-relay.
         // This must succeed — there is no fallback.
-        tracing::debug!(
+        tracing::trace!(
             extension = %name,
             relay_url = %effective_url,
             "activate_channel_relay: fetching signing secret from channel-relay"
