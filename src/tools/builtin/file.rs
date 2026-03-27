@@ -477,6 +477,11 @@ async fn list_dir_inner(
         if recursive && is_dir && current_depth < max_depth {
             // Skip sensitive credential directories during recursive traversal
             if is_sensitive_path(&entry_path) {
+                // Replace the last entry with an annotated version so the user
+                // knows the directory was intentionally skipped.
+                if let Some(last) = entries.last_mut() {
+                    *last = format!("{} [sensitive - access blocked]", relative);
+                }
                 continue;
             }
 
