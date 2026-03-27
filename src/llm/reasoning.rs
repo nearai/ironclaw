@@ -1384,10 +1384,7 @@ fn line_bounds(text: &str, pos: usize) -> (usize, usize) {
     let pos = pos.min(text.len());
     // Walk backward to a valid char boundary to avoid slicing inside a
     // multi-byte UTF-8 sequence.
-    let mut safe_pos = pos;
-    while safe_pos > 0 && !text.is_char_boundary(safe_pos) {
-        safe_pos -= 1;
-    }
+    let safe_pos = (0..=pos).rev().find(|&i| text.is_char_boundary(i)).unwrap_or(0);
     let start = text[..safe_pos].rfind('\n').map_or(0, |idx| idx + 1);
     let end = text[safe_pos..].find('\n').map_or(text.len(), |idx| safe_pos + idx);
     (start, end)
