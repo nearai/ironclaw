@@ -124,8 +124,10 @@ impl WasmToolLoader {
         let wasm_bytes = fs::read(wasm_path).await?;
 
         // Read capabilities (optional) and extract OAuth refresh config
-        // and tool description. Parameter schema is auto-derived from the
-        // WASM module's schema() export (see WasmToolSchemas::compact_schema).
+        // and tool description. Parameter schema is NOT read from the
+        // capabilities file — it is auto-derived from the WASM module's
+        // schema() export at prepare time (see WasmToolSchemas::compact_schema),
+        // so no schema override is needed here.
         let (capabilities, oauth_refresh, description) = if let Some(cap_path) = capabilities_path {
             if cap_path.exists() {
                 let cap_bytes = fs::read(cap_path).await?;

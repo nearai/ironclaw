@@ -752,14 +752,31 @@ impl WasmToolSchemas {
         }
 
         let kept: serde_json::Map<String, serde_json::Value> = all_properties
-            .into_iter()
+            .iter()
             .filter(|(name, prop)| {
-                required.contains(name) || prop.get("enum").is_some() || prop.get("const").is_some()
+                required.contains(name.as_str())
+                    || prop.get("enum").is_some()
+                    || prop.get("const").is_some()
             })
+            .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
 
         if kept.is_empty() {
-            return Self::permissive_schema();
+            // When the schema has typed properties but none survived the
+            // required/enum filter, include all typed properties so the LLM
+            // sees meaningful parameter hints instead of permissive `{}`.
+            let typed: serde_json::Map<String, serde_json::Value> = all_properties
+                .into_iter()
+                .filter(|(_, prop)| schema_is_typed_property(prop))
+                .collect();
+            if typed.is_empty() {
+                return Self::permissive_schema();
+            }
+            return serde_json::json!({
+                "type": "object",
+                "properties": typed,
+                "additionalProperties": true,
+            });
         }
 
         let kept_required: Vec<serde_json::Value> = required
@@ -1984,6 +2001,58 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn test_typed_schema_without_required_is_advertised() {
+        // Regression test for #1303: when a WASM tool exports a typed schema
+        // with no required/enum fields, the advertised schema should still
+        // contain the typed properties instead of falling back to permissive {}.
+        let discovery_schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "query": { "type": "string" },
+                "limit": { "type": "integer" }
+            }
+        });
+
+        let runtime = Arc::new(WasmToolRuntime::new(WasmRuntimeConfig::for_testing()).unwrap());
+        let prepared = runtime
+            .prepare("typed_search", b"\0asm\x0d\0\x01\0", None)
+            .await
+            .unwrap();
+        let mut wrapper =
+            super::WasmToolWrapper::new(Arc::clone(&runtime), prepared, Capabilities::default());
+        wrapper.schemas = super::WasmToolSchemas::new(discovery_schema.clone());
+        wrapper.description = "Typed search tool".to_string();
+
+        let advertised = wrapper.parameters_schema();
+        let props = advertised["properties"].as_object().unwrap();
+
+        // Both typed properties should be preserved in the advertised schema
+        assert!(
+            props.contains_key("query"),
+            "advertised schema should contain 'query' property"
+        );
+        assert!(
+            props.contains_key("limit"),
+            "advertised schema should contain 'limit' property"
+        );
+        assert_eq!(props.len(), 2);
+
+        // The schema should NOT be permissive
+        assert!(
+            !super::WasmToolSchemas::is_permissive_schema(&advertised),
+            "advertised schema should not be permissive when typed properties exist"
+        );
+
+        // No tool_info hint needed since typed properties are visible
+        let schema = wrapper.schema();
+        assert!(
+            !schema.description.contains("tool_info"),
+            "description should not contain tool_info hint: {}",
+            schema.description
+        );
+    }
+
     #[test]
     fn test_compact_schema_keeps_required_and_enum_properties() {
         let schema = serde_json::json!({
@@ -2021,13 +2090,31 @@ mod tests {
     }
 
     #[test]
-    fn test_compact_schema_falls_back_to_permissive_when_empty() {
-        // No required, no enum → permissive fallback
+    fn test_compact_schema_preserves_typed_properties_when_no_required() {
+        // No required, no enum, but typed properties → keep all typed props
         let schema = serde_json::json!({
             "type": "object",
             "properties": {
                 "query": { "type": "string" },
                 "limit": { "type": "integer" }
+            }
+        });
+
+        let compacted = super::WasmToolSchemas::compact_schema(&schema);
+        let props = compacted["properties"].as_object().unwrap();
+        assert_eq!(props.len(), 2);
+        assert!(props.contains_key("query"));
+        assert!(props.contains_key("limit"));
+        assert_eq!(compacted["additionalProperties"], true);
+    }
+
+    #[test]
+    fn test_compact_schema_falls_back_to_permissive_when_no_typed_properties() {
+        // Properties with no type info → permissive fallback
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "data": {}
             }
         });
 
