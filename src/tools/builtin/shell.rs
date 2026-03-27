@@ -874,23 +874,25 @@ impl Tool for ShellTool {
             .and_then(|v| v.as_str())
             .map(str::trim)
             .filter(|s| !s.is_empty());
+
         let timeout = match params.get("timeout") {
+            None => None,
             Some(v) if v.is_null() => None,
             Some(v) => {
-                if let Some(n) = v.as_u64() {
-                    Some(n)
-                } else if let Some(s) = v.as_str() {
-                    let s = s.trim();
-                    if s.is_empty() {
-                        None
-                    } else {
-                        s.parse::<u64>().ok()
-                    }
-                } else {
-                    None
+                let n = v.as_u64().ok_or_else(|| {
+                    ToolError::InvalidParameters(
+                        "timeout must be an integer number of seconds".to_string(),
+                    )
+                })?;
+
+                if n == 0 {
+                    return Err(ToolError::InvalidParameters(
+                        "timeout must be greater than 0".to_string(),
+                    ));
                 }
+
+                Some(n)
             }
-            None => None,
         };
 
         let start = std::time::Instant::now();
