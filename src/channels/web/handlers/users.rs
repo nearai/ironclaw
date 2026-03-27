@@ -13,7 +13,18 @@ use uuid::Uuid;
 
 use crate::channels::web::auth::{AdminUser, AuthenticatedUser};
 use crate::channels::web::server::GatewayState;
-use crate::db::UserRecord;
+use crate::db::{Database, UserRecord};
+
+/// Check whether `user_id` is the sole active admin. Returns true if demoting,
+/// suspending, or deleting this user would leave zero admins.
+async fn is_last_admin(store: &dyn Database, user_id: &str) -> Result<bool, String> {
+    let users = store
+        .list_users(Some("active"))
+        .await
+        .map_err(|e| e.to_string())?;
+    let active_admins: Vec<_> = users.iter().filter(|u| u.role == "admin").collect();
+    Ok(active_admins.len() == 1 && active_admins[0].id == user_id)
+}
 
 /// POST /api/admin/users — create a new user.
 pub async fn users_create_handler(
@@ -235,6 +246,18 @@ pub async fn users_update_handler(
             ));
         }
         if role != existing.role {
+            // Prevent demoting the last admin.
+            if existing.role == "admin"
+                && role == "member"
+                && is_last_admin(store.as_ref(), &id)
+                    .await
+                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
+            {
+                return Err((
+                    StatusCode::CONFLICT,
+                    "Cannot demote the last admin".to_string(),
+                ));
+            }
             store
                 .update_user_role(&id, role)
                 .await
@@ -287,6 +310,17 @@ pub async fn users_suspend_handler(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "User not found".to_string()))?;
+
+    // Prevent suspending the last admin.
+    if is_last_admin(store.as_ref(), &id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
+    {
+        return Err((
+            StatusCode::CONFLICT,
+            "Cannot suspend the last admin".to_string(),
+        ));
+    }
 
     store
         .update_user_status(&id, "suspended")
@@ -348,6 +382,17 @@ pub async fn users_delete_handler(
         StatusCode::SERVICE_UNAVAILABLE,
         "Database not available".to_string(),
     ))?;
+
+    // Prevent deleting the last admin.
+    if is_last_admin(store.as_ref(), &id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
+    {
+        return Err((
+            StatusCode::CONFLICT,
+            "Cannot delete the last admin".to_string(),
+        ));
+    }
 
     let deleted = store
         .delete_user(&id)

@@ -651,8 +651,10 @@ pub async fn start_server(
                     "unknown panic".to_string()
                 };
                 // Truncate panic payload to avoid leaking sensitive data into logs.
+                // Use floor_char_boundary to avoid panicking on multi-byte UTF-8.
                 let safe_detail = if detail.len() > 200 {
-                    format!("{}…", &detail[..200])
+                    let end = detail.floor_char_boundary(200);
+                    format!("{}…", &detail[..end])
                 } else {
                     detail
                 };

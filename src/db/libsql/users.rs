@@ -480,15 +480,17 @@ impl UserStore for LibSqlBackend {
         let mut rows = if let Some(uid) = user_id {
             conn.query(
                 r#"
-                SELECT j.user_id, l.model, COUNT(*) as call_count,
+                SELECT COALESCE(j.user_id, c.user_id) as user_id,
+                       l.model, COUNT(*) as call_count,
                        COALESCE(SUM(l.input_tokens), 0) as input_tokens,
                        COALESCE(SUM(l.output_tokens), 0) as output_tokens,
                        CAST(COALESCE(SUM(l.cost), 0) AS TEXT) as total_cost
                 FROM llm_calls l
-                JOIN agent_jobs j ON l.job_id = j.id
+                LEFT JOIN agent_jobs j ON l.job_id = j.id
+                LEFT JOIN conversations c ON l.conversation_id = c.id
                 WHERE l.created_at >= ?1
-                  AND j.user_id = ?2
-                GROUP BY j.user_id, l.model
+                  AND COALESCE(j.user_id, c.user_id) = ?2
+                GROUP BY COALESCE(j.user_id, c.user_id), l.model
                 ORDER BY total_cost DESC
                 "#,
                 params![since_str, uid],
@@ -498,14 +500,16 @@ impl UserStore for LibSqlBackend {
         } else {
             conn.query(
                 r#"
-                SELECT j.user_id, l.model, COUNT(*) as call_count,
+                SELECT COALESCE(j.user_id, c.user_id) as user_id,
+                       l.model, COUNT(*) as call_count,
                        COALESCE(SUM(l.input_tokens), 0) as input_tokens,
                        COALESCE(SUM(l.output_tokens), 0) as output_tokens,
                        CAST(COALESCE(SUM(l.cost), 0) AS TEXT) as total_cost
                 FROM llm_calls l
-                JOIN agent_jobs j ON l.job_id = j.id
+                LEFT JOIN agent_jobs j ON l.job_id = j.id
+                LEFT JOIN conversations c ON l.conversation_id = c.id
                 WHERE l.created_at >= ?1
-                GROUP BY j.user_id, l.model
+                GROUP BY COALESCE(j.user_id, c.user_id), l.model
                 ORDER BY total_cost DESC
                 "#,
                 params![since_str],
