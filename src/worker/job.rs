@@ -1176,6 +1176,17 @@ impl<'a> JobDelegate<'a> {
         })
     }
 
+    /// Mark the job as completed, logging a warning on failure.
+    async fn mark_completed_or_warn(&self, context: &str) {
+        if let Err(e) = self.worker.mark_completed().await {
+            tracing::warn!(
+                job_id = %self.worker.job_id,
+                error = %e,
+                "Failed to mark job completed ({context})"
+            );
+        }
+    }
+
     /// If a substantive text response was already produced and the error
     /// indicates the LLM simply returned nothing, treat it as successful
     /// completion rather than a fatal failure.
@@ -1204,16 +1215,11 @@ impl<'a> JobDelegate<'a> {
             error = %error,
             "{context} empty response after text output — treating as completion"
         );
-        if let Err(e) = self.worker.mark_completed().await {
-            tracing::warn!(
-                job_id = %self.worker.job_id,
-                error = %e,
-                "Failed to mark job completed after {context} empty response"
-            );
-        }
+        self.mark_completed_or_warn(context).await;
         Some(crate::llm::RespondOutput {
             result: RespondResult::Text(String::new()),
             usage: crate::llm::TokenUsage::default(),
+            finish_reason: crate::llm::FinishReason::Stop,
         })
     }
 }
@@ -1407,13 +1413,7 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
                     job_id = %self.worker.job_id,
                     "Empty response after text output — treating as completion"
                 );
-                if let Err(e) = self.worker.mark_completed().await {
-                    tracing::warn!(
-                        job_id = %self.worker.job_id,
-                        error = %e,
-                        "Failed to mark job completed after empty text response"
-                    );
-                }
+                self.mark_completed_or_warn("empty text response").await;
                 return TextAction::Return(LoopOutcome::Response(String::new()));
             }
             // No prior text response — this is likely a rate-limit backoff retry.
