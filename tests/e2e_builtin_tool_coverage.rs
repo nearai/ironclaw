@@ -13,7 +13,7 @@ mod tests {
     use ironclaw::agent::routine::{RoutineAction, Trigger};
 
     use crate::support::test_rig::TestRigBuilder;
-    use crate::support::trace_llm::LlmTrace;
+    use crate::support::trace_llm::{LlmTrace, TraceResponse, TraceStep, TraceToolCall, TraceTurn};
 
     // -----------------------------------------------------------------------
     // Test 1: time_parse_and_diff
@@ -834,6 +834,112 @@ mod tests {
             time_json["schema"]["properties"].is_object(),
             "schema should have properties: {:?}",
             time_json
+        );
+
+        rig.shutdown();
+    }
+
+    #[tokio::test]
+    async fn tool_info_clarifies_message_and_channel_setup_roles() {
+        let trace = LlmTrace::new(
+            "test-tool-info-channel-message-clarity",
+            vec![TraceTurn {
+                user_input: "How do message and channels differ?".to_string(),
+                steps: vec![
+                    TraceStep {
+                        request_hint: None,
+                        response: TraceResponse::ToolCalls {
+                            tool_calls: vec![TraceToolCall {
+                                id: "call_tool_info_message".to_string(),
+                                name: "tool_info".to_string(),
+                                arguments: serde_json::json!({"name": "message"}),
+                            }],
+                            input_tokens: 100,
+                            output_tokens: 20,
+                        },
+                        expected_tool_results: Vec::new(),
+                    },
+                    TraceStep {
+                        request_hint: None,
+                        response: TraceResponse::ToolCalls {
+                            tool_calls: vec![TraceToolCall {
+                                id: "call_tool_info_tool_search".to_string(),
+                                name: "tool_info".to_string(),
+                                arguments: serde_json::json!({"name": "tool_search"}),
+                            }],
+                            input_tokens: 140,
+                            output_tokens: 20,
+                        },
+                        expected_tool_results: Vec::new(),
+                    },
+                    TraceStep {
+                        request_hint: None,
+                        response: TraceResponse::Text {
+                            content: "I checked both tool descriptions.".to_string(),
+                            input_tokens: 220,
+                            output_tokens: 30,
+                        },
+                        expected_tool_results: Vec::new(),
+                    },
+                ],
+                expects: Default::default(),
+            }],
+        );
+
+        let rig = TestRigBuilder::new()
+            .with_trace(trace.clone())
+            .with_auto_approve_tools(true)
+            .build()
+            .await;
+
+        rig.send_message("How do message and channels differ?")
+            .await;
+        let responses = rig.wait_for_responses(1, Duration::from_secs(15)).await;
+
+        rig.verify_trace_expects(&trace, &responses);
+
+        let results = rig.tool_results();
+        let info_results: Vec<_> = results.iter().filter(|(n, _)| n == "tool_info").collect();
+        assert_eq!(info_results.len(), 2, "Expected two tool_info results");
+
+        let info_json: Vec<serde_json::Value> = info_results
+            .iter()
+            .map(|(_, preview)| {
+                serde_json::from_str(preview)
+                    .expect("tool_info result preview should be valid JSON")
+            })
+            .collect();
+
+        let message_json = info_json
+            .iter()
+            .find(|info| info["name"] == "message")
+            .expect("tool_info result should contain 'message'");
+        let message_description = message_json["description"]
+            .as_str()
+            .expect("message description should be a string");
+        assert!(
+            message_description.contains("Use normal assistant output to reply"),
+            "message description should distinguish normal replies: {message_description}"
+        );
+        assert!(
+            message_description.contains("proactive notifications"),
+            "message description should describe proactive sends: {message_description}"
+        );
+
+        let tool_search_json = info_json
+            .iter()
+            .find(|info| info["name"] == "tool_search")
+            .expect("tool_info result should contain 'tool_search'");
+        let tool_search_description = tool_search_json["description"]
+            .as_str()
+            .expect("tool_search description should be a string");
+        assert!(
+            tool_search_description.contains("Install and activate channels here"),
+            "tool_search description should describe setup/activation: {tool_search_description}"
+        );
+        assert!(
+            tool_search_description.contains("use the `message` tool for proactive outbound sends"),
+            "tool_search description should point outbound sends to message: {tool_search_description}"
         );
 
         rig.shutdown();

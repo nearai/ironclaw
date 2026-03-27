@@ -1017,8 +1017,10 @@ Example:
 
         "\n\n## Extensions\n\
          You can search, install, and activate extensions to add new capabilities:\n\
-         - **Channels** (Telegram, Slack, Discord) — messaging integrations. \
-         When users ask about connecting a messaging platform, search for it as a channel.\n\
+         - **Channels** (Telegram, Slack, Discord) — connect messaging platforms so users can \
+         talk to you there. When users ask about connecting a messaging platform, search for it \
+         as a channel. Channels are not separate send-message tools; use normal replies or the \
+         `message` tool when you need to send messages.\n\
          - **Tools** — sandboxed functions that extend your abilities.\n\
          - **MCP servers** — external API integrations via the Model Context Protocol.\n\n\
          Use `tool_search` to find extensions by name. Refer to them by their kind \
@@ -1059,15 +1061,16 @@ Example:
 
         let message_tool_hint = "\
 \n\n## Proactive Messaging\n\
+For ordinary replies in the current conversation, respond normally without calling `message`.\n\
 Send messages via Signal, Telegram, Slack, or other connected channels:\n\
 - `content` (required): the message text\n\
 - `attachments` (optional): array of file paths to send\n\
 - `channel` (optional): which channel to use (signal, telegram, slack, etc.)\n\
 - `target` (optional): who to send to (phone number, group ID, etc.)\n\
-\nOmit both `channel` and `target` to send to the current conversation.\n\
+\nOmit both `channel` and `target` for a proactive follow-up in the current conversation.\n\
 Examples (tool calls use JSON format):\n\
-- Reply here: {\"content\": \"Hi!\"}\n\
-- Send file here: {\"content\": \"Here's the file\", \"attachments\": [\"/path/to/file.txt\"]}\n\
+- Proactive follow-up here: {\"content\": \"Hi again!\"}\n\
+- Send file here proactively: {\"content\": \"Here's the file\", \"attachments\": [\"/path/to/file.txt\"]}\n\
 - Message a different user: {\"channel\": \"signal\", \"target\": \"+1234567890\", \"content\": \"Hi!\"}\n\
 - Message a different group: {\"channel\": \"signal\", \"target\": \"group:abc123\", \"content\": \"Hi!\"}";
 
@@ -2450,6 +2453,31 @@ That's my plan."#;
             prompt.contains("echo: Echoes input"),
             "Prompt with tools should list the echo tool"
         );
+    }
+
+    #[test]
+    fn test_extensions_section_clarifies_channels_are_not_send_tools() {
+        let reasoning = make_test_reasoning();
+        let tool_defs = vec![ToolDefinition {
+            name: "tool_search".to_string(),
+            description: "Search extensions".to_string(),
+            parameters: serde_json::json!({}),
+        }];
+
+        let section = reasoning.build_extensions_section_for_tools(&tool_defs);
+        assert!(section.contains("connect messaging platforms so users can talk to you there"));
+        assert!(section.contains("Channels are not separate send-message tools"));
+        assert!(section.contains("`message` tool"));
+    }
+
+    #[test]
+    fn test_channel_section_separates_normal_replies_from_message_tool() {
+        let reasoning = make_test_reasoning().with_channel("telegram");
+
+        let section = reasoning.build_channel_section();
+        assert!(section.contains("respond normally without calling `message`"));
+        assert!(section.contains("proactive follow-up in the current conversation"));
+        assert!(section.contains("Proactive follow-up here"));
     }
 
     // ---- plan/evaluate bypass clean_response (Bug #564-2) ----
