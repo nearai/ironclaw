@@ -714,8 +714,13 @@ impl RoutineInfo {
             crate::agent::routine::RoutineAction::FullJob { .. } => "full_job",
         };
 
-        let status = crate::agent::routine::routine_display_status(r, last_run_status).as_str();
-        let verification_status = crate::agent::routine::routine_verification_status(r).as_str();
+        let verification_status = crate::agent::routine::routine_verification_status(r);
+        let status = crate::agent::routine::routine_display_status_for_verification(
+            r,
+            verification_status,
+            last_run_status,
+        )
+        .as_str();
 
         RoutineInfo {
             id: r.id,
@@ -731,7 +736,7 @@ impl RoutineInfo {
             run_count: r.run_count,
             consecutive_failures: r.consecutive_failures,
             status: status.to_string(),
-            verification_status: verification_status.to_string(),
+            verification_status: verification_status.as_str().to_string(),
         }
     }
 }
@@ -1288,5 +1293,20 @@ mod tests {
 
         assert_eq!(info.status, "active");
         assert_eq!(info.verification_status, "verified");
+    }
+
+    #[test]
+    fn test_routine_info_keeps_unverified_state_when_disabled() {
+        let mut routine = make_routine_for_status_tests();
+        routine.state = crate::agent::routine::reset_routine_verification_state(
+            &routine.state,
+            crate::agent::routine::routine_verification_fingerprint(&routine),
+        );
+        routine.enabled = false;
+
+        let info = RoutineInfo::from_routine(&routine, None);
+
+        assert_eq!(info.status, "disabled");
+        assert_eq!(info.verification_status, "unverified");
     }
 }

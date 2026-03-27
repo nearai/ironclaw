@@ -4210,7 +4210,9 @@ function renderRoutinesList(routines) {
     const triggerTitle = (r.trigger_type === 'cron' && r.trigger_raw)
       ? ' title="' + escapeHtml(r.trigger_raw) + '"'
       : '';
-    const runLabel = r.status === 'unverified' ? 'Verify now' : 'Run';
+    const runLabel = (r.verification_status === 'unverified' || r.status === 'unverified')
+      ? 'Verify now'
+      : 'Run';
 
     return '<tr class="routine-row" data-action="open-routine" data-id="' + escapeHtml(r.id) + '">'
       + '<td>' + escapeHtml(r.name) + '</td>'
@@ -4281,7 +4283,7 @@ function renderRoutineDetail(routine) {
       + '<div class="job-description-body">' + escapeHtml(routine.description) + '</div></div>';
   }
 
-  if (routine.status === 'unverified') {
+  if (routine.verification_status === 'unverified') {
     let verificationCopy = 'Created or updated, but not yet verified with a successful run.';
     if (routine.recent_runs && routine.recent_runs.length > 0) {
       const latestRun = routine.recent_runs[0];

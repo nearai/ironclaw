@@ -20,8 +20,8 @@ use uuid::Uuid;
 
 use crate::agent::routine::{
     NotifyConfig, Routine, RoutineAction, RoutineGuardrails, Trigger, next_cron_fire,
-    normalize_cron_expression, reset_routine_verification_state, routine_display_status,
-    routine_verification_fingerprint, routine_verification_status,
+    normalize_cron_expression, reset_routine_verification_state, routine_verification_fingerprint,
+    routine_verification_status,
 };
 use crate::agent::routine_engine::RoutineEngine;
 use crate::context::JobContext;
@@ -1280,7 +1280,12 @@ impl Tool for RoutineListTool {
         let list: Vec<serde_json::Value> = routines
             .iter()
             .map(|r| {
-                let status = routine_display_status(r, last_run_statuses.get(&r.id).copied());
+                let verification_status = routine_verification_status(r);
+                let status = crate::agent::routine::routine_display_status_for_verification(
+                    r,
+                    verification_status,
+                    last_run_statuses.get(&r.id).copied(),
+                );
                 serde_json::json!({
                     "id": r.id.to_string(),
                     "name": r.name,
@@ -1293,7 +1298,7 @@ impl Tool for RoutineListTool {
                     "run_count": r.run_count,
                     "consecutive_failures": r.consecutive_failures,
                     "status": status.as_str(),
-                    "verification_status": routine_verification_status(r).as_str(),
+                    "verification_status": verification_status.as_str(),
                 })
             })
             .collect();

@@ -11,7 +11,8 @@ use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::agent::routine::{
-    RoutineDisplayStatus, Trigger, next_cron_fire, routine_display_status,
+    RoutineDisplayStatus, RoutineVerificationStatus, Trigger, next_cron_fire,
+    routine_display_status_for_verification, routine_verification_status,
 };
 use crate::channels::web::auth::AuthenticatedUser;
 use crate::channels::web::server::GatewayState;
@@ -75,16 +76,24 @@ pub async fn routines_summary_handler(
     let mut failing = 0u64;
 
     for routine in &routines {
+        let verification_status = routine_verification_status(routine);
         if routine.enabled {
             enabled += 1;
         } else {
             disabled += 1;
         }
 
-        match routine_display_status(routine, last_run_statuses.get(&routine.id).copied()) {
-            RoutineDisplayStatus::Unverified => unverified += 1,
-            RoutineDisplayStatus::Failing => failing += 1,
-            _ => {}
+        if verification_status == RoutineVerificationStatus::Unverified {
+            unverified += 1;
+        }
+
+        if routine_display_status_for_verification(
+            routine,
+            verification_status,
+            last_run_statuses.get(&routine.id).copied(),
+        ) == RoutineDisplayStatus::Failing
+        {
+            failing += 1;
         }
     }
 

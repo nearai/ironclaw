@@ -389,6 +389,20 @@ mod tests {
             .await
             .expect("create routine");
 
+        let mut disabled_routine = routine.clone();
+        disabled_routine.id = Uuid::new_v4();
+        disabled_routine.name = "wf-unverified-disabled".to_string();
+        disabled_routine.enabled = false;
+        disabled_routine.state = reset_routine_verification_state(
+            &disabled_routine.state,
+            routine_verification_fingerprint(&disabled_routine),
+        );
+        harness
+            .db
+            .create_routine(&disabled_routine)
+            .await
+            .expect("create disabled routine");
+
         let list = harness.list_routines().await;
         let routine_id = routine.id.to_string();
         let listed = list["routines"]
@@ -412,7 +426,7 @@ mod tests {
             .json::<serde_json::Value>()
             .await
             .expect("invalid summary response");
-        assert_eq!(summary["unverified"].as_u64(), Some(1));
+        assert_eq!(summary["unverified"].as_u64(), Some(2));
 
         let detail = harness
             .client

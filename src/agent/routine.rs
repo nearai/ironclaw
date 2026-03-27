@@ -596,8 +596,28 @@ fn write_routine_verification_record(
     Value::Object(obj)
 }
 
+fn canonicalize_json_value(value: Value) -> Value {
+    match value {
+        Value::Array(items) => {
+            Value::Array(items.into_iter().map(canonicalize_json_value).collect())
+        }
+        Value::Object(obj) => {
+            let mut keys: Vec<String> = obj.keys().cloned().collect();
+            keys.sort();
+            let mut canonical = Map::new();
+            for key in keys {
+                if let Some(value) = obj.get(&key) {
+                    canonical.insert(key, canonicalize_json_value(value.clone()));
+                }
+            }
+            Value::Object(canonical)
+        }
+        other => other,
+    }
+}
+
 pub fn routine_verification_fingerprint(routine: &Routine) -> String {
-    let canonical = serde_json::json!({
+    let canonical = canonicalize_json_value(serde_json::json!({
         "trigger_type": routine.trigger.type_tag(),
         "trigger": routine.trigger.to_config_json(),
         "action_type": routine.action.type_tag(),
@@ -607,7 +627,7 @@ pub fn routine_verification_fingerprint(routine: &Routine) -> String {
             "max_concurrent": routine.guardrails.max_concurrent,
             "dedup_window_secs": routine.guardrails.dedup_window.map(|d| d.as_secs()),
         },
-    })
+    }))
     .to_string();
     let mut hasher = Sha256::new();
     hasher.update(canonical.as_bytes());
@@ -633,17 +653,25 @@ pub fn apply_routine_verification_result(
     status: RunStatus,
     now: DateTime<Utc>,
 ) -> serde_json::Value {
-    let mut record = routine_verification_record(state).unwrap_or(RoutineVerificationRecord {
-        current_fingerprint: current_fingerprint.clone(),
-        verified_fingerprint: None,
-        last_verified_at: None,
-    });
-    record.current_fingerprint = current_fingerprint.clone();
-    if status == RunStatus::Ok {
-        record.verified_fingerprint = Some(current_fingerprint);
-        record.last_verified_at = Some(now);
+    if let Some(mut record) = routine_verification_record(state) {
+        record.current_fingerprint = current_fingerprint.clone();
+        if status == RunStatus::Ok {
+            record.verified_fingerprint = Some(current_fingerprint);
+            record.last_verified_at = Some(now);
+        }
+        write_routine_verification_record(state, record)
+    } else if status == RunStatus::Ok {
+        write_routine_verification_record(
+            state,
+            RoutineVerificationRecord {
+                current_fingerprint: current_fingerprint.clone(),
+                verified_fingerprint: Some(current_fingerprint),
+                last_verified_at: Some(now),
+            },
+        )
+    } else {
+        state.clone()
     }
-    write_routine_verification_record(state, record)
 }
 
 pub fn routine_verification_status(routine: &Routine) -> RoutineVerificationStatus {
@@ -664,13 +692,25 @@ pub fn routine_display_status(
     routine: &Routine,
     last_run_status: Option<RunStatus>,
 ) -> RoutineDisplayStatus {
+    routine_display_status_for_verification(
+        routine,
+        routine_verification_status(routine),
+        last_run_status,
+    )
+}
+
+pub fn routine_display_status_for_verification(
+    routine: &Routine,
+    verification_status: RoutineVerificationStatus,
+    last_run_status: Option<RunStatus>,
+) -> RoutineDisplayStatus {
     if !routine.enabled {
         return RoutineDisplayStatus::Disabled;
     }
     if last_run_status == Some(RunStatus::Running) {
         return RoutineDisplayStatus::Running;
     }
-    if routine_verification_status(routine) == RoutineVerificationStatus::Unverified {
+    if verification_status == RoutineVerificationStatus::Unverified {
         return RoutineDisplayStatus::Unverified;
     }
     if routine.consecutive_failures > 0 {
@@ -1062,6 +1102,36 @@ mod tests {
 
         assert_eq!(fingerprint.len(), 64);
         assert!(!fingerprint.contains("super-secret-routine-prompt"));
+    }
+
+    #[test]
+    fn test_system_event_fingerprint_is_stable_when_filter_insertion_order_differs() {
+        let mut first_filters = std::collections::HashMap::new();
+        first_filters.insert("repo".to_string(), "nearai/ironclaw".to_string());
+        first_filters.insert("action".to_string(), "opened".to_string());
+
+        let mut second_filters = std::collections::HashMap::new();
+        second_filters.insert("action".to_string(), "opened".to_string());
+        second_filters.insert("repo".to_string(), "nearai/ironclaw".to_string());
+
+        let mut first = make_verification_test_routine();
+        first.trigger = Trigger::SystemEvent {
+            source: "github".to_string(),
+            event_type: "issue".to_string(),
+            filters: first_filters,
+        };
+
+        let mut second = make_verification_test_routine();
+        second.trigger = Trigger::SystemEvent {
+            source: "github".to_string(),
+            event_type: "issue".to_string(),
+            filters: second_filters,
+        };
+
+        assert_eq!(
+            routine_verification_fingerprint(&first),
+            routine_verification_fingerprint(&second)
+        );
     }
 
     #[test]
@@ -1465,6 +1535,24 @@ mod tests {
     fn test_legacy_routine_with_runs_is_treated_as_verified_without_metadata() {
         let mut routine = make_verification_test_routine();
         routine.run_count = 3;
+
+        assert_eq!(
+            routine_verification_status(&routine),
+            RoutineVerificationStatus::Verified
+        );
+    }
+
+    #[test]
+    fn test_failed_legacy_run_preserves_implicit_verification() {
+        let mut routine = make_verification_test_routine();
+        routine.run_count = 2;
+        let fingerprint = routine_verification_fingerprint(&routine);
+        routine.state = apply_routine_verification_result(
+            &routine.state,
+            fingerprint,
+            RunStatus::Failed,
+            Utc::now(),
+        );
 
         assert_eq!(
             routine_verification_status(&routine),
