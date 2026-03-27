@@ -524,6 +524,15 @@ pub async fn start_server(
             post(super::openai_compat::chat_completions_handler),
         )
         .route("/v1/models", get(super::openai_compat::models_handler))
+        // OpenAI Responses API (routes through the full agent loop)
+        .route(
+            "/v1/responses",
+            post(super::responses_api::create_response_handler),
+        )
+        .route(
+            "/v1/responses/{id}",
+            get(super::responses_api::get_response_handler),
+        )
         .route_layer(middleware::from_fn_with_state(
             auth_state.clone(),
             auth_middleware,
