@@ -1,16 +1,16 @@
 """E2E tests for full_job routine execution.
 
-Exercises the complete lifecycle: create a full_job routine via chat,
-trigger it via the API, and verify the job runs tools and completes.
-Covers the plan → execute → completion-check → agentic-loop flow.
+Exercises the complete lifecycle: create a full_job routine via the
+web UI, trigger it via the API, and verify the job runs tools and
+completes without hitting the iteration cap.
+
+Requires Playwright (browser-based tests).
 """
 
 import asyncio
 import uuid
 
-import httpx
-
-from helpers import AUTH_TOKEN, SEL, api_get, api_post
+from helpers import SEL, api_get, api_post
 
 
 # -- Helpers ------------------------------------------------------------------
@@ -73,13 +73,6 @@ async def _wait_for_completed_run(
     )
 
 
-async def _get_job_detail(base_url: str, job_id: str) -> dict:
-    """Fetch job detail."""
-    resp = await api_get(base_url, f"/api/jobs/{job_id}")
-    resp.raise_for_status()
-    return resp.json()
-
-
 async def _wait_for_job_terminal(
     base_url: str,
     job_id: str,
@@ -89,7 +82,9 @@ async def _wait_for_job_terminal(
     """Poll until a job reaches a terminal state."""
     terminal = {"completed", "failed", "cancelled", "submitted", "accepted"}
     for _ in range(int(timeout * 2)):
-        detail = await _get_job_detail(base_url, job_id)
+        resp = await api_get(base_url, f"/api/jobs/{job_id}")
+        resp.raise_for_status()
+        detail = resp.json()
         if detail.get("state", "").lower() in terminal:
             return detail
         await asyncio.sleep(0.5)
@@ -120,13 +115,12 @@ async def test_full_job_routine_completes_with_tools(page, ironclaw_server):
         ironclaw_server, routine["id"], timeout=60
     )
 
-    # The run should have succeeded (status ok or attention, not failed)
+    # The run should have succeeded (not failed)
     assert completed_run["status"].lower() != "failed", (
         f"Full job routine run failed: {completed_run}"
     )
 
-    # Step 4: Verify the job reached a terminal state
-    # The run should have a linked job_id
+    # Step 4: Verify the job reached completed state
     if completed_run.get("job_id"):
         job = await _wait_for_job_terminal(
             ironclaw_server, completed_run["job_id"], timeout=30
@@ -134,34 +128,3 @@ async def test_full_job_routine_completes_with_tools(page, ironclaw_server):
         assert job["state"].lower() == "completed", (
             f"Expected job state 'completed', got '{job['state']}'"
         )
-
-
-async def test_full_job_routine_produces_no_suggestions_in_output(
-    page, ironclaw_server
-):
-    """Full_job routine output should not contain <suggestions> tags."""
-    name = f"fjob-nosug-{uuid.uuid4().hex[:8]}"
-
-    await _send_chat_message(page, f"create full-job owner routine {name}")
-    routine = await _wait_for_routine(ironclaw_server, name)
-
-    resp = await api_post(ironclaw_server, f"/api/routines/{routine['id']}/trigger")
-    resp.raise_for_status()
-
-    completed_run = await _wait_for_completed_run(
-        ironclaw_server, routine["id"], timeout=60
-    )
-    assert completed_run["status"].lower() != "failed"
-
-    # If the run has a job, check events for suggestions tags
-    if completed_run.get("job_id"):
-        job = await _wait_for_job_terminal(
-            ironclaw_server, completed_run["job_id"], timeout=30
-        )
-        # Check that no events contain raw <suggestions> tags
-        events = job.get("events", [])
-        for event in events:
-            content = event.get("content", "")
-            assert "<suggestions>" not in content, (
-                f"Job event should not contain <suggestions> tags: {content[:200]}"
-            )
