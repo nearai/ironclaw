@@ -55,6 +55,8 @@ cargo test                                                   # unit tests
 cargo test --features integration                            # + PostgreSQL tests
 ```
 
+These commands are for day-to-day iteration while you are developing locally. The pre-submission checks below are intentionally stricter and use CI-style flags so you can catch formatting drift and clippy warnings before requesting review.
+
 ## Before You Open a PR
 
 Run the local validation checks required before requesting a review. These are stricter than the commands for iterative development:
