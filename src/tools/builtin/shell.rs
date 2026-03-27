@@ -869,8 +869,29 @@ impl Tool for ShellTool {
     ) -> Result<ToolOutput, ToolError> {
         let command = require_str(&params, "command")?;
 
-        let workdir = params.get("workdir").and_then(|v| v.as_str());
-        let timeout = params.get("timeout").and_then(|v| v.as_u64());
+        let workdir = params
+            .get("workdir")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let timeout = match params.get("timeout") {
+            Some(v) if v.is_null() => None,
+            Some(v) => {
+                if let Some(n) = v.as_u64() {
+                    Some(n)
+                } else if let Some(s) = v.as_str() {
+                    let s = s.trim();
+                    if s.is_empty() {
+                        None
+                    } else {
+                        s.parse::<u64>().ok()
+                    }
+                } else {
+                    None
+                }
+            }
+            None => None,
+        };
 
         let start = std::time::Instant::now();
         let (output, exit_code) = self
