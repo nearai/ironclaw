@@ -12,24 +12,39 @@ IronClaw is a secure, open-source AI agent framework built in Rust and deployed 
 
 ---
 
-## Why IronClaw?
+## Key Capabilities
 
-<Columns cols={2}>
-  <Card title="Encrypted Vault" icon="lock">
-    Credentials are injected into requests only for endpoints you've approved.
+<CardGroup cols={3}>
+  <Card title="Multi-Channel" icon="message" href="/channels">
+    Access IronClaw via web browser, Telegram, terminal UI, or HTTP webhooks
   </Card>
-  <Card title="Sandboxed Tools" icon="box">
-    A compromised tool can't reach anything outside its allowlist.
+
+  <Card title="Security-First" icon="shield-check" href="/security">
+    Multi-layer defense: safety layer, WASM sandbox, Docker isolation, encrypted secrets
   </Card>
-  <Card title="NEAR AI Cloud" icon="shield-halved">
-    Your data and prompts stay truly private
+
+  <Card title="Multi-Provider LLM" icon="brain" href="/providers">
+    Choose from 7+ providers: NEAR AI, Anthropic, OpenAI, Ollama, Tinfoil, and more
   </Card>
-  <Card title="Built in Rust" icon="rust">
-    Memory safety enforced at compile time.
+
+  <Card title="Skills System" icon="puzzle" href="/agents/skills">
+    Extend capabilities with SKILL.md prompt extensions from ClawHub registry
   </Card>
-</Columns>
+
+  <Card title="Parallel Jobs" icon="briefcase" href="/agents/jobs">
+    Execute multiple tasks concurrently with state machine and self-repair
+  </Card>
+
+  <Card title="Persistent Memory" icon="database" href="/agents/memory">
+    Hybrid search (FTS + vector) with identity files and heartbeat system
+  </Card>
+</CardGroup>
 
 ## Resources
+
+<Card title="Get started" icon="rocket" href="/quickstart" horizontal>
+  Deploy your first agent in minutes.
+</Card>
 
 <Columns cols={2}>
   <Card title="Agent Dashboard" icon="sliders" href="https://agent.near.ai/">

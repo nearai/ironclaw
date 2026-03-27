@@ -1,58 +1,65 @@
 ---
-title: "Quickstart"
-description: "Create your Agent in minutes"
+title: Quickstart
+description: Create your first Agent in minutes
 icon: rocket
 ---
 
-Go to https://agent.near.ai/ and login with your preferred method, then start creating an IronClaw agent.
+This guide will get you from zero to a running IronClaw instance in under 10 minutes
 
-## Create the Agent
+---
+
+## Setting Up Your Agent
 
 <Steps>
 
-<Step title="Create the Agent">
+<Step title="Get IronClaw">
 
-Creating and deploying your agent is as simple as filling the required billing information, adding a SSH key, and clicking the "Activate Agent" button. The agent will then be automatically created and deployed in a private instance, and you will be able to connect to it through SSH.
+<Tabs>
+  <Tab title="Agent Hub">
+  Go to https://agent.near.ai/ and login with your preferred method, then create an IronClaw agent in a private instance.
 
-<Accordion title="SSH Key">
+  Once your private instance is ready, you can connect to your agent's private instance through `SSH` using the address provided in the [Agent Dashboard](https://agent.near.ai/):
 
-To use IronClaw, you will need to provide an SSH key. If you don't have one, you can generate it using the following command in your terminal:
+  ```bash
+  ssh -p <PORT> liquid-horse@agent2.near.ai
+  ```
 
-```bash
-ssh-keygen -t rsa -b 4096 -C "you@example.com"
-cat ~/.ssh/id_rsa.pub
-```
+  <Accordion title="SSH Key">
 
-</Accordion>
+  To use IronClaw, you will need to provide an SSH key. If you don't have one, you can generate it using the following command in your terminal:
 
-</Step>
-<Step title="Connect to your Private Instance">
+  ```bash
+  ssh-keygen -t rsa -b 4096 -C "you@example.com"
+  cat ~/.ssh/id_rsa.pub
+  ```
 
-Connect to your agent's private instance through `SSH` using the address provided in the [Agent Dashboard](https://agent.near.ai/):
+  </Accordion>
 
-```bash
-> ssh -p <PORT> liquid-horse@agent2.near.ai
+  <Accordion title="Issues Connecting?">
+  Remember to add your SSH key to your device's SSH agent before connecting:
 
-#Linux 522eab21e8e4 6.9.0-dstack #1 SMP PREEMPT_DYNAMIC Thu May 30 14:26:20 UTC 2024 x86_64
+  ```bash
+  ssh-add ~/.ssh/id_rsa
+  ```
 
-#Debian GNU/Linux comes with ABSOLUTELY NO WARRANTY, to the extent permitted by applicable law.
-agent@1v4d3v23e8f1:~$
-```
+  </Accordion>
+  </Tab>
 
-<Accordion title="Issues Connecting?">
-Remember to add your SSH key to your device's SSH agent before connecting:
+  <Tab title="Local">
+    Best for personal use on your own machine. Uses libSQL (embedded SQLite) — no separate database server required.
 
-```bash
-ssh-add ~/.ssh/id_rsa
-```
-
-</Accordion>
+    ```bash
+    # Install IronClaw
+    curl --proto '=https' --tlsv1.2 -LsSf https://github.com/nearai/ironclaw/releases/latest/download/ironclaw-installer.sh | sh
+    ```
+  </Tab>
+</Tabs>
 
 </Step>
 
 <Step title="Start the Agent">
 
-Once you have successfully connected to your agent's private instance, you can start your agent for the first time
+Start your agent for the first time:
 
 ```bash
 ironclaw
