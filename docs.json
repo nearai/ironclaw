@@ -88,6 +88,7 @@
                 "pages": [
                   "extensions/file-tools",
                   "extensions/github",
+                  "extensions/google-calendar",
                   "extensions/mcp",
                   "extensions/web-search",
                   "extensions/shell"
