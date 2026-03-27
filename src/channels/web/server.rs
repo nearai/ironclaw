@@ -534,6 +534,15 @@ pub async fn start_server(
             post(super::openai_compat::chat_completions_handler),
         )
         .route("/v1/models", get(super::openai_compat::models_handler))
+        // OpenAI Responses API (routes through the full agent loop)
+        .route(
+            "/v1/responses",
+            post(super::responses_api::create_response_handler),
+        )
+        .route(
+            "/v1/responses/{id}",
+            get(super::responses_api::get_response_handler),
+        )
         .route_layer(middleware::from_fn_with_state(
             auth_state.clone(),
             auth_middleware,
@@ -1906,7 +1915,7 @@ async fn chat_threads_handler(
 
     // Fallback: in-memory only (no assistant thread without DB)
     let mut sorted_threads: Vec<_> = sess.threads.values().collect();
-    sorted_threads.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    sorted_threads.sort_by_key(|t| std::cmp::Reverse(t.updated_at));
     let threads: Vec<ThreadInfo> = sorted_threads
         .into_iter()
         .map(|t| ThreadInfo {
@@ -2226,7 +2235,7 @@ async fn extensions_activate_handler(
     AuthenticatedUser(user): AuthenticatedUser,
     Path(name): Path<String>,
 ) -> Result<Json<ActionResponse>, (StatusCode, String)> {
-    tracing::debug!(
+    tracing::trace!(
         extension = %name,
         user_id = %user.user_id,
         "extensions_activate_handler: received activate request"
@@ -2260,7 +2269,7 @@ async fn extensions_activate_handler(
                 crate::extensions::ExtensionError::AuthRequired
             );
 
-            tracing::debug!(
+            tracing::trace!(
                 extension = %name,
                 error = %activate_err,
                 needs_auth = needs_auth,
@@ -2274,7 +2283,7 @@ async fn extensions_activate_handler(
             // Activation failed due to auth; try authenticating first.
             match ext_mgr.auth(&name, &user.user_id).await {
                 Ok(auth_result) if auth_result.is_authenticated() => {
-                    tracing::debug!(
+                    tracing::trace!(
                         extension = %name,
                         "extensions_activate_handler: auth reports authenticated, retrying activate"
                     );

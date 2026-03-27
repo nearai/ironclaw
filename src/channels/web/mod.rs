@@ -18,6 +18,7 @@ pub mod auth;
 pub(crate) mod handlers;
 pub mod log_layer;
 pub mod openai_compat;
+pub mod responses_api;
 pub mod server;
 pub mod sse;
 pub mod types;
