@@ -19,8 +19,8 @@ use crate::llm::costs;
 use crate::llm::error::LlmError;
 use crate::llm::provider::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider, Role, ToolCall,
-    ToolCompletionRequest, ToolCompletionResponse, strip_unsupported_completion_params,
-    strip_unsupported_tool_params,
+    ToolCompletionRequest, ToolCompletionResponse, UnsupportedParam,
+    strip_unsupported_completion_params, strip_unsupported_tool_params,
 };
 const ANTHROPIC_API_URL: &str = "https://api.anthropic.com/v1/messages";
 /// OAuth beta requires 2023-06-01; the 2024-10-22 version is not valid with the beta flag.
@@ -76,7 +76,7 @@ impl AnthropicOAuthProvider {
 
         let unsupported_params: HashSet<String> =
             config.unsupported_params.iter().cloned().collect();
-        let thinking_enabled = !unsupported_params.contains("thinking");
+        let thinking_enabled = !unsupported_params.contains(UnsupportedParam::Thinking.name());
 
         Ok(Self {
             client,
@@ -87,6 +87,16 @@ impl AnthropicOAuthProvider {
             unsupported_params,
             thinking_enabled,
         })
+    }
+
+    fn thinking_config(&self) -> Option<ThinkingConfig> {
+        if self.thinking_enabled {
+            Some(ThinkingConfig {
+                thinking_type: "adaptive".to_string(),
+            })
+        } else {
+            None
+        }
     }
 
     /// Strip unsupported fields from a `CompletionRequest` in place.
@@ -297,13 +307,7 @@ impl LlmProvider for AnthropicOAuthProvider {
         self.strip_unsupported_completion_params(&mut req);
         let (system, messages) = convert_messages(req.messages);
 
-        let thinking = if self.thinking_enabled {
-            Some(ThinkingConfig {
-                thinking_type: "adaptive".to_string(),
-            })
-        } else {
-            None
-        };
+        let thinking = self.thinking_config();
 
         let request = AnthropicRequest {
             model,
@@ -374,13 +378,7 @@ impl LlmProvider for AnthropicOAuthProvider {
             },
         });
 
-        let thinking = if self.thinking_enabled {
-            Some(ThinkingConfig {
-                thinking_type: "adaptive".to_string(),
-            })
-        } else {
-            None
-        };
+        let thinking = self.thinking_config();
 
         let request = AnthropicRequest {
             model,
