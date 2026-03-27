@@ -1,0 +1,130 @@
+---
+title: Routines Overview
+sidebarTitle: Routines
+description: Scheduled and reactive task automation
+---
+
+Routines let IronClaw take action without a human in the loop. Define a trigger, an action, and optional guardrails — the agent handles the rest automatically.
+
+## Two Trigger Types
+
+<CardGroup cols={2}>
+  <Card title="Cron" icon="clock" href="/agents/routines-cron">
+    Schedule tasks using cron expressions. Runs on a repeating schedule — hourly, daily, weekly, or any custom interval.
+  </Card>
+
+  <Card title="Reactive" icon="zap" href="/agents/routines-reactive">
+    React to events and webhooks. Triggers when specific conditions are met — a file changes, a webhook fires, or an internal event occurs.
+  </Card>
+</CardGroup>
+
+## Routine Anatomy
+
+Every routine has three parts:
+
+### Trigger
+
+What causes the routine to run. Either a cron schedule or an event/webhook condition.
+
+```yaml
+trigger:
+  type: cron
+  schedule: "0 9 * * 1-5"   # 9am Monday–Friday
+```
+
+```yaml
+trigger:
+  type: webhook
+  path: /hooks/deploy
+  secret: ${DEPLOY_WEBHOOK_SECRET}
+```
+
+### Action
+
+What the routine does when triggered. This is a prompt sent to the agent — the full reasoning and tool execution loop runs as a job.
+
+```yaml
+action:
+  prompt: |
+    Check the last 24 hours of application logs for errors.
+    Summarize any critical issues and write a report to memory at daily/errors.md.
+```
+
+### Guardrails
+
+Optional constraints that limit what the routine can do. Guardrails prevent runaway automation.
+
+```yaml
+guardrails:
+  max_tokens: 8000          # Stop if LLM usage exceeds this per run
+  max_tool_calls: 20        # Stop if more than 20 tool calls are made
+  allowed_tools:            # Whitelist specific tools (empty = all allowed)
+    - memory_write
+    - memory_read
+    - memory_search
+  timeout_secs: 300         # Kill the job after 5 minutes
+```
+
+## Managing Routines
+
+### Via Chat
+
+Create routines by describing them to the agent:
+
+```
+Create a routine that runs every morning at 8am and checks my email inbox
+for anything urgent, then writes a summary to memory.
+```
+
+The agent will use the `routine_create` tool to set it up.
+
+### Via Web UI
+
+The web gateway includes a Routines tab with a visual interface for creating, editing, enabling, and disabling routines. Changes take effect on the next tick.
+
+### Via Tools
+
+Six built-in tools manage routines programmatically:
+
+| Tool | Description |
+|------|-------------|
+| `routine_create` | Create a new routine with trigger, action, and guardrails |
+| `routine_list` | List all routines with status and last-run info |
+| `routine_update` | Modify an existing routine's trigger, action, or guardrails |
+| `routine_delete` | Remove a routine permanently |
+| `routine_history` | View execution history and outcomes for a routine |
+
+## Configuration
+
+```bash
+# Enable routines system
+ROUTINES_ENABLED=true
+
+# Cron tick interval — how often the engine checks for due cron jobs
+ROUTINES_CRON_INTERVAL=60          # seconds (default: 60)
+
+# Maximum routines running at the same time
+ROUTINES_MAX_CONCURRENT=3
+```
+
+<Note>
+`ROUTINES_CRON_INTERVAL` controls tick granularity, not execution frequency. A routine scheduled at `0 * * * *` (every hour on the hour) will fire within `ROUTINES_CRON_INTERVAL` seconds of the scheduled time.
+</Note>
+
+## Execution Model
+
+When a routine fires, it creates a standard agent job. The job runs through the full agent loop — LLM reasoning, tool calls, safety layer — with the action prompt as the initial message. Guardrails are enforced by the routine engine as the job runs.
+
+Routine jobs appear in job history alongside manual jobs. You can inspect them with `list_jobs` or `job_status`.
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Cron Routines" icon="clock" href="/agents/routines-cron">
+    Schedule recurring tasks with cron expressions
+  </Card>
+
+  <Card title="Reactive Routines" icon="zap" href="/agents/routines-reactive">
+    Event-driven and webhook-triggered automation
+  </Card>
+</CardGroup>

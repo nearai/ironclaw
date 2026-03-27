@@ -1,7 +1,6 @@
 ---
 title: "Web Search"
 description: "Let your agent search the web"
-icon: globe
 ---
 
 The Web Search tool allows your agent to use the [Brave Search API]() search the web for up-to-date information, making it ideal for answering questions about current events, finding specific data, or gathering general information.

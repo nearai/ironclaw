@@ -1,7 +1,6 @@
 ---
 title: "Local"
 description: "Use IronClaw locally via terminal or browser"
-icon: keyboard
 ---
 
 By default, IronClaw provides two local interfaces for chatting with your agent:

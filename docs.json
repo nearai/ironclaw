@@ -15,7 +15,7 @@
   "navbar": {
     "links": [
       {
-        "label": "Support",
+        "label": "Get Support",
         "href": "https://t.me/ironclawAI"
       }
     ],
@@ -34,7 +34,7 @@
             "tab": " ",
             "groups": [
               {
-                "group": "Getting started",
+                "group": " ",
                 "pages": [
                   "index",
                   "quickstart",
@@ -42,26 +42,56 @@
                 ]
               },
               {
+                "group": "Core Capabilities",
+                "icon": "cubes",
+                "pages": [
+                  {
+                    "group": "Memory",
+                    "pages": [
+                      "capabilities/memory/memory",
+                      "capabilities/memory/identity"
+                    ]
+                  },
+                  {
+                    "group": "Routines",
+                    "pages": [
+                      "capabilities/routines/cron",
+                      "capabilities/routines/heartbeat",
+                      "capabilities/routines/reactive"
+                    ]
+                  },
+                  "capabilities/jobs",
+                  "capabilities/skills",
+                  "capabilities/sandboxed-tools"
+                ]
+              },
+              {
                 "group": "Channels",
+                "icon": "message",
                 "pages": [
                   "tunnel",
-                  {
-                    "group": "Available Channels",
-                    "icon": "message",
-                    "pages": [
-                      "channels/local",
-                      "channels/signal",
-                      "channels/telegram",
-                      "channels/webhook"
-                    ]
-                  }
+                  "channels/local",
+                  "channels/signal",
+                  "channels/telegram",
+                  "channels/webhook"
                 ]
               },
               {
                 "group": "Extensions (Tools)",
+                "icon": "hammer",
                 "pages": [
+                  "extensions/file-tools",
+                  "extensions/github",
+                  "extensions/mcp",
                   "extensions/web-search",
-                  "extensions/github"
+                  "extensions/shell"
+                ]
+              },
+              {
+                "group": "Tutorials",
+                "icon": "graduation-cap",
+                "pages": [
+                  "extensions/building-a-tool"
                 ]
               }
             ]
@@ -96,26 +126,56 @@
                 ]
               },
               {
+                "group": "核心能力",
+                "icon": "cubes",
+                "pages": [
+                  {
+                    "group": "记忆",
+                    "pages": [
+                      "zh/capabilities/memory/memory",
+                      "zh/capabilities/memory/identity"
+                    ]
+                  },
+                  {
+                    "group": "例程",
+                    "pages": [
+                      "zh/capabilities/routines/cron",
+                      "zh/capabilities/routines/heartbeat",
+                      "zh/capabilities/routines/reactive"
+                    ]
+                  },
+                  "zh/capabilities/jobs",
+                  "zh/capabilities/skills",
+                  "zh/capabilities/sandboxed-tools"
+                ]
+              },
+              {
                 "group": "渠道",
+                "icon": "message",
                 "pages": [
                   "zh/tunnel",
-                  {
-                    "group": "可用渠道",
-                    "icon": "message",
-                    "pages": [
-                      "zh/channels/local",
-                      "zh/channels/signal",
-                      "zh/channels/telegram",
-                      "zh/channels/webhook"
-                    ]
-                  }
+                  "zh/channels/local",
+                  "zh/channels/signal",
+                  "zh/channels/telegram",
+                  "zh/channels/webhook"
                 ]
               },
               {
                 "group": "扩展（工具）",
+                "icon": "hammer",
                 "pages": [
                   "zh/extensions/web-search",
-                  "zh/extensions/github"
+                  "zh/extensions/github",
+                  "zh/extensions/file-tools",
+                  "zh/extensions/mcp",
+                  "zh/extensions/shell"
+                ]
+              },
+              {
+                "group": "教程",
+                "icon": "graduation-cap",
+                "pages": [
+                  "zh/extensions/building-a-tool"
                 ]
               }
             ]
