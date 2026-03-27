@@ -143,3 +143,36 @@ pub async fn extensions_remove_handler(
         Err(e) => Ok(Json(ActionResponse::fail(e.to_string()))),
     }
 }
+
+/// Invoke a WASM tool by name with JSON params.
+///
+/// `POST /api/extensions/tools/:name/invoke`
+/// Body: the JSON params to pass to the tool.
+/// Returns: the tool output as a JSON string.
+pub async fn extensions_tool_invoke_handler(
+    State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(_user): AuthenticatedUser,
+    Path(name): Path<String>,
+    Json(params): Json<serde_json::Value>,
+) -> Result<axum::response::Response, (StatusCode, String)> {
+    use axum::response::IntoResponse;
+
+    let registry = state.tool_registry.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Tool registry not available".to_string(),
+    ))?;
+
+    let ctx = crate::context::JobContext::default();
+    let safety = crate::safety::SafetyLayer::new(&crate::config::SafetyConfig {
+        max_output_length: 512_000,
+        injection_check_enabled: false,
+    });
+
+    match crate::tools::execute::execute_tool_with_safety(registry, &safety, &name, params, &ctx).await {
+        Ok(output) => Ok((StatusCode::OK, axum::Json(serde_json::json!({ "output": output }))).into_response()),
+        Err(e) => Ok((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            axum::Json(serde_json::json!({ "error": e.to_string() })),
+        ).into_response()),
+    }
+}

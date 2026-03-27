@@ -460,6 +460,10 @@ pub async fn start_server(
         // Extensions
         .route("/api/extensions", get(extensions_list_handler))
         .route("/api/extensions/tools", get(extensions_tools_handler))
+        .route(
+            "/api/extensions/tools/{name}/invoke",
+            post(extensions_tool_invoke_handler),
+        )
         .route("/api/extensions/registry", get(extensions_registry_handler))
         .route("/api/extensions/install", post(extensions_install_handler))
         .route(
@@ -2121,6 +2125,41 @@ async fn extensions_tools_handler(
         .collect();
 
     Ok(Json(ToolListResponse { tools }))
+}
+
+async fn extensions_tool_invoke_handler(
+    State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(_user): AuthenticatedUser,
+    axum::extract::Path(name): axum::extract::Path<String>,
+    Json(params): Json<serde_json::Value>,
+) -> Result<axum::response::Response, (StatusCode, String)> {
+    use axum::response::IntoResponse;
+
+    let registry = state.tool_registry.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Tool registry not available".to_string(),
+    ))?;
+
+    let ctx = crate::context::JobContext::default();
+    let safety = crate::safety::SafetyLayer::new(&crate::config::SafetyConfig {
+        max_output_length: 512_000,
+        injection_check_enabled: false,
+    });
+
+    match crate::tools::execute::execute_tool_with_safety(registry, &safety, &name, params, &ctx)
+        .await
+    {
+        Ok(output) => Ok((
+            StatusCode::OK,
+            Json(serde_json::json!({ "output": output })),
+        )
+            .into_response()),
+        Err(e) => Ok((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+            .into_response()),
+    }
 }
 
 async fn extensions_install_handler(
