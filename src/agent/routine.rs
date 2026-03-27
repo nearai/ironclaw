@@ -24,6 +24,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 use uuid::Uuid;
 
 use crate::error::RoutineError;
@@ -50,6 +51,55 @@ pub struct Routine {
 
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+const ROUTINE_VERIFICATION_STATE_KEY: &str = "_verification";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RoutineVerificationRecord {
+    current_fingerprint: String,
+    #[serde(default)]
+    verified_fingerprint: Option<String>,
+    #[serde(default)]
+    last_verified_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoutineVerificationStatus {
+    Verified,
+    Unverified,
+}
+
+impl RoutineVerificationStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RoutineVerificationStatus::Verified => "verified",
+            RoutineVerificationStatus::Unverified => "unverified",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoutineDisplayStatus {
+    Disabled,
+    Running,
+    Unverified,
+    Failing,
+    Attention,
+    Active,
+}
+
+impl RoutineDisplayStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RoutineDisplayStatus::Disabled => "disabled",
+            RoutineDisplayStatus::Running => "running",
+            RoutineDisplayStatus::Unverified => "unverified",
+            RoutineDisplayStatus::Failing => "failing",
+            RoutineDisplayStatus::Attention => "attention",
+            RoutineDisplayStatus::Active => "active",
+        }
+    }
 }
 
 /// When a routine should fire.
@@ -522,6 +572,112 @@ pub fn content_hash(content: &str) -> u64 {
     hasher.finish()
 }
 
+fn routine_state_as_object(state: &Value) -> Map<String, Value> {
+    state.as_object().cloned().unwrap_or_default()
+}
+
+fn routine_verification_record(state: &Value) -> Option<RoutineVerificationRecord> {
+    state
+        .as_object()
+        .and_then(|obj| obj.get(ROUTINE_VERIFICATION_STATE_KEY))
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok())
+}
+
+fn write_routine_verification_record(
+    state: &Value,
+    record: RoutineVerificationRecord,
+) -> serde_json::Value {
+    let mut obj = routine_state_as_object(state);
+    if let Ok(value) = serde_json::to_value(record) {
+        obj.insert(ROUTINE_VERIFICATION_STATE_KEY.to_string(), value);
+    }
+    Value::Object(obj)
+}
+
+pub fn routine_verification_fingerprint(routine: &Routine) -> String {
+    serde_json::json!({
+        "trigger_type": routine.trigger.type_tag(),
+        "trigger": routine.trigger.to_config_json(),
+        "action_type": routine.action.type_tag(),
+        "action": routine.action.to_config_json(),
+        "guardrails": {
+            "cooldown_secs": routine.guardrails.cooldown.as_secs(),
+            "max_concurrent": routine.guardrails.max_concurrent,
+            "dedup_window_secs": routine.guardrails.dedup_window.map(|d| d.as_secs()),
+        },
+    })
+    .to_string()
+}
+
+pub fn reset_routine_verification_state(
+    state: &Value,
+    current_fingerprint: String,
+) -> serde_json::Value {
+    let mut record = routine_verification_record(state).unwrap_or(RoutineVerificationRecord {
+        current_fingerprint: current_fingerprint.clone(),
+        verified_fingerprint: None,
+        last_verified_at: None,
+    });
+    record.current_fingerprint = current_fingerprint;
+    write_routine_verification_record(state, record)
+}
+
+pub fn apply_routine_verification_result(
+    state: &Value,
+    current_fingerprint: String,
+    status: RunStatus,
+    now: DateTime<Utc>,
+) -> serde_json::Value {
+    let mut record = routine_verification_record(state).unwrap_or(RoutineVerificationRecord {
+        current_fingerprint: current_fingerprint.clone(),
+        verified_fingerprint: None,
+        last_verified_at: None,
+    });
+    record.current_fingerprint = current_fingerprint.clone();
+    if status == RunStatus::Ok {
+        record.verified_fingerprint = Some(current_fingerprint);
+        record.last_verified_at = Some(now);
+    }
+    write_routine_verification_record(state, record)
+}
+
+pub fn routine_verification_status(routine: &Routine) -> RoutineVerificationStatus {
+    let fingerprint = routine_verification_fingerprint(routine);
+    let verified =
+        routine_verification_record(&routine.state).map_or(routine.run_count > 0, |record| {
+            record.current_fingerprint == fingerprint
+                && record.verified_fingerprint.as_deref() == Some(fingerprint.as_str())
+        });
+    if verified {
+        RoutineVerificationStatus::Verified
+    } else {
+        RoutineVerificationStatus::Unverified
+    }
+}
+
+pub fn routine_display_status(
+    routine: &Routine,
+    last_run_status: Option<RunStatus>,
+) -> RoutineDisplayStatus {
+    if !routine.enabled {
+        return RoutineDisplayStatus::Disabled;
+    }
+    if last_run_status == Some(RunStatus::Running) {
+        return RoutineDisplayStatus::Running;
+    }
+    if routine_verification_status(routine) == RoutineVerificationStatus::Unverified {
+        return RoutineDisplayStatus::Unverified;
+    }
+    if routine.consecutive_failures > 0 {
+        return RoutineDisplayStatus::Failing;
+    }
+    if last_run_status == Some(RunStatus::Attention) {
+        return RoutineDisplayStatus::Attention;
+    }
+    RoutineDisplayStatus::Active
+}
+
 /// Normalize a cron expression to the 7-field format expected by the `cron` crate.
 ///
 /// The `cron` crate requires: `sec min hour day-of-month month day-of-week year`.
@@ -730,9 +886,14 @@ pub fn describe_cron(schedule: &str, timezone: Option<&str>) -> String {
 #[cfg(test)]
 mod tests {
     use crate::agent::routine::{
-        MAX_TOOL_ROUNDS_LIMIT, RoutineAction, RoutineGuardrails, RunStatus, Trigger, content_hash,
-        describe_cron, next_cron_fire, normalize_cron_expression,
+        MAX_TOOL_ROUNDS_LIMIT, NotifyConfig, Routine, RoutineAction, RoutineGuardrails,
+        RoutineVerificationStatus, RunStatus, Trigger, apply_routine_verification_result,
+        content_hash, describe_cron, next_cron_fire, normalize_cron_expression,
+        reset_routine_verification_state, routine_verification_fingerprint,
+        routine_verification_status,
     };
+    use chrono::Utc;
+    use uuid::Uuid;
 
     #[test]
     fn test_trigger_roundtrip() {
@@ -1121,5 +1282,156 @@ mod tests {
             }
             _ => panic!("expected Lightweight"),
         }
+    }
+
+    fn make_verification_test_routine() -> Routine {
+        Routine {
+            id: Uuid::new_v4(),
+            name: "verify-me".to_string(),
+            description: "verification test".to_string(),
+            user_id: "test-user".to_string(),
+            enabled: true,
+            trigger: Trigger::Manual,
+            action: RoutineAction::Lightweight {
+                prompt: "Check routine output".to_string(),
+                context_paths: Vec::new(),
+                max_tokens: 1024,
+                use_tools: false,
+                max_tool_rounds: 1,
+            },
+            guardrails: RoutineGuardrails::default(),
+            notify: NotifyConfig::default(),
+            last_run_at: None,
+            next_fire_at: None,
+            run_count: 0,
+            consecutive_failures: 0,
+            state: serde_json::json!({}),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn test_reset_verification_state_marks_new_routine_unverified() {
+        let mut routine = make_verification_test_routine();
+        routine.state = reset_routine_verification_state(
+            &routine.state,
+            routine_verification_fingerprint(&routine),
+        );
+
+        assert_eq!(
+            routine_verification_status(&routine),
+            RoutineVerificationStatus::Unverified
+        );
+    }
+
+    #[test]
+    fn test_successful_run_verifies_current_fingerprint() {
+        let mut routine = make_verification_test_routine();
+        let fingerprint = routine_verification_fingerprint(&routine);
+        routine.state = reset_routine_verification_state(&routine.state, fingerprint.clone());
+        routine.state = apply_routine_verification_result(
+            &routine.state,
+            fingerprint,
+            RunStatus::Ok,
+            Utc::now(),
+        );
+
+        assert_eq!(
+            routine_verification_status(&routine),
+            RoutineVerificationStatus::Verified
+        );
+    }
+
+    #[test]
+    fn test_behavior_change_resets_prior_verification() {
+        let mut routine = make_verification_test_routine();
+        let original_fingerprint = routine_verification_fingerprint(&routine);
+        routine.state =
+            reset_routine_verification_state(&routine.state, original_fingerprint.clone());
+        routine.state = apply_routine_verification_result(
+            &routine.state,
+            original_fingerprint,
+            RunStatus::Ok,
+            Utc::now(),
+        );
+        assert_eq!(
+            routine_verification_status(&routine),
+            RoutineVerificationStatus::Verified
+        );
+
+        if let RoutineAction::Lightweight { prompt, .. } = &mut routine.action {
+            *prompt = "Updated prompt".to_string();
+        }
+        routine.state = reset_routine_verification_state(
+            &routine.state,
+            routine_verification_fingerprint(&routine),
+        );
+
+        assert_eq!(
+            routine_verification_status(&routine),
+            RoutineVerificationStatus::Unverified
+        );
+    }
+
+    #[test]
+    fn test_failed_unverified_run_stays_unverified() {
+        let mut routine = make_verification_test_routine();
+        let fingerprint = routine_verification_fingerprint(&routine);
+        routine.state = reset_routine_verification_state(&routine.state, fingerprint.clone());
+        routine.state = apply_routine_verification_result(
+            &routine.state,
+            fingerprint,
+            RunStatus::Failed,
+            Utc::now(),
+        );
+
+        assert_eq!(
+            routine_verification_status(&routine),
+            RoutineVerificationStatus::Unverified
+        );
+    }
+
+    #[test]
+    fn test_schedule_change_resets_verification() {
+        let mut routine = make_verification_test_routine();
+        routine.trigger = Trigger::Cron {
+            schedule: "0 0 9 * * MON-FRI *".to_string(),
+            timezone: Some("UTC".to_string()),
+        };
+        let original_fingerprint = routine_verification_fingerprint(&routine);
+        routine.state =
+            reset_routine_verification_state(&routine.state, original_fingerprint.clone());
+        routine.state = apply_routine_verification_result(
+            &routine.state,
+            original_fingerprint,
+            RunStatus::Ok,
+            Utc::now(),
+        );
+
+        routine.trigger = Trigger::Cron {
+            schedule: "0 0 10 * * MON-FRI *".to_string(),
+            timezone: Some("UTC".to_string()),
+        };
+        routine.state = reset_routine_verification_state(
+            &routine.state,
+            routine_verification_fingerprint(&routine),
+        );
+
+        assert_eq!(
+            routine_verification_status(&routine),
+            RoutineVerificationStatus::Unverified
+        );
+    }
+
+    #[test]
+    fn test_legacy_routine_with_runs_is_treated_as_verified_without_metadata() {
+        let mut routine = make_verification_test_routine();
+        routine.run_count = 3;
+
+        assert_eq!(
+            routine_verification_status(&routine),
+            RoutineVerificationStatus::Verified
+        );
     }
 }

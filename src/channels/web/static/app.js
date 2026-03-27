@@ -4182,6 +4182,7 @@ function renderRoutinesSummary(s) {
     + summaryCard(I18n.t('routines.summary.total'), s.total, '')
     + summaryCard(I18n.t('routines.summary.enabled'), s.enabled, 'active')
     + summaryCard(I18n.t('routines.summary.disabled'), s.disabled, '')
+    + summaryCard(I18n.t('routines.summary.unverified'), s.unverified, 'pending')
     + summaryCard(I18n.t('routines.summary.failing'), s.failing, 'failed')
     + summaryCard(I18n.t('routines.summary.runsToday'), s.runs_today, 'completed');
 }
@@ -4200,6 +4201,8 @@ function renderRoutinesList(routines) {
   tbody.innerHTML = routines.map((r) => {
     const statusClass = r.status === 'active' ? 'completed'
       : r.status === 'failing' ? 'failed'
+      : r.status === 'attention' ? 'stuck'
+      : r.status === 'running' ? 'in_progress'
       : 'pending';
 
     const toggleLabel = r.enabled ? 'Disable' : 'Enable';
@@ -4207,6 +4210,7 @@ function renderRoutinesList(routines) {
     const triggerTitle = (r.trigger_type === 'cron' && r.trigger_raw)
       ? ' title="' + escapeHtml(r.trigger_raw) + '"'
       : '';
+    const runLabel = r.status === 'unverified' ? 'Verify now' : 'Run';
 
     return '<tr class="routine-row" data-action="open-routine" data-id="' + escapeHtml(r.id) + '">'
       + '<td>' + escapeHtml(r.name) + '</td>'
@@ -4218,7 +4222,7 @@ function renderRoutinesList(routines) {
       + '<td><span class="badge ' + statusClass + '">' + escapeHtml(r.status) + '</span></td>'
       + '<td>'
       + '<button class="' + toggleClass + '" data-action="toggle-routine" data-id="' + escapeHtml(r.id) + '">' + toggleLabel + '</button> '
-      + '<button class="btn-restart" data-action="trigger-routine" data-id="' + escapeHtml(r.id) + '">Run</button> '
+      + '<button class="btn-restart" data-action="trigger-routine" data-id="' + escapeHtml(r.id) + '">' + runLabel + '</button> '
       + '<button class="btn-cancel" data-action="delete-routine" data-id="' + escapeHtml(r.id) + '" data-name="' + escapeHtml(r.name) + '">Delete</button>'
       + '</td>'
       + '</tr>';
@@ -4247,12 +4251,12 @@ function renderRoutineDetail(routine) {
   const detail = document.getElementById('routine-detail');
   detail.style.display = 'block';
 
-  const statusClass = !routine.enabled ? 'pending'
-    : routine.consecutive_failures > 0 ? 'failed'
-    : 'completed';
-  const statusLabel = !routine.enabled ? 'disabled'
-    : routine.consecutive_failures > 0 ? 'failing'
-    : 'active';
+  const statusClass = routine.status === 'active' ? 'completed'
+    : routine.status === 'failing' ? 'failed'
+    : routine.status === 'attention' ? 'stuck'
+    : routine.status === 'running' ? 'in_progress'
+    : 'pending';
+  const statusLabel = routine.status || 'active';
 
   let html = '<div class="job-detail-header">'
     + '<button class="btn-back" data-action="close-routine-detail">&larr; Back</button>'
@@ -4275,6 +4279,20 @@ function renderRoutineDetail(routine) {
   if (routine.description) {
     html += '<div class="job-description"><h3>Description</h3>'
       + '<div class="job-description-body">' + escapeHtml(routine.description) + '</div></div>';
+  }
+
+  if (routine.status === 'unverified') {
+    let verificationCopy = 'Created or updated, but not yet verified with a successful run.';
+    if (routine.recent_runs && routine.recent_runs.length > 0) {
+      const latestRun = routine.recent_runs[0];
+      if (latestRun.status === 'failed') {
+        verificationCopy = 'The latest verification attempt failed. Review the run details and verify again after fixing it.';
+      } else if (latestRun.status === 'attention') {
+        verificationCopy = 'The latest verification attempt needs attention. Review the run details and verify again when ready.';
+      }
+    }
+    html += '<div class="job-description"><h3>Verification</h3>'
+      + '<div class="job-description-body">' + escapeHtml(verificationCopy) + '</div></div>';
   }
 
   // Trigger config

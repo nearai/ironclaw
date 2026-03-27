@@ -37,7 +37,7 @@
         {
           "response": {
             "type": "text",
-            "content": "Created the **morning-tech-news** routine with manual trigger and full_job mode. The `message` and `http` tools are pre-authorized.",
+            "content": "Created the **morning-tech-news** routine with manual trigger and full_job mode. The `message` and `http` tools are available, but the routine is not verified yet.",
             "input_tokens": 200,
             "output_tokens": 50
           }
