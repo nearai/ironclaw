@@ -3028,8 +3028,20 @@ impl ExtensionManager {
     }
 
     async fn cleanup_uninstalled_extension_secrets(&self, plan: SecretCleanupPlan, user_id: &str) {
+        let referenced_secrets = match self.collect_referenced_secret_names(user_id).await {
+            Ok(secret_names) => secret_names,
+            Err(error) => {
+                tracing::warn!(
+                    user_id,
+                    error,
+                    "Failed to determine which secrets are still referenced; keeping secrets"
+                );
+                return;
+            }
+        };
+
         for base_secret in &plan.base_secrets {
-            if self.secret_still_referenced(base_secret, user_id).await {
+            if referenced_secrets.contains(base_secret) {
                 continue;
             }
 
@@ -3037,10 +3049,7 @@ impl ExtensionManager {
 
             if let Some(companion_secrets) = plan.companion_secrets.get(base_secret) {
                 for companion_secret in companion_secrets {
-                    if !self
-                        .secret_still_referenced(companion_secret, user_id)
-                        .await
-                    {
+                    if !referenced_secrets.contains(companion_secret) {
                         self.delete_secret_best_effort(user_id, companion_secret)
                             .await;
                     }
@@ -3060,36 +3069,18 @@ impl ExtensionManager {
         }
     }
 
-    async fn secret_still_referenced(&self, secret_name: &str, user_id: &str) -> bool {
-        match self.try_secret_still_referenced(secret_name, user_id).await {
-            Ok(referenced) => referenced,
-            Err(error) => {
-                tracing::warn!(
-                    secret_name,
-                    user_id,
-                    error,
-                    "Failed to determine whether secret is still referenced; keeping secret"
-                );
-                true
-            }
-        }
-    }
-
-    async fn try_secret_still_referenced(
+    async fn collect_referenced_secret_names(
         &self,
-        secret_name: &str,
         user_id: &str,
-    ) -> Result<bool, String> {
-        let normalized_secret_name = secret_name.to_lowercase();
+    ) -> Result<HashSet<String>, String> {
+        let mut referenced_secret_names = HashSet::new();
 
         let tools = discover_tools(&self.wasm_tools_dir)
             .await
             .map_err(|e| format!("discover tools: {e}"))?;
         for tool_name in tools.keys() {
-            if let Some(cap) = self.load_tool_capabilities(tool_name).await
-                && Self::tool_references_secret(&cap, &normalized_secret_name)
-            {
-                return Ok(true);
+            if let Some(cap) = self.load_tool_capabilities(tool_name).await {
+                referenced_secret_names.extend(Self::tool_secret_names(&cap));
             }
         }
 
@@ -3097,10 +3088,8 @@ impl ExtensionManager {
             .await
             .map_err(|e| format!("discover channels: {e}"))?;
         for channel_name in channels.keys() {
-            if let Some(cap) = self.load_channel_capabilities(channel_name).await
-                && Self::channel_references_secret(&cap, &normalized_secret_name)
-            {
-                return Ok(true);
+            if let Some(cap) = self.load_channel_capabilities(channel_name).await {
+                referenced_secret_names.extend(Self::channel_secret_names(&cap));
             }
         }
 
@@ -3108,44 +3097,48 @@ impl ExtensionManager {
             .load_mcp_servers(user_id)
             .await
             .map_err(|e| format!("load MCP servers: {e}"))?;
-        if mcp_servers
-            .servers
-            .iter()
-            .any(|server| Self::mcp_server_references_secret(server, &normalized_secret_name))
-        {
-            return Ok(true);
+        for server in &mcp_servers.servers {
+            referenced_secret_names.extend(Self::mcp_server_secret_names(server));
         }
 
-        Ok(false)
+        Ok(referenced_secret_names)
     }
 
-    fn tool_references_secret(
-        cap: &crate::tools::wasm::CapabilitiesFile,
-        secret_name: &str,
-    ) -> bool {
-        cap.auth
-            .as_ref()
-            .is_some_and(|auth| auth.secret_name.eq_ignore_ascii_case(secret_name))
-            || cap.setup.as_ref().is_some_and(|setup| {
+    fn tool_secret_names(cap: &crate::tools::wasm::CapabilitiesFile) -> HashSet<String> {
+        let mut names = HashSet::new();
+
+        if let Some(auth) = &cap.auth {
+            names.insert(auth.secret_name.to_lowercase());
+        }
+        if let Some(setup) = &cap.setup {
+            names.extend(
                 setup
                     .required_secrets
                     .iter()
-                    .any(|secret| secret.name.eq_ignore_ascii_case(secret_name))
-            })
+                    .map(|secret| secret.name.to_lowercase()),
+            );
+        }
+
+        names
     }
 
-    fn channel_references_secret(
+    fn channel_secret_names(
         cap: &crate::channels::wasm::ChannelCapabilitiesFile,
-        secret_name: &str,
-    ) -> bool {
+    ) -> HashSet<String> {
         cap.setup
             .required_secrets
             .iter()
-            .any(|secret| secret.name.eq_ignore_ascii_case(secret_name))
+            .map(|secret| secret.name.to_lowercase())
+            .collect()
     }
 
-    fn mcp_server_references_secret(server: &McpServerConfig, secret_name: &str) -> bool {
-        server.token_secret_name() == secret_name || server.client_id_secret_name() == secret_name
+    fn mcp_server_secret_names(server: &McpServerConfig) -> HashSet<String> {
+        [
+            server.token_secret_name().to_lowercase(),
+            server.client_id_secret_name().to_lowercase(),
+        ]
+        .into_iter()
+        .collect()
     }
 
     /// Collect merged OAuth scopes from all installed tools sharing the same secret_name.
