@@ -648,7 +648,13 @@ pub async fn start_server(
                 } else {
                     "unknown panic".to_string()
                 };
-                tracing::error!("Handler panicked: {}", detail);
+                // Truncate panic payload to avoid leaking sensitive data into logs.
+                let safe_detail = if detail.len() > 200 {
+                    format!("{}…", &detail[..200])
+                } else {
+                    detail
+                };
+                tracing::error!("Handler panicked: {}", safe_detail);
                 axum::http::Response::builder()
                     .status(axum::http::StatusCode::INTERNAL_SERVER_ERROR)
                     .header("content-type", "text/plain")

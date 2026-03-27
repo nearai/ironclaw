@@ -29,9 +29,11 @@ pub async fn users_create_handler(
     let display_name = body
         .get("display_name")
         .and_then(|v| v.as_str())
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
         .ok_or((
             StatusCode::BAD_REQUEST,
-            "Missing required field 'display_name'".to_string(),
+            "Missing or empty 'display_name'".to_string(),
         ))?
         .to_string();
 
@@ -128,30 +130,10 @@ pub async fn users_list_handler(
         .map(|s| (s.user_id.clone(), s))
         .collect();
 
-    // Supplement with in-memory per-user cost from CostGuard. This captures
-    // LLM spend from chat turns (which don't create agent_jobs/llm_calls DB
-    // rows) and is the same source shown in the status bar token counter.
-    let cost_guard = state.cost_guard.clone();
-
     let mut users_json: Vec<serde_json::Value> = Vec::with_capacity(users.len());
     for u in users {
         let db_stats = stats_map.get(&u.id);
-
-        // Use CostGuard daily spend when DB has no recorded cost — this
-        // covers the common case where the user has been chatting (in-memory
-        // cost tracked) but hasn't dispatched background jobs (no DB rows).
-        let db_cost = db_stats.map_or(rust_decimal::Decimal::ZERO, |s| s.total_cost);
-        let live_cost = if let Some(ref cg) = cost_guard {
-            cg.daily_spend_for_user(&u.id).await
-        } else {
-            rust_decimal::Decimal::ZERO
-        };
-        // Show whichever is larger — DB has historical total, live has today's chat spend.
-        let display_cost = if live_cost > db_cost {
-            live_cost
-        } else {
-            db_cost
-        };
+        let total_cost = db_stats.map_or(rust_decimal::Decimal::ZERO, |s| s.total_cost);
 
         // Last active: prefer DB timestamp, fall back to last_login_at.
         let last_active = db_stats.and_then(|s| s.last_active_at).or(u.last_login_at);
@@ -167,7 +149,7 @@ pub async fn users_list_handler(
             "last_login_at": u.last_login_at.map(|dt| dt.to_rfc3339()),
             "created_by": u.created_by,
             "job_count": db_stats.map_or(0, |s| s.job_count),
-            "total_cost": display_cost.to_string(),
+            "total_cost": total_cost.to_string(),
             "last_active_at": last_active.map(|dt| dt.to_rfc3339()),
         }));
     }
@@ -228,9 +210,21 @@ pub async fn users_update_handler(
     let display_name = body
         .get("display_name")
         .and_then(|v| v.as_str())
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
         .unwrap_or(&existing.display_name);
 
-    let metadata = body.get("metadata").unwrap_or(&existing.metadata);
+    let metadata = if let Some(m) = body.get("metadata") {
+        if !m.is_object() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "metadata must be a JSON object".to_string(),
+            ));
+        }
+        m
+    } else {
+        &existing.metadata
+    };
 
     // Update role if provided and valid.
     if let Some(role) = body.get("role").and_then(|v| v.as_str()) {
@@ -403,8 +397,20 @@ pub async fn profile_update_handler(
     let display_name = body
         .get("display_name")
         .and_then(|v| v.as_str())
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
         .unwrap_or(&current.display_name);
-    let metadata = body.get("metadata").unwrap_or(&current.metadata);
+    let metadata = if let Some(m) = body.get("metadata") {
+        if !m.is_object() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "metadata must be a JSON object".to_string(),
+            ));
+        }
+        m
+    } else {
+        &current.metadata
+    };
 
     store
         .update_user_profile(&user.user_id, display_name, metadata)
