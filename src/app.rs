@@ -291,13 +291,14 @@ impl AppBuilder {
         // Initialize tool registry with credential injection support
         let credential_registry = Arc::new(SharedCredentialRegistry::new());
         let tools = if let Some(ref ss) = self.secrets_store {
-            Arc::new(
-                ToolRegistry::new()
-                    .with_credentials(Arc::clone(&credential_registry), Arc::clone(ss)),
-            )
+            ToolRegistry::new()
+                .with_credentials(Arc::clone(&credential_registry), Arc::clone(ss))
+                .with_http_allowed_domains(self.config.sandbox.extra_allowed_domains.clone())
         } else {
-            Arc::new(ToolRegistry::new())
+            ToolRegistry::new()
+                .with_http_allowed_domains(self.config.sandbox.extra_allowed_domains.clone())
         };
+        let tools = Arc::new(tools);
         tools.register_builtin_tools();
         tools.register_tool_info();
 
@@ -704,7 +705,10 @@ impl AppBuilder {
             use crate::secrets::{InMemorySecretsStore, SecretsCrypto};
             let ephemeral_key =
                 secrecy::SecretString::from(crate::secrets::keychain::generate_master_key_hex());
-            let crypto = Arc::new(SecretsCrypto::new(ephemeral_key).expect("ephemeral crypto"));
+            let crypto = Arc::new(
+                SecretsCrypto::new(ephemeral_key)
+                    .map_err(|e| anyhow::anyhow!("ephemeral crypto: {}", e))?,
+            );
             tracing::debug!("Using ephemeral in-memory secrets store for extension manager");
             Arc::new(InMemorySecretsStore::new(crypto))
         };
@@ -957,9 +961,13 @@ mod tests {
             {
                 self.tx
                     .send((user_id.clone(), session_id.clone()))
-                    .expect("test channel receiver should be alive");
+                    .map_err(|_| HookError::ExecutionFailed {
+                        reason: "test channel receiver should be alive".to_string(),
+                    })?;
             } else {
-                panic!("SessionStartHook received an unexpected event: {event:?}");
+                return Err(HookError::ExecutionFailed {
+                    reason: format!("SessionStartHook received an unexpected event: {event:?}"),
+                });
             }
             Ok(HookOutcome::ok())
         }
@@ -974,11 +982,14 @@ mod tests {
         let manager = AgentSessionManager::new().with_hooks(Arc::clone(&hooks));
         manager.get_or_create_session("user-123").await;
 
-        let (user_id, session_id) =
-            tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
-                .await
-                .expect("session start hook should fire")
-                .expect("session start payload should be present");
+        let received = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv()).await;
+        assert!(
+            matches!(received, Ok(Some(_))),
+            "session start hook should fire"
+        );
+        let Ok(Some((user_id, session_id))) = received else {
+            return;
+        };
 
         assert_eq!(user_id, "user-123");
         assert!(!session_id.is_empty());
