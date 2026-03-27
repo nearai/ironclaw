@@ -329,8 +329,11 @@ impl Tool for MessageTool {
         if !attachments.is_empty() {
             response = response.with_attachments(attachments);
         }
-        if channel.as_deref() == Some("gateway")
-            && response.thread_id.is_none()
+        // Attach thread_id so the gateway can route the message into the
+        // correct conversation.  Previously this only fired when channel was
+        // explicitly "gateway", which meant broadcast_all (channel=null) sent
+        // a response without a thread_id and the gateway silently dropped it.
+        if response.thread_id.is_none()
             && let Some(thread_id) = metadata_string(&ctx.metadata, "notify_thread_id")
         {
             response = response.in_thread(thread_id);
