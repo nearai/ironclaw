@@ -567,10 +567,17 @@ fn validate_legacy_flow_id(flow_id: &str) -> Result<(), String> {
             flow_id.len()
         ));
     }
-    if !is_valid_legacy_state_component(flow_id) {
+    if flow_id.len() > LEGACY_STATE_MAX_LEN {
         return Err(format!(
-            "Legacy OAuth flow_id contains invalid characters or exceeds max length ({LEGACY_STATE_MAX_LEN})"
+            "Legacy OAuth flow_id too long ({} chars, maximum {LEGACY_STATE_MAX_LEN})",
+            flow_id.len()
         ));
+    }
+    if !flow_id
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
+        return Err("Legacy OAuth flow_id contains invalid characters".to_string());
     }
     Ok(())
 }
@@ -1777,10 +1784,7 @@ mod tests {
 
         let long_id = "a".repeat(200);
         let err = decode_hosted_oauth_state(&long_id).expect_err("oversized flow_id");
-        assert!(
-            err.contains("invalid characters") || err.contains("max length"),
-            "unexpected error: {err}"
-        );
+        assert!(err.contains("too long"), "unexpected error: {err}");
     }
 
     /// Valid legacy flow IDs at boundary lengths are accepted.
