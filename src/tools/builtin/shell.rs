@@ -53,6 +53,8 @@ use async_trait::async_trait;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
+use ironclaw_safety::sensitive_paths::is_sensitive_path;
+
 use crate::context::JobContext;
 use crate::sandbox::{SandboxManager, SandboxPolicy};
 use crate::tools::tool::{
@@ -556,6 +558,103 @@ pub struct ShellTool {
     sandbox_policy: SandboxPolicy,
 }
 
+/// Commands that read file contents. When these appear at the start of a command
+/// or after a pipe/semicolon, their arguments are checked against `is_sensitive_path`.
+///
+/// This is defense-in-depth: it catches obvious `cat ~/.ssh/id_rsa` patterns but
+/// cannot prevent all bypass techniques (shell aliases, variable expansion, etc.).
+/// Full mitigation requires filesystem-level sandboxing (seccomp/landlock).
+const FILE_READ_COMMANDS: &[&str] = &[
+    "cat", "head", "tail", "less", "more", "tac", "nl", "bat", "batcat", "cp", "mv", "scp",
+    "rsync", "source", ".", // shell source
+    "vim", "vi", "nano", "code", "strings", "xxd", "hexdump", "od", "file", "stat", "wc", "diff",
+    "cmp", "tar", "zip", "gzip", "bzip2", "xz", "zstd", "base64",
+];
+
+/// Check if a command attempts to access sensitive credential files.
+///
+/// Scans arguments of known file-reading commands against `is_sensitive_path`.
+/// Returns a human-readable reason if a sensitive path is detected.
+fn check_sensitive_file_access(cmd: &str) -> Option<String> {
+    // Split on common shell separators to handle pipes and chains
+    for segment in cmd.split(&['|', ';', '&'][..]) {
+        let segment = segment.trim();
+        // Strip leading shell operators like `<` redirection
+        let segment = segment.trim_start_matches('<').trim();
+
+        // Get the command name (first token)
+        let mut tokens = segment.split_whitespace();
+        let cmd_name = match tokens.next() {
+            Some(name) => name,
+            None => continue,
+        };
+
+        // Strip path prefix (e.g., /usr/bin/cat -> cat)
+        let base_cmd = cmd_name.rsplit('/').next().unwrap_or(cmd_name);
+
+        let is_file_cmd = FILE_READ_COMMANDS
+            .iter()
+            .any(|&fc| base_cmd.eq_ignore_ascii_case(fc));
+
+        if !is_file_cmd {
+            continue;
+        }
+
+        // Check each remaining token as a potential file path
+        for token in tokens {
+            // Skip flags
+            if token.starts_with('-') {
+                continue;
+            }
+            // Expand ~ to home directory
+            let expanded = if let Some(rest) = token.strip_prefix("~/") {
+                if let Some(home) = dirs::home_dir() {
+                    home.join(rest)
+                } else {
+                    PathBuf::from(token)
+                }
+            } else {
+                PathBuf::from(token)
+            };
+
+            if is_sensitive_path(&expanded) {
+                return Some(format!(
+                    "Access denied: '{}' targets a sensitive credential path",
+                    token
+                ));
+            }
+        }
+    }
+
+    // Also check for input redirection to sensitive paths: `< ~/.ssh/id_rsa`
+    for segment in cmd.split(&['|', ';', '&'][..]) {
+        let segment = segment.trim();
+        if let Some(pos) = segment.find('<') {
+            let after_redirect = segment[pos + 1..].trim();
+            let path_token = after_redirect.split_whitespace().next().unwrap_or("");
+            if !path_token.is_empty() {
+                let expanded = if let Some(rest) = path_token.strip_prefix("~/") {
+                    if let Some(home) = dirs::home_dir() {
+                        home.join(rest)
+                    } else {
+                        PathBuf::from(path_token)
+                    }
+                } else {
+                    PathBuf::from(path_token)
+                };
+                if is_sensitive_path(&expanded) {
+                    return Some(format!(
+                        "Access denied: input redirection targets sensitive path '{}'",
+                        path_token
+                    ));
+                }
+            }
+        }
+    }
+
+    None
+}
+
 impl std::fmt::Debug for ShellTool {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ShellTool")
@@ -794,6 +893,13 @@ impl ShellTool {
                 reason,
                 truncate_for_error(cmd)
             )));
+        }
+
+        // Check for file-reading commands targeting sensitive credential paths.
+        // Defense-in-depth: catches obvious patterns like `cat ~/.ssh/id_rsa`
+        // but cannot prevent all shell-level bypass techniques.
+        if let Some(reason) = check_sensitive_file_access(cmd) {
+            return Err(ToolError::NotAuthorized(reason));
         }
 
         // Determine working directory
@@ -1508,5 +1614,56 @@ mod tests {
         assert_eq!(r2, RiskLevel::High); // safety: test code
         let r3 = classify_command_risk("DROP table users;");
         assert_eq!(r3, RiskLevel::High); // safety: test code
+    }
+
+    // ── Sensitive file access tests ──────────────────────────────────
+
+    #[test]
+    fn sensitive_file_access_blocks_cat_ssh() {
+        assert!(check_sensitive_file_access("cat /home/user/.ssh/id_rsa").is_some());
+        assert!(check_sensitive_file_access("cat ~/.ssh/id_rsa").is_some());
+    }
+
+    #[test]
+    fn sensitive_file_access_blocks_head_tail_less() {
+        assert!(check_sensitive_file_access("head -20 /home/user/.env").is_some());
+        assert!(check_sensitive_file_access("tail /home/user/.aws/credentials").is_some());
+        assert!(check_sensitive_file_access("less /home/user/.gnupg/secring.gpg").is_some());
+    }
+
+    #[test]
+    fn sensitive_file_access_blocks_piped_commands() {
+        assert!(check_sensitive_file_access("cat /home/user/.env | grep KEY").is_some());
+        assert!(check_sensitive_file_access("echo ok; cat /home/user/.ssh/id_rsa").is_some());
+    }
+
+    #[test]
+    fn sensitive_file_access_blocks_cp_mv() {
+        assert!(check_sensitive_file_access("cp /home/user/.ssh/id_rsa /tmp/stolen").is_some());
+        assert!(check_sensitive_file_access("mv /home/user/.aws/credentials /tmp/").is_some());
+    }
+
+    #[test]
+    fn sensitive_file_access_blocks_input_redirection() {
+        assert!(check_sensitive_file_access("wc -l < /home/user/.ssh/id_rsa").is_some());
+    }
+
+    #[test]
+    fn sensitive_file_access_allows_normal_files() {
+        assert!(check_sensitive_file_access("cat /home/user/code/main.rs").is_none());
+        assert!(check_sensitive_file_access("head README.md").is_none());
+        assert!(check_sensitive_file_access("tail -f /var/log/syslog").is_none());
+        assert!(check_sensitive_file_access("ls -la").is_none());
+        assert!(check_sensitive_file_access("cargo build").is_none());
+    }
+
+    #[test]
+    fn sensitive_file_access_allows_env_example() {
+        assert!(check_sensitive_file_access("cat /app/.env.example").is_none());
+    }
+
+    #[test]
+    fn sensitive_file_access_blocks_full_path_commands() {
+        assert!(check_sensitive_file_access("/usr/bin/cat /home/user/.ssh/id_rsa").is_some());
     }
 }
