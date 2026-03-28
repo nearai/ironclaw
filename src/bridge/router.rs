@@ -296,56 +296,31 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
         debug!("engine v2: failed to create learning missions: {e}");
     }
 
-    // Migrate v1 skills and build SkillSelector for the engine
-    {
-        use ironclaw_engine::capability::skill_selector::SkillSelector;
-
-        if let Some(registry) = agent.deps.skill_registry.as_ref() {
-            // Clone skills out of the std::sync::RwLock guard before awaiting
-            // to avoid holding the lock across async points.
-            let skills_snapshot = {
-                let guard = registry.read().map_err(|e| {
-                    engine_err("skill registry", format!("lock poisoned: {e}"))
-                })?;
-                guard.skills().to_vec()
-            };
-            if !skills_snapshot.is_empty() {
-                match crate::bridge::skill_migration::migrate_v1_skill_list(
-                    &skills_snapshot,
-                    &store_dyn,
-                    project_id,
-                )
-                .await
-                {
-                    Ok(count) if count > 0 => {
-                        debug!("engine v2: migrated {count} v1 skill(s)");
-                    }
-                    Err(e) => {
-                        debug!("engine v2: skill migration failed: {e}");
-                    }
-                    _ => {}
-                }
-            }
-        }
-
-        let all_docs = store_dyn
-            .list_memory_docs(project_id)
+    // Migrate v1 skills to v2 MemoryDocs (skill selection happens in the
+    // Python orchestrator at runtime via __list_skills__).
+    if let Some(registry) = agent.deps.skill_registry.as_ref() {
+        let skills_snapshot = {
+            let guard = registry.read().map_err(|e| {
+                engine_err("skill registry", format!("lock poisoned: {e}"))
+            })?;
+            guard.skills().to_vec()
+        };
+        if !skills_snapshot.is_empty() {
+            match crate::bridge::skill_migration::migrate_v1_skill_list(
+                &skills_snapshot,
+                &store_dyn,
+                project_id,
+            )
             .await
-            .unwrap_or_default();
-        match SkillSelector::from_docs(all_docs) {
-            Ok(selector) if !selector.is_empty() => {
-                debug!(
-                    "engine v2: loaded {} skill(s) into SkillSelector",
-                    selector.len()
-                );
-                thread_manager
-                    .set_skill_selector(Arc::new(selector))
-                    .await;
+            {
+                Ok(count) if count > 0 => {
+                    debug!("engine v2: migrated {count} v1 skill(s)");
+                }
+                Err(e) => {
+                    debug!("engine v2: skill migration failed: {e}");
+                }
+                _ => {}
             }
-            Err(e) => {
-                debug!("engine v2: failed to build SkillSelector: {e}");
-            }
-            _ => {}
         }
     }
 

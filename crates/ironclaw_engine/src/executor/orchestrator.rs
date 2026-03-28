@@ -238,7 +238,7 @@ pub async fn execute_orchestrator(
     signal_rx: &mut SignalReceiver,
     event_tx: Option<&tokio::sync::broadcast::Sender<ThreadEvent>>,
     retrieval: Option<&RetrievalEngine>,
-    _store: Option<&Arc<dyn Store>>,
+    store: Option<&Arc<dyn Store>>,
     persisted_state: &serde_json::Value,
 ) -> Result<OrchestratorResult, EngineError> {
     let mut total_tokens = TokenUsage::default();
@@ -371,6 +371,16 @@ pub async fn execute_orchestrator(
 
                     // __get_actions__()
                     "__get_actions__" => handle_get_actions(thread, effects, leases).await,
+
+                    // __list_skills__(max_candidates, max_tokens)
+                    "__list_skills__" => {
+                        handle_list_skills(args, thread, store).await
+                    }
+
+                    // __record_skill_usage__(doc_id, success)
+                    "__record_skill_usage__" => {
+                        handle_record_skill_usage(args, store).await
+                    }
 
                     // Unknown — let Monty resolve it (user-defined functions, builtins)
                     other => ExtFunctionResult::NotFound(other.to_string()),
@@ -1093,6 +1103,78 @@ async fn handle_get_actions(
             ExtFunctionResult::Return(json_to_monty(&serde_json::json!([])))
         }
     }
+}
+
+/// Handle `__list_skills__()`.
+///
+/// Loads all `DocType::Skill` MemoryDocs from the project and returns them
+/// as a list of Python dicts. The Python orchestrator handles scoring,
+/// selection, and injection — Rust just provides data access.
+async fn handle_list_skills(
+    _args: &[MontyObject],
+    thread: &Thread,
+    store: Option<&Arc<dyn Store>>,
+) -> ExtFunctionResult {
+    let Some(store) = store else {
+        return ExtFunctionResult::Return(json_to_monty(&serde_json::json!([])));
+    };
+
+    let docs = match store.list_memory_docs(thread.project_id).await {
+        Ok(docs) => docs,
+        Err(e) => {
+            debug!("__list_skills__: failed to load docs: {e}");
+            return ExtFunctionResult::Return(json_to_monty(&serde_json::json!([])));
+        }
+    };
+
+    let skills: Vec<serde_json::Value> = docs
+        .into_iter()
+        .filter(|d| d.doc_type == crate::types::memory::DocType::Skill)
+        .map(|d| {
+            serde_json::json!({
+                "doc_id": d.id.0.to_string(),
+                "title": d.title,
+                "content": d.content,
+                "metadata": d.metadata,
+            })
+        })
+        .collect();
+
+    ExtFunctionResult::Return(json_to_monty(&serde_json::json!(skills)))
+}
+
+/// Handle `__record_skill_usage__(doc_id, success)`.
+///
+/// Records that a skill was used in this thread. Called by the Python
+/// orchestrator after skill-assisted execution completes.
+async fn handle_record_skill_usage(
+    args: &[MontyObject],
+    store: Option<&Arc<dyn Store>>,
+) -> ExtFunctionResult {
+    let Some(store) = store else {
+        return ExtFunctionResult::Return(MontyObject::None);
+    };
+
+    let doc_id_str = args.first().map(monty_to_string).unwrap_or_default();
+    let success = args
+        .get(1)
+        .map(|o| matches!(o, MontyObject::Bool(true)))
+        .unwrap_or(false);
+
+    let Ok(uuid) = uuid::Uuid::parse_str(&doc_id_str) else {
+        debug!("__record_skill_usage__: invalid doc_id: {doc_id_str}");
+        return ExtFunctionResult::Return(MontyObject::None);
+    };
+
+    let tracker = crate::capability::skill_tracker::SkillTracker::new(Arc::clone(store));
+    if let Err(e) = tracker
+        .record_usage(crate::types::memory::DocId(uuid), success)
+        .await
+    {
+        debug!("__record_skill_usage__: failed: {e}");
+    }
+
+    ExtFunctionResult::Return(MontyObject::None)
 }
 
 // ── Helpers ─────────────────────────────────────────────────

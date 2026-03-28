@@ -48,10 +48,8 @@ pub struct ExecutionLoop {
     event_tx: Option<tokio::sync::broadcast::Sender<crate::types::event::ThreadEvent>>,
     /// Optional retrieval engine for injecting prior knowledge into context.
     retrieval: Option<crate::memory::RetrievalEngine>,
-    /// Optional Store for runtime prompt overlay loading.
+    /// Optional Store for runtime prompt overlay loading and skill retrieval.
     store: Option<Arc<dyn crate::traits::store::Store>>,
-    /// Optional skill selector for deterministic skill activation.
-    skill_selector: Option<Arc<crate::capability::skill_selector::SkillSelector>>,
 }
 
 impl ExecutionLoop {
@@ -76,7 +74,6 @@ impl ExecutionLoop {
             event_tx: None,
             retrieval: None,
             store: None,
-            skill_selector: None,
         }
     }
 
@@ -104,18 +101,9 @@ impl ExecutionLoop {
         self
     }
 
-    /// Set the Store for runtime prompt overlay loading.
+    /// Set the Store for runtime prompt overlay loading and skill retrieval.
     pub fn with_store(mut self, store: Arc<dyn crate::traits::store::Store>) -> Self {
         self.store = Some(store);
-        self
-    }
-
-    /// Set the skill selector for deterministic skill activation.
-    pub fn with_skill_selector(
-        mut self,
-        selector: Arc<crate::capability::skill_selector::SkillSelector>,
-    ) -> Self {
-        self.skill_selector = Some(selector);
         self
     }
 
@@ -240,52 +228,15 @@ impl ExecutionLoop {
                     Vec::new()
                 }
             };
-            let mut system_prompt = crate::executor::prompt::build_codeact_system_prompt(
+            let system_prompt = crate::executor::prompt::build_codeact_system_prompt(
                 &actions,
                 self.store.as_ref(),
                 self.thread.project_id,
             )
             .await;
 
-            // Select and inject active skills into the system prompt.
-            if let Some(ref selector) = self.skill_selector {
-                let goal = &self.thread.goal;
-                let selection = selector.select(goal, 3, 4000);
-                if !selection.skills.is_empty() {
-                    let skill_section =
-                        crate::executor::prompt::format_skills_section(&selection.skills);
-                    system_prompt.push_str(&skill_section);
-
-                    // Store active skill doc IDs in thread metadata for tracking.
-                    let skill_ids: Vec<String> = selection
-                        .skills
-                        .iter()
-                        .map(|s| s.doc_id.0.to_string())
-                        .collect();
-                    let snippet_names: Vec<String> = selection
-                        .skills
-                        .iter()
-                        .flat_map(|s| s.metadata.code_snippets.iter().map(|c| c.name.clone()))
-                        .collect();
-                    if let Some(meta) = self.thread.metadata.as_object_mut() {
-                        meta.insert(
-                            "active_skill_ids".into(),
-                            serde_json::json!(skill_ids),
-                        );
-                        meta.insert(
-                            "skill_snippet_names".into(),
-                            serde_json::json!(snippet_names),
-                        );
-                    }
-
-                    debug!(
-                        thread_id = %self.thread.id,
-                        skills = ?skill_ids,
-                        "activated {} skill(s) for thread",
-                        selection.skills.len()
-                    );
-                }
-            }
+            // Skill selection and injection happens in the Python orchestrator
+            // via __list_skills__() host function — not here in Rust.
 
             self.thread
                 .messages

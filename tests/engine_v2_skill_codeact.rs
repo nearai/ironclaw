@@ -21,7 +21,6 @@ use ironclaw_engine::{
     Thread, ThreadConfig, ThreadEvent, ThreadId, ThreadManager, ThreadMessage, ThreadOutcome,
     ThreadState, ThreadType, TokenUsage,
 };
-use ironclaw_engine::capability::skill_selector::SkillSelector;
 use ironclaw_engine::types::capability::{EffectType, LeaseId};
 
 
@@ -365,10 +364,8 @@ fn canned_github_issues() -> serde_json::Value {
 async fn skill_codeact_e2e_github_issues() {
     let project_id = ProjectId::new();
 
-    // 1. Build GitHub skill and selector
+    // 1. Build GitHub skill doc (stored in TestStore for Python orchestrator to find)
     let skill_doc = make_github_skill_doc(project_id);
-    let selector = Arc::new(SkillSelector::from_docs(vec![skill_doc]).unwrap());
-    assert_eq!(selector.len(), 1);
 
     // 2. Script the LLM: return Python code that calls http() then FINAL()
     let python_code = r#"
@@ -391,8 +388,10 @@ FINAL(str(result))
     );
     let effects = HttpMockEffects::new(canned);
 
-    // 4. Build infrastructure
+    // 4. Build infrastructure — store skill doc so __list_skills__() finds it
     let store = TestStore::new();
+    store.save_memory_doc(&skill_doc).await.unwrap();
+
     let mut caps = CapabilityRegistry::new();
     caps.register(Capability {
         name: "tools".into(),
@@ -416,9 +415,9 @@ FINAL(str(result))
         Arc::new(LeaseManager::new()),
         Arc::new(PolicyEngine::new()),
     );
-    mgr.set_skill_selector(selector).await;
 
     // 5. Spawn thread with a goal that matches the GitHub skill keywords
+    // (Python orchestrator calls __list_skills__() and selects based on goal)
     let tid = mgr
         .spawn_thread(
             "show me open github issues for test-org/test-repo",
@@ -460,33 +459,16 @@ FINAL(str(result))
         "http should be called with GitHub issues URL, got: {url}"
     );
 
-    // 9. Verify skill was activated (check thread metadata)
+    // 9. Verify skill content was injected into thread messages
+    // (Python orchestrator appends skill content via __add_message__("system_append", ...))
     let thread = store.load_thread(tid).await.unwrap().unwrap();
-    let active_ids = thread
-        .metadata
-        .get("active_skill_ids")
-        .and_then(|v| v.as_array())
-        .map(|v| v.len())
-        .unwrap_or(0);
-    assert!(
-        active_ids > 0,
-        "github skill should be in active_skill_ids"
-    );
-
-    // 10. Verify skill content was injected into system prompt
-    let system_msg = thread
+    let has_skill_content = thread
         .messages
         .iter()
-        .find(|m| m.role == ironclaw_engine::MessageRole::System);
-    assert!(system_msg.is_some(), "system message should exist");
-    let prompt = &system_msg.unwrap().content;
+        .any(|m| m.content.contains("Active Skills") || m.content.contains("GitHub API Skill"));
     assert!(
-        prompt.contains("Active Skills"),
-        "system prompt should contain Active Skills section"
-    );
-    assert!(
-        prompt.contains("GitHub API Skill"),
-        "system prompt should contain GitHub skill content"
+        has_skill_content,
+        "thread messages should contain injected skill content"
     );
 }
 
@@ -496,7 +478,6 @@ async fn non_matching_goal_skips_skill_codeact() {
     let project_id = ProjectId::new();
 
     let skill_doc = make_github_skill_doc(project_id);
-    let selector = Arc::new(SkillSelector::from_docs(vec![skill_doc]).unwrap());
 
     // LLM just returns text — no code execution needed
     let llm = ScriptedLlm::new(vec![LlmOutput {
@@ -506,6 +487,7 @@ async fn non_matching_goal_skips_skill_codeact() {
 
     let effects = HttpMockEffects::new(HashMap::new());
     let store = TestStore::new();
+    store.save_memory_doc(&skill_doc).await.unwrap();
 
     let mgr = ThreadManager::new(
         llm,
@@ -515,7 +497,6 @@ async fn non_matching_goal_skips_skill_codeact() {
         Arc::new(LeaseManager::new()),
         Arc::new(PolicyEngine::new()),
     );
-    mgr.set_skill_selector(selector).await;
 
     let tid = mgr
         .spawn_thread(
@@ -536,13 +517,11 @@ async fn non_matching_goal_skips_skill_codeact() {
     let calls = effects.recorded_calls().await;
     assert!(calls.is_empty(), "no http calls for weather query");
 
-    // No skills should be activated
+    // Skill content should NOT appear in messages (goal doesn't match)
     let thread = store.load_thread(tid).await.unwrap().unwrap();
-    let active_ids = thread
-        .metadata
-        .get("active_skill_ids")
-        .and_then(|v| v.as_array())
-        .map(|v| v.len())
-        .unwrap_or(0);
-    assert_eq!(active_ids, 0, "no skills for unrelated goal");
+    let has_skill_content = thread
+        .messages
+        .iter()
+        .any(|m| m.content.contains("Active Skills"));
+    assert!(!has_skill_content, "no skills for unrelated goal");
 }

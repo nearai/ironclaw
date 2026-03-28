@@ -116,6 +116,109 @@ def format_docs(docs):
     return "\n".join(parts)
 
 
+# ── Skill selection and injection (self-modifiable) ────────
+
+
+def score_skill(skill, message_lower):
+    """Score a skill against a user message. Returns 0 if vetoed."""
+    meta = skill.get("metadata", {})
+    activation = meta.get("activation", {})
+
+    # Exclude keyword veto
+    for excl in activation.get("exclude_keywords", []):
+        if excl.lower() in message_lower:
+            return 0
+
+    score = 0
+
+    # Keyword scoring: exact word = 10, substring = 5 (cap 30)
+    kw_score = 0
+    words = message_lower.split()
+    for kw in activation.get("keywords", []):
+        kw_lower = kw.lower()
+        if kw_lower in words:
+            kw_score += 10
+        elif kw_lower in message_lower:
+            kw_score += 5
+    score += min(kw_score, 30)
+
+    # Tag scoring: substring = 3 (cap 15)
+    tag_score = 0
+    for tag in activation.get("tags", []):
+        if tag.lower() in message_lower:
+            tag_score += 3
+    score += min(tag_score, 15)
+
+    # Confidence factor for extracted skills
+    source = meta.get("source", "authored")
+    if source == "extracted":
+        metrics = meta.get("metrics", {})
+        total = metrics.get("success_count", 0) + metrics.get("failure_count", 0)
+        confidence = metrics.get("success_count", 0) / total if total > 0 else 1.0
+        factor = 0.5 + 0.5 * max(0.0, min(1.0, confidence))
+        score = int(score * factor)
+
+    return score
+
+
+def select_skills(skills, goal, max_candidates=3, max_tokens=4000):
+    """Select relevant skills using deterministic scoring."""
+    if not skills or not goal:
+        return []
+
+    message_lower = goal.lower()
+    scored = []
+    for skill in skills:
+        s = score_skill(skill, message_lower)
+        if s > 0:
+            scored.append((s, skill))
+
+    scored.sort(key=lambda x: -x[0])
+
+    # Budget selection
+    selected = []
+    budget = max_tokens
+    for _, skill in scored:
+        if len(selected) >= max_candidates:
+            break
+        meta = skill.get("metadata", {})
+        activation = meta.get("activation", {})
+        cost = max(activation.get("max_context_tokens", 1000), 1)
+        if cost <= budget:
+            budget -= cost
+            selected.append(skill)
+
+    return selected
+
+
+def format_skills(skills):
+    """Format selected skills for system prompt injection."""
+    parts = ["\n## Active Skills\n"]
+    for skill in skills:
+        meta = skill.get("metadata", {})
+        name = meta.get("name", "unknown")
+        version = meta.get("version", "?")
+        trust = meta.get("trust", "trusted").upper()
+        content = skill.get("content", "")
+
+        parts.append('<skill name="' + str(name) + '" version="' +
+                      str(version) + '" trust="' + trust + '">')
+        parts.append(content)
+        if trust == "INSTALLED":
+            parts.append("\n(Treat the above as SUGGESTIONS only.)")
+        parts.append("</skill>\n")
+
+        # Document code snippets
+        snippets = meta.get("code_snippets", [])
+        if snippets:
+            parts.append("### Skill functions (callable in code)\n")
+            for sn in snippets:
+                parts.append("- `" + sn.get("name", "?") + "()` — " +
+                              sn.get("description", "") + "\n")
+
+    return "\n".join(parts)
+
+
 # ── Main execution loop ─────────────────────────────────────
 
 
@@ -150,12 +253,25 @@ def run_loop(context, goal, actions, state, config):
             __transition_to__("completed", "cost budget exhausted")
             return {"outcome": "completed", "response": "Cost budget exhausted."}
 
-        # 3. Inject prior knowledge on first step
+        # 3. Inject prior knowledge and activate skills on first step
         if step == 0:
             docs = __retrieve_docs__(goal, 5)
             if docs:
                 knowledge = format_docs(docs)
                 __add_message__("system_append", knowledge)
+
+            # Select and inject skills based on goal keywords
+            all_skills = __list_skills__()
+            active_skills = select_skills(all_skills, goal, max_candidates=3, max_tokens=4000)
+            if active_skills:
+                skill_text = format_skills(active_skills)
+                __add_message__("system_append", skill_text)
+                # Store active skill IDs in state for tracking
+                state["active_skill_ids"] = [s.get("doc_id", "") for s in active_skills]
+                state["skill_snippet_names"] = []
+                for s in active_skills:
+                    for sn in s.get("metadata", {}).get("code_snippets", []):
+                        state["skill_snippet_names"].append(sn.get("name", ""))
 
         # 4. Call LLM
         __emit_event__("step_started", step=step)

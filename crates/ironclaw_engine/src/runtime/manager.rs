@@ -43,8 +43,6 @@ pub struct ThreadManager {
     completed: Arc<RwLock<HashMap<ThreadId, ThreadOutcome>>>,
     /// Broadcast channel for thread events (for live status updates).
     event_tx: tokio::sync::broadcast::Sender<crate::types::event::ThreadEvent>,
-    /// Optional skill selector for deterministic skill activation.
-    skill_selector: RwLock<Option<Arc<crate::capability::skill_selector::SkillSelector>>>,
 }
 
 impl ThreadManager {
@@ -69,19 +67,7 @@ impl ThreadManager {
             running: Arc::new(RwLock::new(HashMap::new())),
             completed: Arc::new(RwLock::new(HashMap::new())),
             event_tx,
-            skill_selector: RwLock::new(None),
         }
-    }
-
-    /// Set the skill selector for deterministic skill activation.
-    ///
-    /// Can be called after construction (through `Arc`) since this uses
-    /// internal mutability via `RwLock`.
-    pub async fn set_skill_selector(
-        &self,
-        selector: Arc<crate::capability::skill_selector::SkillSelector>,
-    ) {
-        *self.skill_selector.write().await = Some(selector);
     }
 
     /// Subscribe to thread events for live status updates.
@@ -251,15 +237,11 @@ impl ThreadManager {
         let store_for_retrieval = Arc::clone(&self.store);
         let retrieval = crate::memory::RetrievalEngine::new(store_for_retrieval);
 
-        let mut exec_loop = ExecutionLoop::new(thread, llm, effects, leases, policy, rx, user_id)
+        let exec_loop = ExecutionLoop::new(thread, llm, effects, leases, policy, rx, user_id)
             .with_capabilities(Arc::clone(&self.capabilities))
             .with_event_tx(self.event_tx.clone())
             .with_retrieval(retrieval)
             .with_store(Arc::clone(&self.store));
-
-        if let Some(ref selector) = *self.skill_selector.read().await {
-            exec_loop = exec_loop.with_skill_selector(Arc::clone(selector));
-        }
 
         // Spawn background task
         let store_for_task = Arc::clone(&self.store);
@@ -1009,172 +991,6 @@ mod tests {
         assert!(matches!(outcome, ThreadOutcome::Completed { .. }));
     }
 
-    // ── Skill integration tests ──────────────────────────────
-
-    #[tokio::test]
-    async fn skill_injected_into_thread_for_matching_goal() {
-        use crate::capability::skill_selector::SkillSelector;
-        use crate::types::memory::{DocType, MemoryDoc};
-        use ironclaw_skills::types::ActivationCriteria;
-        use ironclaw_skills::v2::{SkillMetrics, V2SkillMetadata, V2SkillSource};
-
-        let project = ProjectId::new();
-
-        // Create a GitHub skill doc
-        let meta = V2SkillMetadata {
-            name: "github".into(),
-            version: 1,
-            description: "GitHub API skill".into(),
-            activation: ActivationCriteria {
-                keywords: vec!["github".into(), "issues".into(), "pull".into()],
-                max_context_tokens: 1000,
-                ..Default::default()
-            },
-            source: V2SkillSource::Authored,
-            trust: ironclaw_skills::SkillTrust::Trusted,
-            code_snippets: vec![ironclaw_skills::v2::CodeSnippet {
-                name: "list_issues".into(),
-                code: "def list_issues(owner, repo): pass".into(),
-                description: "List open issues".into(),
-            }],
-            metrics: SkillMetrics::default(),
-            parent_version: None,
-            content_hash: String::new(),
-        };
-        let mut skill_doc = MemoryDoc::new(
-            project,
-            DocType::Skill,
-            "skill:github",
-            "# GitHub Skill\nUse the http tool to call GitHub APIs.",
-        );
-        skill_doc.metadata = serde_json::to_value(&meta).unwrap();
-
-        let selector = Arc::new(SkillSelector::from_docs(vec![skill_doc]).unwrap());
-        assert_eq!(selector.len(), 1);
-
-        // Build manager with the skill selector
-        let store = Arc::new(MockStore::new());
-        let mgr = make_manager_with_store(MockLlm::text("Here are your issues."), store.clone());
-        mgr.set_skill_selector(selector).await;
-
-        // Spawn thread with goal matching "github" + "issues" keywords
-        let tid = mgr
-            .spawn_thread(
-                "show me open github issues",
-                ThreadType::Foreground,
-                project,
-                ThreadConfig::default(),
-                None,
-                "user",
-            )
-            .await
-            .unwrap();
-
-        let outcome = mgr.join_thread(tid).await.unwrap();
-        assert!(
-            matches!(outcome, ThreadOutcome::Completed { response: Some(ref r) } if r.contains("issues")),
-            "expected completed with response, got: {outcome:?}"
-        );
-
-        // Verify skill was activated by checking thread metadata
-        let thread = store.load_thread(tid).await.unwrap().unwrap();
-        let active_ids = thread
-            .metadata
-            .get("active_skill_ids")
-            .and_then(|v| v.as_array())
-            .map(|v| v.len())
-            .unwrap_or(0);
-        assert!(active_ids > 0, "expected active_skill_ids in thread metadata");
-
-        let snippet_names = thread
-            .metadata
-            .get("skill_snippet_names")
-            .and_then(|v| v.as_array());
-        assert!(snippet_names.is_some(), "expected skill_snippet_names in metadata");
-        let names: Vec<String> = snippet_names
-            .unwrap()
-            .iter()
-            .filter_map(|v| v.as_str().map(String::from))
-            .collect();
-        assert!(names.contains(&"list_issues".to_string()), "expected list_issues snippet");
-
-        // Verify system prompt contains skill content
-        let system_msg = thread
-            .messages
-            .iter()
-            .find(|m| m.role == crate::types::message::MessageRole::System);
-        assert!(system_msg.is_some(), "expected system message");
-        let prompt = &system_msg.unwrap().content;
-        assert!(
-            prompt.contains("Active Skills"),
-            "system prompt should contain Active Skills section"
-        );
-        assert!(
-            prompt.contains("GitHub Skill"),
-            "system prompt should contain skill content"
-        );
-        assert!(
-            prompt.contains("list_issues"),
-            "system prompt should document code snippets"
-        );
-    }
-
-    #[tokio::test]
-    async fn non_matching_goal_does_not_activate_skills() {
-        use crate::capability::skill_selector::SkillSelector;
-        use crate::types::memory::{DocType, MemoryDoc};
-        use ironclaw_skills::types::ActivationCriteria;
-        use ironclaw_skills::v2::{SkillMetrics, V2SkillMetadata, V2SkillSource};
-
-        let project = ProjectId::new();
-
-        let meta = V2SkillMetadata {
-            name: "github".into(),
-            version: 1,
-            description: "GitHub".into(),
-            activation: ActivationCriteria {
-                keywords: vec!["github".into(), "issues".into()],
-                max_context_tokens: 1000,
-                ..Default::default()
-            },
-            source: V2SkillSource::Authored,
-            trust: ironclaw_skills::SkillTrust::Trusted,
-            code_snippets: vec![],
-            metrics: SkillMetrics::default(),
-            parent_version: None,
-            content_hash: String::new(),
-        };
-        let mut skill_doc =
-            MemoryDoc::new(project, DocType::Skill, "skill:github", "GitHub skill");
-        skill_doc.metadata = serde_json::to_value(&meta).unwrap();
-
-        let selector = Arc::new(SkillSelector::from_docs(vec![skill_doc]).unwrap());
-        let store = Arc::new(MockStore::new());
-        let mgr = make_manager_with_store(MockLlm::text("Sure!"), store.clone());
-        mgr.set_skill_selector(selector).await;
-
-        // Goal does NOT match github keywords
-        let tid = mgr
-            .spawn_thread(
-                "what is the weather today",
-                ThreadType::Foreground,
-                project,
-                ThreadConfig::default(),
-                None,
-                "user",
-            )
-            .await
-            .unwrap();
-
-        let _outcome = mgr.join_thread(tid).await.unwrap();
-        let thread = store.load_thread(tid).await.unwrap().unwrap();
-
-        let active_ids = thread
-            .metadata
-            .get("active_skill_ids")
-            .and_then(|v| v.as_array())
-            .map(|v| v.len())
-            .unwrap_or(0);
-        assert_eq!(active_ids, 0, "no skills should activate for unrelated goal");
-    }
+    // Skill selection and injection tests are in tests/engine_v2_skill_codeact.rs
+    // (skill selection happens in the Python orchestrator, not in Rust).
 }
