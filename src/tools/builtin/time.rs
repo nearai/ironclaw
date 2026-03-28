@@ -62,7 +62,7 @@ impl Tool for TimeTool {
                     "description": "Second timestamp for diff."
                 }
             },
-            "required": ["operation"]
+            "required": []
         })
     }
 

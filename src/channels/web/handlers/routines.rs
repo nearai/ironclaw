@@ -122,11 +122,15 @@ pub async fn routines_detail_handler(
         .collect();
     let routine_info = RoutineInfo::from_routine(&routine);
 
-    // Look up the routine's conversation thread so the UI can link to full output.
+    // Read-only lookup — do not create a conversation on a GET request.
+    // The conversation is created lazily when the routine first executes.
     let conversation_id = store
-        .get_or_create_routine_conversation(routine.id, &routine.name, &routine.user_id)
+        .find_routine_conversation(routine.id, &routine.user_id)
         .await
-        .ok();
+        .unwrap_or_else(|e| {
+            tracing::warn!(routine_id = %routine.id, error = %e, "Failed to look up routine conversation");
+            None
+        });
 
     Ok(Json(RoutineDetailResponse {
         id: routine.id,

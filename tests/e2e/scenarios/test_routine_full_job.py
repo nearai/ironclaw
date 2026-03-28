@@ -120,11 +120,14 @@ async def test_full_job_routine_completes_with_tools(page, ironclaw_server):
         f"Full job routine run failed: {completed_run}"
     )
 
-    # Step 4: Verify the job reached completed state
+    # Step 4: Verify the job reached a success state.
+    # Jobs may advance past "completed" to "submitted" or "accepted",
+    # so treat all post-completion states as success.
+    success_states = {"completed", "submitted", "accepted"}
     if completed_run.get("job_id"):
         job = await _wait_for_job_terminal(
             ironclaw_server, completed_run["job_id"], timeout=30
         )
-        assert job["state"].lower() == "completed", (
-            f"Expected job state 'completed', got '{job['state']}'"
+        assert job["state"].lower() in success_states, (
+            f"Expected job state in {success_states}, got '{job['state']}'"
         )

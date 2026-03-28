@@ -276,8 +276,33 @@ impl LlmProvider for OpenAiCodexProvider {
         &self,
         request: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, LlmError> {
+        // Build a reverse map so we can translate sanitized names back to originals.
+        // Only needed when sanitization actually changes a name (e.g. MCP tools with dots).
+        let name_map: std::collections::HashMap<String, String> = request
+            .tools
+            .iter()
+            .filter_map(|t| {
+                let sanitized = sanitize_tool_name(&t.name);
+                if sanitized != t.name {
+                    Some((sanitized, t.name.clone()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
         let body = self.build_request_body(&request.messages, Some(&request.tools));
-        let parsed = self.send_request(body).await?;
+        let mut parsed = self.send_request(body).await?;
+
+        // Reverse-map sanitized tool names back to originals so the caller
+        // can look them up in the tool registry.
+        if !name_map.is_empty() {
+            for tc in &mut parsed.tool_calls {
+                if let Some(original) = name_map.get(&tc.name) {
+                    tc.name = original.clone();
+                }
+            }
+        }
 
         let finish_reason = if !parsed.tool_calls.is_empty() {
             FinishReason::ToolUse
@@ -1145,5 +1170,57 @@ data: {"type":"response.completed","response":{"status":"completed","usage":{"in
         let msg = ChatMessage::assistant_with_tool_calls(None, tool_calls);
         let items = super::convert_message(&msg, 0);
         assert_eq!(items[0]["name"], "mcp_server_search");
+    }
+
+    /// Regression: sanitized tool names in API responses must be reverse-mapped
+    /// back to original names so the tool registry can look them up.
+    #[test]
+    fn test_sanitized_name_reverse_mapping() {
+        use std::collections::HashMap;
+
+        let tools = [
+            ToolDefinition {
+                name: "mcp.server.search".to_string(),
+                description: "Search".to_string(),
+                parameters: serde_json::json!({"type": "object", "properties": {}}),
+            },
+            ToolDefinition {
+                name: "memory_search".to_string(),
+                description: "Memory".to_string(),
+                parameters: serde_json::json!({"type": "object", "properties": {}}),
+            },
+        ];
+
+        // Build name map (same logic as complete_with_tools)
+        let name_map: HashMap<String, String> = tools
+            .iter()
+            .filter_map(|t| {
+                let sanitized = super::sanitize_tool_name(&t.name);
+                if sanitized != t.name {
+                    Some((sanitized, t.name.clone()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Only the MCP tool should appear (its name changed)
+        assert_eq!(name_map.len(), 1);
+        assert_eq!(
+            name_map.get("mcp_server_search"),
+            Some(&"mcp.server.search".to_string())
+        );
+
+        // Simulate a tool call coming back with the sanitized name
+        let mut tc = ToolCall {
+            id: "call_1".to_string(),
+            name: "mcp_server_search".to_string(),
+            arguments: serde_json::json!({}),
+            reasoning: None,
+        };
+        if let Some(original) = name_map.get(&tc.name) {
+            tc.name = original.clone();
+        }
+        assert_eq!(tc.name, "mcp.server.search");
     }
 }
