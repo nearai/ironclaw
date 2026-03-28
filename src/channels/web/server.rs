@@ -46,6 +46,10 @@ use crate::channels::web::handlers::routines::{
     routines_delete_handler, routines_detail_handler, routines_list_handler,
     routines_summary_handler, routines_toggle_handler, routines_trigger_handler,
 };
+use crate::channels::web::handlers::frontend::{
+    frontend_layout_handler, frontend_layout_update_handler, frontend_widget_file_handler,
+    frontend_widgets_handler,
+};
 use crate::channels::web::handlers::skills::{
     skills_install_handler, skills_list_handler, skills_remove_handler, skills_search_handler,
 };
@@ -580,6 +584,16 @@ pub async fn start_server(
             "/api/tokens/{id}",
             axum::routing::delete(super::handlers::tokens::tokens_revoke_handler),
         )
+        // Frontend extension API
+        .route(
+            "/api/frontend/layout",
+            get(frontend_layout_handler).put(frontend_layout_update_handler),
+        )
+        .route("/api/frontend/widgets", get(frontend_widgets_handler))
+        .route(
+            "/api/frontend/widget/{id}/{*file}",
+            get(frontend_widget_file_handler),
+        )
         // Gateway control plane
         .route("/api/gateway/status", get(gateway_status_handler))
         // OpenAI-compatible API
@@ -726,6 +740,11 @@ pub async fn start_server(
 }
 
 // --- Static file handlers ---
+//
+// All frontend assets are embedded in the `ironclaw_frontend` crate.
+// These handlers serve them with appropriate MIME types and cache headers.
+
+use ironclaw_frontend::assets;
 
 async fn index_handler() -> impl IntoResponse {
     (
@@ -733,7 +752,7 @@ async fn index_handler() -> impl IntoResponse {
             (header::CONTENT_TYPE, "text/html; charset=utf-8"),
             (header::CACHE_CONTROL, "no-cache"),
         ],
-        include_str!("static/index.html"),
+        assets::INDEX_HTML,
     )
 }
 
@@ -743,7 +762,7 @@ async fn css_handler() -> impl IntoResponse {
             (header::CONTENT_TYPE, "text/css"),
             (header::CACHE_CONTROL, "no-cache"),
         ],
-        include_str!("static/style.css"),
+        assets::STYLE_CSS,
     )
 }
 
@@ -753,7 +772,7 @@ async fn js_handler() -> impl IntoResponse {
             (header::CONTENT_TYPE, "application/javascript"),
             (header::CACHE_CONTROL, "no-cache"),
         ],
-        include_str!("static/app.js"),
+        assets::APP_JS,
     )
 }
 
@@ -763,7 +782,7 @@ async fn theme_init_handler() -> impl IntoResponse {
             (header::CONTENT_TYPE, "application/javascript"),
             (header::CACHE_CONTROL, "no-cache"),
         ],
-        include_str!("static/theme-init.js"),
+        assets::THEME_INIT_JS,
     )
 }
 
@@ -773,7 +792,7 @@ async fn favicon_handler() -> impl IntoResponse {
             (header::CONTENT_TYPE, "image/x-icon"),
             (header::CACHE_CONTROL, "public, max-age=86400"),
         ],
-        include_bytes!("static/favicon.ico").as_slice(),
+        assets::FAVICON_ICO,
     )
 }
 
@@ -783,7 +802,7 @@ async fn i18n_index_handler() -> impl IntoResponse {
             (header::CONTENT_TYPE, "application/javascript"),
             (header::CACHE_CONTROL, "no-cache"),
         ],
-        include_str!("static/i18n/index.js"),
+        assets::I18N_INDEX_JS,
     )
 }
 
@@ -793,7 +812,7 @@ async fn i18n_en_handler() -> impl IntoResponse {
             (header::CONTENT_TYPE, "application/javascript"),
             (header::CACHE_CONTROL, "no-cache"),
         ],
-        include_str!("static/i18n/en.js"),
+        assets::I18N_EN_JS,
     )
 }
 
@@ -803,7 +822,7 @@ async fn i18n_zh_handler() -> impl IntoResponse {
             (header::CONTENT_TYPE, "application/javascript"),
             (header::CACHE_CONTROL, "no-cache"),
         ],
-        include_str!("static/i18n/zh-CN.js"),
+        assets::I18N_ZH_CN_JS,
     )
 }
 
@@ -813,7 +832,7 @@ async fn i18n_app_handler() -> impl IntoResponse {
             (header::CONTENT_TYPE, "application/javascript"),
             (header::CACHE_CONTROL, "no-cache"),
         ],
-        include_str!("static/i18n-app.js"),
+        assets::I18N_APP_JS,
     )
 }
 

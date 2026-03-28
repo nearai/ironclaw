@@ -13,20 +13,20 @@ use crate::channels::web::types::*;
 // --- Static file handlers ---
 
 pub async fn index_handler() -> Html<&'static str> {
-    Html(include_str!("../static/index.html"))
+    Html(ironclaw_frontend::assets::INDEX_HTML)
 }
 
 pub async fn css_handler() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/css")],
-        include_str!("../static/style.css"),
+        ironclaw_frontend::assets::STYLE_CSS,
     )
 }
 
 pub async fn js_handler() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "application/javascript")],
-        include_str!("../static/app.js"),
+        ironclaw_frontend::assets::APP_JS,
     )
 }
 

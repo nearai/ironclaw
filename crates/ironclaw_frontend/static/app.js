@@ -6324,3 +6324,152 @@ document.getElementById('settings-search-input').addEventListener('input', funct
     activePanel.appendChild(empty);
   }
 });
+
+// ==================== Widget Extension System ====================
+//
+// Provides a registration API for frontend widgets. Widgets are self-contained
+// components that plug into named slots in the UI (tabs, sidebar, status bar, etc.).
+//
+// Widget authors call IronClaw.registerWidget({ id, name, slot, init, ... })
+// from their module script. The init() function receives a container DOM element
+// and the IronClaw.api object for authenticated fetch, event subscription, etc.
+
+window.IronClaw = window.IronClaw || {};
+IronClaw.widgets = new Map();
+IronClaw._widgetInitQueue = [];
+
+/**
+ * Register a widget component.
+ * @param {Object} def - Widget definition
+ * @param {string} def.id - Unique widget identifier
+ * @param {string} def.name - Display name
+ * @param {string} def.slot - Target slot ('tab', 'chat_header', etc.)
+ * @param {string} [def.icon] - Icon identifier
+ * @param {Function} def.init - Called with (container, api) when widget activates
+ * @param {Function} [def.activate] - Called when widget becomes visible
+ * @param {Function} [def.deactivate] - Called when widget is hidden
+ * @param {Function} [def.destroy] - Called when widget is removed
+ */
+IronClaw.registerWidget = function(def) {
+  if (!def.id || !def.init) {
+    console.error('[IronClaw] Widget registration requires id and init:', def);
+    return;
+  }
+  IronClaw.widgets.set(def.id, def);
+
+  if (def.slot === 'tab') {
+    _addWidgetTab(def);
+  }
+};
+
+/**
+ * API object exposed to widgets for safe interaction with the app.
+ */
+IronClaw.api = {
+  /** Authenticated fetch wrapper — injects the session token. */
+  fetch: function(path, opts) {
+    opts = opts || {};
+    opts.headers = Object.assign({}, opts.headers || {}, {
+      'Authorization': 'Bearer ' + token
+    });
+    return fetch(path, opts);
+  },
+
+  /** Subscribe to an SSE/WebSocket event type. Returns an unsubscribe function. */
+  subscribe: function(eventType, handler) {
+    if (!window._widgetEventHandlers) window._widgetEventHandlers = {};
+    if (!window._widgetEventHandlers[eventType]) window._widgetEventHandlers[eventType] = [];
+    window._widgetEventHandlers[eventType].push(handler);
+    return function() {
+      var handlers = window._widgetEventHandlers[eventType];
+      if (handlers) {
+        var idx = handlers.indexOf(handler);
+        if (idx !== -1) handlers.splice(idx, 1);
+      }
+    };
+  },
+
+  /** Current theme information. */
+  theme: {
+    get current() { return document.documentElement.dataset.theme || 'dark'; }
+  },
+
+  /** Internationalization helper. */
+  i18n: {
+    t: function(key) { return (window.I18n && window.I18n.t) ? window.I18n.t(key) : key; }
+  },
+
+  /** Navigate to a tab by ID. */
+  navigate: function(tabId) {
+    if (typeof switchTab === 'function') switchTab(tabId);
+  }
+};
+
+/**
+ * Add a widget as a new tab in the tab bar.
+ * @private
+ */
+function _addWidgetTab(def) {
+  var tabBar = document.querySelector('.tab-bar');
+  var tabContent = document.querySelector('.tab-content') || document.getElementById('tab-content');
+  if (!tabBar || !tabContent) {
+    // DOM not ready yet — queue for later
+    IronClaw._widgetInitQueue.push(def);
+    return;
+  }
+
+  // Create tab button
+  var btn = document.createElement('button');
+  btn.className = 'tab-btn';
+  btn.dataset.tab = def.id;
+  btn.textContent = def.name;
+  if (def.icon) {
+    btn.dataset.icon = def.icon;
+  }
+  btn.addEventListener('click', function() {
+    if (typeof switchTab === 'function') switchTab(def.id);
+  });
+  // Insert before the settings tab (last built-in tab) or at the end
+  var settingsBtn = tabBar.querySelector('[data-tab="settings"]');
+  if (settingsBtn) {
+    tabBar.insertBefore(btn, settingsBtn);
+  } else {
+    tabBar.appendChild(btn);
+  }
+
+  // Create container panel
+  var panel = document.createElement('div');
+  panel.className = 'tab-panel';
+  panel.dataset.tab = def.id;
+  panel.dataset.widget = def.id;
+  panel.style.display = 'none';
+  tabContent.appendChild(panel);
+
+  // Initialize the widget
+  try {
+    def.init(panel, IronClaw.api);
+  } catch (e) {
+    console.error('[IronClaw] Widget "' + def.id + '" init failed:', e);
+    panel.innerHTML = '<div style="padding:2rem;color:var(--color-error,red);">Widget "' +
+      def.id + '" failed to load: ' + (e.message || e) + '</div>';
+  }
+}
+
+// Apply layout config if injected by the server
+if (window.__IRONCLAW_LAYOUT__) {
+  (function() {
+    var layout = window.__IRONCLAW_LAYOUT__;
+    // Apply branding title
+    if (layout.branding && layout.branding.title) {
+      var titleEl = document.querySelector('.app-title');
+      if (titleEl) titleEl.textContent = layout.branding.title;
+    }
+    // Apply tab visibility
+    if (layout.tabs && layout.tabs.hidden) {
+      layout.tabs.hidden.forEach(function(tabId) {
+        var btn = document.querySelector('.tab-btn[data-tab="' + tabId + '"]');
+        if (btn) btn.style.display = 'none';
+      });
+    }
+  })();
+}

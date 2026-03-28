@@ -1,0 +1,37 @@
+//! Embedded static assets for the IronClaw web gateway.
+//!
+//! All frontend files are compiled into the binary via `include_str!()` /
+//! `include_bytes!()`. The web gateway serves these as the default baseline;
+//! workspace-stored customizations (layout config, widgets, CSS overrides)
+//! are layered on top at runtime.
+
+// ==================== Core Files ====================
+
+/// Main HTML page (SPA shell).
+pub const INDEX_HTML: &str = include_str!("../static/index.html");
+
+/// Main application JavaScript.
+pub const APP_JS: &str = include_str!("../static/app.js");
+
+/// Base stylesheet.
+pub const STYLE_CSS: &str = include_str!("../static/style.css");
+
+/// Theme initialization script (runs synchronously in `<head>` to prevent FOUC).
+pub const THEME_INIT_JS: &str = include_str!("../static/theme-init.js");
+
+/// Favicon.
+pub const FAVICON_ICO: &[u8] = include_bytes!("../static/favicon.ico");
+
+// ==================== Internationalization ====================
+
+/// i18n core library.
+pub const I18N_INDEX_JS: &str = include_str!("../static/i18n/index.js");
+
+/// English translations.
+pub const I18N_EN_JS: &str = include_str!("../static/i18n/en.js");
+
+/// Chinese (Simplified) translations.
+pub const I18N_ZH_CN_JS: &str = include_str!("../static/i18n/zh-CN.js");
+
+/// i18n integration with the app.
+pub const I18N_APP_JS: &str = include_str!("../static/i18n-app.js");
