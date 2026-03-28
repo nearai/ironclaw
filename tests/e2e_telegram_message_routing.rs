@@ -200,6 +200,8 @@ mod tests {
             document_extraction: None,
             sandbox_readiness: ironclaw::agent::SandboxReadiness::DisabledByConfig,
             builder: None,
+            llm_backend: "nearai".to_string(),
+            tenant_rates: std::sync::Arc::new(ironclaw::tenant::TenantRateRegistry::new(4, 3)),
         };
 
         let gateway = Arc::new(TestChannel::new());

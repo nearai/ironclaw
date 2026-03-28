@@ -249,8 +249,22 @@ impl JobStore for PgBackend {
         self.store.list_agent_jobs().await
     }
 
+    async fn list_agent_jobs_for_user(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<AgentJobRecord>, DatabaseError> {
+        self.store.list_agent_jobs_for_user(user_id).await
+    }
+
     async fn agent_job_summary(&self) -> Result<AgentJobSummary, DatabaseError> {
         self.store.agent_job_summary().await
+    }
+
+    async fn agent_job_summary_for_user(
+        &self,
+        user_id: &str,
+    ) -> Result<AgentJobSummary, DatabaseError> {
+        self.store.agent_job_summary_for_user(user_id).await
     }
 
     async fn get_agent_job_failure_reason(
@@ -496,12 +510,28 @@ impl RoutineStore for PgBackend {
             .await
     }
 
+    async fn batch_get_last_run_status(
+        &self,
+        routine_ids: &[Uuid],
+    ) -> Result<std::collections::HashMap<Uuid, crate::agent::routine::RunStatus>, DatabaseError>
+    {
+        self.store.batch_get_last_run_status(routine_ids).await
+    }
+
     async fn link_routine_run_to_job(
         &self,
         run_id: Uuid,
         job_id: Uuid,
     ) -> Result<(), DatabaseError> {
         self.store.link_routine_run_to_job(run_id, job_id).await
+    }
+
+    async fn get_webhook_routine_by_path(
+        &self,
+        path: &str,
+        user_id: Option<&str>,
+    ) -> Result<Option<Routine>, DatabaseError> {
+        self.store.get_webhook_routine_by_path(path, user_id).await
     }
 
     async fn list_dispatched_routine_runs(&self) -> Result<Vec<RoutineRun>, DatabaseError> {
@@ -708,6 +738,51 @@ impl WorkspaceStore for PgBackend {
     ) -> Result<Vec<SearchResult>, WorkspaceError> {
         self.repo
             .hybrid_search(user_id, agent_id, query, embedding, config)
+            .await
+    }
+
+    // Optimized multi-scope overrides using `ANY($1::text[])` SQL.
+
+    async fn hybrid_search_multi(
+        &self,
+        user_ids: &[String],
+        agent_id: Option<Uuid>,
+        query: &str,
+        embedding: Option<&[f32]>,
+        config: &SearchConfig,
+    ) -> Result<Vec<SearchResult>, WorkspaceError> {
+        self.repo
+            .hybrid_search_multi(user_ids, agent_id, query, embedding, config)
+            .await
+    }
+
+    async fn list_all_paths_multi(
+        &self,
+        user_ids: &[String],
+        agent_id: Option<Uuid>,
+    ) -> Result<Vec<String>, WorkspaceError> {
+        self.repo.list_all_paths_multi(user_ids, agent_id).await
+    }
+
+    async fn get_document_by_path_multi(
+        &self,
+        user_ids: &[String],
+        agent_id: Option<Uuid>,
+        path: &str,
+    ) -> Result<MemoryDocument, WorkspaceError> {
+        self.repo
+            .get_document_by_path_multi(user_ids, agent_id, path)
+            .await
+    }
+
+    async fn list_directory_multi(
+        &self,
+        user_ids: &[String],
+        agent_id: Option<Uuid>,
+        directory: &str,
+    ) -> Result<Vec<WorkspaceEntry>, WorkspaceError> {
+        self.repo
+            .list_directory_multi(user_ids, agent_id, directory)
             .await
     }
 }

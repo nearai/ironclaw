@@ -3591,8 +3591,22 @@ fn status_to_wit(
             },
             metadata_json,
         },
-        // Suggestions are web-gateway-only; skip for WASM channels
-        StatusUpdate::Suggestions { .. } => return None,
+        // Suggestions and turn cost are web-gateway-only; skip for WASM channels
+        StatusUpdate::Suggestions { .. } | StatusUpdate::TurnCost { .. } => return None,
+        StatusUpdate::ReasoningUpdate {
+            narrative,
+            decisions,
+        } => {
+            let mut msg = narrative.clone();
+            for d in decisions {
+                msg.push_str(&format!("\n  → {}: {}", d.tool_name, d.rationale));
+            }
+            wit_channel::StatusUpdate {
+                status: wit_channel::StatusType::Status,
+                message: msg,
+                metadata_json,
+            }
+        }
     })
 }
 

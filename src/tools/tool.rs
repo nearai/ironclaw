@@ -1,5 +1,6 @@
 //! Tool trait and types.
 
+use std::fmt;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -28,30 +29,29 @@ impl ApprovalRequirement {
     }
 }
 
-/// Approval context for autonomous tool execution (routines, background jobs).
+/// Precomputed autonomous tool scope for background jobs and routines.
 ///
-/// Interactive sessions don't use this type — they rely on session-level
-/// auto-approve lists managed by the UI. This enum models only the autonomous
-/// case where no interactive user is present.
+/// Interactive sessions don't use this type — they still rely on
+/// `requires_approval()` and session-level approval state.
 #[derive(Debug, Clone)]
 pub enum ApprovalContext {
-    /// Autonomous job with no interactive user. `UnlessAutoApproved` tools are
-    /// pre-approved. `Always` tools are blocked unless listed in `allowed_tools`.
+    /// Autonomous job with no interactive user. Only tools in `allowed_tools`
+    /// may run; interactive approval requirements are ignored.
     Autonomous {
-        /// Tool names that are pre-authorized even for `Always` approval.
+        /// Tool names that may run autonomously for this job/run.
         allowed_tools: std::collections::HashSet<String>,
     },
 }
 
 impl ApprovalContext {
-    /// Create an autonomous context with no extra tool permissions.
+    /// Create an autonomous context with no allowed tools.
     pub fn autonomous() -> Self {
         Self::Autonomous {
             allowed_tools: std::collections::HashSet::new(),
         }
     }
 
-    /// Create an autonomous context with specific tools pre-authorized.
+    /// Create an autonomous context with specific allowed tools.
     pub fn autonomous_with_tools(tools: impl IntoIterator<Item = String>) -> Self {
         Self::Autonomous {
             allowed_tools: tools.into_iter().collect(),
@@ -59,13 +59,9 @@ impl ApprovalContext {
     }
 
     /// Check whether a tool invocation is blocked in this context.
-    pub fn is_blocked(&self, tool_name: &str, requirement: ApprovalRequirement) -> bool {
+    pub fn is_blocked(&self, tool_name: &str, _requirement: ApprovalRequirement) -> bool {
         match self {
-            Self::Autonomous { allowed_tools } => match requirement {
-                ApprovalRequirement::Never => false,
-                ApprovalRequirement::UnlessAutoApproved => false,
-                ApprovalRequirement::Always => !allowed_tools.contains(tool_name),
-            },
+            Self::Autonomous { allowed_tools } => !allowed_tools.contains(tool_name),
         }
     }
 
@@ -113,6 +109,33 @@ impl Default for ToolRateLimitConfig {
         Self {
             requests_per_minute: 60,
             requests_per_hour: 1000,
+        }
+    }
+}
+
+/// Risk level of a tool invocation.
+///
+/// Used by the shell tool to classify commands and by the worker to drive
+/// approval decisions and observability logging. Implements `Ord` so callers
+/// can compare levels (e.g. `risk >= RiskLevel::High`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum RiskLevel {
+    /// Read-only, safe, reversible (e.g. `ls`, `cat`, `grep`).
+    Low,
+    /// Creates or modifies state, but generally reversible
+    /// (e.g. `mkdir`, `git commit`, `cargo build`).
+    Medium,
+    /// Destructive, irreversible, or security-sensitive
+    /// (e.g. `rm -rf`, `git push --force`, `kill -9`).
+    High,
+}
+
+impl fmt::Display for RiskLevel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Low => f.write_str("low"),
+            Self::Medium => f.write_str("medium"),
+            Self::High => f.write_str("high"),
         }
     }
 }
@@ -279,6 +302,18 @@ pub trait Tool: Send + Sync {
     /// where the output might contain malicious content.
     fn requires_sanitization(&self) -> bool {
         true
+    }
+
+    /// Risk level for a specific invocation of this tool.
+    ///
+    /// Defaults to `Low` (read-only, safe). Override for tools whose risk
+    /// depends on the parameters — the shell tool classifies commands into
+    /// `Low` / `Medium` / `High` based on the command string.
+    ///
+    /// The worker logs this value with every tool call so operators can audit
+    /// the risk level at which each execution was classified.
+    fn risk_level_for(&self, _params: &serde_json::Value) -> RiskLevel {
+        RiskLevel::Low
     }
 
     /// Whether this tool invocation requires user approval.
@@ -467,6 +502,22 @@ pub fn redact_params(params: &serde_json::Value, sensitive: &[&str]) -> serde_js
 /// on maliciously crafted schemas.
 const MAX_SCHEMA_DEPTH: usize = 16;
 
+/// Returns true if the schema uses `oneOf`, `anyOf`, or `allOf` combinators
+/// where at least one variant is an object type (has `type: "object"` or `properties`).
+fn has_object_combinator_variants(schema: &serde_json::Value) -> bool {
+    for key in ["oneOf", "anyOf", "allOf"] {
+        if let Some(variants) = schema.get(key).and_then(|v| v.as_array())
+            && variants.iter().any(|v| {
+                v.get("type").and_then(|t| t.as_str()) == Some("object")
+                    || v.get("properties").is_some()
+            })
+        {
+            return true;
+        }
+    }
+    false
+}
+
 pub fn validate_tool_schema(schema: &serde_json::Value, path: &str) -> Vec<String> {
     validate_tool_schema_inner(schema, path, 0)
 }
@@ -481,7 +532,18 @@ fn validate_tool_schema_inner(schema: &serde_json::Value, path: &str, depth: usi
         return errors;
     }
 
-    // Rule 1: must have "type": "object" at this level
+    // Report non-array combinator values as errors.
+    for key in ["oneOf", "anyOf", "allOf"] {
+        if let Some(val) = schema.get(key)
+            && !val.is_array()
+        {
+            errors.push(format!("{path}: \"{key}\" must be an array"));
+        }
+    }
+
+    let has_combinators = has_object_combinator_variants(schema);
+
+    // Rule 1: must have "type": "object" at this level (unless combinators define the structure)
     match schema.get("type").and_then(|t| t.as_str()) {
         Some("object") => {}
         Some(other) => {
@@ -489,16 +551,71 @@ fn validate_tool_schema_inner(schema: &serde_json::Value, path: &str, depth: usi
             return errors; // Can't check further
         }
         None => {
-            errors.push(format!("{path}: missing \"type\": \"object\""));
-            return errors;
+            if !has_combinators {
+                errors.push(format!("{path}: missing \"type\": \"object\""));
+                return errors;
+            }
         }
     }
 
-    // Rule 2: must have "properties" as an object
+    // Validate combinator variants recursively
+    for key in ["allOf", "oneOf", "anyOf"] {
+        if let Some(variants) = schema.get(key).and_then(|v| v.as_array()) {
+            for (i, variant) in variants.iter().enumerate() {
+                if variant.get("type").and_then(|t| t.as_str()) == Some("object")
+                    || variant.get("properties").is_some()
+                {
+                    let variant_path = format!("{path}.{key}[{i}]");
+                    errors.extend(validate_tool_schema_inner(
+                        variant,
+                        &variant_path,
+                        depth + 1,
+                    ));
+                }
+            }
+        }
+    }
+
+    // Rule 2: must have "properties" as an object (unless combinators define them)
     let properties = match schema.get("properties").and_then(|p| p.as_object()) {
         Some(p) => p,
         None => {
-            errors.push(format!("{path}: missing or non-object \"properties\""));
+            if !has_combinators {
+                errors.push(format!("{path}: missing or non-object \"properties\""));
+                return errors;
+            }
+            // Combinators define the structure — validate top-level `required` keys
+            // against merged properties from all combinator variants.
+            if let Some(required) = schema.get("required").and_then(|r| r.as_array()) {
+                let mut merged_keys = std::collections::HashSet::new();
+                if let Some(all_of) = schema.get("allOf").and_then(|a| a.as_array()) {
+                    for variant in all_of {
+                        if let Some(props) = variant.get("properties").and_then(|p| p.as_object()) {
+                            merged_keys.extend(props.keys().cloned());
+                        }
+                    }
+                }
+                for key in ["oneOf", "anyOf"] {
+                    if let Some(variants) = schema.get(key).and_then(|v| v.as_array()) {
+                        for variant in variants {
+                            if let Some(props) =
+                                variant.get("properties").and_then(|p| p.as_object())
+                            {
+                                merged_keys.extend(props.keys().cloned());
+                            }
+                        }
+                    }
+                }
+                for req in required {
+                    if let Some(key) = req.as_str()
+                        && !merged_keys.contains(key)
+                    {
+                        errors.push(format!(
+                            "{path}: required key \"{key}\" not found in any combinator variant properties"
+                        ));
+                    }
+                }
+            }
             return errors;
         }
     };
@@ -889,26 +1006,27 @@ mod tests {
     }
 
     #[test]
-    fn test_approval_context_autonomous_allows_unless_auto_approved() {
+    fn test_approval_context_autonomous_blocks_tools_not_in_scope() {
         let ctx = ApprovalContext::autonomous();
-        assert!(!ctx.is_blocked("shell", ApprovalRequirement::Never));
-        assert!(!ctx.is_blocked("shell", ApprovalRequirement::UnlessAutoApproved));
+        assert!(ctx.is_blocked("shell", ApprovalRequirement::Never));
+        assert!(ctx.is_blocked("shell", ApprovalRequirement::UnlessAutoApproved));
         assert!(ctx.is_blocked("shell", ApprovalRequirement::Always));
     }
 
     #[test]
-    fn test_approval_context_autonomous_with_tools_allows_always() {
+    fn test_approval_context_autonomous_with_tools_allows_registered_name() {
         let ctx =
             ApprovalContext::autonomous_with_tools(["shell".to_string(), "message".to_string()]);
+        assert!(!ctx.is_blocked("shell", ApprovalRequirement::Never));
         assert!(!ctx.is_blocked("shell", ApprovalRequirement::Always));
         assert!(!ctx.is_blocked("message", ApprovalRequirement::Always));
         assert!(ctx.is_blocked("http", ApprovalRequirement::Always));
     }
 
     #[test]
-    fn test_approval_context_never_is_not_blocked() {
+    fn test_approval_context_blocks_never_when_not_in_scope() {
         let ctx = ApprovalContext::autonomous();
-        assert!(!ctx.is_blocked("any_tool", ApprovalRequirement::Never));
+        assert!(ctx.is_blocked("any_tool", ApprovalRequirement::Never));
     }
 
     #[test]
@@ -946,7 +1064,7 @@ mod tests {
             "other",
             ApprovalRequirement::Always
         ));
-        assert!(!ApprovalContext::is_blocked_or_default(
+        assert!(ApprovalContext::is_blocked_or_default(
             &ctx,
             "any",
             ApprovalRequirement::UnlessAutoApproved

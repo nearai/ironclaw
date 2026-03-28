@@ -28,7 +28,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use async_trait::async_trait;
 use rust_decimal::Decimal;
-use tokio::sync::mpsc;
+use tokio::sync::{Mutex as AsyncMutex, mpsc};
 
 use crate::agent::AgentDeps;
 use crate::channels::{
@@ -361,6 +361,75 @@ impl Channel for StubChannel {
     }
 }
 
+/// Captured broadcast deliveries keyed by the target user or chat identifier.
+pub type BroadcastCapture = Arc<AsyncMutex<Vec<(String, OutgoingResponse)>>>;
+
+/// A lightweight channel double that only records `broadcast()` traffic.
+///
+/// This is useful for unit tests that need to assert message routing without
+/// spinning up a full interactive channel harness.
+pub struct RecordingBroadcastChannel {
+    name: &'static str,
+    captures: BroadcastCapture,
+}
+
+impl RecordingBroadcastChannel {
+    pub fn new(name: &'static str) -> (Self, BroadcastCapture) {
+        let captures = Arc::new(AsyncMutex::new(Vec::new()));
+        (
+            Self {
+                name,
+                captures: Arc::clone(&captures),
+            },
+            captures,
+        )
+    }
+}
+
+#[async_trait]
+impl Channel for RecordingBroadcastChannel {
+    fn name(&self) -> &str {
+        self.name
+    }
+
+    async fn start(&self) -> Result<MessageStream, ChannelError> {
+        let (_tx, rx) = mpsc::channel::<IncomingMessage>(1);
+        Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))
+    }
+
+    async fn respond(
+        &self,
+        _msg: &IncomingMessage,
+        _response: OutgoingResponse,
+    ) -> Result<(), ChannelError> {
+        Ok(())
+    }
+
+    async fn send_status(
+        &self,
+        _status: StatusUpdate,
+        _metadata: &serde_json::Value,
+    ) -> Result<(), ChannelError> {
+        Ok(())
+    }
+
+    async fn broadcast(
+        &self,
+        user_id: &str,
+        response: OutgoingResponse,
+    ) -> Result<(), ChannelError> {
+        self.captures
+            .lock()
+            .await
+            .push((user_id.to_string(), response));
+        Ok(())
+    }
+
+    async fn health_check(&self) -> Result<(), ChannelError> {
+        Ok(())
+    }
+}
+
 /// Assembled test components.
 pub struct TestHarness {
     /// The agent dependencies, ready for use.
@@ -463,6 +532,7 @@ impl TestHarnessBuilder {
         let cost_guard = Arc::new(CostGuard::new(CostGuardConfig {
             max_cost_per_day_cents: None,
             max_actions_per_hour: None,
+            max_cost_per_user_per_day_cents: None,
         }));
 
         let channel = if self.stub_channel {
@@ -494,6 +564,8 @@ impl TestHarnessBuilder {
             document_extraction: None,
             sandbox_readiness: crate::agent::routine_engine::SandboxReadiness::DisabledByConfig,
             builder: None,
+            llm_backend: "nearai".to_string(),
+            tenant_rates: std::sync::Arc::new(crate::tenant::TenantRateRegistry::new(4, 3)),
         };
 
         TestHarness {
