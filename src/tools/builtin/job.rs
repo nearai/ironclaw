@@ -21,7 +21,7 @@ use crate::context::{ContextManager, JobContext, JobState};
 use crate::db::Database;
 use crate::history::SandboxJobRecord;
 use crate::orchestrator::auth::CredentialGrant;
-use crate::orchestrator::job_manager::{ContainerJobManager, JobMode};
+use crate::orchestrator::job_manager::{ContainerJobManager, JobCreationParams, JobMode};
 use crate::secrets::SecretsStore;
 use crate::tools::tool::{ApprovalRequirement, Tool, ToolError, ToolOutput, require_str};
 use ironclaw_common::AppEvent;
@@ -355,16 +355,13 @@ impl CreateJobTool {
     }
 
     /// Execute via sandboxed Docker container.
-    #[allow(clippy::too_many_arguments)]
     async fn execute_sandbox(
         &self,
         task: &str,
         explicit_dir: Option<PathBuf>,
         wait: bool,
         mode: JobMode,
-        credential_grants: Vec<CredentialGrant>,
-        mcp_servers: Option<Vec<String>>,
-        max_iterations: Option<u32>,
+        params: JobCreationParams,
         ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
@@ -379,7 +376,7 @@ impl CreateJobTool {
         let project_dir_str = project_dir.display().to_string();
 
         // Serialize credential grants so restarts can reload them.
-        let credential_grants_json = match serde_json::to_string(&credential_grants) {
+        let credential_grants_json = match serde_json::to_string(&params.credential_grants) {
             Ok(json) => json,
             Err(e) => {
                 tracing::warn!(
@@ -434,15 +431,7 @@ impl CreateJobTool {
 
         // Create the container job with the pre-determined job_id.
         let _token = jm
-            .create_job(
-                job_id,
-                task,
-                Some(project_dir),
-                mode,
-                credential_grants,
-                mcp_servers,
-                max_iterations,
-            )
+            .create_job(job_id, task, Some(project_dir), mode, params)
             .await
             .map_err(|e| {
                 self.update_status(
@@ -962,9 +951,11 @@ impl Tool for CreateJobTool {
                 explicit_dir,
                 wait,
                 mode,
-                credential_grants,
-                mcp_servers,
-                max_iterations,
+                JobCreationParams {
+                    credential_grants,
+                    mcp_servers,
+                    max_iterations,
+                },
                 ctx,
             )
             .await
@@ -1623,9 +1614,7 @@ mod tests {
                 None,
                 false,
                 JobMode::Worker,
-                vec![],
-                None,
-                None,
+                JobCreationParams::default(),
                 &JobContext::default(),
             )
             .await;

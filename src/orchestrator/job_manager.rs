@@ -19,6 +19,11 @@ use crate::sandbox::connect_docker;
 /// Path to the master worker MCP config on the host.
 const WORKER_MCP_CONFIG_PATH: &str = "/opt/ironclaw/config/worker/mcp-servers.json";
 
+/// Maximum worker agent loop iterations. Must match `MAX_WORKER_ITERATIONS` in
+/// `src/worker/job.rs`. Applied server-side in `create_job_inner` so that even
+/// a direct API call (bypassing tool parameter parsing) is capped.
+const MAX_WORKER_ITERATIONS: u32 = 500;
+
 /// Which mode a sandbox container runs in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JobMode {
@@ -41,6 +46,19 @@ impl std::fmt::Display for JobMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.as_str())
     }
+}
+
+/// Parameters for creating a container job, bundled to avoid positional
+/// argument proliferation on `create_job` / `execute_sandbox`.
+#[derive(Debug, Clone, Default)]
+pub struct JobCreationParams {
+    /// Credential grants for the worker (served via `/credentials`).
+    pub credential_grants: Vec<CredentialGrant>,
+    /// Optional filter: which MCP servers to mount into the container.
+    /// `None` = full master config, `Some([])` = no MCP, `Some(["name"])` = filtered.
+    pub mcp_servers: Option<Vec<String>>,
+    /// Optional cap on worker agent loop iterations (clamped to 1..=500 server-side).
+    pub max_iterations: Option<u32>,
 }
 
 /// Configuration for the container job manager.
@@ -255,23 +273,20 @@ impl ContainerJobManager {
     /// before the container is created. Credential grants are stored in the
     /// TokenStore and served on-demand via the `/credentials` endpoint.
     /// Returns the auth token for the worker.
-    #[allow(clippy::too_many_arguments)]
     pub async fn create_job(
         &self,
         job_id: Uuid,
         task: &str,
         project_dir: Option<PathBuf>,
         mode: JobMode,
-        credential_grants: Vec<CredentialGrant>,
-        mcp_servers: Option<Vec<String>>,
-        max_iterations: Option<u32>,
+        params: JobCreationParams,
     ) -> Result<String, OrchestratorError> {
         // Generate auth token (stored in TokenStore, never logged)
         let token = self.token_store.create_token(job_id).await;
 
         // Store credential grants (revoked automatically when the token is revoked)
         self.token_store
-            .store_grants(job_id, credential_grants)
+            .store_grants(job_id, params.credential_grants)
             .await;
 
         // Record the handle
@@ -297,8 +312,8 @@ impl ContainerJobManager {
                 &token,
                 project_dir,
                 mode,
-                mcp_servers,
-                max_iterations,
+                params.mcp_servers,
+                params.max_iterations,
             )
             .await
         {
@@ -312,7 +327,6 @@ impl ContainerJobManager {
     }
 
     /// Inner implementation of container creation (separated for cleanup).
-    #[allow(clippy::too_many_arguments)]
     async fn create_job_inner(
         &self,
         job_id: Uuid,
@@ -352,10 +366,13 @@ impl ContainerJobManager {
         }
 
         // Inject max_iterations if specified (only for Worker mode — ClaudeCode uses max_turns).
+        // Server-side clamp ensures the cap is enforced even if the tool parsing
+        // layer is bypassed (e.g., direct API call via the web restart handler).
         if let Some(iters) = max_iterations
             && mode == JobMode::Worker
         {
-            env_vec.push(format!("IRONCLAW_MAX_ITERATIONS={}", iters));
+            let capped = iters.clamp(1, MAX_WORKER_ITERATIONS);
+            env_vec.push(format!("IRONCLAW_MAX_ITERATIONS={}", capped));
         }
 
         // Mount per-job MCP config when the feature is enabled.
@@ -705,6 +722,22 @@ fn generate_worker_mcp_config(
 
         // Filter to specific servers
         Some(names) => {
+            // Validate server names: reject path separators, null bytes, and
+            // excessively long names to prevent misuse if names are ever used
+            // in file paths or shell commands.
+            for name in names {
+                if name.len() > 128
+                    || name.contains('/')
+                    || name.contains('\\')
+                    || name.contains('\0')
+                {
+                    return Err(OrchestratorError::ContainerCreationFailed {
+                        job_id,
+                        reason: format!("invalid MCP server name: {:?}", name),
+                    });
+                }
+            }
+
             let content = std::fs::read_to_string(master_path).map_err(|e| {
                 OrchestratorError::ContainerCreationFailed {
                     job_id,
@@ -989,6 +1022,56 @@ mod tests {
             "cli/mod.rs must have env = \"IRONCLAW_MAX_ITERATIONS\" on the max_iterations arg"
         );
         drop(mgr);
+    }
+
+    #[test]
+    fn test_max_iterations_not_injected_for_claude_code() {
+        // ClaudeCode mode uses its own `max_turns`, not IRONCLAW_MAX_ITERATIONS.
+        // Verify the gate in create_job_inner only injects for Worker mode.
+        let source = include_str!("job_manager.rs");
+        assert!(
+            source.contains("mode == JobMode::Worker"),
+            "create_job_inner must gate IRONCLAW_MAX_ITERATIONS on JobMode::Worker \
+             (ClaudeCode has its own max_turns)"
+        );
+    }
+
+    #[test]
+    fn test_server_side_max_iterations_clamp() {
+        // Verify the server-side clamp uses the same constant as worker/job.rs
+        let source = include_str!("job_manager.rs");
+        assert!(
+            source.contains("iters.clamp(1, MAX_WORKER_ITERATIONS)"),
+            "create_job_inner must clamp max_iterations server-side using MAX_WORKER_ITERATIONS"
+        );
+    }
+
+    #[test]
+    fn test_mcp_server_name_validation_rejects_path_separators() {
+        let job_id = Uuid::new_v4();
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            tmp.path(),
+            r#"{"servers":[{"name":"test","enabled":true}]}"#,
+        )
+        .unwrap();
+
+        // Path separator should be rejected
+        let names = vec!["../../etc/passwd".to_string()];
+        assert!(generate_worker_mcp_config(tmp.path(), Some(&names), job_id).is_err());
+
+        // Null byte should be rejected
+        let names = vec!["test\0evil".to_string()];
+        assert!(generate_worker_mcp_config(tmp.path(), Some(&names), job_id).is_err());
+
+        // Excessively long name should be rejected
+        let names = vec!["a".repeat(129)];
+        assert!(generate_worker_mcp_config(tmp.path(), Some(&names), job_id).is_err());
+
+        // Valid name should pass
+        let names = vec!["test".to_string()];
+        let result = generate_worker_mcp_config(tmp.path(), Some(&names), job_id);
+        assert!(result.is_ok());
     }
 
     // ── Regression tests (CI-required) ────────────────────────────────
