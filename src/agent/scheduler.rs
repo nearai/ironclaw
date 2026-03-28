@@ -15,13 +15,13 @@ use crate::error::{Error, JobError};
 use crate::extensions::ExtensionManager;
 use crate::hooks::HookRegistry;
 use crate::llm::LlmProvider;
-use crate::safety::SafetyLayer;
 use crate::tenant::AdminScope;
 use crate::tools::{
     ApprovalContext, ToolRegistry, autonomous_allowed_tool_names, autonomous_unavailable_error,
     prepare_tool_params,
 };
 use crate::worker::job::{Worker, WorkerDeps};
+use ironclaw_safety::SafetyLayer;
 
 /// Message to send to a worker.
 #[derive(Debug)]
@@ -731,8 +731,8 @@ mod tests {
         CompletionRequest, CompletionResponse, LlmError, LlmProvider, ToolCompletionRequest,
         ToolCompletionResponse,
     };
-    use crate::safety::SafetyLayer;
     use crate::tools::{ApprovalRequirement, Tool, ToolError, ToolOutput};
+    use ironclaw_safety::SafetyLayer;
     use rust_decimal_macros::dec;
 
     /// Minimal LLM provider stub for scheduler tests that don't exercise LLM calls.

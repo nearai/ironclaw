@@ -28,10 +28,10 @@ use crate::error::{ChannelError, Error};
 use crate::extensions::ExtensionManager;
 use crate::hooks::HookRegistry;
 use crate::llm::LlmProvider;
-use crate::safety::SafetyLayer;
-use crate::skills::SkillRegistry;
 use crate::tools::ToolRegistry;
 use crate::workspace::Workspace;
+use ironclaw_safety::SafetyLayer;
+use ironclaw_skills::SkillRegistry;
 
 /// Static greeting persisted to DB and broadcast on first launch.
 ///
@@ -162,7 +162,7 @@ pub struct AgentDeps {
     pub workspace: Option<Arc<Workspace>>,
     pub extension_manager: Option<Arc<ExtensionManager>>,
     pub skill_registry: Option<Arc<std::sync::RwLock<SkillRegistry>>>,
-    pub skill_catalog: Option<Arc<crate::skills::catalog::SkillCatalog>>,
+    pub skill_catalog: Option<Arc<ironclaw_skills::catalog::SkillCatalog>>,
     pub skills_config: SkillsConfig,
     pub hooks: Arc<HookRegistry>,
     /// Cost enforcement guardrails (daily budget, hourly rate limits).
@@ -290,7 +290,9 @@ impl Agent {
         self.routine_engine_slot = slot;
     }
 
-    pub(super) async fn routine_engine(&self) -> Option<Arc<crate::agent::routine_engine::RoutineEngine>> {
+    pub(super) async fn routine_engine(
+        &self,
+    ) -> Option<Arc<crate::agent::routine_engine::RoutineEngine>> {
         self.routine_engine_slot.read().await.clone()
     }
 
@@ -299,9 +301,7 @@ impl Agent {
         *self.mission_manager_slot.write().await = Some(mgr);
     }
 
-    pub(crate) async fn mission_manager(
-        &self,
-    ) -> Option<Arc<ironclaw_engine::MissionManager>> {
+    pub(crate) async fn mission_manager(&self) -> Option<Arc<ironclaw_engine::MissionManager>> {
         self.mission_manager_slot.read().await.clone()
     }
 
@@ -410,7 +410,7 @@ impl Agent {
         self.deps.skill_registry.as_ref()
     }
 
-    pub(super) fn skill_catalog(&self) -> Option<&Arc<crate::skills::catalog::SkillCatalog>> {
+    pub(super) fn skill_catalog(&self) -> Option<&Arc<ironclaw_skills::catalog::SkillCatalog>> {
         self.deps.skill_catalog.as_ref()
     }
 
@@ -418,7 +418,7 @@ impl Agent {
     pub(super) fn select_active_skills(
         &self,
         message_content: &str,
-    ) -> Vec<crate::skills::LoadedSkill> {
+    ) -> Vec<ironclaw_skills::LoadedSkill> {
         if let Some(registry) = self.skill_registry() {
             let guard = match registry.read() {
                 Ok(g) => g,
@@ -429,7 +429,7 @@ impl Agent {
             };
             let available = guard.skills();
             let skills_cfg = &self.deps.skills_config;
-            let selected = crate::skills::prefilter_skills(
+            let selected = ironclaw_skills::prefilter_skills(
                 message_content,
                 available,
                 skills_cfg.max_active_skills,

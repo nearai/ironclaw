@@ -51,13 +51,13 @@ use crate::channels::wasm::schema::ChannelConfig;
 use crate::channels::{Channel, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate};
 use crate::error::ChannelError;
 use crate::pairing::PairingStore;
-use crate::safety::LeakDetector;
 use crate::secrets::SecretsStore;
 use crate::tools::wasm::LogLevel;
 use crate::tools::wasm::WasmResourceLimiter;
 use crate::tools::wasm::credential_injector::{
     InjectedCredentials, host_matches_pattern, inject_credential,
 };
+use ironclaw_safety::LeakDetector;
 
 // Generate component model bindings from the WIT file
 wasmtime::component::bindgen!({
@@ -3059,8 +3059,10 @@ fn status_to_wit(
             },
             metadata_json,
         },
-        // Suggestions and turn cost are web-gateway-only; skip for WASM channels
-        StatusUpdate::Suggestions { .. } | StatusUpdate::TurnCost { .. } => return None,
+        // Suggestions, turn cost, and skill activation are web-gateway-only; skip for WASM channels
+        StatusUpdate::Suggestions { .. }
+        | StatusUpdate::TurnCost { .. }
+        | StatusUpdate::SkillActivated { .. } => return None,
         StatusUpdate::ReasoningUpdate {
             narrative,
             decisions,

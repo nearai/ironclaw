@@ -1,8 +1,8 @@
 //! Skills system for IronClaw.
 //!
-//! This module re-exports everything from the `ironclaw_skills` crate,
-//! keeping `crate::skills::*` imports working throughout the codebase.
-//! New code should import from `ironclaw_skills` directly.
+//! This module contains main-crate skill logic that depends on types from
+//! other `src/` modules (e.g. `crate::llm::ToolDefinition`, `crate::secrets`).
+//! For core skill types, parsing, and registry, import from `ironclaw_skills` directly.
 //!
 //! The `attenuation` submodule remains here because it depends on
 //! `crate::llm::ToolDefinition` which is a main-crate type.
@@ -20,22 +20,22 @@
 //!   in the SKILL.md frontmatter and registered at migration time in `skill_migration.rs`.
 //! - **`credential_spec_to_mapping()` / `convert_credential_location()`** — Conversion
 //!   helpers used by `register_skill_credentials()`. Same lifecycle.
-//! - **This entire shim module** — Once v1 is gone, callers import from
-//!   `ironclaw_skills` directly and this file is deleted.
+//! - **This entire module** — Once v1 is gone, the remaining local items
+//!   can be deleted and this file removed.
 //!
 //! The `ironclaw_skills` crate itself remains (types, parser, validation, v2 types).
 
 pub mod attenuation;
 pub mod bundled;
 
-// Re-export everything from the extracted crate.
-pub use ironclaw_skills::*;
+// Items from `ironclaw_skills` are no longer glob-re-exported.
+// Callers should import from `ironclaw_skills` directly.
 
 // Re-export attenuation at the same path as before.
 pub use attenuation::{AttenuationResult, attenuate_tools};
 
 use crate::secrets::{CredentialLocation, CredentialMapping};
-use ironclaw_skills::types::{SkillCredentialLocation, SkillCredentialSpec};
+use ironclaw_skills::{LoadedSkill, SkillCredentialLocation, SkillCredentialSpec};
 
 /// Convert a skill credential location to the main crate's [`CredentialLocation`].
 fn convert_credential_location(loc: &SkillCredentialLocation) -> CredentialLocation {
@@ -48,9 +48,9 @@ fn convert_credential_location(loc: &SkillCredentialLocation) -> CredentialLocat
             name: name.clone(),
             prefix: prefix.clone(),
         },
-        SkillCredentialLocation::QueryParam { name } => CredentialLocation::QueryParam {
-            name: name.clone(),
-        },
+        SkillCredentialLocation::QueryParam { name } => {
+            CredentialLocation::QueryParam { name: name.clone() }
+        }
     }
 }
 

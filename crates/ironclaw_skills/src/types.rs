@@ -290,15 +290,18 @@ impl LoadedSkill {
 
         patterns
             .iter()
-            .filter_map(
-                |p| match regex::RegexBuilder::new(p).size_limit(MAX_REGEX_SIZE).build() {
+            .filter_map(|p| {
+                match regex::RegexBuilder::new(p)
+                    .size_limit(MAX_REGEX_SIZE)
+                    .build()
+                {
                     Ok(re) => Some(re),
                     Err(e) => {
                         tracing::warn!("Invalid activation regex pattern '{}': {}", p, e);
                         None
                     }
-                },
-            )
+                }
+            })
             .collect()
     }
 }

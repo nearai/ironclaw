@@ -147,8 +147,8 @@ impl SkillTracker {
 mod tests {
     use super::*;
     use crate::types::project::ProjectId;
-    use ironclaw_skills::v2::{SkillMetrics, V2SkillSource};
     use ironclaw_skills::SkillTrust;
+    use ironclaw_skills::v2::{SkillMetrics, V2SkillSource};
 
     fn make_skill_doc(project_id: ProjectId) -> MemoryDoc {
         let meta = V2SkillMetadata {
@@ -169,8 +169,12 @@ mod tests {
             content_hash: String::new(),
         };
 
-        let mut doc =
-            MemoryDoc::new(project_id, DocType::Skill, "skill:test", "Test skill prompt");
+        let mut doc = MemoryDoc::new(
+            project_id,
+            DocType::Skill,
+            "skill:test",
+            "Test skill prompt",
+        );
         doc.metadata = serde_json::to_value(&meta).unwrap();
         doc
     }

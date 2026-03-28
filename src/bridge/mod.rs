@@ -23,8 +23,6 @@ pub use router::{
     get_engine_mission,
     get_engine_project,
     get_engine_thread,
-    // Initialization
-    init_engine,
     // Action handlers
     handle_approval,
     handle_clear,
@@ -32,6 +30,8 @@ pub use router::{
     handle_interrupt,
     handle_new_thread,
     handle_with_engine,
+    // Initialization
+    init_engine,
     is_engine_v2_enabled,
     list_engine_missions,
     list_engine_projects,

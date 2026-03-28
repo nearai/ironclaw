@@ -387,9 +387,10 @@ impl MissionManager {
                             .count();
 
                         if thread.state == crate::types::thread::ThreadState::Done
-                            && trace.issues.iter().all(|i| {
-                                i.severity != crate::executor::trace::IssueSeverity::Error
-                            })
+                            && trace
+                                .issues
+                                .iter()
+                                .all(|i| i.severity != crate::executor::trace::IssueSeverity::Error)
                             && thread.step_count >= SKILL_EXTRACTION_MIN_STEPS
                             && action_count >= SKILL_EXTRACTION_MIN_ACTIONS
                         {
@@ -434,37 +435,28 @@ impl MissionManager {
                         // ── Trigger 3: Conversation insights ────────────
                         // Use the thread's project_id as a proxy for conversation scope.
                         let conv_key = thread.project_id.0.to_string();
-                        let count = conv_thread_counts
-                            .entry(conv_key.clone())
-                            .or_insert(0);
+                        let count = conv_thread_counts.entry(conv_key.clone()).or_insert(0);
                         *count += 1;
 
                         if (*count).is_multiple_of(CONVERSATION_INSIGHTS_INTERVAL) {
                             // Collect recent thread goals for context
-                            let thread_goals: Vec<String> = match mgr
-                                .store
-                                .list_threads(thread.project_id)
-                                .await
-                            {
-                                Ok(threads) => threads
-                                    .iter()
-                                    .rev()
-                                    .take(CONVERSATION_INSIGHTS_INTERVAL as usize)
-                                    .map(|t| t.goal.clone())
-                                    .collect(),
-                                Err(_) => vec![thread.goal.clone()],
-                            };
+                            let thread_goals: Vec<String> =
+                                match mgr.store.list_threads(thread.project_id).await {
+                                    Ok(threads) => threads
+                                        .iter()
+                                        .rev()
+                                        .take(CONVERSATION_INSIGHTS_INTERVAL as usize)
+                                        .map(|t| t.goal.clone())
+                                        .collect(),
+                                    Err(_) => vec![thread.goal.clone()],
+                                };
 
                             // Collect sample user messages from recent threads
                             let sample_messages: Vec<String> = thread
                                 .messages
                                 .iter()
-                                .filter(|m| {
-                                    m.role == crate::types::message::MessageRole::User
-                                })
-                                .map(|m| {
-                                    m.content.chars().take(200).collect::<String>()
-                                })
+                                .filter(|m| m.role == crate::types::message::MessageRole::User)
+                                .map(|m| m.content.chars().take(200).collect::<String>())
                                 .take(10)
                                 .collect();
 
@@ -567,10 +559,7 @@ impl MissionManager {
     /// Creates (if missing) the self-improvement, skill extraction, and
     /// conversation insights missions. This is the preferred entry point —
     /// call once at project bootstrap.
-    pub async fn ensure_learning_missions(
-        &self,
-        project_id: ProjectId,
-    ) -> Result<(), EngineError> {
+    pub async fn ensure_learning_missions(&self, project_id: ProjectId) -> Result<(), EngineError> {
         // 1. Error diagnosis (self-improvement) — existing
         self.ensure_self_improvement_mission(project_id).await?;
 
@@ -1028,8 +1017,7 @@ fn extract_json_from_response(response: &str) -> Option<serde_json::Value> {
 /// This is the "program.md" — a concrete, step-by-step prompt that tells the
 /// agent exactly what to do. Inspired by karpathy/autoresearch: the entire
 /// research org is a markdown file with an explicit loop.
-const SELF_IMPROVEMENT_GOAL: &str =
-    include_str!("../../prompts/mission_self_improvement.md");
+const SELF_IMPROVEMENT_GOAL: &str = include_str!("../../prompts/mission_self_improvement.md");
 
 /// Well-known title for the fix pattern database.
 pub const FIX_PATTERN_DB_TITLE: &str = "fix_pattern_database";
@@ -1038,16 +1026,14 @@ pub const FIX_PATTERN_DB_TITLE: &str = "fix_pattern_database";
 pub const FIX_PATTERN_DB_TAG: &str = "fix_patterns";
 
 /// The goal for the skill extraction mission.
-const SKILL_EXTRACTION_GOAL: &str =
-    include_str!("../../prompts/mission_skill_extraction.md");
+const SKILL_EXTRACTION_GOAL: &str = include_str!("../../prompts/mission_skill_extraction.md");
 
 /// The goal for the conversation insights mission.
 const CONVERSATION_INSIGHTS_GOAL: &str =
     include_str!("../../prompts/mission_conversation_insights.md");
 
 /// The goal for the expected-behavior mission (user feedback loop).
-const EXPECTED_BEHAVIOR_GOAL: &str =
-    include_str!("../../prompts/mission_expected_behavior.md");
+const EXPECTED_BEHAVIOR_GOAL: &str = include_str!("../../prompts/mission_expected_behavior.md");
 
 /// Seed content for the fix pattern database.
 const SEED_FIX_PATTERNS: &str = "\

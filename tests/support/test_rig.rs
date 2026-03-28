@@ -661,10 +661,10 @@ impl TestRigBuilder {
             // AppBuilder did not wire them for this environment.
             if enable_skills {
                 let registry = Arc::new(std::sync::RwLock::new(
-                    ironclaw::skills::SkillRegistry::new(temp_dir.path().join("skills"))
+                    ironclaw_skills::SkillRegistry::new(temp_dir.path().join("skills"))
                         .with_installed_dir(temp_dir.path().join("installed_skills")),
                 ));
-                let catalog = ironclaw::skills::catalog::shared_catalog();
+                let catalog = ironclaw_skills::catalog::shared_catalog();
                 components
                     .tools
                     .register_skill_tools(Arc::clone(&registry), Arc::clone(&catalog));

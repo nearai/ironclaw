@@ -362,9 +362,9 @@ pub struct GatewayState {
     /// LLM provider for OpenAI-compatible API proxy.
     pub llm_provider: Option<Arc<dyn crate::llm::LlmProvider>>,
     /// Skill registry for skill management API.
-    pub skill_registry: Option<Arc<std::sync::RwLock<crate::skills::SkillRegistry>>>,
+    pub skill_registry: Option<Arc<std::sync::RwLock<ironclaw_skills::SkillRegistry>>>,
     /// Skill catalog for searching the ClawHub registry.
-    pub skill_catalog: Option<Arc<crate::skills::catalog::SkillCatalog>>,
+    pub skill_catalog: Option<Arc<ironclaw_skills::catalog::SkillCatalog>>,
     /// Scheduler for sending follow-up messages to running agent jobs.
     pub scheduler: Option<crate::tools::builtin::SchedulerSlot>,
     /// Per-user rate limiter for chat endpoints (30 messages per 60 seconds per user).

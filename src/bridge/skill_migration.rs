@@ -12,14 +12,14 @@
 
 use std::sync::Arc;
 
+use ironclaw_engine::traits::store::Store;
 use ironclaw_engine::types::error::EngineError;
 use ironclaw_engine::types::memory::{DocType, MemoryDoc};
 use ironclaw_engine::types::project::ProjectId;
-use ironclaw_engine::traits::store::Store;
 
+use ironclaw_skills::SkillRegistry;
 use ironclaw_skills::types::{LoadedSkill, SkillSource};
 use ironclaw_skills::v2::{SkillMetrics, V2SkillMetadata, V2SkillSource};
-use ironclaw_skills::SkillRegistry;
 
 /// Migrate v1 skills to v2 MemoryDocs.
 ///

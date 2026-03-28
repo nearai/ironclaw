@@ -261,10 +261,9 @@ impl ThreadManager {
 
             // Transition Completed → Done
             if exec.thread.state == crate::types::thread::ThreadState::Completed
-                && let Err(e) = exec.thread.transition_to(
-                    crate::types::thread::ThreadState::Done,
-                    None,
-                )
+                && let Err(e) = exec
+                    .thread
+                    .transition_to(crate::types::thread::ThreadState::Done, None)
             {
                 tracing::warn!(thread_id = %thread_id, "failed to transition to Done: {e}");
             }

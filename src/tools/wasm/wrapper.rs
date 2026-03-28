@@ -18,7 +18,6 @@ use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiView};
 
 use crate::context::JobContext;
 use crate::llm::recording::{HttpExchangeRequest, HttpExchangeResponse, HttpInterceptor};
-use crate::safety::LeakDetector;
 use crate::secrets::{DecryptedSecret, SecretsStore};
 use crate::tools::tool::{Tool, ToolError, ToolOutput};
 use crate::tools::wasm::capabilities::Capabilities;
@@ -29,6 +28,7 @@ use crate::tools::wasm::error::WasmError;
 use crate::tools::wasm::host::{HostState, LogLevel};
 use crate::tools::wasm::limits::{ResourceLimits, WasmResourceLimiter};
 use crate::tools::wasm::runtime::{EPOCH_TICK_INTERVAL, PreparedModule, WasmToolRuntime};
+use ironclaw_safety::LeakDetector;
 
 // Generate component model bindings from the WIT file.
 //
@@ -2961,7 +2961,7 @@ mod tests {
     /// tool's own legitimate outbound request.
     #[test]
     fn test_leak_scan_runs_before_credential_injection() {
-        use crate::safety::LeakDetector;
+        use ironclaw_safety::LeakDetector;
 
         // Simulate pre-injection headers: WASM only sees the placeholder, not the real token.
         let raw_headers: Vec<(String, String)> = vec![

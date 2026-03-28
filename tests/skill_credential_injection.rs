@@ -326,7 +326,11 @@ fn test_validation_rejects_insecure_and_malformed_specs() {
         setup_instructions: None,
     };
     let errors = ironclaw_skills::validate_credential_spec(&spec);
-    assert_eq!(errors.len(), 3, "should accumulate: bad name + empty provider + empty hosts");
+    assert_eq!(
+        errors.len(),
+        3,
+        "should accumulate: bad name + empty provider + empty hosts"
+    );
 }
 
 // ── Registry Pipeline Tests ──────────────────────────────────────────────
@@ -600,7 +604,11 @@ credentials:
     // Step 2: Validate
     for spec in &manifest.credentials {
         let errors = ironclaw_skills::validate_credential_spec(spec);
-        assert!(errors.is_empty(), "valid spec should pass validation: {:?}", errors);
+        assert!(
+            errors.is_empty(),
+            "valid spec should pass validation: {:?}",
+            errors
+        );
     }
 
     // Step 3: Build LoadedSkill and register (same code path as app.rs)
@@ -639,8 +647,7 @@ credentials:
     store
         .create(
             "developer",
-            CreateSecretParams::new("github_token", "ghp_test_secret_42")
-                .with_provider("github"),
+            CreateSecretParams::new("github_token", "ghp_test_secret_42").with_provider("github"),
         )
         .await
         .unwrap();

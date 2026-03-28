@@ -17,15 +17,15 @@ use crate::db::Database;
 use crate::extensions::ExtensionManager;
 use crate::hooks::HookRegistry;
 use crate::llm::{LlmProvider, RecordingLlm, SessionManager};
-use crate::safety::SafetyLayer;
 use crate::secrets::SecretsStore;
-use crate::skills::SkillRegistry;
-use crate::skills::catalog::SkillCatalog;
 use crate::tools::ToolRegistry;
 use crate::tools::mcp::{McpProcessManager, McpSessionManager};
 use crate::tools::wasm::SharedCredentialRegistry;
 use crate::tools::wasm::WasmToolRuntime;
 use crate::workspace::{EmbeddingCacheConfig, EmbeddingProvider, Workspace};
+use ironclaw_safety::SafetyLayer;
+use ironclaw_skills::SkillRegistry;
+use ironclaw_skills::catalog::SkillCatalog;
 
 /// Fully initialized application components, ready for channel wiring
 /// and agent construction.
@@ -426,7 +426,14 @@ impl AppBuilder {
             None
         };
 
-        Ok((safety, tools, embeddings, workspace, builder, credential_registry))
+        Ok((
+            safety,
+            tools,
+            embeddings,
+            workspace,
+            builder,
+            credential_registry,
+        ))
     }
 
     /// Phase 5: Load WASM tools, MCP servers, and create extension manager.
@@ -873,13 +880,10 @@ impl AppBuilder {
 
             // Register credential mappings from skill frontmatter into the
             // shared registry so the HTTP tool can auto-inject credentials.
-            crate::skills::register_skill_credentials(
-                registry.skills(),
-                &credential_registry,
-            );
+            crate::skills::register_skill_credentials(registry.skills(), &credential_registry);
 
             let registry = Arc::new(std::sync::RwLock::new(registry));
-            let catalog = crate::skills::catalog::shared_catalog();
+            let catalog = ironclaw_skills::catalog::shared_catalog();
             tools.register_skill_tools(Arc::clone(&registry), Arc::clone(&catalog));
             (Some(registry), Some(catalog))
         } else {

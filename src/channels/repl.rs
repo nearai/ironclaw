@@ -887,42 +887,6 @@ impl Channel for ReplChannel {
                     );
                 }
             }
-            StatusUpdate::AuthRequired {
-                extension_name,
-                instructions,
-                auth_url,
-                ..
-            } => {
-                eprintln!();
-                eprintln!(
-                    "  \x1b[33m\u{26BF} Authentication required: {}\x1b[0m",
-                    extension_name
-                );
-                if let Some(url) = auth_url {
-                    eprintln!("    \x1b[36mAuth URL: {}\x1b[0m", url);
-                }
-                if let Some(instr) = instructions {
-                    eprintln!("    \x1b[90m{}\x1b[0m", instr);
-                }
-                eprintln!();
-            }
-            StatusUpdate::AuthCompleted {
-                extension_name,
-                success,
-                message,
-            } => {
-                if success {
-                    eprintln!(
-                        "  \x1b[32m\u{2713} {} authenticated: {}\x1b[0m",
-                        extension_name, message
-                    );
-                } else {
-                    eprintln!(
-                        "  \x1b[31m\u{2717} {} auth failed: {}\x1b[0m",
-                        extension_name, message
-                    );
-                }
-            }
         }
         Ok(())
     }

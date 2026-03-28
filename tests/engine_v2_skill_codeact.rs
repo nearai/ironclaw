@@ -14,6 +14,7 @@ use std::time::Duration;
 
 use tokio::sync::RwLock;
 
+use ironclaw_engine::types::capability::{EffectType, LeaseId};
 use ironclaw_engine::{
     ActionDef, ActionResult, Capability, CapabilityLease, CapabilityRegistry, DocId, DocType,
     EffectExecutor, EngineError, LeaseManager, LlmBackend, LlmCallConfig, LlmOutput, LlmResponse,
@@ -21,8 +22,6 @@ use ironclaw_engine::{
     Thread, ThreadConfig, ThreadEvent, ThreadId, ThreadManager, ThreadMessage, ThreadOutcome,
     ThreadState, ThreadType, TokenUsage,
 };
-use ironclaw_engine::types::capability::{EffectType, LeaseId};
-
 
 use ironclaw_skills::types::ActivationCriteria;
 use ironclaw_skills::v2::{CodeSnippet, SkillMetrics, V2SkillMetadata, V2SkillSource};
@@ -105,10 +104,7 @@ impl EffectExecutor for HttpMockEffects {
             .push((action_name.to_string(), parameters.clone()));
 
         // Match by URL substring in canned responses
-        let url = parameters
-            .get("url")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let url = parameters.get("url").and_then(|v| v.as_str()).unwrap_or("");
 
         let output = self
             .canned_responses
@@ -198,7 +194,11 @@ impl Store for TestStore {
             .cloned()
             .collect())
     }
-    async fn update_thread_state(&self, id: ThreadId, state: ThreadState) -> Result<(), EngineError> {
+    async fn update_thread_state(
+        &self,
+        id: ThreadId,
+        state: ThreadState,
+    ) -> Result<(), EngineError> {
         if let Some(t) = self.threads.write().await.get_mut(&id) {
             t.state = state;
         }
@@ -274,7 +274,13 @@ impl Store for TestStore {
         Ok(())
     }
     async fn load_mission(&self, id: MissionId) -> Result<Option<Mission>, EngineError> {
-        Ok(self.missions.read().await.iter().find(|m| m.id == id).cloned())
+        Ok(self
+            .missions
+            .read()
+            .await
+            .iter()
+            .find(|m| m.id == id)
+            .cloned())
     }
     async fn list_missions(&self, pid: ProjectId) -> Result<Vec<Mission>, EngineError> {
         Ok(self
@@ -286,7 +292,11 @@ impl Store for TestStore {
             .cloned()
             .collect())
     }
-    async fn update_mission_status(&self, _: MissionId, _: MissionStatus) -> Result<(), EngineError> {
+    async fn update_mission_status(
+        &self,
+        _: MissionId,
+        _: MissionStatus,
+    ) -> Result<(), EngineError> {
         Ok(())
     }
 }

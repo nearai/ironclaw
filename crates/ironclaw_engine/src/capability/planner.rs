@@ -81,5 +81,4 @@ mod tests {
         assert_eq!(plans[0].capability_name, "tools");
         assert_eq!(plans[0].granted_actions, vec!["read_file"]);
     }
-
 }

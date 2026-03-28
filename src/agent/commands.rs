@@ -559,7 +559,12 @@ impl Agent {
         // Also fire through v1 routine engine (if routines listen for this)
         if let Some(engine) = self.routine_engine().await {
             fired += engine
-                .emit_system_event("user_feedback", "expected_behavior", &payload, Some(user_id))
+                .emit_system_event(
+                    "user_feedback",
+                    "expected_behavior",
+                    &payload,
+                    Some(user_id),
+                )
                 .await;
         }
 

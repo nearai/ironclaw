@@ -37,7 +37,7 @@ All I/O is async with tokio. Use `Arc<T>` for shared state, `RwLock` for concurr
 
 ## Extracted Crates
 
-Safety logic lives in `crates/ironclaw_safety/`. The `src/safety/mod.rs` shim re-exports everything for backward compatibility, but **new code should import from `ironclaw_safety` directly** (e.g. `use ironclaw_safety::SafetyLayer`). When touching a file that still uses `crate::safety::*`, migrate its imports to `ironclaw_safety::*`.
+Safety logic lives in `crates/ironclaw_safety/`, skills in `crates/ironclaw_skills/`. **Import directly from the extracted crate** (e.g. `use ironclaw_safety::SafetyLayer`, `use ironclaw_skills::SkillRegistry`). Do not use `crate::safety::` or `crate::skills::` for types that originate in extracted crates — `src/safety/mod.rs` and `src/skills/mod.rs` no longer glob-re-export. Local items defined in those modules (e.g. `crate::skills::attenuate_tools`) are fine.
 
 ## Project Structure
 

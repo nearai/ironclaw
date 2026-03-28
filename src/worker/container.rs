@@ -22,11 +22,11 @@ use crate::config::SafetyConfig;
 use crate::context::JobContext;
 use crate::error::WorkerError;
 use crate::llm::{ChatMessage, LlmProvider, Reasoning, ReasoningContext};
-use crate::safety::SafetyLayer;
 use crate::tools::ToolRegistry;
 use crate::tools::execute::{execute_tool_simple, process_tool_result};
 use crate::worker::api::{CompletionReport, JobEventPayload, StatusUpdate, WorkerHttpClient};
 use crate::worker::proxy_llm::ProxyLlmProvider;
+use ironclaw_safety::SafetyLayer;
 
 /// Configuration for the worker runtime.
 pub struct WorkerConfig {

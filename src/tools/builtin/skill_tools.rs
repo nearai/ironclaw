@@ -8,9 +8,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::context::JobContext;
-use crate::skills::catalog::SkillCatalog;
-use crate::skills::registry::SkillRegistry;
 use crate::tools::tool::{ApprovalRequirement, Tool, ToolError, ToolOutput, require_str};
+use ironclaw_skills::catalog::SkillCatalog;
+use ironclaw_skills::registry::SkillRegistry;
 
 // ── skill_list ──────────────────────────────────────────────────────────
 
@@ -311,7 +311,7 @@ impl Tool for SkillInstallTool {
         } else {
             // Look up in catalog and fetch
             let download_url =
-                crate::skills::catalog::skill_download_url(self.catalog.registry_url(), name);
+                ironclaw_skills::catalog::skill_download_url(self.catalog.registry_url(), name);
             fetch_skill_content(&download_url).await?
         };
 
@@ -323,8 +323,8 @@ impl Tool for SkillInstallTool {
                 .map_err(|e| ToolError::ExecutionFailed(format!("Lock poisoned: {}", e)))?;
 
             // Parse to extract the name (cheap, in-memory)
-            let normalized = crate::skills::normalize_line_endings(&content);
-            let parsed = crate::skills::parser::parse_skill_md(&normalized)
+            let normalized = ironclaw_skills::normalize_line_endings(&content);
+            let parsed = ironclaw_skills::parser::parse_skill_md(&normalized)
                 .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
             let skill_name = parsed.manifest.name.clone();
 
@@ -340,10 +340,10 @@ impl Tool for SkillInstallTool {
 
         // Perform async I/O (write to disk, validate round-trip) with no lock held.
         let (skill_name, loaded_skill) =
-            crate::skills::registry::SkillRegistry::prepare_install_to_disk(
+            ironclaw_skills::registry::SkillRegistry::prepare_install_to_disk(
                 &user_dir,
                 &skill_name_from_parse,
-                &crate::skills::normalize_line_endings(&content),
+                &ironclaw_skills::normalize_line_endings(&content),
             )
             .await
             .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
@@ -587,11 +587,11 @@ pub async fn fetch_skill_content(url: &str) -> Result<String, ToolError> {
     };
 
     // Basic size check
-    if content.len() as u64 > crate::skills::MAX_PROMPT_FILE_SIZE {
+    if content.len() as u64 > ironclaw_skills::MAX_PROMPT_FILE_SIZE {
         return Err(ToolError::ExecutionFailed(format!(
             "Skill content too large: {} bytes (max {} bytes)",
             content.len(),
-            crate::skills::MAX_PROMPT_FILE_SIZE
+            ironclaw_skills::MAX_PROMPT_FILE_SIZE
         )));
     }
 
@@ -750,7 +750,7 @@ impl Tool for SkillRemoveTool {
         };
 
         // Delete files from disk (async I/O, no lock held).
-        crate::skills::registry::SkillRegistry::delete_skill_files(&skill_path)
+        ironclaw_skills::registry::SkillRegistry::delete_skill_files(&skill_path)
             .await
             .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
 

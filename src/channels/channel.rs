@@ -356,9 +356,7 @@ pub enum StatusUpdate {
         cost_usd: String,
     },
     /// Skills activated for this conversation turn.
-    SkillActivated {
-        skill_names: Vec<String>,
-    },
+    SkillActivated { skill_names: Vec<String> },
 }
 
 impl StatusUpdate {

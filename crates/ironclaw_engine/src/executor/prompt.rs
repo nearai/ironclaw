@@ -166,7 +166,8 @@ mod tests {
 
     #[tokio::test]
     async fn prompt_without_store_uses_compiled_preamble() {
-        let prompt = build_codeact_system_prompt(&[], None, ProjectId(uuid::Uuid::nil()), None).await;
+        let prompt =
+            build_codeact_system_prompt(&[], None, ProjectId(uuid::Uuid::nil()), None).await;
         assert!(prompt.contains("Python REPL environment"));
         assert!(prompt.contains("Strategy"));
         assert!(!prompt.contains("Learned Rules"));
@@ -190,7 +191,8 @@ mod tests {
 
         let store = Arc::new(crate::tests::InMemoryStore::with_docs(vec![overlay]));
         let prompt =
-            build_codeact_system_prompt(&[], Some(&(store as Arc<dyn Store>)), project_id, None).await;
+            build_codeact_system_prompt(&[], Some(&(store as Arc<dyn Store>)), project_id, None)
+                .await;
         assert!(prompt.contains("Learned Rules"));
         assert!(prompt.contains("Never call web_fetch"));
     }
@@ -216,7 +218,8 @@ mod tests {
 
         let store = Arc::new(crate::tests::InMemoryStore::with_docs(vec![overlay]));
         let prompt =
-            build_codeact_system_prompt(&[], Some(&(store as Arc<dyn Store>)), project_id, None).await;
+            build_codeact_system_prompt(&[], Some(&(store as Arc<dyn Store>)), project_id, None)
+                .await;
 
         let snowman_count = prompt.chars().filter(|c| *c == '\u{2603}').count();
         assert_eq!(snowman_count, MAX_PROMPT_OVERLAY_CHARS);
@@ -241,7 +244,8 @@ mod tests {
 
         let store = Arc::new(crate::tests::InMemoryStore::with_docs(vec![overlay]));
         let prompt =
-            build_codeact_system_prompt(&[], Some(&(store as Arc<dyn Store>)), project_id, None).await;
+            build_codeact_system_prompt(&[], Some(&(store as Arc<dyn Store>)), project_id, None)
+                .await;
         assert!(!prompt.contains("Should not appear"));
         assert!(!prompt.contains("Learned Rules"));
     }
@@ -257,13 +261,8 @@ mod tests {
             owner_id: Some("alice.near".into()),
             repo_url: Some("https://github.com/nearai/ironclaw".into()),
         };
-        let prompt = build_codeact_system_prompt(
-            &[],
-            None,
-            ProjectId(uuid::Uuid::nil()),
-            Some(&info),
-        )
-        .await;
+        let prompt =
+            build_codeact_system_prompt(&[], None, ProjectId(uuid::Uuid::nil()), Some(&info)).await;
         assert!(prompt.contains("IronClaw"));
         assert!(prompt.contains("1.2.3"));
         assert!(prompt.contains("nearai"));

@@ -21,15 +21,14 @@ use ironclaw_engine::{
 
 use crate::context::JobContext;
 use crate::hooks::{HookEvent, HookOutcome, HookRegistry};
-use crate::safety::SafetyLayer;
 use crate::tools::rate_limiter::RateLimiter;
 use crate::tools::{ApprovalRequirement, ToolRegistry};
+use ironclaw_safety::SafetyLayer;
 
 /// Callback invoked when a credential is missing and the user needs to authenticate.
 /// Parameters: (credential_name, action_name).
 /// The router sets this to emit SSE events; mission threads may have a no-op.
-pub type AuthRequiredCallback =
-    Box<dyn Fn(&str, &str) + Send + Sync>;
+pub type AuthRequiredCallback = Box<dyn Fn(&str, &str) + Send + Sync>;
 
 /// Wraps the existing tool pipeline to implement the engine's `EffectExecutor`.
 ///
@@ -192,12 +191,11 @@ impl EffectBridgeAdapter {
                     });
                 match id {
                     Ok(id) => {
-                        let res =
-                            if action_name == "mission_pause" {
-                                mgr.pause_mission(id).await
-                            } else {
-                                mgr.resume_mission(id).await
-                            };
+                        let res = if action_name == "mission_pause" {
+                            mgr.pause_mission(id).await
+                        } else {
+                            mgr.resume_mission(id).await
+                        };
                         match res {
                             Ok(()) => Ok(serde_json::json!({"status": "ok"})),
                             Err(e) => Err(e),
@@ -330,13 +328,10 @@ impl EffectExecutor for EffectBridgeAdapter {
                         // The user authorized by storing the credential — the v1
                         // interactive approval flow doesn't exist in v2.
                         let has_credential_backing = lookup_name == "http"
-                            && self
-                                .tools
-                                .credential_registry()
-                                .is_some_and(|reg| {
-                                    crate::tools::builtin::extract_host_from_params(&parameters)
-                                        .is_some_and(|host| reg.has_credentials_for_host(&host))
-                                });
+                            && self.tools.credential_registry().is_some_and(|reg| {
+                                crate::tools::builtin::extract_host_from_params(&parameters)
+                                    .is_some_and(|host| reg.has_credentials_for_host(&host))
+                            });
 
                         if !has_credential_backing {
                             return Err(EngineError::LeaseDenied {
@@ -456,16 +451,16 @@ impl EffectExecutor for EffectBridgeAdapter {
                 // frontends) but return the error normally — the LLM sees it and
                 // tells the user. This avoids blocking mission/sub-threads that
                 // have no channel context.
-                if error_msg.contains("authentication_required") {
-                    if let Some(cred_name) = extract_credential_name(&error_msg) {
-                        tracing::warn!(
-                            credential = %cred_name,
-                            tool = %lookup_name,
-                            user = %context.user_id,
-                            "Credential missing — emitting auth_required event"
-                        );
-                        self.emit_auth_required(&cred_name, action_name).await;
-                    }
+                if error_msg.contains("authentication_required")
+                    && let Some(cred_name) = extract_credential_name(&error_msg)
+                {
+                    tracing::warn!(
+                        credential = %cred_name,
+                        tool = %lookup_name,
+                        user = %context.user_id,
+                        "Credential missing — emitting auth_required event"
+                    );
+                    self.emit_auth_required(&cred_name, action_name).await;
                 }
 
                 let sanitized = self.safety.sanitize_tool_output(lookup_name, &error_msg);
@@ -562,13 +557,13 @@ fn parse_cadence(s: &str) -> ironclaw_engine::types::mission::MissionCadence {
 fn extract_credential_name(error_msg: &str) -> Option<String> {
     // The error is JSON-encoded inside the tool error string.
     // Find the JSON portion and parse credential_name from it.
-    if let Some(json_start) = error_msg.find('{') {
-        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&error_msg[json_start..]) {
-            return parsed
-                .get("credential_name")
-                .and_then(|v| v.as_str())
-                .map(String::from);
-        }
+    if let Some(json_start) = error_msg.find('{')
+        && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&error_msg[json_start..])
+    {
+        return parsed
+            .get("credential_name")
+            .and_then(|v| v.as_str())
+            .map(String::from);
     }
     None
 }
