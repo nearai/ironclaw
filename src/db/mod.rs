@@ -391,6 +391,13 @@ pub trait ConversationStore: Send + Sync {
         routine_name: &str,
         user_id: &str,
     ) -> Result<Uuid, DatabaseError>;
+    /// Read-only lookup for an existing routine conversation. Returns `None`
+    /// if the routine has never executed (no conversation created yet).
+    async fn find_routine_conversation(
+        &self,
+        routine_id: Uuid,
+        user_id: &str,
+    ) -> Result<Option<Uuid>, DatabaseError>;
     async fn get_or_create_heartbeat_conversation(
         &self,
         user_id: &str,

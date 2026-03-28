@@ -828,14 +828,11 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                     }),
                 );
 
-                if matches!(
-                    &e,
-                    Error::Tool(crate::error::ToolError::AutonomousUnavailable { .. })
-                ) {
-                    Err(e)
-                } else {
-                    Ok(())
-                }
+                // All tool errors (including AutonomousUnavailable) are
+                // recoverable — the error message is already recorded in
+                // reason_ctx so the LLM can see it and try a different
+                // approach. Returning Err here would kill the entire job.
+                Ok(())
             }
         }
     }
@@ -930,17 +927,31 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
 
-        // Plan completed, check with LLM if job is done
+        // Plan completed — ask the LLM whether the job is done.
+        let msg_count_before = reason_ctx.messages.len();
         reason_ctx.messages.push(ChatMessage::user(
-            "All planned actions have been executed. Is the job complete? If not, what else needs to be done?",
+            "All planned actions have been executed. Assess the results: \
+             if the job is fully complete, state that the job is complete. \
+             Otherwise, briefly list what remains.",
         ));
 
         let response = reasoning.respond(reason_ctx).await?;
-        reason_ctx.messages.push(ChatMessage::assistant(&response));
+        let response = crate::agent::strip_suggestions(&response);
 
         if crate::util::llm_signals_completion(&response) {
+            reason_ctx.messages.push(ChatMessage::assistant(&response));
             self.mark_completed().await?;
         } else {
+            // Replace the completion-check exchange with an action-oriented
+            // continuation prompt. Leaving the "Is the job complete?" / "No"
+            // dialogue in context causes the agentic loop to repeat the same
+            // analysis instead of calling tools (self-dialogue loop).
+            reason_ctx.messages.truncate(msg_count_before);
+            reason_ctx.messages.push(ChatMessage::user(format!(
+                "The planned actions are done but the job is not yet complete. \
+                 Remaining work:\n\n{response}\n\n\
+                 Continue executing now — use tools to finish the job."
+            )));
             tracing::info!(
                 "Job {} plan completed but work remains, falling back to direct selection",
                 self.job_id
@@ -1420,16 +1431,20 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
             return TextAction::Continue;
         }
 
-        // Check for explicit completion
-        if crate::util::llm_signals_completion(text) {
-            if let Err(e) = self.worker.mark_completed().await {
-                tracing::warn!(
-                    "Failed to mark job {} as completed: {}",
-                    self.worker.job_id,
-                    e
-                );
-            }
-            return TextAction::Return(LoopOutcome::Response(text.to_string()));
+        // Jobs run autonomously — strip <suggestions> tags that are only
+        // meaningful for interactive chat sessions.
+        let text = crate::agent::strip_suggestions(text);
+
+        // A non-empty text response with no tool intent (already filtered
+        // by the agentic loop's nudge mechanism) is the LLM's final answer.
+        // Mark the job complete and stop the loop. Without this, the LLM
+        // restates its summary every iteration until the cap is hit.
+        if let Err(e) = self.worker.mark_completed().await {
+            tracing::warn!(
+                "Failed to mark job {} as completed: {}",
+                self.worker.job_id,
+                e
+            );
         }
 
         // Track that a substantive response has been produced.
@@ -1437,7 +1452,7 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
             .store(true, std::sync::atomic::Ordering::Relaxed);
 
         // Add assistant response to context
-        reason_ctx.messages.push(ChatMessage::assistant(text));
+        reason_ctx.messages.push(ChatMessage::assistant(&text));
 
         self.worker.log_event(
             "message",
@@ -1447,7 +1462,7 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
             }),
         );
 
-        TextAction::Continue
+        TextAction::Return(LoopOutcome::Response(text))
     }
 
     async fn execute_tool_calls(
@@ -1456,6 +1471,9 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
         content: Option<String>,
         reason_ctx: &mut ReasoningContext,
     ) -> Result<Option<LoopOutcome>, crate::error::Error> {
+        // Strip suggestions from accompanying text (not useful in job context).
+        let content = content.map(|c| crate::agent::strip_suggestions(&c));
+
         if let Some(ref text) = content {
             self.worker.log_event(
                 "message",
@@ -2156,6 +2174,53 @@ mod tests {
         );
     }
 
+    /// Regression: a text response without rigid completion phrases (e.g.
+    /// "Weekly review completed and saved to Notion") must still terminate the
+    /// agentic loop and mark the job complete, rather than continuing until
+    /// max_iterations.
+    #[tokio::test]
+    async fn test_text_response_terminates_loop_without_explicit_completion_phrase() {
+        let worker = make_worker(vec![]).await;
+        worker
+            .context_manager()
+            .update_context(worker.job_id, |ctx| {
+                ctx.transition_to(JobState::InProgress, None)
+            })
+            .await
+            .unwrap() // safety: test
+            .unwrap(); // safety: test
+
+        let (_, mut rx) = tokio::sync::mpsc::channel(1);
+        let delegate = JobDelegate {
+            worker: &worker,
+            rx: tokio::sync::Mutex::new(&mut rx),
+            consecutive_rate_limits: std::sync::atomic::AtomicUsize::new(0),
+            has_text_response: std::sync::atomic::AtomicBool::new(false),
+        };
+
+        let mut reason_ctx = ReasoningContext::new();
+
+        // Text that a real LLM would produce but doesn't match llm_signals_completion
+        let action = delegate
+            .handle_text_response(
+                "Weekly review created in Notion and notification sent.",
+                &mut reason_ctx,
+            )
+            .await;
+
+        assert!(
+            matches!(action, TextAction::Return(_)),
+            "Text response should terminate the loop, got Continue"
+        ); // safety: test
+
+        let ctx = worker
+            .context_manager()
+            .get_context(worker.job_id)
+            .await
+            .unwrap(); // safety: test
+        assert_eq!(ctx.state, JobState::Completed); // safety: test
+    }
+
     /// Regression test: selections_to_tool_calls must preserve tool_call_id
     /// so that tool_result messages match the assistant_with_tool_calls message
     /// and are not treated as orphaned by sanitize_tool_messages.
@@ -2428,5 +2493,40 @@ mod tests {
                 reason: "timeout".to_string(),
             }
         ));
+    }
+
+    /// Regression test: AutonomousUnavailable errors must be recoverable.
+    /// Previously the job worker treated them as fatal, killing the entire
+    /// job instead of feeding the error back to the LLM.
+    #[tokio::test]
+    async fn test_autonomous_unavailable_is_recoverable() {
+        let worker = make_worker(vec![]).await;
+        let mut reason_ctx = ReasoningContext::new();
+        let selection = ToolSelection {
+            tool_name: "secret_list".to_string(),
+            parameters: serde_json::json!({}),
+            reasoning: "list secrets".to_string(),
+            alternatives: vec![],
+            tool_call_id: "call_123".to_string(),
+        };
+        let err = Error::Tool(crate::error::ToolError::AutonomousUnavailable {
+            name: "secret_list".to_string(),
+            reason: "not available in autonomous jobs".to_string(),
+        });
+
+        let result = worker
+            .process_tool_result_job(&mut reason_ctx, &selection, Err(err))
+            .await;
+
+        assert!(
+            result.is_ok(),
+            "AutonomousUnavailable must be recoverable, not fatal: {:?}",
+            result
+        );
+        // The error should be fed back to the LLM as a message.
+        assert!(
+            !reason_ctx.messages.is_empty(),
+            "Error message should be added to reason_ctx for the LLM"
+        );
     }
 }

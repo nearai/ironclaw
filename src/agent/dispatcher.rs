@@ -1269,6 +1269,14 @@ pub(crate) fn extract_suggestions(text: &str) -> (String, Vec<String>) {
     (cleaned, suggestions)
 }
 
+/// Remove `<suggestions>` tags from a response, returning only the cleaned text.
+///
+/// Convenience wrapper around [`extract_suggestions`] for callers that don't
+/// need the parsed suggestion list (e.g. job worker, plan completion check).
+pub(crate) fn strip_suggestions(text: &str) -> String {
+    extract_suggestions(text).0
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -2537,6 +2545,18 @@ mod tests {
         let input = format!("Answer.\n<suggestions>[\"{}\", \"ok\"]</suggestions>", long);
         let (_, suggestions) = super::extract_suggestions(&input);
         assert_eq!(suggestions, vec!["ok"]); // safety: test
+    }
+
+    #[test]
+    fn test_strip_suggestions_removes_tags() {
+        let input = "The job is complete.\n<suggestions>[\"Check logs\"]</suggestions>";
+        assert_eq!(super::strip_suggestions(input), "The job is complete."); // safety: test
+    }
+
+    #[test]
+    fn test_strip_suggestions_no_tag_passthrough() {
+        let input = "Plain text without tags.";
+        assert_eq!(super::strip_suggestions(input), input); // safety: test
     }
 
     #[test]
