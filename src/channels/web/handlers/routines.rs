@@ -122,6 +122,16 @@ pub async fn routines_detail_handler(
         .collect();
     let routine_info = RoutineInfo::from_routine(&routine);
 
+    // Read-only lookup — do not create a conversation on a GET request.
+    // The conversation is created lazily when the routine first executes.
+    let conversation_id = store
+        .find_routine_conversation(routine.id, &routine.user_id)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(routine_id = %routine.id, error = %e, "Failed to look up routine conversation");
+            None
+        });
+
     Ok(Json(RoutineDetailResponse {
         id: routine.id,
         name: routine.name.clone(),
@@ -139,6 +149,7 @@ pub async fn routines_detail_handler(
         run_count: routine.run_count,
         consecutive_failures: routine.consecutive_failures,
         created_at: routine.created_at.to_rfc3339(),
+        conversation_id,
         recent_runs,
     }))
 }

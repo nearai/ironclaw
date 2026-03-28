@@ -65,6 +65,7 @@ struct NormalizedExecutionRequest {
     context_paths: Vec<String>,
     use_tools: bool,
     max_tool_rounds: u32,
+    max_iterations: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -328,6 +329,13 @@ fn full_job_execution_variant() -> Value {
                 "type": "string",
                 "enum": ["full_job"],
                 "description": "Full-job execution mode."
+            },
+            "max_iterations": {
+                "type": "integer",
+                "description": "Maximum LLM iterations for the job (default: 25). Increase for complex multi-step tasks.",
+                "default": 25,
+                "minimum": 1,
+                "maximum": 200
             }
         },
         "required": ["mode"]
@@ -644,6 +652,12 @@ pub(crate) fn routine_update_parameters_schema() -> Value {
             "description": {
                 "type": "string",
                 "description": "New description"
+            },
+            "max_iterations": {
+                "type": "integer",
+                "description": "Maximum LLM iterations for full_job routines (1-200).",
+                "minimum": 1,
+                "maximum": 200
             }
         },
         "required": ["name"]
@@ -887,11 +901,16 @@ fn parse_routine_execution(
         .clamp(1, crate::agent::routine::MAX_TOOL_ROUNDS_LIMIT as u64)
         as u32;
 
+    let max_iterations = u64_field(params, "execution", "max_iterations", &["max_iterations"])
+        .unwrap_or(25)
+        .clamp(1, 200) as u32;
+
     Ok(NormalizedExecutionRequest {
         mode,
         context_paths,
         use_tools,
         max_tool_rounds,
+        max_iterations,
     })
 }
 
@@ -972,7 +991,7 @@ fn build_routine_action(
         NormalizedExecutionMode::FullJob => RoutineAction::FullJob {
             title: name.to_string(),
             description: prompt.to_string(),
-            max_iterations: 10,
+            max_iterations: execution.max_iterations,
         },
     }
 }
@@ -1317,6 +1336,12 @@ impl Tool for RoutineUpdateTool {
             }
         }
 
+        if let Some(iters) = params.get("max_iterations").and_then(|v| v.as_u64())
+            && let RoutineAction::FullJob { max_iterations, .. } = &mut routine.action
+        {
+            *max_iterations = (iters.clamp(1, 200)) as u32;
+        }
+
         // Validate timezone param if provided
         let new_timezone = params
             .get("timezone")
@@ -1544,6 +1569,7 @@ impl Tool for RoutineFireTool {
             "name": name,
             "run_id": run_id.to_string(),
             "status": "fired",
+            "note": "Routine is executing asynchronously. Use routine_history to check the result.",
         });
 
         Ok(ToolOutput::success(result, start.elapsed()))
@@ -1642,10 +1668,47 @@ impl Tool for RoutineHistoryTool {
             })
             .collect();
 
+        // Look up the routine's conversation thread and fetch recent messages
+        // so the user can see the full output of routine runs.
+        let (conversation_id, recent_output) = match self
+            .store
+            .get_or_create_routine_conversation(routine.id, name, &ctx.user_id)
+            .await
+        {
+            Ok(conv_id) => {
+                let messages = self
+                    .store
+                    .list_conversation_messages_paginated(conv_id, None, limit)
+                    .await
+                    .map(|(msgs, _)| msgs)
+                    .unwrap_or_default();
+                let msg_list: Vec<serde_json::Value> = messages
+                    .iter()
+                    .map(|m| {
+                        serde_json::json!({
+                            "role": m.role,
+                            "content": m.content,
+                            "timestamp": m.created_at.to_rfc3339(),
+                        })
+                    })
+                    .collect();
+                (Some(conv_id.to_string()), msg_list)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    routine = %name,
+                    "Failed to fetch routine conversation thread: {e}"
+                );
+                (None, Vec::new())
+            }
+        };
+
         let result = serde_json::json!({
             "routine": name,
             "total_runs": routine.run_count,
+            "conversation_id": conversation_id,
             "runs": run_list,
+            "recent_output": recent_output,
         });
 
         Ok(ToolOutput::success(result, start.elapsed()))
@@ -2282,8 +2345,8 @@ mod tests {
             .and_then(Value::as_object)
             .expect("full_job properties");
         assert!(
-            full_job_props.len() == 1 && full_job_props.contains_key("mode"),
-            "full_job variant should only expose the execution mode",
+            full_job_props.contains_key("mode") && full_job_props.contains_key("max_iterations"),
+            "full_job variant should expose mode and max_iterations",
         );
     }
 
@@ -2491,6 +2554,7 @@ mod tests {
             context_paths: Vec::new(),
             use_tools: false,
             max_tool_rounds: 3,
+            max_iterations: 25,
         };
 
         let action = build_routine_action("issue-1316", "Run it", &execution);
@@ -2503,7 +2567,7 @@ mod tests {
                 max_iterations,
             } if title == "issue-1316"
                 && description == "Run it"
-                && max_iterations == 10
+                && max_iterations == 25
         ));
     }
 }
