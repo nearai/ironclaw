@@ -11,8 +11,6 @@ use crate::extensions::ExtensionManager;
 use crate::llm::{LlmProvider, ToolDefinition};
 use crate::orchestrator::job_manager::ContainerJobManager;
 use crate::secrets::SecretsStore;
-use crate::skills::catalog::SkillCatalog;
-use crate::skills::registry::SkillRegistry;
 use crate::tools::builder::{
     BuildSoftwareTool, BuilderConfig, LlmSoftwareBuilder, SoftwareBuilder,
 };
@@ -31,6 +29,8 @@ use crate::tools::wasm::{
     WasmStorageError, WasmToolRuntime, WasmToolStore, WasmToolWrapper,
 };
 use crate::workspace::Workspace;
+use ironclaw_skills::catalog::SkillCatalog;
+use ironclaw_skills::registry::SkillRegistry;
 
 /// Names of built-in tools that cannot be shadowed by dynamic registrations.
 /// This prevents a dynamically built or installed tool from replacing a
@@ -131,6 +131,11 @@ impl ToolRegistry {
     /// Get a reference to the shared credential registry.
     pub fn credential_registry(&self) -> Option<&Arc<SharedCredentialRegistry>> {
         self.credential_registry.as_ref()
+    }
+
+    /// Get a reference to the secrets store (for credential storage during auth flows).
+    pub fn secrets_store(&self) -> Option<&Arc<dyn SecretsStore + Send + Sync>> {
+        self.secrets_store.as_ref()
     }
 
     /// Get the shared rate limiter for checking built-in tool limits.

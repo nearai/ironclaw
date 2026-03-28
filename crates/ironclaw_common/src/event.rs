@@ -181,6 +181,14 @@ pub enum AppEvent {
         thread_id: Option<String>,
     },
 
+    /// Skills activated for a conversation turn.
+    #[serde(rename = "skill_activated")]
+    SkillActivated {
+        skill_names: Vec<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
+    },
+
     /// Extension activation status change (WASM channels).
     #[serde(rename = "extension_status")]
     ExtensionStatus {
@@ -205,6 +213,33 @@ pub enum AppEvent {
         job_id: String,
         narrative: String,
         decisions: Vec<ToolDecisionDto>,
+    },
+
+    // ── Engine v2 thread lifecycle events ──
+    /// Engine thread changed state (e.g. Running → Completed).
+    #[serde(rename = "thread_state_changed")]
+    ThreadStateChanged {
+        thread_id: String,
+        from_state: String,
+        to_state: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
+
+    /// A child thread was spawned by a parent thread.
+    #[serde(rename = "child_thread_spawned")]
+    ChildThreadSpawned {
+        parent_thread_id: String,
+        child_thread_id: String,
+        goal: String,
+    },
+
+    /// A mission spawned a new thread.
+    #[serde(rename = "mission_thread_spawned")]
+    MissionThreadSpawned {
+        mission_id: String,
+        thread_id: String,
+        mission_name: String,
     },
 }
 
@@ -233,9 +268,13 @@ impl AppEvent {
             Self::ImageGenerated { .. } => "image_generated",
             Self::Suggestions { .. } => "suggestions",
             Self::TurnCost { .. } => "turn_cost",
+            Self::SkillActivated { .. } => "skill_activated",
             Self::ExtensionStatus { .. } => "extension_status",
             Self::ReasoningUpdate { .. } => "reasoning_update",
             Self::JobReasoning { .. } => "job_reasoning",
+            Self::ThreadStateChanged { .. } => "thread_state_changed",
+            Self::ChildThreadSpawned { .. } => "child_thread_spawned",
+            Self::MissionThreadSpawned { .. } => "mission_thread_spawned",
         }
     }
 }
@@ -351,6 +390,10 @@ mod tests {
                 cost_usd: String::new(),
                 thread_id: None,
             },
+            AppEvent::SkillActivated {
+                skill_names: vec![],
+                thread_id: None,
+            },
             AppEvent::ExtensionStatus {
                 extension_name: String::new(),
                 status: String::new(),
@@ -365,6 +408,22 @@ mod tests {
                 job_id: String::new(),
                 narrative: String::new(),
                 decisions: vec![],
+            },
+            AppEvent::ThreadStateChanged {
+                thread_id: String::new(),
+                from_state: String::new(),
+                to_state: String::new(),
+                reason: None,
+            },
+            AppEvent::ChildThreadSpawned {
+                parent_thread_id: String::new(),
+                child_thread_id: String::new(),
+                goal: String::new(),
+            },
+            AppEvent::MissionThreadSpawned {
+                mission_id: String::new(),
+                thread_id: String::new(),
+                mission_name: String::new(),
             },
         ];
 

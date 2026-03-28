@@ -23,7 +23,7 @@ pub use extension_tools::{
     ToolRemoveTool, ToolSearchTool, ToolUpgradeTool,
 };
 pub use file::{ApplyPatchTool, ListDirTool, ReadFileTool, WriteFileTool};
-pub use http::HttpTool;
+pub use http::{HttpTool, extract_host_from_params};
 pub use job::{
     CancelJobTool, CreateJobTool, JobEventsTool, JobPromptTool, JobStatusTool, ListJobsTool,
     PromptQueue, SchedulerSlot,

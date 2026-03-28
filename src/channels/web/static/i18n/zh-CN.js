@@ -32,6 +32,7 @@ I18n.register('zh-CN', {
   'tab.chat': '聊天',
   'tab.memory': '记忆',
   'tab.jobs': '任务',
+  'tab.missions': '使命',
   'tab.routines': '定时任务',
   'tab.settings': '设置',
   'tab.extensions': '扩展',
@@ -148,6 +149,20 @@ I18n.register('zh-CN', {
   'jobs.viewJob': '查看任务',
   'jobs.browse': '浏览',
   
+  // 使命标签页
+  'missions.name': '名称',
+  'missions.goal': '目标',
+  'missions.cadence': '节奏',
+  'missions.threads': '线程',
+  'missions.status': '状态',
+  'missions.actions': '操作',
+  'missions.noConfigured': '暂无使命。请让助手创建一个。',
+  'missions.summary.total': '总计',
+  'missions.summary.active': '活跃',
+  'missions.summary.paused': '暂停',
+  'missions.summary.completed': '已完成',
+  'missions.summary.failed': '失败',
+
   // 定时任务标签页
   'routines.summary': '定时任务摘要',
   'routines.name': '名称',

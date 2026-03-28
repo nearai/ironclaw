@@ -24,6 +24,8 @@ E2E tests: see `tests/e2e/CLAUDE.md`.
 - Prefer strong types over strings (enums, newtypes)
 - Keep functions focused, extract helpers when logic is reused
 - Comments for non-obvious logic only
+- **Prompt templates live in files, not Rust code**: Multi-line prompt strings (mission goals, system prompts, CodeAct preambles) go in `crates/ironclaw_engine/prompts/*.md` and are loaded via `include_str!()`. Never inline large prompt templates as Rust string constants — they're hard to read, review, and iterate on. Single-line format strings are fine inline.
+- **Logging levels matter for REPL/TUI**: `info!` and `warn!` output appears in the REPL and corrupts the terminal UI. Use `debug!` for internal diagnostics (trace analysis, reflection results, engine internals). Reserve `info!` for user-facing status that the REPL intentionally renders. Background tasks (reflection, trace analysis) must NEVER use `info!` — it breaks the interactive display.
 
 ## Architecture
 
@@ -35,7 +37,7 @@ All I/O is async with tokio. Use `Arc<T>` for shared state, `RwLock` for concurr
 
 ## Extracted Crates
 
-Safety logic lives in `crates/ironclaw_safety/`. The `src/safety/mod.rs` shim re-exports everything for backward compatibility, but **new code should import from `ironclaw_safety` directly** (e.g. `use ironclaw_safety::SafetyLayer`). When touching a file that still uses `crate::safety::*`, migrate its imports to `ironclaw_safety::*`.
+Safety logic lives in `crates/ironclaw_safety/`, skills in `crates/ironclaw_skills/`. **Import directly from the extracted crate** (e.g. `use ironclaw_safety::SafetyLayer`, `use ironclaw_skills::SkillRegistry`). Do not use `crate::safety::` or `crate::skills::` for types that originate in extracted crates — `src/safety/mod.rs` and `src/skills/mod.rs` no longer glob-re-export. Local items defined in those modules (e.g. `crate::skills::attenuate_tools`) are fine.
 
 ## Project Structure
 
@@ -191,6 +193,7 @@ When modifying a module with a spec, read the spec first. Code follows spec; spe
 | `src/setup/` | `src/setup/README.md` |
 | `src/tools/` | `src/tools/README.md` |
 | `src/workspace/` | `src/workspace/README.md` |
+| `crates/ironclaw_engine/` | `crates/ironclaw_engine/CLAUDE.md` |
 | `tests/e2e/` | `tests/e2e/CLAUDE.md` |
 
 ## Job State Machine

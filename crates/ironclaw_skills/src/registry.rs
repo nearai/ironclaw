@@ -1,24 +1,27 @@
 //! Skill registry for discovering, loading, and managing available skills.
 //!
-//! Skills are discovered from two filesystem locations:
+//! Skills are discovered from multiple sources:
 //! 1. Workspace skills directory (`<workspace>/skills/`) -- Trusted
 //! 2. User skills directory (`~/.ironclaw/skills/`) -- Trusted
+//! 3. Installed skills directory (`~/.ironclaw/installed_skills/`) -- Installed
+//! 4. Bundled skills compiled into the binary -- Trusted
 //!
 //! Both flat (`skills/SKILL.md`) and subdirectory (`skills/<name>/SKILL.md`)
-//! layouts are supported. Earlier locations win on name collision (workspace
-//! overrides user). Uses async I/O throughout to avoid blocking the tokio runtime.
+//! layouts are supported. Earlier sources win on name collision (workspace
+//! overrides user overrides installed overrides bundled).
+//! Uses async I/O throughout to avoid blocking the tokio runtime.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
-use crate::skills::gating;
-use crate::skills::parser::{SkillParseError, parse_skill_md};
-use crate::skills::{
+use crate::gating;
+use crate::parser::{SkillParseError, parse_skill_md};
+use crate::types::{
     GatingRequirements, LoadedSkill, MAX_PROMPT_FILE_SIZE, SkillSource, SkillTrust,
-    normalize_line_endings,
 };
+use crate::validation::normalize_line_endings;
 
 /// Maximum number of skills that can be discovered from a single directory.
 /// Prevents resource exhaustion from a directory with thousands of entries.
@@ -78,6 +81,9 @@ pub struct SkillRegistry {
     installed_dir: Option<PathBuf>,
     /// Optional workspace skills directory.
     workspace_dir: Option<PathBuf>,
+    /// Bundled skill content compiled into the binary (name, raw SKILL.md content).
+    /// Loaded as Trusted at lowest discovery priority.
+    bundled_content: &'static [(String, String)],
 }
 
 impl SkillRegistry {
@@ -88,6 +94,7 @@ impl SkillRegistry {
             user_dir,
             installed_dir: None,
             workspace_dir: None,
+            bundled_content: &[],
         }
     }
 
@@ -105,6 +112,16 @@ impl SkillRegistry {
     /// Set a workspace skills directory.
     pub fn with_workspace_dir(mut self, dir: PathBuf) -> Self {
         self.workspace_dir = Some(dir);
+        self
+    }
+
+    /// Set bundled skill content compiled into the binary.
+    ///
+    /// Each entry is `(skill_name, raw_skill_md_content)`. These skills are
+    /// discovered at the lowest priority (after workspace, user, and installed)
+    /// with `SkillTrust::Trusted` since they ship with the application binary.
+    pub fn with_bundled_content(mut self, content: &'static [(String, String)]) -> Self {
+        self.bundled_content = content;
         self
     }
 
@@ -148,7 +165,7 @@ impl SkillRegistry {
             self.skills.push(skill);
         }
 
-        // 3. Installed skills (registry-installed, lowest priority)
+        // 3. Installed skills (registry-installed)
         if let Some(inst_dir) = self.installed_dir.clone() {
             let inst_skills = self
                 .discover_from_dir(&inst_dir, SkillTrust::Installed, SkillSource::User)
@@ -161,6 +178,16 @@ impl SkillRegistry {
                     );
                     continue;
                 }
+                seen.insert(name.clone());
+                loaded_names.push(name);
+                self.skills.push(skill);
+            }
+        }
+
+        // 4. Bundled skills (compiled into binary, lowest priority)
+        if !self.bundled_content.is_empty() {
+            let bundled = self.load_bundled_skills(&seen).await;
+            for (name, skill) in bundled {
                 seen.insert(name.clone());
                 loaded_names.push(name);
                 self.skills.push(skill);
@@ -280,6 +307,36 @@ impl SkillRegistry {
         source: SkillSource,
     ) -> Result<(String, LoadedSkill), SkillRegistryError> {
         load_and_validate_skill(path, trust, source).await
+    }
+
+    /// Load bundled skills from in-memory content, skipping names already seen.
+    async fn load_bundled_skills(&self, seen: &HashSet<String>) -> Vec<(String, LoadedSkill)> {
+        let mut results = Vec::new();
+        for (name, content) in self.bundled_content {
+            if seen.contains(name) {
+                tracing::debug!(
+                    "Skipping bundled skill '{}' (overridden by user/workspace/installed)",
+                    name
+                );
+                continue;
+            }
+            match load_from_content(
+                content,
+                SkillTrust::Trusted,
+                SkillSource::Bundled(PathBuf::from(name)),
+            )
+            .await
+            {
+                Ok((loaded_name, skill)) => {
+                    tracing::debug!("Loaded bundled skill: {}", loaded_name);
+                    results.push((loaded_name, skill));
+                }
+                Err(e) => {
+                    tracing::debug!("Skipping bundled skill '{}': {}", name, e);
+                }
+            }
+        }
+        results
     }
 
     /// Get all loaded skills.
@@ -606,6 +663,84 @@ async fn load_and_validate_skill(
     Ok((name, skill))
 }
 
+/// Load and validate a skill from in-memory content (no disk I/O).
+///
+/// Used for bundled skills compiled into the binary.
+async fn load_from_content(
+    raw_content: &str,
+    trust: SkillTrust,
+    source: SkillSource,
+) -> Result<(String, LoadedSkill), SkillRegistryError> {
+    if raw_content.len() as u64 > MAX_PROMPT_FILE_SIZE {
+        return Err(SkillRegistryError::FileTooLarge {
+            name: "(bundled)".to_string(),
+            size: raw_content.len() as u64,
+            max: MAX_PROMPT_FILE_SIZE,
+        });
+    }
+
+    let normalized_content = normalize_line_endings(raw_content);
+
+    let parsed = parse_skill_md(&normalized_content).map_err(|e: SkillParseError| match e {
+        SkillParseError::InvalidName { ref name } => SkillRegistryError::ParseError {
+            name: name.clone(),
+            reason: e.to_string(),
+        },
+        _ => SkillRegistryError::ParseError {
+            name: "(bundled)".to_string(),
+            reason: e.to_string(),
+        },
+    })?;
+
+    let manifest = parsed.manifest;
+    let prompt_content = parsed.prompt_content;
+
+    // Check gating requirements
+    if let Some(ref meta) = manifest.metadata
+        && let Some(ref openclaw) = meta.openclaw
+    {
+        let result = gating::check_requirements(&openclaw.requires).await;
+        if !result.passed {
+            return Err(SkillRegistryError::GatingFailed {
+                name: manifest.name.clone(),
+                reason: result.failures.join("; "),
+            });
+        }
+    }
+
+    // Check token budget
+    let approx_tokens = (prompt_content.len() as f64 * 0.25) as usize;
+    let declared = manifest.activation.max_context_tokens;
+    if declared > 0 && approx_tokens > declared * 2 {
+        return Err(SkillRegistryError::TokenBudgetExceeded {
+            name: manifest.name.clone(),
+            approx_tokens,
+            declared,
+        });
+    }
+
+    let content_hash = compute_hash(&prompt_content);
+    let compiled_patterns = LoadedSkill::compile_patterns(&manifest.activation.patterns);
+    let lowercased_keywords = to_lowercase_vec(&manifest.activation.keywords);
+    let lowercased_exclude_keywords = to_lowercase_vec(&manifest.activation.exclude_keywords);
+    let lowercased_tags = to_lowercase_vec(&manifest.activation.tags);
+
+    let name = manifest.name.clone();
+    let skill = LoadedSkill {
+        manifest,
+        prompt_content,
+        trust,
+        source,
+        content_hash,
+        compiled_patterns,
+        lowercased_keywords,
+        lowercased_exclude_keywords,
+        lowercased_tags,
+    };
+
+    Ok((name, skill))
+}
+
 /// Compute SHA-256 hash of content in the format "sha256:hex...".
 pub fn compute_hash(content: &str) -> String {
     let mut hasher = Sha256::new();
@@ -616,9 +751,7 @@ pub fn compute_hash(content: &str) -> String {
 
 /// Helper to check gating for a `GatingRequirements`. Useful for callers that
 /// don't have the full skill loaded yet.
-pub async fn check_gating(
-    requirements: &GatingRequirements,
-) -> crate::skills::gating::GatingResult {
+pub async fn check_gating(requirements: &GatingRequirements) -> crate::gating::GatingResult {
     gating::check_requirements(requirements).await
 }
 
@@ -1090,5 +1223,97 @@ mod tests {
 
         let skill = registry.find_by_name("my-skill").unwrap();
         assert_eq!(skill.trust, SkillTrust::Trusted);
+    }
+
+    #[tokio::test]
+    async fn test_bundled_skills_loaded() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Leak the vec so we get a &'static slice
+        let bundled: &'static [(String, String)] = Box::leak(Box::new(vec![(
+            "bundled-skill".to_string(),
+            "---\nname: bundled-skill\ndescription: A bundled test\nactivation:\n  keywords: [\"test\"]\n---\n\nBundled prompt.\n".to_string(),
+        )]));
+
+        let mut registry =
+            SkillRegistry::new(dir.path().to_path_buf()).with_bundled_content(bundled);
+        let loaded = registry.discover_all().await;
+
+        assert_eq!(loaded, vec!["bundled-skill"]);
+        assert_eq!(registry.count(), 1);
+
+        let skill = registry.find_by_name("bundled-skill").unwrap();
+        assert_eq!(skill.trust, SkillTrust::Trusted);
+        assert!(matches!(skill.source, SkillSource::Bundled(_)));
+        assert!(skill.prompt_content.contains("Bundled prompt."));
+    }
+
+    #[tokio::test]
+    async fn test_bundled_skill_overridden_by_user() {
+        let user_dir = tempfile::tempdir().unwrap();
+
+        // User skill
+        let skill_dir = user_dir.path().join("my-skill");
+        fs::create_dir(&skill_dir).unwrap();
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: my-skill\n---\n\nUser version.\n",
+        )
+        .unwrap();
+
+        // Bundled skill with same name
+        let bundled: &'static [(String, String)] = Box::leak(Box::new(vec![(
+            "my-skill".to_string(),
+            "---\nname: my-skill\n---\n\nBundled version.\n".to_string(),
+        )]));
+
+        let mut registry =
+            SkillRegistry::new(user_dir.path().to_path_buf()).with_bundled_content(bundled);
+        let loaded = registry.discover_all().await;
+
+        assert_eq!(loaded, vec!["my-skill"]);
+        assert_eq!(registry.count(), 1);
+        // User version wins over bundled
+        assert!(
+            registry.skills()[0]
+                .prompt_content
+                .contains("User version.")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_bundled_skill_gating_failure_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let bundled: &'static [(String, String)] = Box::leak(Box::new(vec![(
+            "gated".to_string(),
+            "---\nname: gated\nmetadata:\n  openclaw:\n    requires:\n      bins: [\"__nonexistent__\"]\n---\n\nGated.\n".to_string(),
+        )]));
+
+        let mut registry =
+            SkillRegistry::new(dir.path().to_path_buf()).with_bundled_content(bundled);
+        let loaded = registry.discover_all().await;
+
+        assert!(loaded.is_empty(), "gated bundled skill should be skipped");
+    }
+
+    #[tokio::test]
+    async fn test_bundled_skill_cannot_be_removed() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let bundled: &'static [(String, String)] = Box::leak(Box::new(vec![(
+            "permanent".to_string(),
+            "---\nname: permanent\n---\n\nCannot remove.\n".to_string(),
+        )]));
+
+        let mut registry =
+            SkillRegistry::new(dir.path().to_path_buf()).with_bundled_content(bundled);
+        registry.discover_all().await;
+
+        let result = registry.remove_skill("permanent").await;
+        assert!(matches!(
+            result,
+            Err(SkillRegistryError::CannotRemove { .. })
+        ));
     }
 }

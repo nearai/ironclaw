@@ -472,6 +472,114 @@ impl Agent {
         }
     }
 
+    /// Handle `/expected <description>` — capture expected behavior and fire into
+    /// the self-improvement pipeline.
+    ///
+    /// Collects recent conversation turns (user input, tool calls, responses) and
+    /// packages them with the user's description of what should have happened.
+    /// This fires a `user_feedback:expected_behavior` system event that the
+    /// expected-behavior learning mission picks up.
+    pub(super) async fn process_expected(
+        &self,
+        session: Arc<Mutex<Session>>,
+        thread_id: Uuid,
+        description: &str,
+        user_id: &str,
+    ) -> Result<SubmissionResult, Error> {
+        // Extract recent turns from the session (last 5 turns for context)
+        let recent_context = {
+            let sess = session.lock().await;
+            let thread = sess
+                .threads
+                .get(&thread_id)
+                .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
+
+            let turns: Vec<serde_json::Value> = thread
+                .turns
+                .iter()
+                .rev()
+                .take(5)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .map(|turn| {
+                    let tool_calls: Vec<serde_json::Value> = turn
+                        .tool_calls
+                        .iter()
+                        .map(|tc| {
+                            serde_json::json!({
+                                "tool": tc.name,
+                                "error": tc.error,
+                            })
+                        })
+                        .collect();
+                    serde_json::json!({
+                        "user_input": turn.user_input,
+                        "response": turn.response,
+                        "tool_calls": tool_calls,
+                        "state": format!("{:?}", turn.state),
+                        "error": turn.error,
+                    })
+                })
+                .collect();
+            turns
+        };
+
+        if recent_context.is_empty() {
+            return Ok(SubmissionResult::ok_with_message(
+                "No conversation history to attach feedback to.",
+            ));
+        }
+
+        let payload = serde_json::json!({
+            "expected_behavior": description,
+            "thread_id": thread_id.to_string(),
+            "recent_turns": recent_context,
+        });
+
+        // Fire into v2 mission manager (learning missions)
+        let mut fired: usize = 0;
+        if let Some(mgr) = self.mission_manager().await {
+            match mgr
+                .fire_on_system_event(
+                    "user_feedback",
+                    "expected_behavior",
+                    user_id,
+                    Some(payload.clone()),
+                )
+                .await
+            {
+                Ok(ids) => fired += ids.len(),
+                Err(e) => {
+                    tracing::debug!("failed to fire expected-behavior mission: {e}");
+                }
+            }
+        }
+
+        // Also fire through v1 routine engine (if routines listen for this)
+        if let Some(engine) = self.routine_engine().await {
+            fired += engine
+                .emit_system_event(
+                    "user_feedback",
+                    "expected_behavior",
+                    &payload,
+                    Some(user_id),
+                )
+                .await;
+        }
+
+        if fired > 0 {
+            Ok(SubmissionResult::ok_with_message(format!(
+                "Feedback captured. Fired {fired} self-improvement thread(s) to investigate."
+            )))
+        } else {
+            Ok(SubmissionResult::ok_with_message(
+                "Feedback noted but no self-improvement missions are configured to handle it. \
+                 The engine will use this context in future learning cycles.",
+            ))
+        }
+    }
+
     /// Handle `/reasoning [N|all]` — show reasoning history for the active thread.
     pub(super) async fn handle_reasoning_command(
         &self,

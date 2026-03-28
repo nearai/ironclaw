@@ -229,7 +229,7 @@ All responses include:
 
 ## Pending Approvals
 
-Tool approval state is **in-memory only** (not persisted to DB). Server restart clears all pending approvals. The `pending_approval` field in `HistoryResponse` is re-populated on thread switch from in-memory state.
+Classic agent approvals are in-memory, but engine v2 approvals are mirrored into durable engine metadata. `HistoryResponse.pending_approval` should rehydrate from live session state first and then from engine metadata so approval cards survive thread switches and restart recovery.
 
 ## Adding a New API Endpoint
 

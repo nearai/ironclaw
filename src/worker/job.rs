@@ -26,7 +26,6 @@ use crate::llm::{
     ActionPlan, ChatMessage, LlmProvider, Reasoning, ReasoningContext, RespondResult, ToolCall,
     ToolSelection,
 };
-use crate::safety::SafetyLayer;
 use crate::tenant::AdminScope;
 use crate::tools::execute::process_tool_result;
 use crate::tools::rate_limiter::RateLimitResult;
@@ -34,6 +33,7 @@ use crate::tools::{
     ApprovalContext, ToolRegistry, autonomous_unavailable_error, prepare_tool_params, redact_params,
 };
 use ironclaw_common::AppEvent;
+use ironclaw_safety::SafetyLayer;
 
 /// Shared dependencies for worker execution.
 ///
@@ -1611,10 +1611,10 @@ mod tests {
         CompletionRequest, CompletionResponse, LlmProvider, ToolCompletionRequest,
         ToolCompletionResponse,
     };
-    use crate::safety::SafetyLayer;
     use crate::testing::{BroadcastCapture, RecordingBroadcastChannel};
     use crate::tools::builtin::MessageTool;
     use crate::tools::{Tool, ToolError as ToolExecError, ToolOutput};
+    use ironclaw_safety::SafetyLayer;
 
     /// A test tool that sleeps for a configurable duration before returning.
     struct SlowTool {

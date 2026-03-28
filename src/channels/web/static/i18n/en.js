@@ -32,6 +32,7 @@ I18n.register('en', {
   'tab.chat': 'Chat',
   'tab.memory': 'Memory',
   'tab.jobs': 'Jobs',
+  'tab.missions': 'Missions',
   'tab.routines': 'Routines',
   'tab.settings': 'Settings',
   'tab.extensions': 'Extensions',
@@ -148,6 +149,20 @@ I18n.register('en', {
   'jobs.viewJob': 'View Job',
   'jobs.browse': 'Browse',
   
+  // Missions Tab
+  'missions.name': 'Name',
+  'missions.goal': 'Goal',
+  'missions.cadence': 'Cadence',
+  'missions.threads': 'Threads',
+  'missions.status': 'Status',
+  'missions.actions': 'Actions',
+  'missions.noConfigured': 'No missions found. Ask the assistant to create one.',
+  'missions.summary.total': 'Total',
+  'missions.summary.active': 'Active',
+  'missions.summary.paused': 'Paused',
+  'missions.summary.completed': 'Completed',
+  'missions.summary.failed': 'Failed',
+
   // Routines Tab
   'routines.summary': 'Routines Summary',
   'routines.name': 'Name',

@@ -49,10 +49,10 @@ use crate::db::Database;
 use crate::error::ChannelError;
 use crate::extensions::ExtensionManager;
 use crate::orchestrator::job_manager::ContainerJobManager;
-use crate::skills::catalog::SkillCatalog;
-use crate::skills::registry::SkillRegistry;
 use crate::tools::ToolRegistry;
 use crate::workspace::Workspace;
+use ironclaw_skills::catalog::SkillCatalog;
+use ironclaw_skills::registry::SkillRegistry;
 
 use self::log_layer::{LogBroadcaster, LogLevelHandle};
 
@@ -485,6 +485,10 @@ impl Channel for GatewayChannel {
                 cost_usd,
                 thread_id,
             },
+            StatusUpdate::SkillActivated { skill_names } => AppEvent::SkillActivated {
+                skill_names,
+                thread_id,
+            },
         };
 
         // Scope events to the user when user_id is available in metadata.
@@ -504,22 +508,17 @@ impl Channel for GatewayChannel {
         user_id: &str,
         response: OutgoingResponse,
     ) -> Result<(), ChannelError> {
-        let thread_id = match response.thread_id {
-            Some(tid) => tid,
-            None => {
-                tracing::warn!(
-                    "Gateway broadcast with no thread_id — skipping (clients would drop it)"
-                );
-                return Ok(());
-            }
-        };
-        self.state.sse.broadcast_for_user(
-            user_id,
-            AppEvent::Response {
+        let event = match response.thread_id {
+            Some(thread_id) => AppEvent::Response {
                 content: response.content,
                 thread_id,
             },
-        );
+            None => AppEvent::Status {
+                message: response.content,
+                thread_id: None,
+            },
+        };
+        self.state.sse.broadcast_for_user(user_id, event);
         Ok(())
     }
 

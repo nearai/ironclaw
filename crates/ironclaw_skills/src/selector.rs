@@ -10,7 +10,7 @@
 //! - Tag match: 3 points (capped at 15 total)
 //! - Regex pattern match: 20 points (capped at 40 total)
 
-use crate::skills::LoadedSkill;
+use crate::types::LoadedSkill;
 
 /// Default maximum context tokens allocated to skills.
 pub const MAX_SKILL_CONTEXT_TOKENS: usize = 4000;
@@ -147,10 +147,24 @@ fn score_skill(skill: &LoadedSkill, message_lower: &str, message_original: &str)
     score
 }
 
+/// Apply confidence factor to a base score.
+///
+/// Authored skills always get factor 1.0 (no adjustment).
+/// Extracted skills get `0.5 + 0.5 * confidence`, so a skill with 0% confidence
+/// gets its score halved (not zeroed — it can still be selected when strongly
+/// keyword-matched).
+pub fn apply_confidence_factor(base_score: u32, confidence: f64, is_authored: bool) -> u32 {
+    if is_authored {
+        return base_score;
+    }
+    let factor = 0.5 + 0.5 * confidence.clamp(0.0, 1.0);
+    (base_score as f64 * factor) as u32
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::skills::{ActivationCriteria, LoadedSkill, SkillManifest, SkillSource, SkillTrust};
+    use crate::types::{ActivationCriteria, LoadedSkill, SkillManifest, SkillSource, SkillTrust};
     use std::path::PathBuf;
 
     fn make_skill(name: &str, keywords: &[&str], tags: &[&str], patterns: &[&str]) -> LoadedSkill {
@@ -172,6 +186,7 @@ mod tests {
                     tags: tag_vec,
                     max_context_tokens: 1000,
                 },
+                credentials: vec![],
                 metadata: None,
             },
             prompt_content: "Test prompt".to_string(),
@@ -298,7 +313,6 @@ mod tests {
         skill2.manifest.activation.max_context_tokens = 3000;
 
         let skills = vec![skill, skill2];
-        // Budget of 4000 can only fit one 3000-token skill
         let result = prefilter_skills("test", &skills, 5, 4000);
         assert_eq!(result.len(), 1);
     }
@@ -394,12 +408,8 @@ mod tests {
         skill
     }
 
-    // --- exclude_keywords tests ---
-
     #[test]
     fn test_exclude_keyword_vetos_match() {
-        // Skill matches on "write" but exclude_keywords: ["route"] — message contains "route"
-        // so the skill should score 0 and be excluded.
         let skills = vec![make_skill_with_excludes(
             "writer",
             &["write"],
@@ -421,7 +431,6 @@ mod tests {
 
     #[test]
     fn test_exclude_keyword_absent_does_not_block() {
-        // Same skill, message does NOT contain the exclude keyword — should activate normally.
         let skills = vec![make_skill_with_excludes(
             "writer",
             &["write"],
@@ -444,8 +453,6 @@ mod tests {
 
     #[test]
     fn test_exclude_keyword_veto_wins_over_positive_match() {
-        // Both a keyword match AND an exclude_keyword match are present.
-        // The veto must win regardless of how high the positive score is.
         let skills = vec![make_skill_with_excludes(
             "writer",
             &["write", "draft", "compose"],
@@ -467,7 +474,6 @@ mod tests {
 
     #[test]
     fn test_exclude_keyword_case_insensitive() {
-        // exclude_keywords are pre-lowercased; the veto must fire regardless of case in the message.
         let skills = vec![make_skill_with_excludes(
             "writer",
             &["write"],
@@ -485,5 +491,30 @@ mod tests {
             result.is_empty(),
             "exclude_keyword veto should be case-insensitive"
         );
+    }
+
+    #[test]
+    fn test_apply_confidence_factor_authored() {
+        assert_eq!(apply_confidence_factor(100, 0.0, true), 100);
+        assert_eq!(apply_confidence_factor(100, 0.5, true), 100);
+        assert_eq!(apply_confidence_factor(100, 1.0, true), 100);
+    }
+
+    #[test]
+    fn test_apply_confidence_factor_extracted() {
+        // 0% confidence → factor 0.5 → score halved
+        assert_eq!(apply_confidence_factor(100, 0.0, false), 50);
+        // 50% confidence → factor 0.75 → score * 0.75
+        assert_eq!(apply_confidence_factor(100, 0.5, false), 75);
+        // 100% confidence → factor 1.0 → unchanged
+        assert_eq!(apply_confidence_factor(100, 1.0, false), 100);
+    }
+
+    #[test]
+    fn test_apply_confidence_factor_clamps() {
+        // Negative confidence clamped to 0
+        assert_eq!(apply_confidence_factor(100, -0.5, false), 50);
+        // Over 1.0 clamped to 1.0
+        assert_eq!(apply_confidence_factor(100, 1.5, false), 100);
     }
 }

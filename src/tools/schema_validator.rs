@@ -501,12 +501,12 @@ mod tests {
     fn test_skill_tool_schemas() {
         use std::sync::Arc;
 
-        use crate::skills::catalog::SkillCatalog;
-        use crate::skills::registry::SkillRegistry;
         use crate::tools::Tool;
         use crate::tools::builtin::{
             SkillInstallTool, SkillListTool, SkillRemoveTool, SkillSearchTool,
         };
+        use ironclaw_skills::catalog::SkillCatalog;
+        use ironclaw_skills::registry::SkillRegistry;
 
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.keep();

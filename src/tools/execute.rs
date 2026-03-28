@@ -9,8 +9,8 @@ use std::borrow::Cow;
 use crate::context::JobContext;
 use crate::error::Error;
 use crate::llm::ChatMessage;
-use crate::safety::SafetyLayer;
 use crate::tools::{ToolRegistry, prepare_tool_params, redact_params};
+use ironclaw_safety::SafetyLayer;
 
 /// Execute a tool with safety checks: lookup → validate → timeout → execute → serialize.
 ///

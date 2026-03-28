@@ -41,6 +41,12 @@ impl SubmissionParser {
         if lower == "/suggest" {
             return Submission::Suggest;
         }
+        if lower.starts_with("/expected ") {
+            let description = trimmed["/expected ".len()..].trim().to_string();
+            if !description.is_empty() {
+                return Submission::Expected { description };
+            }
+        }
         if lower == "/thread new" || lower == "/new" {
             return Submission::NewThread;
         }
@@ -270,6 +276,13 @@ pub enum Submission {
 
     /// Suggest next steps based on the current thread.
     Suggest,
+
+    /// User-provided expected behavior for the last interaction.
+    /// Fires into the self-improvement pipeline with conversation context.
+    Expected {
+        /// What the user expected to happen.
+        description: String,
+    },
 
     /// Check job status. No job_id shows all jobs; with job_id shows a specific job.
     JobStatus {
@@ -866,5 +879,21 @@ mod tests {
         ));
         assert!(matches!(SubmissionParser::parse("/QUIT"), Submission::Quit));
         assert!(matches!(SubmissionParser::parse("/Exit"), Submission::Quit));
+    }
+
+    #[test]
+    fn test_parser_expected() {
+        let submission =
+            SubmissionParser::parse("/expected should have logged in via GitHub OAuth");
+        assert!(
+            matches!(submission, Submission::Expected { description } if description == "should have logged in via GitHub OAuth")
+        );
+    }
+
+    #[test]
+    fn test_parser_expected_empty_is_user_input() {
+        // "/expected " with no description should fall through to user input
+        let submission = SubmissionParser::parse("/expected ");
+        assert!(matches!(submission, Submission::UserInput { .. }));
     }
 }

@@ -526,7 +526,7 @@ async fn check_skills() -> CheckResult {
     let user_dir = ironclaw_base_dir().join("skills");
     let installed_dir = ironclaw_base_dir().join("installed_skills");
 
-    let mut registry = crate::skills::SkillRegistry::new(user_dir.clone());
+    let mut registry = ironclaw_skills::SkillRegistry::new(user_dir.clone());
     registry = registry.with_installed_dir(installed_dir);
 
     // discover_all() returns loaded skill names (not warnings).

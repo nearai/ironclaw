@@ -3,7 +3,8 @@
 //! Parses files with YAML frontmatter delimited by `---` lines, followed by a
 //! markdown prompt body.
 
-use crate::skills::{SkillManifest, validate_skill_name};
+use crate::types::SkillManifest;
+use crate::validation::validate_skill_name;
 
 /// Error type for SKILL.md parsing failures.
 #[derive(Debug, thiserror::Error)]

@@ -26,7 +26,7 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, Layer, reload};
 
-use crate::safety::LeakDetector;
+use ironclaw_safety::LeakDetector;
 
 /// Maximum number of recent log entries kept for late-joining SSE subscribers.
 const HISTORY_CAP: usize = 500;
@@ -454,7 +454,7 @@ mod tests {
 
     #[test]
     fn test_leak_detector_scrubs_api_key_in_log() {
-        let detector = crate::safety::LeakDetector::new();
+        let detector = ironclaw_safety::LeakDetector::new();
         let msg = "Connecting with token sk-proj-test1234567890abcdefghij";
         let result = detector.scan_and_clean(msg);
         // Should be blocked (OpenAI key pattern)
@@ -463,7 +463,7 @@ mod tests {
 
     #[test]
     fn test_leak_detector_passes_clean_log() {
-        let detector = crate::safety::LeakDetector::new();
+        let detector = ironclaw_safety::LeakDetector::new();
         let msg = "Request completed status=200 url=https://api.example.com/data";
         let result = detector.scan_and_clean(msg);
         assert!(result.is_ok());

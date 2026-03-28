@@ -95,6 +95,7 @@
       <button class="active" data-tab="chat" data-i18n="tab.chat">Chat</button>
       <button data-tab="memory" data-i18n="tab.memory">Memory</button>
       <button data-tab="jobs" data-i18n="tab.jobs">Jobs</button>
+      <button data-tab="missions" data-i18n="tab.missions">Missions</button>
       <button data-tab="routines" data-i18n="tab.routines">Routines</button>
       <button data-tab="settings" data-i18n="tab.settings">Settings</button>
       <div class="spacer"></div>
@@ -256,6 +257,30 @@
     </div>
 
     <!-- Routines Tab -->
+    <!-- Missions Tab -->
+    <div class="tab-panel" id="tab-missions">
+      <div class="missions-container">
+        <div class="missions-summary" id="missions-summary"></div>
+        <table class="missions-table" id="missions-table">
+          <thead>
+            <tr>
+              <th data-i18n="missions.name">Name</th>
+              <th data-i18n="missions.goal">Goal</th>
+              <th data-i18n="missions.cadence">Cadence</th>
+              <th data-i18n="missions.threads">Threads</th>
+              <th data-i18n="missions.status">Status</th>
+              <th data-i18n="missions.actions">Actions</th>
+            </tr>
+          </thead>
+          <tbody id="missions-tbody"></tbody>
+        </table>
+        <div class="empty-state" id="missions-empty" style="display:none">
+          <span data-i18n="missions.noConfigured">No missions found. Ask the assistant to create one.</span>
+        </div>
+        <div class="mission-detail" id="mission-detail" style="display:none"></div>
+      </div>
+    </div>
+
     <div class="tab-panel" id="tab-routines">
       <div class="routines-container">
         <div class="routines-summary" id="routines-summary"></div>

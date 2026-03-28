@@ -377,6 +377,8 @@ pub struct Reasoning {
     /// Channel-specific conversation context (e.g., sender number, UUID, group ID).
     /// This is passed to the LLM to provide clarity about who/group it's talking to.
     conversation_context: std::collections::HashMap<String, String>,
+    /// Platform identity and runtime metadata for self-awareness.
+    platform_info: Option<ironclaw_engine::PlatformInfo>,
 }
 
 impl Reasoning {
@@ -390,6 +392,7 @@ impl Reasoning {
             model_name: None,
             is_group_chat: false,
             conversation_context: std::collections::HashMap::new(),
+            platform_info: None,
         }
     }
 
@@ -421,6 +424,12 @@ impl Reasoning {
         if !ch.is_empty() {
             self.channel = Some(ch);
         }
+        self
+    }
+
+    /// Set platform metadata for self-awareness in system prompts.
+    pub fn with_platform_info(mut self, info: ironclaw_engine::PlatformInfo) -> Self {
+        self.platform_info = Some(info);
         self
     }
 
@@ -1078,6 +1087,13 @@ Examples (tool calls use JSON format):\n\
     }
 
     fn build_runtime_section(&self) -> String {
+        // Platform identity section (self-awareness)
+        let platform_section = if let Some(ref info) = self.platform_info {
+            info.to_prompt_section()
+        } else {
+            String::new()
+        };
+
         let mut parts = Vec::new();
         if let Some(ref ch) = self.channel {
             parts.push(format!("channel={}", ch));
@@ -1085,10 +1101,13 @@ Examples (tool calls use JSON format):\n\
         if let Some(ref model) = self.model_name {
             parts.push(format!("model={}", model));
         }
-        if parts.is_empty() {
-            return String::new();
-        }
-        format!("\n\n## Runtime\n{}", parts.join(" | "))
+        let runtime = if parts.is_empty() {
+            String::new()
+        } else {
+            format!("\n\n## Runtime\n{}", parts.join(" | "))
+        };
+
+        format!("{platform_section}{runtime}")
     }
 
     fn build_conversation_section(&self) -> String {
