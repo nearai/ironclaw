@@ -418,7 +418,16 @@ fn parse_gateway_event_queue(
     queue_json: &str,
     known_bot_user_id: Option<&str>,
 ) -> GatewayPollResult {
-    let frames: Vec<String> = serde_json::from_str(queue_json).unwrap_or_default();
+    let frames: Vec<String> = match serde_json::from_str(queue_json) {
+        Ok(v) => v,
+        Err(e) => {
+            channel_host::log(
+                channel_host::LogLevel::Warn,
+                &format!("Failed to deserialize gateway event queue: {}", e),
+            );
+            return GatewayPollResult::default();
+        }
+    };
     let mut result = GatewayPollResult::default();
     let mut bot_user_id = known_bot_user_id.map(ToOwned::to_owned);
 

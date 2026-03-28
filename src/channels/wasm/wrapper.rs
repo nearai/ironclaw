@@ -1231,25 +1231,27 @@ impl WasmChannel {
                                                 if let Ok(poll_guard) = Arc::clone(&websocket_poll_lock).try_lock_owned() {
                                                     spawn_websocket_poll(
                                                         poll_guard,
-                                                        channel_name.clone(),
-                                                        Arc::clone(&runtime),
-                                                        Arc::clone(&prepared),
-                                                        capabilities.clone(),
-                                                        poll_capabilities.clone(),
-                                                        Arc::clone(&credentials),
-                                                        pairing_store.clone(),
-                                                        workspace_store.clone(),
-                                                        message_tx.clone(),
-                                                        Arc::clone(&rate_limiter),
-                                                        Arc::clone(&last_broadcast_metadata),
-                                                        settings_store.clone(),
-                                                        owner_scope_id.clone(),
-                                                        owner_actor_id.clone(),
-                                                        websocket_secrets_store.clone(),
-                                                        outbound_tx.clone(),
-                                                        queue_path.clone(),
-                                                        processing_queue_path.clone(),
-                                                        callback_timeout,
+                                                        WebsocketPollContext {
+                                                            channel_name: channel_name.clone(),
+                                                            runtime: Arc::clone(&runtime),
+                                                            prepared: Arc::clone(&prepared),
+                                                            capabilities: capabilities.clone(),
+                                                            poll_capabilities: poll_capabilities.clone(),
+                                                            credentials: Arc::clone(&credentials),
+                                                            pairing_store: pairing_store.clone(),
+                                                            workspace_store: workspace_store.clone(),
+                                                            message_tx: message_tx.clone(),
+                                                            rate_limiter: Arc::clone(&rate_limiter),
+                                                            last_broadcast_metadata: Arc::clone(&last_broadcast_metadata),
+                                                            settings_store: settings_store.clone(),
+                                                            owner_scope_id: owner_scope_id.clone(),
+                                                            owner_actor_id: owner_actor_id.clone(),
+                                                            secrets_store: websocket_secrets_store.clone(),
+                                                            outbound_tx: outbound_tx.clone(),
+                                                            queue_path: queue_path.clone(),
+                                                            processing_queue_path: processing_queue_path.clone(),
+                                                            callback_timeout,
+                                                        },
                                                     );
                                                 }
                                             }
@@ -3192,8 +3194,14 @@ fn parse_websocket_hello_heartbeat_interval_ms(text: &str) -> Option<u64> {
 }
 
 fn websocket_reconnect_backoff(attempt: u32) -> Duration {
+    use rand::Rng;
+
     let exponent = attempt.min(6);
-    Duration::from_secs(1u64 << exponent)
+    let base_ms = (1u64 << exponent) * 1_000;
+    // Add 0-25% jitter per Discord's reconnection recommendations to avoid
+    // thundering-herd when many bots reconnect after a Discord deploy.
+    let jitter_ms = rand::thread_rng().gen_range(0..=base_ms / 4);
+    Duration::from_millis(base_ms + jitter_ms)
 }
 
 fn websocket_heartbeat_sleep_duration(interval_ms: u64) -> Duration {
@@ -3289,13 +3297,11 @@ fn drain_guest_logs(
     entries
 }
 
-/// Spawn the websocket-triggered poll task.
+/// Shared state for websocket-triggered poll tasks.
 ///
-/// Extracted from the select loop to reduce nesting. Moves items from the
-/// event queue to a processing queue and runs the WASM `on_poll` callback.
-#[allow(clippy::too_many_arguments)]
-fn spawn_websocket_poll(
-    poll_guard: tokio::sync::OwnedMutexGuard<()>,
+/// Groups the many `Arc` handles needed by [`spawn_websocket_poll`] into a
+/// single cloneable context so the call site stays readable.
+struct WebsocketPollContext {
     channel_name: String,
     runtime: Arc<WasmChannelRuntime>,
     prepared: Arc<PreparedChannelModule>,
@@ -3310,22 +3316,29 @@ fn spawn_websocket_poll(
     settings_store: Option<Arc<dyn crate::db::SettingsStore>>,
     owner_scope_id: String,
     owner_actor_id: Option<String>,
-    websocket_secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
+    secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
     outbound_tx: mpsc::UnboundedSender<String>,
     queue_path: String,
     processing_queue_path: String,
     callback_timeout: Duration,
-) {
+}
+
+/// Spawn the websocket-triggered poll task.
+///
+/// Extracted from the select loop to reduce nesting. Moves items from the
+/// event queue to a processing queue and runs the WASM `on_poll` callback.
+fn spawn_websocket_poll(poll_guard: tokio::sync::OwnedMutexGuard<()>, ctx: WebsocketPollContext) {
     tokio::spawn(async move {
         let _poll_guard = poll_guard;
 
         loop {
-            let moved = match workspace_store
-                .move_json_text_queue(&queue_path, &processing_queue_path)
+            let moved = match ctx
+                .workspace_store
+                .move_json_text_queue(&ctx.queue_path, &ctx.processing_queue_path)
             {
                 Ok(value) => value,
                 Err(error) => {
-                    tracing::warn!(channel = %channel_name, error = %error, "Failed to snapshot websocket queue for polling");
+                    tracing::warn!(channel = %ctx.channel_name, error = %error, "Failed to snapshot websocket queue for polling");
                     break;
                 }
             };
@@ -3335,22 +3348,22 @@ fn spawn_websocket_poll(
             }
 
             let host_credentials = resolve_channel_host_credentials(
-                &poll_capabilities,
-                websocket_secrets_store.as_deref(),
-                &owner_scope_id,
+                &ctx.poll_capabilities,
+                ctx.secrets_store.as_deref(),
+                &ctx.owner_scope_id,
             )
             .await;
 
             match WasmChannel::execute_poll(
-                &channel_name,
-                &runtime,
-                &prepared,
-                &capabilities,
-                &credentials,
+                &ctx.channel_name,
+                &ctx.runtime,
+                &ctx.prepared,
+                &ctx.capabilities,
+                &ctx.credentials,
                 host_credentials,
-                pairing_store.clone(),
-                callback_timeout,
-                &workspace_store,
+                ctx.pairing_store.clone(),
+                ctx.callback_timeout,
+                &ctx.workspace_store,
             )
             .await
             {
@@ -3358,32 +3371,32 @@ fn spawn_websocket_poll(
                     if !emitted_messages.is_empty()
                         && let Err(error) = WasmChannel::dispatch_emitted_messages(
                             EmitDispatchContext {
-                                channel_name: &channel_name,
-                                owner_scope_id: &owner_scope_id,
-                                owner_actor_id: owner_actor_id.as_deref(),
-                                message_tx: &message_tx,
-                                rate_limiter: &rate_limiter,
-                                last_broadcast_metadata: &last_broadcast_metadata,
-                                settings_store: settings_store.as_ref(),
+                                channel_name: &ctx.channel_name,
+                                owner_scope_id: &ctx.owner_scope_id,
+                                owner_actor_id: ctx.owner_actor_id.as_deref(),
+                                message_tx: &ctx.message_tx,
+                                rate_limiter: &ctx.rate_limiter,
+                                last_broadcast_metadata: &ctx.last_broadcast_metadata,
+                                settings_store: ctx.settings_store.as_ref(),
                             },
                             emitted_messages,
                         )
                         .await
                     {
-                        tracing::warn!(channel = %channel_name, error = %error, "Failed to dispatch emitted websocket poll messages");
+                        tracing::warn!(channel = %ctx.channel_name, error = %error, "Failed to dispatch emitted websocket poll messages");
                     }
                 }
                 Err(error) => {
-                    tracing::warn!(channel = %channel_name, error = %error, "Websocket-triggered poll failed");
+                    tracing::warn!(channel = %ctx.channel_name, error = %error, "Websocket-triggered poll failed");
                 }
             }
 
             if let Some(payload) = build_gateway_presence_update(
-                &channel_name,
-                workspace_store.as_ref(),
-                pairing_store.as_ref(),
+                &ctx.channel_name,
+                ctx.workspace_store.as_ref(),
+                ctx.pairing_store.as_ref(),
             ) {
-                let _ = outbound_tx.send(payload);
+                let _ = ctx.outbound_tx.send(payload);
             }
         }
     });
@@ -3500,18 +3513,21 @@ impl WebsocketSessionState {
             if !sent_resume && let Some(payload) = identify_payload {
                 actions.push(WebsocketFrameAction::Send(payload.to_string()));
             }
+        }
+
+        // OP 0 Dispatch READY: capture session_id and resume_gateway_url.
+        // Presence update is sent here (after READY) rather than on Hello,
+        // because Discord's gateway protocol requires waiting for READY/RESUMED
+        // before sending non-Identify commands.
+        if let Some((sid, resume_url)) = parse_websocket_ready_session(text) {
+            self.session_id = Some(sid);
+            self.resume_gateway_url = resume_url;
 
             if let Some(payload) =
                 build_gateway_presence_update(channel_name, workspace_store, pairing_store)
             {
                 actions.push(WebsocketFrameAction::Send(payload));
             }
-        }
-
-        // OP 0 Dispatch READY: capture session_id and resume_gateway_url
-        if let Some((sid, resume_url)) = parse_websocket_ready_session(text) {
-            self.session_id = Some(sid);
-            self.resume_gateway_url = resume_url;
         }
 
         // Track sequence number from any dispatch
@@ -4280,12 +4296,22 @@ mod tests {
     }
 
     #[test]
-    fn test_websocket_reconnect_backoff_caps_at_sixty_four_seconds() {
-        assert_eq!(websocket_reconnect_backoff(0), Duration::from_secs(1));
-        assert_eq!(websocket_reconnect_backoff(1), Duration::from_secs(2));
-        assert_eq!(websocket_reconnect_backoff(5), Duration::from_secs(32));
-        assert_eq!(websocket_reconnect_backoff(6), Duration::from_secs(64));
-        assert_eq!(websocket_reconnect_backoff(10), Duration::from_secs(64));
+    fn test_websocket_reconnect_backoff_caps_at_sixty_four_seconds_with_jitter() {
+        // Backoff = base + 0-25% jitter, so check range [base, base * 1.25].
+        let check = |attempt: u32, base_secs: u64| {
+            let d = websocket_reconnect_backoff(attempt);
+            let base = Duration::from_secs(base_secs);
+            let max = base + base / 4;
+            assert!(
+                d >= base && d <= max,
+                "attempt {attempt}: {d:?} not in [{base:?}, {max:?}]"
+            );
+        };
+        check(0, 1);
+        check(1, 2);
+        check(5, 32);
+        check(6, 64);
+        check(10, 64); // capped at 2^6
     }
 
     #[test]

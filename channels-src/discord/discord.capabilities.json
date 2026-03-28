@@ -42,6 +42,7 @@
       "connect_on_start": true,
       "identify_secret_name": "discord_bot_token",
       "identify": {
+        "_intents_doc": "GUILDS(1) + GUILD_MESSAGES(512) + DIRECT_MESSAGES(4096)",
         "intents": 4609,
         "properties": {
           "os": "linux",
