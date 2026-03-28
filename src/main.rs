@@ -928,6 +928,13 @@ async fn async_main() -> anyhow::Result<()> {
         document_extraction: Some(Arc::new(
             ironclaw::document_extraction::DocumentExtractionMiddleware::new(),
         )),
+        sandbox_readiness: if !config.sandbox.enabled {
+            ironclaw::agent::routine_engine::SandboxReadiness::DisabledByConfig
+        } else if docker_status.is_ok() {
+            ironclaw::agent::routine_engine::SandboxReadiness::Available
+        } else {
+            ironclaw::agent::routine_engine::SandboxReadiness::DockerUnavailable
+        },
         builder: components.builder,
         llm_backend: config.llm.backend.clone(),
         tenant_rates: Arc::new(ironclaw::tenant::TenantRateRegistry::new(

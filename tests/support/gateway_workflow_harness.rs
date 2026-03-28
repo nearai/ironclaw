@@ -264,6 +264,8 @@ impl GatewayWorkflowHarness {
                 http_interceptor: None,
                 transcription: None,
                 document_extraction: None,
+                sandbox_readiness:
+                    ironclaw::agent::routine_engine::SandboxReadiness::DisabledByConfig,
                 builder: None,
                 llm_backend: "nearai".to_string(),
                 tenant_rates: std::sync::Arc::new(ironclaw::tenant::TenantRateRegistry::new(4, 3)),

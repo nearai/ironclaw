@@ -1140,6 +1140,7 @@ data: {"type":"response.completed","response":{"status":"completed","usage":{"in
             id: "call_1".to_string(),
             name: "mcp.server.search".to_string(),
             arguments: serde_json::json!({"q": "test"}),
+            reasoning: None,
         }];
         let msg = ChatMessage::assistant_with_tool_calls(None, tool_calls);
         let items = super::convert_message(&msg, 0);
