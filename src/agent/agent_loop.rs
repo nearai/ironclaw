@@ -85,13 +85,36 @@ impl SensitiveChatCredential {
     }
 }
 
-static TELEGRAM_BOT_TOKEN_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^\d{6,}:[A-Za-z0-9_-]{20,}$").expect("TELEGRAM_BOT_TOKEN_RE")); // safety: hardcoded literal
+/// Tighter Telegram bot-token regex: numeric bot-ID (8–15 digits, matching
+/// real tokens), followed by `:`, followed by the secret part (30+
+/// alphanumeric / `_` / `-` characters).  Unanchored so it can find tokens
+/// embedded in longer messages.
+static TELEGRAM_BOT_TOKEN_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\d{8,15}:[A-Za-z0-9_-]{30,}").expect("TELEGRAM_BOT_TOKEN_RE") // safety: hardcoded literal
+});
 
+/// Scan a user message for sensitive credentials that should never flow
+/// through normal chat.  Splits on whitespace and strips common wrapping
+/// punctuation so tokens pasted as `token: 123…`, `` `123…` ``, or
+/// `(123…)` are still caught.
 fn detect_sensitive_chat_credential(content: &str) -> Option<SensitiveChatCredential> {
-    let trimmed = content.trim();
-    if TELEGRAM_BOT_TOKEN_RE.is_match(trimmed) {
+    // Fast path: if the regex matches anywhere in the raw text we have a candidate.
+    if TELEGRAM_BOT_TOKEN_RE.is_match(content) {
         return Some(SensitiveChatCredential::TelegramBotToken);
+    }
+
+    // Slower path: strip common wrapping characters per word so that
+    // pastes like `` `123456789:AABBcc…` `` are still detected.
+    for word in content.split_whitespace() {
+        let stripped = word.trim_matches(|c: char| {
+            matches!(
+                c,
+                '`' | '\'' | '"' | '(' | ')' | '[' | ']' | '{' | '}' | '<' | '>' | ','
+            )
+        });
+        if TELEGRAM_BOT_TOKEN_RE.is_match(stripped) {
+            return Some(SensitiveChatCredential::TelegramBotToken);
+        }
     }
     None
 }
@@ -1144,6 +1167,23 @@ impl Agent {
             std::any::type_name_of_val(&submission)
         );
 
+        // Sensitive credential interception — runs BEFORE hooks so that
+        // BeforeInbound hooks never receive raw secrets.  Skipped when the
+        // thread is in auth mode (`pending_auth`) so the legitimate
+        // secure-setup token-submission flow still works.
+        if let Submission::UserInput { ref content } = submission
+            && !self
+                .session_manager
+                .has_pending_auth(&message.user_id)
+                .await
+            && let Some(credential) = detect_sensitive_chat_credential(content)
+        {
+            return Ok(Some(
+                self.intercept_sensitive_chat_credential(message, credential)
+                    .await,
+            ));
+        }
+
         // Hook: BeforeInbound — allow hooks to modify or reject user input
         if let Submission::UserInput { ref content } = submission {
             let event = crate::hooks::HookEvent::Inbound {
@@ -1290,15 +1330,6 @@ impl Agent {
                         // Fall through to normal handling
                     }
                 }
-            }
-        }
-
-        if let Submission::UserInput { ref content } = submission {
-            if let Some(credential) = detect_sensitive_chat_credential(content) {
-                return Ok(Some(
-                    self.intercept_sensitive_chat_credential(message, credential)
-                        .await,
-                ));
             }
         }
 
@@ -1784,7 +1815,7 @@ mod tests {
 
     #[test]
     fn detects_telegram_bot_token_messages() {
-        let detected = detect_sensitive_chat_credential("123456789:AABBccDDeeFFgg_Test-Token");
+        let detected = detect_sensitive_chat_credential("123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw");
         assert_eq!(detected, Some(SensitiveChatCredential::TelegramBotToken));
     }
 
@@ -1828,6 +1859,8 @@ mod tests {
             document_extraction: None,
             sandbox_readiness: crate::agent::routine_engine::SandboxReadiness::DisabledByConfig,
             builder: None,
+            llm_backend: "stub".to_string(),
+            tenant_rates: Arc::new(crate::tenant::TenantRateRegistry::new(4, 3)),
         };
 
         let agent = Agent::new(
@@ -1843,10 +1876,15 @@ mod tests {
                 allow_local_tools: false,
                 max_cost_per_day_cents: None,
                 max_actions_per_hour: None,
+                max_cost_per_user_per_day_cents: None,
                 max_tool_iterations: 5,
                 auto_approve_tools: false,
                 default_timezone: "UTC".to_string(),
+                max_jobs_per_user: None,
                 max_tokens_per_job: 0,
+                multi_tenant: false,
+                max_llm_concurrent_per_user: None,
+                max_jobs_concurrent_per_user: None,
             },
             deps,
             Arc::new(channel_manager),
@@ -1868,7 +1906,7 @@ mod tests {
         let message = IncomingMessage::new(
             "gateway",
             "test-user",
-            "123456789:AABBccDDeeFFgg_Test-Token",
+            "123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw",
         );
 
         let response = agent
@@ -1928,7 +1966,7 @@ mod tests {
         let message = IncomingMessage::new(
             "gateway",
             "test-user",
-            "123456789:AABBccDDeeFFgg_Test-Token",
+            "123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw",
         )
         .with_thread(thread_id.to_string());
 
@@ -1944,11 +1982,13 @@ mod tests {
         );
         assert_eq!(llm_handle.calls(), 0, "LLM should not see auth-mode tokens");
 
-        let statuses = statuses.lock().expect("poisoned");
-        assert!(
-            statuses.is_empty(),
-            "no redirect status should be emitted when auth mode consumes the token"
-        );
+        {
+            let statuses = statuses.lock().expect("poisoned");
+            assert!(
+                statuses.is_empty(),
+                "no redirect status should be emitted when auth mode consumes the token"
+            );
+        }
 
         let sess = session.lock().await;
         let pending_auth = sess
@@ -1958,6 +1998,92 @@ mod tests {
         assert!(
             pending_auth.is_none(),
             "auth mode should be cleared after the token is processed"
+        );
+    }
+
+    // ── Comprehensive credential detection tests (review feedback) ──
+
+    #[test]
+    fn detects_telegram_token_with_surrounding_whitespace() {
+        let token = "  1234567890:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw  ";
+        assert_eq!(
+            detect_sensitive_chat_credential(token),
+            Some(SensitiveChatCredential::TelegramBotToken)
+        );
+    }
+
+    #[test]
+    fn detects_telegram_token_with_prefix_text() {
+        let msg = "here is my token: 1234567890:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw";
+        assert_eq!(
+            detect_sensitive_chat_credential(msg),
+            Some(SensitiveChatCredential::TelegramBotToken)
+        );
+    }
+
+    #[test]
+    fn detects_telegram_token_in_backticks() {
+        let msg = "my token is `1234567890:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw`";
+        assert_eq!(
+            detect_sensitive_chat_credential(msg),
+            Some(SensitiveChatCredential::TelegramBotToken)
+        );
+    }
+
+    #[test]
+    fn detects_telegram_token_in_parentheses() {
+        let msg = "(1234567890:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw)";
+        assert_eq!(
+            detect_sensitive_chat_credential(msg),
+            Some(SensitiveChatCredential::TelegramBotToken)
+        );
+    }
+
+    #[test]
+    fn detects_telegram_token_with_trailing_punctuation() {
+        let msg = "1234567890:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw,";
+        assert_eq!(
+            detect_sensitive_chat_credential(msg),
+            Some(SensitiveChatCredential::TelegramBotToken)
+        );
+    }
+
+    #[test]
+    fn detects_telegram_token_in_multiline_paste() {
+        let msg = "I got my token from BotFather:\n1234567890:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw\nPlease set it up";
+        assert_eq!(
+            detect_sensitive_chat_credential(msg),
+            Some(SensitiveChatCredential::TelegramBotToken)
+        );
+    }
+
+    #[test]
+    fn ignores_short_digit_colon_strings() {
+        // Too few digits for a real bot ID
+        assert_eq!(detect_sensitive_chat_credential("123:abc"), None);
+        // Secret part too short
+        assert_eq!(detect_sensitive_chat_credential("12345678:short"), None);
+    }
+
+    #[test]
+    fn ignores_colon_separated_non_token_strings() {
+        assert_eq!(
+            detect_sensitive_chat_credential("timestamp 12:30:45 is fine"),
+            None
+        );
+        assert_eq!(
+            detect_sensitive_chat_credential("ratio is 100:1 in my favor"),
+            None
+        );
+    }
+
+    #[test]
+    fn credential_extension_name_and_message() {
+        let cred = SensitiveChatCredential::TelegramBotToken;
+        assert_eq!(cred.extension_name(), "telegram");
+        assert!(
+            cred.redirect_message()
+                .contains("secure Telegram setup flow")
         );
     }
 }
