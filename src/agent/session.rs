@@ -252,9 +252,7 @@ pub fn is_approval_authorized(source: Option<&str>, requesting: &str) -> bool {
     match source {
         None => false,
         Some(src) if src == BOOTSTRAP_SOURCE_CHANNEL => true,
-        Some(src) => {
-            src == requesting || requesting == "web" || requesting == "gateway"
-        }
+        Some(src) => src == requesting || requesting == "web" || requesting == "gateway",
     }
 }
 

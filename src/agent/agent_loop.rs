@@ -1163,9 +1163,7 @@ impl Agent {
                         "Blocked approval for thread with no pending approval"
                     );
                     drop(sess);
-                    return Ok(Some(
-                        "Error: no pending approval on this thread".into(),
-                    ));
+                    return Ok(Some("Error: no pending approval on this thread".into()));
                 }
 
                 let authorized = crate::agent::session::is_approval_authorized(

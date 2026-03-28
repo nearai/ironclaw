@@ -146,17 +146,18 @@ impl Agent {
         } else {
             None
         };
-        let effective_source_channel = db_source_channel
-            .as_deref()
-            .or(Some(&*message.channel));
+        let effective_source_channel = db_source_channel.as_deref().or(Some(&*message.channel));
 
         let session_id = {
             let sess = session.lock().await;
             sess.id
         };
 
-        let mut thread =
-            crate::agent::session::Thread::with_id(thread_uuid, session_id, effective_source_channel);
+        let mut thread = crate::agent::session::Thread::with_id(
+            thread_uuid,
+            session_id,
+            effective_source_channel,
+        );
         if !chat_messages.is_empty() {
             thread.restore_from_messages(chat_messages);
         }
