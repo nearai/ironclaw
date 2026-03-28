@@ -1,9 +1,13 @@
 //! Configuration for IronClaw.
 //!
-//! Settings are loaded with priority: database > env var > default.
+//! Settings are loaded from env vars, the DB settings table, TOML config,
+//! and built-in defaults. Priority varies by subsystem:
+//!
+//! - **LLM settings** (backend, model, api_key, base_url): DB > env > default
+//! - **Most other settings** (agent, channels, tunnel, …): env > DB > default
+//!
 //! `DATABASE_URL` lives in `~/.ironclaw/.env` (loaded via dotenvy early
-//! in startup). Everything else comes from env vars, the DB settings
-//! table, or auto-detection.
+//! in startup).
 
 mod agent;
 mod builder;
@@ -186,8 +190,9 @@ impl Config {
 
     /// Load configuration from environment variables and the database.
     ///
-    /// Priority: DB settings > env var > TOML config file > default.
-    /// This is the primary way to load config after DB is connected.
+    /// TOML is loaded first as a base, then DB values are merged on top
+    /// (DB wins over TOML). Individual subsystem resolvers then apply
+    /// their own env-vs-DB priority — see module docs for details.
     pub async fn from_db(
         store: &(dyn crate::db::SettingsStore + Sync),
         user_id: &str,
@@ -197,9 +202,9 @@ impl Config {
 
     /// Load from DB with an optional TOML config file overlay.
     ///
-    /// Priority: DB settings > env var > TOML config file > default.
     /// TOML is loaded first as a base, then DB values are merged on top
-    /// so that DB always wins over TOML.
+    /// (DB wins over TOML). Per-subsystem resolvers then decide whether
+    /// env vars or DB values take final precedence — see module docs.
     pub async fn from_db_with_toml(
         store: &(dyn crate::db::SettingsStore + Sync),
         user_id: &str,

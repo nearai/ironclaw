@@ -116,7 +116,7 @@ pub async fn settings_set_handler(
     // Guard: cannot remove a custom provider that is currently active.
     if key == "llm_custom_providers" {
         guard_active_provider_not_removed(store, &user.user_id, &body.value).await?;
-        validate_custom_providers_adapters(&body.value)?;
+        validate_custom_providers(&body.value)?;
     }
 
     // Extract API keys from LLM settings and vault them in the secrets store.
@@ -143,6 +143,34 @@ pub async fn settings_set_handler(
 }
 
 const VALID_ADAPTERS: &[&str] = &["open_ai_completions", "anthropic", "ollama"];
+
+/// Valid provider ID: lowercase alphanumeric and hyphens, 1-64 chars.
+fn is_valid_provider_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
+/// Returns `Err(422)` if any provider has an invalid ID or unrecognised adapter.
+fn validate_custom_providers(value: &serde_json::Value) -> Result<(), StatusCode> {
+    let providers = match value.as_array() {
+        Some(arr) => arr,
+        None => return Ok(()),
+    };
+    for p in providers {
+        let id = p.get("id").and_then(|v| v.as_str()).unwrap_or("");
+        if !is_valid_provider_id(id) {
+            tracing::warn!(
+                id = %id,
+                "Rejected custom provider with invalid ID (must be lowercase alphanumeric/hyphens, 1-64 chars)"
+            );
+            return Err(StatusCode::UNPROCESSABLE_ENTITY);
+        }
+    }
+    validate_custom_providers_adapters(value)
+}
 
 /// Returns `Err(422)` if any provider in the incoming list has an unrecognised adapter.
 fn validate_custom_providers_adapters(value: &serde_json::Value) -> Result<(), StatusCode> {
@@ -845,5 +873,93 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    // --- Provider ID validation tests ---
+
+    #[test]
+    fn test_valid_provider_ids() {
+        assert!(is_valid_provider_id("my-llm"));
+        assert!(is_valid_provider_id("openai"));
+        assert!(is_valid_provider_id("custom-provider-123"));
+        assert!(is_valid_provider_id("a"));
+    }
+
+    #[test]
+    fn test_invalid_provider_ids() {
+        assert!(!is_valid_provider_id(""), "empty ID");
+        assert!(!is_valid_provider_id("My-LLM"), "uppercase");
+        assert!(!is_valid_provider_id("my llm"), "spaces");
+        assert!(!is_valid_provider_id("my_llm"), "underscores");
+        assert!(!is_valid_provider_id("../../etc"), "path traversal");
+        assert!(!is_valid_provider_id("a.b"), "dots");
+        assert!(
+            !is_valid_provider_id(&"a".repeat(65)),
+            "exceeds 64 char limit"
+        );
+    }
+
+    #[test]
+    fn test_validate_custom_providers_rejects_bad_id() {
+        let input = serde_json::json!([
+            { "id": "UPPER-CASE", "adapter": "open_ai_completions" }
+        ]);
+        assert_eq!(
+            validate_custom_providers(&input).unwrap_err(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        );
+    }
+
+    #[test]
+    fn test_validate_custom_providers_accepts_valid() {
+        let input = serde_json::json!([
+            { "id": "my-llm", "adapter": "open_ai_completions" },
+            { "id": "local-ollama", "adapter": "ollama" }
+        ]);
+        assert!(validate_custom_providers(&input).is_ok());
+    }
+
+    // --- Adapter validation tests ---
+
+    #[test]
+    fn test_validate_adapters_rejects_unknown() {
+        let input = serde_json::json!([
+            { "id": "test", "adapter": "not_a_real_adapter" }
+        ]);
+        assert_eq!(
+            validate_custom_providers_adapters(&input).unwrap_err(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        );
+    }
+
+    #[test]
+    fn test_validate_adapters_rejects_missing() {
+        let input = serde_json::json!([
+            { "id": "test" }
+        ]);
+        assert_eq!(
+            validate_custom_providers_adapters(&input).unwrap_err(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        );
+    }
+
+    #[test]
+    fn test_validate_adapters_accepts_all_valid() {
+        for adapter in VALID_ADAPTERS {
+            let input = serde_json::json!([
+                { "id": "test", "adapter": adapter }
+            ]);
+            assert!(
+                validate_custom_providers_adapters(&input).is_ok(),
+                "adapter '{}' should be accepted",
+                adapter
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_adapters_non_array_is_ok() {
+        let input = serde_json::json!("not-an-array");
+        assert!(validate_custom_providers_adapters(&input).is_ok());
     }
 }

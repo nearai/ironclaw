@@ -2747,14 +2747,16 @@ async fn resolve_api_key_from_secrets(
     }
 }
 
-/// Check if a base URL belongs to a NEAR AI private endpoint by verifying the
-/// hostname ends with `.near.ai` and contains "private". This prevents an
-/// attacker from crafting `https://evil.com/private/...` to match.
+/// Check if a base URL belongs to a NEAR AI private endpoint.
+///
+/// Matches `private.near.ai` exactly or any subdomain of it
+/// (e.g. `us.private.near.ai`). Rejects lookalikes like
+/// `private-evil.near.ai` or `myprivate.near.ai`.
 fn is_nearai_private_endpoint(base_url: &str) -> bool {
     url::Url::parse(base_url)
         .ok()
         .and_then(|u| u.host_str().map(|h| h.to_lowercase()))
-        .is_some_and(|host| host.ends_with(".near.ai") && host.contains("private"))
+        .is_some_and(|host| host == "private.near.ai" || host.ends_with(".private.near.ai"))
 }
 
 async fn test_provider_connection(req: TestConnectionRequest) -> TestConnectionResponse {
@@ -4771,5 +4773,36 @@ mod tests {
     fn test_is_local_origin_rejects_garbage() {
         assert!(!is_local_origin("not-a-url"));
         assert!(!is_local_origin(""));
+    }
+
+    // --- is_nearai_private_endpoint tests ---
+
+    #[test]
+    fn test_nearai_private_exact_match() {
+        assert!(is_nearai_private_endpoint("https://private.near.ai/v1"));
+    }
+
+    #[test]
+    fn test_nearai_private_subdomain() {
+        assert!(is_nearai_private_endpoint("https://us.private.near.ai/v1"));
+    }
+
+    #[test]
+    fn test_nearai_public_endpoint_not_private() {
+        assert!(!is_nearai_private_endpoint("https://cloud-api.near.ai/v1"));
+    }
+
+    #[test]
+    fn test_nearai_private_lookalike_rejected() {
+        // "private" appears in the hostname but not as the correct domain
+        assert!(!is_nearai_private_endpoint(
+            "https://private-evil.near.ai/v1"
+        ));
+        assert!(!is_nearai_private_endpoint("https://myprivate.near.ai/v1"));
+    }
+
+    #[test]
+    fn test_nearai_private_non_near_ai_rejected() {
+        assert!(!is_nearai_private_endpoint("https://private.evil.com/v1"));
     }
 }

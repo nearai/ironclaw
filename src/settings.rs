@@ -902,7 +902,8 @@ impl Settings {
         let content = format!(
             "# IronClaw configuration file.\n\
              #\n\
-             # Priority: database settings > env var > this file > defaults.\n\
+             # Priority varies by subsystem. LLM: DB > env > this file > defaults.\n\
+             # Most others: env > DB > this file > defaults.\n\
              # Uncomment and edit values to override defaults.\n\
              # Run `ironclaw config init` to regenerate this file.\n\
              #\n\
@@ -1386,56 +1387,53 @@ mod tests {
         );
     }
 
-    /// Regression: TOML overlay must not clobber a DB-persisted selected_model
-    /// when the TOML file matches the DB. This is the normal case after /model
-    /// successfully writes to both DB and TOML.
+    /// TOML is loaded as a base, then DB is merged on top (DB wins).
+    /// When both agree, the result matches.
     #[test]
-    fn toml_overlay_preserves_matching_model() {
-        // DB settings with new model from /model command.
-        let mut db_settings = Settings {
+    fn toml_and_db_matching_model_preserved() {
+        // from_db_with_toml: TOML base, then DB merged on top.
+        let mut toml_base = Settings {
+            selected_model: Some("new-model".to_string()),
+            ..Default::default()
+        };
+
+        let db_overlay = Settings {
             llm_backend: Some("nearai".to_string()),
             selected_model: Some("new-model".to_string()),
             ..Default::default()
         };
 
-        // TOML also updated by /model command to the same value.
-        let toml_settings = Settings {
-            selected_model: Some("new-model".to_string()),
-            ..Default::default()
-        };
-
-        db_settings.merge_from(&toml_settings);
+        toml_base.merge_from(&db_overlay);
         assert_eq!(
-            db_settings.selected_model,
+            toml_base.selected_model,
             Some("new-model".to_string()),
-            "TOML overlay must not clobber matching model"
+            "matching values: result should be the shared value"
         );
     }
 
-    /// Regression: when /model updates DB but TOML write fails, a stale TOML
-    /// file would overwrite the DB value. This test documents the priority:
-    /// TOML > DB (by design). persist_selected_model MUST update the TOML.
+    /// Regression: when TOML has a stale model but DB has been updated via
+    /// /model command, DB must win. This matches from_db_with_toml where
+    /// TOML is loaded first as base, then DB is merged on top.
     #[test]
-    fn stale_toml_overwrites_db_model() {
-        // DB has the new model from /model.
-        let mut db_settings = Settings {
-            selected_model: Some("new-model".to_string()),
-            ..Default::default()
-        };
-
-        // TOML still has the old model (write failed or was not attempted).
-        let stale_toml = Settings {
+    fn db_model_wins_over_stale_toml() {
+        // TOML base with old model.
+        let mut toml_base = Settings {
             selected_model: Some("old-model".to_string()),
             ..Default::default()
         };
 
-        db_settings.merge_from(&stale_toml);
-        // This documents the current priority: TOML wins over DB.
-        // The fix in persist_selected_model ensures TOML is always updated.
+        // DB has the new model from /model command.
+        let db_overlay = Settings {
+            selected_model: Some("new-model".to_string()),
+            ..Default::default()
+        };
+
+        // from_db_with_toml: TOML first, then DB merged on top.
+        toml_base.merge_from(&db_overlay);
         assert_eq!(
-            db_settings.selected_model,
-            Some("old-model".to_string()),
-            "TOML overlay has higher priority than DB (by design)"
+            toml_base.selected_model,
+            Some("new-model".to_string()),
+            "DB selected_model must win over stale TOML value"
         );
     }
 
@@ -1464,24 +1462,20 @@ mod tests {
         assert_eq!(reloaded.selected_model, Some("new-model".to_string()));
     }
 
-    /// Regression: /model must create config.toml when it doesn't exist, so the
-    /// model survives restarts. Previously the Ok(None) case was a no-op.
+    /// save_toml / load_toml round-trip for selected_model.
     #[test]
-    fn toml_created_when_missing_for_model_persist() {
+    fn toml_save_and_load_round_trip() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
 
-        // No config.toml yet (fresh install, no wizard).
         assert!(Settings::load_toml(&path).unwrap().is_none());
 
-        // Simulate what persist_selected_model now does for the Ok(None) case.
         let settings = Settings {
             selected_model: Some("new-model".to_string()),
             ..Default::default()
         };
         settings.save_toml(&path).unwrap();
 
-        // Verify the model survived.
         let loaded = Settings::load_toml(&path).unwrap().unwrap();
         assert_eq!(loaded.selected_model, Some("new-model".to_string()));
     }
