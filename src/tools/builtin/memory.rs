@@ -265,7 +265,7 @@ impl Tool for MemoryWriteTool {
                     "default": false
                 }
             },
-            "required": ["content"]
+            "required": []
         })
     }
 
@@ -276,7 +276,9 @@ impl Tool for MemoryWriteTool {
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
 
-        let content = require_str(&params, "content")?;
+        // In patch mode (old_string present), content is not required.
+        let is_patch_mode = params.get("old_string").and_then(|v| v.as_str()).is_some();
+        let content = params.get("content").and_then(|v| v.as_str()).unwrap_or("");
 
         let target = params
             .get("target")
@@ -316,9 +318,9 @@ impl Tool for MemoryWriteTool {
             return Ok(ToolOutput::success(output, start.elapsed()));
         }
 
-        if content.trim().is_empty() {
+        if !is_patch_mode && content.trim().is_empty() {
             return Err(ToolError::InvalidParameters(
-                "content cannot be empty".to_string(),
+                "content cannot be empty (use old_string/new_string for patch mode)".to_string(),
             ));
         }
 
@@ -491,14 +493,20 @@ impl Tool for MemoryWriteTool {
         }
 
         // Apply metadata if provided (after write/append, works for all targets).
+        // We read the document once to get its ID — this is a hot read right
+        // after the write, so it's effectively free (same DB connection/cache).
         if let Some(meta) = params.get("metadata")
             && meta.is_object()
         {
-            // Read the document to get its ID
-            if let Ok(doc) = workspace.read(&resolved_path).await
-                && let Err(e) = workspace.update_metadata(doc.id, meta).await
-            {
-                tracing::warn!(path = %resolved_path, "failed to update metadata: {e}");
+            match workspace.read(&resolved_path).await {
+                Ok(doc) => {
+                    if let Err(e) = workspace.update_metadata(doc.id, meta).await {
+                        tracing::warn!(path = %resolved_path, "failed to update metadata: {e}");
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(path = %resolved_path, "failed to read doc for metadata update: {e}");
+                }
             }
         }
 

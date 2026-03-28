@@ -540,11 +540,17 @@ mod tests {
         });
         let meta = DocumentMetadata::from_value(&value);
         assert_eq!(meta.skip_indexing, Some(true));
-        assert_eq!(meta.extra.get("custom_field").and_then(|v| v.as_str()), Some("hello"));
+        assert_eq!(
+            meta.extra.get("custom_field").and_then(|v| v.as_str()),
+            Some("hello")
+        );
 
         // Round-trip preserves the field
         let back = meta.to_value();
-        assert_eq!(back.get("custom_field").and_then(|v| v.as_str()), Some("hello"));
+        assert_eq!(
+            back.get("custom_field").and_then(|v| v.as_str()),
+            Some("hello")
+        );
     }
 
     #[test]

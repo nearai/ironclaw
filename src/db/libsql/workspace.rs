@@ -855,9 +855,10 @@ impl WorkspaceStore for LibSqlBackend {
                 reason: e.to_string(),
             })?;
         let now = fmt_ts(&Utc::now());
-        let meta_str = serde_json::to_string(metadata).map_err(|e| WorkspaceError::SearchFailed {
-            reason: format!("Failed to serialize metadata: {e}"),
-        })?;
+        let meta_str =
+            serde_json::to_string(metadata).map_err(|e| WorkspaceError::SearchFailed {
+                reason: format!("Failed to serialize metadata: {e}"),
+            })?;
         conn.execute(
             "UPDATE memory_documents SET metadata = ?2, updated_at = ?3 WHERE id = ?1",
             params![id.to_string(), meta_str, now],
@@ -899,9 +900,13 @@ impl WorkspaceStore for LibSqlBackend {
             })?;
 
         let mut docs = Vec::new();
-        while let Some(row) = rows.next().await.map_err(|e| WorkspaceError::SearchFailed {
-            reason: format!("Failed to read config document row: {e}"),
-        })? {
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| WorkspaceError::SearchFailed {
+                reason: format!("Failed to read config document row: {e}"),
+            })?
+        {
             docs.push(row_to_memory_document(&row));
         }
         Ok(docs)
@@ -926,8 +931,17 @@ impl WorkspaceStore for LibSqlBackend {
         let doc_id = document_id.to_string();
         let now = fmt_ts(&Utc::now());
 
-        // Get next version number
-        let mut rows = conn
+        // Use a transaction to prevent race conditions: the SELECT and INSERT
+        // must be atomic so concurrent writers don't allocate the same version.
+        let tx = conn
+            .transaction()
+            .await
+            .map_err(|e| WorkspaceError::SearchFailed {
+                reason: format!("Failed to start transaction: {e}"),
+            })?;
+
+        // Get next version number (inside transaction — serializes writers)
+        let mut rows = tx
             .query(
                 "SELECT COALESCE(MAX(version), 0) + 1 FROM memory_document_versions WHERE document_id = ?1",
                 params![doc_id.clone()],
@@ -937,26 +951,44 @@ impl WorkspaceStore for LibSqlBackend {
                 reason: format!("Failed to get next version number: {e}"),
             })?;
 
-        let next_version = if let Some(row) = rows.next().await.map_err(|e| WorkspaceError::SearchFailed {
-            reason: format!("Failed to read version number: {e}"),
-        })? {
+        let next_version = if let Some(row) =
+            rows.next()
+                .await
+                .map_err(|e| WorkspaceError::SearchFailed {
+                    reason: format!("Failed to read version number: {e}"),
+                })? {
             get_i64(&row, 0) as i32
         } else {
             1
         };
+        drop(rows);
 
-        conn.execute(
+        tx.execute(
             r#"
             INSERT INTO memory_document_versions
                 (id, document_id, version, content, content_hash, created_at, changed_by)
             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
             "#,
-            params![id, doc_id, next_version as i64, content, content_hash, now, changed_by],
+            params![
+                id,
+                doc_id,
+                next_version as i64,
+                content,
+                content_hash,
+                now,
+                changed_by
+            ],
         )
         .await
         .map_err(|e| WorkspaceError::SearchFailed {
             reason: format!("Failed to save version: {e}"),
         })?;
+
+        tx.commit()
+            .await
+            .map_err(|e| WorkspaceError::SearchFailed {
+                reason: format!("Failed to commit version: {e}"),
+            })?;
 
         Ok(next_version)
     }
@@ -999,12 +1031,16 @@ impl WorkspaceStore for LibSqlBackend {
             })?;
 
         Ok(DocumentVersion {
-            id: get_text(&row, 0).parse().map_err(|e| WorkspaceError::SearchFailed {
-                reason: format!("Invalid version UUID: {e}"),
-            })?,
-            document_id: get_text(&row, 1).parse().map_err(|e| WorkspaceError::SearchFailed {
-                reason: format!("Invalid document UUID: {e}"),
-            })?,
+            id: get_text(&row, 0)
+                .parse()
+                .map_err(|e| WorkspaceError::SearchFailed {
+                    reason: format!("Invalid version UUID: {e}"),
+                })?,
+            document_id: get_text(&row, 1)
+                .parse()
+                .map_err(|e| WorkspaceError::SearchFailed {
+                    reason: format!("Invalid document UUID: {e}"),
+                })?,
             version: get_i64(&row, 2) as i32,
             content: get_text(&row, 3),
             content_hash: get_text(&row, 4),
@@ -1041,9 +1077,13 @@ impl WorkspaceStore for LibSqlBackend {
             })?;
 
         let mut versions = Vec::new();
-        while let Some(row) = rows.next().await.map_err(|e| WorkspaceError::SearchFailed {
-            reason: format!("Failed to read version row: {e}"),
-        })? {
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| WorkspaceError::SearchFailed {
+                reason: format!("Failed to read version row: {e}"),
+            })?
+        {
             versions.push(VersionSummary {
                 version: get_i64(&row, 0) as i32,
                 content_hash: get_text(&row, 1),
@@ -1074,9 +1114,13 @@ impl WorkspaceStore for LibSqlBackend {
                 reason: format!("Failed to get latest version number: {e}"),
             })?;
 
-        if let Some(row) = rows.next().await.map_err(|e| WorkspaceError::SearchFailed {
-            reason: format!("Failed to read version number: {e}"),
-        })? {
+        if let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| WorkspaceError::SearchFailed {
+                reason: format!("Failed to read version number: {e}"),
+            })?
+        {
             // MAX returns NULL if no rows — libsql returns Null for the value
             let val = row.get::<libsql::Value>(0).ok();
             match val {

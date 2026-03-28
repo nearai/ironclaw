@@ -174,11 +174,7 @@ pub async fn run_if_due(workspace: &Workspace, config: &HygieneConfig) -> Hygien
         match cleanup_directory(workspace, &directory, hygiene.retention_days).await {
             Ok(deleted) => {
                 if deleted > 0 {
-                    tracing::info!(
-                        directory,
-                        deleted,
-                        "memory hygiene: cleaned directory"
-                    );
+                    tracing::info!(directory, deleted, "memory hygiene: cleaned directory");
                 }
                 report.directories_cleaned.push((directory, deleted));
             }
@@ -454,11 +450,7 @@ mod tests {
         }
 
         /// Helper to seed a .config document with hygiene metadata on a directory.
-        async fn seed_hygiene_config(
-            workspace: &Workspace,
-            directory: &str,
-            retention_days: u32,
-        ) {
+        async fn seed_hygiene_config(workspace: &Workspace, directory: &str, retention_days: u32) {
             let config_path = format!("{}.config", directory);
             // Create the .config document with empty content
             workspace
@@ -492,9 +484,7 @@ mod tests {
             ws.write("daily/2024-01-15.md", "Old log")
                 .await
                 .expect("write log");
-            ws.write("daily/.config", "")
-                .await
-                .expect("write config");
+            ws.write("daily/.config", "").await.expect("write config");
 
             // Run cleanup with 0-day retention (deletes everything old)
             let deleted = cleanup_directory(&ws, "daily/", 0)
