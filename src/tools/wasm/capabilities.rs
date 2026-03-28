@@ -321,6 +321,7 @@ pub struct WebhookCapability {
     pub signature_key_secret_name: Option<String>,
     /// Secret name in secrets store for HMAC-SHA256 signing validation.
     pub hmac_secret_name: Option<String>,
+    pub hmac_secret_env_var: Option<String>,
     /// Header containing signature (e.g. X-Hub-Signature-256 or X-Slack-Signature).
     pub hmac_signature_header: Option<String>,
     /// Optional timestamp header. When present, Slack-style v0 signature is used.
