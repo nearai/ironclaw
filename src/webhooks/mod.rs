@@ -258,7 +258,9 @@ async fn resolve_webhook_hmac_secret(
             Ok(Some(value)) => return Ok(value),
             Ok(None) => {}
             Err(err) => {
-                return Err(format!("Failed to read HMAC secret env var '{env_var}': {err}"));
+                return Err(format!(
+                    "Failed to read HMAC secret env var '{env_var}': {err}"
+                ));
             }
         }
     }
@@ -399,7 +401,7 @@ async fn validate_webhook_auth(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, LazyLock, Mutex};
+    use std::sync::{Arc, LazyLock};
     use std::time::Duration;
 
     use async_trait::async_trait;
@@ -412,7 +414,8 @@ mod tests {
 
     use super::*;
 
-    static HMAC_ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+    static HMAC_ENV_LOCK: LazyLock<tokio::sync::Mutex<()>> =
+        LazyLock::new(|| tokio::sync::Mutex::new(()));
 
     struct TestWebhookTool;
     struct ProtectedWebhookTool;
@@ -632,7 +635,7 @@ mod tests {
     async fn accepts_with_valid_hmac_signature() {
         use hmac::Mac;
 
-        let _guard = HMAC_ENV_LOCK.lock().expect("lock env");
+        let _guard = HMAC_ENV_LOCK.lock().await;
 
         let tools = Arc::new(ToolRegistry::new());
         tools.register(Arc::new(HmacWebhookTool)).await;
@@ -683,7 +686,7 @@ mod tests {
     async fn accepts_with_valid_hmac_signature_from_env_without_secrets_store() {
         use hmac::Mac;
 
-        let _guard = HMAC_ENV_LOCK.lock().expect("lock env");
+        let _guard = HMAC_ENV_LOCK.lock().await;
 
         unsafe { std::env::set_var("ICTEST_HMAC_WEBHOOK_SECRET", "github-secret") };
 
@@ -722,7 +725,7 @@ mod tests {
     async fn accepts_with_valid_hmac_signature_from_env_before_secrets_store() {
         use hmac::Mac;
 
-        let _guard = HMAC_ENV_LOCK.lock().expect("lock env");
+        let _guard = HMAC_ENV_LOCK.lock().await;
 
         unsafe { std::env::set_var("ICTEST_HMAC_WEBHOOK_SECRET", "github-secret") };
 
@@ -775,7 +778,7 @@ mod tests {
     async fn rejects_when_invalid_env_hmac_secret_overrides_valid_secrets_store() {
         use hmac::Mac;
 
-        let _guard = HMAC_ENV_LOCK.lock().expect("lock env");
+        let _guard = HMAC_ENV_LOCK.lock().await;
 
         unsafe { std::env::set_var("ICTEST_HMAC_WEBHOOK_SECRET", "wrong-env-secret") };
 
