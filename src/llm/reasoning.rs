@@ -3176,7 +3176,9 @@ That's my plan."#;
 
     #[tokio::test]
     async fn test_respond_with_tools_flags_empty_tool_completion_when_content_is_none() {
-        use crate::llm::{FinishReason, LlmProvider, ToolCompletionRequest, ToolCompletionResponse};
+        use crate::llm::{
+            FinishReason, LlmProvider, ToolCompletionRequest, ToolCompletionResponse,
+        };
         use async_trait::async_trait;
         use rust_decimal::Decimal;
 
