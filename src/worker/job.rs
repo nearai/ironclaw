@@ -314,7 +314,6 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
         reasoning: &Reasoning,
         reason_ctx: &mut ReasoningContext,
     ) -> Result<(), Error> {
-        const MAX_WORKER_ITERATIONS: usize = 500;
         let max_iterations = self
             .context_manager()
             .get_context(self.job_id)
@@ -322,7 +321,7 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
             .ok()
             .and_then(|ctx| ctx.metadata.get("max_iterations").and_then(|v| v.as_u64()))
             .unwrap_or(50) as usize;
-        let max_iterations = max_iterations.min(MAX_WORKER_ITERATIONS);
+        let max_iterations = max_iterations.min(ironclaw_common::MAX_WORKER_ITERATIONS as usize);
 
         // Initial tool definitions for planning (will be refreshed in loop)
         reason_ctx.available_tools = self.tools().tool_definitions().await;

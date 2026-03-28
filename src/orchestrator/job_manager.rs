@@ -19,10 +19,7 @@ use crate::sandbox::connect_docker;
 /// Path to the master worker MCP config on the host.
 const WORKER_MCP_CONFIG_PATH: &str = "/opt/ironclaw/config/worker/mcp-servers.json";
 
-/// Maximum worker agent loop iterations. Must match `MAX_WORKER_ITERATIONS` in
-/// `src/worker/job.rs`. Applied server-side in `create_job_inner` so that even
-/// a direct API call (bypassing tool parameter parsing) is capped.
-const MAX_WORKER_ITERATIONS: u32 = 500;
+use ironclaw_common::MAX_WORKER_ITERATIONS;
 
 /// Which mode a sandbox container runs in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -378,7 +375,9 @@ impl ContainerJobManager {
         // Mount per-job MCP config when the feature is enabled.
         if self.config.mcp_per_job_enabled {
             let mcp_config_host = std::path::Path::new(WORKER_MCP_CONFIG_PATH);
-            match generate_worker_mcp_config(mcp_config_host, mcp_servers.as_deref(), job_id)? {
+            match generate_worker_mcp_config(mcp_config_host, mcp_servers.as_deref(), job_id)
+                .await?
+            {
                 Some(config_path) => {
                     binds.push(format!(
                         "{}:/home/sandbox/.ironclaw/mcp-servers.json:ro",
@@ -704,12 +703,12 @@ impl ContainerJobManager {
 ///
 /// Temp files are written to `<temp_dir>/ironclaw-mcp-configs/` and cleaned up
 /// in `cleanup_job`.
-fn generate_worker_mcp_config(
+async fn generate_worker_mcp_config(
     master_path: &std::path::Path,
     server_names: Option<&[String]>,
     job_id: Uuid,
 ) -> Result<Option<std::path::PathBuf>, OrchestratorError> {
-    if !master_path.exists() {
+    if !tokio::fs::try_exists(master_path).await.unwrap_or(false) {
         return Ok(None);
     }
 
@@ -738,7 +737,7 @@ fn generate_worker_mcp_config(
                 }
             }
 
-            let content = std::fs::read_to_string(master_path).map_err(|e| {
+            let content = tokio::fs::read_to_string(master_path).await.map_err(|e| {
                 OrchestratorError::ContainerCreationFailed {
                     job_id,
                     reason: format!("failed to read master MCP config: {e}"),
@@ -786,7 +785,7 @@ fn generate_worker_mcp_config(
             });
 
             let tmp_dir = std::env::temp_dir().join("ironclaw-mcp-configs");
-            std::fs::create_dir_all(&tmp_dir).map_err(|e| {
+            tokio::fs::create_dir_all(&tmp_dir).await.map_err(|e| {
                 OrchestratorError::ContainerCreationFailed {
                     job_id,
                     reason: format!("failed to create MCP config temp dir: {e}"),
@@ -798,7 +797,9 @@ fn generate_worker_mcp_config(
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                let _ = std::fs::set_permissions(&tmp_dir, std::fs::Permissions::from_mode(0o700));
+                let _ =
+                    tokio::fs::set_permissions(&tmp_dir, std::fs::Permissions::from_mode(0o700))
+                        .await;
             }
 
             let tmp_path = tmp_dir.join(format!("{}.json", job_id));
@@ -808,12 +809,12 @@ fn generate_worker_mcp_config(
                     reason: format!("failed to serialize filtered MCP config: {e}"),
                 }
             })?;
-            std::fs::write(&tmp_path, config_json).map_err(|e| {
-                OrchestratorError::ContainerCreationFailed {
+            tokio::fs::write(&tmp_path, config_json)
+                .await
+                .map_err(|e| OrchestratorError::ContainerCreationFailed {
                     job_id,
                     reason: format!("failed to write per-job MCP config: {e}"),
-                }
-            })?;
+                })?;
 
             Ok(Some(tmp_path))
         }
@@ -917,34 +918,35 @@ mod tests {
 
     // ── generate_worker_mcp_config tests ────────────────────────────
 
-    #[test]
-    fn test_mcp_config_none_filter_returns_master_path() {
+    #[tokio::test]
+    async fn test_mcp_config_none_filter_returns_master_path() {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(tmp.path(), r#"{"servers":[]}"#).unwrap();
-        let result = generate_worker_mcp_config(tmp.path(), None, Uuid::new_v4());
+        let result = generate_worker_mcp_config(tmp.path(), None, Uuid::new_v4()).await;
         assert_eq!(result.unwrap(), Some(tmp.path().to_path_buf()));
     }
 
-    #[test]
-    fn test_mcp_config_empty_filter_returns_none() {
+    #[tokio::test]
+    async fn test_mcp_config_empty_filter_returns_none() {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(tmp.path(), r#"{"servers":[]}"#).unwrap();
-        let result = generate_worker_mcp_config(tmp.path(), Some(&[]), Uuid::new_v4());
+        let result = generate_worker_mcp_config(tmp.path(), Some(&[]), Uuid::new_v4()).await;
         assert_eq!(result.unwrap(), None);
     }
 
-    #[test]
-    fn test_mcp_config_missing_master_returns_none() {
+    #[tokio::test]
+    async fn test_mcp_config_missing_master_returns_none() {
         let result = generate_worker_mcp_config(
             std::path::Path::new("/nonexistent/mcp.json"),
             None,
             Uuid::new_v4(),
-        );
+        )
+        .await;
         assert_eq!(result.unwrap(), None);
     }
 
-    #[test]
-    fn test_mcp_config_filters_to_named_servers() {
+    #[tokio::test]
+    async fn test_mcp_config_filters_to_named_servers() {
         let job_id = Uuid::new_v4();
         let tmp = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(
@@ -958,7 +960,7 @@ mod tests {
         .unwrap();
 
         let names = vec!["serpstat".to_string(), "disabled".to_string()];
-        let result = generate_worker_mcp_config(tmp.path(), Some(&names), job_id);
+        let result = generate_worker_mcp_config(tmp.path(), Some(&names), job_id).await;
         let out_path = result.unwrap().expect("should produce a filtered config");
 
         let content: serde_json::Value =
@@ -974,8 +976,8 @@ mod tests {
         let _ = std::fs::remove_file(&out_path);
     }
 
-    #[test]
-    fn test_mcp_config_no_match_returns_none() {
+    #[tokio::test]
+    async fn test_mcp_config_no_match_returns_none() {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(
             tmp.path(),
@@ -984,12 +986,12 @@ mod tests {
         .unwrap();
 
         let names = vec!["nonexistent".to_string()];
-        let result = generate_worker_mcp_config(tmp.path(), Some(&names), Uuid::new_v4());
+        let result = generate_worker_mcp_config(tmp.path(), Some(&names), Uuid::new_v4()).await;
         assert_eq!(result.unwrap(), None);
     }
 
-    #[test]
-    fn test_mcp_config_case_insensitive_match() {
+    #[tokio::test]
+    async fn test_mcp_config_case_insensitive_match() {
         let job_id = Uuid::new_v4();
         let tmp = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(
@@ -999,7 +1001,7 @@ mod tests {
         .unwrap();
 
         let names = vec!["serpstat".to_string()];
-        let result = generate_worker_mcp_config(tmp.path(), Some(&names), job_id);
+        let result = generate_worker_mcp_config(tmp.path(), Some(&names), job_id).await;
         let out_path = result.unwrap().expect("case-insensitive match should work");
         let _ = std::fs::remove_file(&out_path);
     }
@@ -1046,8 +1048,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_mcp_server_name_validation_rejects_path_separators() {
+    #[tokio::test]
+    async fn test_mcp_server_name_validation_rejects_path_separators() {
         let job_id = Uuid::new_v4();
         let tmp = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(
@@ -1058,26 +1060,38 @@ mod tests {
 
         // Path separator should be rejected
         let names = vec!["../../etc/passwd".to_string()];
-        assert!(generate_worker_mcp_config(tmp.path(), Some(&names), job_id).is_err());
+        assert!(
+            generate_worker_mcp_config(tmp.path(), Some(&names), job_id)
+                .await
+                .is_err()
+        );
 
         // Null byte should be rejected
         let names = vec!["test\0evil".to_string()];
-        assert!(generate_worker_mcp_config(tmp.path(), Some(&names), job_id).is_err());
+        assert!(
+            generate_worker_mcp_config(tmp.path(), Some(&names), job_id)
+                .await
+                .is_err()
+        );
 
         // Excessively long name should be rejected
         let names = vec!["a".repeat(129)];
-        assert!(generate_worker_mcp_config(tmp.path(), Some(&names), job_id).is_err());
+        assert!(
+            generate_worker_mcp_config(tmp.path(), Some(&names), job_id)
+                .await
+                .is_err()
+        );
 
         // Valid name should pass
         let names = vec!["test".to_string()];
-        let result = generate_worker_mcp_config(tmp.path(), Some(&names), job_id);
+        let result = generate_worker_mcp_config(tmp.path(), Some(&names), job_id).await;
         assert!(result.is_ok());
     }
 
     // ── Regression tests (CI-required) ────────────────────────────────
 
-    #[test]
-    fn test_filtered_config_contains_only_requested_server() {
+    #[tokio::test]
+    async fn test_filtered_config_contains_only_requested_server() {
         let job_id = Uuid::new_v4();
         let tmp = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(
@@ -1091,7 +1105,7 @@ mod tests {
         .unwrap();
 
         let names = vec!["serpstat".to_string()];
-        let result = generate_worker_mcp_config(tmp.path(), Some(&names), job_id);
+        let result = generate_worker_mcp_config(tmp.path(), Some(&names), job_id).await;
         let out_path = result.unwrap().expect("should produce a filtered config");
 
         let content: serde_json::Value =
@@ -1116,8 +1130,8 @@ mod tests {
         let _ = std::fs::remove_file(&out_path);
     }
 
-    #[test]
-    fn test_feature_flag_disabled_skips_mcp_filtering() {
+    #[tokio::test]
+    async fn test_feature_flag_disabled_skips_mcp_filtering() {
         // When MCP_PER_JOB_ENABLED is false (the default), the mcp_servers
         // parameter should be ignored and no filtered config should be created.
         let config = ContainerJobConfig::default();
@@ -1135,8 +1149,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_temp_file_cleanup_removes_per_job_config() {
+    #[tokio::test]
+    async fn test_temp_file_cleanup_removes_per_job_config() {
         let job_id = Uuid::new_v4();
         let tmp = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(
@@ -1146,7 +1160,7 @@ mod tests {
         .unwrap();
 
         let names = vec!["serpstat".to_string()];
-        let result = generate_worker_mcp_config(tmp.path(), Some(&names), job_id);
+        let result = generate_worker_mcp_config(tmp.path(), Some(&names), job_id).await;
         let out_path = result.unwrap().expect("should produce a filtered config");
         assert!(
             out_path.exists(),
@@ -1179,8 +1193,8 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[test]
-    fn test_temp_dir_has_restrictive_permissions() {
+    #[tokio::test]
+    async fn test_temp_dir_has_restrictive_permissions() {
         use std::os::unix::fs::PermissionsExt;
 
         let job_id = Uuid::new_v4();
@@ -1192,7 +1206,7 @@ mod tests {
         .unwrap();
 
         let names = vec!["test".to_string()];
-        let result = generate_worker_mcp_config(tmp.path(), Some(&names), job_id);
+        let result = generate_worker_mcp_config(tmp.path(), Some(&names), job_id).await;
         let out_path = result.unwrap().expect("should produce a filtered config");
 
         let dir_path = out_path.parent().unwrap();
