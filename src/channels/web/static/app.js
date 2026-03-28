@@ -4265,6 +4265,13 @@ function renderRoutineDetail(routine) {
   html += '<div class="job-description"><h3>Action</h3>'
     + '<pre class="action-json">' + escapeHtml(JSON.stringify(routine.action, null, 2)) + '</pre></div>';
 
+  // Conversation thread link
+  if (routine.conversation_id) {
+    html += '<div class="job-description">'
+      + '<a href="#" data-action="view-routine-thread" data-id="' + escapeHtml(routine.conversation_id) + '" class="btn-primary" style="display:inline-block;margin:0.5rem 0">'
+      + 'View Execution Thread</a></div>';
+  }
+
   // Recent runs
   if (routine.recent_runs && routine.recent_runs.length > 0) {
     html += '<div class="job-timeline-section"><h3>Recent Runs</h3>'
@@ -6189,6 +6196,11 @@ document.addEventListener('click', function(e) {
       e.preventDefault();
       switchTab('jobs');
       openJobDetail(el.dataset.id);
+      break;
+    case 'view-routine-thread':
+      e.preventDefault();
+      switchTab('chat');
+      switchThread(el.dataset.id);
       break;
     case 'copy-tee-report':
       copyTeeReport();

@@ -768,6 +768,7 @@ pub struct RoutineDetailResponse {
     pub run_count: u64,
     pub consecutive_failures: u32,
     pub created_at: String,
+    pub conversation_id: Option<Uuid>,
     pub recent_runs: Vec<RoutineRunInfo>,
 }
 

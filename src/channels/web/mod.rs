@@ -347,10 +347,10 @@ impl Channel for GatewayChannel {
         let thread_id = match &msg.thread_id {
             Some(tid) => tid.clone(),
             None => {
-                tracing::warn!(
-                    "Gateway respond with no thread_id — skipping (clients would drop it)"
-                );
-                return Ok(());
+                return Err(ChannelError::MissingRoutingTarget {
+                    name: "gateway".to_string(),
+                    reason: "respond() requires a thread_id on the incoming message".to_string(),
+                });
             }
         };
 
@@ -507,10 +507,10 @@ impl Channel for GatewayChannel {
         let thread_id = match response.thread_id {
             Some(tid) => tid,
             None => {
-                tracing::warn!(
-                    "Gateway broadcast with no thread_id — skipping (clients would drop it)"
-                );
-                return Ok(());
+                return Err(ChannelError::MissingRoutingTarget {
+                    name: "gateway".to_string(),
+                    reason: "broadcast() requires a thread_id on the response".to_string(),
+                });
             }
         };
         self.state.sse.broadcast_for_user(
