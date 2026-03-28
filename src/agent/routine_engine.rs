@@ -2002,18 +2002,19 @@ fn sanitize_summary(s: &str) -> String {
 /// Only strips patterns that look like real HTML/XML tags (e.g. `<div>`, `</p>`,
 /// `<img src=...>`), not generic angle-bracket content like `Vec<String>`,
 /// `cat < input.txt`, or comparison operators.
+///
+/// Also strips HTML comments (`<!--...-->`), SVG/MathML tags, and custom elements
+/// (tags containing hyphens like `<custom-element>`).
 fn strip_html_tags(s: &str) -> String {
     use std::sync::LazyLock;
 
-    // Matches opening tags like <div>, <a href="...">, <img src=x onerror=...>,
-    // closing tags like </p>, </script>, and self-closing tags like <br/>.
-    // Does NOT match things like Vec<String>, x<10, or < input.txt because those
-    // don't have a letter immediately after '<' followed by valid tag structure,
-    // or they aren't among recognized HTML tag names.
+    // HTML comment pattern: <!--...-->
+    static COMMENT_RE: LazyLock<Option<Regex>> =
+        LazyLock::new(|| Regex::new(r"<!--[\s\S]*?-->").ok());
+
+    // Known HTML/SVG/MathML tag names. Includes SVG tags (svg, path, circle, etc.)
+    // and MathML tags (math, mrow, etc.) that can carry event handlers.
     static HTML_TAG_RE: LazyLock<Option<Regex>> = LazyLock::new(|| {
-        // Match <tagname ...> or </tagname> where tagname starts with a letter.
-        // We restrict to known HTML tag names to avoid false positives on generic
-        // identifiers like Vec<String>.
         let tags = "a|abbr|address|area|article|aside|audio|b|base|bdi|bdo|blockquote|\
             body|br|button|canvas|caption|cite|code|col|colgroup|data|datalist|dd|del|\
             details|dfn|dialog|div|dl|dt|em|embed|fieldset|figcaption|figure|footer|\
@@ -2022,14 +2023,34 @@ fn strip_html_tags(s: &str) -> String {
             option|output|p|param|picture|pre|progress|q|rp|rt|ruby|s|samp|script|\
             section|select|slot|small|source|span|strong|style|sub|summary|sup|table|\
             tbody|td|template|textarea|tfoot|th|thead|time|title|tr|track|u|ul|var|\
-            video|wbr";
-        Regex::new(&format!(r"(?i)</?(?:{})(?:\s[^>]*)?>", tags)).ok()
+            video|wbr|\
+            svg|g|path|circle|ellipse|line|polyline|polygon|rect|text|tspan|defs|\
+            clippath|mask|pattern|image|use|symbol|marker|lineargradient|\
+            radialgradient|stop|filter|foreignobject|animate|animatetransform|\
+            math|mrow|mi|mo|mn|ms|mtext|mfrac|msqrt|mroot|msub|msup|msubsup|\
+            munder|mover|munderover|mtable|mtr|mtd|mspace|mpadded|mfenced|menclose";
+        // Handles: <tag>, </tag>, <tag/>, <tag />, <tag attr="val">, <tag attr="val"/>
+        Regex::new(&format!(r"(?i)</?(?:{})(?:\s[^>]*)?\s*/?>", tags)).ok()
     });
 
-    match HTML_TAG_RE.as_ref() {
-        Some(re) => re.replace_all(s, "").into_owned(),
-        None => s.to_string(),
+    // Custom elements: tags containing a hyphen (web components spec requires it).
+    // E.g. <custom-element>, <my-widget foo="bar">, </x-foo>
+    static CUSTOM_ELEMENT_RE: LazyLock<Option<Regex>> =
+        LazyLock::new(|| Regex::new(r"(?i)</?\w+-[\w-]*(?:\s[^>]*)?\s*/?>").ok());
+
+    let mut result = s.to_string();
+
+    if let Some(re) = COMMENT_RE.as_ref() {
+        result = re.replace_all(&result, "").into_owned();
     }
+    if let Some(re) = HTML_TAG_RE.as_ref() {
+        result = re.replace_all(&result, "").into_owned();
+    }
+    if let Some(re) = CUSTOM_ELEMENT_RE.as_ref() {
+        result = re.replace_all(&result, "").into_owned();
+    }
+
+    result
 }
 
 #[cfg(test)]
@@ -2654,6 +2675,46 @@ mod tests {
         assert!(
             result.ends_with("..."),
             "Truncated summary should end with ellipsis"
+        );
+    }
+
+    #[test]
+    fn test_sanitize_summary_strips_all_html_forms() {
+        use super::sanitize_summary;
+
+        // Self-closing tags without whitespace: <br/>, <img/>
+        assert_eq!(sanitize_summary("line1<br/>line2"), "line1line2");
+        assert_eq!(sanitize_summary("text<img/>more"), "textmore");
+        assert_eq!(sanitize_summary("text<br />more"), "textmore");
+
+        // HTML comments
+        assert_eq!(sanitize_summary("before<!--x-->after"), "beforeafter");
+        assert_eq!(sanitize_summary("a<!-- multi\nline -->b"), "ab");
+
+        // SVG tags (can carry event handlers)
+        assert_eq!(
+            sanitize_summary("<svg onload=alert(1)>payload</svg>"),
+            "payload"
+        );
+        assert_eq!(sanitize_summary("<svg><circle r=10/></svg>"), "");
+
+        // MathML tags
+        assert_eq!(sanitize_summary("<math><mrow>x</mrow></math>"), "x");
+
+        // Custom elements (web components with hyphens)
+        assert_eq!(
+            sanitize_summary("before<custom-element>inner</custom-element>after"),
+            "beforeinnerafter"
+        );
+        assert_eq!(
+            sanitize_summary("<my-widget foo=\"bar\">content</my-widget>"),
+            "content"
+        );
+
+        // Generics must still be preserved
+        assert_eq!(
+            sanitize_summary("expected Vec<String>"),
+            "expected Vec<String>"
         );
     }
 
