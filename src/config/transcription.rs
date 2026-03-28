@@ -1,6 +1,6 @@
 use secrecy::SecretString;
 
-use crate::config::helpers::{optional_env, parse_bool_env, validate_base_url};
+use crate::config::helpers::{db_first_bool, optional_env, validate_base_url};
 use crate::error::ConfigError;
 use crate::settings::Settings;
 
@@ -39,10 +39,8 @@ impl Default for TranscriptionConfig {
 
 impl TranscriptionConfig {
     pub(crate) fn resolve(settings: &Settings) -> Result<Self, ConfigError> {
-        let enabled = parse_bool_env(
-            "TRANSCRIPTION_ENABLED",
-            settings.transcription.as_ref().is_some_and(|t| t.enabled),
-        )?;
+        let settings_enabled = settings.transcription.as_ref().is_some_and(|t| t.enabled);
+        let enabled = db_first_bool(settings_enabled, false, "TRANSCRIPTION_ENABLED")?;
 
         let provider =
             optional_env("TRANSCRIPTION_PROVIDER")?.unwrap_or_else(|| "openai".to_string());
