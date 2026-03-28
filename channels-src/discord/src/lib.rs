@@ -29,7 +29,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use exports::near::agent::channel::{
     AgentResponse, ChannelConfig, Guest, HttpEndpointConfig, IncomingHttpRequest,
-    OutgoingHttpResponse, StatusType, StatusUpdate,
+    OutgoingHttpResponse, PollConfig, StatusType, StatusUpdate,
 };
 use near::agent::channel_host::{self, EmittedMessage};
 
@@ -107,6 +107,14 @@ struct DiscordMessage {
     author: DiscordUser,
 }
 
+/// Deserialize a String that may be null or missing (backward compat with old Option<String> fields).
+fn deserialize_nullable_string<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer).map(|opt| opt.unwrap_or_default())
+}
+
 /// Metadata stored with emitted messages for response routing.
 #[derive(Debug, Serialize, Deserialize)]
 struct DiscordMessageMetadata {
@@ -114,13 +122,20 @@ struct DiscordMessageMetadata {
     channel_id: String,
 
     /// Interaction ID for followups
+    #[serde(default, deserialize_with = "deserialize_nullable_string")]
     interaction_id: String,
 
     /// Interaction token for responding
+    #[serde(default, deserialize_with = "deserialize_nullable_string")]
     token: String,
 
     /// Application ID
+    #[serde(default, deserialize_with = "deserialize_nullable_string")]
     application_id: String,
+
+    /// Source message ID when handling mention-poll events.
+    #[serde(default)]
+    source_message_id: Option<String>,
 
     /// Thread ID (for forum threads)
     thread_id: Option<String>,
@@ -310,6 +325,10 @@ fn send_discord_request(url: &str, request: &DiscordHttpRequest) -> Result<(), S
 
 /// Workspace path for persisting owner_id across WASM callbacks.
 const OWNER_ID_PATH: &str = "state/owner_id";
+/// Workspace path for persisting polling_enabled flag.
+const POLLING_ENABLED_PATH: &str = "state/polling_enabled";
+/// Workspace path for persisting mention channel IDs (JSON array).
+const MENTION_CHANNEL_IDS_PATH: &str = "state/mention_channel_ids";
 /// Workspace path for persisting dm_policy across WASM callbacks.
 const DM_POLICY_PATH: &str = "state/dm_policy";
 /// Workspace path for persisting allow_from (JSON array) across WASM callbacks.
@@ -351,6 +370,29 @@ struct DiscordGatewayMessageCreate {
     guild_id: Option<String>,
     content: String,
     author: DiscordGatewayAuthor,
+}
+
+/// A message returned by the Discord REST channel-messages endpoint.
+#[derive(Debug, Deserialize)]
+struct DiscordChannelMessage {
+    id: String,
+    content: String,
+    channel_id: String,
+    author: DiscordChannelAuthor,
+    #[serde(default)]
+    mentions: Vec<DiscordUser>,
+    #[serde(default)]
+    webhook_id: Option<String>,
+}
+
+/// Author sub-object for REST channel messages.
+#[derive(Debug, Deserialize)]
+struct DiscordChannelAuthor {
+    id: String,
+    username: String,
+    global_name: Option<String>,
+    #[serde(default)]
+    bot: bool,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -465,6 +507,10 @@ fn gateway_content_for_agent(
     None
 }
 
+fn default_poll_interval_ms() -> u32 {
+    30_000
+}
+
 /// Channel configuration from capabilities file.
 #[derive(Debug, Deserialize)]
 struct DiscordConfig {
@@ -477,6 +523,12 @@ struct DiscordConfig {
     dm_policy: Option<String>,
     #[serde(default)]
     allow_from: Option<Vec<String>>,
+    #[serde(default)]
+    polling_enabled: bool,
+    #[serde(default = "default_poll_interval_ms")]
+    poll_interval_ms: u32,
+    #[serde(default)]
+    mention_channel_ids: Vec<String>,
 }
 
 struct DiscordChannel;
@@ -507,6 +559,15 @@ impl Guest for DiscordChannel {
             .unwrap_or_else(|_| "[]".to_string());
         let _ = channel_host::workspace_write(ALLOW_FROM_PATH, &allow_from_json);
 
+        // Persist polling config
+        let _ = channel_host::workspace_write(
+            POLLING_ENABLED_PATH,
+            &config.polling_enabled.to_string(),
+        );
+        let mention_ids_json =
+            serde_json::to_string(&config.mention_channel_ids).unwrap_or_else(|_| "[]".to_string());
+        let _ = channel_host::workspace_write(MENTION_CHANNEL_IDS_PATH, &mention_ids_json);
+
         Ok(ChannelConfig {
             display_name: "Discord".to_string(),
             http_endpoints: vec![HttpEndpointConfig {
@@ -514,7 +575,14 @@ impl Guest for DiscordChannel {
                 methods: vec!["POST".to_string()],
                 require_secret: true,
             }],
-            poll: None,
+            poll: if config.polling_enabled {
+                Some(PollConfig {
+                    interval_ms: config.poll_interval_ms.max(30_000),
+                    enabled: true,
+                })
+            } else {
+                None
+            },
         })
     }
 
@@ -585,78 +653,123 @@ impl Guest for DiscordChannel {
     }
 
     fn on_poll() {
+        // 1. Process Gateway event queue
         let queue_json = channel_host::workspace_read(GATEWAY_EVENT_QUEUE_PATH).unwrap_or_default();
-        if queue_json.trim().is_empty() || queue_json.trim() == "[]" {
-            return;
-        }
+        let has_gateway_events = !queue_json.trim().is_empty() && queue_json.trim() != "[]";
 
-        let known_bot_user_id = channel_host::workspace_read(BOT_USER_ID_PATH);
-        let parsed = parse_gateway_event_queue(&queue_json, known_bot_user_id.as_deref());
+        if has_gateway_events {
+            let known_bot_user_id = channel_host::workspace_read(BOT_USER_ID_PATH);
+            let parsed = parse_gateway_event_queue(&queue_json, known_bot_user_id.as_deref());
 
-        if let Err(error) = channel_host::workspace_write(GATEWAY_EVENT_QUEUE_PATH, "[]") {
-            channel_host::log(
-                channel_host::LogLevel::Warn,
-                &format!("Failed to clear Discord gateway queue: {}", error),
-            );
-        }
-
-        if let Some(bot_user_id) = parsed.bot_user_id.as_deref() {
-            if let Err(error) = channel_host::workspace_write(BOT_USER_ID_PATH, bot_user_id) {
+            if let Err(error) = channel_host::workspace_write(GATEWAY_EVENT_QUEUE_PATH, "[]") {
                 channel_host::log(
                     channel_host::LogLevel::Warn,
-                    &format!("Failed to persist Discord bot user id: {}", error),
+                    &format!("Failed to clear Discord gateway queue: {}", error),
                 );
             }
-        }
 
-        for message in parsed.messages {
-            if !check_sender_permission(
-                &message.user_id,
-                Some(&message.user_name),
-                message.is_dm,
-                PermissionSource::Gateway,
-                Some(&PairingReplyCtx {
-                    channel_id: message.channel_id.clone(),
-                    application_id: String::new(),
-                    token: String::new(),
-                }),
-            ) {
-                continue;
+            if let Some(bot_user_id) = parsed.bot_user_id.as_deref() {
+                if let Err(error) = channel_host::workspace_write(BOT_USER_ID_PATH, bot_user_id) {
+                    channel_host::log(
+                        channel_host::LogLevel::Warn,
+                        &format!("Failed to persist Discord bot user id: {}", error),
+                    );
+                }
             }
 
-            let metadata = DiscordMessageMetadata {
-                channel_id: message.channel_id,
-                interaction_id: String::new(),
-                token: String::new(),
-                application_id: String::new(),
-                thread_id: None,
-            };
-
-            let metadata_json = match serde_json::to_string(&metadata) {
-                Ok(json) => json,
-                Err(error) => {
-                    channel_host::log(
-                        channel_host::LogLevel::Error,
-                        &format!("Failed to serialize gateway metadata: {}", error),
-                    );
+            for message in parsed.messages {
+                if !check_sender_permission(
+                    &message.user_id,
+                    Some(&message.user_name),
+                    message.is_dm,
+                    PermissionSource::Gateway,
+                    Some(&PairingReplyCtx {
+                        channel_id: message.channel_id.clone(),
+                        application_id: String::new(),
+                        token: String::new(),
+                    }),
+                ) {
                     continue;
                 }
-            };
 
-            channel_host::emit_message(&EmittedMessage {
-                user_id: message.user_id,
-                user_name: Some(message.user_name),
-                content: message.content,
-                thread_id: None,
-                metadata_json,
-                attachments: vec![],
-            });
+                let metadata = DiscordMessageMetadata {
+                    channel_id: message.channel_id,
+                    interaction_id: String::new(),
+                    token: String::new(),
+                    application_id: String::new(),
+                    source_message_id: None,
+                    thread_id: None,
+                };
+
+                let metadata_json = match serde_json::to_string(&metadata) {
+                    Ok(json) => json,
+                    Err(error) => {
+                        channel_host::log(
+                            channel_host::LogLevel::Error,
+                            &format!("Failed to serialize gateway metadata: {}", error),
+                        );
+                        continue;
+                    }
+                };
+
+                channel_host::emit_message(&EmittedMessage {
+                    user_id: message.user_id,
+                    user_name: Some(message.user_name),
+                    content: message.content,
+                    thread_id: None,
+                    metadata_json,
+                    attachments: vec![],
+                });
+            }
         }
+
+        // 2. Run mention polling if configured
+        poll_for_mentions();
     }
 
     fn on_respond(response: AgentResponse) -> Result<(), String> {
         let metadata: DiscordMessageMetadata = serde_json::from_str(&response.metadata_json)
             .map_err(|e| format!("Failed to parse metadata: {}", e))?;
+
+        // Mention-poll replies: include message_reference so Discord renders as a reply
+        if let Some(ref source_id) = metadata.source_message_id {
+            if let DiscordResponseRoute::ChannelMessage(ref url) =
+                response_route_for_metadata(&metadata)
+            {
+                let embeds = embeds_from_metadata_json(&response.metadata_json);
+                let content = if response.content.chars().count() > DISCORD_MESSAGE_CHAR_LIMIT {
+                    truncate_message(&response.content)
+                } else {
+                    response.content.clone()
+                };
+
+                let mut payload = serde_json::json!({
+                    "content": content,
+                    "message_reference": {
+                        "message_id": source_id
+                    },
+                    "allowed_mentions": {
+                        "replied_user": true
+                    }
+                });
+
+                if let Some(ref e) = embeds {
+                    payload["embeds"] = e.clone();
+                }
+
+                let headers = discord_auth_headers_json(true);
+                let body = serde_json::to_vec(&payload)
+                    .map_err(|e| format!("Failed to serialize: {}", e))?;
+
+                return send_discord_request(
+                    url,
+                    &DiscordHttpRequest {
+                        headers_json: headers,
+                        body,
+                    },
+                );
+            }
+        }
 
         let route = response_route_for_metadata(&metadata);
         let plan = build_discord_reply_plan(&response)?;
@@ -793,6 +906,7 @@ fn handle_slash_command(interaction: &DiscordInteraction) -> bool {
         interaction_id: interaction.id.clone(),
         token: interaction.token.clone(),
         application_id: interaction.application_id.clone(),
+        source_message_id: None,
         thread_id: None,
     };
 
@@ -868,6 +982,7 @@ fn handle_message_component(interaction: &DiscordInteraction, message: &DiscordM
         interaction_id: interaction.id.clone(),
         token: interaction.token.clone(),
         application_id: interaction.application_id.clone(),
+        source_message_id: None,
         thread_id: None,
     };
 
@@ -909,11 +1024,10 @@ enum PermissionSource {
     Gateway,
 }
 
-fn should_apply_dm_pairing(source: PermissionSource, is_dm: bool) -> bool {
-    matches!(
-        source,
-        PermissionSource::Webhook | PermissionSource::Gateway
-    ) && is_dm
+fn should_apply_dm_pairing(_source: PermissionSource, is_dm: bool) -> bool {
+    // All current permission sources (Webhook, Gateway) apply DM pairing equally.
+    // Kept as a function for future sources that may bypass pairing (e.g. internal).
+    is_dm
 }
 
 /// Check if a sender is permitted to interact with the bot.
@@ -1059,6 +1173,297 @@ fn send_pairing_reply(ctx: &PairingReplyCtx, code: &str) -> Result<(), String> {
             ))
         }
         Err(e) => Err(format!("HTTP request failed: {}", e)),
+    }
+}
+
+// ============================================================================
+// Mention Polling
+// ============================================================================
+
+/// Maximum number of processed message IDs to keep per channel for dedup.
+const DEDUP_CAP: usize = 200;
+
+/// Poll configured channels for new messages that mention the bot.
+fn poll_for_mentions() {
+    let enabled = channel_host::workspace_read(POLLING_ENABLED_PATH)
+        .map(|v| v.trim() == "true")
+        .unwrap_or(false);
+
+    if !enabled {
+        return;
+    }
+
+    let bot_id = match get_or_fetch_bot_id() {
+        Some(id) => id,
+        None => {
+            channel_host::log(
+                channel_host::LogLevel::Warn,
+                "Mention polling: unable to determine bot user id",
+            );
+            return;
+        }
+    };
+
+    let channel_ids: Vec<String> = channel_host::workspace_read(MENTION_CHANNEL_IDS_PATH)
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+
+    for channel_id in &channel_ids {
+        poll_channel_mentions(channel_id, &bot_id);
+    }
+}
+
+/// Read the bot user ID from workspace or fetch it from the Discord API.
+fn get_or_fetch_bot_id() -> Option<String> {
+    if let Some(id) = channel_host::workspace_read(BOT_USER_ID_PATH).filter(|s| !s.is_empty()) {
+        return Some(id);
+    }
+
+    let headers = discord_auth_headers_json(false);
+    let resp = channel_host::http_request(
+        "GET",
+        "https://discord.com/api/v10/users/@me",
+        &headers,
+        None,
+        None,
+    )
+    .ok()?;
+
+    if resp.status < 200 || resp.status >= 300 {
+        return None;
+    }
+
+    let body: serde_json::Value = serde_json::from_slice(&resp.body).ok()?;
+    let id = body["id"].as_str()?.to_string();
+
+    let _ = channel_host::workspace_write(BOT_USER_ID_PATH, &id);
+    Some(id)
+}
+
+/// Poll a single channel for new mention messages.
+fn poll_channel_mentions(channel_id: &str, bot_id: &str) {
+    let cursor_path = format!("state/mention_cursor/{}", channel_id);
+    let last_seen = channel_host::workspace_read(&cursor_path).unwrap_or_default();
+
+    let messages = if last_seen.is_empty() {
+        // First poll: initialise cursor without emitting any messages.
+        if let Some(latest_id) = fetch_latest_message_id(channel_id) {
+            let _ = channel_host::workspace_write(&cursor_path, &latest_id);
+        }
+        return;
+    } else {
+        match fetch_messages_after_cursor(channel_id, &last_seen) {
+            Some(msgs) => msgs,
+            None => return,
+        }
+    };
+
+    let mut processed_ids = load_recent_processed_ids(channel_id);
+    let mut new_cursor = last_seen.clone();
+
+    for msg in &messages {
+        if !is_new_message(&last_seen, &msg.id) {
+            continue;
+        }
+        if processed_ids.contains(&msg.id) {
+            continue;
+        }
+        if msg.author.bot || msg.author.id == bot_id {
+            remember_processed_id(channel_id, &msg.id, &mut processed_ids);
+            continue;
+        }
+        if msg.webhook_id.is_some() {
+            remember_processed_id(channel_id, &msg.id, &mut processed_ids);
+            continue;
+        }
+        if !message_mentions_bot(msg, bot_id) {
+            remember_processed_id(channel_id, &msg.id, &mut processed_ids);
+            continue;
+        }
+
+        // Permission check (API-based poll uses Webhook source)
+        if !check_sender_permission(
+            &msg.author.id,
+            Some(&msg.author.username),
+            false,
+            PermissionSource::Webhook,
+            None,
+        ) {
+            remember_processed_id(channel_id, &msg.id, &mut processed_ids);
+            continue;
+        }
+
+        let content = strip_bot_mention(&msg.content, bot_id);
+        if content.is_empty() {
+            remember_processed_id(channel_id, &msg.id, &mut processed_ids);
+            continue;
+        }
+
+        let user_name = msg
+            .author
+            .global_name
+            .clone()
+            .unwrap_or_else(|| msg.author.username.clone());
+
+        let metadata = DiscordMessageMetadata {
+            channel_id: msg.channel_id.clone(),
+            interaction_id: String::new(),
+            token: String::new(),
+            application_id: String::new(),
+            source_message_id: Some(msg.id.clone()),
+            thread_id: None,
+        };
+
+        let metadata_json = match serde_json::to_string(&metadata) {
+            Ok(json) => json,
+            Err(error) => {
+                channel_host::log(
+                    channel_host::LogLevel::Error,
+                    &format!("Failed to serialize mention-poll metadata: {}", error),
+                );
+                continue;
+            }
+        };
+
+        channel_host::emit_message(&EmittedMessage {
+            user_id: msg.author.id.clone(),
+            user_name: Some(user_name),
+            content,
+            thread_id: None,
+            metadata_json,
+            attachments: vec![],
+        });
+
+        remember_processed_id(channel_id, &msg.id, &mut processed_ids);
+
+        if compare_message_ids(&msg.id, &new_cursor) == std::cmp::Ordering::Greater {
+            new_cursor = msg.id.clone();
+        }
+    }
+
+    if new_cursor != last_seen {
+        let _ = channel_host::workspace_write(&cursor_path, &new_cursor);
+    }
+
+    save_recent_processed_ids(channel_id, &processed_ids);
+}
+
+/// Fetch the latest message ID in a channel (used for cursor initialisation).
+fn fetch_latest_message_id(channel_id: &str) -> Option<String> {
+    let url = format!(
+        "https://discord.com/api/v10/channels/{}/messages?limit=1",
+        channel_id
+    );
+    let headers = discord_auth_headers_json(false);
+    let resp = channel_host::http_request("GET", &url, &headers, None, None).ok()?;
+
+    if resp.status < 200 || resp.status >= 300 {
+        return None;
+    }
+
+    let messages: Vec<serde_json::Value> = serde_json::from_slice(&resp.body).ok()?;
+    messages
+        .first()
+        .and_then(|m| m["id"].as_str().map(String::from))
+}
+
+/// Fetch messages after `last_seen` using the `after` parameter.
+fn fetch_messages_after_cursor(
+    channel_id: &str,
+    last_seen: &str,
+) -> Option<Vec<DiscordChannelMessage>> {
+    let url = format!(
+        "https://discord.com/api/v10/channels/{}/messages?after={}&limit=100",
+        channel_id, last_seen
+    );
+    let headers = discord_auth_headers_json(false);
+    let resp = channel_host::http_request("GET", &url, &headers, None, None).ok()?;
+
+    if resp.status < 200 || resp.status >= 300 {
+        let body_str = String::from_utf8_lossy(&resp.body);
+        channel_host::log(
+            channel_host::LogLevel::Warn,
+            &format!(
+                "Mention poll: failed to fetch messages for channel {}: {} - {}",
+                channel_id, resp.status, body_str
+            ),
+        );
+        return None;
+    }
+
+    serde_json::from_slice(&resp.body).ok()
+}
+
+/// Compare two Discord snowflake IDs. Falls back to lexical comparison.
+fn compare_message_ids(a: &str, b: &str) -> std::cmp::Ordering {
+    match (a.parse::<u64>(), b.parse::<u64>()) {
+        (Ok(a_num), Ok(b_num)) => a_num.cmp(&b_num),
+        _ => a.cmp(b),
+    }
+}
+
+fn dedup_ids_path(channel_id: &str) -> String {
+    format!("state/mention_dedup/{}", channel_id)
+}
+
+fn load_recent_processed_ids(channel_id: &str) -> Vec<String> {
+    channel_host::workspace_read(&dedup_ids_path(channel_id))
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn save_recent_processed_ids(channel_id: &str, ids: &[String]) {
+    let json = serde_json::to_string(ids).unwrap_or_else(|_| "[]".to_string());
+    let _ = channel_host::workspace_write(&dedup_ids_path(channel_id), &json);
+}
+
+fn remember_processed_id(_channel_id: &str, msg_id: &str, ids: &mut Vec<String>) {
+    if ids.contains(&msg_id.to_string()) {
+        return;
+    }
+    ids.push(msg_id.to_string());
+    if ids.len() > DEDUP_CAP {
+        let excess = ids.len() - DEDUP_CAP;
+        ids.drain(0..excess);
+    }
+}
+
+/// Returns true when `current` is strictly newer than `last_seen`.
+fn is_new_message(last_seen: &str, current: &str) -> bool {
+    compare_message_ids(current, last_seen) == std::cmp::Ordering::Greater
+}
+
+/// Returns true if the message mentions the bot (by mention objects or content).
+fn message_mentions_bot(msg: &DiscordChannelMessage, bot_id: &str) -> bool {
+    if msg.mentions.iter().any(|u| u.id == bot_id) {
+        return true;
+    }
+    let mention = format!("<@{}>", bot_id);
+    let mention_nick = format!("<@!{}>", bot_id);
+    msg.content.contains(&mention) || msg.content.contains(&mention_nick)
+}
+
+/// Strip the bot mention prefix from content.
+fn strip_bot_mention(content: &str, bot_id: &str) -> String {
+    let trimmed = content.trim();
+    for mention in [format!("<@{}>", bot_id), format!("<@!{}>", bot_id)] {
+        if let Some(rest) = trimmed.strip_prefix(&mention) {
+            return rest.trim().to_string();
+        }
+    }
+    trimmed.to_string()
+}
+
+/// Build JSON headers string with Discord bot authorization.
+/// When `include_content_type` is true, includes `Content-Type: application/json`.
+fn discord_auth_headers_json(include_content_type: bool) -> String {
+    if include_content_type {
+        serde_json::json!({
+            "Content-Type": "application/json"
+        })
+        .to_string()
+    } else {
+        serde_json::json!({}).to_string()
     }
 }
 
@@ -1275,6 +1680,7 @@ mod tests {
             interaction_id: "456".into(),
             token: "abc".into(),
             application_id: "789".into(),
+            source_message_id: None,
             thread_id: None,
         };
         let json = serde_json::to_string(&metadata).unwrap();
@@ -1284,12 +1690,36 @@ mod tests {
     }
 
     #[test]
+    fn test_metadata_backward_compat_with_old_option_format() {
+        // Old metadata format used Option<String> for these fields
+        let old_json = r#"{
+            "channel_id": "123",
+            "interaction_id": null,
+            "token": null,
+            "application_id": null,
+            "thread_id": null
+        }"#;
+        let parsed: DiscordMessageMetadata = serde_json::from_str(old_json).unwrap();
+        assert_eq!(parsed.channel_id, "123");
+        assert!(parsed.interaction_id.is_empty());
+
+        // Old format without the fields at all
+        let minimal_json = r#"{"channel_id": "456"}"#;
+        let parsed: DiscordMessageMetadata = serde_json::from_str(minimal_json).unwrap();
+        assert_eq!(parsed.channel_id, "456");
+        assert!(parsed.interaction_id.is_empty());
+        assert!(parsed.token.is_empty());
+        assert!(parsed.application_id.is_empty());
+    }
+
+    #[test]
     fn test_response_route_uses_webhook_for_interactions() {
         let metadata = DiscordMessageMetadata {
             channel_id: "123".into(),
             interaction_id: "456".into(),
             token: "tok".into(),
             application_id: "app".into(),
+            source_message_id: None,
             thread_id: None,
         };
 
@@ -1308,6 +1738,7 @@ mod tests {
             interaction_id: String::new(),
             token: String::new(),
             application_id: String::new(),
+            source_message_id: None,
             thread_id: None,
         };
 
@@ -1592,5 +2023,127 @@ mod tests {
                 "https://discord.com/api/v10/webhooks/app-1/tok-1".to_string()
             )
         );
+    }
+
+    // ======================================================================
+    // Mention polling tests
+    // ======================================================================
+
+    #[test]
+    fn test_is_new_message() {
+        assert!(is_new_message("100", "200"));
+        assert!(!is_new_message("200", "100"));
+        assert!(!is_new_message("100", "100"));
+        // Large snowflake-like IDs
+        assert!(is_new_message("1234567890123456789", "1234567890123456790"));
+        assert!(!is_new_message(
+            "1234567890123456790",
+            "1234567890123456789"
+        ));
+    }
+
+    #[test]
+    fn test_strip_bot_mention() {
+        assert_eq!(
+            strip_bot_mention("<@bot-123> hello world", "bot-123"),
+            "hello world"
+        );
+        assert_eq!(
+            strip_bot_mention("<@!bot-123> hi there", "bot-123"),
+            "hi there"
+        );
+        // No mention prefix — return content as-is
+        assert_eq!(
+            strip_bot_mention("no mention here", "bot-123"),
+            "no mention here"
+        );
+        // Only mention, no content after stripping
+        assert_eq!(strip_bot_mention("<@bot-123>", "bot-123"), "");
+        assert_eq!(strip_bot_mention("<@bot-123>   ", "bot-123"), "");
+    }
+
+    #[test]
+    fn test_message_mentions_bot() {
+        // Via mentions array
+        let msg = DiscordChannelMessage {
+            id: "1".to_string(),
+            content: "hello".to_string(),
+            channel_id: "ch-1".to_string(),
+            author: DiscordChannelAuthor {
+                id: "user-1".to_string(),
+                username: "alice".to_string(),
+                global_name: None,
+                bot: false,
+            },
+            mentions: vec![DiscordUser {
+                id: "bot-1".to_string(),
+                username: "ironclaw".to_string(),
+                global_name: None,
+            }],
+            webhook_id: None,
+        };
+        assert!(message_mentions_bot(&msg, "bot-1"));
+        assert!(!message_mentions_bot(&msg, "other-bot"));
+
+        // Via content
+        let msg2 = DiscordChannelMessage {
+            id: "2".to_string(),
+            content: "<@bot-2> do something".to_string(),
+            channel_id: "ch-1".to_string(),
+            author: DiscordChannelAuthor {
+                id: "user-1".to_string(),
+                username: "alice".to_string(),
+                global_name: None,
+                bot: false,
+            },
+            mentions: vec![],
+            webhook_id: None,
+        };
+        assert!(message_mentions_bot(&msg2, "bot-2"));
+        assert!(!message_mentions_bot(&msg2, "other-bot"));
+    }
+
+    #[test]
+    fn test_compare_message_ids() {
+        use std::cmp::Ordering;
+        assert_eq!(compare_message_ids("100", "200"), Ordering::Less);
+        assert_eq!(compare_message_ids("200", "100"), Ordering::Greater);
+        assert_eq!(compare_message_ids("100", "100"), Ordering::Equal);
+        // Non-numeric fallback
+        assert_eq!(compare_message_ids("abc", "abd"), Ordering::Less);
+        assert_eq!(compare_message_ids("abd", "abc"), Ordering::Greater);
+    }
+
+    #[test]
+    fn test_remember_processed_id_dedup_and_cap() {
+        let mut ids = Vec::new();
+
+        // Basic add
+        remember_processed_id("ch", "msg-1", &mut ids);
+        assert_eq!(ids, vec!["msg-1".to_string()]);
+
+        // Duplicate is ignored
+        remember_processed_id("ch", "msg-1", &mut ids);
+        assert_eq!(ids.len(), 1);
+
+        // Fill beyond DEDUP_CAP
+        for i in 2..=(DEDUP_CAP + 5) {
+            remember_processed_id("ch", &format!("msg-{}", i), &mut ids);
+        }
+        assert_eq!(ids.len(), DEDUP_CAP);
+        // Oldest entries should have been drained
+        assert!(!ids.contains(&"msg-1".to_string()));
+        assert!(ids.contains(&format!("msg-{}", DEDUP_CAP + 5)));
+    }
+
+    #[test]
+    fn test_discord_auth_headers_json_shape() {
+        let with_ct = discord_auth_headers_json(true);
+        let parsed: serde_json::Value = serde_json::from_str(&with_ct).unwrap();
+        assert_eq!(parsed["Content-Type"], "application/json");
+
+        let without_ct = discord_auth_headers_json(false);
+        let parsed: serde_json::Value = serde_json::from_str(&without_ct).unwrap();
+        assert!(parsed.get("Content-Type").is_none());
     }
 }

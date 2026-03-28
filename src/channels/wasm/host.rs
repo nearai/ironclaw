@@ -693,7 +693,7 @@ mod tests {
     use crate::channels::wasm::capabilities::{ChannelCapabilities, EmitRateLimitConfig};
     use crate::channels::wasm::host::{
         Attachment, ChannelEmitRateLimiter, ChannelHostState, EmittedMessage,
-        MAX_ATTACHMENTS_PER_MESSAGE, MAX_ATTACHMENT_TOTAL_SIZE, MAX_EMITS_PER_EXECUTION,
+        MAX_ATTACHMENT_TOTAL_SIZE, MAX_ATTACHMENTS_PER_MESSAGE, MAX_EMITS_PER_EXECUTION,
         MAX_MESSAGE_CONTENT_SIZE,
     };
 

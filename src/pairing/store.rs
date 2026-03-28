@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use fs4::FileExt;
-use rand::rngs::OsRng;
 use rand::Rng;
+use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 
 use crate::bootstrap::ironclaw_base_dir;
@@ -603,10 +603,12 @@ mod tests {
             .unwrap();
         assert!(result.created);
         assert_eq!(result.code.len(), PAIRING_CODE_LENGTH);
-        assert!(result
-            .code
-            .chars()
-            .all(|c| PAIRING_ALPHABET.contains(&(c as u8))));
+        assert!(
+            result
+                .code
+                .chars()
+                .all(|c| PAIRING_ALPHABET.contains(&(c as u8)))
+        );
     }
 
     #[test]
@@ -674,9 +676,11 @@ mod tests {
         let r = store.upsert_request("telegram", "user999", None).unwrap();
         store.approve("telegram", &r.code).unwrap();
 
-        assert!(store
-            .is_sender_allowed("telegram", "user999", None)
-            .unwrap());
+        assert!(
+            store
+                .is_sender_allowed("telegram", "user999", None)
+                .unwrap()
+        );
         assert!(!store.is_sender_allowed("telegram", "other", None).unwrap());
     }
 
@@ -696,9 +700,11 @@ mod tests {
         // approve adds id to allow_from. For username we need to add it manually.
         // Actually approve adds entry.id which is "alice". So is_sender_allowed("telegram", "alice", None) would work.
         assert!(store.is_sender_allowed("telegram", "alice", None).unwrap());
-        assert!(store
-            .is_sender_allowed("telegram", "alice", Some("alice"))
-            .unwrap());
+        assert!(
+            store
+                .is_sender_allowed("telegram", "alice", Some("alice"))
+                .unwrap()
+        );
     }
 
     #[test]

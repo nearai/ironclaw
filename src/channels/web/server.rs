@@ -2069,11 +2069,12 @@ async fn extensions_list_handler(
     let extensions = installed
         .into_iter()
         .map(|ext| {
-            let activation_status = crate::channels::web::handlers::extensions::derive_activation_status(
-                &ext,
-                &pairing_store,
-                owner_bound_channels.contains(&ext.name),
-            );
+            let activation_status =
+                crate::channels::web::handlers::extensions::derive_activation_status(
+                    &ext,
+                    &pairing_store,
+                    owner_bound_channels.contains(&ext.name),
+                );
             ExtensionInfo {
                 name: ext.name,
                 display_name: ext.display_name,
