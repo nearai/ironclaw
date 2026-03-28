@@ -15,7 +15,7 @@ The key architectural innovation: **the execution loop is Python code running in
 | **Thread** | Unit of work with lifecycle, parent-child tree, capability leases | Session + Job + Routine + Sub-agent |
 | **Step** | Unit of execution (one LLM call + its action executions) | Agentic loop iteration + tool calls |
 | **Capability** | Unit of effect (actions + knowledge + policies) | Tool + Skill + Hook + Extension |
-| **MemoryDoc** | Unit of durable knowledge (summaries, lessons, playbooks) | Workspace memory blobs |
+| **MemoryDoc** | Unit of durable knowledge (summaries, lessons, skills) | Workspace memory blobs |
 | **Project** | Unit of context (scopes memory, threads, missions) | Flat workspace namespace |
 
 ## Execution Model
@@ -97,7 +97,7 @@ This is the same mechanism as `rlm_query()` (recursive sub-agent). Each VM owns 
 ```
 Created → Running → Waiting → Running (resume)
                   → Suspended → Running (resume)
-                  → Completed → Reflecting → Done
+                  → Completed → Done
                   → Failed
 ```
 
@@ -120,36 +120,134 @@ Set `ENGINE_V2=true` environment variable. The router in `src/bridge/router.rs` 
 
 For trace debugging: `ENGINE_V2_TRACE=1` writes full JSON traces to `engine_trace_*.json`.
 
-## Memory and Reflection
+## Memory System
 
 ### MemoryDoc Types
 
 | Type | Purpose | Produced By |
 |------|---------|-------------|
-| `Summary` | What a thread accomplished | Reflection (always) |
-| `Lesson` | Durable learning from experience | Reflection (on errors) |
-| `Playbook` | Reusable multi-step procedure | Reflection (on success with 2+ tools) |
-| `Issue` | Detected problem for follow-up | Reflection (on failure) |
-| `Spec` | Missing capability request | Reflection (on "not found" errors) |
-| `Note` | Working memory / scratch | Self-improvement, orchestrator code |
+| `Summary` | What a thread accomplished | Conversation insights mission |
+| `Lesson` | Durable learning from experience | Self-improvement mission |
+| `Playbook` | Reusable multi-step procedure | Legacy (superseded by Skill) |
+| `Skill` | Reusable skill with activation metadata and code snippets | Skill extraction mission, v1 migration |
+| `Issue` | Detected problem for follow-up | Self-improvement mission |
+| `Spec` | Missing capability request | Self-improvement mission |
+| `Note` | Working memory / scratch | Orchestrator, prompt overlays |
 
-### Reflection Pipeline
+### Learning Missions (replaced Reflection)
 
-After a thread completes with `enable_reflection: true`:
+Instead of a separate reflection pipeline, knowledge extraction is handled by three event-driven **learning missions** that fire automatically after thread completion:
 
-1. **Trace analysis** (non-LLM, always runs) — detects 8 issue categories
-2. **LLM reflection** — spawns a Reflection-type CodeAct thread with read-only tools
-3. **Doc production** — creates Summary, Lesson, Issue, Spec, Playbook docs
-4. **Persistence** — saves docs to Store (HybridStore → workspace files)
-5. **Event firing** — if issues detected, fires OnSystemEvent missions (self-improvement)
+1. **Self-improvement** (`self-improvement`) — fires when a thread completes with trace issues (errors, tool-not-found, etc.). Diagnoses root cause, applies prompt overlays or orchestrator patches. Graduated risk: Level 1 (prompt) → Level 2 (config) → Level 3 (code, propose only).
+
+2. **Skill extraction** (`skill-extraction`) — fires when a thread succeeds with 5+ steps and 3+ distinct tool actions. Extracts reusable skills with structured metadata: activation keywords/patterns, CodeAct code snippets, domain tags. Output is a `DocType::Skill` MemoryDoc with `V2SkillMetadata` JSON.
+
+3. **Conversation insights** (`conversation-insights`) — fires every 5 completed threads in a project. Extracts user preferences, domain knowledge, workflow patterns, and corrections.
 
 ### Context Injection
 
-On each LLM call, `build_step_context()` retrieves up to 5 relevant MemoryDocs from the project and appends them to the system prompt as "## Prior Knowledge". This gives the LLM access to lessons, playbooks, and known issues from prior threads.
+On each LLM call, two knowledge sources are injected into the system prompt:
+
+1. **Memory docs** — `build_step_context()` retrieves up to 5 relevant MemoryDocs (lessons, issues, specs) from the project via keyword scoring and appends them as "## Prior Knowledge".
+
+2. **Active skills** — The `SkillSelector` scores all `DocType::Skill` docs against the thread goal using the deterministic 4-phase pipeline (gating → scoring → budget → attenuation). Selected skills are injected as `<skill>` XML blocks with their full prompt content and code snippet documentation.
+
+## Skills System
+
+Skills are the v2 replacement for both v1 SKILL.md prompt extensions and v1 playbooks. They provide deterministic, keyword-driven knowledge injection with optional executable code snippets for the CodeAct runtime.
+
+### Architecture
+
+Skills live in the `ironclaw_skills` crate (extracted from `src/skills/`), shared by both v1 and v2 engines. The engine crate depends on `ironclaw_skills` with `default-features = false` (no catalog/registry — just types + selection).
+
+```
+ironclaw_skills crate (shared)
+  ├── types.rs       — SkillManifest, ActivationCriteria, LoadedSkill, SkillTrust
+  ├── v2.rs          — V2SkillMetadata, CodeSnippet, SkillMetrics
+  ├── selector.rs    — Deterministic scoring + confidence factor
+  ├── parser.rs      — SKILL.md frontmatter parsing
+  ├── validation.rs  — Name/content escaping, credential validation
+  ├── gating.rs      — Binary/env/config requirements checking
+  ├── registry.rs    — Filesystem discovery (feature-gated)
+  └── catalog.rs     — ClawHub HTTP catalog (feature-gated)
+
+ironclaw_engine crate (v2 integration)
+  ├── capability/skill_selector.rs  — MemoryDoc → LoadedSkill bridge
+  ├── capability/skill_tracker.rs   — Confidence tracking + rollback
+
+src/skills/ (v1 shim)
+  ├── mod.rs          — Re-exports from ironclaw_skills + credential conversion
+  └── attenuation.rs  — Trust-based tool filtering (depends on ToolDefinition)
+
+src/bridge/
+  └── skill_migration.rs  — V1 SKILL.md → V2 MemoryDoc conversion
+```
+
+### Deterministic Selection Pipeline
+
+Skill selection is entirely deterministic — no LLM involvement, preventing circular manipulation:
+
+1. **Gating** — Check binary/env/config requirements; skip skills whose prerequisites are missing
+2. **Scoring** — Keyword exact (10pts, cap 30) + substring (5pts) + tag (3pts, cap 15) + regex pattern (20pts, cap 40). Exclude keywords veto (score = 0). Confidence factor for extracted skills: `0.5 + 0.5 * confidence`
+3. **Budget** — Greedy top-down selection within `max_context_tokens` (default 4000)
+4. **Attenuation** — Minimum trust across active skills determines tool ceiling
+
+### Skill Storage
+
+Skills are stored as `MemoryDoc` with `DocType::Skill`. The `metadata` JSON field carries `V2SkillMetadata`:
+
+```json
+{
+  "name": "github",
+  "version": 2,
+  "description": "GitHub API integration",
+  "activation": {
+    "keywords": ["github", "issues", "pull request"],
+    "patterns": ["(?i)(list|show|get).*issue"],
+    "tags": ["git", "devops"],
+    "max_context_tokens": 1500
+  },
+  "source": "extracted",
+  "trust": "trusted",
+  "code_snippets": [{
+    "name": "list_issues",
+    "code": "def list_issues(owner, repo): ...",
+    "description": "List open GitHub issues"
+  }],
+  "metrics": { "usage_count": 12, "success_count": 10, "failure_count": 2 },
+  "parent_version": 1,
+  "content_hash": "sha256:..."
+}
+```
+
+### CodeAct Integration
+
+Skills inject knowledge at two levels:
+
+1. **System prompt** — Skill prompt content wrapped in `<skill name="..." trust="...">` XML blocks, with code snippet documentation listed as callable functions.
+
+2. **Monty NameLookup** — Code snippet function names registered as known actions in the CodeAct runtime, so the LLM can call `list_issues()` directly without reconstructing the logic.
+
+### Confidence Tracking
+
+Auto-extracted skills track usage metrics via `SkillTracker`:
+- After each thread: `record_usage(doc_id, success)` increments counters
+- Confidence = `success_count / (success_count + failure_count)` (1.0 if no data)
+- Low-confidence skills get demoted in scoring via `apply_confidence_factor()`
+- `update_skill()` increments version with `parent_version` for rollback
+- `rollback_skill()` restores previous version if an update causes failures
+
+### V1 Migration
+
+At engine startup (`init_engine()`), v1 SKILL.md files are converted to v2 MemoryDocs:
+- `SkillSource::Workspace/User` → `V2SkillSource::Migrated`
+- Trust level preserved
+- Code snippets empty (v1 skills are prompt-only)
+- Content hash checked for idempotency (unchanged skills are skipped)
 
 ## Missions
 
-Missions are long-running goals that spawn threads over time. They replace v1 Routines.
+Missions are long-running goals that spawn threads over time. They replace v1 Routines and the old reflection pipeline.
 
 ```
 Mission
@@ -164,9 +262,19 @@ Mission
 ### How Missions Fire
 
 - **Cron**: Background ticker checks every 60s, fires missions with past `next_fire_at`
-- **OnSystemEvent**: Event listener subscribes to ThreadManager events, fires matching missions when threads complete with issues
+- **OnSystemEvent**: Event listener subscribes to ThreadManager events, fires matching missions when threads complete
 - **Manual**: `mission_fire(id)` from CodeAct or API
 - **Webhook**: Bridge routes incoming webhooks to matching missions
+
+### Learning Missions (Built-in)
+
+Three missions are created automatically at project bootstrap via `ensure_learning_missions()`:
+
+| Mission | Trigger | Max/day | What it does |
+|---------|---------|---------|-------------|
+| `self-improvement` | Thread completes with trace issues | 5 | Diagnoses errors, applies prompt overlays or orchestrator patches |
+| `skill-extraction` | Thread succeeds with 5+ steps, 3+ tools | 3 | Extracts reusable skills with activation metadata + CodeAct snippets |
+| `conversation-insights` | Every 5 completed threads | 2 | Extracts user preferences, domain knowledge, workflow patterns |
 
 ### Meta-Prompt Generation
 
@@ -174,10 +282,23 @@ When a mission fires, `build_meta_prompt()` assembles:
 - Mission goal + success criteria
 - Current focus (what to work on next)
 - Approach history (what was tried and what happened)
-- Project knowledge (relevant MemoryDocs)
-- Trigger payload (event data, trace issues)
+- Project knowledge (relevant MemoryDocs, up to 10)
+- Trigger payload (event data, trace issues, thread stats)
 
-The thread runs with this context and returns: what it accomplished, what to focus on next, whether the goal is achieved. `process_mission_outcome()` extracts these and updates the mission.
+The thread runs with this context and returns: what it accomplished, what to focus on next, whether the goal is achieved. `process_mission_outcome()` extracts these and updates the mission state.
+
+### Self-Improvement Loop
+
+The self-improvement mission creates a feedback loop:
+
+```
+Thread fails → trace analysis detects issues → self-improvement fires
+  → diagnoses root cause (PROMPT / CONFIG / CODE)
+  → Level 1: updates prompt overlay (low risk, auto-apply)
+  → Level 2: patches orchestrator code (medium risk, versioned with rollback)
+  → Level 3: proposes code change (high risk, human review)
+  → records fix in pattern database → next similar failure uses known fix
+```
 
 ## Capability System
 
@@ -228,63 +349,78 @@ A naive approach to adding third-party integrations (Slack, GitHub, Stripe, etc.
 
 This was confirmed by studying [Pica](https://github.com/withoneai/pica) (formerly IntegrationOS), which supports 200+ platforms via data-driven definitions in MongoDB. Pica's approach works for programmatic API access, but registering all those actions as LLM tools would degrade agent performance.
 
-### The Solution: Capabilities as Knowledge-Bearing Definitions
+### The Solution: Skills as Knowledge-Bearing Definitions
 
-In engine v2, Capabilities replace both Tools and Skills. A Capability bundles **actions** (what it can do) with **knowledge** (how to do it). For API integrations, this means:
+In engine v2, **Skills** replace both WASM API wrapper tools and static prompt extensions. A Skill bundles **knowledge** (how to call an API) with **activation criteria** (when to load) and optional **CodeAct code snippets** (reusable Python functions). For API integrations:
 
 1. The `http` action is always available (one tool in the LLM's action list)
-2. Each integration is a Capability with knowledge text that teaches the LLM how to call that platform's API
-3. Capabilities are loaded on-demand based on thread context, not registered globally
-4. The LLM reads the knowledge, constructs the correct `http` call
+2. Each integration is a Skill with prompt content that teaches the LLM how to call that platform's API
+3. Skills are selected on-demand per thread based on keyword/pattern matching against the goal — not registered globally
+4. The LLM reads the skill content, constructs the correct `http` call
+5. Credentials are auto-injected at the HTTP boundary — the LLM never sees tokens
 
 ```
 User: "post hello to #general on slack"
        ↓
-Capability activation: "slack-api" loaded into thread context
+Skill activation: "slack" skill selected (keywords: "slack", "message", "channel")
        ↓
-LLM reads knowledge: learns endpoints, auth pattern, body format
+LLM reads skill prompt: learns endpoints, body format, pagination
        ↓
-LLM calls `http` action:
-  POST https://slack.com/api/chat.postMessage
-  headers: {"Authorization": "Bearer {SLACK_BOT_TOKEN}"}
-  body: {"channel": "C01234", "text": "hello"}
+LLM writes CodeAct Python:
+  result = http(method="POST", url="https://slack.com/api/chat.postMessage",
+                body={"channel": "C01234", "text": "hello"})
+  FINAL(str(result))
        ↓
 EffectExecutor: policy check → credential injection → SSRF protection → leak detection → response
 ```
+
+Skills can also carry **CodeAct snippets** — pre-built Python functions that the LLM can call directly, avoiding the need to reconstruct API patterns from scratch each time.
 
 ### Token Cost Comparison
 
 | Scenario | Dedicated Tools (200 actions) | Capability + http |
 |---|---|---|
-| User asks about Slack | ~20,000 (all tools in list) | ~700 (http action + slack knowledge) |
+| User asks about Slack | ~20,000 (all tools in list) | ~700 (http action + slack skill) |
 | User asks about nothing | ~20,000 (still there) | ~200 (just http action) |
 | Tool selection accuracy | Degrades with count | Always picks `http` — no confusion |
-| Adding a new platform | Define N tool schemas + executor | Write knowledge text (markdown) |
+| Adding a new platform | Define N tool schemas + executor | Write a SKILL.md (markdown + YAML) |
 
-### What a Capability Definition Looks Like
+### What a Skill Definition Looks Like
+
+A SKILL.md file with YAML frontmatter (activation + credentials) and markdown body (API knowledge):
 
 ```yaml
-name: slack-api
-description: Slack Web API — post messages, manage channels, search, react
-knowledge: |
-  Base: `https://slack.com/api`
-  Auth header: `Authorization: Bearer {SLACK_BOT_TOKEN}`
-  All POST bodies are JSON with `Content-Type: application/json`.
+---
+name: slack
+version: "1.0.0"
+description: Slack Web API — post messages, manage channels, search
+activation:
+  keywords: ["slack", "message", "channel"]
+  patterns: ["(?i)(post|send).*slack", "(?i)slack.*(message|channel)"]
+  tags: ["chat", "messaging"]
+  max_context_tokens: 1500
+credentials:
+  - name: slack_bot_token
+    provider: slack
+    location: { type: bearer }
+    hosts: ["slack.com"]
+---
 
-  **Post message**: POST `/chat.postMessage` body `{"channel":"<id>","text":"<msg>"}`
-  **List channels**: GET `/conversations.list?types=public_channel&limit=100`
-  **Search**: GET `/search.messages?query=<text>`
-  **Add reaction**: POST `/reactions.add` body `{"channel":"<id>","timestamp":"<ts>","name":"<emoji>"}`
+# Slack API
 
-  All responses: `{"ok": true, ...}` or `{"ok": false, "error": "<code>"}`.
-  Paginate with `cursor` param when `response_metadata.next_cursor` is non-empty.
-actions: [http]
-effects: [CredentialedNetwork, ReadExternal, WriteExternal]
-policies:
-  requires_secret: SLACK_BOT_TOKEN
+Base URL: `https://slack.com/api`. Auth injected automatically.
+
+**Post message**: `http(method="POST", url="https://slack.com/api/chat.postMessage", body={"channel": "<id>", "text": "<msg>"})`
+**List channels**: `http(method="GET", url="https://slack.com/api/conversations.list?types=public_channel&limit=100")`
+**Search**: `http(method="GET", url="https://slack.com/api/search.messages?query=<text>")`
+
+All responses: `{"ok": true, ...}` or `{"ok": false, "error": "<code>"}`.
+Paginate with `cursor` param when `response_metadata.next_cursor` is non-empty.
 ```
 
-~350 tokens of knowledge covers 4+ actions. The LLM generalizes the pattern to other Slack endpoints from training data.
+~350 tokens of knowledge covers 4+ API endpoints. The LLM generalizes the pattern to other Slack endpoints from training data. Credentials are declared in frontmatter and injected automatically — the LLM never sees token values.
+
+Skills can also be **auto-extracted** by the skill-extraction mission from successful multi-step threads, complete with activation keywords and CodeAct code snippets learned from actual usage.
 
 ### Classification of v1 Built-in Tools
 
@@ -307,13 +443,14 @@ Studied all 37 v1 built-in tools to determine which fit the knowledge-driven pat
 - `json`, `time`, `echo` — pure local computation
 - `message`, `restart`, `tool_info` — internal agent control
 
-**Takeaway**: Only 3 of 37 existing tools are HTTP wrappers. The value is not converting existing tools — it's enabling hundreds of **new** integrations (Slack, GitHub, Jira, Stripe, Salesforce, etc.) without writing Rust.
+**Takeaway**: Only 3 of 37 existing tools are HTTP wrappers. The value is not converting existing tools — it's enabling hundreds of **new** integrations (Slack, GitHub, Jira, Stripe, Salesforce, etc.) without writing Rust or WASM — just a SKILL.md file.
 
 ### Where Dedicated Actions Still Win
 
 1. **Autonomous/headless threads** — Missions and background threads with no human oversight benefit from deterministic execution for their 1-2 critical integrations. Register those specific actions via leases.
-2. **OAuth token acquisition** — The LLM cannot perform redirect-based OAuth flows. A dedicated `oauth_init` action handles the redirect dance and stores tokens in the secrets system. The Capability knowledge then instructs the LLM to call `oauth_init` before using the API.
-3. **High-frequency reliability-critical paths** — If a specific integration is called thousands of times and must never fail, a dedicated action avoids LLM reasoning variance.
+2. **OAuth token acquisition** — The LLM cannot perform redirect-based OAuth flows. Skills declare OAuth config in their `credentials` frontmatter; the system handles the redirect dance and stores tokens. The skill's prompt content then instructs the LLM to just call `http` — credentials are injected transparently.
+3. **High-frequency reliability-critical paths** — If a specific integration is called thousands of times and must never fail, a dedicated action avoids LLM reasoning variance. Over time, the skill-extraction mission learns reliable CodeAct snippets from successful executions, which narrows this gap.
+4. **Complex computation or data transformation** — WASM tools still make sense for CPU-intensive processing (image manipulation, format conversion) where the sandbox guarantees matter.
 
 ### Comparison with Pica's Approach
 
@@ -324,7 +461,7 @@ Studied all 37 v1 built-in tools to determine which fit the knowledge-driven pat
 - **JS sandbox transforms** — `fromCommonModel`/`toCommonModel` functions for data mapping
 - **`knowledge` field** — free-text documentation per action for AI tool discovery
 
-Pica's model is optimized for programmatic API access (SDK calls from code). For LLM agents, the Capability-as-knowledge approach is superior because it avoids tool list bloat while leveraging the LLM's ability to construct HTTP calls from documentation. The two approaches share the insight that **integrations should be data, not code**.
+Pica's model is optimized for programmatic API access (SDK calls from code). For LLM agents, the skill-as-knowledge approach is superior because it avoids tool list bloat while leveraging the LLM's ability to construct HTTP calls from documentation. The two approaches share the insight that **integrations should be data, not code**. IronClaw extends this further: the skill-extraction mission can learn new skills from successful thread executions, making the integration library self-expanding.
 
 ## Key Files
 
@@ -332,24 +469,33 @@ Pica's model is optimized for programmatic API access (SDK calls from code). For
 |------|---------|
 | `crates/ironclaw_engine/orchestrator/default.py` | The Python execution loop (v0) |
 | `crates/ironclaw_engine/src/executor/orchestrator.rs` | Host functions + versioning + loading |
-| `crates/ironclaw_engine/src/executor/loop_engine.rs` | Bootstrap (loads + runs orchestrator) |
-| `crates/ironclaw_engine/src/executor/scripting.rs` | Monty VM integration, user code execution |
-| `crates/ironclaw_engine/src/runtime/manager.rs` | ThreadManager (spawn, stop, join, reflection) |
-| `crates/ironclaw_engine/src/runtime/mission.rs` | MissionManager (lifecycle, firing, self-improvement) |
+| `crates/ironclaw_engine/src/executor/loop_engine.rs` | Bootstrap (loads + runs orchestrator, skill injection) |
+| `crates/ironclaw_engine/src/executor/scripting.rs` | Monty VM integration, user code execution, CodeAct skill snippets |
+| `crates/ironclaw_engine/src/executor/prompt.rs` | System prompt construction, skill section formatting |
+| `crates/ironclaw_engine/src/runtime/manager.rs` | ThreadManager (spawn, stop, join, skill selector wiring) |
+| `crates/ironclaw_engine/src/runtime/mission.rs` | MissionManager (lifecycle, firing, learning missions) |
+| `crates/ironclaw_engine/src/capability/skill_selector.rs` | MemoryDoc → LoadedSkill bridge, deterministic selection |
+| `crates/ironclaw_engine/src/capability/skill_tracker.rs` | Confidence tracking, versioned updates, rollback |
 | `crates/ironclaw_engine/src/types/` | All core data structures |
 | `crates/ironclaw_engine/src/traits/` | LlmBackend, Store, EffectExecutor |
-| `src/bridge/router.rs` | Engine v2 entry point from main crate |
+| `crates/ironclaw_skills/` | Shared skills crate (types, selector, parser, validation) |
+| `src/bridge/router.rs` | Engine v2 entry point, skill migration at startup |
+| `src/bridge/skill_migration.rs` | V1 SKILL.md → V2 MemoryDoc conversion |
 | `src/bridge/effect_adapter.rs` | Tool execution bridge with safety |
 | `src/bridge/llm_adapter.rs` | LLM provider bridge |
 | `src/bridge/store_adapter.rs` | HybridStore (in-memory + workspace) |
+| `skills/github/SKILL.md` | Reference GitHub skill (API patterns + credential spec) |
+| `tests/engine_v2_skill_codeact.rs` | E2E test: skill → CodeAct → mock HTTP → canned response |
 
 ## Testing
 
 ```bash
-cargo check -p ironclaw_engine                                    # compiles
-cargo clippy -p ironclaw_engine --all-targets -- -D warnings     # zero warnings
-cargo test -p ironclaw_engine                                     # 189 tests
-cargo clippy --all --all-features                                 # full crate
+cargo check -p ironclaw_skills                                    # skills crate compiles
+cargo test -p ironclaw_skills                                     # 94 tests (types, selector, parser, gating, registry, catalog)
+cargo check -p ironclaw_engine                                    # engine crate compiles
+cargo test -p ironclaw_engine                                     # 203 tests (execution, missions, skills, tracking)
+cargo test --test engine_v2_skill_codeact                         # E2E: full CodeAct loop with mock HTTP
+cargo clippy --all -- -D warnings                                 # zero warnings across workspace
 cargo test                                                        # full suite
 ```
 
