@@ -95,6 +95,118 @@ let authFlowPending = false;
 let _ghostSuggestion = '';
 let currentSettingsSubtab = 'inference';
 
+// --- Hash-based URL Navigation ---
+//
+// Encodes navigation state in window.location.hash so refreshing
+// the page restores the current tab, thread, memory file, job detail, etc.
+//
+// Hash format: #/{tab}[/{detail}[/{subtab}]]
+//   #/chat                     → chat tab, assistant thread
+//   #/chat/{threadId}          → chat tab, specific thread
+//   #/memory                   → memory tab, tree root
+//   #/memory/{path/to/file}    → memory tab, specific file
+//   #/jobs                     → jobs list
+//   #/jobs/{jobId}             → job detail
+//   #/routines                 → routines list
+//   #/routines/{id}            → routine detail
+//   #/settings/{subtab}        → settings tab with specific sub-tab
+//   #/logs                     → logs tab
+
+/** Suppress hash-change handling while we're programmatically updating. */
+let _suppressHashChange = false;
+
+/** Update the URL hash to reflect current navigation state. */
+function updateHash() {
+  var parts = [currentTab];
+
+  switch (currentTab) {
+    case 'chat':
+      if (currentThreadId && currentThreadId !== assistantThreadId) {
+        parts.push(currentThreadId);
+      }
+      break;
+    case 'memory':
+      if (typeof currentMemoryPath === 'string' && currentMemoryPath) {
+        parts.push(currentMemoryPath);
+      }
+      break;
+    case 'jobs':
+      if (typeof currentJobId !== 'undefined' && currentJobId) {
+        parts.push(currentJobId);
+      }
+      break;
+    case 'routines':
+      if (typeof currentRoutineId !== 'undefined' && currentRoutineId) {
+        parts.push(currentRoutineId);
+      }
+      break;
+    case 'settings':
+      if (currentSettingsSubtab && currentSettingsSubtab !== 'inference') {
+        parts.push(currentSettingsSubtab);
+      }
+      break;
+  }
+
+  var hash = '#/' + parts.join('/');
+  _suppressHashChange = true;
+  if (window.location.hash !== hash) {
+    window.history.replaceState(null, '', hash);
+  }
+  _suppressHashChange = false;
+}
+
+/** Parse the current URL hash into navigation state. */
+function parseHash() {
+  var hash = window.location.hash || '';
+  if (!hash.startsWith('#/')) return null;
+  var parts = hash.substring(2).split('/');
+  return {
+    tab: parts[0] || 'chat',
+    detail: parts.slice(1).join('/') || null,
+  };
+}
+
+/**
+ * Restore navigation state from the URL hash.
+ * Called once after authentication and on hashchange events.
+ */
+function restoreFromHash() {
+  var state = parseHash();
+  if (!state) return;
+
+  // Switch tab (without recursively updating hash)
+  if (state.tab && state.tab !== currentTab) {
+    switchTab(state.tab);
+  }
+
+  // Restore detail state within the tab
+  if (state.detail) {
+    switch (state.tab) {
+      case 'chat':
+        // Defer thread switch until threads are loaded
+        window._pendingThreadRestore = state.detail;
+        break;
+      case 'memory':
+        readMemoryFile(state.detail);
+        break;
+      case 'jobs':
+        openJobDetail(state.detail);
+        break;
+      case 'routines':
+        openRoutineDetail(state.detail);
+        break;
+      case 'settings':
+        switchSettingsSubtab(state.detail);
+        break;
+    }
+  }
+}
+
+window.addEventListener('hashchange', function() {
+  if (_suppressHashChange) return;
+  restoreFromHash();
+});
+
 // --- Streaming Debounce State ---
 let _streamBuffer = '';
 let _streamDebounceTimer = null;
@@ -197,6 +309,8 @@ function authenticate() {
       loadThreads();
       loadMemoryTree();
       loadJobs();
+      // Restore navigation state from URL hash (tab, thread, memory file, etc.)
+      restoreFromHash();
       // Apply URL log_level param if present, otherwise just sync the dropdown
       if (urlLogLevel) {
         setServerLogLevel(urlLogLevel);
@@ -2136,6 +2250,19 @@ function loadThreads() {
       list.appendChild(item);
     }
 
+    // Restore thread from URL hash if pending (deferred from restoreFromHash)
+    if (window._pendingThreadRestore) {
+      var pendingId = window._pendingThreadRestore;
+      window._pendingThreadRestore = null;
+      // Verify the thread exists in the loaded list
+      var found = (pendingId === assistantThreadId) ||
+        threads.some(function(t) { return t.id === pendingId; });
+      if (found) {
+        switchThread(pendingId);
+        return;
+      }
+    }
+
     // Default to assistant thread on first load if no thread selected
     if (!currentThreadId && assistantThreadId) {
       switchToAssistant();
@@ -2175,6 +2302,7 @@ function switchToAssistant() {
   oldestTimestamp = null;
   loadHistory();
   loadThreads();
+  updateHash();
   if (window.innerWidth <= 768) {
     const sidebar = document.getElementById('thread-sidebar');
     sidebar.classList.remove('expanded-mobile');
@@ -2191,6 +2319,7 @@ function switchThread(threadId) {
   oldestTimestamp = null;
   loadHistory();
   loadThreads();
+  updateHash();
   if (window.innerWidth <= 768) {
     const sidebar = document.getElementById('thread-sidebar');
     sidebar.classList.remove('expanded-mobile');
@@ -2204,6 +2333,7 @@ function createNewThread() {
     document.getElementById('chat-messages').innerHTML = '';
     showWelcomeCard();
     loadThreads();
+    updateHash();
   }).catch((err) => {
     showToast('Failed to create thread: ' + err.message, 'error');
   });
@@ -2351,6 +2481,7 @@ function switchTab(tab) {
     stopPairingPoll();
   }
   updateTabIndicator();
+  updateHash();
 }
 
 function updateTabIndicator() {
@@ -2496,6 +2627,7 @@ function toggleExpand(node) {
 
 function readMemoryFile(path) {
   currentMemoryPath = path;
+  updateHash();
   // Update breadcrumb
   document.getElementById('memory-breadcrumb-path').innerHTML = buildBreadcrumb(path);
   document.getElementById('memory-edit-btn').style.display = 'inline-block';
@@ -3809,6 +3941,7 @@ function restartJob(jobId) {
 function openJobDetail(jobId) {
   currentJobId = jobId;
   currentJobSubTab = 'activity';
+  updateHash();
   apiFetch('/api/jobs/' + jobId).then((job) => {
     renderJobDetail(job);
   }).catch((err) => {
@@ -3821,6 +3954,7 @@ function closeJobDetail() {
   currentJobId = null;
   jobFilesTreeState = null;
   loadJobs();
+  updateHash();
 }
 
 function renderJobDetail(job) {
@@ -4317,6 +4451,7 @@ function renderRoutinesList(routines) {
 
 function openRoutineDetail(id) {
   currentRoutineId = id;
+  updateHash();
   apiFetch('/api/routines/' + id).then((routine) => {
     renderRoutineDetail(routine);
   }).catch((err) => {
@@ -4327,6 +4462,7 @@ function openRoutineDetail(id) {
 function closeRoutineDetail() {
   currentRoutineId = null;
   loadRoutines();
+  updateHash();
 }
 
 function renderRoutineDetail(routine) {
@@ -5304,6 +5440,7 @@ function switchSettingsSubtab(subtab) {
     document.querySelector('.settings-layout').classList.add('settings-detail-active');
   }
   loadSettingsSubtab(subtab);
+  updateHash();
 }
 
 function settingsBack() {
