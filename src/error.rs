@@ -411,10 +411,16 @@ pub enum RoutineError {
     JobDispatchFailed { reason: String },
 
     #[error("LLM returned empty content")]
-    EmptyResponse,
+    EmptyResponse {
+        /// Tokens consumed by the call that produced the empty response.
+        partial_tokens: Option<i32>,
+    },
 
     #[error("LLM response truncated (finish_reason=length) with no content")]
-    TruncatedResponse,
+    TruncatedResponse {
+        /// Tokens consumed by the call that produced the truncated response.
+        partial_tokens: Option<i32>,
+    },
 }
 
 impl RoutineError {
@@ -428,7 +434,7 @@ impl RoutineError {
     pub fn is_retryable(&self) -> bool {
         match self {
             RoutineError::LlmFailed { retryable, .. } => *retryable,
-            RoutineError::EmptyResponse | RoutineError::TruncatedResponse => true,
+            RoutineError::EmptyResponse { .. } | RoutineError::TruncatedResponse { .. } => true,
             _ => false,
         }
     }
@@ -561,8 +567,18 @@ mod tests {
             }
             .is_retryable()
         );
-        assert!(RoutineError::EmptyResponse.is_retryable());
-        assert!(RoutineError::TruncatedResponse.is_retryable());
+        assert!(
+            RoutineError::EmptyResponse {
+                partial_tokens: None
+            }
+            .is_retryable()
+        );
+        assert!(
+            RoutineError::TruncatedResponse {
+                partial_tokens: None
+            }
+            .is_retryable()
+        );
 
         // Hard failures should NOT be retryable
         assert!(

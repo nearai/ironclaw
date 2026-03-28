@@ -1095,9 +1095,13 @@ async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) 
 
     let is_lightweight = matches!(routine.action, RoutineAction::Lightweight { .. });
 
-    let result = {
+    // The retry block returns both the execution result and any accumulated
+    // token count so that usage is preserved even on final failure.
+    let (result, accumulated_tokens) = {
         let mut attempt = 0u32;
-        let mut accumulated_tokens: i32 = 0;
+        // Track accumulated tokens as Option to preserve None semantics:
+        // None = no attempt reported tokens; Some(n) = at least one attempt did.
+        let mut accumulated_tokens: Option<i32> = None;
         let uses_tools = matches!(
             routine.action,
             RoutineAction::Lightweight {
@@ -1105,6 +1109,33 @@ async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) 
                 ..
             }
         ) && ctx.config.lightweight_tools_enabled;
+
+        /// Extract partial_tokens from any RoutineError variant that carries them.
+        fn extract_partial_tokens(e: &RoutineError) -> Option<i32> {
+            match e {
+                RoutineError::LlmFailed {
+                    partial_tokens: Some(t),
+                    ..
+                }
+                | RoutineError::EmptyResponse {
+                    partial_tokens: Some(t),
+                }
+                | RoutineError::TruncatedResponse {
+                    partial_tokens: Some(t),
+                } => Some(*t),
+                _ => None,
+            }
+        }
+
+        /// Merge an optional partial token count into the accumulator,
+        /// only materializing Some when at least one source had Some.
+        fn accumulate(acc: Option<i32>, partial: Option<i32>) -> Option<i32> {
+            match (acc, partial) {
+                (Some(a), Some(p)) => Some(a.saturating_add(p)),
+                (Some(a), None) => Some(a),
+                (None, p) => p,
+            }
+        }
 
         loop {
             let execution_result = match &routine.action {
@@ -1142,24 +1173,22 @@ async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) 
 
             match execution_result {
                 Ok((status, summary, tokens)) => {
-                    // Accumulate tokens from this attempt with any previous attempts
-                    let total = Some(accumulated_tokens.saturating_add(tokens.unwrap_or(0)));
-                    break Ok((status, summary, total));
+                    // Merge tokens: only produce Some when at least one source had Some.
+                    let total = accumulate(accumulated_tokens, tokens);
+                    break (Ok((status, summary, total)), accumulated_tokens);
                 }
                 Err(ref e)
                     if is_lightweight
                         && !uses_tools
                         && e.is_retryable()
+                        // Skip outer retry for LlmFailed — RetryProvider already
+                        // retries transient LLM errors with its own budget. Retrying
+                        // here would create a multiplicative retry count.
+                        && !matches!(e, RoutineError::LlmFailed { .. })
                         && attempt < MAX_RETRIES =>
                 {
-                    // Accumulate any partial tokens from the failed attempt
-                    if let RoutineError::LlmFailed {
-                        partial_tokens: Some(t),
-                        ..
-                    } = e
-                    {
-                        accumulated_tokens = accumulated_tokens.saturating_add(*t);
-                    }
+                    // Accumulate partial tokens from the failed attempt.
+                    accumulated_tokens = accumulate(accumulated_tokens, extract_partial_tokens(e));
 
                     attempt += 1;
 
@@ -1169,7 +1198,11 @@ async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) 
                     tracing::event!(target: "transient_routine_errors", tracing::Level::WARN, routine = %routine.name, attempt = attempt, max_retries = MAX_RETRIES, delay_ms = delay.as_millis() as u64, "Transient routine error, retrying: {}", e);
                     tokio::time::sleep(delay).await;
                 }
-                Err(e) => break Err(e),
+                Err(e) => {
+                    // Accumulate tokens from the final failed attempt.
+                    accumulated_tokens = accumulate(accumulated_tokens, extract_partial_tokens(&e));
+                    break (Err(e), accumulated_tokens);
+                }
             }
         }
     };
@@ -1177,12 +1210,13 @@ async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) 
     // Decrement running count
     ctx.running_count.fetch_sub(1, Ordering::Relaxed);
 
-    // Process result
+    // Process result — on failure, preserve accumulated token total from
+    // earlier retry attempts so usage reporting stays accurate.
     let (status, summary, tokens) = match result {
         Ok(execution) => execution,
         Err(e) => {
             tracing::error!(routine = %routine.name, "Execution failed: {}", e);
-            (RunStatus::Failed, Some(e.to_string()), None)
+            (RunStatus::Failed, Some(e.to_string()), accumulated_tokens)
         }
     };
 
@@ -1591,12 +1625,18 @@ fn handle_text_response(
 ) -> Result<(RunStatus, Option<String>, Option<i32>), RoutineError> {
     let content = content.trim();
 
-    // Empty content guard
+    // Empty content guard — carry consumed tokens so the retry loop can
+    // accumulate them even when the response shape is invalid.
     if content.is_empty() {
+        let consumed = Some((total_input_tokens + total_output_tokens) as i32);
         return if finish_reason == FinishReason::Length {
-            Err(RoutineError::TruncatedResponse)
+            Err(RoutineError::TruncatedResponse {
+                partial_tokens: consumed,
+            })
         } else {
-            Err(RoutineError::EmptyResponse)
+            Err(RoutineError::EmptyResponse {
+                partial_tokens: consumed,
+            })
         };
     }
 
@@ -2591,8 +2631,12 @@ mod tests {
                 partial_tokens: Some(42),
                 retryable: true,
             },
-            RoutineError::EmptyResponse,
-            RoutineError::TruncatedResponse,
+            RoutineError::EmptyResponse {
+                partial_tokens: None,
+            },
+            RoutineError::TruncatedResponse {
+                partial_tokens: Some(100),
+            },
         ];
         for err in &transient_errors {
             assert!(err.is_retryable(), "{} should be retryable", err);
