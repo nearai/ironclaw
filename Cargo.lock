@@ -3482,6 +3482,7 @@ dependencies = [
  "wasmparser 0.220.1",
  "wasmtime",
  "wasmtime-wasi",
+ "webpki-roots 0.26.11",
  "zbus",
  "zip",
 ]
@@ -6991,6 +6992,7 @@ dependencies = [
  "futures-util",
  "http 1.4.0",
  "http-body 1.0.1",
+ "http-body-util",
  "iri-string",
  "pin-project-lite",
  "tower 0.5.3",

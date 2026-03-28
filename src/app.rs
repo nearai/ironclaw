@@ -336,17 +336,12 @@ impl AppBuilder {
             ws = ws.with_memory_layers(self.config.workspace.memory_layers.clone());
             let ws = Arc::new(ws);
 
-            // Detect multi-tenant mode: when GATEWAY_USER_TOKENS is configured,
+            // Detect multi-tenant mode: when the database has registered users,
             // each authenticated user needs their own workspace scope. Use
             // WorkspacePool (which implements WorkspaceResolver) to create
             // per-user workspaces on demand instead of sharing the startup
             // workspace across all users.
-            let is_multi_tenant = self
-                .config
-                .channels
-                .gateway
-                .as_ref()
-                .is_some_and(|gw| gw.user_tokens.is_some());
+            let is_multi_tenant = db.has_any_users().await.unwrap_or(false);
 
             if is_multi_tenant {
                 let pool = Arc::new(crate::channels::web::server::WorkspacePool::new(

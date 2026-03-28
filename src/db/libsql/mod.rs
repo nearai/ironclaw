@@ -12,6 +12,7 @@ mod routines;
 mod sandbox;
 mod settings;
 mod tool_failures;
+mod users;
 mod workspace;
 
 use std::path::Path;

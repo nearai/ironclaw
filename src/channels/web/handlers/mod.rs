@@ -5,7 +5,10 @@
 pub mod jobs;
 pub mod memory;
 pub mod routines;
+pub mod secrets;
 pub mod skills;
+pub mod tokens;
+pub mod users;
 
 // Modules not yet wired into server.rs router -- suppress dead_code until
 // they replace their inline counterparts.

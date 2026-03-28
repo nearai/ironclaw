@@ -16,8 +16,8 @@ use crate::agent::routine::{Routine, RoutineRun, RunStatus};
 use crate::config::DatabaseConfig;
 use crate::context::{ActionRecord, JobContext, JobState};
 use crate::db::{
-    ConversationStore, Database, JobStore, RoutineStore, SandboxStore, SettingsStore,
-    ToolFailureStore, WorkspaceStore,
+    ApiTokenRecord, ConversationStore, Database, JobStore, RoutineStore, SandboxStore,
+    SettingsStore, ToolFailureStore, UserRecord, UserStore, WorkspaceStore,
 };
 use crate::error::{DatabaseError, WorkspaceError};
 use crate::history::{
@@ -783,6 +783,118 @@ impl WorkspaceStore for PgBackend {
     ) -> Result<Vec<WorkspaceEntry>, WorkspaceError> {
         self.repo
             .list_directory_multi(user_ids, agent_id, directory)
+            .await
+    }
+}
+
+// ==================== UserStore ====================
+
+#[async_trait]
+impl UserStore for PgBackend {
+    async fn create_user(&self, user: &UserRecord) -> Result<(), DatabaseError> {
+        self.store.create_user(user).await
+    }
+
+    async fn get_user(&self, id: &str) -> Result<Option<UserRecord>, DatabaseError> {
+        self.store.get_user(id).await
+    }
+
+    async fn get_user_by_email(&self, email: &str) -> Result<Option<UserRecord>, DatabaseError> {
+        self.store.get_user_by_email(email).await
+    }
+
+    async fn list_users(&self, status: Option<&str>) -> Result<Vec<UserRecord>, DatabaseError> {
+        self.store.list_users(status).await
+    }
+
+    async fn update_user_status(&self, id: &str, status: &str) -> Result<(), DatabaseError> {
+        self.store.update_user_status(id, status).await
+    }
+
+    async fn update_user_role(&self, id: &str, role: &str) -> Result<(), DatabaseError> {
+        self.store.update_user_role(id, role).await
+    }
+
+    async fn update_user_profile(
+        &self,
+        id: &str,
+        display_name: &str,
+        metadata: &serde_json::Value,
+    ) -> Result<(), DatabaseError> {
+        self.store
+            .update_user_profile(id, display_name, metadata)
+            .await
+    }
+
+    async fn record_login(&self, id: &str) -> Result<(), DatabaseError> {
+        self.store.record_login(id).await
+    }
+
+    async fn create_api_token(
+        &self,
+        user_id: &str,
+        name: &str,
+        token_hash: &[u8; 32],
+        token_prefix: &str,
+        expires_at: Option<DateTime<Utc>>,
+    ) -> Result<ApiTokenRecord, DatabaseError> {
+        self.store
+            .create_api_token(user_id, name, token_hash, token_prefix, expires_at)
+            .await
+    }
+
+    async fn list_api_tokens(&self, user_id: &str) -> Result<Vec<ApiTokenRecord>, DatabaseError> {
+        self.store.list_api_tokens(user_id).await
+    }
+
+    async fn revoke_api_token(&self, token_id: Uuid, user_id: &str) -> Result<bool, DatabaseError> {
+        self.store.revoke_api_token(token_id, user_id).await
+    }
+
+    async fn authenticate_token(
+        &self,
+        token_hash: &[u8; 32],
+    ) -> Result<Option<(ApiTokenRecord, UserRecord)>, DatabaseError> {
+        self.store.authenticate_token(token_hash).await
+    }
+
+    async fn record_token_usage(&self, token_id: Uuid) -> Result<(), DatabaseError> {
+        self.store.record_token_usage(token_id).await
+    }
+
+    async fn has_any_users(&self) -> Result<bool, DatabaseError> {
+        self.store.has_any_users().await
+    }
+
+    async fn delete_user(&self, id: &str) -> Result<bool, DatabaseError> {
+        self.store.delete_user(id).await
+    }
+
+    async fn user_usage_stats(
+        &self,
+        user_id: Option<&str>,
+        since: DateTime<Utc>,
+    ) -> Result<Vec<crate::db::UserUsageStats>, DatabaseError> {
+        self.store.user_usage_stats(user_id, since).await
+    }
+
+    async fn user_summary_stats(
+        &self,
+        user_id: Option<&str>,
+    ) -> Result<Vec<crate::db::UserSummaryStats>, DatabaseError> {
+        self.store.user_summary_stats(user_id).await
+    }
+
+    async fn create_user_with_token(
+        &self,
+        user: &UserRecord,
+        token_name: &str,
+        token_hash: &[u8; 32],
+        token_prefix: &str,
+        expires_at: Option<DateTime<Utc>>,
+    ) -> Result<ApiTokenRecord, DatabaseError> {
+        self.store
+            .create_user_with_token(user, token_name, token_hash, token_prefix, expires_at)
             .await
     }
 }
