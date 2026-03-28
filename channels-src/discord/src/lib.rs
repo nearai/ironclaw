@@ -28,6 +28,9 @@ use std::{cmp::Ordering, collections::HashMap};
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 
+/// Discord REST API v10 base URL.
+const DISCORD_API_BASE: &str = "https://discord.com/api/v10";
+
 use exports::near::agent::channel::{
     AgentResponse, ChannelConfig, Guest, HttpEndpointConfig, IncomingHttpRequest,
     OutgoingHttpResponse, PollConfig, StatusUpdate,
@@ -427,7 +430,7 @@ impl Guest for DiscordChannel {
             (
                 "PATCH",
                 format!(
-                    "https://discord.com/api/v10/webhooks/{}/{}/messages/@original",
+                    "{DISCORD_API_BASE}/webhooks/{}/{}/messages/@original",
                     application_id, token
                 ),
             )
@@ -438,20 +441,7 @@ impl Guest for DiscordChannel {
             payload["allowed_mentions"] = serde_json::json!({
                 "replied_user": true
             });
-            let mention_payload = serde_json::to_vec(&payload)
-                .map_err(|e| format!("Failed to serialize mention payload: {}", e))?;
-            let mention_url = format!(
-                "https://discord.com/api/v10/channels/{}/messages",
-                metadata.channel_id
-            );
-            let result = channel_host::http_request(
-                "POST",
-                &mention_url,
-                &discord_auth_headers_json(true),
-                Some(&mention_payload),
-                None,
-            );
-            return map_discord_response(result);
+            return send_channel_message(&metadata.channel_id, payload);
         } else {
             return Err("Unsupported Discord response metadata".to_string());
         };
@@ -469,8 +459,8 @@ impl Guest for DiscordChannel {
 
     fn on_status(_update: StatusUpdate) {}
 
-    fn on_broadcast(_user_id: String, _response: AgentResponse) -> Result<(), String> {
-        Err("broadcast not yet implemented for Discord channel".to_string())
+    fn on_broadcast(user_id: String, response: AgentResponse) -> Result<(), String> {
+        broadcast_dm(&user_id, &response.content)
     }
 
     fn on_shutdown() {
@@ -499,6 +489,21 @@ fn map_discord_response(
         }
         Err(e) => Err(format!("HTTP request failed: {}", e)),
     }
+}
+
+/// Post a JSON payload to a Discord channel as a new message.
+fn send_channel_message(channel_id: &str, payload: serde_json::Value) -> Result<(), String> {
+    let payload_bytes = serde_json::to_vec(&payload)
+        .map_err(|e| format!("Failed to serialize message: {}", e))?;
+    let url = format!("{DISCORD_API_BASE}/channels/{}/messages", channel_id);
+    let result = channel_host::http_request(
+        "POST",
+        &url,
+        &discord_auth_headers_json(true),
+        Some(&payload_bytes),
+        None,
+    );
+    map_discord_response(result)
 }
 
 fn load_runtime_config() -> DiscordRuntimeConfig {
@@ -539,7 +544,7 @@ fn get_or_fetch_bot_id() -> Option<String> {
 
     let response = channel_host::http_request(
         "GET",
-        "https://discord.com/api/v10/users/@me",
+        &format!("{DISCORD_API_BASE}/users/@me"),
         &discord_auth_headers_json(false),
         None,
         Some(10_000),
@@ -659,7 +664,7 @@ fn poll_channel_mentions(channel_id: &str, bot_id: &str) {
 
 fn fetch_latest_message_id(channel_id: &str) -> Option<String> {
     let url = format!(
-        "https://discord.com/api/v10/channels/{}/messages?limit=1",
+        "{DISCORD_API_BASE}/channels/{}/messages?limit=1",
         channel_id
     );
     let response = channel_host::http_request(
@@ -697,7 +702,7 @@ fn fetch_messages_after_cursor(
 
     for page in 0..MAX_PAGES {
         let url = format!(
-            "https://discord.com/api/v10/channels/{}/messages?limit={}&after={}",
+            "{DISCORD_API_BASE}/channels/{}/messages?limit={}&after={}",
             channel_id, PAGE_LIMIT, after
         );
         let response = match channel_host::http_request(
@@ -986,7 +991,7 @@ fn handle_slash_command(interaction: &DiscordInteraction) -> bool {
             );
             // Attempt to notify user of internal error
             let url = format!(
-                "https://discord.com/api/v10/webhooks/{}/{}",
+                "{DISCORD_API_BASE}/webhooks/{}/{}",
                 interaction.application_id, interaction.token
             );
             let payload = serde_json::json!({
@@ -1106,7 +1111,7 @@ fn check_sender_permission(
     }
 
     let dm_policy =
-        channel_host::workspace_read(DM_POLICY_PATH).unwrap_or_else(|| default_dm_policy());
+        channel_host::workspace_read(DM_POLICY_PATH).unwrap_or_else(default_dm_policy);
     if dm_policy == "open" {
         return true;
     }
@@ -1161,7 +1166,7 @@ fn check_sender_permission(
 /// Send a pairing code as an ephemeral Discord followup message.
 fn send_pairing_reply(ctx: &PairingReplyCtx, code: &str) -> Result<(), String> {
     let url = format!(
-        "https://discord.com/api/v10/webhooks/{}/{}",
+        "{DISCORD_API_BASE}/webhooks/{}/{}",
         ctx.application_id, ctx.token
     );
     let payload = serde_json::json!({
@@ -1192,6 +1197,57 @@ fn send_pairing_reply(ctx: &PairingReplyCtx, code: &str) -> Result<(), String> {
         }
         Err(e) => Err(format!("HTTP request failed: {}", e)),
     }
+}
+
+/// Send a broadcast message to a Discord user via DM.
+///
+/// Creates a DM channel with the user (Discord caches this, so repeated calls
+/// for the same user reuse the existing channel) and then posts the message.
+fn broadcast_dm(user_id: &str, content: &str) -> Result<(), String> {
+    // Validate user_id is a plausible Discord snowflake (numeric, 17-20 digits)
+    // to avoid injecting arbitrary strings into API URLs.
+    if user_id.is_empty()
+        || !user_id.chars().all(|c| c.is_ascii_digit())
+        || user_id.len() < 17
+        || user_id.len() > 20
+    {
+        return Err(format!("Invalid Discord user ID: '{}'", user_id));
+    }
+
+    // Step 1: Open (or reuse) a DM channel with the target user.
+    let create_dm_payload = serde_json::json!({ "recipient_id": user_id });
+    let create_dm_bytes = serde_json::to_vec(&create_dm_payload)
+        .map_err(|e| format!("Failed to serialize DM channel request: {}", e))?;
+
+    let dm_response = channel_host::http_request(
+        "POST",
+        &format!("{DISCORD_API_BASE}/users/@me/channels"),
+        &discord_auth_headers_json(true),
+        Some(&create_dm_bytes),
+        Some(10_000),
+    )
+    .map_err(|e| format!("Failed to create DM channel: {}", e))?;
+
+    if !(200..300).contains(&dm_response.status) {
+        let body = String::from_utf8_lossy(&dm_response.body);
+        return Err(format!(
+            "Discord create-DM failed: {} - {}",
+            dm_response.status, body
+        ));
+    }
+
+    #[derive(Deserialize)]
+    struct DmChannelResponse {
+        id: String,
+    }
+    let dm_channel: DmChannelResponse = serde_json::from_slice(&dm_response.body)
+        .map_err(|e| format!("Failed to parse DM channel response: {}", e))?;
+    let channel_id = &dm_channel.id;
+
+    // Step 2: Send the message to the DM channel.
+    let truncated = truncate_message(content);
+    let payload = serde_json::json!({ "content": truncated });
+    send_channel_message(channel_id, payload)
 }
 
 fn json_response(status: u16, value: serde_json::Value) -> OutgoingHttpResponse {
@@ -1592,5 +1648,44 @@ mod tests {
         let interaction: DiscordInteraction = serde_json::from_str(json).unwrap();
         assert_eq!(interaction.interaction_type, 2);
         assert!(interaction.data.is_some());
+    }
+
+    #[test]
+    fn test_broadcast_dm_payload_format() {
+        // Verify the DM channel creation payload is well-formed JSON that
+        // Discord's API expects.
+        let user_id = "123456789012345678";
+        let payload = serde_json::json!({ "recipient_id": user_id });
+        let serialized = serde_json::to_vec(&payload).unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&serialized).unwrap();
+        assert_eq!(
+            parsed.get("recipient_id").and_then(|v| v.as_str()),
+            Some(user_id)
+        );
+    }
+
+    #[test]
+    fn test_broadcast_message_truncation() {
+        // Broadcast uses truncate_message, verify it handles content within
+        // Discord's 2000-char limit for DMs.
+        let short = "Hello from broadcast";
+        assert_eq!(truncate_message(short), short);
+
+        let long = "x".repeat(2500);
+        let result = truncate_message(&long);
+        assert!(result.len() <= 2006); // 1990 content + 16 suffix
+        assert!(result.ends_with("\n... (truncated)"));
+    }
+
+    #[test]
+    fn test_broadcast_dm_validates_snowflake() {
+        // broadcast_dm rejects invalid Discord snowflake IDs before making
+        // any API calls. We can call it directly since invalid IDs are
+        // rejected before any host function is invoked.
+        assert!(broadcast_dm("", "hi").is_err());
+        assert!(broadcast_dm("abc", "hi").is_err());
+        assert!(broadcast_dm("12345", "hi").is_err()); // too short
+        assert!(broadcast_dm("123456789012345678901", "hi").is_err()); // too long
+        assert!(broadcast_dm("12345678901234567x", "hi").is_err()); // non-digit
     }
 }
