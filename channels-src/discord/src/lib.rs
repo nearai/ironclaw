@@ -33,6 +33,8 @@ use exports::near::agent::channel::{
 };
 use near::agent::channel_host::{self, EmittedMessage};
 
+const DISCORD_API_BASE: &str = "https://discord.com/api/v10";
+
 /// Discord interaction wrapper.
 #[derive(Debug, Deserialize)]
 struct DiscordInteraction {
@@ -150,12 +152,12 @@ enum DiscordResponseRoute {
 fn response_route_for_metadata(metadata: &DiscordMessageMetadata) -> DiscordResponseRoute {
     if !metadata.application_id.is_empty() && !metadata.token.is_empty() {
         DiscordResponseRoute::InteractionWebhook(format!(
-            "https://discord.com/api/v10/webhooks/{}/{}/messages/@original",
+            "{DISCORD_API_BASE}/webhooks/{}/{}/messages/@original",
             metadata.application_id, metadata.token
         ))
     } else {
         DiscordResponseRoute::ChannelMessage(format!(
-            "https://discord.com/api/v10/channels/{}/messages",
+            "{DISCORD_API_BASE}/channels/{}/messages",
             metadata.channel_id
         ))
     }
@@ -172,7 +174,7 @@ fn typing_request_url_for_update(update: &StatusUpdate) -> Option<String> {
     }
 
     Some(format!(
-        "https://discord.com/api/v10/channels/{}/typing",
+        "{DISCORD_API_BASE}/channels/{}/typing",
         metadata.channel_id
     ))
 }
@@ -847,8 +849,8 @@ impl Guest for DiscordChannel {
         }
     }
 
-    fn on_broadcast(_user_id: String, _response: AgentResponse) -> Result<(), String> {
-        Err("broadcast not yet implemented for Discord channel".to_string())
+    fn on_broadcast(user_id: String, response: AgentResponse) -> Result<(), String> {
+        broadcast_dm(&user_id, &response.content)
     }
 
     fn on_shutdown() {
@@ -932,7 +934,7 @@ fn handle_slash_command(interaction: &DiscordInteraction) -> bool {
                 &format!("Failed to serialize metadata: {}", e),
             );
             let url = format!(
-                "https://discord.com/api/v10/webhooks/{}/{}",
+                "{DISCORD_API_BASE}/webhooks/{}/{}",
                 interaction.application_id, interaction.token
             );
             let payload = serde_json::json!({
@@ -1133,12 +1135,12 @@ fn check_sender_permission(
 fn pairing_reply_route(ctx: &PairingReplyCtx) -> DiscordResponseRoute {
     if !ctx.application_id.is_empty() && !ctx.token.is_empty() {
         DiscordResponseRoute::InteractionWebhook(format!(
-            "https://discord.com/api/v10/webhooks/{}/{}",
+            "{DISCORD_API_BASE}/webhooks/{}/{}",
             ctx.application_id, ctx.token
         ))
     } else {
         DiscordResponseRoute::ChannelMessage(format!(
-            "https://discord.com/api/v10/channels/{}/messages",
+            "{DISCORD_API_BASE}/channels/{}/messages",
             ctx.channel_id
         ))
     }
@@ -1235,7 +1237,7 @@ fn get_or_fetch_bot_id() -> Option<String> {
     let headers = discord_auth_headers_json(false);
     let resp = channel_host::http_request(
         "GET",
-        "https://discord.com/api/v10/users/@me",
+        "{DISCORD_API_BASE}/users/@me",
         &headers,
         None,
         None,
@@ -1364,7 +1366,7 @@ fn poll_channel_mentions(channel_id: &str, bot_id: &str) {
 /// Fetch the latest message ID in a channel (used for cursor initialisation).
 fn fetch_latest_message_id(channel_id: &str) -> Option<String> {
     let url = format!(
-        "https://discord.com/api/v10/channels/{}/messages?limit=1",
+        "{DISCORD_API_BASE}/channels/{}/messages?limit=1",
         channel_id
     );
     let headers = discord_auth_headers_json(false);
@@ -1395,7 +1397,7 @@ fn fetch_messages_after_cursor(
 
     for _ in 0..MENTION_POLL_MAX_PAGES {
         let url = format!(
-            "https://discord.com/api/v10/channels/{}/messages?after={}&limit=100",
+            "{DISCORD_API_BASE}/channels/{}/messages?after={}&limit=100",
             channel_id, after
         );
         let resp = channel_host::http_request("GET", &url, &headers, None, None).ok()?;
@@ -1512,6 +1514,62 @@ fn discord_auth_headers_json(include_content_type: bool) -> String {
     } else {
         serde_json::json!({}).to_string()
     }
+}
+
+/// Send a DM to a Discord user by opening (or reusing) a DM channel.
+fn broadcast_dm(user_id: &str, content: &str) -> Result<(), String> {
+    // Validate user_id is a plausible Discord snowflake (numeric, 17-20 digits)
+    // to avoid injecting arbitrary strings into API URLs.
+    if user_id.is_empty()
+        || !user_id.chars().all(|c| c.is_ascii_digit())
+        || user_id.len() < 17
+        || user_id.len() > 20
+    {
+        return Err(format!("Invalid Discord user ID: '{}'", user_id));
+    }
+
+    // Step 1: Open (or reuse) a DM channel with the target user.
+    let create_dm_payload = serde_json::json!({ "recipient_id": user_id });
+    let create_dm_bytes = serde_json::to_vec(&create_dm_payload)
+        .map_err(|e| format!("Failed to serialize DM channel request: {}", e))?;
+
+    let dm_response = channel_host::http_request(
+        "POST",
+        &format!("{DISCORD_API_BASE}/users/@me/channels"),
+        &discord_auth_headers_json(true),
+        Some(&create_dm_bytes),
+        Some(10_000),
+    )
+    .map_err(|e| format!("Failed to create DM channel: {}", e))?;
+
+    if !(200..300).contains(&dm_response.status) {
+        let body = String::from_utf8_lossy(&dm_response.body);
+        return Err(format!(
+            "Discord create-DM failed: {} - {}",
+            dm_response.status, body
+        ));
+    }
+
+    #[derive(Deserialize)]
+    struct DmChannelResponse {
+        id: String,
+    }
+    let dm_channel: DmChannelResponse = serde_json::from_slice(&dm_response.body)
+        .map_err(|e| format!("Failed to parse DM channel response: {}", e))?;
+
+    // Step 2: Send the message to the DM channel.
+    let truncated = truncate_message(content);
+    let payload = serde_json::json!({ "content": truncated });
+    let body =
+        serde_json::to_vec(&payload).map_err(|e| format!("Failed to serialize: {}", e))?;
+    send_discord_request(
+        "POST",
+        &format!("{DISCORD_API_BASE}/channels/{}/messages", dm_channel.id),
+        &DiscordHttpRequest {
+            headers_json: discord_auth_headers_json(true),
+            body,
+        },
+    )
 }
 
 fn json_response(status: u16, value: serde_json::Value) -> OutgoingHttpResponse {
@@ -1773,7 +1831,7 @@ mod tests {
         assert_eq!(
             response_route_for_metadata(&metadata),
             DiscordResponseRoute::InteractionWebhook(
-                "https://discord.com/api/v10/webhooks/app/tok/messages/@original".to_string()
+                format!("{DISCORD_API_BASE}/webhooks/app/tok/messages/@original")
             )
         );
     }
@@ -1792,7 +1850,7 @@ mod tests {
         assert_eq!(
             response_route_for_metadata(&metadata),
             DiscordResponseRoute::ChannelMessage(
-                "https://discord.com/api/v10/channels/chan-1/messages".to_string()
+                format!("{DISCORD_API_BASE}/channels/chan-1/messages")
             )
         );
     }
@@ -1814,7 +1872,7 @@ mod tests {
 
         assert_eq!(
             typing_request_url_for_update(&update),
-            Some("https://discord.com/api/v10/channels/chan-42/typing".to_string())
+            Some(format!("{DISCORD_API_BASE}/channels/chan-42/typing"))
         );
     }
 
@@ -2051,7 +2109,7 @@ mod tests {
         assert_eq!(
             route,
             DiscordResponseRoute::ChannelMessage(
-                "https://discord.com/api/v10/channels/chan-1/messages".to_string()
+                format!("{DISCORD_API_BASE}/channels/chan-1/messages")
             )
         );
     }
@@ -2067,7 +2125,7 @@ mod tests {
         assert_eq!(
             route,
             DiscordResponseRoute::InteractionWebhook(
-                "https://discord.com/api/v10/webhooks/app-1/tok-1".to_string()
+                format!("{DISCORD_API_BASE}/webhooks/app-1/tok-1")
             )
         );
     }

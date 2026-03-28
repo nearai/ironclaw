@@ -224,7 +224,13 @@ impl Tool for MessageTool {
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
 
-        let content = require_str(&params, "content")?;
+        // Accept "message" as an alias for "content" — LLMs frequently use
+        // the wrong parameter name in autonomous job execution.
+        let content = require_str(&params, "content").or_else(|_| {
+            require_str(&params, "message").map_err(|_| {
+                ToolError::InvalidParameters("missing 'content' parameter".to_string())
+            })
+        })?;
 
         let explicit_channel = params
             .get("channel")
@@ -323,8 +329,11 @@ impl Tool for MessageTool {
         if !attachments.is_empty() {
             response = response.with_attachments(attachments);
         }
-        if channel.as_deref() == Some("gateway")
-            && response.thread_id.is_none()
+        // Attach thread_id so the gateway can route the message into the
+        // correct conversation.  Previously this only fired when channel was
+        // explicitly "gateway", which meant broadcast_all (channel=null) sent
+        // a response without a thread_id and the gateway silently dropped it.
+        if response.thread_id.is_none()
             && let Some(thread_id) = metadata_string(&ctx.metadata, "notify_thread_id")
         {
             response = response.in_thread(thread_id);
@@ -478,6 +487,31 @@ mod tests {
 
         let params = schema.get("properties").unwrap();
         assert!(params.get("attachments").is_some());
+    }
+
+    /// Regression: LLMs frequently pass {"message": "..."} instead of
+    /// {"content": "..."}. The tool should accept both.
+    #[tokio::test]
+    async fn message_param_alias_accepted() {
+        let tool = MessageTool::new(Arc::new(ChannelManager::new()));
+        tool.set_context(Some("gateway".to_string()), Some("user".to_string()))
+            .await;
+
+        let ctx = crate::context::JobContext::new("test", "test");
+
+        // "message" alias should not produce InvalidParameters
+        let result = tool
+            .execute(serde_json::json!({"message": "hello from alias"}), &ctx)
+            .await;
+        // Execution may fail for other reasons (no real channel), but
+        // the error must NOT be about a missing 'content' parameter.
+        if let Err(ref e) = result {
+            let msg = e.to_string();
+            assert!(
+                !msg.contains("missing 'content'"),
+                "Should accept 'message' as alias for 'content', got: {msg}"
+            );
+        }
     }
 
     #[tokio::test]

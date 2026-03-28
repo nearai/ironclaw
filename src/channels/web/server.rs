@@ -16,7 +16,7 @@ use axum::{
         IntoResponse,
         sse::{Event, KeepAlive, Sse},
     },
-    routing::{get, post},
+    routing::{get, post, put},
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -31,7 +31,7 @@ use crate::bootstrap::ironclaw_base_dir;
 use crate::channels::IncomingMessage;
 use crate::channels::relay::DEFAULT_RELAY_NAME;
 use crate::channels::web::auth::{
-    AuthenticatedUser, MultiAuthState, UserIdentity, auth_middleware,
+    AuthenticatedUser, CombinedAuthState, UserIdentity, auth_middleware,
 };
 use crate::channels::web::handlers::jobs::{
     job_files_list_handler, job_files_read_handler, jobs_cancel_handler, jobs_detail_handler,
@@ -290,7 +290,22 @@ impl WorkspacePool {
         }
 
         let ws = Arc::new(ws);
+
         cache.insert(identity.user_id.clone(), Arc::clone(&ws));
+
+        // Seed identity files after inserting into cache (so the lock can be
+        // dropped) but before returning, so callers see a seeded workspace.
+        // Drop the write lock explicitly before the async seed to avoid
+        // blocking other workspace lookups.
+        drop(cache);
+        if let Err(e) = ws.seed_if_empty().await {
+            tracing::warn!(
+                user_id = identity.user_id,
+                "Failed to seed workspace: {}",
+                e
+            );
+        }
+
         ws
     }
 }
@@ -347,8 +362,6 @@ pub struct GatewayState {
     pub prompt_queue: Option<PromptQueue>,
     /// Durable owner scope for persistence and unauthenticated callback flows.
     pub owner_id: String,
-    /// Default sender/routing identity for gateway-originated messages.
-    pub default_sender_id: String,
     /// Shutdown signal sender.
     pub shutdown_tx: tokio::sync::RwLock<Option<oneshot::Sender<()>>>,
     /// WebSocket connection tracker.
@@ -378,6 +391,10 @@ pub struct GatewayState {
     pub startup_time: std::time::Instant,
     /// Snapshot of active (resolved) configuration for the frontend.
     pub active_config: ActiveConfigSnapshot,
+    /// Secrets store for admin secret provisioning.
+    pub secrets_store: Option<Arc<dyn crate::secrets::SecretsStore + Send + Sync>>,
+    /// DB auth cache for invalidation on security-critical actions.
+    pub db_auth: Option<Arc<crate::channels::web::auth::DbAuthenticator>>,
 }
 
 /// Start the gateway HTTP server.
@@ -386,7 +403,7 @@ pub struct GatewayState {
 pub async fn start_server(
     addr: SocketAddr,
     state: Arc<GatewayState>,
-    auth: MultiAuthState,
+    auth: CombinedAuthState,
 ) -> Result<SocketAddr, crate::error::ChannelError> {
     let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
         crate::error::ChannelError::StartupFailed {
@@ -512,6 +529,57 @@ pub async fn start_server(
             "/api/settings/{key}",
             axum::routing::delete(settings_delete_handler),
         )
+        // User management (admin)
+        .route(
+            "/api/admin/users",
+            get(super::handlers::users::users_list_handler)
+                .post(super::handlers::users::users_create_handler),
+        )
+        .route(
+            "/api/admin/users/{id}",
+            get(super::handlers::users::users_detail_handler)
+                .patch(super::handlers::users::users_update_handler)
+                .delete(super::handlers::users::users_delete_handler),
+        )
+        .route(
+            "/api/admin/users/{id}/suspend",
+            post(super::handlers::users::users_suspend_handler),
+        )
+        .route(
+            "/api/admin/users/{id}/activate",
+            post(super::handlers::users::users_activate_handler),
+        )
+        // Admin secrets provisioning (per-user)
+        .route(
+            "/api/admin/users/{user_id}/secrets",
+            get(super::handlers::secrets::secrets_list_handler),
+        )
+        .route(
+            "/api/admin/users/{user_id}/secrets/{name}",
+            put(super::handlers::secrets::secrets_put_handler)
+                .delete(super::handlers::secrets::secrets_delete_handler),
+        )
+        // Usage reporting (admin)
+        .route(
+            "/api/admin/usage",
+            get(super::handlers::users::usage_stats_handler),
+        )
+        // User self-service profile
+        .route(
+            "/api/profile",
+            get(super::handlers::users::profile_get_handler)
+                .patch(super::handlers::users::profile_update_handler),
+        )
+        // Token management
+        .route(
+            "/api/tokens",
+            get(super::handlers::tokens::tokens_list_handler)
+                .post(super::handlers::tokens::tokens_create_handler),
+        )
+        .route(
+            "/api/tokens/{id}",
+            axum::routing::delete(super::handlers::tokens::tokens_revoke_handler),
+        )
         // Gateway control plane
         .route("/api/gateway/status", get(gateway_status_handler))
         // OpenAI-compatible API
@@ -571,6 +639,7 @@ pub async fn start_server(
             axum::http::Method::GET,
             axum::http::Method::POST,
             axum::http::Method::PUT,
+            axum::http::Method::PATCH,
             axum::http::Method::DELETE,
         ])
         .allow_headers(AllowHeaders::list([
@@ -585,6 +654,33 @@ pub async fn start_server(
         .merge(projects)
         .merge(protected)
         .layer(DefaultBodyLimit::max(10 * 1024 * 1024)) // 10 MB max request body (image uploads)
+        .layer(tower_http::catch_panic::CatchPanicLayer::custom(
+            |panic_info: Box<dyn std::any::Any + Send + 'static>| {
+                let detail = if let Some(s) = panic_info.downcast_ref::<String>() {
+                    s.clone()
+                } else if let Some(s) = panic_info.downcast_ref::<&str>() {
+                    (*s).to_string()
+                } else {
+                    "unknown panic".to_string()
+                };
+                // Truncate panic payload to avoid leaking sensitive data into logs.
+                // Use floor_char_boundary to avoid panicking on multi-byte UTF-8.
+                let safe_detail = if detail.len() > 200 {
+                    let end = detail.floor_char_boundary(200);
+                    format!("{}…", &detail[..end])
+                } else {
+                    detail
+                };
+                tracing::error!("Handler panicked: {}", safe_detail);
+                axum::http::Response::builder()
+                    .status(axum::http::StatusCode::INTERNAL_SERVER_ERROR)
+                    .header("content-type", "text/plain")
+                    .body(axum::body::Body::from("Internal Server Error"))
+                    .unwrap_or_else(|_| {
+                        axum::http::Response::new(axum::body::Body::from("Internal Server Error"))
+                    })
+            },
+        ))
         .layer(cors)
         .layer(SetResponseHeaderLayer::if_not_present(
             header::X_CONTENT_TYPE_OPTIONS,
@@ -1332,9 +1428,6 @@ async fn chat_send_handler(
     }
 
     let mut msg = IncomingMessage::new("gateway", &user.user_id, &req.content);
-    if state.owner_id != state.default_sender_id && user.user_id == state.owner_id {
-        msg = msg.with_sender_id(&state.default_sender_id);
-    }
     // Prefer timezone from JSON body, fall back to X-Timezone header
     let tz = req
         .timezone
@@ -1436,9 +1529,6 @@ async fn chat_approval_handler(
     })?;
 
     let mut msg = IncomingMessage::new("gateway", &user.user_id, content);
-    if state.owner_id != state.default_sender_id && user.user_id == state.owner_id {
-        msg = msg.with_sender_id(&state.default_sender_id);
-    }
 
     if let Some(ref thread_id) = req.thread_id {
         msg = msg.with_thread(thread_id);
@@ -3026,7 +3116,6 @@ mod tests {
             job_manager: None,
             prompt_queue: None,
             owner_id: "test".to_string(),
-            default_sender_id: "test".to_string(),
             shutdown_tx: tokio::sync::RwLock::new(None),
             ws_tracker: None,
             llm_provider: None,
@@ -3041,6 +3130,8 @@ mod tests {
             routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
             startup_time: std::time::Instant::now(),
             active_config: ActiveConfigSnapshot::default(),
+            secrets_store: None,
+            db_auth: None,
         })
     }
 
@@ -3261,6 +3352,7 @@ mod tests {
         // without needing the full auth middleware layer.
         req.extensions_mut().insert(UserIdentity {
             user_id: "test".to_string(),
+            role: "admin".to_string(),
             workspace_read_scopes: Vec::new(),
         });
 
@@ -3345,6 +3437,7 @@ mod tests {
         // without needing the full auth middleware layer.
         req.extensions_mut().insert(UserIdentity {
             user_id: "test".to_string(),
+            role: "admin".to_string(),
             workspace_read_scopes: Vec::new(),
         });
 
@@ -3394,7 +3487,10 @@ mod tests {
         let state = test_gateway_state(None);
 
         let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-        let auth = MultiAuthState::single("test-token".to_string(), "test".to_string());
+        let auth = CombinedAuthState::from(crate::channels::web::auth::MultiAuthState::single(
+            "test-token".to_string(),
+            "test".to_string(),
+        ));
         let bound = start_server(addr, state.clone(), auth)
             .await
             .expect("server should start");

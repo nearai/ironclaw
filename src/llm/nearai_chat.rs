@@ -490,9 +490,8 @@ impl LlmProvider for NearAiChatProvider {
                 .choices
                 .into_iter()
                 .next()
-                .ok_or_else(|| LlmError::InvalidResponse {
+                .ok_or_else(|| LlmError::EmptyResponse {
                     provider: "nearai_chat".to_string(),
-                    reason: "No choices in response".to_string(),
                 })?;
 
         // Fall back to reasoning_content when content is null (same as
@@ -570,9 +569,8 @@ impl LlmProvider for NearAiChatProvider {
                 .choices
                 .into_iter()
                 .next()
-                .ok_or_else(|| LlmError::InvalidResponse {
+                .ok_or_else(|| LlmError::EmptyResponse {
                     provider: "nearai_chat".to_string(),
-                    reason: "No choices in response".to_string(),
                 })?;
 
         let tool_calls: Vec<ToolCall> = choice

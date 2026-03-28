@@ -352,7 +352,7 @@ pub async fn run_routines_cli(
         .await
         .map_err(|e| anyhow::anyhow!("{e:#}"))?;
 
-    let user_id = std::env::var("GATEWAY_USER_ID").unwrap_or_else(|_| "default".to_string());
+    let user_id = std::env::var("IRONCLAW_OWNER_ID").unwrap_or_else(|_| "default".to_string());
     run_routines_command(routines_cmd.clone(), db, &user_id).await
 }
 
