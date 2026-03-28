@@ -57,6 +57,7 @@ refinery = { version = "0.8", features = ["tokio-postgres"], optional = true }
 tokio-postgres-rustls = { version = "0.13", optional = true }
 rustls = { version = "0.23", optional = true, default-features = false }
 rustls-native-certs = { version = "0.8", optional = true }
+webpki-roots = { version = "0.26", optional = true }
 
 # Database - libSQL/Turso (optional embedded database)
 libsql = { version = "0.6", optional = true, default-features = false, features = ["core", "replication", "remote", "tls"] }
@@ -95,7 +96,7 @@ termimad = "0.34"
 # Channel integrations
 axum = { version = "0.8", features = ["ws"] }
 tower = "0.5"
-tower-http = { version = "0.6", features = ["trace", "cors", "set-header"] }
+tower-http = { version = "0.6", features = ["trace", "cors", "set-header", "catch-panic"] }
 
 # Cron scheduling for routines
 cron = "0.13"
@@ -219,6 +220,7 @@ postgres = [
     "dep:tokio-postgres-rustls",
     "dep:rustls",
     "dep:rustls-native-certs",
+    "dep:webpki-roots",
     "dep:postgres-types",
     "dep:refinery",
     "dep:pgvector",

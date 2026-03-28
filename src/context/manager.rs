@@ -195,6 +195,20 @@ impl ContextManager {
             .collect()
     }
 
+    /// Count jobs consuming a parallel execution slot for a specific user.
+    ///
+    /// Uses `is_parallel_blocking()` (Pending/InProgress/Stuck) rather than
+    /// `is_active()`, so Completed/Submitted jobs don't count against the
+    /// per-user concurrency limit.
+    pub async fn parallel_blocking_count_for(&self, user_id: &str) -> usize {
+        self.contexts
+            .read()
+            .await
+            .iter()
+            .filter(|(_, c)| c.user_id == user_id && c.state.is_parallel_blocking())
+            .count()
+    }
+
     /// List all job IDs for a specific user.
     pub async fn all_jobs_for(&self, user_id: &str) -> Vec<Uuid> {
         self.contexts

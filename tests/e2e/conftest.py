@@ -271,7 +271,6 @@ async def ironclaw_server(
         "GATEWAY_HOST": "127.0.0.1",
         "GATEWAY_PORT": str(gateway_port),
         "GATEWAY_AUTH_TOKEN": AUTH_TOKEN,
-        "GATEWAY_USER_ID": "e2e-web-sender",
         "HTTP_HOST": "127.0.0.1",
         "HTTP_PORT": str(http_port),
         "HTTP_WEBHOOK_SECRET": HTTP_WEBHOOK_SECRET,
@@ -371,7 +370,6 @@ async def hosted_oauth_refresh_server(
             "GATEWAY_HOST": "127.0.0.1",
             "GATEWAY_PORT": str(gateway_port),
             "GATEWAY_AUTH_TOKEN": AUTH_TOKEN,
-            "GATEWAY_USER_ID": OWNER_SCOPE_ID,
             "HTTP_HOST": "127.0.0.1",
             "HTTP_PORT": str(http_port),
             "HTTP_WEBHOOK_SECRET": HTTP_WEBHOOK_SECRET,
@@ -411,7 +409,6 @@ async def hosted_oauth_refresh_server(
             yield {
                 "base_url": base_url,
                 "db_path": db_path,
-                "gateway_user_id": OWNER_SCOPE_ID,
                 "mock_llm_url": mock_llm_server,
             }
         except TimeoutError:
@@ -473,7 +470,6 @@ async def http_channel_server_without_secret(
         "GATEWAY_HOST": "127.0.0.1",
         "GATEWAY_PORT": str(gateway_port),
         "GATEWAY_AUTH_TOKEN": AUTH_TOKEN,
-        "GATEWAY_USER_ID": "e2e-tester",
         "HTTP_HOST": "127.0.0.1",
         "HTTP_PORT": str(http_port),
         "CLI_ENABLED": "false",
