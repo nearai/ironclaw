@@ -391,6 +391,7 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
             worker: self,
             rx: tokio::sync::Mutex::new(rx),
             consecutive_rate_limits: std::sync::atomic::AtomicUsize::new(0),
+            has_text_response: std::sync::atomic::AtomicBool::new(false),
         };
 
         let config = AgenticLoopConfig {
@@ -1101,6 +1102,15 @@ fn store_fallback_in_metadata(
 }
 
 /// Job delegate: implements `LoopDelegate` for the background job context.
+/// Whether an LLM error represents a completion-eligible empty response.
+///
+/// Only `EmptyResponse` (provider returned no choices/content) qualifies.
+/// Infrastructure errors (`AuthFailed`, `Http`, `Io`, etc.) never qualify —
+/// they must propagate even if prior text output was produced.
+fn is_completion_eligible_error(error: &crate::error::LlmError) -> bool {
+    matches!(error, crate::error::LlmError::EmptyResponse { .. })
+}
+
 ///
 /// Handles: signal channel (stop/ping/user messages), cancellation checks,
 /// rate-limit retry, parallel tool execution, DB persistence, SSE broadcasting.
@@ -1109,6 +1119,10 @@ struct JobDelegate<'a> {
     rx: tokio::sync::Mutex<&'a mut mpsc::Receiver<WorkerMessage>>,
     /// Tracks consecutive rate-limit errors to fail fast instead of burning iterations.
     consecutive_rate_limits: std::sync::atomic::AtomicUsize,
+    /// Whether a substantive (non-empty) text response has been produced.
+    /// When true, an empty follow-up response is treated as job completion
+    /// rather than a retry signal (prevents spurious failures in routines).
+    has_text_response: std::sync::atomic::AtomicBool,
 }
 
 impl<'a> JobDelegate<'a> {
@@ -1156,6 +1170,53 @@ impl<'a> JobDelegate<'a> {
         tokio::time::sleep(wait).await;
 
         Ok(crate::llm::RespondOutput {
+            result: RespondResult::Text(String::new()),
+            usage: crate::llm::TokenUsage::default(),
+            finish_reason: crate::llm::FinishReason::Stop,
+        })
+    }
+
+    /// Mark the job as completed, logging a warning on failure.
+    async fn mark_completed_or_warn(&self, context: &str) {
+        if let Err(e) = self.worker.mark_completed().await {
+            tracing::warn!(
+                job_id = %self.worker.job_id,
+                error = %e,
+                "Failed to mark job completed ({context})"
+            );
+        }
+    }
+
+    /// If a substantive text response was already produced and the error
+    /// indicates the LLM simply returned nothing, treat it as successful
+    /// completion rather than a fatal failure.
+    ///
+    /// Only swallows `EmptyResponse` — infrastructure errors (`AuthFailed`,
+    /// `ContextLengthExceeded`, `Http`, `Io`, etc.) always propagate.
+    ///
+    /// Returns `Some(empty RespondOutput)` when the error should be swallowed,
+    /// `None` when it should propagate normally.
+    async fn try_complete_on_error(
+        &self,
+        context: &str,
+        error: &crate::error::LlmError,
+    ) -> Option<crate::llm::RespondOutput> {
+        if !is_completion_eligible_error(error) {
+            return None;
+        }
+        if !self
+            .has_text_response
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return None;
+        }
+        tracing::info!(
+            job_id = %self.worker.job_id,
+            error = %error,
+            "{context} empty response after text output — treating as completion"
+        );
+        self.mark_completed_or_warn(context).await;
+        Some(crate::llm::RespondOutput {
             result: RespondResult::Text(String::new()),
             usage: crate::llm::TokenUsage::default(),
             finish_reason: crate::llm::FinishReason::Stop,
@@ -1291,7 +1352,12 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
             Err(crate::error::LlmError::RateLimited { retry_after, .. }) => {
                 return self.handle_rate_limit(retry_after, "tool selection").await;
             }
-            Err(e) => return Err(e.into()),
+            Err(e) => {
+                if let Some(output) = self.try_complete_on_error("select_tools", &e).await {
+                    return Ok(output);
+                }
+                return Err(e.into());
+            }
         };
 
         // Fall back to respond_with_tools
@@ -1321,7 +1387,12 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
                 self.handle_rate_limit(retry_after, "respond_with_tools")
                     .await
             }
-            Err(e) => Err(e.into()),
+            Err(e) => {
+                if let Some(output) = self.try_complete_on_error("respond_with_tools", &e).await {
+                    return Ok(output);
+                }
+                Err(e.into())
+            }
         }
     }
 
@@ -1330,9 +1401,22 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
         text: &str,
         reason_ctx: &mut ReasoningContext,
     ) -> TextAction {
-        // Empty text from rate-limit backoff retry — skip processing and let the
-        // loop proceed to the next iteration which will re-call the LLM.
+        // Empty text after a substantive response means the LLM has finished.
+        // Treat as successful completion rather than continuing the loop (which
+        // would produce "Response contained no message or tool call (empty)").
         if text.is_empty() {
+            if self
+                .has_text_response
+                .load(std::sync::atomic::Ordering::Relaxed)
+            {
+                tracing::debug!(
+                    job_id = %self.worker.job_id,
+                    "Empty response after text output — treating as completion"
+                );
+                self.mark_completed_or_warn("empty text response").await;
+                return TextAction::Return(LoopOutcome::Response(String::new()));
+            }
+            // No prior text response — this is likely a rate-limit backoff retry.
             return TextAction::Continue;
         }
 
@@ -1347,6 +1431,10 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
             }
             return TextAction::Return(LoopOutcome::Response(text.to_string()));
         }
+
+        // Track that a substantive response has been produced.
+        self.has_text_response
+            .store(true, std::sync::atomic::Ordering::Relaxed);
 
         // Add assistant response to context
         reason_ctx.messages.push(ChatMessage::assistant(text));
@@ -2284,5 +2372,61 @@ mod tests {
         assert_eq!(telegram.len(), 1);
         assert_eq!(telegram[0].0, "owner-scope");
         assert_eq!(telegram[0].1.content, "hello from routine");
+    }
+
+    /// Regression test: only `EmptyResponse` errors are eligible for
+    /// completion-swallowing. Infrastructure errors must always propagate.
+    #[test]
+    fn is_completion_eligible_only_matches_empty_response() {
+        use crate::error::LlmError;
+
+        // EmptyResponse is eligible
+        assert!(super::is_completion_eligible_error(
+            &LlmError::EmptyResponse {
+                provider: "test".to_string(),
+            }
+        ));
+
+        // All other variants are NOT eligible
+        assert!(!super::is_completion_eligible_error(
+            &LlmError::InvalidResponse {
+                provider: "test".to_string(),
+                reason: "parse error".to_string(),
+            }
+        ));
+        assert!(!super::is_completion_eligible_error(
+            &LlmError::AuthFailed {
+                provider: "test".to_string(),
+            }
+        ));
+        assert!(!super::is_completion_eligible_error(
+            &LlmError::ContextLengthExceeded {
+                used: 100_000,
+                limit: 50_000,
+            }
+        ));
+        assert!(!super::is_completion_eligible_error(
+            &LlmError::ModelNotAvailable {
+                provider: "test".to_string(),
+                model: "gpt-4".to_string(),
+            }
+        ));
+        assert!(!super::is_completion_eligible_error(
+            &LlmError::RequestFailed {
+                provider: "test".to_string(),
+                reason: "timeout".to_string(),
+            }
+        ));
+        assert!(!super::is_completion_eligible_error(
+            &LlmError::SessionExpired {
+                provider: "test".to_string(),
+            }
+        ));
+        assert!(!super::is_completion_eligible_error(
+            &LlmError::SessionRenewalFailed {
+                provider: "test".to_string(),
+                reason: "timeout".to_string(),
+            }
+        ));
     }
 }
