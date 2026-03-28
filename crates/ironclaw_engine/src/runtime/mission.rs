@@ -282,10 +282,10 @@ impl MissionManager {
         let mgr = Arc::clone(self);
         let mut rx = mgr.thread_manager.subscribe_events();
 
-        /// Minimum steps for a thread to be a playbook candidate.
-        const PLAYBOOK_MIN_STEPS: usize = 5;
-        /// Minimum distinct action executions for playbook extraction.
-        const PLAYBOOK_MIN_ACTIONS: usize = 3;
+        /// Minimum steps for a thread to be a skill extraction candidate.
+        const SKILL_EXTRACTION_MIN_STEPS: usize = 5;
+        /// Minimum distinct action executions for skill extraction.
+        const SKILL_EXTRACTION_MIN_ACTIONS: usize = 3;
         /// Completed thread interval for conversation insights.
         const CONVERSATION_INSIGHTS_INTERVAL: u32 = 5;
 
@@ -390,8 +390,8 @@ impl MissionManager {
                             && trace.issues.iter().all(|i| {
                                 i.severity != crate::executor::trace::IssueSeverity::Error
                             })
-                            && thread.step_count >= PLAYBOOK_MIN_STEPS
-                            && action_count >= PLAYBOOK_MIN_ACTIONS
+                            && thread.step_count >= SKILL_EXTRACTION_MIN_STEPS
+                            && action_count >= SKILL_EXTRACTION_MIN_ACTIONS
                         {
                             let actions_used: Vec<String> = thread
                                 .events
@@ -549,7 +549,7 @@ impl MissionManager {
             use crate::types::memory::{DocType, MemoryDoc};
             let pattern_doc = MemoryDoc::new(
                 project_id,
-                DocType::Playbook,
+                DocType::Note,
                 FIX_PATTERN_DB_TITLE,
                 SEED_FIX_PATTERNS,
             )
@@ -946,7 +946,7 @@ async fn process_self_improvement_output(
         } else {
             MemoryDoc::new(
                 project_id,
-                DocType::Playbook,
+                DocType::Note,
                 FIX_PATTERN_DB_TITLE,
                 SEED_FIX_PATTERNS,
             )

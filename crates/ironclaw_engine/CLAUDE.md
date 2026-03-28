@@ -33,7 +33,7 @@ src/
 │   ├── thread.rs         # Thread, ThreadId, ThreadState (state machine), ThreadType, ThreadConfig
 │   ├── step.rs           # Step, StepId, LlmResponse, ActionCall, ActionResult, TokenUsage
 │   ├── capability.rs     # Capability, ActionDef, EffectType, CapabilityLease, PolicyRule
-│   ├── memory.rs         # MemoryDoc, DocId, DocType (Summary/Lesson/Playbook/Issue/Spec/Note)
+│   ├── memory.rs         # MemoryDoc, DocId, DocType (Summary/Lesson/Playbook[legacy]/Skill/Issue/Spec/Note)
 │   ├── project.rs        # Project, ProjectId
 │   ├── event.rs          # ThreadEvent, EventKind (18 variants for event sourcing)
 │   ├── message.rs        # ThreadMessage, MessageRole
@@ -48,7 +48,9 @@ src/
 ├── capability/           # Capability management
 │   ├── registry.rs       # CapabilityRegistry — register/get/list capabilities
 │   ├── lease.rs          # LeaseManager — grant/check/consume/revoke/expire leases
-│   └── policy.rs         # PolicyEngine — deterministic effect-level allow/deny/approve + provenance taint
+│   ├── policy.rs         # PolicyEngine — deterministic effect-level allow/deny/approve + provenance taint
+│   ├── skill_selector.rs # SkillSelector — MemoryDoc→LoadedSkill bridge, deterministic selection
+│   └── skill_tracker.rs  # SkillTracker — confidence tracking, versioned updates, rollback
 ├── runtime/              # Thread lifecycle management
 │   ├── manager.rs        # ThreadManager — spawn, stop, inject messages, join threads
 │   ├── conversation.rs   # ConversationManager — routes UI messages to threads
@@ -86,7 +88,7 @@ Validated by `ThreadState::can_transition_to()`. Terminal states: `Done`, `Faile
 Three event-driven missions fire automatically after thread completion:
 
 1. **Error diagnosis** (`self-improvement`) — fires when a thread completes with trace issues. Diagnoses root cause and applies prompt overlays or orchestrator patches.
-2. **Playbook extraction** (`playbook-extraction`) — fires when a thread succeeds with 5+ steps and 3+ tool actions. Extracts reusable step-by-step procedures.
+2. **Skill extraction** (`skill-extraction`) — fires when a thread succeeds with 5+ steps and 3+ tool actions. Extracts reusable skills with activation metadata, CodeAct code snippets, and domain tags. Output stored as `DocType::Skill` MemoryDoc.
 3. **Conversation insights** (`conversation-insights`) — fires every 5 completed threads in a project. Extracts user preferences, domain knowledge, and workflow patterns.
 
 Created by `MissionManager::ensure_learning_missions()` at project bootstrap.
