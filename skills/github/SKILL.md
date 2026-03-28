@@ -21,22 +21,6 @@ activation:
     - "code-review"
     - "devops"
   max_context_tokens: 2000
-credentials:
-  - name: github_token
-    provider: github
-    location:
-      type: bearer
-    hosts:
-      - "api.github.com"
-    oauth:
-      authorization_url: "https://github.com/login/oauth/authorize"
-      token_url: "https://github.com/login/oauth/access_token"
-      scopes:
-        - "repo"
-        - "read:org"
-      refresh:
-        strategy: reauthorize_only
-    setup_instructions: "Create a personal access token at https://github.com/settings/tokens"
 ---
 
 # GitHub API Skill
