@@ -189,6 +189,10 @@ json5 = { version = "0.4", optional = true }
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = "3"
 
+# PTY allocation for Claude CLI stdout buffering fix (Unix only)
+[target.'cfg(unix)'.dependencies]
+pty-process = { version = "0.5", features = ["async"] }
+
 # Linux secret-service (GNOME Keyring, KWallet)
 [target.'cfg(target_os = "linux")'.dependencies]
 secret-service = { version = "4", features = ["rt-tokio-crypto-rust"] }
