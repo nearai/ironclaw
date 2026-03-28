@@ -14,6 +14,7 @@ use uuid::Uuid;
 use crate::channels::web::auth::AuthenticatedUser;
 use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::*;
+use crate::channels::web::util::{sanitized_db_error, sanitized_internal_error_response};
 
 pub async fn jobs_list_handler(
     State(state): State<Arc<GatewayState>>,
@@ -213,10 +214,7 @@ pub async fn jobs_detail_handler(
         }
         Ok(None) => {}
         Err(e) => {
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Database error: {}", e),
-            ));
+            return Err(sanitized_db_error(e, "get sandbox job detail"));
         }
     }
 
@@ -257,10 +255,7 @@ pub async fn jobs_detail_handler(
             }))
         }
         Ok(None) => Err((StatusCode::NOT_FOUND, "Job not found".to_string())),
-        Err(e) => Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Database error: {}", e),
-        )),
+        Err(e) => Err(sanitized_db_error(e, "get agent job detail")),
     }
 }
 
@@ -295,7 +290,7 @@ pub async fn jobs_cancel_handler(
                             Some(chrono::Utc::now()),
                         )
                         .await
-                        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+                        .map_err(|e| sanitized_db_error(e, "persist sandbox job cancellation"))?;
                 }
                 return Ok(Json(serde_json::json!({
                     "status": "cancelled",
@@ -304,10 +299,7 @@ pub async fn jobs_cancel_handler(
             }
             Ok(None) => {}
             Err(e) => {
-                return Err((
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("Database error: {}", e),
-                ));
+                return Err(sanitized_db_error(e, "get sandbox job for cancellation"));
             }
         }
     }
@@ -341,7 +333,7 @@ pub async fn jobs_cancel_handler(
                             Some("Cancelled by user"),
                         )
                         .await
-                        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+                        .map_err(|e| sanitized_db_error(e, "persist agent job cancellation"))?;
                 }
                 return Ok(Json(serde_json::json!({
                     "status": "cancelled",
@@ -350,10 +342,7 @@ pub async fn jobs_cancel_handler(
             }
             Ok(None) => {}
             Err(e) => {
-                return Err((
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("Database error: {}", e),
-                ));
+                return Err(sanitized_db_error(e, "get agent job for cancellation"));
             }
         }
     }
@@ -421,7 +410,7 @@ pub async fn jobs_restart_handler(
             store
                 .save_sandbox_job(&record)
                 .await
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+                .map_err(|e| sanitized_db_error(e, "persist restarted sandbox job"))?;
 
             let mode = match store.get_sandbox_job_mode(old_job_id).await {
                 Ok(Some(m)) if m == "claude_code" => {
@@ -452,16 +441,13 @@ pub async fn jobs_restart_handler(
                 )
                 .await
                 .map_err(|e| {
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        format!("Failed to create container: {}", e),
-                    )
+                    sanitized_internal_error_response(e, "create restarted sandbox container")
                 })?;
 
             store
                 .update_sandbox_job_status(new_job_id, "running", None, None, Some(now), None)
                 .await
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+                .map_err(|e| sanitized_db_error(e, "mark restarted sandbox job running"))?;
 
             return Ok(Json(serde_json::json!({
                 "status": "restarted",
@@ -471,10 +457,7 @@ pub async fn jobs_restart_handler(
         }
         Ok(None) => {}
         Err(e) => {
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Database error: {}", e),
-            ));
+            return Err(sanitized_db_error(e, "get sandbox job for restart"));
         }
     }
 
@@ -521,7 +504,9 @@ pub async fn jobs_restart_handler(
             let new_job_id = scheduler
                 .dispatch_job(&old_job.user_id, &title, &old_job.description, None)
                 .await
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+                .map_err(|e| {
+                    sanitized_internal_error_response(e, "dispatch restarted agent job")
+                })?;
 
             Ok(Json(serde_json::json!({
                 "status": "restarted",
@@ -530,10 +515,7 @@ pub async fn jobs_restart_handler(
             })))
         }
         Ok(None) => Err((StatusCode::NOT_FOUND, "Job not found".to_string())),
-        Err(e) => Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Database error: {}", e),
-        )),
+        Err(e) => Err(sanitized_db_error(e, "get agent job for restart")),
     }
 }
 
@@ -609,10 +591,7 @@ pub async fn jobs_prompt_handler(
                 return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
             }
             Err(e) => {
-                return Err((
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("Database error: {}", e),
-                ));
+                return Err(sanitized_db_error(e, "get agent job for prompt"));
             }
         }
     }
@@ -625,10 +604,9 @@ pub async fn jobs_prompt_handler(
     if let Some(ref scheduler) = *scheduler_guard
         && scheduler.is_running(job_id).await
     {
-        scheduler
-            .send_message(job_id, content)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        scheduler.send_message(job_id, content).await.map_err(|e| {
+            sanitized_internal_error_response(e, "send prompt to running agent job")
+        })?;
         return Ok(Json(serde_json::json!({
             "status": "sent",
             "job_id": job_id.to_string(),
@@ -667,17 +645,14 @@ pub async fn jobs_events_handler(
             return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
         }
         Err(e) => {
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Database error: {}", e),
-            ));
+            return Err(sanitized_db_error(e, "get sandbox job events"));
         }
     }
 
     let events = store
         .list_job_events(job_id, None)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|e| sanitized_db_error(e, "list job events"))?;
 
     let events_json: Vec<serde_json::Value> = events
         .into_iter()
@@ -721,7 +696,7 @@ pub async fn job_files_list_handler(
     let job = store
         .get_sandbox_job(job_id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map_err(|e| sanitized_db_error(e, "get sandbox job file list"))?
         .ok_or((StatusCode::NOT_FOUND, "Job not found".to_string()))?;
 
     if job.user_id != user.user_id {
@@ -789,7 +764,7 @@ pub async fn job_files_read_handler(
     let job = store
         .get_sandbox_job(job_id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map_err(|e| sanitized_db_error(e, "get sandbox job file read"))?
         .ok_or((StatusCode::NOT_FOUND, "Job not found".to_string()))?;
 
     if job.user_id != user.user_id {

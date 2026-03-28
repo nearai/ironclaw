@@ -15,6 +15,7 @@ use subtle::ConstantTimeEq;
 
 use crate::agent::routine::Trigger;
 use crate::channels::web::server::GatewayState;
+use crate::channels::web::util::{sanitized_db_error, sanitized_routine_error};
 
 /// Validate the webhook secret for a routine.
 ///
@@ -114,7 +115,7 @@ async fn fire_webhook_inner(
     let routine = store
         .get_webhook_routine_by_path(path, user_id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map_err(|e| sanitized_db_error(e, "get webhook routine by path"))?
         .ok_or((
             StatusCode::NOT_FOUND,
             "No routine matches this webhook path".to_string(),
@@ -137,16 +138,10 @@ async fn fire_webhook_inner(
         ))?
     };
 
-    let run_id = engine.fire_webhook(routine.id, path).await.map_err(|e| {
-        let status = match &e {
-            crate::error::RoutineError::NotFound { .. } => StatusCode::NOT_FOUND,
-            crate::error::RoutineError::Disabled { .. }
-            | crate::error::RoutineError::Cooldown { .. }
-            | crate::error::RoutineError::MaxConcurrent { .. } => StatusCode::CONFLICT,
-            _ => StatusCode::INTERNAL_SERVER_ERROR,
-        };
-        (status, e.to_string())
-    })?;
+    let run_id = engine
+        .fire_webhook(routine.id, path)
+        .await
+        .map_err(|e| sanitized_routine_error(e, "trigger routine from webhook"))?;
 
     Ok(Json(serde_json::json!({
         "status": "triggered",

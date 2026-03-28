@@ -14,7 +14,7 @@ use crate::agent::routine::{Trigger, next_cron_fire};
 use crate::channels::web::auth::AuthenticatedUser;
 use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::*;
-use crate::error::RoutineError;
+use crate::channels::web::util::{sanitized_db_error, sanitized_routine_error};
 
 pub async fn routines_list_handler(
     State(state): State<Arc<GatewayState>>,
@@ -28,7 +28,7 @@ pub async fn routines_list_handler(
     let routines = store
         .list_routines(&user.user_id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|e| sanitized_db_error(e, "list routines"))?;
 
     let items: Vec<RoutineInfo> = routines.iter().map(RoutineInfo::from_routine).collect();
 
@@ -47,7 +47,7 @@ pub async fn routines_summary_handler(
     let routines = store
         .list_routines(&user.user_id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|e| sanitized_db_error(e, "list routines summary"))?;
 
     let total = routines.len() as u64;
     let enabled = routines.iter().filter(|r| r.enabled).count() as u64;
@@ -95,7 +95,7 @@ pub async fn routines_detail_handler(
     let routine = store
         .get_routine(routine_id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map_err(|e| sanitized_db_error(e, "get routine detail"))?
         .ok_or((StatusCode::NOT_FOUND, "Routine not found".to_string()))?;
 
     if routine.user_id != user.user_id {
@@ -105,7 +105,7 @@ pub async fn routines_detail_handler(
     let runs = store
         .list_routine_runs(routine_id, 20)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|e| sanitized_db_error(e, "list routine detail runs"))?;
 
     let recent_runs: Vec<RoutineRunInfo> = runs
         .iter()
@@ -163,7 +163,7 @@ pub async fn routines_trigger_handler(
     let run_id = engine
         .fire_manual(routine_id, Some(&user.user_id))
         .await
-        .map_err(|e| (routine_error_status(&e), e.to_string()))?;
+        .map_err(|e| sanitized_routine_error(e, "trigger routine manually"))?;
 
     Ok(Json(serde_json::json!({
         "status": "triggered",
@@ -194,7 +194,7 @@ pub async fn routines_toggle_handler(
     let mut routine = store
         .get_routine(routine_id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map_err(|e| sanitized_db_error(e, "get routine for toggle"))?
         .ok_or((StatusCode::NOT_FOUND, "Routine not found".to_string()))?;
 
     if routine.user_id != user.user_id {
@@ -228,7 +228,7 @@ pub async fn routines_toggle_handler(
     store
         .update_routine(&routine)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|e| sanitized_db_error(e, "update routine toggle state"))?;
 
     // Refresh the in-memory event trigger cache so event/system_event
     // routines reflect the new enabled state immediately (issue #1076).
@@ -259,7 +259,7 @@ pub async fn routines_delete_handler(
     let routine = store
         .get_routine(routine_id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map_err(|e| sanitized_db_error(e, "get routine for delete"))?
         .ok_or((StatusCode::NOT_FOUND, "Routine not found".to_string()))?;
 
     if routine.user_id != user.user_id {
@@ -269,7 +269,7 @@ pub async fn routines_delete_handler(
     let deleted = store
         .delete_routine(routine_id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|e| sanitized_db_error(e, "delete routine"))?;
 
     if deleted {
         // Refresh the in-memory event trigger cache so deleted event/system_event
@@ -305,7 +305,7 @@ pub async fn routines_runs_handler(
     let routine = store
         .get_routine(routine_id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map_err(|e| sanitized_db_error(e, "get routine runs"))?
         .ok_or((StatusCode::NOT_FOUND, "Routine not found".to_string()))?;
 
     if routine.user_id != user.user_id {
@@ -315,7 +315,7 @@ pub async fn routines_runs_handler(
     let runs = store
         .list_routine_runs(routine_id, 50)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|e| sanitized_db_error(e, "list routine runs"))?;
 
     let run_infos: Vec<RoutineRunInfo> = runs
         .iter()
@@ -335,16 +335,4 @@ pub async fn routines_runs_handler(
         "routine_id": routine_id,
         "runs": run_infos,
     })))
-}
-
-/// Map `RoutineError` variants to appropriate HTTP status codes.
-fn routine_error_status(err: &RoutineError) -> StatusCode {
-    match err {
-        RoutineError::NotFound { .. } => StatusCode::NOT_FOUND,
-        RoutineError::NotAuthorized { .. } => StatusCode::FORBIDDEN,
-        RoutineError::Disabled { .. }
-        | RoutineError::Cooldown { .. }
-        | RoutineError::MaxConcurrent { .. } => StatusCode::CONFLICT,
-        _ => StatusCode::INTERNAL_SERVER_ERROR,
-    }
 }

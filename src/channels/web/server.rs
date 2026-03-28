@@ -1807,7 +1807,13 @@ async fn chat_history_handler(
         let (messages, has_more) = store
             .list_conversation_messages_paginated(thread_id, before_cursor, limit as i64)
             .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            .map_err(|e| {
+                tracing::error!(error = %e, "DB error listing paginated messages");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Database error".to_string(),
+                )
+            })?;
 
         let oldest_timestamp = messages.first().map(|m| m.created_at.to_rfc3339());
         let turns = build_turns_from_db_messages(&messages);
@@ -1880,7 +1886,13 @@ async fn chat_history_handler(
         let (messages, has_more) = store
             .list_conversation_messages_paginated(thread_id, None, limit as i64)
             .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            .map_err(|e| {
+                tracing::error!(error = %e, "DB error listing messages");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Database error".to_string(),
+                )
+            })?;
 
         if !messages.is_empty() {
             let oldest_timestamp = messages.first().map(|m| m.created_at.to_rfc3339());
@@ -1923,7 +1935,13 @@ async fn chat_threads_handler(
         let assistant_id = store
             .get_or_create_assistant_conversation(&user.user_id, "gateway")
             .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            .map_err(|e| {
+                tracing::error!(error = %e, "DB error getting assistant conversation");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Database error".to_string(),
+                )
+            })?;
 
         match store
             .list_conversations_all_channels(&user.user_id, 50)
@@ -2145,7 +2163,13 @@ async fn extensions_list_handler(
     let installed = ext_mgr
         .list(None, false, &user.user_id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|e| {
+            tracing::error!(error = %e, "Error listing extensions");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Internal error".to_string(),
+            )
+        })?;
 
     let pairing_store = crate::pairing::PairingStore::new();
     let mut owner_bound_channels = std::collections::HashSet::new();
@@ -2575,7 +2599,13 @@ async fn extensions_setup_handler(
     let setup = ext_mgr
         .get_setup_schema(&name, &user.user_id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|e| {
+            tracing::error!(error = %e, "Error getting extension setup schema");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Internal error".to_string(),
+            )
+        })?;
 
     let kind = ext_mgr
         .list(None, false, &user.user_id)
@@ -2649,9 +2679,13 @@ async fn pairing_list_handler(
     Path(channel): Path<String>,
 ) -> Result<Json<PairingListResponse>, (StatusCode, String)> {
     let store = crate::pairing::PairingStore::new();
-    let requests = store
-        .list_pending(&channel)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let requests = store.list_pending(&channel).map_err(|e| {
+        tracing::error!(error = %e, "Error listing pairing requests");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Internal error".to_string(),
+        )
+    })?;
 
     let infos = requests
         .into_iter()
@@ -2707,17 +2741,26 @@ async fn routines_runs_handler(
     let routine = store
         .get_routine(routine_id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map_err(|e| {
+            tracing::error!(error = %e, "DB error getting routine");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Database error".to_string(),
+            )
+        })?
         .ok_or((StatusCode::NOT_FOUND, "Routine not found".to_string()))?;
 
     if routine.user_id != user.user_id {
         return Err((StatusCode::NOT_FOUND, "Routine not found".to_string()));
     }
 
-    let runs = store
-        .list_routine_runs(routine_id, 50)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let runs = store.list_routine_runs(routine_id, 50).await.map_err(|e| {
+        tracing::error!(error = %e, "DB error listing routine runs");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Database error".to_string(),
+        )
+    })?;
 
     let run_infos: Vec<RoutineRunInfo> = runs
         .iter()
@@ -3115,8 +3158,10 @@ mod tests {
 
     // --- OAuth callback handler tests ---
 
-    /// Build a minimal `GatewayState` for testing the OAuth callback handler.
-    fn test_gateway_state(ext_mgr: Option<Arc<ExtensionManager>>) -> Arc<GatewayState> {
+    fn test_gateway_state_inner(
+        ext_mgr: Option<Arc<ExtensionManager>>,
+        store: Option<Arc<dyn crate::db::Database>>,
+    ) -> Arc<GatewayState> {
         Arc::new(GatewayState {
             msg_tx: tokio::sync::RwLock::new(None),
             sse: Arc::new(SseManager::new()),
@@ -3127,7 +3172,7 @@ mod tests {
             log_level_handle: None,
             extension_manager: ext_mgr,
             tool_registry: None,
-            store: None,
+            store,
             job_manager: None,
             prompt_queue: None,
             owner_id: "test".to_string(),
@@ -3148,6 +3193,31 @@ mod tests {
             secrets_store: None,
             db_auth: None,
         })
+    }
+
+    /// Build a minimal `GatewayState` for testing the OAuth callback handler.
+    fn test_gateway_state(ext_mgr: Option<Arc<ExtensionManager>>) -> Arc<GatewayState> {
+        test_gateway_state_inner(ext_mgr, None)
+    }
+
+    fn test_gateway_state_with_store(
+        store: Arc<dyn crate::db::Database>,
+        ext_mgr: Option<Arc<ExtensionManager>>,
+    ) -> Arc<GatewayState> {
+        test_gateway_state_inner(ext_mgr, Some(store))
+    }
+
+    #[cfg(feature = "libsql")]
+    async fn create_unmigrated_test_db() -> (Arc<dyn crate::db::Database>, tempfile::TempDir) {
+        use crate::db::libsql::LibSqlBackend;
+
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let db_path = temp_dir.path().join("test.db");
+        let backend = LibSqlBackend::new_local(&db_path)
+            .await
+            .expect("LibSqlBackend");
+        let db: Arc<dyn crate::db::Database> = Arc::new(backend);
+        (db, temp_dir)
     }
 
     /// Build a test router with just the OAuth callback route.
@@ -3389,6 +3459,47 @@ mod tests {
                 .contains("Activation failed"),
             "expected activation failure in message: {:?}",
             parsed
+        );
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_routines_list_sanitizes_database_errors() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let (db, _tmp) = create_unmigrated_test_db().await;
+        let state = test_gateway_state_with_store(db, None);
+        let app = Router::new()
+            .route(
+                "/api/routines",
+                get(crate::channels::web::handlers::routines::routines_list_handler),
+            )
+            .with_state(state);
+
+        let mut req = axum::http::Request::builder()
+            .method("GET")
+            .uri("/api/routines")
+            .body(Body::empty())
+            .expect("request");
+        req.extensions_mut().insert(UserIdentity {
+            user_id: "test".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+            .await
+            .expect("body");
+        let text = String::from_utf8(body.to_vec()).expect("utf8 body");
+        assert_eq!(text, "Database error");
+        assert!(
+            !text.contains("no such table"),
+            "client response should not leak backend error details"
         );
     }
 

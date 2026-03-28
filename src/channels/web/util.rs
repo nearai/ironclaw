@@ -1,5 +1,9 @@
 //! Shared utility functions for the web gateway.
 
+use std::fmt::Display;
+
+use axum::http::StatusCode;
+
 use crate::channels::web::types::{ToolCallInfo, TurnInfo};
 
 pub use ironclaw_common::truncate_preview;
@@ -7,6 +11,59 @@ pub use ironclaw_common::truncate_preview;
 /// Convert stored tool errors into plain text suitable for UI display.
 pub fn tool_error_for_display(error: &str) -> String {
     ironclaw_safety::SafetyLayer::unwrap_tool_output(error).unwrap_or_else(|| error.to_string())
+}
+
+fn sanitized_internal_error<E: Display>(
+    error: E,
+    context: &str,
+    client_message: &str,
+) -> (StatusCode, String) {
+    tracing::error!(error = %error, context, "Web gateway request failed");
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        client_message.to_string(),
+    )
+}
+
+/// Log a detailed backend error while returning a generic DB message to the client.
+pub fn sanitized_db_error<E: Display>(error: E, context: &str) -> (StatusCode, String) {
+    sanitized_internal_error(error, context, "Database error")
+}
+
+/// Log a detailed backend error while returning a generic internal message to the client.
+pub fn sanitized_internal_error_response<E: Display>(
+    error: E,
+    context: &str,
+) -> (StatusCode, String) {
+    sanitized_internal_error(error, context, "Internal error")
+}
+
+/// Return safe client responses for `RoutineError` while preserving user-actionable variants.
+pub fn sanitized_routine_error(
+    error: crate::error::RoutineError,
+    context: &str,
+) -> (StatusCode, String) {
+    use crate::error::RoutineError;
+
+    match error {
+        err @ RoutineError::NotFound { .. } => (StatusCode::NOT_FOUND, err.to_string()),
+        err @ RoutineError::NotAuthorized { .. } => (StatusCode::FORBIDDEN, err.to_string()),
+        err @ RoutineError::Disabled { .. }
+        | err @ RoutineError::Cooldown { .. }
+        | err @ RoutineError::MaxConcurrent { .. } => (StatusCode::CONFLICT, err.to_string()),
+        err @ RoutineError::Database { .. } => sanitized_db_error(err, context),
+        err @ RoutineError::LlmFailed { .. }
+        | err @ RoutineError::JobDispatchFailed { .. }
+        | err @ RoutineError::EmptyResponse
+        | err @ RoutineError::TruncatedResponse
+        | err @ RoutineError::UnknownTriggerType { .. }
+        | err @ RoutineError::UnknownActionType { .. }
+        | err @ RoutineError::MissingField { .. }
+        | err @ RoutineError::InvalidCron { .. }
+        | err @ RoutineError::UnknownRunStatus { .. } => {
+            sanitized_internal_error_response(err, context)
+        }
+    }
 }
 
 /// Parse tool call summary JSON objects into `ToolCallInfo` structs.
@@ -127,6 +184,30 @@ pub fn build_turns_from_db_messages(
 mod tests {
     use super::*;
     use uuid::Uuid;
+
+    #[test]
+    fn test_sanitized_db_error_hides_internal_details() {
+        let (_, body) = sanitized_db_error("sqlite: no such table: routines", "list routines");
+        assert_eq!(body, "Database error");
+    }
+
+    #[test]
+    fn test_sanitized_internal_error_hides_internal_details() {
+        let (_, body) =
+            sanitized_internal_error_response("container launch failed: timeout", "restart job");
+        assert_eq!(body, "Internal error");
+    }
+
+    #[test]
+    fn test_sanitized_routine_error_hides_database_details() {
+        let (_, body) = sanitized_routine_error(
+            crate::error::RoutineError::Database {
+                reason: "sqlite: no such table: routine_runs".to_string(),
+            },
+            "trigger routine",
+        );
+        assert_eq!(body, "Database error");
+    }
 
     // ---- build_turns_from_db_messages tests ----
 
