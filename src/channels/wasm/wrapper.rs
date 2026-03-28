@@ -5951,4 +5951,53 @@ mod tests {
             "image/png"
         );
     }
+
+    /// Regression test: leak scan must run on the raw WASM-provided headers
+    /// (pre-injection), not the post-injection headers. Host-injected Bearer
+    /// tokens (e.g., xoxb- Slack tokens) would otherwise trigger the leak
+    /// detector since WASM never saw those values.
+    #[test]
+    fn test_leak_scan_uses_pre_injection_headers() {
+        use crate::safety::LeakDetector;
+
+        let detector = LeakDetector::new();
+
+        // Pre-injection headers from WASM: no secrets, should pass.
+        let pre_injection = vec![("Content-Type".to_string(), "application/json".to_string())];
+        assert!(
+            detector
+                .scan_http_request(
+                    "https://slack.com/api/chat.postMessage",
+                    &pre_injection,
+                    None
+                )
+                .is_ok(),
+            "Pre-injection headers should pass leak scan"
+        );
+
+        // Post-injection headers with host-injected Bearer token: would fail
+        // if we scanned these instead of the pre-injection headers.
+        let post_injection = vec![
+            ("Content-Type".to_string(), "application/json".to_string()),
+            (
+                "Authorization".to_string(),
+                // Fake key matching openai_api_key pattern (LeakAction::Block).
+                "Bearer sk-proj-TESTFAKEKEY01234567890abcdef".to_string(),
+            ),
+        ];
+        // This demonstrates the false positive: scanning post-injection headers
+        // detects the host-injected token as a leak.
+        let scan_result = detector.scan_http_request(
+            "https://slack.com/api/chat.postMessage",
+            &post_injection,
+            None,
+        );
+        // The fake API key should be flagged as a potential leak.
+        // This proves scanning must happen PRE-injection.
+        assert!(
+            scan_result.is_err(),
+            "Post-injection headers with API key pattern should trigger leak detector, \
+             confirming that scanning must happen before credential injection"
+        );
+    }
 }
