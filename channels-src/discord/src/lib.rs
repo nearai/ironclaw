@@ -150,7 +150,7 @@ enum DiscordResponseRoute {
 fn response_route_for_metadata(metadata: &DiscordMessageMetadata) -> DiscordResponseRoute {
     if !metadata.application_id.is_empty() && !metadata.token.is_empty() {
         DiscordResponseRoute::InteractionWebhook(format!(
-            "https://discord.com/api/v10/webhooks/{}/{}",
+            "https://discord.com/api/v10/webhooks/{}/{}/messages/@original",
             metadata.application_id, metadata.token
         ))
     } else {
@@ -299,9 +299,13 @@ fn build_discord_reply_plan(response: &AgentResponse) -> Result<DiscordReplyPlan
     })
 }
 
-fn send_discord_request(url: &str, request: &DiscordHttpRequest) -> Result<(), String> {
+fn send_discord_request(
+    method: &str,
+    url: &str,
+    request: &DiscordHttpRequest,
+) -> Result<(), String> {
     match channel_host::http_request(
-        "POST",
+        method,
         url,
         &request.headers_json,
         Some(&request.body),
@@ -762,6 +766,7 @@ impl Guest for DiscordChannel {
                     .map_err(|e| format!("Failed to serialize: {}", e))?;
 
                 return send_discord_request(
+                    "POST",
                     url,
                     &DiscordHttpRequest {
                         headers_json: headers,
@@ -774,15 +779,15 @@ impl Guest for DiscordChannel {
         let route = response_route_for_metadata(&metadata);
         let plan = build_discord_reply_plan(&response)?;
 
-        let url = match &route {
-            DiscordResponseRoute::InteractionWebhook(url) => url,
-            DiscordResponseRoute::ChannelMessage(url) => url,
+        let (method, url) = match &route {
+            DiscordResponseRoute::InteractionWebhook(url) => ("PATCH", url.as_str()),
+            DiscordResponseRoute::ChannelMessage(url) => ("POST", url.as_str()),
         };
 
         match plan {
-            DiscordReplyPlan::Inline(request) => send_discord_request(url, &request),
+            DiscordReplyPlan::Inline(request) => send_discord_request(method, url, &request),
             DiscordReplyPlan::Attachment { upload, fallback } => {
-                match send_discord_request(url, &upload) {
+                match send_discord_request(method, url, &upload) {
                     Ok(()) => Ok(()),
                     Err(upload_error) => {
                         channel_host::log(
@@ -792,7 +797,7 @@ impl Guest for DiscordChannel {
                                 upload_error
                             ),
                         );
-                        send_discord_request(url, &fallback).map_err(|fallback_error| {
+                        send_discord_request(method, url, &fallback).map_err(|fallback_error| {
                             format!(
                                 "Discord attachment upload failed: {}; fallback also failed: {}",
                                 upload_error, fallback_error
@@ -1134,14 +1139,13 @@ fn pairing_reply_route(ctx: &PairingReplyCtx) -> DiscordResponseRoute {
 fn send_pairing_reply(ctx: &PairingReplyCtx, code: &str) -> Result<(), String> {
     let route = pairing_reply_route(ctx);
 
-    let payload = serde_json::json!({
+    let mut payload = serde_json::json!({
         "content": format!(
             "To pair with this bot, run: `ironclaw pairing approve discord {}`",
             code
         )
     });
 
-    let mut payload = payload;
     if matches!(route, DiscordResponseRoute::InteractionWebhook(_)) {
         payload["flags"] = serde_json::json!(64);
     }
@@ -1269,15 +1273,15 @@ fn poll_channel_mentions(channel_id: &str, bot_id: &str) {
             continue;
         }
         if msg.author.bot || msg.author.id == bot_id {
-            remember_processed_id(channel_id, &msg.id, &mut processed_ids);
+            remember_processed_id(&msg.id, &mut processed_ids);
             continue;
         }
         if msg.webhook_id.is_some() {
-            remember_processed_id(channel_id, &msg.id, &mut processed_ids);
+            remember_processed_id(&msg.id, &mut processed_ids);
             continue;
         }
         if !message_mentions_bot(msg, bot_id) {
-            remember_processed_id(channel_id, &msg.id, &mut processed_ids);
+            remember_processed_id(&msg.id, &mut processed_ids);
             continue;
         }
 
@@ -1289,13 +1293,13 @@ fn poll_channel_mentions(channel_id: &str, bot_id: &str) {
             PermissionSource::Webhook,
             None,
         ) {
-            remember_processed_id(channel_id, &msg.id, &mut processed_ids);
+            remember_processed_id(&msg.id, &mut processed_ids);
             continue;
         }
 
         let content = strip_bot_mention(&msg.content, bot_id);
         if content.is_empty() {
-            remember_processed_id(channel_id, &msg.id, &mut processed_ids);
+            remember_processed_id(&msg.id, &mut processed_ids);
             continue;
         }
 
@@ -1334,7 +1338,7 @@ fn poll_channel_mentions(channel_id: &str, bot_id: &str) {
             attachments: vec![],
         });
 
-        remember_processed_id(channel_id, &msg.id, &mut processed_ids);
+        remember_processed_id(&msg.id, &mut processed_ids);
 
         if compare_message_ids(&msg.id, &new_cursor) == std::cmp::Ordering::Greater {
             new_cursor = msg.id.clone();
@@ -1367,31 +1371,65 @@ fn fetch_latest_message_id(channel_id: &str) -> Option<String> {
         .and_then(|m| m["id"].as_str().map(String::from))
 }
 
-/// Fetch messages after `last_seen` using the `after` parameter.
+/// Maximum number of pages to fetch when catching up on missed messages.
+const MENTION_POLL_MAX_PAGES: usize = 5;
+
+/// Fetch messages after `last_seen` using the `after` parameter, paginating up
+/// to [`MENTION_POLL_MAX_PAGES`] pages of 100 messages each.
 fn fetch_messages_after_cursor(
     channel_id: &str,
     last_seen: &str,
 ) -> Option<Vec<DiscordChannelMessage>> {
-    let url = format!(
-        "https://discord.com/api/v10/channels/{}/messages?after={}&limit=100",
-        channel_id, last_seen
-    );
     let headers = discord_auth_headers_json(false);
-    let resp = channel_host::http_request("GET", &url, &headers, None, None).ok()?;
+    let mut all_messages: Vec<DiscordChannelMessage> = Vec::new();
+    let mut after = last_seen.to_string();
 
-    if resp.status < 200 || resp.status >= 300 {
-        let body_str = String::from_utf8_lossy(&resp.body);
-        channel_host::log(
-            channel_host::LogLevel::Warn,
-            &format!(
-                "Mention poll: failed to fetch messages for channel {}: {} - {}",
-                channel_id, resp.status, body_str
-            ),
+    for _ in 0..MENTION_POLL_MAX_PAGES {
+        let url = format!(
+            "https://discord.com/api/v10/channels/{}/messages?after={}&limit=100",
+            channel_id, after
         );
-        return None;
+        let resp = channel_host::http_request("GET", &url, &headers, None, None).ok()?;
+
+        if resp.status < 200 || resp.status >= 300 {
+            let body_str = String::from_utf8_lossy(&resp.body);
+            channel_host::log(
+                channel_host::LogLevel::Warn,
+                &format!(
+                    "Mention poll: failed to fetch messages for channel {}: {} - {}",
+                    channel_id, resp.status, body_str
+                ),
+            );
+            return None;
+        }
+
+        let page: Vec<DiscordChannelMessage> = serde_json::from_slice(&resp.body).ok()?;
+        let page_len = page.len();
+
+        if page.is_empty() {
+            break;
+        }
+
+        // Discord returns newest-first; find the max ID for the next page cursor
+        let page_max_id = page
+            .iter()
+            .map(|m| m.id.as_str())
+            .max_by(|a, b| compare_message_ids(a, b))
+            .map(str::to_string);
+
+        all_messages.extend(page);
+
+        if page_len < 100 {
+            break;
+        }
+
+        match page_max_id {
+            Some(max_id) if max_id != after => after = max_id,
+            _ => break,
+        }
     }
 
-    serde_json::from_slice(&resp.body).ok()
+    Some(all_messages)
 }
 
 /// Compare two Discord snowflake IDs. Falls back to lexical comparison.
@@ -1417,7 +1455,7 @@ fn save_recent_processed_ids(channel_id: &str, ids: &[String]) {
     let _ = channel_host::workspace_write(&dedup_ids_path(channel_id), &json);
 }
 
-fn remember_processed_id(_channel_id: &str, msg_id: &str, ids: &mut Vec<String>) {
+fn remember_processed_id(msg_id: &str, ids: &mut Vec<String>) {
     if ids.contains(&msg_id.to_string()) {
         return;
     }
@@ -1726,7 +1764,7 @@ mod tests {
         assert_eq!(
             response_route_for_metadata(&metadata),
             DiscordResponseRoute::InteractionWebhook(
-                "https://discord.com/api/v10/webhooks/app/tok".to_string()
+                "https://discord.com/api/v10/webhooks/app/tok/messages/@original".to_string()
             )
         );
     }
@@ -2119,16 +2157,16 @@ mod tests {
         let mut ids = Vec::new();
 
         // Basic add
-        remember_processed_id("ch", "msg-1", &mut ids);
+        remember_processed_id("msg-1", &mut ids);
         assert_eq!(ids, vec!["msg-1".to_string()]);
 
         // Duplicate is ignored
-        remember_processed_id("ch", "msg-1", &mut ids);
+        remember_processed_id("msg-1", &mut ids);
         assert_eq!(ids.len(), 1);
 
         // Fill beyond DEDUP_CAP
         for i in 2..=(DEDUP_CAP + 5) {
-            remember_processed_id("ch", &format!("msg-{}", i), &mut ids);
+            remember_processed_id(&format!("msg-{}", i), &mut ids);
         }
         assert_eq!(ids.len(), DEDUP_CAP);
         // Oldest entries should have been drained

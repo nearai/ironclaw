@@ -3163,7 +3163,11 @@ fn discord_gateway_presence_status(
     use crate::tools::wasm::WorkspaceReader;
 
     let owner_key = format!("channels/{}/state/owner_id", channel_name);
-    if workspace_store.read(&owner_key).is_some() {
+    if workspace_store
+        .read(&owner_key)
+        .filter(|s| !s.is_empty())
+        .is_some()
+    {
         return "online";
     }
 
@@ -4304,6 +4308,23 @@ mod tests {
         let store = crate::channels::wasm::host::ChannelWorkspaceStore::new();
         let pairing_dir = tempdir().unwrap();
         let pairing_store = PairingStore::with_base_dir(pairing_dir.path().to_path_buf());
+
+        assert_eq!(
+            discord_gateway_presence_status("discord", &store, &pairing_store),
+            "dnd"
+        );
+    }
+
+    #[test]
+    fn test_discord_gateway_presence_empty_owner_id_is_dnd() {
+        let store = crate::channels::wasm::host::ChannelWorkspaceStore::new();
+        let pairing_dir = tempdir().unwrap();
+        let pairing_store = PairingStore::with_base_dir(pairing_dir.path().to_path_buf());
+        // Simulate on_start writing empty string when no owner_id is configured
+        store.commit_writes(&[PendingWorkspaceWrite {
+            path: "channels/discord/state/owner_id".to_string(),
+            content: String::new(),
+        }]);
 
         assert_eq!(
             discord_gateway_presence_status("discord", &store, &pairing_store),
