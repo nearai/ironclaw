@@ -444,6 +444,115 @@ async def hosted_oauth_refresh_server(
 
 
 @pytest.fixture(scope="session")
+async def extension_cleanup_server(
+    ironclaw_binary,
+    mock_llm_server,
+):
+    """Start an isolated ironclaw instance for uninstall secret cleanup E2E tests."""
+    reserved = _reserve_loopback_sockets(2)
+    db_tmpdir = tempfile.TemporaryDirectory(prefix="ironclaw-e2e-cleanup-db-")
+    home_tmpdir = tempfile.TemporaryDirectory(prefix="ironclaw-e2e-cleanup-home-")
+    tools_tmpdir = tempfile.TemporaryDirectory(prefix="ironclaw-e2e-cleanup-tools-")
+    channels_tmpdir = tempfile.TemporaryDirectory(prefix="ironclaw-e2e-cleanup-channels-")
+
+    try:
+        gateway_port = reserved[0].getsockname()[1]
+        http_port = reserved[1].getsockname()[1]
+        for sock in reserved:
+            if sock.fileno() != -1:
+                sock.close()
+
+        db_path = os.path.join(db_tmpdir.name, "extension-cleanup.db")
+        home_dir = home_tmpdir.name
+        env = {
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "HOME": home_dir,
+            "IRONCLAW_BASE_DIR": os.path.join(home_dir, ".ironclaw"),
+            "RUST_LOG": "ironclaw=info",
+            "RUST_BACKTRACE": "1",
+            "IRONCLAW_OWNER_ID": OWNER_SCOPE_ID,
+            "GATEWAY_ENABLED": "true",
+            "GATEWAY_HOST": "127.0.0.1",
+            "GATEWAY_PORT": str(gateway_port),
+            "GATEWAY_AUTH_TOKEN": AUTH_TOKEN,
+            "GATEWAY_USER_ID": OWNER_SCOPE_ID,
+            "HTTP_HOST": "127.0.0.1",
+            "HTTP_PORT": str(http_port),
+            "HTTP_WEBHOOK_SECRET": HTTP_WEBHOOK_SECRET,
+            "CLI_ENABLED": "false",
+            "LLM_BACKEND": "openai_compatible",
+            "LLM_BASE_URL": mock_llm_server,
+            "LLM_MODEL": "mock-model",
+            "DATABASE_BACKEND": "libsql",
+            "LIBSQL_PATH": db_path,
+            "SECRETS_MASTER_KEY": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "SANDBOX_ENABLED": "false",
+            "SKILLS_ENABLED": "true",
+            "ROUTINES_ENABLED": "true",
+            "HEARTBEAT_ENABLED": "false",
+            "EMBEDDING_ENABLED": "false",
+            "WASM_ENABLED": "true",
+            "WASM_TOOLS_DIR": tools_tmpdir.name,
+            "WASM_CHANNELS_DIR": channels_tmpdir.name,
+            "ONBOARD_COMPLETED": "true",
+            "IRONCLAW_OAUTH_CALLBACK_URL": "https://oauth.test.example/oauth/callback",
+            "IRONCLAW_OAUTH_EXCHANGE_URL": mock_llm_server,
+            "GOOGLE_OAUTH_CLIENT_ID": "hosted-google-client-id",
+        }
+        _forward_coverage_env(env)
+
+        proc = await asyncio.create_subprocess_exec(
+            ironclaw_binary, "--no-onboard",
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )
+        startup_kill_attempted = False
+        base_url = f"http://127.0.0.1:{gateway_port}"
+        try:
+            await wait_for_ready(f"{base_url}/api/health", timeout=60)
+            yield {
+                "base_url": base_url,
+                "db_path": db_path,
+                "gateway_user_id": OWNER_SCOPE_ID,
+                "mock_llm_url": mock_llm_server,
+            }
+        except TimeoutError:
+            if proc.returncode is None:
+                startup_kill_attempted = True
+                await _stop_process(proc, timeout=2)
+            returncode = proc.returncode
+            stderr_bytes = b""
+            if proc.stderr:
+                try:
+                    stderr_bytes = await asyncio.wait_for(proc.stderr.read(8192), timeout=2)
+                except asyncio.TimeoutError:
+                    pass
+            stderr_text = stderr_bytes.decode("utf-8", errors="replace")
+            pytest.fail(
+                f"extension cleanup server failed to start on port {gateway_port} "
+                f"(returncode={returncode}).\nstderr:\n{stderr_text}"
+            )
+        finally:
+            if proc.returncode is None:
+                if startup_kill_attempted:
+                    await _stop_process(proc, timeout=2)
+                else:
+                    await _stop_process(proc, sig=signal.SIGINT, timeout=10)
+                    if proc.returncode is None:
+                        await _stop_process(proc, timeout=2)
+    finally:
+        for sock in reserved:
+            if sock.fileno() != -1:
+                sock.close()
+        db_tmpdir.cleanup()
+        home_tmpdir.cleanup()
+        tools_tmpdir.cleanup()
+        channels_tmpdir.cleanup()
+
+
+@pytest.fixture(scope="session")
 async def http_channel_server(ironclaw_server, server_ports):
     """HTTP webhook channel base URL."""
     base_url = f"http://127.0.0.1:{server_ports['http']}"
