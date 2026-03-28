@@ -314,7 +314,9 @@ impl ConversationStore for LibSqlBackend {
             .await
             .map_err(|e| DatabaseError::Query(e.to_string()))?
         {
-            let id_str: String = row.get(0).unwrap_or_default();
+            let id_str: String = row.get(0).map_err(|e| {
+                DatabaseError::Query(format!("Failed to read conversation id: {e}"))
+            })?;
             let id = id_str
                 .parse()
                 .map_err(|_| DatabaseError::Serialization("Invalid UUID".to_string()))?;

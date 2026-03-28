@@ -1072,15 +1072,23 @@ pub async fn refresh_access_token(
 
     // Get the refresh token (try current name, fall back to legacy name for
     // users who authenticated before the naming convention was fixed).
+    // Only fall back on NotFound/Expired — propagate real errors (DB, decryption).
     let refresh_token = match secrets
         .get_decrypted(user_id, &server_config.refresh_token_secret_name())
         .await
     {
         Ok(token) => token,
-        Err(_) => secrets
-            .get_decrypted(user_id, &server_config.legacy_refresh_token_secret_name())
-            .await
-            .map_err(|e| AuthError::RefreshFailed(format!("No refresh token: {}", e)))?,
+        Err(crate::secrets::SecretError::NotFound(_) | crate::secrets::SecretError::Expired) => {
+            secrets
+                .get_decrypted(user_id, &server_config.legacy_refresh_token_secret_name())
+                .await
+                .map_err(|e| AuthError::RefreshFailed(format!("No refresh token: {}", e)))?
+        }
+        Err(e) => {
+            return Err(AuthError::RefreshFailed(format!(
+                "Failed to read refresh token: {e}"
+            )));
+        }
     };
 
     // Discover the token endpoint

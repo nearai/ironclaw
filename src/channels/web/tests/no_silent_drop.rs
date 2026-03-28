@@ -10,15 +10,16 @@ use crate::config::GatewayConfig;
 use crate::error::ChannelError;
 
 fn test_gateway() -> GatewayChannel {
-    GatewayChannel::new(GatewayConfig {
-        host: "127.0.0.1".to_string(),
-        port: 0,
-        auth_token: Some("test-token".to_string()),
-        user_id: "test-user".to_string(),
-        workspace_read_scopes: vec![],
-        memory_layers: vec![],
-        user_tokens: None,
-    })
+    GatewayChannel::new(
+        GatewayConfig {
+            host: "127.0.0.1".to_string(),
+            port: 0,
+            auth_token: Some("test-token".to_string()),
+            workspace_read_scopes: vec![],
+            memory_layers: vec![],
+        },
+        "test-user".to_string(),
+    )
 }
 
 #[tokio::test]

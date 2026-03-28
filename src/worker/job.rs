@@ -1410,7 +1410,7 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
     async fn handle_text_response(
         &self,
         text: &str,
-        _reason_ctx: &mut ReasoningContext,
+        reason_ctx: &mut ReasoningContext,
     ) -> TextAction {
         // Empty text after a substantive response means the LLM has finished.
         // Treat as successful completion rather than continuing the loop (which
@@ -2195,6 +2195,7 @@ mod tests {
             worker: &worker,
             rx: tokio::sync::Mutex::new(&mut rx),
             consecutive_rate_limits: std::sync::atomic::AtomicUsize::new(0),
+            has_text_response: std::sync::atomic::AtomicBool::new(false),
         };
 
         let mut reason_ctx = ReasoningContext::new();
