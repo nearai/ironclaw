@@ -252,8 +252,7 @@ strip = true          # Remove debug symbols from release binaries
 # The profile that 'cargo dist' will build with
 [profile.dist]
 inherits = "release"
-lto = "thin"          # Thin LTO (fast build, nearly equivalent codegen)
-codegen-units = 16    # Parallel codegen units for faster compilation
+lto = "thin"
 
 # Config for 'dist'
 [workspace.metadata.dist]

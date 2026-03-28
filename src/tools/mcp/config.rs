@@ -257,6 +257,15 @@ impl McpServerConfig {
         format!("{}_refresh_token", self.token_secret_name())
     }
 
+    /// Legacy secret name for refresh tokens (pre-v0.22).
+    ///
+    /// Earlier versions stored refresh tokens as `mcp_{name}_refresh_token`
+    /// instead of `{token_secret_name}_refresh_token`. Used as a fallback
+    /// during lookup to avoid forcing re-auth on existing users.
+    pub fn legacy_refresh_token_secret_name(&self) -> String {
+        format!("mcp_{}_refresh_token", self.name)
+    }
+
     /// Get the secret name used to store the DCR client ID.
     pub fn client_id_secret_name(&self) -> String {
         format!("mcp_{}_client_id", self.name)
@@ -758,6 +767,11 @@ mod tests {
         assert_eq!(
             config.refresh_token_secret_name(),
             "mcp_notion_access_token_refresh_token"
+        );
+        // Legacy name used before v0.22 — fallback lookup prevents forced re-auth
+        assert_eq!(
+            config.legacy_refresh_token_secret_name(),
+            "mcp_notion_refresh_token"
         );
     }
 

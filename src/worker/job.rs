@@ -928,6 +928,7 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
         }
 
         // Plan completed — ask the LLM whether the job is done.
+        let msg_count_before = reason_ctx.messages.len();
         reason_ctx.messages.push(ChatMessage::user(
             "All planned actions have been executed. Assess the results: \
              if the job is fully complete, state that the job is complete. \
@@ -945,7 +946,7 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
             // continuation prompt. Leaving the "Is the job complete?" / "No"
             // dialogue in context causes the agentic loop to repeat the same
             // analysis instead of calling tools (self-dialogue loop).
-            reason_ctx.messages.pop(); // remove "All planned actions…"
+            reason_ctx.messages.truncate(msg_count_before);
             reason_ctx.messages.push(ChatMessage::user(format!(
                 "The planned actions are done but the job is not yet complete. \
                  Remaining work:\n\n{response}\n\n\

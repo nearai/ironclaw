@@ -1070,11 +1070,18 @@ pub async fn refresh_access_token(
     // Get client_id (from config or stored DCR)
     let client_id = get_client_id(server_config, secrets, user_id).await?;
 
-    // Get the refresh token
-    let refresh_token = secrets
+    // Get the refresh token (try current name, fall back to legacy name for
+    // users who authenticated before the naming convention was fixed).
+    let refresh_token = match secrets
         .get_decrypted(user_id, &server_config.refresh_token_secret_name())
         .await
-        .map_err(|e| AuthError::RefreshFailed(format!("No refresh token: {}", e)))?;
+    {
+        Ok(token) => token,
+        Err(_) => secrets
+            .get_decrypted(user_id, &server_config.legacy_refresh_token_secret_name())
+            .await
+            .map_err(|e| AuthError::RefreshFailed(format!("No refresh token: {}", e)))?,
+    };
 
     // Discover the token endpoint
     let token_url = if let Some(ref oauth) = server_config.oauth {

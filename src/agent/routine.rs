@@ -265,6 +265,11 @@ fn default_max_tokens() -> u32 {
     4096
 }
 
+/// Default max agentic loop iterations for full_job routines.
+///
+/// Raised from 10 to 25 to accommodate multi-step tool chains that
+/// stalled at the old cap. Worst-case LLM cost is 2.5x higher per run;
+/// callers needing tighter budgets should set `max_iterations` explicitly.
 fn default_max_iterations() -> u32 {
     25
 }
