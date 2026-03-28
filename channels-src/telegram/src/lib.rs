@@ -1292,6 +1292,77 @@ fn send_document(
 /// Image MIME types that Telegram's sendPhoto API supports.
 const PHOTO_MIME_TYPES: &[&str] = &["image/jpeg", "image/png", "image/gif", "image/webp"];
 
+/// Audio MIME types that Telegram's sendVoice API supports (ogg/opus container).
+const VOICE_MIME_TYPES: &[&str] = &["audio/ogg", "audio/opus"];
+
+/// Send a voice note via the Telegram Bot API (multipart upload).
+///
+/// Telegram's `sendVoice` requires ogg/opus audio and displays it as an
+/// in-chat voice note with waveform and playback controls.
+fn send_voice(
+    chat_id: i64,
+    filename: &str,
+    mime_type: &str,
+    data: &[u8],
+    reply_to_message_id: Option<i64>,
+    message_thread_id: Option<i64>,
+) -> Result<(), String> {
+    let message_thread_id = normalize_thread_id(message_thread_id);
+
+    let boundary = format!("ironclaw-{}", channel_host::now_millis());
+    let mut body = Vec::new();
+
+    write_multipart_field(&mut body, &boundary, "chat_id", &chat_id.to_string());
+    if let Some(msg_id) = reply_to_message_id {
+        write_multipart_field(
+            &mut body,
+            &boundary,
+            "reply_to_message_id",
+            &msg_id.to_string(),
+        );
+    }
+    if let Some(thread_id) = message_thread_id {
+        write_multipart_field(
+            &mut body,
+            &boundary,
+            "message_thread_id",
+            &thread_id.to_string(),
+        );
+    }
+    write_multipart_file(&mut body, &boundary, "voice", filename, mime_type, data);
+    body.extend_from_slice(format!("--{}--\r\n", boundary).as_bytes());
+
+    let headers = serde_json::json!({
+        "Content-Type": format!("multipart/form-data; boundary={}", boundary)
+    });
+
+    let result = channel_host::http_request(
+        "POST",
+        "https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendVoice",
+        &headers.to_string(),
+        Some(&body),
+        Some(60_000), // 60s timeout for file uploads
+    );
+
+    match result {
+        Ok(resp) if resp.status == 200 => {
+            channel_host::log(
+                channel_host::LogLevel::Debug,
+                &format!("Sent voice note '{}' to chat {}", filename, chat_id),
+            );
+            Ok(())
+        }
+        Ok(resp) => {
+            let body_str = String::from_utf8_lossy(&resp.body);
+            Err(format!(
+                "sendVoice failed (HTTP {}): {}",
+                resp.status, body_str
+            ))
+        }
+        Err(e) => Err(format!("sendVoice HTTP request failed: {}", e)),
+    }
+}
+
 /// Send a full agent response (attachments + text) to a chat.
 ///
 /// Shared implementation for both `on_respond` and `on_broadcast`.
@@ -1371,7 +1442,7 @@ fn send_response(
     Ok(())
 }
 
-/// Send a single attachment, choosing sendPhoto or sendDocument based on MIME type.
+/// Send a single attachment, choosing sendPhoto, sendVoice, or sendDocument based on MIME type.
 fn send_attachment(
     chat_id: i64,
     attachment: &Attachment,
@@ -1380,6 +1451,15 @@ fn send_attachment(
 ) -> Result<(), String> {
     if PHOTO_MIME_TYPES.contains(&attachment.mime_type.as_str()) {
         send_photo(
+            chat_id,
+            &attachment.filename,
+            &attachment.mime_type,
+            &attachment.data,
+            reply_to_message_id,
+            message_thread_id,
+        )
+    } else if VOICE_MIME_TYPES.contains(&attachment.mime_type.as_str()) {
+        send_voice(
             chat_id,
             &attachment.filename,
             &attachment.mime_type,
