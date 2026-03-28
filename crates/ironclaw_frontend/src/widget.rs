@@ -49,6 +49,9 @@ pub enum WidgetSlot {
     StatusRight,
     /// Additional section in the Settings tab.
     SettingsSection,
+    /// Custom inline renderer for structured data in chat messages.
+    /// Registered via `IronClaw.registerChatRenderer()` on the browser side.
+    ChatRenderer,
 }
 
 /// Prefix every CSS selector with `[data-widget="{widget_id}"]` for style isolation.

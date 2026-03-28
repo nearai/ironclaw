@@ -1241,6 +1241,128 @@ function sanitizeRenderedHtml(html) {
   return '';
 }
 
+// ==================== Structured Data Rendering ====================
+//
+// Detects JSON objects and key-value data in assistant messages and
+// renders them as styled cards instead of raw text. Also supports
+// extensible chat renderers via IronClaw.registerChatRenderer().
+
+/**
+ * Post-process a .message-content element to upgrade structured data into cards.
+ * Runs registered chat renderers first, then falls back to built-in JSON detection.
+ */
+function upgradeStructuredData(contentEl) {
+  // 1. Run registered chat renderers
+  var renderers = (window.IronClaw && IronClaw._chatRenderers) || [];
+  for (var i = 0; i < renderers.length; i++) {
+    try {
+      if (renderers[i].match(contentEl.textContent, contentEl)) {
+        renderers[i].render(contentEl, contentEl.textContent);
+        return; // First matching renderer wins
+      }
+    } catch (e) {
+      console.error('[IronClaw] Chat renderer "' + renderers[i].id + '" failed:', e);
+    }
+  }
+
+  // 2. Built-in: detect and upgrade inline JSON objects
+  upgradeInlineJson(contentEl);
+}
+
+/**
+ * Find JSON-like objects in text nodes and replace them with styled cards.
+ */
+function upgradeInlineJson(contentEl) {
+  // Walk text content looking for JSON objects: {...} patterns
+  // Only process <p> and top-level text, not code blocks
+  var paragraphs = contentEl.querySelectorAll('p');
+  if (paragraphs.length === 0) {
+    // No <p> tags — markdown might have produced bare text
+    paragraphs = [contentEl];
+  }
+
+  paragraphs.forEach(function(p) {
+    // Skip code blocks
+    if (p.closest('pre') || p.closest('code')) return;
+
+    var html = p.innerHTML;
+    // Match JSON-like objects: {...} (including Python-style single quotes)
+    var jsonRegex = /(\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\})/g;
+    var match;
+    var replaced = false;
+
+    while ((match = jsonRegex.exec(html)) !== null) {
+      var raw = match[1];
+      // Normalize Python-style single quotes to double quotes for parsing
+      var normalized = raw.replace(/'/g, '"');
+      try {
+        var obj = JSON.parse(normalized);
+        if (typeof obj === 'object' && obj !== null && !Array.isArray(obj)) {
+          var card = buildDataCard(obj);
+          html = html.substring(0, match.index) + card + html.substring(match.index + match[0].length);
+          replaced = true;
+          // Reset regex since we modified the string
+          jsonRegex.lastIndex = match.index + card.length;
+        }
+      } catch (e) {
+        // Not valid JSON — leave as text
+      }
+    }
+
+    if (replaced) {
+      p.innerHTML = html;
+    }
+  });
+}
+
+/**
+ * Build an HTML data card from a plain object.
+ */
+function buildDataCard(obj) {
+  var keys = Object.keys(obj);
+  if (keys.length === 0) return '';
+
+  var rows = '';
+  for (var i = 0; i < keys.length; i++) {
+    var key = keys[i];
+    var value = obj[key];
+    var displayKey = key.replace(/_/g, ' ');
+    var valueClass = 'data-card-value';
+    var valueHtml;
+
+    // Special rendering for known value types
+    if (key === 'status' || key === 'state') {
+      var badgeClass = 'status-badge';
+      var sv = String(value).toLowerCase();
+      if (sv === 'created' || sv === 'active' || sv === 'success' || sv === 'completed' || sv === 'ok' || sv === 'running') {
+        badgeClass += ' status-success';
+      } else if (sv === 'failed' || sv === 'error' || sv === 'cancelled' || sv === 'rejected') {
+        badgeClass += ' status-error';
+      } else if (sv === 'pending' || sv === 'waiting' || sv === 'queued') {
+        badgeClass += ' status-pending';
+      }
+      valueHtml = '<span class="' + badgeClass + '">' + escapeHtml(String(value)) + '</span>';
+    } else if (typeof value === 'object' && value !== null) {
+      valueHtml = '<code>' + escapeHtml(JSON.stringify(value)) + '</code>';
+    } else {
+      // Check if value looks like a UUID or ID
+      var strVal = String(value);
+      if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(strVal)) {
+        valueHtml = '<code class="data-card-id">' + escapeHtml(strVal) + '</code>';
+      } else {
+        valueHtml = '<span>' + escapeHtml(strVal) + '</span>';
+      }
+    }
+
+    rows += '<div class="data-card-row">' +
+      '<span class="data-card-label">' + escapeHtml(displayKey) + '</span>' +
+      '<span class="' + valueClass + '">' + valueHtml + '</span>' +
+      '</div>';
+  }
+
+  return '<div class="data-card">' + rows + '</div>';
+}
+
 function copyCodeBlock(btn) {
   const pre = btn.parentElement;
   const code = pre.querySelector('code');
@@ -2248,6 +2370,8 @@ function createMessageElement(role, content) {
   } else {
     div.setAttribute('data-raw', content);
     contentEl.innerHTML = renderMarkdown(content);
+    // Upgrade structured data (JSON objects, etc.) into styled cards
+    upgradeStructuredData(contentEl);
     // Syntax highlighting for code blocks
     if (typeof hljs !== 'undefined') {
       requestAnimationFrame(() => {
@@ -7695,6 +7819,7 @@ document.getElementById('provider-id').addEventListener('input', (e) => {
 window.IronClaw = window.IronClaw || {};
 IronClaw.widgets = new Map();
 IronClaw._widgetInitQueue = [];
+IronClaw._chatRenderers = [];
 
 /**
  * Register a widget component.
@@ -7718,6 +7843,30 @@ IronClaw.registerWidget = function(def) {
   if (def.slot === 'tab') {
     _addWidgetTab(def);
   }
+};
+
+/**
+ * Register a chat renderer for custom inline rendering of structured data.
+ *
+ * Chat renderers run against each assistant message. The first renderer
+ * whose `match()` returns true gets to transform the content.
+ *
+ * @param {Object} def - Renderer definition
+ * @param {string} def.id - Unique identifier
+ * @param {Function} def.match - (textContent, element) => boolean
+ * @param {Function} def.render - (element, textContent) => void (mutate element in place)
+ * @param {number} [def.priority=0] - Higher priority runs first
+ */
+IronClaw.registerChatRenderer = function(def) {
+  if (!def.id || !def.match || !def.render) {
+    console.error('[IronClaw] Chat renderer requires id, match, and render:', def);
+    return;
+  }
+  IronClaw._chatRenderers.push(def);
+  // Sort by priority (higher first)
+  IronClaw._chatRenderers.sort(function(a, b) {
+    return (b.priority || 0) - (a.priority || 0);
+  });
 };
 
 /**
