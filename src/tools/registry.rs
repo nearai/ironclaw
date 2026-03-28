@@ -751,18 +751,25 @@ impl ToolRegistry {
     ) {
         self.register_sync(Arc::new(SkillListTool::new(Arc::clone(&registry))));
         self.register_sync(Arc::new(SkillRemoveTool::new(Arc::clone(&registry))));
+        self.register_sync(Arc::new(SkillInstallTool::new(
+            Arc::clone(&registry),
+            catalog.clone(),
+        )));
+
+        // Base tools: list, remove, install
+        let mut count = 3;
 
         if let Some(ref catalog) = catalog {
             self.register_sync(Arc::new(SkillSearchTool::new(
-                Arc::clone(&registry),
+                registry,
                 Arc::clone(catalog),
             )));
+            count += 1;
         }
 
-        self.register_sync(Arc::new(SkillInstallTool::new(registry, catalog.clone())));
-
         tracing::debug!(
-            "Registered skill management tools (clawhub={})",
+            "Registered {} skill management tools (clawhub={})",
+            count,
             catalog.is_some()
         );
     }
@@ -1753,7 +1760,7 @@ mod tests {
     async fn test_register_skill_tools_without_catalog() {
         let dir = tempfile::tempdir().unwrap();
         let registry = ToolRegistry::new();
-        let sr = Arc::new(std::sync::RwLock::new(crate::skills::SkillRegistry::new(
+        let sr = Arc::new(std::sync::RwLock::new(ironclaw_skills::SkillRegistry::new(
             dir.path().to_path_buf(),
         )));
         registry.register_skill_tools(sr, None);
