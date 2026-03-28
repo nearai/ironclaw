@@ -331,6 +331,92 @@ pub(crate) fn validate_base_url(url: &str, field_name: &str) -> Result<(), Confi
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// DB-first resolution helpers (DB > env > default)
+// ---------------------------------------------------------------------------
+
+/// Log a warning when a DB/TOML setting shadows a set env var.
+fn warn_if_db_shadows_env(env_key: &str, db_value: &dyn std::fmt::Display) {
+    if let Ok(env_val) = std::env::var(env_key)
+        && !env_val.is_empty()
+    {
+        tracing::warn!(
+            db_value = %db_value,
+            env_value = %env_val,
+            "{env_key} env var is set but DB/TOML setting takes priority. \
+             Remove the setting from the DB to use the env var."
+        );
+    }
+}
+
+/// Resolve with DB > env > default priority for concrete settings fields.
+///
+/// If `settings_val != default_val`, the settings value wins (it was explicitly
+/// set in DB or TOML). Otherwise falls back to `optional_env(env_key)`, then
+/// `default_val`.
+pub(crate) fn db_first_or_default<T>(
+    settings_val: &T,
+    default_val: &T,
+    env_key: &str,
+) -> Result<T, ConfigError>
+where
+    T: std::str::FromStr + Clone + PartialEq + std::fmt::Display,
+    T::Err: std::fmt::Display,
+{
+    if settings_val != default_val {
+        warn_if_db_shadows_env(env_key, settings_val);
+        return Ok(settings_val.clone());
+    }
+    parse_optional_env(env_key, default_val.clone())
+}
+
+/// Resolve a bool with DB > env > default priority.
+pub(crate) fn db_first_bool(
+    settings_val: bool,
+    default_val: bool,
+    env_key: &str,
+) -> Result<bool, ConfigError> {
+    if settings_val != default_val {
+        warn_if_db_shadows_env(env_key, &settings_val);
+        return Ok(settings_val);
+    }
+    parse_bool_env(env_key, default_val)
+}
+
+/// Resolve an `Option<String>` with DB > env priority (no hardcoded default).
+///
+/// Non-empty `Some` means DB set it; `None` or empty falls back to env.
+pub(crate) fn db_first_optional_string(
+    settings_val: &Option<String>,
+    env_key: &str,
+) -> Result<Option<String>, ConfigError> {
+    if let Some(val) = settings_val
+        && !val.is_empty()
+    {
+        warn_if_db_shadows_env(env_key, val);
+        return Ok(Some(val.clone()));
+    }
+    optional_env(env_key)
+}
+
+/// Resolve an `Option<T>` with DB > env priority (no hardcoded default).
+///
+/// `Some(v)` means DB set it; `None` falls back to env.
+pub(crate) fn db_first_option<T>(
+    settings_val: &Option<T>,
+    env_key: &str,
+) -> Result<Option<T>, ConfigError>
+where
+    T: std::str::FromStr + Clone + std::fmt::Display,
+    T::Err: std::fmt::Display,
+{
+    if let Some(val) = settings_val {
+        warn_if_db_shadows_env(env_key, val);
+        return Ok(Some(val.clone()));
+    }
+    parse_option_env(env_key)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -518,5 +604,145 @@ mod tests {
             err.contains("failed to resolve"),
             "Expected DNS resolution failure, got: {err}"
         );
+    }
+
+    // --- db_first_* helper tests ---
+
+    #[test]
+    fn db_first_or_default_prefers_settings_over_env() {
+        let _guard = lock_env();
+        let key = "IRONCLAW_TEST_DB_FIRST_1";
+        // SAFETY: under ENV_MUTEX
+        unsafe { std::env::set_var(key, "from-env") };
+
+        let result: String =
+            db_first_or_default(&"from-db".to_string(), &"default".to_string(), key)
+                .expect("should resolve");
+        assert_eq!(result, "from-db", "DB value should win over env");
+
+        unsafe { std::env::remove_var(key) };
+    }
+
+    #[test]
+    fn db_first_or_default_falls_back_to_env() {
+        let _guard = lock_env();
+        let key = "IRONCLAW_TEST_DB_FIRST_2";
+        unsafe { std::env::set_var(key, "from-env") };
+
+        // settings_val == default_val → treated as "unset"
+        let result: String =
+            db_first_or_default(&"default".to_string(), &"default".to_string(), key)
+                .expect("should resolve");
+        assert_eq!(
+            result, "from-env",
+            "env should win when settings at default"
+        );
+
+        unsafe { std::env::remove_var(key) };
+    }
+
+    #[test]
+    fn db_first_or_default_uses_default_when_neither_set() {
+        let _guard = lock_env();
+        let key = "IRONCLAW_TEST_DB_FIRST_3";
+        unsafe { std::env::remove_var(key) };
+
+        let result: String =
+            db_first_or_default(&"default".to_string(), &"default".to_string(), key)
+                .expect("should resolve");
+        assert_eq!(result, "default");
+    }
+
+    #[test]
+    fn db_first_bool_prefers_settings() {
+        let _guard = lock_env();
+        let key = "IRONCLAW_TEST_DB_FIRST_BOOL_1";
+        unsafe { std::env::set_var(key, "false") };
+
+        let result = db_first_bool(true, false, key).expect("should resolve");
+        assert!(result, "DB true should win over env false");
+
+        unsafe { std::env::remove_var(key) };
+    }
+
+    #[test]
+    fn db_first_bool_falls_back_to_env() {
+        let _guard = lock_env();
+        let key = "IRONCLAW_TEST_DB_FIRST_BOOL_2";
+        unsafe { std::env::set_var(key, "true") };
+
+        // settings == default → falls back to env
+        let result = db_first_bool(false, false, key).expect("should resolve");
+        assert!(result, "env should win when settings at default");
+
+        unsafe { std::env::remove_var(key) };
+    }
+
+    #[test]
+    fn db_first_optional_string_prefers_settings() {
+        let _guard = lock_env();
+        let key = "IRONCLAW_TEST_DB_FIRST_OPT_1";
+        unsafe { std::env::set_var(key, "from-env") };
+
+        let val = Some("from-db".to_string());
+        let result = db_first_optional_string(&val, key).expect("should resolve");
+        assert_eq!(result, Some("from-db".to_string()));
+
+        unsafe { std::env::remove_var(key) };
+    }
+
+    #[test]
+    fn db_first_optional_string_falls_back_to_env() {
+        let _guard = lock_env();
+        let key = "IRONCLAW_TEST_DB_FIRST_OPT_2";
+        unsafe { std::env::set_var(key, "from-env") };
+
+        let result = db_first_optional_string(&None, key).expect("should resolve");
+        assert_eq!(result, Some("from-env".to_string()));
+
+        unsafe { std::env::remove_var(key) };
+    }
+
+    #[test]
+    fn db_first_optional_string_empty_treated_as_unset() {
+        let _guard = lock_env();
+        let key = "IRONCLAW_TEST_DB_FIRST_OPT_3";
+        unsafe { std::env::set_var(key, "from-env") };
+
+        let val = Some(String::new());
+        let result = db_first_optional_string(&val, key).expect("should resolve");
+        assert_eq!(
+            result,
+            Some("from-env".to_string()),
+            "empty string should be treated as unset"
+        );
+
+        unsafe { std::env::remove_var(key) };
+    }
+
+    #[test]
+    fn db_first_option_prefers_settings() {
+        let _guard = lock_env();
+        let key = "IRONCLAW_TEST_DB_FIRST_OPT_T_1";
+        unsafe { std::env::set_var(key, "99") };
+
+        let val: Option<u64> = Some(42);
+        let result = db_first_option(&val, key).expect("should resolve");
+        assert_eq!(result, Some(42));
+
+        unsafe { std::env::remove_var(key) };
+    }
+
+    #[test]
+    fn db_first_option_falls_back_to_env() {
+        let _guard = lock_env();
+        let key = "IRONCLAW_TEST_DB_FIRST_OPT_T_2";
+        unsafe { std::env::set_var(key, "99") };
+
+        let val: Option<u64> = None;
+        let result = db_first_option(&val, key).expect("should resolve");
+        assert_eq!(result, Some(99));
+
+        unsafe { std::env::remove_var(key) };
     }
 }
