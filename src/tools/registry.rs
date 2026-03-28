@@ -479,18 +479,25 @@ impl ToolRegistry {
     ) {
         self.register_sync(Arc::new(SkillListTool::new(Arc::clone(&registry))));
         self.register_sync(Arc::new(SkillRemoveTool::new(Arc::clone(&registry))));
+        self.register_sync(Arc::new(SkillInstallTool::new(
+            Arc::clone(&registry),
+            catalog.clone(),
+        )));
+
+        // Base tools: list, remove, install
+        let mut count = 3;
 
         if let Some(ref catalog) = catalog {
             self.register_sync(Arc::new(SkillSearchTool::new(
-                Arc::clone(&registry),
+                registry,
                 Arc::clone(catalog),
             )));
+            count += 1;
         }
 
-        self.register_sync(Arc::new(SkillInstallTool::new(registry, catalog.clone())));
-
         tracing::debug!(
-            "Registered skill management tools (clawhub={})",
+            "Registered {} skill management tools (clawhub={})",
+            count,
             catalog.is_some()
         );
     }
