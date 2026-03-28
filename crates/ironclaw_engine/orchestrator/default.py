@@ -266,6 +266,9 @@ def run_loop(context, goal, actions, state, config):
             if active_skills:
                 skill_text = format_skills(active_skills)
                 __add_message__("system_append", skill_text)
+                # Emit skill activation event for CLI/gateway display
+                skill_names = ",".join(s.get("metadata", {}).get("name", "?") for s in active_skills)
+                __emit_event__("skill_activated", skill_names=skill_names)
                 # Store active skill IDs in state for tracking
                 state["active_skill_ids"] = [s.get("doc_id", "") for s in active_skills]
                 state["skill_snippet_names"] = []

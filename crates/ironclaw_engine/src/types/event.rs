@@ -132,6 +132,11 @@ pub enum EventKind {
         error: String,
     },
 
+    // ── Skill activation ───────────────────────────────────────
+    SkillActivated {
+        skill_names: Vec<String>,
+    },
+
     // ── Orchestrator versioning ───────────────────────────────
     OrchestratorRollback {
         from_version: u64,

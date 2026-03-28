@@ -515,6 +515,10 @@ impl Channel for GatewayChannel {
                 cost_usd,
                 thread_id,
             },
+            StatusUpdate::SkillActivated { skill_names } => AppEvent::SkillActivated {
+                skill_names,
+                thread_id,
+            },
         };
 
         // Scope events to the user when user_id is available in metadata.

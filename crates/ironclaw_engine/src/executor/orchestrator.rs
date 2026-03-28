@@ -375,14 +375,10 @@ pub async fn execute_orchestrator(
                     "__get_actions__" => handle_get_actions(thread, effects, leases).await,
 
                     // __list_skills__(max_candidates, max_tokens)
-                    "__list_skills__" => {
-                        handle_list_skills(args, thread, store).await
-                    }
+                    "__list_skills__" => handle_list_skills(args, thread, store).await,
 
                     // __record_skill_usage__(doc_id, success)
-                    "__record_skill_usage__" => {
-                        handle_record_skill_usage(args, store).await
-                    }
+                    "__record_skill_usage__" => handle_record_skill_usage(args, store).await,
 
                     // Unknown — let Monty resolve it (user-defined functions, builtins)
                     other => ExtFunctionResult::NotFound(other.to_string()),
@@ -702,7 +698,11 @@ async fn handle_execute_action(
         }
         thread.events.push(event);
         thread.updated_at = chrono::Utc::now();
-        thread.add_message(ThreadMessage::action_result(call_id, action_name, output.to_string()));
+        thread.add_message(ThreadMessage::action_result(
+            call_id,
+            action_name,
+            output.to_string(),
+        ));
     };
 
     // 1. Find lease for this action
@@ -898,6 +898,15 @@ fn handle_emit_event(
                 call_id,
                 error,
             }
+        }
+        "skill_activated" => {
+            let names_str = extract_string_kwarg(kwargs, "skill_names").unwrap_or_default();
+            let skill_names: Vec<String> = names_str
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            EventKind::SkillActivated { skill_names }
         }
         _ => {
             debug!(kind = %kind_str, "orchestrator: unknown event kind, skipping");

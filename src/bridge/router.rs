@@ -289,7 +289,10 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
     }
 
     // Create mission manager and start cron ticker
-    let mission_manager = Arc::new(MissionManager::new(store_dyn.clone(), Arc::clone(&thread_manager)));
+    let mission_manager = Arc::new(MissionManager::new(
+        store_dyn.clone(),
+        Arc::clone(&thread_manager),
+    ));
     if let Err(e) = thread_manager.recover_project_threads(project_id).await {
         debug!("engine v2: recover_project_threads failed: {e}");
     }
@@ -309,10 +312,7 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
     mission_manager.start_event_listener(agent.deps.owner_id.clone());
 
     // Ensure all learning missions exist for this project
-    if let Err(e) = mission_manager
-        .ensure_learning_missions(project_id)
-        .await
-    {
+    if let Err(e) = mission_manager.ensure_learning_missions(project_id).await {
         debug!("engine v2: failed to create learning missions: {e}");
     }
 
@@ -320,9 +320,9 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
     // Python orchestrator at runtime via __list_skills__).
     if let Some(registry) = agent.deps.skill_registry.as_ref() {
         let skills_snapshot = {
-            let guard = registry.read().map_err(|e| {
-                engine_err("skill registry", format!("lock poisoned: {e}"))
-            })?;
+            let guard = registry
+                .read()
+                .map_err(|e| engine_err("skill registry", format!("lock poisoned: {e}")))?;
             guard.skills().to_vec()
         };
         if !skills_snapshot.is_empty() {
@@ -350,7 +350,9 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
         .await;
 
     // Wire mission manager into agent for /expected command
-    agent.set_mission_manager(Arc::clone(&mission_manager)).await;
+    agent
+        .set_mission_manager(Arc::clone(&mission_manager))
+        .await;
 
     *guard = Some(EngineState {
         thread_manager,
@@ -1064,9 +1066,7 @@ async fn await_thread_outcome(
                 .ok()
         };
         if let Some(cid) = v1_conv_id {
-            let _ = db
-                .add_conversation_message(cid, "assistant", text)
-                .await;
+            let _ = db.add_conversation_message(cid, "assistant", text).await;
         }
     }
 
@@ -1138,7 +1138,9 @@ async fn await_thread_outcome(
                 action_name
             )))
         }
-        ThreadOutcome::NeedAuthentication { credential_name, .. } => {
+        ThreadOutcome::NeedAuthentication {
+            credential_name, ..
+        } => {
             // This shouldn't reach here in the non-blocking design (the error
             // flows through the LLM as a normal action result), but handle
             // gracefully in case it does.
@@ -1228,11 +1230,7 @@ async fn forward_event_to_channel(
                 tokens.input_tokens, tokens.output_tokens
             );
             let _ = channels
-                .send_status(
-                    channel_name,
-                    StatusUpdate::Thinking(tok_msg),
-                    metadata,
-                )
+                .send_status(channel_name, StatusUpdate::Thinking(tok_msg), metadata)
                 .await;
         }
         EventKind::MessageAdded {
@@ -1245,8 +1243,7 @@ async fn forward_event_to_channel(
             } else if role == "User" && content_preview.starts_with("[code ") {
                 Some("Code executed (no output)".to_string())
             } else if role == "User"
-                && (content_preview.contains("Error")
-                    || content_preview.starts_with("Traceback"))
+                && (content_preview.contains("Error") || content_preview.starts_with("Traceback"))
             {
                 Some("Code error — retrying...".to_string())
             } else if role == "Assistant" {
@@ -1256,13 +1253,20 @@ async fn forward_event_to_channel(
             };
             if let Some(text) = msg {
                 let _ = channels
-                    .send_status(
-                        channel_name,
-                        StatusUpdate::Thinking(text),
-                        metadata,
-                    )
+                    .send_status(channel_name, StatusUpdate::Thinking(text), metadata)
                     .await;
             }
+        }
+        EventKind::SkillActivated { skill_names } => {
+            let _ = channels
+                .send_status(
+                    channel_name,
+                    StatusUpdate::SkillActivated {
+                        skill_names: skill_names.clone(),
+                    },
+                    metadata,
+                )
+                .await;
         }
         _ => {}
     }
@@ -1331,8 +1335,7 @@ fn thread_event_to_app_events(
             } else if role == "User" && content_preview.starts_with("[code ") {
                 Some("Code executed (no output)")
             } else if role == "User"
-                && (content_preview.contains("Error")
-                    || content_preview.starts_with("Traceback"))
+                && (content_preview.contains("Error") || content_preview.starts_with("Traceback"))
             {
                 Some("Code error — retrying...")
             } else if role == "Assistant" {
@@ -1349,9 +1352,9 @@ fn thread_event_to_app_events(
         }
         EventKind::StateChanged { from, to, reason } => {
             vec![AppEvent::ThreadStateChanged {
-            thread_id: thread_id.into(),
-            from_state: format!("{from:?}"),
-            to_state: format!("{to:?}"),
+                thread_id: thread_id.into(),
+                from_state: format!("{from:?}"),
+                to_state: format!("{to:?}"),
                 reason: reason.clone(),
             }]
         }
@@ -1359,6 +1362,10 @@ fn thread_event_to_app_events(
             parent_thread_id: thread_id.into(),
             child_thread_id: child_id.to_string(),
             goal: goal.clone(),
+        }],
+        EventKind::SkillActivated { skill_names } => vec![AppEvent::SkillActivated {
+            skill_names: skill_names.clone(),
+            thread_id: Some(thread_id.into()),
         }],
         _ => vec![],
     }
