@@ -19,9 +19,9 @@ pub mod users;
 pub mod chat;
 #[allow(dead_code)]
 pub mod extensions;
+pub mod frontend;
 #[allow(dead_code)]
 pub mod settings;
 #[allow(dead_code)]
 pub mod static_files;
-pub mod frontend;
 pub mod webhooks;

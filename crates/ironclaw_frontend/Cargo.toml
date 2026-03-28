@@ -2,8 +2,9 @@
 name = "ironclaw_frontend"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.92"
 description = "Frontend assets, layout configuration, and widget extension system for IronClaw"
+license = "MIT OR Apache-2.0"
 
 [package.metadata.dist]
 dist = false

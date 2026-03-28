@@ -92,10 +92,7 @@ pub fn assemble_index(base_html: &str, bundle: &FrontendBundle) -> String {
     // Custom CSS
     if let Some(ref custom_css) = bundle.custom_css {
         if !custom_css.trim().is_empty() {
-            body_injections.push(format!(
-                "<style data-custom-css>{}</style>",
-                custom_css
-            ));
+            body_injections.push(format!("<style data-custom-css>{}</style>", custom_css));
         }
     }
 

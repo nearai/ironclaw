@@ -77,7 +77,10 @@ pub async fn frontend_widgets_handler(
 ) -> Result<Json<Vec<WidgetManifest>>, (StatusCode, String)> {
     let workspace = resolve_workspace(&state, &user).await?;
 
-    let entries = workspace.list("frontend/widgets/").await.unwrap_or_default();
+    let entries = workspace
+        .list("frontend/widgets/")
+        .await
+        .unwrap_or_default();
 
     let mut manifests = Vec::new();
     for entry in entries {
@@ -86,8 +89,14 @@ pub async fn frontend_widgets_handler(
         }
         let manifest_path = format!("frontend/widgets/{}/manifest.json", entry.name());
         if let Ok(doc) = workspace.read(&manifest_path).await {
-            if let Ok(manifest) = serde_json::from_str::<WidgetManifest>(&doc.content) {
-                manifests.push(manifest);
+            match serde_json::from_str::<WidgetManifest>(&doc.content) {
+                Ok(manifest) => manifests.push(manifest),
+                Err(e) => {
+                    tracing::warn!(
+                        path = %manifest_path,
+                        "skipping widget with invalid manifest: {e}"
+                    );
+                }
             }
         }
     }
