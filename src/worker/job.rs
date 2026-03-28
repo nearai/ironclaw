@@ -20,7 +20,6 @@ use crate::agent::scheduler::WorkerMessage;
 use crate::agent::task::TaskOutput;
 use crate::channels::web::types::ToolDecisionDto;
 use crate::context::{ContextManager, JobState};
-use crate::db::Database;
 use crate::error::Error;
 use crate::hooks::HookRegistry;
 use crate::llm::{
@@ -28,6 +27,7 @@ use crate::llm::{
     ToolSelection,
 };
 use crate::safety::SafetyLayer;
+use crate::tenant::AdminScope;
 use crate::tools::execute::process_tool_result;
 use crate::tools::rate_limiter::RateLimitResult;
 use crate::tools::{
@@ -45,7 +45,7 @@ pub struct WorkerDeps {
     pub llm: Arc<dyn LlmProvider>,
     pub safety: Arc<SafetyLayer>,
     pub tools: Arc<ToolRegistry>,
-    pub store: Option<Arc<dyn Database>>,
+    pub store: Option<AdminScope>,
     pub hooks: Arc<HookRegistry>,
     pub timeout: Duration,
     pub use_planning: bool,
@@ -94,7 +94,7 @@ impl Worker {
         &self.deps.tools
     }
 
-    fn store(&self) -> Option<&Arc<dyn Database>> {
+    fn store(&self) -> Option<&AdminScope> {
         self.deps.store.as_ref()
     }
 
@@ -1158,6 +1158,7 @@ impl<'a> JobDelegate<'a> {
         Ok(crate::llm::RespondOutput {
             result: RespondResult::Text(String::new()),
             usage: crate::llm::TokenUsage::default(),
+            finish_reason: crate::llm::FinishReason::Stop,
         })
     }
 }
@@ -1283,6 +1284,7 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
                         content: reasoning_text,
                     },
                     usage: crate::llm::TokenUsage::default(),
+                    finish_reason: crate::llm::FinishReason::ToolUse,
                 });
             }
             Ok(_) => {} // empty selections, fall through

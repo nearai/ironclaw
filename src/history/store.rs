@@ -1162,15 +1162,25 @@ impl Store {
     pub async fn get_webhook_routine_by_path(
         &self,
         path: &str,
+        user_id: Option<&str>,
     ) -> Result<Option<Routine>, DatabaseError> {
         let conn = self.conn().await?;
-        let row = conn
-            .query_opt(
+        let row = if let Some(uid) = user_id {
+            conn.query_opt(
+                "SELECT * FROM routines WHERE enabled AND trigger_type = 'webhook' \
+                 AND user_id = $2 \
+                 AND (trigger_config->>'path' = $1 OR (trigger_config->>'path' IS NULL AND id::text = $1))",
+                &[&path, &uid],
+            )
+            .await?
+        } else {
+            conn.query_opt(
                 "SELECT * FROM routines WHERE enabled AND trigger_type = 'webhook' \
                  AND (trigger_config->>'path' = $1 OR (trigger_config->>'path' IS NULL AND id::text = $1))",
                 &[&path],
             )
-            .await?;
+            .await?
+        };
         row.as_ref().map(row_to_routine).transpose()
     }
 

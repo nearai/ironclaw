@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 use crate::llm::error::LlmError;
 
 use crate::llm::{
-    ChatMessage, CompletionRequest, LlmProvider, Role, ToolCall, ToolCompletionRequest,
-    ToolDefinition,
+    ChatMessage, CompletionRequest, FinishReason, LlmProvider, Role, ToolCall,
+    ToolCompletionRequest, ToolDefinition,
 };
 
 /// Token the agent returns when it has nothing to say (e.g. in group chats).
@@ -22,6 +22,13 @@ pub const TOOL_INTENT_NUDGE: &str = "\
 You said you would perform an action, but you did not include any tool calls.\n\
 Do NOT describe what you intend to do — actually call the tool now.\n\
 Use the tool_calls mechanism to invoke the appropriate tool.";
+
+/// Notice injected when the LLM's response was truncated mid-tool-call,
+/// causing incomplete parameters. Tells the LLM to try a different approach.
+pub const TRUNCATED_TOOL_CALL_NOTICE: &str = "\
+Your previous response was truncated while generating tool call parameters. \
+The tool calls were discarded. Please try a different approach — \
+summarize or transform the data instead of echoing it verbatim in a tool call.";
 
 /// Seed value used as the second argument to `generate_tool_call_id` when
 /// recovering tool calls from malformed LLM text responses. This must differ
@@ -194,11 +201,17 @@ pub struct ReasoningContext {
     pub metadata: std::collections::HashMap<String, String>,
     /// When true, force a text-only response (ignore available tools).
     /// Used by the agentic loop to guarantee termination near the iteration limit.
+    /// Sticky: once set, never cleared within a loop invocation. Callers must
+    /// create a fresh `ReasoningContext` per `run_agentic_loop()` call.
     pub force_text: bool,
     /// Pre-built system prompt. When set, `respond_with_tools` uses this directly
     /// instead of calling `build_system_prompt_with_tools`. Allows callers to build
     /// the prompt once and reuse it across iterations.
     pub system_prompt: Option<String>,
+    /// Per-user model override. When set, completion requests use this model
+    /// instead of the provider's default. Only effective with providers that
+    /// support per-request model overrides (e.g. NearAI).
+    pub model_override: Option<String>,
 }
 
 impl ReasoningContext {
@@ -212,6 +225,7 @@ impl ReasoningContext {
             metadata: std::collections::HashMap::new(),
             force_text: false,
             system_prompt: None,
+            model_override: None,
         }
     }
 
@@ -344,6 +358,7 @@ pub enum RespondResult {
 pub struct RespondOutput {
     pub result: RespondResult,
     pub usage: TokenUsage,
+    pub finish_reason: FinishReason,
 }
 
 /// Reasoning engine for the agent.
@@ -525,6 +540,17 @@ impl Reasoning {
 
         let response = self.llm.complete_with_tools(request).await?;
 
+        // If the response was truncated, tool call parameters are likely incomplete.
+        // Return empty so the caller can fall through to respond_with_tools() which
+        // has a larger output token budget.
+        if response.finish_reason == FinishReason::Length {
+            tracing::warn!(
+                "select_tools response truncated (finish_reason=Length), \
+                 discarding potentially incomplete tool selections"
+            );
+            return Ok(vec![]);
+        }
+
         let shared_reasoning = response
             .content
             .map(|c| {
@@ -671,6 +697,9 @@ Respond in JSON format:
                 .with_temperature(0.7)
                 .with_tool_choice("auto");
             request.metadata = context.metadata.clone();
+            if let Some(ref model) = context.model_override {
+                request.model = Some(model.clone());
+            }
 
             let response = self.llm.complete_with_tools(request).await?;
             let usage = TokenUsage {
@@ -714,6 +743,7 @@ Respond in JSON format:
                         content: narrative,
                     },
                     usage,
+                    finish_reason: response.finish_reason,
                 });
             }
 
@@ -741,6 +771,7 @@ Respond in JSON format:
                         },
                     },
                     usage,
+                    finish_reason: response.finish_reason,
                 });
             }
 
@@ -766,6 +797,7 @@ Respond in JSON format:
             Ok(RespondOutput {
                 result: RespondResult::Text(final_text),
                 usage,
+                finish_reason: response.finish_reason,
             })
         } else {
             // No tools, use simple completion
@@ -773,6 +805,9 @@ Respond in JSON format:
                 .with_max_tokens(4096)
                 .with_temperature(0.7);
             request.metadata = context.metadata.clone();
+            if let Some(ref model) = context.model_override {
+                request.model = Some(model.clone());
+            }
 
             let response = self.llm.complete(request).await?;
             let pre_truncated = truncate_at_tool_tags(&response.content);
@@ -794,6 +829,7 @@ Respond in JSON format:
                     cache_read_input_tokens: response.cache_read_input_tokens,
                     cache_creation_input_tokens: response.cache_creation_input_tokens,
                 },
+                finish_reason: response.finish_reason,
             })
         }
     }
@@ -1334,6 +1370,49 @@ fn is_inside_code(pos: usize, regions: &[CodeRegion]) -> bool {
     regions.iter().any(|r| pos >= r.start && pos < r.end)
 }
 
+/// Check whether a byte range overlaps any code region.
+fn overlaps_code_region(start: usize, end: usize, regions: &[CodeRegion]) -> bool {
+    regions.iter().any(|r| start < r.end && end > r.start)
+}
+
+/// Return the byte bounds of the line containing `pos`, excluding the trailing newline.
+fn line_bounds(text: &str, pos: usize) -> (usize, usize) {
+    let start = text[..pos].rfind('\n').map_or(0, |idx| idx + 1);
+    let end = text[pos..].find('\n').map_or(text.len(), |idx| pos + idx);
+    (start, end)
+}
+
+/// Only recover XML-style tool calls when they are isolated content outside
+/// markdown code and quote contexts. This avoids converting code examples or
+/// quoted snippets into executable tool calls.
+fn is_recoverable_tool_call_segment(
+    text: &str,
+    start: usize,
+    end: usize,
+    code_regions: &[CodeRegion],
+) -> bool {
+    if overlaps_code_region(start, end, code_regions) {
+        return false;
+    }
+
+    let (first_line_start, first_line_end) = line_bounds(text, start);
+    let first_line = &text[first_line_start..first_line_end];
+
+    if first_line.trim_start().starts_with('>') {
+        return false;
+    }
+
+    let (_, last_line_end) = line_bounds(text, end.saturating_sub(1));
+    let first_line_prefix = &text[first_line_start..start];
+    let last_line_suffix = &text[end..last_line_end];
+
+    if !first_line_prefix.trim().is_empty() || !last_line_suffix.trim().is_empty() {
+        return false;
+    }
+
+    true
+}
+
 /// Clean up LLM response by stripping model-internal tags and reasoning patterns.
 ///
 /// Some models (GLM-4.7, etc.) emit XML-tagged internal state like
@@ -1353,6 +1432,7 @@ fn recover_tool_calls_from_content(
 ) -> Vec<ToolCall> {
     let tool_names: std::collections::HashSet<&str> =
         available_tools.iter().map(|t| t.name.as_str()).collect();
+    let code_regions = find_code_regions(content);
     let mut calls = Vec::new();
 
     for (open, close) in &[
@@ -1361,15 +1441,23 @@ fn recover_tool_calls_from_content(
         ("<function_call>", "</function_call>"),
         ("<|function_call|>", "<|/function_call|>"),
     ] {
-        let mut remaining = content;
-        while let Some(start) = remaining.find(open) {
+        let mut search_from = 0;
+        while let Some(offset) = content[search_from..].find(open) {
+            let start = search_from + offset;
             let inner_start = start + open.len();
-            let after = &remaining[inner_start..];
-            let Some(end) = after.find(close) else {
+            let after = &content[inner_start..];
+            let Some(end_offset) = after.find(close) else {
                 break;
             };
-            let inner = after[..end].trim();
-            remaining = &after[end + close.len()..];
+            let end = inner_start + end_offset;
+            let segment_end = end + close.len();
+            search_from = segment_end;
+
+            if !is_recoverable_tool_call_segment(content, start, segment_end, &code_regions) {
+                continue;
+            }
+
+            let inner = content[inner_start..end].trim();
 
             if inner.is_empty() {
                 continue;
@@ -2302,6 +2390,40 @@ That's my plan."#;
         assert_eq!(calls[0].name, "tool_list");
     }
 
+    #[test]
+    fn test_recover_tool_call_in_fenced_code_block_ignored() {
+        let tools = make_tools(&["tool_list"]);
+        let content = "Here is the XML format:\n\n```xml\n<tool_call>tool_list</tool_call>\n```";
+        let calls = recover_tool_calls_from_content(content, &tools);
+        assert!(calls.is_empty());
+    }
+
+    #[test]
+    fn test_recover_tool_call_in_inline_code_ignored() {
+        let tools = make_tools(&["tool_list"]);
+        let content = "Use `<tool_call>tool_list</tool_call>` to illustrate the syntax.";
+        let calls = recover_tool_calls_from_content(content, &tools);
+        assert!(calls.is_empty());
+    }
+
+    #[test]
+    fn test_recover_tool_call_in_blockquote_ignored() {
+        let tools = make_tools(&["tool_list"]);
+        let content = "The page replied:\n> <tool_call>tool_list</tool_call>";
+        let calls = recover_tool_calls_from_content(content, &tools);
+        assert!(calls.is_empty());
+    }
+
+    #[test]
+    fn test_recover_multiline_json_tool_call_on_own_line() {
+        let tools = make_tools(&["memory_search"]);
+        let content = "Let me check.\n\n<tool_call>\n{\"name\": \"memory_search\", \"arguments\": {\"query\": \"test\"}}\n</tool_call>\n\nDone.";
+        let calls = recover_tool_calls_from_content(content, &tools);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "memory_search");
+        assert_eq!(calls[0].arguments, serde_json::json!({"query": "test"}));
+    }
+
     // ---- System prompt building tests (issue #565) ----
 
     fn make_test_reasoning() -> Reasoning {
@@ -3217,5 +3339,86 @@ That's my plan."#;
         let pre_truncated = truncate_at_tool_tags(raw);
         let cleaned = clean_response(&pre_truncated);
         assert!(cleaned.trim().is_empty());
+    }
+
+    // ---- select_tools truncation guard ----
+
+    /// Mock provider that returns tool calls with a configurable finish_reason.
+    struct TruncatingLlm {
+        finish_reason: crate::llm::FinishReason,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::llm::LlmProvider for TruncatingLlm {
+        fn model_name(&self) -> &str {
+            "truncating-stub"
+        }
+        fn cost_per_token(&self) -> (rust_decimal::Decimal, rust_decimal::Decimal) {
+            (rust_decimal::Decimal::ZERO, rust_decimal::Decimal::ZERO)
+        }
+        async fn complete(
+            &self,
+            _request: crate::llm::CompletionRequest,
+        ) -> Result<crate::llm::CompletionResponse, crate::llm::error::LlmError> {
+            unimplemented!()
+        }
+        async fn complete_with_tools(
+            &self,
+            _request: crate::llm::ToolCompletionRequest,
+        ) -> Result<crate::llm::ToolCompletionResponse, crate::llm::error::LlmError> {
+            Ok(crate::llm::ToolCompletionResponse {
+                content: Some("I'll write the report.".to_string()),
+                tool_calls: vec![ToolCall {
+                    id: "call_1".to_string(),
+                    name: "memory_write".to_string(),
+                    arguments: serde_json::json!({}),
+                    reasoning: None,
+                }],
+                input_tokens: 5000,
+                output_tokens: 1024,
+                finish_reason: self.finish_reason,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn test_select_tools_returns_empty_on_truncation() {
+        let llm = Arc::new(TruncatingLlm {
+            finish_reason: FinishReason::Length,
+        });
+        let reasoning = Reasoning::new(llm);
+        let mut ctx = ReasoningContext::new().with_message(ChatMessage::user("Write a report"));
+        ctx.available_tools.push(ToolDefinition {
+            name: "memory_write".to_string(),
+            description: "Write to memory".to_string(),
+            parameters: serde_json::json!({"type": "object"}),
+        });
+
+        let selections = reasoning.select_tools(&ctx).await.unwrap();
+        assert!(
+            selections.is_empty(),
+            "Truncated tool selections should be discarded (got {} selections)",
+            selections.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_select_tools_returns_selections_when_not_truncated() {
+        let llm = Arc::new(TruncatingLlm {
+            finish_reason: FinishReason::ToolUse,
+        });
+        let reasoning = Reasoning::new(llm);
+        let mut ctx = ReasoningContext::new().with_message(ChatMessage::user("Write a report"));
+        ctx.available_tools.push(ToolDefinition {
+            name: "memory_write".to_string(),
+            description: "Write to memory".to_string(),
+            parameters: serde_json::json!({"type": "object"}),
+        });
+
+        let selections = reasoning.select_tools(&ctx).await.unwrap();
+        assert_eq!(selections.len(), 1);
+        assert_eq!(selections[0].tool_name, "memory_write");
     }
 }

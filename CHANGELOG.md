@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.23.0](https://github.com/nearai/ironclaw/compare/ironclaw-v0.22.0...ironclaw-v0.23.0) - 2026-03-27
+
+### Added
+
+- complete multi-tenant isolation — phases 2–4 ([#1614](https://github.com/nearai/ironclaw/pull/1614))
+
+### Fixed
+
+- *(routines)* recover delete name after failed update fallback ([#1108](https://github.com/nearai/ironclaw/pull/1108))
+- *(mcp)* handle 202 Accepted and wire session manager for Streamable HTTP ([#1437](https://github.com/nearai/ironclaw/pull/1437))
+- *(extensions)* channel-relay auth dead-end, observability, and URL override ([#1681](https://github.com/nearai/ironclaw/pull/1681))
+- *(agent)* discard truncated tool calls when finish_reason == Length ([#1631](https://github.com/nearai/ironclaw/pull/1631)) ([#1632](https://github.com/nearai/ironclaw/pull/1632))
+- *(llm)* filter XML tool-call recovery by context ([#1641](https://github.com/nearai/ironclaw/pull/1641))
+
+### Other
+
+- Support direct hosted OAuth callbacks with proxy auth token ([#1684](https://github.com/nearai/ironclaw/pull/1684))
+
 ## [0.22.0](https://github.com/nearai/ironclaw/compare/ironclaw-v0.21.0...ironclaw-v0.22.0) - 2026-03-25
 
 ### Added

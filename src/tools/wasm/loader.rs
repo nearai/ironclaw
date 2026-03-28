@@ -446,16 +446,14 @@ fn resolve_oauth_refresh_config(cap_file: &CapabilitiesFile) -> Option<OAuthRefr
         builtin.as_ref(),
         exchange_proxy_url.is_some(),
     );
-    let gateway_token = crate::config::helpers::env_or_override("GATEWAY_AUTH_TOKEN")
-        .map(|token| token.trim().to_string())
-        .filter(|token| !token.is_empty());
+    let oauth_proxy_auth_token = crate::cli::oauth_defaults::oauth_proxy_auth_token();
 
     Some(OAuthRefreshConfig {
         token_url: oauth.token_url.clone(),
         client_id,
         client_secret,
         exchange_proxy_url,
-        gateway_token,
+        gateway_token: oauth_proxy_auth_token,
         secret_name: auth.secret_name.clone(),
         provider: auth.provider.clone(),
     })
@@ -891,6 +889,11 @@ mod tests {
             AuthCapabilitySchema, CapabilitiesFile, OAuthConfigSchema,
         };
 
+        let _guard = lock_env();
+        let _proxy_guard = set_env_var("IRONCLAW_OAUTH_EXCHANGE_URL", None);
+        let _gateway_token_guard = set_env_var("GATEWAY_AUTH_TOKEN", None);
+        let _oauth_proxy_token_guard = set_env_var("IRONCLAW_OAUTH_PROXY_AUTH_TOKEN", None);
+
         let caps = CapabilitiesFile {
             auth: Some(AuthCapabilitySchema {
                 secret_name: "google_oauth_token".to_string(),
@@ -982,6 +985,7 @@ mod tests {
         let _guard = lock_env();
         let _proxy_guard = set_env_var("IRONCLAW_OAUTH_EXCHANGE_URL", None);
         let _gateway_token_guard = set_env_var("GATEWAY_AUTH_TOKEN", None);
+        let _oauth_proxy_token_guard = set_env_var("IRONCLAW_OAUTH_PROXY_AUTH_TOKEN", None);
 
         // google_oauth_token should fall back to built-in credentials
         let caps = CapabilitiesFile {
@@ -1021,6 +1025,7 @@ mod tests {
             Some("https://compose-api.example.com"),
         );
         let _gateway_token_guard = set_env_var("GATEWAY_AUTH_TOKEN", Some("gateway-test-token"));
+        let _oauth_proxy_token_guard = set_env_var("IRONCLAW_OAUTH_PROXY_AUTH_TOKEN", None);
         let _client_id_guard =
             set_env_var("GOOGLE_OAUTH_CLIENT_ID", Some("hosted-google-client-id"));
 
@@ -1061,6 +1066,7 @@ mod tests {
             Some("https://compose-api.example.com"),
         );
         let _gateway_token_guard = set_env_var("GATEWAY_AUTH_TOKEN", Some("gateway-test-token"));
+        let _oauth_proxy_token_guard = set_env_var("IRONCLAW_OAUTH_PROXY_AUTH_TOKEN", None);
         let _client_id_guard =
             set_env_var("GOOGLE_OAUTH_CLIENT_ID", Some("hosted-google-client-id"));
         let _client_secret_guard =
@@ -1093,6 +1099,47 @@ mod tests {
             Some("https://compose-api.example.com")
         );
         assert_eq!(config.gateway_token.as_deref(), Some("gateway-test-token"));
+    }
+
+    #[test]
+    fn test_resolve_oauth_refresh_config_hosted_proxy_prefers_dedicated_proxy_auth_token() {
+        use crate::tools::wasm::capabilities_schema::{
+            AuthCapabilitySchema, CapabilitiesFile, OAuthConfigSchema,
+        };
+
+        let _guard = lock_env();
+        let _proxy_guard = set_env_var(
+            "IRONCLAW_OAUTH_EXCHANGE_URL",
+            Some("https://compose-api.example.com"),
+        );
+        let _gateway_token_guard = set_env_var("GATEWAY_AUTH_TOKEN", Some("gateway-test-token"));
+        let _oauth_proxy_token_guard = set_env_var(
+            "IRONCLAW_OAUTH_PROXY_AUTH_TOKEN",
+            Some("shared-oauth-proxy-secret"),
+        );
+        let _client_id_guard =
+            set_env_var("GOOGLE_OAUTH_CLIENT_ID", Some("hosted-google-client-id"));
+
+        let caps = CapabilitiesFile {
+            auth: Some(AuthCapabilitySchema {
+                secret_name: "google_oauth_token".to_string(),
+                provider: Some("google".to_string()),
+                oauth: Some(OAuthConfigSchema {
+                    authorization_url: "https://accounts.google.com/o/oauth2/v2/auth".to_string(),
+                    token_url: "https://oauth2.googleapis.com/token".to_string(),
+                    client_id_env: Some("GOOGLE_OAUTH_CLIENT_ID".to_string()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let config = super::resolve_oauth_refresh_config(&caps).expect("hosted oauth config");
+        assert_eq!(
+            config.gateway_token.as_deref(),
+            Some("shared-oauth-proxy-secret")
+        );
     }
 
     // ---------------------------------------------------------------
