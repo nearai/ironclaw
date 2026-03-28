@@ -1694,7 +1694,13 @@ impl Tool for RoutineHistoryTool {
                     .collect();
                 (Some(conv_id.to_string()), msg_list)
             }
-            Err(_) => (None, Vec::new()),
+            Err(e) => {
+                tracing::warn!(
+                    routine = %name,
+                    "Failed to fetch routine conversation thread: {e}"
+                );
+                (None, Vec::new())
+            }
         };
 
         let result = serde_json::json!({
