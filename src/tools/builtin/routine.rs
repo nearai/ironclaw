@@ -73,6 +73,9 @@ struct NormalizedExecutionRequest {
 struct NormalizedDeliveryRequest {
     channel: Option<String>,
     user: Option<String>,
+    agent_review_on_success: bool,
+    agent_review_on_attention: bool,
+    agent_review_on_failure: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -164,6 +167,21 @@ fn delivery_properties() -> Value {
         "user": {
             "type": "string",
             "description": "Default user or target for notifications and routine job message calls. If omitted, the owner's last-seen notification target is used."
+        },
+        "agent_review_on_success": {
+            "type": "boolean",
+            "description": "When true, successful completions are sent to the agent for interpretation before reaching the user. Default: false.",
+            "default": false
+        },
+        "agent_review_on_attention": {
+            "type": "boolean",
+            "description": "When true, actionable findings are sent to the agent for interpretation. Default: false.",
+            "default": false
+        },
+        "agent_review_on_failure": {
+            "type": "boolean",
+            "description": "When true, failures are sent to the agent for diagnosis. The agent can investigate and decide what to report. Default: false.",
+            "default": false
         }
     })
 }
@@ -676,6 +694,21 @@ pub(crate) fn routine_update_parameters_schema() -> Value {
                 "description": "Maximum LLM iterations for full_job routines (1-200).",
                 "minimum": 1,
                 "maximum": 200
+            },
+            "agent_review_on_success": {
+                "type": "boolean",
+                "description": "When true, successful completions are sent to the agent for interpretation before reaching the user. Default: false.",
+                "default": false
+            },
+            "agent_review_on_attention": {
+                "type": "boolean",
+                "description": "When true, actionable findings are sent to the agent for interpretation. Default: false.",
+                "default": false
+            },
+            "agent_review_on_failure": {
+                "type": "boolean",
+                "description": "When true, failures are sent to the agent for diagnosis. The agent can investigate and decide what to report. Default: false.",
+                "default": false
             }
         },
         "required": ["name"]
@@ -936,6 +969,12 @@ fn parse_routine_delivery(params: &Value) -> NormalizedDeliveryRequest {
     NormalizedDeliveryRequest {
         channel: string_field(params, "delivery", "channel", &["notify_channel"]),
         user: string_field(params, "delivery", "user", &["notify_user"]),
+        agent_review_on_success: bool_field(params, "delivery", "agent_review_on_success", &[])
+            .unwrap_or(false),
+        agent_review_on_attention: bool_field(params, "delivery", "agent_review_on_attention", &[])
+            .unwrap_or(false),
+        agent_review_on_failure: bool_field(params, "delivery", "agent_review_on_failure", &[])
+            .unwrap_or(false),
     }
 }
 
@@ -1194,6 +1233,9 @@ impl Tool for RoutineCreateTool {
                         .filter(|v| *v != "default")
                         .map(ToOwned::to_owned)
                 }),
+                agent_review_on_success: normalized.delivery.agent_review_on_success,
+                agent_review_on_attention: normalized.delivery.agent_review_on_attention,
+                agent_review_on_failure: normalized.delivery.agent_review_on_failure,
                 ..NotifyConfig::default()
             },
             last_run_at: None,
@@ -1409,6 +1451,25 @@ impl Tool for RoutineUpdateTool {
             && let RoutineAction::FullJob { max_iterations, .. } = &mut routine.action
         {
             *max_iterations = (iters.clamp(1, 200)) as u32;
+        }
+
+        if let Some(v) = params
+            .get("agent_review_on_success")
+            .and_then(|v| v.as_bool())
+        {
+            routine.notify.agent_review_on_success = v;
+        }
+        if let Some(v) = params
+            .get("agent_review_on_attention")
+            .and_then(|v| v.as_bool())
+        {
+            routine.notify.agent_review_on_attention = v;
+        }
+        if let Some(v) = params
+            .get("agent_review_on_failure")
+            .and_then(|v| v.as_bool())
+        {
+            routine.notify.agent_review_on_failure = v;
         }
 
         // Validate timezone param if provided
