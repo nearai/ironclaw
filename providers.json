@@ -445,5 +445,25 @@
       "display_name": "Cloudflare Workers AI",
       "can_list_models": false
     }
+  },
+  {
+    "id": "novita",
+    "aliases": [
+      "novita_ai"
+    ],
+    "protocol": "open_ai_completions",
+    "default_base_url": "https://api.novita.ai/v1",
+    "api_key_env": "NOVITA_API_KEY",
+    "api_key_required": true,
+    "model_env": "NOVITA_MODEL",
+    "default_model": "deepseek/deepseek-v3.2",
+    "description": "Novita AI OpenAI-compatible endpoint",
+    "setup": {
+      "kind": "api_key",
+      "secret_name": "llm_novita_api_key",
+      "key_url": "https://novita.ai/settings/api-keys",
+      "display_name": "Novita",
+      "can_list_models": true
+    }
   }
 ]
