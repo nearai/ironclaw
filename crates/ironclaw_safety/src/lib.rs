@@ -11,6 +11,7 @@ mod credential_detect;
 mod leak_detector;
 mod policy;
 mod sanitizer;
+pub mod sensitive_paths;
 mod validator;
 
 pub use credential_detect::params_contain_manual_credentials;
