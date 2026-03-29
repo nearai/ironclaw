@@ -296,11 +296,13 @@ fn build_inference_config(
 fn strip_tool_blocks(messages: &mut [crate::llm::provider::ChatMessage]) {
     use crate::llm::provider::Role;
 
+    let mut stripped = 0u32;
     for msg in messages.iter_mut() {
         match msg.role {
             Role::Assistant if msg.tool_calls.is_some() => {
                 // May leave content empty; convert_messages() skips empty assistant messages.
                 msg.tool_calls = None;
+                stripped += 1;
             }
             Role::Tool => {
                 let tool_name = msg.name.as_deref().unwrap_or("unknown");
@@ -308,9 +310,16 @@ fn strip_tool_blocks(messages: &mut [crate::llm::provider::ChatMessage]) {
                 msg.content = format!("[Tool `{}` returned: {}]", tool_name, msg.content);
                 msg.tool_call_id = None;
                 msg.name = None;
+                stripped += 1;
             }
             _ => {}
         }
+    }
+    if stripped > 0 {
+        tracing::debug!(
+            stripped,
+            "Stripped tool blocks from messages (no toolConfig)"
+        );
     }
 }
 
@@ -1360,6 +1369,47 @@ mod tests {
                 "Message {} has wrong role for alternation",
                 i
             );
+            for block in msg.content() {
+                assert!(!block.is_tool_use());
+                assert!(!block.is_tool_result());
+            }
+        }
+    }
+
+    #[test]
+    fn test_complete_with_tools_choice_none_strips_history() {
+        // tool_choice="none" causes build_tool_config to return None,
+        // which should trigger stripping of tool blocks from messages.
+        let tools = vec![ToolDefinition {
+            name: "echo".to_string(),
+            description: "Echoes".to_string(),
+            parameters: serde_json::json!({"type": "object"}),
+        }];
+
+        let tc = crate::llm::provider::ToolCall {
+            id: "call_1".to_string(),
+            name: "echo".to_string(),
+            arguments: serde_json::json!({}),
+            reasoning: None,
+        };
+
+        let mut messages = vec![
+            ChatMessage::user("Do it"),
+            ChatMessage::assistant_with_tool_calls(None, vec![tc]),
+            ChatMessage::tool_result("call_1", "echo", "done"),
+        ];
+
+        crate::llm::provider::sanitize_tool_messages(&mut messages);
+        let tool_config = build_tool_config(&tools, Some("none")).unwrap();
+        assert!(tool_config.is_none());
+
+        if tool_config.is_none() {
+            strip_tool_blocks(&mut messages);
+        }
+
+        let (_, bedrock_msgs) = convert_messages(&messages).unwrap();
+
+        for msg in &bedrock_msgs {
             for block in msg.content() {
                 assert!(!block.is_tool_use());
                 assert!(!block.is_tool_result());
