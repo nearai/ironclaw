@@ -1,0 +1,58 @@
+{
+  "version": "0.1.0",
+  "wit_version": "0.3.0",
+  "description": "Near Intents tools for token resolution, balance queries, and reverse lookups on the Defuse protocol.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "action": {
+        "type": "string",
+        "enum": ["resolve_token", "reverse_resolve_token", "get_balance"],
+        "description": "Which action to perform"
+      },
+      "query": {
+        "type": "string",
+        "description": "Token reference to resolve (for resolve_token)"
+      },
+      "list_all": {
+        "type": "boolean",
+        "description": "Return all tokens (for resolve_token)",
+        "default": false
+      },
+      "asset_id": {
+        "type": "string",
+        "description": "Defuse asset ID (for reverse_resolve_token)"
+      },
+      "account_id": {
+        "type": "string",
+        "description": "NEAR wallet address (for get_balance)"
+      },
+      "token_ids": {
+        "type": "array",
+        "items": { "type": "string" },
+        "description": "Specific defuse asset IDs to query (for get_balance)"
+      }
+    },
+    "required": ["action"]
+  },
+  "capabilities": {
+    "http": {
+      "allowlist": [
+        {
+          "host": "1click.chaindefuser.com",
+          "path_prefix": "/v0/tokens",
+          "methods": ["GET"]
+        },
+        {
+          "host": "rpc.mainnet.near.org",
+          "path_prefix": "/",
+          "methods": ["POST"]
+        }
+      ],
+      "rate_limit": {
+        "requests_per_minute": 60
+      }
+    }
+  },
+  "tags": ["trading", "near", "defi", "intents"]
+}
