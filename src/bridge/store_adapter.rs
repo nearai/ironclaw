@@ -561,6 +561,7 @@ fn doc_workspace_path(doc: &MemoryDoc) -> String {
         DocType::Spec => "specs",
         DocType::Note => "notes",
         DocType::Skill => "skills",
+        DocType::Plan => "plans",
     };
     let slug = slugify(&doc.title, &id_str);
     format!("{KNOWLEDGE_PREFIX}/{type_dir}/{slug}.md")

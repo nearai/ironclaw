@@ -14,6 +14,7 @@ use ironclaw_engine::{
 use ironclaw_common::AppEvent;
 
 use crate::agent::Agent;
+use crate::bridge::auth_manager::AuthManager;
 use crate::bridge::effect_adapter::EffectBridgeAdapter;
 use crate::bridge::llm_adapter::LlmBridgeAdapter;
 use crate::bridge::store_adapter::HybridStore;
@@ -88,6 +89,8 @@ struct EngineState {
     db: Option<Arc<dyn Database>>,
     /// Secrets store for storing credentials after auth flow.
     secrets_store: Option<Arc<dyn crate::secrets::SecretsStore + Send + Sync>>,
+    /// Centralized auth manager for setup instruction lookup and credential checks.
+    auth_manager: Option<Arc<AuthManager>>,
 }
 
 /// Global engine state, initialized on first use.
@@ -151,6 +154,19 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
             })))
             .await;
     }
+
+    // Build centralized auth manager for pre-flight credential checks.
+    let auth_manager = if let Some(ss) = agent.tools().secrets_store().cloned() {
+        let mgr = Arc::new(AuthManager::new(
+            ss,
+            agent.deps.skill_registry.clone(),
+            agent.deps.extension_manager.clone(),
+        ));
+        effect_adapter.set_auth_manager(Arc::clone(&mgr)).await;
+        Some(mgr)
+    } else {
+        None
+    };
 
     let store = Arc::new(HybridStore::new(agent.workspace().cloned()));
     store.load_state_from_workspace().await;
@@ -394,6 +410,7 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
         sse: agent.deps.sse_tx.clone(),
         db: agent.deps.store.clone(),
         secrets_store: agent.tools().secrets_store().cloned(),
+        auth_manager,
     });
 
     Ok(())
@@ -943,11 +960,7 @@ pub async fn has_pending_auth(user_id: &str) -> bool {
     let Some(state) = guard.as_ref() else {
         return false;
     };
-    state
-        .pending_auth
-        .read()
-        .await
-        .contains_key(user_id)
+    state.pending_auth.read().await.contains_key(user_id)
 }
 
 /// Handle a user message through the engine v2 pipeline.
@@ -1231,12 +1244,17 @@ async fn await_thread_outcome(
         ThreadOutcome::Completed { response } => {
             debug!(thread_id = %thread_id, "engine v2: completed");
 
-            // Detect authentication_required in the response and enter auth mode.
-            // The user sees a prompt to paste their token; the next message stores
-            // it and retries the original request.
+            // Text-based auth fallback: detect authentication_required in the
+            // response and enter auth mode. This is a defense-in-depth safety net
+            // — the pre-flight auth gate should catch most cases before execution.
             if let Some(ref text) = response
                 && text.contains("authentication_required")
             {
+                debug!(
+                    thread_id = %thread_id,
+                    "text-based auth fallback triggered — pre-flight gate did not catch this"
+                );
+
                 // Extract credential name from the response text
                 let cred_name = text
                     .split("credential_name")
@@ -1249,23 +1267,11 @@ async fn await_thread_outcome(
                     .unwrap_or("unknown")
                     .to_string();
 
-                // Find setup instructions from skill credential spec
-                let setup_hint = agent
-                    .deps
-                    .skill_registry
+                // Look up setup instructions via AuthManager (or fall back to inline lookup)
+                let setup_hint = state
+                    .auth_manager
                     .as_ref()
-                    .and_then(|sr| {
-                        let reg = sr.read().ok()?;
-                        reg.skills().iter().find_map(|s| {
-                            s.manifest.credentials.iter().find_map(|c| {
-                                if c.name == cred_name {
-                                    c.setup_instructions.clone()
-                                } else {
-                                    None
-                                }
-                            })
-                        })
-                    })
+                    .and_then(|mgr| mgr.get_setup_instructions(&cred_name))
                     .unwrap_or_else(|| format!("Provide your {} token", cred_name));
 
                 // Store pending auth for this user
@@ -1357,22 +1363,11 @@ async fn await_thread_outcome(
             credential_name, ..
         } => {
             // Look up setup instructions from the skill's credential spec.
-            let setup_hint = agent
-                .deps
-                .skill_registry
+            // Look up setup instructions via AuthManager (or fall back to default).
+            let setup_hint = state
+                .auth_manager
                 .as_ref()
-                .and_then(|sr| {
-                    let reg = sr.read().ok()?;
-                    reg.skills().iter().find_map(|s| {
-                        s.manifest.credentials.iter().find_map(|c| {
-                            if c.name == credential_name {
-                                c.setup_instructions.clone()
-                            } else {
-                                None
-                            }
-                        })
-                    })
-                })
+                .and_then(|mgr| mgr.get_setup_instructions(&credential_name))
                 .unwrap_or_else(|| format!("Provide your {} token", credential_name));
 
             // Enter the guided auth flow — next user message is treated as a token.
