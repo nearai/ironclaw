@@ -27,6 +27,7 @@ mod wasm;
 pub(crate) mod workspace;
 
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::{LazyLock, Mutex, Once};
 
 use crate::error::ConfigError;
@@ -77,6 +78,19 @@ pub use self::helpers::{env_or_override, set_runtime_env};
 static INJECTED_VARS: LazyLock<Mutex<HashMap<String, String>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 static WARNED_EXPLICIT_DEFAULT_OWNER_ID: Once = Once::new();
+
+/// Default HTTP webhook bind address for the current platform.
+pub fn default_webhook_bind_addr(port: u16) -> SocketAddr {
+    #[cfg(windows)]
+    {
+        SocketAddr::from(([127, 0, 0, 1], port))
+    }
+
+    #[cfg(not(windows))]
+    {
+        SocketAddr::from(([0, 0, 0, 0], port))
+    }
+}
 
 /// Main configuration for the agent.
 #[derive(Debug, Clone)]
