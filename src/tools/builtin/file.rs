@@ -117,6 +117,13 @@ impl Tool for ReadFileTool {
 
         let path = validate_path(path_str, self.base_dir.as_deref())?;
 
+        if super::path_utils::is_sensitive_path(&path) {
+            return Err(ToolError::NotAuthorized(format!(
+                "Access denied: '{}' is a sensitive path. Use the appropriate secrets management tool instead.",
+                path_str
+            )));
+        }
+
         // Check file size
         let metadata = fs::metadata(&path)
             .await
@@ -256,6 +263,13 @@ impl Tool for WriteFileTool {
 
         let path = validate_path(path_str, self.base_dir.as_deref())?;
 
+        if super::path_utils::is_sensitive_path(&path) {
+            return Err(ToolError::NotAuthorized(format!(
+                "Access denied: '{}' is a sensitive path",
+                path_str
+            )));
+        }
+
         // Create parent directories
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).await.map_err(|e| {
@@ -364,6 +378,13 @@ impl Tool for ListDirTool {
 
         let path = validate_path(path_str, self.base_dir.as_deref())?;
 
+        if super::path_utils::is_sensitive_path(&path) {
+            return Err(ToolError::NotAuthorized(format!(
+                "Access denied: '{}' is a sensitive directory",
+                path_str
+            )));
+        }
+
         let mut entries = Vec::new();
         list_dir_inner(&path, &path, recursive, max_depth, 0, &mut entries).await?;
 
@@ -447,6 +468,10 @@ async fn list_dir_inner(
         entries.push(display);
 
         if recursive && is_dir && current_depth < max_depth {
+            // Skip sensitive directories during recursive traversal
+            if super::path_utils::is_sensitive_path(&entry_path) {
+                continue;
+            }
             // Skip common non-essential directories
             let name = entry.file_name();
             let name_str = name.to_string_lossy();
@@ -560,6 +585,13 @@ impl Tool for ApplyPatchTool {
         let start = std::time::Instant::now();
 
         let path = validate_path(path_str, self.base_dir.as_deref())?;
+
+        if super::path_utils::is_sensitive_path(&path) {
+            return Err(ToolError::NotAuthorized(format!(
+                "Access denied: '{}' is a sensitive path",
+                path_str
+            )));
+        }
 
         // Read current content
         let content = fs::read_to_string(&path)
