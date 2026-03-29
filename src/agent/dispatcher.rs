@@ -137,6 +137,18 @@ impl Agent {
             }
         }
 
+        if let Some(extension_manager) = self.deps.extension_manager.as_ref() {
+            match extension_manager.llm_extension_state_summary().await {
+                Ok(Some(summary)) => {
+                    reasoning = reasoning.with_extension_state_summary(summary);
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::debug!("Could not load extension state summary: {}", e);
+                }
+            }
+        }
+
         if let Some(prompt) = system_prompt {
             reasoning = reasoning.with_system_prompt(prompt);
         }

@@ -1614,6 +1614,52 @@ impl ExtensionManager {
         Ok(extensions)
     }
 
+    /// Build a compact, deterministic extension snapshot for LLM prompt context.
+    pub async fn llm_extension_state_summary(&self) -> Result<Option<String>, ExtensionError> {
+        let mut extensions = self.list(None, false).await?;
+        extensions.sort_by(|a, b| {
+            llm_extension_sort_key(a.kind)
+                .cmp(&llm_extension_sort_key(b.kind))
+                .then_with(|| a.name.cmp(&b.name))
+        });
+
+        let mut channels = Vec::new();
+        let mut tools = Vec::new();
+        let mut servers = Vec::new();
+
+        for extension in extensions {
+            let owner_bound = matches!(extension.kind, ExtensionKind::WasmChannel)
+                && self.has_wasm_channel_owner_binding(&extension.name).await;
+            if !(extension.active || extension.authenticated || owner_bound) {
+                continue;
+            }
+
+            let item = llm_extension_summary_item(&extension, owner_bound);
+            match extension.kind {
+                ExtensionKind::WasmChannel | ExtensionKind::ChannelRelay => channels.push(item),
+                ExtensionKind::WasmTool => tools.push(item),
+                ExtensionKind::McpServer => servers.push(item),
+            }
+        }
+
+        let mut lines = Vec::new();
+        if !channels.is_empty() {
+            lines.push(format!("- Channels: {}", channels.join("; ")));
+        }
+        if !tools.is_empty() {
+            lines.push(format!("- Tools: {}", tools.join("; ")));
+        }
+        if !servers.is_empty() {
+            lines.push(format!("- MCP servers: {}", servers.join("; ")));
+        }
+
+        if lines.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(lines.join("\n")))
+        }
+    }
+
     /// Remove an installed extension.
     pub async fn remove(&self, name: &str, user_id: &str) -> Result<String, ExtensionError> {
         Self::validate_extension_name(name)?;
@@ -6311,6 +6357,40 @@ fn combine_install_errors(
     }
 }
 
+fn llm_extension_sort_key(kind: ExtensionKind) -> u8 {
+    match kind {
+        ExtensionKind::WasmChannel | ExtensionKind::ChannelRelay => 0,
+        ExtensionKind::WasmTool => 1,
+        ExtensionKind::McpServer => 2,
+    }
+}
+
+fn llm_extension_summary_item(extension: &InstalledExtension, owner_bound: bool) -> String {
+    let mut states = Vec::new();
+    if extension.authenticated {
+        states.push("authenticated".to_string());
+    }
+    if extension.active {
+        states.push("active".to_string());
+    } else if extension.authenticated {
+        states.push("inactive".to_string());
+    }
+    if owner_bound {
+        states.push("owner-bound".to_string());
+    }
+    if !extension.tools.is_empty() {
+        let mut tool_names = extension.tools.clone();
+        tool_names.sort();
+        states.push(format!("tools: {}", tool_names.join(", ")));
+    }
+
+    if states.is_empty() {
+        extension.name.clone()
+    } else {
+        format!("{} ({})", extension.name, states.join(", "))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::fmt::Debug;
@@ -7314,6 +7394,142 @@ mod tests {
             bot_username_setting,
             Some(serde_json::json!("test_hot_bot")),
             "bot username setting",
+        )
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_llm_extension_state_summary_reports_active_owner_bound_telegram()
+    -> Result<(), String> {
+        let dir = tempfile::tempdir().map_err(|err| format!("temp dir: {err}"))?;
+        let channels_dir = dir.path().join("channels");
+        std::fs::create_dir_all(&channels_dir).map_err(|err| format!("channels dir: {err}"))?;
+        std::fs::write(channels_dir.join("telegram.wasm"), b"mock")
+            .map_err(|err| format!("write wasm: {err}"))?;
+        std::fs::write(
+            channels_dir.join("telegram.capabilities.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "type": "channel",
+                "name": "telegram",
+                "setup": {
+                    "required_secrets": [
+                        {
+                            "name": "telegram_bot_token",
+                            "prompt": "Enter your Telegram Bot API token (from @BotFather)",
+                            "optional": false
+                        }
+                    ]
+                },
+                "capabilities": {
+                    "channel": {
+                        "allowed_paths": ["/webhook/telegram"]
+                    }
+                },
+                "config": {
+                    "owner_id": null
+                }
+            }))
+            .map_err(|err| format!("serialize capabilities: {err}"))?,
+        )
+        .map_err(|err| format!("write capabilities: {err}"))?;
+
+        let (db, _db_tmp) = crate::testing::test_db().await;
+        let manager = {
+            use crate::secrets::{InMemorySecretsStore, SecretsCrypto};
+            use crate::testing::credentials::TEST_CRYPTO_KEY;
+            use crate::tools::ToolRegistry;
+            use crate::tools::mcp::process::McpProcessManager;
+            use crate::tools::mcp::session::McpSessionManager;
+
+            let master_key = secrecy::SecretString::from(TEST_CRYPTO_KEY.to_string());
+            let crypto = Arc::new(
+                SecretsCrypto::new(master_key)
+                    .map_err(|err| format!("failed to construct test crypto: {err}"))?,
+            );
+
+            ExtensionManager::new(
+                Arc::new(McpSessionManager::new()),
+                Arc::new(McpProcessManager::new()),
+                Arc::new(InMemorySecretsStore::new(crypto)),
+                Arc::new(ToolRegistry::new()),
+                None,
+                None,
+                dir.path().join("tools"),
+                channels_dir.clone(),
+                None,
+                "test".to_string(),
+                Some(db),
+                Vec::new(),
+            )
+        };
+
+        let channel_manager = Arc::new(ChannelManager::new());
+        let runtime = Arc::new(
+            WasmChannelRuntime::new(WasmChannelRuntimeConfig::for_testing())
+                .map_err(|err| format!("runtime: {err}"))?,
+        );
+        let pairing_store = Arc::new(PairingStore::with_base_dir(
+            dir.path().join("pairing-state"),
+        ));
+        let router = Arc::new(WasmChannelRouter::new());
+        manager
+            .set_channel_runtime(
+                Arc::clone(&channel_manager),
+                Arc::clone(&runtime),
+                Arc::clone(&pairing_store),
+                Arc::clone(&router),
+                std::collections::HashMap::new(),
+            )
+            .await;
+        manager
+            .set_test_wasm_channel_loader(Arc::new({
+                let runtime = Arc::clone(&runtime);
+                let pairing_store = Arc::clone(&pairing_store);
+                move |name| {
+                    Ok(make_test_loaded_channel(
+                        Arc::clone(&runtime),
+                        name,
+                        Arc::clone(&pairing_store),
+                    ))
+                }
+            }))
+            .await;
+        manager
+            .set_test_telegram_binding_resolver(Arc::new(|_token, existing_owner_id| {
+                if existing_owner_id.is_some() {
+                    return Err(ExtensionError::Other(
+                        "owner binding should be derived during setup".to_string(),
+                    ));
+                }
+                Ok(TelegramBindingResult::Bound(TelegramBindingData {
+                    owner_id: 424242,
+                    bot_username: Some("test_hot_bot".to_string()),
+                    binding_state: TelegramOwnerBindingState::VerifiedNow,
+                }))
+            }))
+            .await;
+
+        manager
+            .configure(
+                "telegram",
+                &std::collections::HashMap::from([(
+                    "telegram_bot_token".to_string(),
+                    "123456789:ABCdefGhI".to_string(),
+                )]),
+                &std::collections::HashMap::new(),
+            )
+            .await
+            .map_err(|err| format!("configure succeeds: {err}"))?;
+
+        let summary = manager
+            .llm_extension_state_summary()
+            .await
+            .map_err(|err| format!("summary: {err}"))?
+            .ok_or_else(|| "expected extension summary".to_string())?;
+
+        require(
+            summary.contains("- Channels: telegram (authenticated, active, owner-bound)"),
+            format!("unexpected summary: {summary}"),
         )
     }
 

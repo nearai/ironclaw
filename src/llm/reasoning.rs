@@ -368,6 +368,8 @@ pub struct Reasoning {
     workspace_system_prompt: Option<String>,
     /// Optional skill context block to inject into system prompt.
     skill_context: Option<String>,
+    /// Optional snapshot of connected/active extensions for the current user.
+    extension_state_summary: Option<String>,
     /// Channel name (e.g. "discord", "telegram") for formatting hints.
     channel: Option<String>,
     /// Model name for runtime context.
@@ -386,6 +388,7 @@ impl Reasoning {
             llm,
             workspace_system_prompt: None,
             skill_context: None,
+            extension_state_summary: None,
             channel: None,
             model_name: None,
             is_group_chat: false,
@@ -411,6 +414,14 @@ impl Reasoning {
     pub fn with_skill_context(mut self, context: String) -> Self {
         if !context.is_empty() {
             self.skill_context = Some(context);
+        }
+        self
+    }
+
+    /// Set extension runtime context to inject into the system prompt.
+    pub fn with_extension_state_summary(mut self, summary: String) -> Self {
+        if !summary.is_empty() {
+            self.extension_state_summary = Some(summary);
         }
         self
     }
@@ -1009,21 +1020,54 @@ Example:
     }
 
     fn build_extensions_section_for_tools(&self, tools: &[ToolDefinition]) -> String {
-        // Only include when the extension management tools are available
-        let has_ext_tools = tools.iter().any(|t| t.name == "tool_search");
-        if !has_ext_tools {
+        let has_search = tools.iter().any(|t| t.name == "tool_search");
+        let has_list = tools.iter().any(|t| t.name == "tool_list");
+        let has_info = tools.iter().any(|t| t.name == "extension_info");
+
+        if self.extension_state_summary.is_none() && !has_search && !has_list && !has_info {
             return String::new();
         }
 
-        "\n\n## Extensions\n\
-         You can search, install, and activate extensions to add new capabilities:\n\
-         - **Channels** (Telegram, Slack, Discord) — messaging integrations. \
-         When users ask about connecting a messaging platform, search for it as a channel.\n\
-         - **Tools** — sandboxed functions that extend your abilities.\n\
-         - **MCP servers** — external API integrations via the Model Context Protocol.\n\n\
-         Use `tool_search` to find extensions by name. Refer to them by their kind \
-         (channel, tool, or server) — not as \"MCP server\" generically."
-            .to_string()
+        let mut blocks = Vec::new();
+        if let Some(ref summary) = self.extension_state_summary {
+            blocks.push(format!(
+                "Current extension state for this user:\n{}",
+                summary
+            ));
+        }
+
+        if has_search || has_list || has_info {
+            let mut guidance = String::from(
+                "You can search, install, and activate extensions to add new capabilities:\n\
+                 - **Channels** (Telegram, Slack, Discord) — messaging integrations. \
+                 When users ask about connecting a messaging platform, search for it as a channel.\n\
+                 - **Tools** — sandboxed functions that extend your abilities.\n\
+                 - **MCP servers** — external API integrations via the Model Context Protocol.",
+            );
+
+            if has_list {
+                guidance.push_str(
+                    "\n\nBefore telling the user to connect, activate, or re-enable an extension, \
+                     inspect the current state with `tool_list`.",
+                );
+            }
+            if has_info {
+                guidance.push_str(
+                    "\nUse `extension_info` when you need deeper compatibility or runtime details \
+                     for an installed extension.",
+                );
+            }
+            if has_search {
+                guidance.push_str(
+                    "\nUse `tool_search` to find extensions by name. Refer to them by their kind \
+                     (channel, tool, or server) — not as \"MCP server\" generically.",
+                );
+            }
+
+            blocks.push(guidance);
+        }
+
+        format!("\n\n## Extensions\n{}", blocks.join("\n\n"))
     }
 
     fn build_channel_section(&self) -> String {
@@ -2503,6 +2547,42 @@ That's my plan."#;
         assert!(
             prompt.contains("echo: Echoes input"),
             "Prompt with tools should list the echo tool"
+        );
+    }
+
+    #[test]
+    fn test_system_prompt_includes_extension_runtime_summary() {
+        let reasoning = make_test_reasoning().with_extension_state_summary(
+            "- Channels: telegram (authenticated, active, owner-bound)".to_string(),
+        );
+
+        let prompt = reasoning.build_system_prompt_with_tools(&[]);
+        assert!(
+            prompt.contains("## Extensions"),
+            "Prompt should contain an Extensions section when runtime state is present"
+        );
+        assert!(
+            prompt.contains("telegram (authenticated, active, owner-bound)"),
+            "Prompt should include the injected extension runtime summary"
+        );
+    }
+
+    #[test]
+    fn test_system_prompt_extension_guidance_prefers_inspection_before_reconnect() {
+        let reasoning = make_test_reasoning();
+        let prompt = reasoning.build_system_prompt_with_tools(&make_tools(&[
+            "tool_search",
+            "tool_list",
+            "extension_info",
+        ]));
+
+        assert!(
+            prompt.contains("inspect the current state with `tool_list`"),
+            "Prompt should direct the model to inspect installed/active state first"
+        );
+        assert!(
+            prompt.contains("Use `extension_info` when you need deeper compatibility"),
+            "Prompt should mention extension_info for deeper extension details"
         );
     }
 
