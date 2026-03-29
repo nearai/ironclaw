@@ -857,7 +857,8 @@ impl AppBuilder {
         // Skills system
         let (skill_registry, skill_catalog) = if self.config.skills.enabled {
             let mut registry = SkillRegistry::new(self.config.skills.local_dir.clone())
-                .with_installed_dir(self.config.skills.installed_dir.clone());
+                .with_installed_dir(self.config.skills.installed_dir.clone())
+                .with_max_scan_depth(self.config.skills.max_scan_depth);
             let loaded = registry.discover_all().await;
             if !loaded.is_empty() {
                 tracing::debug!("Loaded {} skill(s): {}", loaded.len(), loaded.join(", "));
