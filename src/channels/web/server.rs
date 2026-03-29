@@ -39,7 +39,7 @@ use crate::channels::web::handlers::jobs::{
     jobs_summary_handler,
 };
 use crate::channels::web::handlers::llm::{
-    llm_env_defaults_handler, llm_list_models_handler, llm_test_connection_handler,
+    llm_list_models_handler, llm_providers_handler, llm_test_connection_handler,
 };
 use crate::channels::web::handlers::memory::{
     memory_list_handler, memory_read_handler, memory_search_handler, memory_tree_handler,
@@ -542,7 +542,7 @@ pub async fn start_server(
             post(llm_test_connection_handler),
         )
         .route("/api/llm/list_models", post(llm_list_models_handler))
-        .route("/api/llm/env_defaults", get(llm_env_defaults_handler))
+        .route("/api/llm/providers", get(llm_providers_handler))
         // User management (admin)
         .route(
             "/api/admin/users",
@@ -620,7 +620,6 @@ pub async fn start_server(
     let statics = Router::new()
         .route("/", get(index_handler))
         .route("/style.css", get(css_handler))
-        .route("/providers.js", get(providers_js_handler))
         .route("/app.js", get(js_handler))
         .route("/theme-init.js", get(theme_init_handler))
         .route("/favicon.ico", get(favicon_handler))
@@ -759,16 +758,6 @@ async fn css_handler() -> impl IntoResponse {
             (header::CACHE_CONTROL, "no-cache"),
         ],
         include_str!("static/style.css"),
-    )
-}
-
-async fn providers_js_handler() -> impl IntoResponse {
-    (
-        [
-            (header::CONTENT_TYPE, "application/javascript"),
-            (header::CACHE_CONTROL, "no-cache"),
-        ],
-        include_str!("static/providers.js"),
     )
 }
 

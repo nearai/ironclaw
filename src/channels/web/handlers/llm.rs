@@ -363,71 +363,124 @@ async fn fetch_provider_models(req: ListModelsRequest) -> ListModelsResponse {
 }
 
 // ---------------------------------------------------------------------------
-// Env defaults
+// Provider list + env defaults (replaces static providers.js)
 // ---------------------------------------------------------------------------
 
-/// Returns env-var-based defaults for each builtin LLM provider.
+/// Returns all builtin LLM provider definitions plus env-var defaults.
 ///
-/// The frontend uses these as fallback values when the DB has no overrides.
+/// Each entry contains the provider definition (id, name, adapter, base_url,
+/// default_model, api_key_required, can_list_models) and env-var overrides
+/// (has_api_key presence flag, model override, base_url override).
 /// API keys are never returned — only a boolean `has_api_key`.
-pub async fn llm_env_defaults_handler(
+pub async fn llm_providers_handler(
     AuthenticatedUser(_user): AuthenticatedUser,
 ) -> Json<serde_json::Value> {
-    Json(build_llm_env_defaults())
+    Json(build_llm_providers())
 }
 
-fn build_llm_env_defaults() -> serde_json::Value {
+fn build_llm_providers() -> serde_json::Value {
     use crate::config::helpers::optional_env;
     use crate::llm::registry::ProviderRegistry;
 
     let registry = ProviderRegistry::load();
-    let mut defaults = serde_json::Map::new();
 
     // Helper: read env var via optional_env (checks real env + injected overlay).
+    // Intentionally swallows ConfigError — this is a best-effort informational
+    // endpoint, not a config resolver.
     let read_env = |key: &str| -> Option<String> { optional_env(key).ok().flatten() };
 
-    // NEAR AI is a special case (not in the registry)
+    let mut providers = Vec::new();
+
+    // NEAR AI is not in the registry — add it as a special case.
     {
         let mut entry = serde_json::Map::new();
-        // Only expose presence of API key, never the value itself.
+        entry.insert("id".into(), "nearai".into());
+        entry.insert("name".into(), "NEAR AI".into());
+        entry.insert("adapter".into(), "nearai".into());
+        entry.insert("base_url".into(), "https://cloud-api.near.ai/v1".into());
+        entry.insert("builtin".into(), true.into());
         entry.insert(
-            "has_api_key".to_string(),
-            serde_json::Value::Bool(read_env("NEARAI_API_KEY").is_some()),
+            "default_model".into(),
+            serde_json::Value::String(crate::llm::DEFAULT_MODEL.to_string()),
+        );
+        entry.insert("api_key_required".into(), true.into());
+        entry.insert("can_list_models".into(), true.into());
+        // Env defaults
+        entry.insert(
+            "has_api_key".into(),
+            read_env("NEARAI_API_KEY").is_some().into(),
         );
         if let Some(model) = read_env("NEARAI_MODEL") {
-            entry.insert("model".to_string(), serde_json::Value::String(model));
+            entry.insert("env_model".into(), serde_json::Value::String(model));
         }
         if let Some(url) = read_env("NEARAI_BASE_URL") {
-            entry.insert("base_url".to_string(), serde_json::Value::String(url));
+            entry.insert("env_base_url".into(), serde_json::Value::String(url));
         }
-        defaults.insert("nearai".to_string(), serde_json::Value::Object(entry));
+        providers.push(serde_json::Value::Object(entry));
     }
 
     // Registry-based providers
     for def in registry.all() {
         let mut entry = serde_json::Map::new();
-
+        entry.insert("id".into(), serde_json::Value::String(def.id.clone()));
+        // Use display_name from setup hint, falling back to titlecased id.
+        let name = def
+            .setup
+            .as_ref()
+            .map(|s| s.display_name().to_string())
+            .unwrap_or_else(|| def.id.clone());
+        entry.insert("name".into(), serde_json::Value::String(name));
+        // Serialize protocol as the adapter name the frontend expects.
+        let adapter = serde_json::to_value(def.protocol)
+            .ok()
+            .and_then(|v| v.as_str().map(String::from))
+            .unwrap_or_else(|| "open_ai_completions".to_string());
+        entry.insert("adapter".into(), serde_json::Value::String(adapter));
+        entry.insert(
+            "base_url".into(),
+            serde_json::Value::String(def.default_base_url.clone().unwrap_or_default()),
+        );
+        entry.insert("builtin".into(), true.into());
+        entry.insert(
+            "default_model".into(),
+            serde_json::Value::String(def.default_model.clone()),
+        );
+        entry.insert("api_key_required".into(), def.api_key_required.into());
+        let can_list = def.setup.as_ref().is_some_and(|s| s.can_list_models());
+        entry.insert("can_list_models".into(), can_list.into());
+        // Env defaults
         if let Some(ref api_key_env) = def.api_key_env {
-            entry.insert(
-                "has_api_key".to_string(),
-                serde_json::Value::Bool(read_env(api_key_env).is_some()),
-            );
+            entry.insert("has_api_key".into(), read_env(api_key_env).is_some().into());
         }
-
         if let Some(model) = read_env(&def.model_env) {
-            entry.insert("model".to_string(), serde_json::Value::String(model));
+            entry.insert("env_model".into(), serde_json::Value::String(model));
         }
-
         if let Some(ref base_url_env) = def.base_url_env
             && let Some(url) = read_env(base_url_env)
         {
-            entry.insert("base_url".to_string(), serde_json::Value::String(url));
+            entry.insert("env_base_url".into(), serde_json::Value::String(url));
         }
-
-        defaults.insert(def.id.clone(), serde_json::Value::Object(entry));
+        providers.push(serde_json::Value::Object(entry));
     }
 
-    serde_json::Value::Object(defaults)
+    // Bedrock is not in the registry — add it as a special case.
+    {
+        let mut entry = serde_json::Map::new();
+        entry.insert("id".into(), "bedrock".into());
+        entry.insert("name".into(), "AWS Bedrock".into());
+        entry.insert("adapter".into(), "bedrock".into());
+        entry.insert("base_url".into(), "".into());
+        entry.insert("builtin".into(), true.into());
+        entry.insert(
+            "default_model".into(),
+            "anthropic.claude-3-sonnet-20240229-v1:0".into(),
+        );
+        entry.insert("api_key_required".into(), false.into());
+        entry.insert("can_list_models".into(), false.into());
+        providers.push(serde_json::Value::Object(entry));
+    }
+
+    serde_json::Value::Array(providers)
 }
 
 // ---------------------------------------------------------------------------
@@ -456,8 +509,8 @@ async fn resolve_api_key_from_secrets(
         None => return,
     };
     let secret_name = match provider_type.as_deref() {
-        Some("custom") => format!("llm_custom_{}_api_key", pid),
-        _ => format!("llm_builtin_{}_api_key", pid),
+        Some("custom") => crate::settings::custom_secret_name(pid),
+        _ => crate::settings::builtin_secret_name(pid),
     };
     if let Ok(decrypted) = secrets.get_decrypted(user_id, &secret_name).await {
         *api_key = Some(decrypted.expose().to_string());
@@ -480,10 +533,19 @@ fn is_nearai_private_endpoint(base_url: &str) -> bool {
 mod tests {
     use super::*;
 
-    // --- LLM env defaults handler tests ---
+    // --- LLM providers handler tests ---
+
+    fn find_provider<'a>(
+        providers: &'a [serde_json::Value],
+        id: &str,
+    ) -> Option<&'a serde_json::Value> {
+        providers
+            .iter()
+            .find(|p| p.get("id").and_then(|v| v.as_str()) == Some(id))
+    }
 
     #[tokio::test]
-    async fn test_llm_env_defaults_returns_nearai_env_vars() {
+    async fn test_llm_providers_returns_nearai_with_env_vars() {
         // SAFETY: test-only; tokio::test runs single-threaded by default.
         unsafe {
             std::env::set_var("NEARAI_API_KEY", "test-key-123");
@@ -491,14 +553,10 @@ mod tests {
             std::env::set_var("NEARAI_BASE_URL", "https://test.near.ai/v1");
         }
 
-        let result = build_llm_env_defaults();
-        let map = result.as_object().expect("should be an object");
+        let result = build_llm_providers();
+        let arr = result.as_array().expect("should be an array");
 
-        // Check NEAR AI entry
-        let nearai = map
-            .get("nearai")
-            .and_then(|v| v.as_object())
-            .expect("nearai entry");
+        let nearai = find_provider(arr, "nearai").expect("nearai entry");
         // API key should NOT be exposed — only has_api_key presence flag.
         assert_eq!(
             nearai.get("has_api_key").and_then(|v| v.as_bool()),
@@ -509,13 +567,19 @@ mod tests {
             "raw api_key must never be returned"
         );
         assert_eq!(
-            nearai.get("model").and_then(|v| v.as_str()),
+            nearai.get("env_model").and_then(|v| v.as_str()),
             Some("test-model")
         );
         assert_eq!(
-            nearai.get("base_url").and_then(|v| v.as_str()),
+            nearai.get("env_base_url").and_then(|v| v.as_str()),
             Some("https://test.near.ai/v1")
         );
+        // Check definition fields are present
+        assert_eq!(
+            nearai.get("adapter").and_then(|v| v.as_str()),
+            Some("nearai")
+        );
+        assert_eq!(nearai.get("builtin").and_then(|v| v.as_bool()), Some(true));
 
         // Clean up
         unsafe {
@@ -526,18 +590,44 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_llm_env_defaults_includes_registry_providers() {
-        let result = build_llm_env_defaults();
-        let map = result.as_object().expect("should be an object");
+    async fn test_llm_providers_includes_registry_and_special_providers() {
+        let result = build_llm_providers();
+        let arr = result.as_array().expect("should be an array");
 
-        // Registry providers should be present (openai, anthropic, ollama, etc.)
-        assert!(map.contains_key("openai"), "should contain openai");
-        assert!(map.contains_key("anthropic"), "should contain anthropic");
-        assert!(map.contains_key("ollama"), "should contain ollama");
+        // Registry providers should be present
+        assert!(
+            find_provider(arr, "openai").is_some(),
+            "should contain openai"
+        );
+        assert!(
+            find_provider(arr, "anthropic").is_some(),
+            "should contain anthropic"
+        );
+        assert!(
+            find_provider(arr, "ollama").is_some(),
+            "should contain ollama"
+        );
 
-        // Each entry should have has_api_key field
-        for (id, val) in map {
-            assert!(val.is_object(), "{id} should be an object");
+        // Special providers should be present
+        assert!(
+            find_provider(arr, "nearai").is_some(),
+            "should contain nearai"
+        );
+        assert!(
+            find_provider(arr, "bedrock").is_some(),
+            "should contain bedrock"
+        );
+
+        // Each entry should have required fields
+        for p in arr {
+            let id = p.get("id").and_then(|v| v.as_str()).unwrap_or("<missing>");
+            assert!(p.get("name").is_some(), "{id} missing name");
+            assert!(p.get("adapter").is_some(), "{id} missing adapter");
+            assert!(p.get("builtin").is_some(), "{id} missing builtin");
+            assert!(
+                p.get("default_model").is_some(),
+                "{id} missing default_model"
+            );
         }
     }
 

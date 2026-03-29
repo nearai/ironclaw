@@ -57,6 +57,16 @@ pub struct LlmBuiltinOverride {
     pub base_url: Option<String>,
 }
 
+/// Canonical secret name for a built-in provider's API key.
+pub fn builtin_secret_name(provider_id: &str) -> String {
+    format!("llm_builtin_{provider_id}_api_key")
+}
+
+/// Canonical secret name for a custom provider's API key.
+pub fn custom_secret_name(provider_id: &str) -> String {
+    format!("llm_custom_{provider_id}_api_key")
+}
+
 /// User settings persisted to disk.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Settings {

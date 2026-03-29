@@ -198,8 +198,8 @@ async fn guard_active_provider_not_removed(
     };
 
     // Parse the incoming provider list.
-    let new_providers: Vec<serde_json::Value> = match new_value.as_array() {
-        Some(arr) => arr.clone(),
+    let new_providers = match new_value.as_array() {
+        Some(arr) => arr,
         None => return Ok(()),
     };
 
@@ -208,14 +208,14 @@ async fn guard_active_provider_not_removed(
         Ok(Some(v)) => v,
         _ => return Ok(()),
     };
-    let old_providers: Vec<serde_json::Value> = match old_providers_value.as_array() {
-        Some(arr) => arr.clone(),
+    let old_providers = match old_providers_value.as_array() {
+        Some(arr) => arr,
         None => return Ok(()),
     };
 
     let active_was_custom = old_providers
         .iter()
-        .any(|p| p.get("id").and_then(|v| v.as_str()) == Some(&active_backend));
+        .any(|p| p.get("id").and_then(|v| v.as_str()) == Some(active_backend.as_str()));
     if !active_was_custom {
         return Ok(());
     }
@@ -223,7 +223,7 @@ async fn guard_active_provider_not_removed(
     // Reject if the active provider is absent from the new list.
     let still_present = new_providers
         .iter()
-        .any(|p| p.get("id").and_then(|v| v.as_str()) == Some(&active_backend));
+        .any(|p| p.get("id").and_then(|v| v.as_str()) == Some(active_backend.as_str()));
     if !still_present {
         tracing::warn!(
             active_backend = %active_backend,
@@ -321,15 +321,7 @@ pub async fn settings_import_handler(
 // LLM API key vaulting helpers
 // ---------------------------------------------------------------------------
 
-/// Canonical secret name for a built-in provider's API key.
-fn builtin_secret_name(provider_id: &str) -> String {
-    format!("llm_builtin_{}_api_key", provider_id)
-}
-
-/// Canonical secret name for a custom provider's API key.
-fn custom_secret_name(provider_id: &str) -> String {
-    format!("llm_custom_{}_api_key", provider_id)
-}
+use crate::settings::{builtin_secret_name, custom_secret_name};
 
 /// Returns true if the `api_key` value is a real key (not sentinel/empty).
 fn is_real_api_key(key: &str) -> bool {

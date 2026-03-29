@@ -551,7 +551,7 @@ pub async fn hydrate_llm_keys_from_secrets(
         if override_val.api_key.is_some() {
             continue; // Already has a key (legacy plaintext or TOML)
         }
-        let secret_name = format!("llm_builtin_{}_api_key", provider_id);
+        let secret_name = crate::settings::builtin_secret_name(provider_id);
         if let Ok(decrypted) = secrets.get_decrypted(user_id, &secret_name).await {
             override_val.api_key = Some(decrypted.expose().to_string());
         }
@@ -562,7 +562,7 @@ pub async fn hydrate_llm_keys_from_secrets(
         if provider.api_key.is_some() {
             continue;
         }
-        let secret_name = format!("llm_custom_{}_api_key", provider.id);
+        let secret_name = crate::settings::custom_secret_name(&provider.id);
         if let Ok(decrypted) = secrets.get_decrypted(user_id, &secret_name).await {
             provider.api_key = Some(decrypted.expose().to_string());
         }
@@ -596,7 +596,7 @@ pub async fn migrate_plaintext_llm_keys(
                 if api_key.is_empty() {
                     continue;
                 }
-                let secret_name = format!("llm_builtin_{}_api_key", provider_id);
+                let secret_name = crate::settings::builtin_secret_name(provider_id);
                 if !secrets.exists(user_id, &secret_name).await.unwrap_or(false)
                     && let Err(e) = secrets
                         .create(
@@ -652,7 +652,7 @@ pub async fn migrate_plaintext_llm_keys(
                 if api_key.is_empty() {
                     continue;
                 }
-                let secret_name = format!("llm_custom_{}_api_key", provider_id);
+                let secret_name = crate::settings::custom_secret_name(provider_id);
                 if !secrets.exists(user_id, &secret_name).await.unwrap_or(false)
                     && let Err(e) = secrets
                         .create(
