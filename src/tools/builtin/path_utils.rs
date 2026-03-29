@@ -82,7 +82,10 @@ pub fn is_sensitive_path(path: &Path) -> bool {
     }
 
     // Check sensitive path patterns
-    if SENSITIVE_PATH_PATTERNS.iter().any(|p| path_str.contains(p)) {
+    if SENSITIVE_PATH_PATTERNS
+        .iter()
+        .any(|p| path_pattern_matches(&lower, p))
+    {
         return true;
     }
 
@@ -100,21 +103,83 @@ pub fn is_sensitive_path(path: &Path) -> bool {
 /// Scan a shell command string for references to sensitive paths.
 /// Returns the first matched pattern, or None if the command is clean.
 /// Used by the shell tool to block `cat ~/.ssh/id_rsa` etc.
+///
+/// # Limitations
+///
+/// This is a **defense-in-depth** heuristic operating on a raw command string.
+/// It inherently cannot catch every bypass, including but not limited to:
+///
+/// - **Symlink-based bypasses** (`ln -s ~/.ssh/id_rsa /tmp/link && cat /tmp/link`)
+/// - **Encoding tricks** (backtick/subshell expansion, base64-encoded paths, hex escapes)
+/// - **Quoted or escaped path segments** that defeat simple token splitting
+/// - **Variable expansion** (`$HOME/.ssh/id_rsa`, `${SECRET_FILE}`)
+/// - **Glob-based access** (`cat /etc/sh*dow`)
+///
+/// The **sandbox / Docker isolation layer** is the real security boundary.
+/// This scanner exists to catch the common, obvious cases at the tool layer.
 pub fn command_references_sensitive_path(command: &str) -> Option<&'static str> {
     let normalized = command.to_lowercase();
 
     for pattern in SENSITIVE_PATH_PATTERNS.iter() {
-        // For path patterns, check case-insensitively
-        if normalized.contains(&pattern.to_lowercase()) {
+        let pat_lower = pattern.to_lowercase();
+        if pattern_matches_in_command(&normalized, &pat_lower) {
             return Some(pattern);
         }
     }
 
-    // Check for sensitive extensions in file arguments
+    // Check for sensitive extensions in whitespace-delimited tokens.
+    // Requiring the extension at the end of a token avoids false positives
+    // like `--key-file /tmp/foo` matching `.key`.
+    let tokens: Vec<&str> = normalized.split_whitespace().collect();
     SENSITIVE_EXTENSIONS
         .iter()
-        .find(|ext| normalized.contains(*ext))
+        .find(|ext| tokens.iter().any(|tok| tok.ends_with(*ext)))
         .copied()
+}
+
+/// Check whether a sensitive path pattern matches within a file path string.
+/// Handles the `/.env` special case the same way as the command scanner.
+fn path_pattern_matches(path_lower: &str, pattern: &str) -> bool {
+    if pattern == "/.env" {
+        pattern_matches_in_command(path_lower, &pattern.to_lowercase())
+    } else {
+        path_lower.contains(&pattern.to_lowercase())
+    }
+}
+
+/// Check whether `pattern` matches in `command` with awareness of the `/.env`
+/// special case: `/.env` must match exactly as a complete filename or be
+/// followed by `.` (e.g. `/.env.local`), but NOT match `.envrc`,
+/// `.environment`, or other extensions that merely start with `env`.
+fn pattern_matches_in_command(command: &str, pattern: &str) -> bool {
+    if pattern == "/.env" {
+        // Find all occurrences of "/.env" and check what follows
+        let mut start = 0;
+        while let Some(pos) = command[start..].find(pattern) {
+            let abs_pos = start + pos;
+            let after = abs_pos + pattern.len();
+            if after >= command.len() {
+                // "/.env" at end of string -- exact match
+                return true;
+            }
+            let next_char = command.as_bytes()[after];
+            // Allow /.env followed by: whitespace, '.' (for .env.local etc.), '/' or end
+            if next_char == b' '
+                || next_char == b'\t'
+                || next_char == b'.'
+                || next_char == b'/'
+                || next_char == b'"'
+                || next_char == b'\''
+            {
+                return true;
+            }
+            // Otherwise it's something like .envrc -- skip and keep looking
+            start = after;
+        }
+        false
+    } else {
+        command.contains(pattern)
+    }
 }
 
 /// Normalize a path by resolving `.` and `..` components lexically (no filesystem access).
@@ -436,5 +501,54 @@ mod tests {
         assert!(command_references_sensitive_path("cargo build").is_none());
         assert!(command_references_sensitive_path("git status").is_none());
         assert!(command_references_sensitive_path("cat README.md").is_none());
+    }
+
+    // ── Issue 1: .env must not match .envrc or .environment ──
+
+    #[test]
+    fn test_envrc_not_blocked_by_path_check() {
+        assert!(!is_sensitive_path(Path::new("/app/.envrc")));
+        assert!(!is_sensitive_path(Path::new("/home/user/.environment")));
+        assert!(!is_sensitive_path(Path::new("/project/.envrc.local")));
+    }
+
+    #[test]
+    fn test_envrc_not_blocked_by_command_scanner() {
+        assert!(command_references_sensitive_path("cat /app/.envrc").is_none());
+        assert!(command_references_sensitive_path("source .envrc").is_none());
+        assert!(command_references_sensitive_path("direnv allow /project/.envrc").is_none());
+        assert!(command_references_sensitive_path("cat /app/.environment").is_none());
+    }
+
+    #[test]
+    fn test_env_files_still_blocked_after_envrc_fix() {
+        // Exact .env
+        assert!(is_sensitive_path(Path::new("/app/.env")));
+        assert!(command_references_sensitive_path("cat /app/.env").is_some());
+        // .env.local, .env.production etc.
+        assert!(is_sensitive_path(Path::new("/app/.env.local")));
+        assert!(command_references_sensitive_path("cat /app/.env.production").is_some());
+    }
+
+    // ── Issue 2: extension matching must not be substring-based in commands ──
+
+    #[test]
+    fn test_key_flag_not_blocked() {
+        // --key-file is a flag, not a .key file
+        assert!(command_references_sensitive_path("--key-file /tmp/foo").is_none());
+        // --keystore-password is a flag, not a .keystore file
+        assert!(
+            command_references_sensitive_path("java --keystore-password=abc main.jar").is_none()
+        );
+        // But actual .key files should still be blocked
+        assert!(command_references_sensitive_path("cat private.key").is_some());
+        assert!(command_references_sensitive_path("cp server.pem /backup/").is_some());
+    }
+
+    #[test]
+    fn test_extension_at_end_of_token_still_blocked() {
+        assert!(command_references_sensitive_path("scp host:cert.pem .").is_some());
+        assert!(command_references_sensitive_path("cat /certs/tls.key").is_some());
+        assert!(command_references_sensitive_path("keytool -import -file store.p12").is_some());
     }
 }
