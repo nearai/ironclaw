@@ -9,6 +9,7 @@ mod json;
 pub mod memory;
 mod message;
 pub mod path_utils;
+mod plan;
 mod restart;
 pub mod routine;
 pub mod secrets_tools;
@@ -31,6 +32,7 @@ pub use job::{
 pub use json::JsonTool;
 pub use memory::{MemoryReadTool, MemorySearchTool, MemoryTreeTool, MemoryWriteTool};
 pub use message::MessageTool;
+pub use plan::PlanUpdateTool;
 pub use restart::RestartTool;
 pub use routine::{
     EventEmitTool, RoutineCreateTool, RoutineDeleteTool, RoutineFireTool, RoutineHistoryTool,

@@ -661,6 +661,13 @@ function connectSSE() {
       }
     });
   }
+
+  // Plan progress checklist
+  eventSource.addEventListener('plan_update', (e) => {
+    const data = JSON.parse(e.data);
+    if (data.thread_id && !isCurrentThread(data.thread_id)) return;
+    renderPlanChecklist(data);
+  });
 }
 
 // Check if an SSE event belongs to the currently viewed thread.
@@ -1449,6 +1456,94 @@ function showApproval(data) {
 
   container.appendChild(card);
   container.scrollTop = container.scrollHeight;
+}
+
+// --- Plan Checklist ---
+
+function renderPlanChecklist(data) {
+  const chatContainer = document.getElementById('chat-messages');
+  const planId = data.plan_id;
+
+  // Find or create the plan container
+  let container = chatContainer.querySelector('.plan-container[data-plan-id="' + CSS.escape(planId) + '"]');
+  if (!container) {
+    container = document.createElement('div');
+    container.className = 'plan-container';
+    container.setAttribute('data-plan-id', planId);
+    chatContainer.appendChild(container);
+  }
+
+  // Clear and rebuild
+  container.innerHTML = '';
+
+  // Header
+  const header = document.createElement('div');
+  header.className = 'plan-header';
+
+  const title = document.createElement('span');
+  title.className = 'plan-title';
+  title.textContent = data.title || planId;
+  header.appendChild(title);
+
+  const badge = document.createElement('span');
+  badge.className = 'plan-status-badge plan-status-' + (data.status || 'draft');
+  badge.textContent = data.status || 'draft';
+  header.appendChild(badge);
+
+  container.appendChild(header);
+
+  // Steps
+  if (data.steps && data.steps.length > 0) {
+    const stepsList = document.createElement('div');
+    stepsList.className = 'plan-steps';
+
+    let completed = 0;
+    for (const step of data.steps) {
+      const stepEl = document.createElement('div');
+      stepEl.className = 'plan-step';
+      stepEl.setAttribute('data-status', step.status || 'pending');
+
+      const icon = document.createElement('span');
+      icon.className = 'plan-step-icon';
+      if (step.status === 'completed') {
+        icon.textContent = '\u2713'; // checkmark
+        completed++;
+      } else if (step.status === 'failed') {
+        icon.textContent = '\u2717'; // X
+      } else if (step.status === 'in_progress') {
+        icon.innerHTML = '<span class="plan-spinner"></span>';
+      } else {
+        icon.textContent = '\u25CB'; // circle
+      }
+      stepEl.appendChild(icon);
+
+      const text = document.createElement('span');
+      text.className = 'plan-step-text';
+      text.textContent = step.title;
+      stepEl.appendChild(text);
+
+      if (step.result) {
+        const result = document.createElement('span');
+        result.className = 'plan-step-result';
+        result.textContent = step.result;
+        stepEl.appendChild(result);
+      }
+
+      stepsList.appendChild(stepEl);
+    }
+    container.appendChild(stepsList);
+
+    // Summary
+    const summary = document.createElement('div');
+    summary.className = 'plan-summary';
+    summary.textContent = completed + ' of ' + data.steps.length + ' steps completed';
+    if (data.mission_id) {
+      summary.textContent += ' \u00b7 Mission: ' + data.mission_id.substring(0, 8);
+    }
+    container.appendChild(summary);
+  }
+
+  chatContainer.scrollTop = chatContainer.scrollHeight;
 }
 
 function showJobCard(data) {

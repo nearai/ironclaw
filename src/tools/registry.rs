@@ -17,10 +17,10 @@ use crate::tools::builder::{
 use crate::tools::builtin::{
     ApplyPatchTool, CancelJobTool, CreateJobTool, EchoTool, ExtensionInfoTool, HttpTool,
     JobEventsTool, JobPromptTool, JobStatusTool, JsonTool, ListDirTool, ListJobsTool,
-    MemoryReadTool, MemorySearchTool, MemoryTreeTool, MemoryWriteTool, PromptQueue, ReadFileTool,
-    ShellTool, SkillInstallTool, SkillListTool, SkillRemoveTool, SkillSearchTool, TimeTool,
-    ToolActivateTool, ToolAuthTool, ToolInstallTool, ToolListTool, ToolRemoveTool, ToolSearchTool,
-    ToolUpgradeTool, WriteFileTool,
+    MemoryReadTool, MemorySearchTool, MemoryTreeTool, MemoryWriteTool, PlanUpdateTool, PromptQueue,
+    ReadFileTool, ShellTool, SkillInstallTool, SkillListTool, SkillRemoveTool, SkillSearchTool,
+    TimeTool, ToolActivateTool, ToolAuthTool, ToolInstallTool, ToolListTool, ToolRemoveTool,
+    ToolSearchTool, ToolUpgradeTool, WriteFileTool,
 };
 use crate::tools::rate_limiter::RateLimiter;
 use crate::tools::tool::{ApprovalRequirement, Tool, ToolDomain};
@@ -246,6 +246,7 @@ impl ToolRegistry {
         self.register_sync(Arc::new(EchoTool));
         self.register_sync(Arc::new(TimeTool));
         self.register_sync(Arc::new(JsonTool));
+        self.register_sync(Arc::new(PlanUpdateTool::new()));
 
         let mut http = HttpTool::new();
         if let (Some(cr), Some(ss)) = (&self.credential_registry, &self.secrets_store) {
@@ -526,6 +527,20 @@ impl ToolRegistry {
         self.register_sync(Arc::new(RoutineHistoryTool::new(store)));
         self.register_sync(Arc::new(EventEmitTool::new(engine)));
         tracing::debug!("Registered 7 routine management tools");
+    }
+
+    /// Register plan management tools.
+    ///
+    /// The plan_update tool lets the LLM emit structured plan progress
+    /// checklist events via SSE. Works without SSE (no broadcast), but
+    /// pass the `SseManager` for real-time UI updates.
+    pub fn register_plan_tools(&self, sse: Option<Arc<crate::channels::web::sse::SseManager>>) {
+        let mut tool = PlanUpdateTool::new();
+        if let Some(sse) = sse {
+            tool = tool.with_sse(sse);
+        }
+        self.register_sync(Arc::new(tool));
+        tracing::debug!("Registered plan_update tool");
     }
 
     /// Register message tool for sending messages to channels.

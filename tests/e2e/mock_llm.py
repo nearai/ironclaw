@@ -126,6 +126,53 @@ TOOL_CALL_PATTERNS = [
             "url": f"{_github_api_url}/drive/v3/files",
         },
     ),
+    # Plan mode: create a plan → calls plan_update tool with draft checklist
+    (
+        re.compile(r"\[PLAN MODE\].*create.*plan", re.IGNORECASE),
+        "plan_update",
+        lambda _: {
+            "plan_id": "test-plan-001",
+            "title": "Test Execution Plan",
+            "status": "draft",
+            "steps": [
+                {"title": "Analyze requirements", "status": "pending"},
+                {"title": "Implement changes", "status": "pending"},
+                {"title": "Run verification", "status": "pending"},
+            ],
+        },
+    ),
+    # Plan mode: approve → calls plan_update with executing status
+    (
+        re.compile(r"\[PLAN MODE\].*approve", re.IGNORECASE),
+        "plan_update",
+        lambda _: {
+            "plan_id": "test-plan-001",
+            "title": "Test Execution Plan",
+            "status": "executing",
+            "steps": [
+                {"title": "Analyze requirements", "status": "in_progress"},
+                {"title": "Implement changes", "status": "pending"},
+                {"title": "Run verification", "status": "pending"},
+            ],
+            "mission_id": "00000000-0000-0000-0000-000000000001",
+        },
+    ),
+    # Plan mode: status → calls plan_update to refresh UI
+    (
+        re.compile(r"\[PLAN MODE\].*(?:status|show status)", re.IGNORECASE),
+        "plan_update",
+        lambda _: {
+            "plan_id": "test-plan-001",
+            "title": "Test Execution Plan",
+            "status": "executing",
+            "steps": [
+                {"title": "Analyze requirements", "status": "completed", "result": "No issues found"},
+                {"title": "Implement changes", "status": "in_progress"},
+                {"title": "Run verification", "status": "pending"},
+            ],
+            "mission_id": "00000000-0000-0000-0000-000000000001",
+        },
+    ),
 ]
 
 

@@ -432,8 +432,8 @@ mod tests {
     fn test_all_simple_tool_schemas() {
         use crate::tools::Tool;
         use crate::tools::builtin::{
-            ApplyPatchTool, EchoTool, HttpTool, JsonTool, ListDirTool, ReadFileTool, ShellTool,
-            TimeTool, WriteFileTool,
+            ApplyPatchTool, EchoTool, HttpTool, JsonTool, ListDirTool, PlanUpdateTool,
+            ReadFileTool, ShellTool, TimeTool, WriteFileTool,
         };
 
         let tools: Vec<Box<dyn Tool>> = vec![
@@ -446,6 +446,7 @@ mod tests {
             Box::new(WriteFileTool::new()),
             Box::new(ListDirTool::new()),
             Box::new(ApplyPatchTool::new()),
+            Box::new(PlanUpdateTool::new()),
         ];
 
         let mut failures = Vec::new();

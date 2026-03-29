@@ -1553,6 +1553,41 @@ impl Agent {
                 self.process_approval(message, session, thread_id, None, approved, always)
                     .await
             }
+            Submission::Plan { sub } => {
+                use crate::agent::submission::PlanSubcommand;
+                let rewritten = match sub {
+                    PlanSubcommand::Create { description } => {
+                        format!("[PLAN MODE] Create a plan for: {description}")
+                    }
+                    PlanSubcommand::Approve { plan_ref } => {
+                        let r = plan_ref.as_deref().unwrap_or("the most recent plan");
+                        format!(
+                            "[PLAN MODE] Approve and execute plan {r}. \
+                             Create a mission from the plan content using mission_create, \
+                             then fire it with mission_fire."
+                        )
+                    }
+                    PlanSubcommand::Status { plan_ref } => {
+                        let r = plan_ref.as_deref().unwrap_or("the most recent plan");
+                        format!(
+                            "[PLAN MODE] Show status of plan {r}. \
+                             Check the associated mission's thread_history, \
+                             current_focus, and approach_history."
+                        )
+                    }
+                    PlanSubcommand::Revise { plan_ref, feedback } => {
+                        let r = plan_ref.as_deref().unwrap_or("the most recent plan");
+                        format!("[PLAN MODE] Revise plan {r} based on: {feedback}")
+                    }
+                    PlanSubcommand::List => {
+                        "[PLAN MODE] List all plans. Search memory for plan documents \
+                         and show their status."
+                            .to_string()
+                    }
+                };
+                self.process_user_input(message, tenant, session, thread_id, &rewritten)
+                    .await
+            }
         };
 
         // Convert SubmissionResult to response string

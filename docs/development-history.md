@@ -327,6 +327,9 @@ Session 11:   E2E test suite (12 tests across 5 files) → found 9 engine bugs
 Session 12:   Kernel-level auth — pre-flight credential gate, post-install
               auth pipeline, tool_auth/tool_activate removed from v2 LLM,
               AuthManager centralizes credential checks + setup instructions
+Session 13:   Plan mode — autonomous long-running tasks via composing
+              existing v2 primitives (MemoryDoc, Mission, SSE events)
+              + /plan command + plan-mode skill + live checklist UI
 ```
 
 ## Session 12: Kernel-Level Authentication (2026-03-29)
@@ -376,6 +379,75 @@ LLM calls http(url="https://api.github.com/...") →
 - HTTP tool (`src/tools/builtin/http.rs`) — existing 401 detection stays as safety net
 - WASM credential injection — zero-exposure model unchanged
 - `/api/chat/auth-token` endpoint — already bypasses LLM correctly
+
+## Session 13: Plan Mode — Autonomous Long-Running Tasks (2026-03-29)
+
+Designed and built plan mode for autonomous task execution, inspired by OpenAI Codex's `update_plan` checklist and Claude Code's file-based plan mode. The key insight: both systems enforce plan mode restrictions entirely through prompting, not tool removal. IronClaw's implementation composes existing v2 primitives (MemoryDoc, Mission, SSE events) with a skill and thin command shim.
+
+### Research
+
+Studied two external references:
+- **OpenAI Codex** (`github.com/openai/codex`) — Three collaboration modes (Plan/Default/Execute), `update_plan` tool for structured checklist rendering, `<proposed_plan>` tag parsing. Plan restrictions are prompt-based, not tool-level.
+- **Claude Code plan mode** ([lucumr.pocoo.org](https://lucumr.pocoo.org/2025/12/17/what-is-plan-mode/)) — Plans written to filesystem as markdown. Phased approach (Understand/Design/Review/Final). `ExitPlanMode` tool signals completion. All enforcement is prompt-based.
+
+### Design: Compose, Don't Build
+
+Rather than adding engine states or new worker modes, plan mode maps to existing v2 primitives:
+
+| Concept | V2 Primitive |
+|---------|-------------|
+| Plan document | `MemoryDoc` with `DocType::Plan` |
+| Execution | `Mission` (Manual cadence) → spawns `ThreadType::Mission` threads |
+| Progress | `AppEvent::PlanUpdate` SSE event → live UI checklist |
+| Learning | Existing learning missions (auto-fire after thread completion) |
+| Behavior | `skills/plan-mode/SKILL.md` (prompt engineering) |
+
+### Implementation
+
+1. **`DocType::Plan`** — Added to engine's `MemoryDoc` enum. Plans are project-scoped, retrievable via `RetrievalEngine`, and injected into mission threads by `build_meta_prompt()`.
+
+2. **`AppEvent::PlanUpdate`** — New SSE event carrying a full checklist snapshot (`PlanStepDto` with index, title, status, result). Modeled after Codex's `update_plan` — always sends the full list (not diffs) so the UI is idempotent.
+
+3. **`plan_update` tool** (`src/tools/builtin/plan.rs`) — Like Codex's `update_plan`, "this function doesn't do anything useful — it gives the model a structured way to record its plan that clients can render." Broadcasts `PlanUpdate` SSE event. Registered in `register_builtin_tools()` without SSE, then upgraded with SSE manager in `main.rs` post-gateway-init.
+
+4. **`/plan` command** — `PlanSubcommand` enum (Create/Approve/Status/Revise/List) parsed in `submission.rs`. All subcommands rewrite to `Submission::UserInput` with `[PLAN MODE]` prefix, which activates the plan-mode skill. No new handler methods — the LLM + skill use existing tools (`memory_write`, `mission_create`, `mission_fire`, `plan_update`).
+
+5. **Plan-mode skill** (`skills/plan-mode/SKILL.md`) — Trusted skill activated on `[PLAN MODE]` keyword. Defines the full protocol: plan document format (markdown with checkboxes), creation flow (search context → write plan → emit checklist), approval flow (create mission → fire → track), execution protocol (update steps, handle failures), and revision flow.
+
+6. **Web UI** — `plan_update` SSE listener + `renderPlanChecklist()` in `app.js`. Inline chat widget with status badge, step checklist (checkmarks/spinners/circles), and progress summary. CSS reuses existing activity card patterns.
+
+7. **E2E tests** — 5 scenarios in `test_plan_mode.py`: create renders checklist, approve changes status, status shows progress, list via API, command parsing. Mock LLM patterns return `plan_update` tool calls for plan-related messages.
+
+### Key Design Decisions
+
+1. **`/plan` rewrites to `UserInput`, not a new handler** — The skill handles all logic using existing tools. The command is pure UX sugar. This means zero new methods in `commands.rs` (only help text).
+
+2. **Full checklist snapshots, not diffs** — Each `PlanUpdate` SSE event carries the entire step list. The UI replaces the DOM on every event. This avoids client-side state synchronization bugs.
+
+3. **Plan execution via Mission, not Job** — Missions track `current_focus` (which step to work on next), `approach_history` (what was tried), and `thread_history` (all execution threads). The outcome watcher updates these automatically. Jobs don't have this evolving-strategy primitive.
+
+4. **No tool restriction in plan mode** — Unlike Codex which prompts the LLM not to mutate, IronClaw's plan-mode skill naturally guides the LLM to only use read/search/write tools during planning. During execution (mission thread), all tools are available per capability leases.
+
+### Files Changed
+
+| File | Role |
+|------|------|
+| `crates/ironclaw_engine/src/types/memory.rs` | `DocType::Plan` variant |
+| `crates/ironclaw_common/src/event.rs` | `PlanStepDto`, `AppEvent::PlanUpdate`, tests |
+| `src/tools/builtin/plan.rs` | **New** — `PlanUpdateTool` (SSE broadcast) |
+| `src/tools/builtin/mod.rs` | Module + export registration |
+| `src/tools/registry.rs` | `register_plan_tools()`, auto-register in builtins |
+| `src/main.rs` | Wire SSE into plan tool post-gateway-init |
+| `src/tools/schema_validator.rs` | Added to schema validation test |
+| `src/agent/submission.rs` | `PlanSubcommand` enum, `Submission::Plan`, parsing |
+| `src/agent/agent_loop.rs` | `Submission::Plan` match arm (rewrite to UserInput) |
+| `src/agent/commands.rs` | Help text for /plan commands |
+| `skills/plan-mode/SKILL.md` | **New** — Full plan protocol skill |
+| `src/channels/web/static/app.js` | SSE listener + `renderPlanChecklist()` |
+| `src/channels/web/static/style.css` | Plan checklist component styles |
+| `tests/e2e/mock_llm.py` | Plan mode tool call patterns |
+| `tests/e2e/helpers.py` | Plan DOM selectors |
+| `tests/e2e/scenarios/test_plan_mode.py` | **New** — 5 E2E tests |
 
 ## Key Commits
 
