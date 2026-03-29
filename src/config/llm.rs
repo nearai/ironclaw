@@ -52,11 +52,13 @@ impl LlmConfig {
         settings: &Settings,
         default: &str,
     ) -> Result<String, ConfigError> {
-        Ok(settings
-            .selected_model
-            .clone()
-            .or_else(|| optional_env(env_var).ok().flatten())
-            .unwrap_or_else(|| default.to_string()))
+        if let Some(model) = settings.selected_model.clone() {
+            Ok(model)
+        } else if let Some(model) = optional_env(env_var)? {
+            Ok(model)
+        } else {
+            Ok(default.to_string())
+        }
     }
 
     pub(crate) fn resolve(settings: &Settings) -> Result<Self, ConfigError> {
@@ -134,38 +136,35 @@ impl LlmConfig {
         // Always resolve NEAR AI config (used for embeddings even when not the primary backend)
         // Priority: DB (builtin_overrides) > env > default
         let nearai_override = settings.llm_builtin_overrides.get("nearai");
-        let nearai_api_key = nearai_override
-            .and_then(|o| o.api_key.as_ref())
-            .map(|k| SecretString::from(k.clone()))
-            .or_else(|| {
-                optional_env("NEARAI_API_KEY")
-                    .ok()
-                    .flatten()
-                    .map(SecretString::from)
-            });
+        let nearai_api_key = if let Some(key) = nearai_override.and_then(|o| o.api_key.as_ref()) {
+            Some(SecretString::from(key.clone()))
+        } else {
+            optional_env("NEARAI_API_KEY")?.map(SecretString::from)
+        };
+        // Model priority: selected_model (DB) > builtin_overrides (DB) > env > default
+        let nearai_model = if let Some(model) = settings.selected_model.clone() {
+            model
+        } else if let Some(model) = nearai_override.and_then(|o| o.model.clone()) {
+            model
+        } else if let Some(model) = optional_env("NEARAI_MODEL")? {
+            model
+        } else {
+            crate::llm::DEFAULT_MODEL.to_string()
+        };
+        let nearai_base_url = if let Some(url) = nearai_override.and_then(|o| o.base_url.clone()) {
+            url
+        } else if let Some(url) = optional_env("NEARAI_BASE_URL")? {
+            url
+        } else if nearai_api_key.is_some() {
+            "https://cloud-api.near.ai".to_string()
+        } else {
+            "https://private.near.ai".to_string()
+        };
+        validate_base_url(&nearai_base_url, "NEARAI_BASE_URL")?;
         let nearai = NearAiConfig {
-            // Model priority: selected_model (DB) > builtin_overrides (DB) > env > default
-            model: settings
-                .selected_model
-                .clone()
-                .or_else(|| nearai_override.and_then(|o| o.model.clone()))
-                .or_else(|| optional_env("NEARAI_MODEL").ok().flatten())
-                .unwrap_or_else(|| crate::llm::DEFAULT_MODEL.to_string()),
+            model: nearai_model,
             cheap_model: optional_env("NEARAI_CHEAP_MODEL")?,
-            base_url: {
-                let url = nearai_override
-                    .and_then(|o| o.base_url.clone())
-                    .or_else(|| optional_env("NEARAI_BASE_URL").ok().flatten())
-                    .unwrap_or_else(|| {
-                        if nearai_api_key.is_some() {
-                            "https://cloud-api.near.ai".to_string()
-                        } else {
-                            "https://private.near.ai".to_string()
-                        }
-                    });
-                validate_base_url(&url, "NEARAI_BASE_URL")?;
-                url
-            },
+            base_url: nearai_base_url,
             api_key: nearai_api_key,
             fallback_model: optional_env("NEARAI_FALLBACK_MODEL")?,
             max_retries: parse_optional_env("NEARAI_MAX_RETRIES", 3)?,
@@ -202,7 +201,7 @@ impl LlmConfig {
             let explicit_region = settings
                 .bedrock_region
                 .clone()
-                .or_else(|| optional_env("BEDROCK_REGION").ok().flatten());
+                .or(optional_env("BEDROCK_REGION")?);
             if explicit_region.is_none() {
                 tracing::info!("BEDROCK_REGION not set, defaulting to us-east-1");
             }
@@ -210,7 +209,7 @@ impl LlmConfig {
             let model = settings
                 .selected_model
                 .clone()
-                .or_else(|| optional_env("BEDROCK_MODEL").ok().flatten())
+                .or(optional_env("BEDROCK_MODEL")?)
                 .ok_or_else(|| ConfigError::MissingRequired {
                     key: "BEDROCK_MODEL".to_string(),
                     hint: "Set BEDROCK_MODEL or selected_model when LLM_BACKEND=bedrock"
@@ -219,7 +218,7 @@ impl LlmConfig {
             let cross_region = settings
                 .bedrock_cross_region
                 .clone()
-                .or_else(|| optional_env("BEDROCK_CROSS_REGION").ok().flatten());
+                .or(optional_env("BEDROCK_CROSS_REGION")?);
             if let Some(ref cr) = cross_region
                 && !matches!(cr.as_str(), "us" | "eu" | "apac" | "global")
             {
@@ -234,7 +233,7 @@ impl LlmConfig {
             let profile = settings
                 .bedrock_profile
                 .clone()
-                .or_else(|| optional_env("AWS_PROFILE").ok().flatten());
+                .or(optional_env("AWS_PROFILE")?);
             Some(BedrockConfig {
                 region,
                 model,
@@ -251,8 +250,8 @@ impl LlmConfig {
             let model = settings
                 .selected_model
                 .clone()
-                .or_else(|| optional_env("OPENAI_CODEX_MODEL").ok().flatten())
-                .or_else(|| optional_env("OPENAI_MODEL").ok().flatten())
+                .or(optional_env("OPENAI_CODEX_MODEL")?)
+                .or(optional_env("OPENAI_MODEL")?)
                 .unwrap_or_else(|| "gpt-5.3-codex".to_string());
             let auth_endpoint = optional_env("OPENAI_CODEX_AUTH_URL")?
                 .unwrap_or_else(|| "https://auth.openai.com".to_string());
@@ -364,7 +363,7 @@ impl LlmConfig {
         let model = settings
             .selected_model
             .clone()
-            .or_else(|| optional_env("LLM_MODEL").ok().flatten())
+            .or(optional_env("LLM_MODEL")?)
             .or_else(|| custom.default_model.clone())
             .unwrap_or_default();
         if model.is_empty() {
@@ -465,12 +464,15 @@ impl LlmConfig {
             Some(creds.token)
         } else if let Some(env_var) = api_key_env {
             // Resolve API key: settings override (DB) > env var (including secrets store overlay)
-            settings
+            if let Some(key) = settings
                 .llm_builtin_overrides
                 .get(backend)
                 .and_then(|o| o.api_key.as_ref())
-                .map(|k| SecretString::from(k.clone()))
-                .or_else(|| optional_env(env_var).ok().flatten().map(SecretString::from))
+            {
+                Some(SecretString::from(key.clone()))
+            } else {
+                optional_env(env_var)?.map(SecretString::from)
+            }
         } else {
             None
         };
@@ -488,6 +490,11 @@ impl LlmConfig {
 
         // Resolve base URL: codex override > builtin_overrides (DB) > legacy settings (DB) > env var > registry default
         let is_codex_chatgpt = codex_base_url_override.is_some();
+        let env_base_url = if let Some(env_var) = base_url_env {
+            optional_env(env_var)?
+        } else {
+            None
+        };
         let base_url = codex_base_url_override
             .or_else(|| {
                 // DB settings: per-provider base_url override
@@ -506,13 +513,7 @@ impl LlmConfig {
                     _ => None,
                 }
             })
-            .or_else(|| {
-                if let Some(env_var) = base_url_env {
-                    optional_env(env_var).ok().flatten()
-                } else {
-                    None
-                }
-            })
+            .or(env_base_url)
             .or_else(|| default_base_url.map(String::from))
             .unwrap_or_default();
 
@@ -542,7 +543,7 @@ impl LlmConfig {
                     .get(backend)
                     .and_then(|o| o.model.clone())
             })
-            .or_else(|| optional_env(model_env).ok().flatten())
+            .or(optional_env(model_env)?)
             .unwrap_or_else(|| default_model.to_string());
 
         // Resolve extra headers

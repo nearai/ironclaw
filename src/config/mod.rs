@@ -693,3 +693,144 @@ pub async fn migrate_plaintext_llm_keys(
         );
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    fn test_secrets_store() -> Arc<dyn crate::secrets::SecretsStore + Send + Sync> {
+        let crypto = Arc::new(
+            crate::secrets::SecretsCrypto::new(secrecy::SecretString::from(
+                crate::secrets::keychain::generate_master_key_hex(),
+            ))
+            .unwrap(),
+        );
+        Arc::new(crate::secrets::InMemorySecretsStore::new(crypto))
+    }
+
+    #[tokio::test]
+    async fn hydrate_populates_builtin_override_keys_from_secrets() {
+        let secrets = test_secrets_store();
+        secrets
+            .create(
+                "test",
+                crate::secrets::CreateSecretParams {
+                    name: "llm_builtin_openai_api_key".to_string(),
+                    value: secrecy::SecretString::from("sk-from-vault".to_string()),
+                    provider: Some("openai".to_string()),
+                    expires_at: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        let mut settings = Settings {
+            llm_builtin_overrides: {
+                let mut m = std::collections::HashMap::new();
+                m.insert(
+                    "openai".to_string(),
+                    crate::settings::LlmBuiltinOverride {
+                        api_key: None, // stripped during write
+                        model: Some("gpt-4o".to_string()),
+                        base_url: None,
+                    },
+                );
+                m
+            },
+            ..Default::default()
+        };
+
+        hydrate_llm_keys_from_secrets(&mut settings, secrets.as_ref(), "test").await;
+
+        assert_eq!(
+            settings.llm_builtin_overrides["openai"].api_key.as_deref(),
+            Some("sk-from-vault"),
+            "api_key should be hydrated from secrets store"
+        );
+        assert_eq!(
+            settings.llm_builtin_overrides["openai"].model.as_deref(),
+            Some("gpt-4o"),
+            "model should remain unchanged"
+        );
+    }
+
+    #[tokio::test]
+    async fn hydrate_populates_custom_provider_keys_from_secrets() {
+        let secrets = test_secrets_store();
+        secrets
+            .create(
+                "test",
+                crate::secrets::CreateSecretParams {
+                    name: "llm_custom_my-llm_api_key".to_string(),
+                    value: secrecy::SecretString::from("gsk-custom".to_string()),
+                    provider: Some("my-llm".to_string()),
+                    expires_at: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        let mut settings = Settings {
+            llm_custom_providers: vec![crate::settings::CustomLlmProviderSettings {
+                id: "my-llm".to_string(),
+                name: "My LLM".to_string(),
+                adapter: "open_ai_completions".to_string(),
+                base_url: Some("http://localhost:8080".to_string()),
+                default_model: Some("model-1".to_string()),
+                api_key: None, // stripped during write
+                builtin: false,
+            }],
+            ..Default::default()
+        };
+
+        hydrate_llm_keys_from_secrets(&mut settings, secrets.as_ref(), "test").await;
+
+        assert_eq!(
+            settings.llm_custom_providers[0].api_key.as_deref(),
+            Some("gsk-custom"),
+            "custom provider api_key should be hydrated from secrets store"
+        );
+    }
+
+    #[tokio::test]
+    async fn hydrate_skips_when_key_already_present() {
+        let secrets = test_secrets_store();
+        secrets
+            .create(
+                "test",
+                crate::secrets::CreateSecretParams {
+                    name: "llm_builtin_openai_api_key".to_string(),
+                    value: secrecy::SecretString::from("sk-from-vault".to_string()),
+                    provider: Some("openai".to_string()),
+                    expires_at: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        let mut settings = Settings {
+            llm_builtin_overrides: {
+                let mut m = std::collections::HashMap::new();
+                m.insert(
+                    "openai".to_string(),
+                    crate::settings::LlmBuiltinOverride {
+                        api_key: Some("sk-existing".to_string()),
+                        model: None,
+                        base_url: None,
+                    },
+                );
+                m
+            },
+            ..Default::default()
+        };
+
+        hydrate_llm_keys_from_secrets(&mut settings, secrets.as_ref(), "test").await;
+
+        assert_eq!(
+            settings.llm_builtin_overrides["openai"].api_key.as_deref(),
+            Some("sk-existing"),
+            "existing key should not be overwritten"
+        );
+    }
+}

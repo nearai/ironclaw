@@ -6639,7 +6639,7 @@ document.getElementById('save-provider-btn').addEventListener('click', () => {
     return;
   }
 
-  if (!/^[a-z0-9-]+$/.test(id)) {
+  if (!/^[a-z0-9_-]+$/.test(id)) {
     showToast(I18n.t('config.providerIdInvalid'), 'error');
     return;
   }
@@ -6758,7 +6758,7 @@ document.getElementById('fetch-models-btn').addEventListener('click', () => {
 document.getElementById('provider-name').addEventListener('input', (e) => {
   const idField = document.getElementById('provider-id');
   if (!idField.dataset.edited) {
-    idField.value = e.target.value.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+    idField.value = e.target.value.toLowerCase().replace(/[^a-z0-9_]+/g, '-').replace(/^-|-$/g, '');
   }
 });
 

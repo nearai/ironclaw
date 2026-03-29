@@ -1,11 +1,11 @@
 //! User settings persistence.
 //!
 //! Stores user preferences in `~/.ironclaw` (JSON/TOML) and, for some values,
-//! in the database. Precedence between database values, environment variables,
-//! on-disk config, and built-in defaults is determined on a per-setting basis
-//! by the corresponding resolver. LLM provider settings (backend, model,
-//! api_key, base_url) prefer DB values over environment variables, as
-//! documented on their respective types.
+//! in the database. At runtime, precedence between database values,
+//! environment variables, on-disk config, and built-in defaults is determined
+//! on a per-setting basis by the corresponding resolver.
+//! LLM backend and related settings in particular may prefer DB values over
+//! environment variables, as documented on their respective types.
 
 use std::collections::HashMap;
 use std::path::PathBuf;

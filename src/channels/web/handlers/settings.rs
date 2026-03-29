@@ -144,13 +144,13 @@ pub async fn settings_set_handler(
 
 const VALID_ADAPTERS: &[&str] = &["open_ai_completions", "anthropic", "ollama"];
 
-/// Valid provider ID: lowercase alphanumeric and hyphens, 1-64 chars.
+/// Valid provider ID: lowercase alphanumeric, hyphens, and underscores, 1-64 chars.
 fn is_valid_provider_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 64
         && id
             .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
 }
 
 /// Returns `Err(422)` if any provider has an invalid ID or unrecognised adapter.
@@ -164,28 +164,17 @@ fn validate_custom_providers(value: &serde_json::Value) -> Result<(), StatusCode
         if !is_valid_provider_id(id) {
             tracing::warn!(
                 id = %id,
-                "Rejected custom provider with invalid ID (must be lowercase alphanumeric/hyphens, 1-64 chars)"
+                "Rejected custom provider with invalid ID (must be lowercase alphanumeric/hyphens/underscores, 1-64 chars)"
             );
             return Err(StatusCode::UNPROCESSABLE_ENTITY);
         }
-    }
-    validate_custom_providers_adapters(value)
-}
-
-/// Returns `Err(422)` if any provider in the incoming list has an unrecognised adapter.
-fn validate_custom_providers_adapters(value: &serde_json::Value) -> Result<(), StatusCode> {
-    let providers = match value.as_array() {
-        Some(arr) => arr,
-        None => return Ok(()),
-    };
-    for p in providers {
         let adapter = p.get("adapter").and_then(|v| v.as_str()).unwrap_or("");
         if adapter.is_empty() {
-            tracing::warn!("Rejected custom provider with missing adapter field");
+            tracing::warn!(id = %id, "Rejected custom provider with missing adapter field");
             return Err(StatusCode::UNPROCESSABLE_ENTITY);
         }
         if !VALID_ADAPTERS.contains(&adapter) {
-            tracing::warn!(adapter = %adapter, "Rejected unknown LLM adapter");
+            tracing::warn!(id = %id, adapter = %adapter, "Rejected unknown LLM adapter");
             return Err(StatusCode::UNPROCESSABLE_ENTITY);
         }
     }
@@ -883,6 +872,11 @@ mod tests {
         assert!(is_valid_provider_id("openai"));
         assert!(is_valid_provider_id("custom-provider-123"));
         assert!(is_valid_provider_id("a"));
+        assert!(is_valid_provider_id("my_llm"), "underscores allowed");
+        assert!(
+            is_valid_provider_id("openai_compatible"),
+            "matches builtin naming"
+        );
     }
 
     #[test]
@@ -890,7 +884,6 @@ mod tests {
         assert!(!is_valid_provider_id(""), "empty ID");
         assert!(!is_valid_provider_id("My-LLM"), "uppercase");
         assert!(!is_valid_provider_id("my llm"), "spaces");
-        assert!(!is_valid_provider_id("my_llm"), "underscores");
         assert!(!is_valid_provider_id("../../etc"), "path traversal");
         assert!(!is_valid_provider_id("a.b"), "dots");
         assert!(
@@ -922,35 +915,35 @@ mod tests {
     // --- Adapter validation tests ---
 
     #[test]
-    fn test_validate_adapters_rejects_unknown() {
+    fn test_validate_custom_providers_rejects_unknown_adapter() {
         let input = serde_json::json!([
             { "id": "test", "adapter": "not_a_real_adapter" }
         ]);
         assert_eq!(
-            validate_custom_providers_adapters(&input).unwrap_err(),
+            validate_custom_providers(&input).unwrap_err(),
             StatusCode::UNPROCESSABLE_ENTITY,
         );
     }
 
     #[test]
-    fn test_validate_adapters_rejects_missing() {
+    fn test_validate_custom_providers_rejects_missing_adapter() {
         let input = serde_json::json!([
             { "id": "test" }
         ]);
         assert_eq!(
-            validate_custom_providers_adapters(&input).unwrap_err(),
+            validate_custom_providers(&input).unwrap_err(),
             StatusCode::UNPROCESSABLE_ENTITY,
         );
     }
 
     #[test]
-    fn test_validate_adapters_accepts_all_valid() {
+    fn test_validate_custom_providers_accepts_all_valid_adapters() {
         for adapter in VALID_ADAPTERS {
             let input = serde_json::json!([
                 { "id": "test", "adapter": adapter }
             ]);
             assert!(
-                validate_custom_providers_adapters(&input).is_ok(),
+                validate_custom_providers(&input).is_ok(),
                 "adapter '{}' should be accepted",
                 adapter
             );
@@ -958,8 +951,8 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_adapters_non_array_is_ok() {
+    fn test_validate_custom_providers_non_array_is_ok() {
         let input = serde_json::json!("not-an-array");
-        assert!(validate_custom_providers_adapters(&input).is_ok());
+        assert!(validate_custom_providers(&input).is_ok());
     }
 }

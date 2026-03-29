@@ -366,7 +366,7 @@ I18n.register('en', {
   'config.providerNamePlaceholder': 'My Provider',
   'config.providerId': 'Provider ID',
   'config.providerIdPlaceholder': 'my-provider',
-  'config.providerIdHint': 'Lowercase letters, numbers, hyphens',
+  'config.providerIdHint': 'Lowercase letters, numbers, hyphens, underscores',
   'config.providerAdapter': 'API Adapter',
   'config.adapterOpenAI': 'OpenAI Compatible',
   'config.adapterAnthropic': 'Anthropic',
@@ -384,11 +384,12 @@ I18n.register('en', {
   'config.testConnection': 'Test',
   'config.testing': 'Testing…',
   'config.fetchModels': 'Fetch available models',
+  'config.fetchingModels': 'Fetching…',
   'config.modelsFetched': '{count} model(s) loaded — type to filter',
   'config.modelsFetchFailed': 'Failed to fetch models',
   'config.providerBaseUrlRequired': 'Base URL is required to fetch models',
   'config.providerFieldsRequired': 'Display name and Provider ID are required',
-  'config.providerIdInvalid': 'Provider ID: use only lowercase letters, numbers, hyphens',
+  'config.providerIdInvalid': 'Provider ID: use only lowercase letters, numbers, hyphens, underscores',
   'config.providerIdTaken': 'Provider ID "{id}" is already taken',
 
   // Configure

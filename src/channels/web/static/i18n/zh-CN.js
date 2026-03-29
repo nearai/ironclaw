@@ -366,7 +366,7 @@ I18n.register('zh-CN', {
   'config.providerNamePlaceholder': '我的提供商',
   'config.providerId': '提供商 ID',
   'config.providerIdPlaceholder': 'my-provider',
-  'config.providerIdHint': '小写字母、数字、连字符',
+  'config.providerIdHint': '小写字母、数字、连字符、下划线',
   'config.providerAdapter': 'API 适配器',
   'config.adapterOpenAI': 'OpenAI 兼容',
   'config.adapterAnthropic': 'Anthropic',
@@ -384,11 +384,12 @@ I18n.register('zh-CN', {
   'config.testConnection': '测试',
   'config.testing': '测试中…',
   'config.fetchModels': '获取可用模型',
+  'config.fetchingModels': '获取中…',
   'config.modelsFetched': '已加载 {count} 个模型，可输入过滤',
   'config.modelsFetchFailed': '获取模型列表失败',
   'config.providerBaseUrlRequired': '请先填写 Base URL',
   'config.providerFieldsRequired': '显示名称和提供商 ID 为必填项',
-  'config.providerIdInvalid': '提供商 ID 只能包含小写字母、数字和连字符',
+  'config.providerIdInvalid': '提供商 ID 只能包含小写字母、数字、连字符和下划线',
   'config.providerIdTaken': '提供商 ID "{id}" 已被占用',
 
   // 配置
