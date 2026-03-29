@@ -187,14 +187,13 @@ pub(crate) fn parse_string_env(
 }
 
 /// Returns true if the IP is a cloud metadata endpoint (169.254.169.254)
-/// or its IPv4-compatible/mapped IPv6 equivalent. Always blocked regardless of config.
+/// or its IPv4-mapped IPv6 equivalent. Always blocked regardless of config.
 fn is_cloud_metadata(ip: &std::net::IpAddr) -> bool {
     use std::net::Ipv4Addr;
     let metadata = Ipv4Addr::new(169, 254, 169, 254);
     match ip {
         std::net::IpAddr::V4(v4) => *v4 == metadata,
-        // to_ipv4() covers both ::ffff:A.B.C.D (mapped) and ::A.B.C.D (compatible)
-        std::net::IpAddr::V6(v6) => v6.to_ipv4().is_some_and(|v4| v4 == metadata),
+        std::net::IpAddr::V6(v6) => v6.to_ipv4_mapped().is_some_and(|v4| v4 == metadata),
     }
 }
 
@@ -224,8 +223,7 @@ fn is_dangerous_ip(ip: &std::net::IpAddr, allow_local: bool) -> bool {
     match ip {
         IpAddr::V4(v4) => is_dangerous_ipv4(v4, allow_local),
         IpAddr::V6(v6) => {
-            // to_ipv4() covers both mapped (::ffff:) and compatible (::) forms
-            if let Some(v4) = v6.to_ipv4() {
+            if let Some(v4) = v6.to_ipv4_mapped() {
                 is_dangerous_ipv4(&v4, allow_local)
             } else {
                 let is_loopback = v6.is_loopback();
@@ -248,7 +246,7 @@ fn is_private_ip(ip: &std::net::IpAddr) -> bool {
     match ip {
         std::net::IpAddr::V4(v4) => v4.is_private() || v4.is_loopback(),
         std::net::IpAddr::V6(v6) => {
-            if let Some(v4) = v6.to_ipv4() {
+            if let Some(v4) = v6.to_ipv4_mapped() {
                 v4.is_private() || v4.is_loopback()
             } else {
                 v6.is_loopback() || (v6.octets()[0] & 0xfe) == 0xfc // ULA fc00::/7
@@ -304,10 +302,31 @@ pub(crate) fn validate_base_url(
 
     let host_lower = host.to_lowercase();
 
-    let ssrf_hint = if allow_local {
-        ""
-    } else {
-        " Set LLM_ALLOW_LOCAL_NETWORK=true to allow local network endpoints."
+    // Only suggest LLM_ALLOW_LOCAL_NETWORK for RFC 1918 private IPs,
+    // not for metadata, CGN, link-local, or other non-routable addresses.
+    let ssrf_hint_for = |ip: &std::net::IpAddr| -> &'static str {
+        if allow_local {
+            return "";
+        }
+        match ip {
+            std::net::IpAddr::V4(v4) if v4.is_private() || v4.is_loopback() => {
+                " Set LLM_ALLOW_LOCAL_NETWORK=true to allow local network endpoints."
+            }
+            std::net::IpAddr::V6(v6) => {
+                if v6.is_loopback() || (v6.octets()[0] & 0xfe) == 0xfc {
+                    " Set LLM_ALLOW_LOCAL_NETWORK=true to allow local network endpoints."
+                } else if let Some(v4) = v6.to_ipv4_mapped() {
+                    if v4.is_private() || v4.is_loopback() {
+                        " Set LLM_ALLOW_LOCAL_NETWORK=true to allow local network endpoints."
+                    } else {
+                        ""
+                    }
+                } else {
+                    ""
+                }
+            }
+            _ => "",
+        }
     };
 
     // For HTTP (non-TLS), only allow localhost — remote HTTP endpoints
@@ -346,8 +365,9 @@ pub(crate) fn validate_base_url(
                 key: field_name.to_string(),
                 message: format!(
                     "URL points to a private/internal IP '{}'. \
-                     This is blocked to prevent SSRF attacks.{ssrf_hint}",
-                    ip
+                     This is blocked to prevent SSRF attacks.{}",
+                    ip,
+                    ssrf_hint_for(&ip)
                 ),
             });
         }
@@ -387,9 +407,10 @@ pub(crate) fn validate_base_url(
                             key: field_name.to_string(),
                             message: format!(
                                 "hostname '{}' resolves to private/internal IP '{}'. \
-                                 This is blocked to prevent SSRF attacks.{ssrf_hint}",
+                                 This is blocked to prevent SSRF attacks.{}",
                                 host,
-                                addr.ip()
+                                addr.ip(),
+                                ssrf_hint_for(&addr.ip())
                             ),
                         });
                     }
@@ -656,6 +677,56 @@ mod tests {
     fn allow_local_false_rejects_private_ip() {
         assert!(validate_base_url("http://192.168.1.100:11434", "TEST", false).is_err());
         assert!(validate_base_url("https://10.0.0.5:8080", "TEST", false).is_err());
+    }
+
+    #[test]
+    fn allow_local_ipv4_mapped_ipv6_metadata_blocked() {
+        // ::ffff:169.254.169.254 must remain blocked (cloud metadata) regardless of allow_local
+        assert!(validate_base_url("https://[::ffff:169.254.169.254]", "TEST", true).is_err());
+        assert!(validate_base_url("https://[::ffff:169.254.169.254]", "TEST", false).is_err());
+    }
+
+    #[test]
+    fn allow_local_still_blocks_cgn_range() {
+        // CGN (100.64.0.0/10) must remain blocked even with allow_local=true
+        assert!(validate_base_url("https://100.64.0.1", "TEST", true).is_err());
+        assert!(validate_base_url("http://100.127.255.254:8080", "TEST", true).is_err());
+    }
+
+    #[test]
+    fn allow_local_still_blocks_unspecified() {
+        // 0.0.0.0 must remain blocked even with allow_local=true
+        assert!(validate_base_url("https://0.0.0.0", "TEST", true).is_err());
+    }
+
+    #[test]
+    fn ssrf_hint_only_for_rfc1918() {
+        // Private IPs should include the LLM_ALLOW_LOCAL_NETWORK hint
+        let err = validate_base_url("https://192.168.1.1", "TEST", false)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("LLM_ALLOW_LOCAL_NETWORK"),
+            "RFC 1918 IP should suggest LLM_ALLOW_LOCAL_NETWORK, got: {err}"
+        );
+
+        // Cloud metadata should NOT include the hint
+        let err = validate_base_url("https://169.254.169.254", "TEST", false)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            !err.contains("LLM_ALLOW_LOCAL_NETWORK"),
+            "Cloud metadata error should not suggest LLM_ALLOW_LOCAL_NETWORK, got: {err}"
+        );
+
+        // CGN should NOT include the hint
+        let err = validate_base_url("https://100.64.0.1", "TEST", false)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            !err.contains("LLM_ALLOW_LOCAL_NETWORK"),
+            "CGN error should not suggest LLM_ALLOW_LOCAL_NETWORK, got: {err}"
+        );
     }
 
     #[test]

@@ -118,7 +118,7 @@ impl LlmConfig {
                         "https://private.near.ai".to_string()
                     }
                 });
-                validate_base_url(&url, "NEARAI_BASE_URL", allow_local_network()?)?;
+                validate_base_url(&url, "NEARAI_BASE_URL", false)?;
                 url
             },
             api_key: nearai_api_key,
