@@ -310,6 +310,9 @@ fn cli_notify_config(notify_channel: Option<String>) -> NotifyConfig {
         on_attention: true,
         on_failure: true,
         on_success: false,
+        agent_review_on_success: false,
+        agent_review_on_attention: false,
+        agent_review_on_failure: false,
     }
 }
 
