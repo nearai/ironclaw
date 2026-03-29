@@ -16,6 +16,7 @@ mod tests {
     use chrono::Utc;
     use ironclaw::agent::routine::{
         NotifyConfig, Routine, RoutineAction, RoutineGuardrails, Trigger,
+        reset_routine_verification_state, routine_verification_fingerprint,
     };
     use uuid::Uuid;
 
@@ -334,6 +335,117 @@ mod tests {
             detail["action"]["description"].as_str(),
             Some("Check effective permission detail")
         );
+
+        harness.shutdown().await;
+        mock.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn routines_api_surfaces_unverified_status_for_new_routine() {
+        let mock = MockOpenAiServerBuilder::new()
+            .with_default_response(MockOpenAiResponse::Text("ack".to_string()))
+            .start()
+            .await;
+
+        let harness =
+            GatewayWorkflowHarness::start_openai_compatible(&mock.openai_base_url(), "mock-model")
+                .await;
+
+        let mut routine = Routine {
+            id: Uuid::new_v4(),
+            name: "wf-unverified".to_string(),
+            description: "Unverified status regression test".to_string(),
+            user_id: harness.user_id.clone(),
+            enabled: true,
+            trigger: Trigger::Manual,
+            action: RoutineAction::Lightweight {
+                prompt: "Check verification status".to_string(),
+                context_paths: Vec::new(),
+                max_tokens: 512,
+                use_tools: false,
+                max_tool_rounds: 1,
+            },
+            guardrails: RoutineGuardrails {
+                cooldown: Duration::from_secs(0),
+                max_concurrent: 1,
+                dedup_window: None,
+            },
+            notify: NotifyConfig::default(),
+            last_run_at: None,
+            next_fire_at: None,
+            run_count: 0,
+            consecutive_failures: 0,
+            state: serde_json::json!({}),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        routine.state = reset_routine_verification_state(
+            &routine.state,
+            routine_verification_fingerprint(&routine),
+        );
+        harness
+            .db
+            .create_routine(&routine)
+            .await
+            .expect("create routine");
+
+        let mut disabled_routine = routine.clone();
+        disabled_routine.id = Uuid::new_v4();
+        disabled_routine.name = "wf-unverified-disabled".to_string();
+        disabled_routine.enabled = false;
+        disabled_routine.state = reset_routine_verification_state(
+            &disabled_routine.state,
+            routine_verification_fingerprint(&disabled_routine),
+        );
+        harness
+            .db
+            .create_routine(&disabled_routine)
+            .await
+            .expect("create disabled routine");
+
+        let list = harness.list_routines().await;
+        let routine_id = routine.id.to_string();
+        let listed = list["routines"]
+            .as_array()
+            .expect("routines array")
+            .iter()
+            .find(|item| item["id"].as_str() == Some(routine_id.as_str()))
+            .expect("routine should be listed");
+        assert_eq!(listed["status"].as_str(), Some("unverified"));
+        assert_eq!(listed["verification_status"].as_str(), Some("unverified"));
+
+        let summary = harness
+            .client
+            .get(format!("{}/api/routines/summary", harness.base_url()))
+            .bearer_auth(&harness.auth_token)
+            .send()
+            .await
+            .expect("summary request failed")
+            .error_for_status()
+            .expect("summary non-2xx")
+            .json::<serde_json::Value>()
+            .await
+            .expect("invalid summary response");
+        assert_eq!(summary["unverified"].as_u64(), Some(2));
+
+        let detail = harness
+            .client
+            .get(format!(
+                "{}/api/routines/{}",
+                harness.base_url(),
+                routine_id
+            ))
+            .bearer_auth(&harness.auth_token)
+            .send()
+            .await
+            .expect("detail request failed")
+            .error_for_status()
+            .expect("detail non-2xx")
+            .json::<serde_json::Value>()
+            .await
+            .expect("invalid detail response");
+        assert_eq!(detail["status"].as_str(), Some("unverified"));
+        assert_eq!(detail["verification_status"].as_str(), Some("unverified"));
 
         harness.shutdown().await;
         mock.shutdown().await;
