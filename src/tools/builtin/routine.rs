@@ -1232,6 +1232,7 @@ impl Tool for RoutineCreateTool {
             "name": routine.name,
             "trigger_type": routine.trigger.type_tag(),
             "next_fire_at": routine.next_fire_at.map(|t| t.to_rfc3339()),
+            "notification_mode": format_notification_mode(&routine.notify),
             "status": "created",
         });
 
@@ -1240,6 +1241,21 @@ impl Tool for RoutineCreateTool {
 
     fn requires_sanitization(&self) -> bool {
         false
+    }
+}
+
+/// Summarize the notification mode for display in routine listings.
+fn format_notification_mode(notify: &NotifyConfig) -> String {
+    let has_notify = notify.on_success || notify.on_failure || notify.on_attention;
+    let has_review = notify.agent_review_on_success
+        || notify.agent_review_on_failure
+        || notify.agent_review_on_attention;
+
+    match (has_notify, has_review) {
+        (true, true) => "notify + agent-review".to_string(),
+        (true, false) => "notify".to_string(),
+        (false, true) => "agent-review only".to_string(),
+        (false, false) => "silent".to_string(),
     }
 }
 
@@ -1300,6 +1316,7 @@ impl Tool for RoutineListTool {
                     "next_fire_at": r.next_fire_at.map(|t| t.to_rfc3339()),
                     "run_count": r.run_count,
                     "consecutive_failures": r.consecutive_failures,
+                    "notification_mode": format_notification_mode(&r.notify),
                 })
             })
             .collect();
@@ -1462,6 +1479,7 @@ impl Tool for RoutineUpdateTool {
             "enabled": routine.enabled,
             "trigger_type": routine.trigger.type_tag(),
             "next_fire_at": routine.next_fire_at.map(|t| t.to_rfc3339()),
+            "notification_mode": format_notification_mode(&routine.notify),
             "status": "updated",
         });
 
