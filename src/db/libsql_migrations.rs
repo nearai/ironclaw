@@ -796,11 +796,11 @@ CREATE INDEX IF NOT EXISTS idx_api_tokens_hash ON api_tokens(token_hash);
     (
         15,
         "routine_agent_review",
-        r#"
-ALTER TABLE routines ADD COLUMN agent_review_on_success INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE routines ADD COLUMN agent_review_on_failure INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE routines ADD COLUMN agent_review_on_attention INTEGER NOT NULL DEFAULT 0;
-"#,
+        // Columns already present in the idempotent CREATE TABLE (migration 13 rebuild).
+        // This migration exists only as a version marker for the PostgreSQL V15 counterpart.
+        // No DDL needed — fresh databases have the columns; upgraded databases got them
+        // via the rebuild in migration 13 which includes them in the schema.
+        r#"SELECT 1;"#,
     ),
 ];
 
