@@ -55,7 +55,7 @@ pub struct Settings {
     pub secrets_master_key_hex: Option<String>,
 
     // === Step 3: Inference Provider ===
-    /// LLM backend: "nearai", "anthropic", "openai", "ollama", "openai_compatible", "tinfoil", "bedrock".
+    /// LLM backend: "nearai", "anthropic", "openai", "github_copilot", "ollama", "openai_compatible", "tinfoil", "bedrock".
     #[serde(default)]
     pub llm_backend: Option<String>,
 
@@ -102,6 +102,17 @@ pub struct Settings {
     /// Heartbeat configuration.
     #[serde(default)]
     pub heartbeat: HeartbeatSettings,
+
+    // === Conversational Profile Onboarding ===
+    /// Whether the conversational profile onboarding has been completed.
+    ///
+    /// Set during the user's first interaction with the running assistant
+    /// (not during the setup wizard), after the agent builds a psychographic
+    /// profile via `memory_write`. Used by the agent loop (via workspace
+    /// system-prompt wiring) to suppress BOOTSTRAP.md injection once
+    /// onboarding is complete.
+    #[serde(default, alias = "personal_onboarding_completed")]
+    pub profile_onboarding_completed: bool,
 
     // === Advanced Settings (not asked during setup, editable via CLI) ===
     /// Agent behavior configuration.
@@ -258,10 +269,6 @@ pub struct ChannelSettings {
     #[serde(default)]
     pub gateway_auth_token: Option<String>,
 
-    /// Web gateway user ID.
-    #[serde(default)]
-    pub gateway_user_id: Option<String>,
-
     /// Whether the CLI channel is enabled.
     #[serde(default = "default_true")]
     pub cli_enabled: bool,
@@ -331,7 +338,6 @@ impl Default for ChannelSettings {
             gateway_host: None,
             gateway_port: None,
             gateway_auth_token: None,
-            gateway_user_id: None,
             cli_enabled: true,
             signal_enabled: false,
             signal_http_url: None,
@@ -1286,6 +1292,92 @@ mod tests {
         assert_eq!(loaded.heartbeat.interval_secs, 900);
     }
 
+    /// Regression: /model writes a single key ("selected_model") to the DB via
+    /// set_setting(). On restart, get_all_settings() returns ALL keys including
+    /// wizard-written defaults. The single-key update must survive the full
+    /// from_db_map() round trip.
+    #[test]
+    fn db_single_key_model_update_survives_roundtrip() {
+        // Step 1: Wizard writes full settings to DB (including selected_model
+        // from initial setup).
+        let wizard_settings = Settings {
+            llm_backend: Some("nearai".to_string()),
+            selected_model: Some("old-wizard-model".to_string()),
+            ..Default::default()
+        };
+        let mut db: std::collections::HashMap<String, serde_json::Value> =
+            wizard_settings.to_db_map();
+
+        // Step 2: User runs /model new-model — persist_selected_model writes
+        // a single key, overwriting the wizard value.
+        db.insert(
+            "selected_model".to_string(),
+            serde_json::Value::String("new-model".to_string()),
+        );
+
+        // Step 3: On restart, from_db_map() rebuilds Settings from the full
+        // DB map.
+        let restored = Settings::from_db_map(&db);
+        assert_eq!(
+            restored.selected_model,
+            Some("new-model".to_string()),
+            "/model change must survive DB round trip"
+        );
+    }
+
+    /// Regression: TOML overlay must not clobber a DB-persisted selected_model
+    /// when the TOML file matches the DB. This is the normal case after /model
+    /// successfully writes to both DB and TOML.
+    #[test]
+    fn toml_overlay_preserves_matching_model() {
+        // DB settings with new model from /model command.
+        let mut db_settings = Settings {
+            llm_backend: Some("nearai".to_string()),
+            selected_model: Some("new-model".to_string()),
+            ..Default::default()
+        };
+
+        // TOML also updated by /model command to the same value.
+        let toml_settings = Settings {
+            selected_model: Some("new-model".to_string()),
+            ..Default::default()
+        };
+
+        db_settings.merge_from(&toml_settings);
+        assert_eq!(
+            db_settings.selected_model,
+            Some("new-model".to_string()),
+            "TOML overlay must not clobber matching model"
+        );
+    }
+
+    /// Regression: when /model updates DB but TOML write fails, a stale TOML
+    /// file would overwrite the DB value. This test documents the priority:
+    /// TOML > DB (by design). persist_selected_model MUST update the TOML.
+    #[test]
+    fn stale_toml_overwrites_db_model() {
+        // DB has the new model from /model.
+        let mut db_settings = Settings {
+            selected_model: Some("new-model".to_string()),
+            ..Default::default()
+        };
+
+        // TOML still has the old model (write failed or was not attempted).
+        let stale_toml = Settings {
+            selected_model: Some("old-model".to_string()),
+            ..Default::default()
+        };
+
+        db_settings.merge_from(&stale_toml);
+        // This documents the current priority: TOML wins over DB.
+        // The fix in persist_selected_model ensures TOML is always updated.
+        assert_eq!(
+            db_settings.selected_model,
+            Some("old-model".to_string()),
+            "TOML overlay has higher priority than DB (by design)"
+        );
+    }
+
     /// Regression test: /model command must persist selected_model to TOML config.
     /// Prior to the fix, `set_model()` only changed the in-memory provider and the
     /// choice was lost on restart.
@@ -1309,6 +1401,28 @@ mod tests {
         // Verify the change survived a reload.
         let reloaded = Settings::load_toml(&path).unwrap().unwrap();
         assert_eq!(reloaded.selected_model, Some("new-model".to_string()));
+    }
+
+    /// Regression: /model must create config.toml when it doesn't exist, so the
+    /// model survives restarts. Previously the Ok(None) case was a no-op.
+    #[test]
+    fn toml_created_when_missing_for_model_persist() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+
+        // No config.toml yet (fresh install, no wizard).
+        assert!(Settings::load_toml(&path).unwrap().is_none());
+
+        // Simulate what persist_selected_model now does for the Ok(None) case.
+        let settings = Settings {
+            selected_model: Some("new-model".to_string()),
+            ..Default::default()
+        };
+        settings.save_toml(&path).unwrap();
+
+        // Verify the model survived.
+        let loaded = Settings::load_toml(&path).unwrap().unwrap();
+        assert_eq!(loaded.selected_model, Some("new-model".to_string()));
     }
 
     #[test]

@@ -5,7 +5,9 @@
 //!
 //! This WASM component implements the channel interface for handling Feishu
 //! webhooks (Event Subscription v2.0) and sending messages back via the
-//! Feishu/Lark Bot API.
+//! Feishu/Lark Bot API. IronClaw currently does not connect to Feishu's
+//! long-connection websocket subscription mode; use Event Subscription
+//! webhooks for this channel.
 //!
 //! # Features
 //!
@@ -21,7 +23,8 @@
 //! - App credentials (app_id, app_secret) are injected by the host into
 //!   the config JSON during startup for token exchange
 //! - Bearer token for API calls is obtained via token exchange and cached
-//! - Verification token validated by host for webhook requests
+//! - Webhook requests must be authenticated by the host or by a matching
+//!   Feishu verification token in the request body
 
 // Generate bindings from the WIT file
 wit_bindgen::generate!({
@@ -30,6 +33,7 @@ wit_bindgen::generate!({
 });
 
 use serde::{Deserialize, Serialize};
+use subtle::ConstantTimeEq;
 
 // Re-export generated types
 use exports::near::agent::channel::{
@@ -48,6 +52,7 @@ const ALLOW_FROM_PATH: &str = "allow_from";
 const API_BASE_PATH: &str = "api_base";
 const APP_ID_PATH: &str = "app_id";
 const APP_SECRET_PATH: &str = "app_secret";
+const VERIFICATION_TOKEN_PATH: &str = "verification_token";
 const TOKEN_PATH: &str = "tenant_access_token";
 const TOKEN_EXPIRY_PATH: &str = "token_expiry";
 
@@ -100,6 +105,10 @@ struct FeishuEventHeader {
     /// Tenant key.
     #[serde(default)]
     tenant_key: Option<String>,
+
+    /// Verification token for v2 event payloads.
+    #[serde(default)]
+    token: Option<String>,
 }
 
 /// Message receive event payload (im.message.receive_v1).
@@ -206,9 +215,17 @@ struct FeishuApiResponse<T> {
     data: Option<T>,
 }
 
-/// Tenant access token response.
-#[derive(Debug, Default, Deserialize)]
-struct TenantAccessTokenData {
+/// Tenant access token response (flat format).
+///
+/// Unlike most Feishu APIs that nest results under `data`, the
+/// `/auth/v3/tenant_access_token/internal` endpoint returns `code`, `msg`,
+/// `tenant_access_token`, and `expire` at the top level.
+#[derive(Debug, Deserialize)]
+struct TenantAccessTokenResponse {
+    #[serde(default)]
+    code: i32,
+    #[serde(default)]
+    msg: String,
     tenant_access_token: String,
     expire: i64,
 }
@@ -240,6 +257,9 @@ struct FeishuConfig {
 
     /// Feishu App Secret (for token exchange).
     app_secret: Option<String>,
+
+    /// Feishu Event Subscription verification token.
+    verification_token: Option<String>,
 
     /// API base URL. Defaults to "https://open.feishu.cn" (use
     /// "https://open.larksuite.com" for Lark international).
@@ -289,6 +309,9 @@ impl Guest for FeishuChannel {
         }
         if let Some(ref app_secret) = config.app_secret {
             let _ = channel_host::workspace_write(APP_SECRET_PATH, app_secret);
+        }
+        if let Some(ref verification_token) = config.verification_token {
+            let _ = channel_host::workspace_write(VERIFICATION_TOKEN_PATH, verification_token);
         }
 
         if let Some(owner_id) = &config.owner_id {
@@ -365,6 +388,23 @@ impl Guest for FeishuChannel {
                 return json_response(200, serde_json::json!({}));
             }
         };
+
+        let configured_token =
+            channel_host::workspace_read(VERIFICATION_TOKEN_PATH).filter(|token| !token.is_empty());
+        if !is_authenticated_webhook(
+            req.secret_validated,
+            configured_token.as_deref(),
+            request_verification_token(&event),
+        ) {
+            channel_host::log(
+                channel_host::LogLevel::Warn,
+                "Rejecting unauthenticated Feishu webhook request",
+            );
+            return json_response(
+                401,
+                serde_json::json!({"error": "Webhook authentication failed"}),
+            );
+        }
 
         // Handle URL verification challenge (initial webhook setup).
         if event.event_type.as_deref() == Some("url_verification") {
@@ -770,9 +810,8 @@ fn obtain_tenant_token(api_base: &str) -> Result<String, String> {
                 ));
             }
 
-            let token_resp: FeishuApiResponse<TenantAccessTokenData> =
-                serde_json::from_slice(&response.body)
-                    .map_err(|e| format!("Failed to parse token response: {}", e))?;
+            let token_resp: TenantAccessTokenResponse = serde_json::from_slice(&response.body)
+                .map_err(|e| format!("Failed to parse token response: {}", e))?;
 
             if token_resp.code != 0 {
                 return Err(format!(
@@ -781,23 +820,33 @@ fn obtain_tenant_token(api_base: &str) -> Result<String, String> {
                 ));
             }
 
-            let data = token_resp
-                .data
-                .ok_or_else(|| "Token response missing data".to_string())?;
+            if token_resp.tenant_access_token.is_empty() {
+                return Err("Token response missing tenant_access_token".to_string());
+            }
+
+            if token_resp.expire <= 0 {
+                return Err(format!(
+                    "Token response has invalid expire value: {}",
+                    token_resp.expire
+                ));
+            }
 
             // Cache the token with expiry.
             let now = channel_host::now_millis();
-            let expiry = now + (data.expire as u64) * 1000;
+            let expiry = now.saturating_add((token_resp.expire as u64).saturating_mul(1000));
 
-            let _ = channel_host::workspace_write(TOKEN_PATH, &data.tenant_access_token);
+            let _ = channel_host::workspace_write(TOKEN_PATH, &token_resp.tenant_access_token);
             let _ = channel_host::workspace_write(TOKEN_EXPIRY_PATH, &expiry.to_string());
 
             channel_host::log(
                 channel_host::LogLevel::Debug,
-                &format!("Tenant access token refreshed, expires in {}s", data.expire),
+                &format!(
+                    "Tenant access token refreshed, expires in {}s",
+                    token_resp.expire
+                ),
             );
 
-            Ok(data.tenant_access_token)
+            Ok(token_resp.tenant_access_token)
         }
         Err(e) => Err(format!("Token exchange request failed: {}", e)),
     }
@@ -817,5 +866,150 @@ fn json_response(status: u16, body: serde_json::Value) -> OutgoingHttpResponse {
         })
         .to_string(),
         body: body_bytes,
+    }
+}
+
+fn is_authenticated_webhook(
+    secret_validated: bool,
+    configured_token: Option<&str>,
+    request_token: Option<&str>,
+) -> bool {
+    if secret_validated {
+        return true;
+    }
+
+    match (configured_token, request_token) {
+        (Some(expected), Some(provided)) => {
+            bool::from(expected.as_bytes().ct_eq(provided.as_bytes()))
+        }
+        _ => false,
+    }
+}
+
+fn request_verification_token(event: &FeishuEvent) -> Option<&str> {
+    event
+        .header
+        .as_ref()
+        .and_then(|header| header.token.as_deref())
+        .or(event.token.as_deref())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_flat_token_response() {
+        let json = r#"{
+            "code": 0,
+            "msg": "ok",
+            "tenant_access_token": "t-abc123",
+            "expire": 7200
+        }"#;
+        let resp: TenantAccessTokenResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.code, 0);
+        assert_eq!(resp.msg, "ok");
+        assert_eq!(resp.tenant_access_token, "t-abc123");
+        assert_eq!(resp.expire, 7200);
+    }
+
+    #[test]
+    fn parse_token_response_rejects_missing_token() {
+        let json = r#"{"code": 0, "msg": "ok", "expire": 7200}"#;
+        let result: Result<TenantAccessTokenResponse, _> = serde_json::from_str(json);
+        assert!(
+            result.is_err(),
+            "should fail when tenant_access_token is missing"
+        );
+    }
+
+    #[test]
+    fn parse_token_response_rejects_missing_expire() {
+        let json = r#"{"code": 0, "msg": "ok", "tenant_access_token": "t-abc"}"#;
+        let result: Result<TenantAccessTokenResponse, _> = serde_json::from_str(json);
+        assert!(result.is_err(), "should fail when expire is missing");
+    }
+
+    #[test]
+    fn parse_token_response_defaults_code_and_msg() {
+        let json = r#"{"tenant_access_token": "t-abc", "expire": 3600}"#;
+        let resp: TenantAccessTokenResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.code, 0);
+        assert_eq!(resp.msg, "");
+        assert_eq!(resp.tenant_access_token, "t-abc");
+        assert_eq!(resp.expire, 3600);
+    }
+
+    #[test]
+    fn parse_token_error_response() {
+        let json = r#"{
+            "code": 10003,
+            "msg": "invalid app_id",
+            "tenant_access_token": "",
+            "expire": 0
+        }"#;
+        let resp: TenantAccessTokenResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.code, 10003);
+        assert!(resp.tenant_access_token.is_empty());
+    }
+
+    #[test]
+    fn webhook_auth_requires_host_auth_or_matching_verification_token() {
+        assert!(
+            !is_authenticated_webhook(false, None, Some("token")),
+            "requests without any configured verification mechanism must be rejected"
+        );
+        assert!(
+            !is_authenticated_webhook(false, Some("expected"), None),
+            "requests missing the Feishu token must be rejected when host auth did not pass"
+        );
+        assert!(
+            !is_authenticated_webhook(false, Some("expected"), Some("wrong")),
+            "requests with the wrong Feishu token must be rejected"
+        );
+        assert!(
+            is_authenticated_webhook(false, Some("expected"), Some("expected")),
+            "matching Feishu verification token should authenticate the request"
+        );
+        assert!(
+            is_authenticated_webhook(true, None, None),
+            "host-authenticated requests should still be accepted"
+        );
+        assert!(
+            is_authenticated_webhook(true, Some("expected"), Some("wrong")),
+            "host authentication should take precedence over body token checks"
+        );
+    }
+
+    #[test]
+    fn request_verification_token_prefers_v2_header_token() {
+        let event: FeishuEvent = serde_json::from_str(
+            r#"{
+                "schema": "2.0",
+                "header": {
+                    "event_id": "evt_123",
+                    "event_type": "im.message.receive_v1",
+                    "token": "header-token"
+                },
+                "event": {}
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(request_verification_token(&event), Some("header-token"));
+    }
+
+    #[test]
+    fn request_verification_token_falls_back_to_top_level_token() {
+        let event: FeishuEvent = serde_json::from_str(
+            r#"{
+                "type": "url_verification",
+                "challenge": "abc",
+                "token": "top-level-token"
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(request_verification_token(&event), Some("top-level-token"));
     }
 }

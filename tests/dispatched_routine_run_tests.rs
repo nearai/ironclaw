@@ -45,7 +45,6 @@ mod tests {
                 title: "Test job".to_string(),
                 description: "Test description".to_string(),
                 max_iterations: 5,
-                tool_permissions: vec![],
             },
             guardrails: RoutineGuardrails {
                 cooldown: std::time::Duration::from_secs(0),

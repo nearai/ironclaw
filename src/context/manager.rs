@@ -1,11 +1,12 @@
 //! Context manager for handling multiple job contexts.
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
-use crate::context::{JobContext, Memory};
+use crate::context::{JobContext, JobState, Memory};
 use crate::error::JobError;
 
 /// Manages contexts for multiple concurrent jobs.
@@ -45,12 +46,41 @@ impl ContextManager {
         title: impl Into<String>,
         description: impl Into<String>,
     ) -> Result<Uuid, JobError> {
-        // Hold write lock for the entire check-insert to prevent TOCTOU races
-        // where two concurrent calls both pass the parallel_count check.
+        let context = JobContext::with_user(user_id, title, description);
+        let job_id = context.job_id;
+        self.insert_context(context).await?;
+        Ok(job_id)
+    }
+
+    /// Register a sandbox job with a pre-determined ID.
+    ///
+    /// Unlike `create_job_for_user` (which generates its own UUID), this method
+    /// accepts an existing `job_id` — used by `execute_sandbox()` which creates
+    /// the UUID before the container so it can be shared with Docker labels and
+    /// DB persistence.
+    ///
+    /// The job starts in `InProgress` state since the container is about to be
+    /// created. Counts against `max_jobs` like any other job.
+    pub async fn register_sandbox_job(
+        &self,
+        job_id: Uuid,
+        user_id: impl Into<String>,
+        title: impl Into<String>,
+        description: impl Into<String>,
+    ) -> Result<(), JobError> {
+        let mut context = JobContext::with_user(user_id, title, description);
+        context.job_id = job_id;
+        context.state = JobState::InProgress;
+        context.started_at = Some(chrono::Utc::now());
+        self.insert_context(context).await
+    }
+
+    /// Check max_jobs limit, insert context, and allocate memory.
+    ///
+    /// Holds the write lock for the entire check-insert to prevent TOCTOU
+    /// races where two concurrent calls both pass the parallel_count check.
+    async fn insert_context(&self, context: JobContext) -> Result<(), JobError> {
         let mut contexts = self.contexts.write().await;
-        // Only count jobs that consume execution slots (Pending, InProgress, Stuck).
-        // Completed and Submitted jobs are no longer actively executing and shouldn't
-        // block new job creation.
         let parallel_count = contexts
             .values()
             .filter(|c| c.state.is_parallel_blocking())
@@ -60,15 +90,16 @@ impl ContextManager {
             return Err(JobError::MaxJobsExceeded { max: self.max_jobs });
         }
 
-        let context = JobContext::with_user(user_id, title, description);
         let job_id = context.job_id;
         contexts.insert(job_id, context);
         drop(contexts);
 
-        let memory = Memory::new(job_id);
-        self.memories.write().await.insert(job_id, memory);
+        self.memories
+            .write()
+            .await
+            .insert(job_id, Memory::new(job_id));
 
-        Ok(job_id)
+        Ok(())
     }
 
     /// Get a job context by ID.
@@ -164,6 +195,20 @@ impl ContextManager {
             .collect()
     }
 
+    /// Count jobs consuming a parallel execution slot for a specific user.
+    ///
+    /// Uses `is_parallel_blocking()` (Pending/InProgress/Stuck) rather than
+    /// `is_active()`, so Completed/Submitted jobs don't count against the
+    /// per-user concurrency limit.
+    pub async fn parallel_blocking_count_for(&self, user_id: &str) -> usize {
+        self.contexts
+            .read()
+            .await
+            .iter()
+            .filter(|(_, c)| c.user_id == user_id && c.state.is_parallel_blocking())
+            .count()
+    }
+
     /// List all job IDs for a specific user.
     pub async fn all_jobs_for(&self, user_id: &str) -> Vec<Uuid> {
         self.contexts
@@ -205,12 +250,46 @@ impl ContextManager {
     }
 
     /// Find stuck jobs.
+    ///
+    /// Returns jobs that are explicitly in `Stuck` state, plus `InProgress`
+    /// jobs that have been running longer than `elapsed_threshold` (if provided).
+    /// The threshold-based detection catches jobs that never transitioned to
+    /// `Stuck` (e.g., due to a deadlock or unhandled timeout).
     pub async fn find_stuck_jobs(&self) -> Vec<Uuid> {
+        self.find_stuck_jobs_with_threshold(None).await
+    }
+
+    /// Find stuck jobs with an optional elapsed threshold for `InProgress` detection.
+    pub async fn find_stuck_jobs_with_threshold(
+        &self,
+        elapsed_threshold: Option<Duration>,
+    ) -> Vec<Uuid> {
+        let now = chrono::Utc::now();
         self.contexts
             .read()
             .await
             .iter()
-            .filter(|(_, c)| c.state == crate::context::JobState::Stuck)
+            .filter(|(_, c)| {
+                // Always include explicitly Stuck jobs.
+                if c.state == crate::context::JobState::Stuck {
+                    return true;
+                }
+                // Detect InProgress jobs that have been running beyond the elapsed threshold.
+                // NOTE: `started_at` is set on the first transition to InProgress and is
+                // NOT reset when a job recovers from Stuck back to InProgress. This means
+                // a recovered job may be re-detected on the next scan. A future improvement
+                // could track `in_progress_since` or use the most recent StateTransition
+                // with `to == InProgress` to avoid false positives on recovered jobs.
+                if c.state == crate::context::JobState::InProgress
+                    && let Some(threshold) = elapsed_threshold
+                    && let Some(started) = c.started_at
+                {
+                    let elapsed = now.signed_duration_since(started);
+                    let elapsed_secs = elapsed.num_seconds().max(0) as u64;
+                    return elapsed_secs > threshold.as_secs();
+                }
+                false
+            })
             .map(|(id, _)| *id)
             .collect()
     }
@@ -627,6 +706,48 @@ mod tests {
         let stuck = manager.find_stuck_jobs().await;
         assert_eq!(stuck.len(), 1);
         assert_eq!(stuck[0], id2);
+    }
+
+    /// Regression test for #1223: InProgress jobs exceeding the threshold
+    /// should be detected as stuck even if they never transitioned to Stuck.
+    #[tokio::test]
+    async fn find_stuck_jobs_with_threshold_detects_idle_in_progress() {
+        let manager = ContextManager::new(10);
+
+        let id1 = manager.create_job("Active job", "desc").await.unwrap();
+        let id2 = manager.create_job("Idle job", "desc").await.unwrap();
+
+        // Both transition to InProgress
+        for id in [id1, id2] {
+            manager
+                .update_context(id, |ctx| {
+                    ctx.transition_to(crate::context::JobState::InProgress, None)
+                })
+                .await
+                .unwrap()
+                .unwrap();
+        }
+
+        // Backdate id2's started_at to simulate a long-running job
+        manager
+            .update_context(id2, |ctx| -> Result<(), crate::error::JobError> {
+                ctx.started_at = Some(chrono::Utc::now() - chrono::Duration::seconds(600));
+                Ok(())
+            })
+            .await
+            .unwrap()
+            .unwrap();
+
+        // With a 5-minute threshold, only id2 (10 min) should be detected
+        let stuck = manager
+            .find_stuck_jobs_with_threshold(Some(Duration::from_secs(300)))
+            .await;
+        assert_eq!(stuck.len(), 1);
+        assert_eq!(stuck[0], id2);
+
+        // Without threshold, neither InProgress job is detected (no explicit Stuck state)
+        let stuck_no_threshold = manager.find_stuck_jobs().await;
+        assert!(stuck_no_threshold.is_empty());
     }
 
     #[tokio::test]
@@ -1184,5 +1305,88 @@ mod tests {
                 panic!("Unexpected error: {:?}", e);
             }
         }
+    }
+
+    // === Regression: sandbox jobs must be visible to query tools ===
+    // Before the fix, execute_sandbox() only persisted to DB but never
+    // registered in ContextManager, making sandbox jobs invisible to
+    // list_jobs, job_status, job_events, and resolve_job_id.
+
+    #[tokio::test]
+    async fn register_sandbox_job_visible_to_queries() {
+        let manager = ContextManager::new(5);
+        let job_id = Uuid::new_v4();
+
+        manager
+            .register_sandbox_job(
+                job_id,
+                "user-42",
+                "Run tests",
+                "Execute test suite in sandbox",
+            )
+            .await
+            .unwrap();
+
+        // Job should be retrievable by ID (used by job_status, job_events)
+        let ctx = manager.get_context(job_id).await.unwrap();
+        assert_eq!(ctx.job_id, job_id);
+        assert_eq!(ctx.user_id, "user-42");
+        assert_eq!(ctx.title, "Run tests");
+        assert_eq!(ctx.state, JobState::InProgress);
+        assert!(ctx.started_at.is_some());
+
+        // Job should appear in all_jobs (used by resolve_job_id prefix matching)
+        let all = manager.all_jobs().await;
+        assert!(all.contains(&job_id));
+
+        // Job should appear in user-scoped listing (used by list_jobs)
+        let user_jobs = manager.all_jobs_for("user-42").await;
+        assert!(user_jobs.contains(&job_id));
+
+        // Job should appear in active jobs listing
+        let active = manager.active_jobs_for("user-42").await;
+        assert!(active.contains(&job_id));
+    }
+
+    #[tokio::test]
+    async fn register_sandbox_job_respects_max_jobs() {
+        let manager = ContextManager::new(2);
+
+        // Fill up the slots with sandbox jobs
+        manager
+            .register_sandbox_job(Uuid::new_v4(), "user-1", "Job 1", "desc")
+            .await
+            .unwrap();
+        manager
+            .register_sandbox_job(Uuid::new_v4(), "user-1", "Job 2", "desc")
+            .await
+            .unwrap();
+
+        // Third should fail
+        let result = manager
+            .register_sandbox_job(Uuid::new_v4(), "user-1", "Job 3", "desc")
+            .await;
+        assert!(matches!(result, Err(JobError::MaxJobsExceeded { max: 2 })));
+    }
+
+    #[tokio::test]
+    async fn register_sandbox_job_transitions_correctly() {
+        let manager = ContextManager::new(5);
+        let job_id = Uuid::new_v4();
+
+        manager
+            .register_sandbox_job(job_id, "user-1", "Task", "desc")
+            .await
+            .unwrap();
+
+        // Should be able to transition InProgress -> Completed
+        manager
+            .update_context(job_id, |ctx| ctx.transition_to(JobState::Completed, None))
+            .await
+            .unwrap()
+            .unwrap();
+
+        let ctx = manager.get_context(job_id).await.unwrap();
+        assert_eq!(ctx.state, JobState::Completed);
     }
 }

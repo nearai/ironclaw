@@ -2,7 +2,7 @@
   "name": "telegram-mtproto",
   "display_name": "Telegram Tool",
   "kind": "tool",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "wit_version": "0.3.0",
   "description": "Your agent uses your Telegram account to read and send messages",
   "keywords": [
@@ -18,8 +18,8 @@
   },
   "artifacts": {
     "wasm32-wasip2": {
-      "url": "https://github.com/nearai/ironclaw/releases/download/v0.19.0/tool-telegram-0.2.0-wasm32-wasip2.tar.gz",
-      "sha256": "c17065ca41fae5f2a7c43b36144686718cd310a2f22442313bb1aa82bbad0ae4"
+      "url": "https://github.com/nearai/ironclaw/releases/download/ironclaw-v0.22.0/tool-telegram-0.2.1-wasm32-wasip2.tar.gz",
+      "sha256": "1e57d0755fc9c7b3ec013d079f30168898b484a6919f9edd105f0cd80131c1cd"
     }
   },
   "auth_summary": {

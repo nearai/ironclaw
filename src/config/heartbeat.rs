@@ -21,6 +21,9 @@ pub struct HeartbeatConfig {
     pub quiet_hours_end: Option<u32>,
     /// Timezone for fire_at and quiet hours evaluation (IANA name).
     pub timezone: Option<String>,
+    /// When true, cycle through all users with routines. Controlled via
+    /// HEARTBEAT_MULTI_TENANT env var; defaults to false.
+    pub multi_tenant: bool,
 }
 
 impl Default for HeartbeatConfig {
@@ -34,6 +37,7 @@ impl Default for HeartbeatConfig {
             quiet_hours_start: None,
             quiet_hours_end: None,
             timezone: None,
+            multi_tenant: false,
         }
     }
 }
@@ -101,6 +105,7 @@ impl HeartbeatConfig {
                 }
                 tz
             },
+            multi_tenant: parse_bool_env("HEARTBEAT_MULTI_TENANT", false)?,
         })
     }
 }

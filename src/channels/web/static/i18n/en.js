@@ -9,8 +9,6 @@ I18n.register('en', {
   'auth.connect': 'Connect',
   'auth.errorRequired': 'Token required',
   'auth.errorInvalid': 'Invalid token',
-  'auth.hint': 'Enter the GATEWAY_AUTH_TOKEN from your .env file',
-  
   // Chat
   'chat.inputPlaceholder': 'Message or / for commands...',
   
@@ -24,6 +22,12 @@ I18n.register('en', {
   'restart.progressSubtitle': 'Please wait for the process to restart...',
   'restart.checkLogs': 'Check the Logs tab for details after restart completes.',
   
+  // Theme
+  'theme.tooltipDark': 'Theme: Dark (click for Light)',
+  'theme.tooltipLight': 'Theme: Light (click for System)',
+  'theme.tooltipSystem': 'Theme: System (click for Dark)',
+  'theme.announce': 'Theme: {mode}',
+
   // Tabs
   'tab.chat': 'Chat',
   'tab.memory': 'Memory',
@@ -38,7 +42,46 @@ I18n.register('en', {
   'settings.channels': 'Channels',
   'settings.networking': 'Networking',
   'settings.mcp': 'MCP',
-  
+  'settings.users': 'Users',
+
+  // Users Tab
+  'users.heading': 'User Management',
+  'users.newUser': '+ New User',
+  'users.displayNamePlaceholder': 'Display name',
+  'users.emailPlaceholder': 'Email (optional)',
+  'users.roleMember': 'Member',
+  'users.roleAdmin': 'Admin',
+  'users.create': 'Create',
+  'users.cancel': 'Cancel',
+  'users.emptyState': 'No users found. Create the first user to get started.',
+  'users.adminRequired': 'Admin access required to manage users.',
+  'users.failedToLoad': 'Failed to load users',
+  'users.suspend': 'Suspend',
+  'users.activate': 'Activate',
+  'users.addToken': '+ Token',
+  'users.failedSuspend': 'Failed to suspend user',
+  'users.failedActivate': 'Failed to activate user',
+  'users.makeAdmin': 'Make Admin',
+  'users.makeMember': 'Make Member',
+  'users.failedRoleChange': 'Failed to change role',
+  'users.userCreated': 'User created!',
+  'users.tokenCreated': 'Token created!',
+  'users.tokenShareMessage': "Share this login link — it won't be shown again:",
+  'users.rawToken': 'Raw token:',
+  'users.copied': 'Copied!',
+  'users.displayNameRequired': 'Display name is required',
+  'users.failedCreate': 'Failed to create user',
+  'users.columns.id': 'ID',
+  'users.columns.displayName': 'Display Name',
+  'users.columns.email': 'Email',
+  'users.columns.role': 'Role',
+  'users.columns.status': 'Status',
+  'users.columns.jobs': 'Jobs',
+  'users.columns.cost': 'Cost',
+  'users.columns.lastActive': 'Last Active',
+  'users.columns.created': 'Created',
+  'users.columns.actions': 'Actions',
+
   // Status
   'status.connected': 'Connected',
   'status.disconnected': 'Disconnected',
@@ -515,4 +558,29 @@ I18n.register('en', {
   'channels.replDesc': 'Simple read-eval-print loop for testing',
   'channels.configureVia': 'Configure via {env}',
   'channels.runWith': 'Run with: {cmd}',
+
+  // Welcome Card
+  'welcome.heading': 'What can I help you with?',
+  'welcome.description': 'IronClaw is your secure AI assistant. Choose a suggestion below or type your own message.',
+  'welcome.runTool': 'Run a tool',
+  'welcome.checkJobs': 'Check job status',
+  'welcome.searchMemory': 'Search memory',
+  'welcome.manageRoutines': 'Manage routines',
+  'welcome.systemStatus': 'System status',
+  'welcome.writeCode': 'Write code',
+
+  // Connection
+  'connection.disconnected': 'Disconnected — attempting to reconnect',
+  'connection.reconnecting': 'Reconnecting (attempt {count})...',
+  'connection.reconnected': 'Reconnected',
+
+  // Messages
+  'message.you': 'You',
+  'message.assistant': 'IronClaw',
+  'message.system': 'System',
+  'message.copy': 'Copy',
+  'message.copied': 'Copied!',
+
+  // Approval
+  'approval.pressY': 'Press Y to approve, N to deny',
 });

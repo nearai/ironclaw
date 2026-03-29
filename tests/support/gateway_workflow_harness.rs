@@ -13,8 +13,11 @@ use ironclaw::agent::routine_engine::RoutineEngine;
 use ironclaw::agent::{Agent, AgentDeps, SessionManager as AgentSessionManager};
 use ironclaw::app::{AppBuilder, AppBuilderFlags};
 use ironclaw::channels::IncomingMessage;
+use ironclaw::channels::web::auth::MultiAuthState;
 use ironclaw::channels::web::log_layer::LogBroadcaster;
-use ironclaw::channels::web::server::{GatewayState, RateLimiter, start_server};
+use ironclaw::channels::web::server::{
+    GatewayState, PerUserRateLimiter, RateLimiter, start_server,
+};
 use ironclaw::channels::web::sse::SseManager;
 use ironclaw::channels::web::ws::WsConnectionTracker;
 use ironclaw::config::{Config, RegistryProviderConfig, RoutineConfig};
@@ -211,8 +214,9 @@ impl GatewayWorkflowHarness {
 
         let gateway_state = Arc::new(GatewayState {
             msg_tx: tokio::sync::RwLock::new(Some(gw_tx)),
-            sse: SseManager::new(),
+            sse: Arc::new(SseManager::new()),
             workspace: components.workspace.clone(),
+            workspace_pool: None,
             session_manager: Some(Arc::clone(&agent_session_manager)),
             log_broadcaster: None,
             log_level_handle: None,
@@ -222,19 +226,22 @@ impl GatewayWorkflowHarness {
             job_manager: None,
             prompt_queue: None,
             scheduler: Some(scheduler_slot.clone()),
-            user_id: user_id.clone(),
+            owner_id: user_id.clone(),
             shutdown_tx: tokio::sync::RwLock::new(None),
             ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
             llm_provider: Some(Arc::clone(&components.llm)),
             skill_registry: components.skill_registry.clone(),
             skill_catalog: components.skill_catalog.clone(),
-            chat_rate_limiter: RateLimiter::new(120, 60),
+            chat_rate_limiter: PerUserRateLimiter::new(120, 60),
             oauth_rate_limiter: RateLimiter::new(10, 60),
+            webhook_rate_limiter: RateLimiter::new(10, 60),
             registry_entries: Vec::new(),
             cost_guard: Some(Arc::clone(&components.cost_guard)),
             routine_engine: Arc::clone(&routine_slot),
             startup_time: Instant::now(),
             active_config: ironclaw::channels::web::server::ActiveConfigSnapshot::default(),
+            secrets_store: None,
+            db_auth: None,
         });
 
         let mut agent = Agent::new(
@@ -253,11 +260,15 @@ impl GatewayWorkflowHarness {
                 skills_config: components.config.skills.clone(),
                 hooks: components.hooks,
                 cost_guard: components.cost_guard,
-                sse_tx: Some(gateway_state.sse.sender()),
+                sse_tx: None,
                 http_interceptor: None,
                 transcription: None,
                 document_extraction: None,
+                sandbox_readiness:
+                    ironclaw::agent::routine_engine::SandboxReadiness::DisabledByConfig,
                 builder: None,
+                llm_backend: "nearai".to_string(),
+                tenant_rates: std::sync::Arc::new(ironclaw::tenant::TenantRateRegistry::new(4, 3)),
             },
             channels,
             None,
@@ -286,11 +297,11 @@ impl GatewayWorkflowHarness {
         }
 
         let auth_token = "gateway-test-token".to_string();
+        let auth = MultiAuthState::single(auth_token.clone(), user_id.clone());
         let addr = start_server(
             "127.0.0.1:0".parse().expect("valid localhost addr"),
             Arc::clone(&gateway_state),
-            auth_token.clone(),
-            None,
+            auth.into(),
         )
         .await
         .expect("failed to start gateway server");

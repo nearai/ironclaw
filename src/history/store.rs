@@ -842,6 +842,38 @@ impl Store {
             .collect())
     }
 
+    pub async fn list_agent_jobs_for_user(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<AgentJobRecord>, DatabaseError> {
+        let conn = self.conn().await?;
+        let rows = conn
+            .query(
+                r#"
+                SELECT id, title, status, user_id, failure_reason,
+                       created_at, started_at, completed_at
+                FROM agent_jobs WHERE source = 'direct' AND user_id = $1
+                ORDER BY created_at DESC
+                "#,
+                &[&user_id],
+            )
+            .await?;
+
+        Ok(rows
+            .iter()
+            .map(|r| AgentJobRecord {
+                id: r.get("id"),
+                title: r.get("title"),
+                status: r.get("status"),
+                user_id: r.get::<_, Option<String>>("user_id").unwrap_or_default(),
+                created_at: r.get("created_at"),
+                started_at: r.get("started_at"),
+                completed_at: r.get("completed_at"),
+                failure_reason: r.get("failure_reason"),
+            })
+            .collect())
+    }
+
     /// Get the failure reason for a single agent job.
     pub async fn get_agent_job_failure_reason(
         &self,
@@ -864,6 +896,27 @@ impl Store {
             .query(
                 "SELECT status, COUNT(*) as cnt FROM agent_jobs WHERE source = 'direct' GROUP BY status",
                 &[],
+            )
+            .await?;
+
+        let mut summary = AgentJobSummary::default();
+        for row in &rows {
+            let status: String = row.get("status");
+            let count: i64 = row.get("cnt");
+            summary.add_count(&status, count as usize);
+        }
+        Ok(summary)
+    }
+
+    pub async fn agent_job_summary_for_user(
+        &self,
+        user_id: &str,
+    ) -> Result<AgentJobSummary, DatabaseError> {
+        let conn = self.conn().await?;
+        let rows = conn
+            .query(
+                "SELECT status, COUNT(*) as cnt FROM agent_jobs WHERE source = 'direct' AND user_id = $1 GROUP BY status",
+                &[&user_id],
             )
             .await?;
 
@@ -1105,6 +1158,32 @@ impl Store {
         rows.iter().map(row_to_routine).collect()
     }
 
+    /// Find an enabled webhook routine by its configured path (or fallback to ID).
+    pub async fn get_webhook_routine_by_path(
+        &self,
+        path: &str,
+        user_id: Option<&str>,
+    ) -> Result<Option<Routine>, DatabaseError> {
+        let conn = self.conn().await?;
+        let row = if let Some(uid) = user_id {
+            conn.query_opt(
+                "SELECT * FROM routines WHERE enabled AND trigger_type = 'webhook' \
+                 AND user_id = $2 \
+                 AND (trigger_config->>'path' = $1 OR (trigger_config->>'path' IS NULL AND id::text = $1))",
+                &[&path, &uid],
+            )
+            .await?
+        } else {
+            conn.query_opt(
+                "SELECT * FROM routines WHERE enabled AND trigger_type = 'webhook' \
+                 AND (trigger_config->>'path' = $1 OR (trigger_config->>'path' IS NULL AND id::text = $1))",
+                &[&path],
+            )
+            .await?
+        };
+        row.as_ref().map(row_to_routine).transpose()
+    }
+
     /// List all enabled cron routines whose next_fire_at <= now.
     pub async fn list_due_cron_routines(&self) -> Result<Vec<Routine>, DatabaseError> {
         let conn = self.conn().await?;
@@ -1332,6 +1411,40 @@ impl Store {
         }
 
         Ok(counts)
+    }
+
+    /// Batch-load the most recent run status for multiple routines in a single query.
+    /// Uses a window function to pick only the latest run per routine.
+    #[cfg(feature = "postgres")]
+    pub async fn batch_get_last_run_status(
+        &self,
+        routine_ids: &[Uuid],
+    ) -> Result<HashMap<Uuid, RunStatus>, DatabaseError> {
+        if routine_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let conn = self.conn().await?;
+        let rows = conn
+            .query(
+                "SELECT DISTINCT ON (routine_id) routine_id, status
+                 FROM routine_runs
+                 WHERE routine_id = ANY($1)
+                 ORDER BY routine_id, started_at DESC",
+                &[&routine_ids],
+            )
+            .await?;
+
+        let mut statuses = HashMap::new();
+        for row in rows {
+            let id: Uuid = row.get("routine_id");
+            let status_str: String = row.get("status");
+            if let std::result::Result::Ok(status) = status_str.parse::<RunStatus>() {
+                statuses.insert(id, status);
+            }
+        }
+
+        Ok(statuses)
     }
 
     /// Link a routine run to a dispatched job.
@@ -1656,6 +1769,27 @@ impl Store {
             .await?;
 
         Ok(row.get("id"))
+    }
+
+    /// Read-only lookup for an existing routine conversation.
+    pub async fn find_routine_conversation(
+        &self,
+        routine_id: Uuid,
+        user_id: &str,
+    ) -> Result<Option<Uuid>, DatabaseError> {
+        let conn = self.conn().await?;
+        let rid = routine_id.to_string();
+        let row = conn
+            .query_opt(
+                r#"
+                SELECT id FROM conversations
+                WHERE user_id = $1 AND metadata->>'routine_id' = $2
+                LIMIT 1
+                "#,
+                &[&user_id, &rid],
+            )
+            .await?;
+        Ok(row.map(|r| r.get("id")))
     }
 
     /// Get or create the singleton heartbeat conversation for a user.
@@ -2163,6 +2297,546 @@ impl Store {
             .await?;
         let count: i64 = row.get("cnt");
         Ok(count > 0)
+    }
+}
+
+// ==================== Users / API Tokens / Invitations ====================
+
+#[cfg(feature = "postgres")]
+use crate::db::{ApiTokenRecord, UserRecord};
+
+#[cfg(feature = "postgres")]
+impl Store {
+    /// Create a new user record.
+    pub async fn create_user(&self, user: &UserRecord) -> Result<(), DatabaseError> {
+        let conn = self.conn().await?;
+        conn.execute(
+            r#"
+            INSERT INTO users (id, email, display_name, status, role, created_at, updated_at, last_login_at, created_by, metadata)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            "#,
+            &[
+                &user.id,
+                &user.email,
+                &user.display_name,
+                &user.status,
+                &user.role,
+                &user.created_at,
+                &user.updated_at,
+                &user.last_login_at,
+                &user.created_by,
+                &user.metadata,
+            ],
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Get a user by their string id.
+    pub async fn get_user(&self, id: &str) -> Result<Option<UserRecord>, DatabaseError> {
+        let conn = self.conn().await?;
+        let row = conn
+            .query_opt("SELECT id, email, display_name, status, role, created_at, updated_at, last_login_at, created_by, metadata FROM users WHERE id = $1", &[&id])
+            .await?;
+        Ok(row.map(|r| row_to_user(&r)))
+    }
+
+    /// Get a user by email address.
+    pub async fn get_user_by_email(
+        &self,
+        email: &str,
+    ) -> Result<Option<UserRecord>, DatabaseError> {
+        let conn = self.conn().await?;
+        let row = conn
+            .query_opt("SELECT id, email, display_name, status, role, created_at, updated_at, last_login_at, created_by, metadata FROM users WHERE email = $1", &[&email])
+            .await?;
+        Ok(row.map(|r| row_to_user(&r)))
+    }
+
+    /// List users, optionally filtered by status.
+    pub async fn list_users(&self, status: Option<&str>) -> Result<Vec<UserRecord>, DatabaseError> {
+        let conn = self.conn().await?;
+        let rows = match status {
+            Some(s) => {
+                conn.query(
+                    "SELECT id, email, display_name, status, role, created_at, updated_at, last_login_at, created_by, metadata FROM users WHERE status = $1 ORDER BY created_at DESC",
+                    &[&s],
+                )
+                .await?
+            }
+            None => {
+                conn.query("SELECT id, email, display_name, status, role, created_at, updated_at, last_login_at, created_by, metadata FROM users ORDER BY created_at DESC", &[])
+                    .await?
+            }
+        };
+        Ok(rows.iter().map(row_to_user).collect())
+    }
+
+    /// Update a user's status.
+    pub async fn update_user_status(&self, id: &str, status: &str) -> Result<(), DatabaseError> {
+        let conn = self.conn().await?;
+        conn.execute(
+            "UPDATE users SET status = $1, updated_at = NOW() WHERE id = $2",
+            &[&status, &id],
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Update a user's role (admin/member).
+    pub async fn update_user_role(&self, id: &str, role: &str) -> Result<(), DatabaseError> {
+        let conn = self.conn().await?;
+        conn.execute(
+            "UPDATE users SET role = $1, updated_at = NOW() WHERE id = $2",
+            &[&role, &id],
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Update a user's display name and metadata.
+    pub async fn update_user_profile(
+        &self,
+        id: &str,
+        display_name: &str,
+        metadata: &serde_json::Value,
+    ) -> Result<(), DatabaseError> {
+        let conn = self.conn().await?;
+        conn.execute(
+            "UPDATE users SET display_name = $1, metadata = $2, updated_at = NOW() WHERE id = $3",
+            &[&display_name, metadata, &id],
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Record a login timestamp for a user.
+    pub async fn record_login(&self, id: &str) -> Result<(), DatabaseError> {
+        let conn = self.conn().await?;
+        conn.execute(
+            "UPDATE users SET last_login_at = NOW(), updated_at = NOW() WHERE id = $1",
+            &[&id],
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Create a new API token.
+    pub async fn create_api_token(
+        &self,
+        user_id: &str,
+        name: &str,
+        token_hash: &[u8; 32],
+        token_prefix: &str,
+        expires_at: Option<DateTime<Utc>>,
+    ) -> Result<ApiTokenRecord, DatabaseError> {
+        let conn = self.conn().await?;
+        let id = Uuid::new_v4();
+        let now = Utc::now();
+        conn.execute(
+            r#"
+            INSERT INTO api_tokens (id, user_id, token_hash, token_prefix, name, expires_at, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            "#,
+            &[
+                &id,
+                &user_id,
+                &token_hash.as_slice(),
+                &token_prefix,
+                &name,
+                &expires_at,
+                &now,
+            ],
+        )
+        .await?;
+        Ok(ApiTokenRecord {
+            id,
+            user_id: user_id.to_string(),
+            name: name.to_string(),
+            token_prefix: token_prefix.to_string(),
+            expires_at,
+            last_used_at: None,
+            created_at: now,
+            revoked_at: None,
+        })
+    }
+
+    /// Create a user and their initial API token atomically in a single transaction.
+    pub async fn create_user_with_token(
+        &self,
+        user: &UserRecord,
+        token_name: &str,
+        token_hash: &[u8; 32],
+        token_prefix: &str,
+        expires_at: Option<DateTime<Utc>>,
+    ) -> Result<ApiTokenRecord, DatabaseError> {
+        let mut conn = self.conn().await?;
+        let tx = conn.transaction().await?;
+
+        tx.execute(
+            r#"
+            INSERT INTO users (id, email, display_name, status, role, created_at, updated_at, last_login_at, created_by, metadata)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            "#,
+            &[
+                &user.id,
+                &user.email,
+                &user.display_name,
+                &user.status,
+                &user.role,
+                &user.created_at,
+                &user.updated_at,
+                &user.last_login_at,
+                &user.created_by,
+                &user.metadata,
+            ],
+        )
+        .await?;
+
+        let id = Uuid::new_v4();
+        let now = Utc::now();
+        tx.execute(
+            r#"
+            INSERT INTO api_tokens (id, user_id, token_hash, token_prefix, name, expires_at, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            "#,
+            &[
+                &id,
+                &user.id,
+                &token_hash.as_slice(),
+                &token_prefix,
+                &token_name,
+                &expires_at,
+                &now,
+            ],
+        )
+        .await?;
+
+        tx.commit().await?;
+
+        Ok(ApiTokenRecord {
+            id,
+            user_id: user.id.clone(),
+            name: token_name.to_string(),
+            token_prefix: token_prefix.to_string(),
+            expires_at,
+            last_used_at: None,
+            created_at: now,
+            revoked_at: None,
+        })
+    }
+
+    /// List tokens for a user.
+    pub async fn list_api_tokens(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<ApiTokenRecord>, DatabaseError> {
+        let conn = self.conn().await?;
+        let rows = conn
+            .query(
+                r#"
+                SELECT id, user_id, name, token_prefix, expires_at, last_used_at, created_at, revoked_at
+                FROM api_tokens
+                WHERE user_id = $1
+                ORDER BY created_at DESC
+                "#,
+                &[&user_id],
+            )
+            .await?;
+        Ok(rows.iter().map(row_to_api_token).collect())
+    }
+
+    /// Soft-revoke a token. Returns false if the token doesn't exist or doesn't belong to the user.
+    pub async fn revoke_api_token(
+        &self,
+        token_id: Uuid,
+        user_id: &str,
+    ) -> Result<bool, DatabaseError> {
+        let conn = self.conn().await?;
+        let count = conn
+            .execute(
+                "UPDATE api_tokens SET revoked_at = NOW() WHERE id = $1 AND user_id = $2 AND revoked_at IS NULL",
+                &[&token_id, &user_id],
+            )
+            .await?;
+        Ok(count > 0)
+    }
+
+    /// Authenticate a token by hash. Returns the token record and its owning user
+    /// if the token is active (non-revoked, non-expired) and the user is active.
+    pub async fn authenticate_token(
+        &self,
+        token_hash: &[u8; 32],
+    ) -> Result<Option<(ApiTokenRecord, UserRecord)>, DatabaseError> {
+        let conn = self.conn().await?;
+        let row = conn
+            .query_opt(
+                r#"
+                SELECT t.id, t.user_id, t.name, t.token_prefix, t.expires_at, t.last_used_at, t.created_at, t.revoked_at,
+                       u.id as u_id, u.email, u.display_name, u.status, u.role, u.created_at as u_created_at, u.updated_at, u.last_login_at, u.created_by, u.metadata
+                FROM api_tokens t
+                JOIN users u ON t.user_id = u.id
+                WHERE t.token_hash = $1
+                  AND t.revoked_at IS NULL
+                  AND (t.expires_at IS NULL OR t.expires_at > NOW())
+                  AND u.status = 'active'
+                "#,
+                &[&token_hash.as_slice()],
+            )
+            .await?;
+        Ok(row.map(|r| {
+            let token = ApiTokenRecord {
+                id: r.get("id"),
+                user_id: r.get("user_id"),
+                name: r.get("name"),
+                token_prefix: r.get("token_prefix"),
+                expires_at: r.get("expires_at"),
+                last_used_at: r.get("last_used_at"),
+                created_at: r.get("created_at"),
+                revoked_at: r.get("revoked_at"),
+            };
+            let user = UserRecord {
+                id: r.get("u_id"),
+                email: r.get("email"),
+                display_name: r.get("display_name"),
+                status: r.get("status"),
+                role: r.get("role"),
+                created_at: r.get("u_created_at"),
+                updated_at: r.get("updated_at"),
+                last_login_at: r.get("last_login_at"),
+                created_by: r.get("created_by"),
+                metadata: r.get("metadata"),
+            };
+            (token, user)
+        }))
+    }
+
+    /// Update `last_used_at` for a token.
+    pub async fn record_token_usage(&self, token_id: Uuid) -> Result<(), DatabaseError> {
+        let conn = self.conn().await?;
+        conn.execute(
+            "UPDATE api_tokens SET last_used_at = NOW() WHERE id = $1",
+            &[&token_id],
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Check whether any user records exist.
+    pub async fn has_any_users(&self) -> Result<bool, DatabaseError> {
+        let conn = self.conn().await?;
+        let row = conn
+            .query_one(
+                "SELECT EXISTS(SELECT 1 FROM users LIMIT 1) as has_users",
+                &[],
+            )
+            .await?;
+        Ok(row.get("has_users"))
+    }
+
+    /// Delete a user and all their data across all user-scoped tables.
+    /// Returns false if the user doesn't exist.
+    pub async fn delete_user(&self, id: &str) -> Result<bool, DatabaseError> {
+        let mut conn = self.conn().await?;
+        let tx = conn
+            .transaction()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        // Delete from child tables first to avoid FK violations.
+        // job_events must come before agent_jobs (FK without CASCADE).
+        // agent_jobs cascades to job_actions, llm_calls, estimation_snapshots.
+        // conversations cascades to conversation_messages.
+        // memory_documents cascades to memory_chunks.
+        // routines cascades to routine_runs.
+        // api_tokens cascade automatically via FK on users.
+        for table in &[
+            "settings",
+            "heartbeat_state",
+            "tool_rate_limit_state",
+            "secret_usage_log",
+            "leak_detection_events",
+            "secrets",
+            "wasm_tools",
+            "routines",
+            "memory_documents",
+            "conversations",
+        ] {
+            tx.execute(&format!("DELETE FROM {table} WHERE user_id = $1"), &[&id])
+                .await
+                .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        }
+        // job_events references agent_jobs(id) without CASCADE — delete via subquery.
+        tx.execute(
+            "DELETE FROM job_events WHERE job_id IN (SELECT id FROM agent_jobs WHERE user_id = $1)",
+            &[&id],
+        )
+        .await
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        tx.execute("DELETE FROM agent_jobs WHERE user_id = $1", &[&id])
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        // Nullify self-referencing created_by before deleting the user
+        tx.execute(
+            "UPDATE users SET created_by = NULL WHERE created_by = $1",
+            &[&id],
+        )
+        .await
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        // api_tokens cascade automatically via FK
+        let result = tx
+            .execute("DELETE FROM users WHERE id = $1", &[&id])
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        tx.commit()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        Ok(result > 0)
+    }
+
+    /// Get per-user LLM usage stats for a time period.
+    /// Aggregates from llm_calls via agent_jobs.user_id.
+    pub async fn user_usage_stats(
+        &self,
+        user_id: Option<&str>,
+        since: DateTime<Utc>,
+    ) -> Result<Vec<crate::db::UserUsageStats>, DatabaseError> {
+        let conn = self.conn().await?;
+        let rows = if let Some(uid) = user_id {
+            conn.query(
+                r#"
+                SELECT COALESCE(j.user_id, c.user_id) as user_id,
+                       l.model, COUNT(*) as call_count,
+                       COALESCE(SUM(l.input_tokens), 0) as input_tokens,
+                       COALESCE(SUM(l.output_tokens), 0) as output_tokens,
+                       COALESCE(SUM(l.cost), 0) as total_cost
+                FROM llm_calls l
+                LEFT JOIN agent_jobs j ON l.job_id = j.id
+                LEFT JOIN conversations c ON l.conversation_id = c.id
+                WHERE l.created_at >= $1
+                  AND COALESCE(j.user_id, c.user_id) = $2
+                GROUP BY COALESCE(j.user_id, c.user_id), l.model
+                ORDER BY total_cost DESC
+                "#,
+                &[&since, &uid],
+            )
+            .await?
+        } else {
+            conn.query(
+                r#"
+                SELECT COALESCE(j.user_id, c.user_id) as user_id,
+                       l.model, COUNT(*) as call_count,
+                       COALESCE(SUM(l.input_tokens), 0) as input_tokens,
+                       COALESCE(SUM(l.output_tokens), 0) as output_tokens,
+                       COALESCE(SUM(l.cost), 0) as total_cost
+                FROM llm_calls l
+                LEFT JOIN agent_jobs j ON l.job_id = j.id
+                LEFT JOIN conversations c ON l.conversation_id = c.id
+                WHERE l.created_at >= $1
+                GROUP BY COALESCE(j.user_id, c.user_id), l.model
+                ORDER BY total_cost DESC
+                "#,
+                &[&since],
+            )
+            .await?
+        };
+        let mut stats = Vec::with_capacity(rows.len());
+        for row in &rows {
+            stats.push(crate::db::UserUsageStats {
+                user_id: row.get("user_id"),
+                model: row.get("model"),
+                call_count: row.get("call_count"),
+                input_tokens: row.get("input_tokens"),
+                output_tokens: row.get("output_tokens"),
+                total_cost: row.get("total_cost"),
+            });
+        }
+        Ok(stats)
+    }
+
+    /// Lightweight per-user summary stats (job count, total cost, last active).
+    ///
+    /// Aggregates from `llm_calls`, resolving user_id via either `agent_jobs`
+    /// (for background job calls) or `conversations` (for chat calls where
+    /// `job_id` is NULL).
+    pub async fn user_summary_stats(
+        &self,
+        user_id: Option<&str>,
+    ) -> Result<Vec<crate::db::UserSummaryStats>, DatabaseError> {
+        let conn = self.conn().await?;
+        let rows = if let Some(uid) = user_id {
+            conn.query(
+                r#"
+                SELECT
+                    COALESCE(j.user_id, c.user_id) AS user_id,
+                    COUNT(DISTINCT j.id) AS job_count,
+                    COALESCE(SUM(l.cost), 0) AS total_cost,
+                    MAX(l.created_at) AS last_active_at
+                FROM llm_calls l
+                LEFT JOIN agent_jobs j ON l.job_id = j.id
+                LEFT JOIN conversations c ON l.conversation_id = c.id
+                WHERE COALESCE(j.user_id, c.user_id) = $1
+                GROUP BY COALESCE(j.user_id, c.user_id)
+                "#,
+                &[&uid],
+            )
+            .await?
+        } else {
+            conn.query(
+                r#"
+                SELECT
+                    COALESCE(j.user_id, c.user_id) AS user_id,
+                    COUNT(DISTINCT j.id) AS job_count,
+                    COALESCE(SUM(l.cost), 0) AS total_cost,
+                    MAX(l.created_at) AS last_active_at
+                FROM llm_calls l
+                LEFT JOIN agent_jobs j ON l.job_id = j.id
+                LEFT JOIN conversations c ON l.conversation_id = c.id
+                GROUP BY COALESCE(j.user_id, c.user_id)
+                "#,
+                &[],
+            )
+            .await?
+        };
+        let mut stats = Vec::with_capacity(rows.len());
+        for row in &rows {
+            stats.push(crate::db::UserSummaryStats {
+                user_id: row.get("user_id"),
+                job_count: row.get("job_count"),
+                total_cost: row.get("total_cost"),
+                last_active_at: row.get("last_active_at"),
+            });
+        }
+        Ok(stats)
+    }
+}
+
+#[cfg(feature = "postgres")]
+fn row_to_user(row: &tokio_postgres::Row) -> UserRecord {
+    UserRecord {
+        id: row.get("id"),
+        email: row.get("email"),
+        display_name: row.get("display_name"),
+        status: row.get("status"),
+        role: row.get("role"),
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+        last_login_at: row.get("last_login_at"),
+        created_by: row.get("created_by"),
+        metadata: row.get("metadata"),
+    }
+}
+
+#[cfg(feature = "postgres")]
+fn row_to_api_token(row: &tokio_postgres::Row) -> ApiTokenRecord {
+    ApiTokenRecord {
+        id: row.get("id"),
+        user_id: row.get("user_id"),
+        name: row.get("name"),
+        token_prefix: row.get("token_prefix"),
+        expires_at: row.get("expires_at"),
+        last_used_at: row.get("last_used_at"),
+        created_at: row.get("created_at"),
+        revoked_at: row.get("revoked_at"),
     }
 }
 

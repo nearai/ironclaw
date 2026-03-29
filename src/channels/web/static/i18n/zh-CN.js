@@ -9,8 +9,6 @@ I18n.register('zh-CN', {
   'auth.connect': '连接',
   'auth.errorRequired': '请输入令牌',
   'auth.errorInvalid': '令牌无效',
-  'auth.hint': '输入 .env 配置文件中的 GATEWAY_AUTH_TOKEN',
-  
   // 聊天
   'chat.inputPlaceholder': '输入消息或 / 以使用命令...',
   
@@ -24,6 +22,12 @@ I18n.register('zh-CN', {
   'restart.progressSubtitle': '请等待进程重启...',
   'restart.checkLogs': '重启完成后，请查看日志标签页了解详情。',
   
+  // 主题
+  'theme.tooltipDark': '主题：深色（点击切换浅色）',
+  'theme.tooltipLight': '主题：浅色（点击切换跟随系统）',
+  'theme.tooltipSystem': '主题：跟随系统（点击切换深色）',
+  'theme.announce': '主题：{mode}',
+
   // 标签页
   'tab.chat': '聊天',
   'tab.memory': '记忆',
@@ -38,7 +42,46 @@ I18n.register('zh-CN', {
   'settings.channels': '频道',
   'settings.networking': '网络',
   'settings.mcp': 'MCP',
-  
+  'settings.users': '用户管理',
+
+  // 用户管理标签页
+  'users.heading': '用户管理',
+  'users.newUser': '+ 新用户',
+  'users.displayNamePlaceholder': '显示名称',
+  'users.emailPlaceholder': '邮箱（可选）',
+  'users.roleMember': '成员',
+  'users.roleAdmin': '管理员',
+  'users.create': '创建',
+  'users.cancel': '取消',
+  'users.emptyState': '暂无用户。创建第一个用户以开始使用。',
+  'users.adminRequired': '需要管理员权限来管理用户。',
+  'users.failedToLoad': '加载用户列表失败',
+  'users.suspend': '停用',
+  'users.activate': '启用',
+  'users.addToken': '+ 令牌',
+  'users.failedSuspend': '停用用户失败',
+  'users.failedActivate': '启用用户失败',
+  'users.makeAdmin': '设为管理员',
+  'users.makeMember': '设为成员',
+  'users.failedRoleChange': '更改角色失败',
+  'users.userCreated': '用户已创建！',
+  'users.tokenCreated': '令牌已创建！',
+  'users.tokenShareMessage': '分享此登录链接——此链接只会显示一次：',
+  'users.rawToken': '原始令牌：',
+  'users.copied': '已复制！',
+  'users.displayNameRequired': '显示名称为必填项',
+  'users.failedCreate': '创建用户失败',
+  'users.columns.id': 'ID',
+  'users.columns.displayName': '显示名称',
+  'users.columns.email': '邮箱',
+  'users.columns.role': '角色',
+  'users.columns.status': '状态',
+  'users.columns.jobs': '任务',
+  'users.columns.cost': '费用',
+  'users.columns.lastActive': '最近活跃',
+  'users.columns.created': '创建时间',
+  'users.columns.actions': '操作',
+
   // 状态
   'status.connected': '已连接',
   'status.disconnected': '已断开',
@@ -514,4 +557,29 @@ I18n.register('zh-CN', {
   'channels.replDesc': '用于测试的简单读取-求值-打印循环',
   'channels.configureVia': '通过 {env} 配置',
   'channels.runWith': '运行命令: {cmd}',
+
+  // Welcome Card
+  'welcome.heading': '有什么可以帮助您的？',
+  'welcome.description': 'IronClaw 是您的安全 AI 助手。选择下方的建议或输入您自己的消息。',
+  'welcome.runTool': '运行工具',
+  'welcome.checkJobs': '查看任务状态',
+  'welcome.searchMemory': '搜索记忆',
+  'welcome.manageRoutines': '管理例程',
+  'welcome.systemStatus': '系统状态',
+  'welcome.writeCode': '编写代码',
+
+  // Connection
+  'connection.disconnected': '已断开连接 — 正在尝试重新连接',
+  'connection.reconnecting': '正在重新连接（第 {count} 次尝试）...',
+  'connection.reconnected': '已重新连接',
+
+  // Messages
+  'message.you': '你',
+  'message.assistant': 'IronClaw',
+  'message.system': '系统',
+  'message.copy': '复制',
+  'message.copied': '已复制！',
+
+  // Approval
+  'approval.pressY': '按 Y 批准，N 拒绝',
 });

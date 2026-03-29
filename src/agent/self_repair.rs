@@ -8,8 +8,8 @@ use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use crate::context::{ContextManager, JobState};
-use crate::db::Database;
 use crate::error::RepairError;
+use crate::tenant::AdminScope;
 use crate::tools::{BuildRequirement, Language, SoftwareBuilder, SoftwareType, ToolRegistry};
 
 /// A job that has been detected as stuck.
@@ -66,9 +66,10 @@ pub trait SelfRepair: Send + Sync {
 /// Default self-repair implementation.
 pub struct DefaultSelfRepair {
     context_manager: Arc<ContextManager>,
+    /// Jobs in `InProgress` longer than this are treated as stuck.
     stuck_threshold: Duration,
     max_repair_attempts: u32,
-    store: Option<Arc<dyn Database>>,
+    store: Option<AdminScope>,
     builder: Option<Arc<dyn SoftwareBuilder>>,
     tools: Option<Arc<ToolRegistry>>,
 }
@@ -90,8 +91,8 @@ impl DefaultSelfRepair {
         }
     }
 
-    /// Add a Store for tool failure tracking.
-    pub fn with_store(mut self, store: Arc<dyn Database>) -> Self {
+    /// Add an admin-scoped store for tool failure tracking.
+    pub fn with_store(mut self, store: AdminScope) -> Self {
         self.store = Some(store);
         self
     }
@@ -111,15 +112,58 @@ impl DefaultSelfRepair {
 #[async_trait]
 impl SelfRepair for DefaultSelfRepair {
     async fn detect_stuck_jobs(&self) -> Vec<StuckJob> {
-        let stuck_ids = self.context_manager.find_stuck_jobs().await;
+        let stuck_ids = self
+            .context_manager
+            .find_stuck_jobs_with_threshold(Some(self.stuck_threshold))
+            .await;
         let mut stuck_jobs = Vec::new();
 
         for job_id in stuck_ids {
             if let Ok(ctx) = self.context_manager.get_context(job_id).await
-                && ctx.state == JobState::Stuck
+                && matches!(ctx.state, JobState::Stuck | JobState::InProgress)
             {
-                // Measure stuck_duration from the most recent Stuck transition,
-                // not from started_at (which reflects when the job first ran).
+                // InProgress jobs detected by threshold need to be transitioned
+                // to Stuck before they can be repaired (attempt_recovery requires
+                // Stuck state). These jobs already passed the threshold check in
+                // find_stuck_jobs_with_threshold, so skip the duration filter below.
+                let just_transitioned = ctx.state == JobState::InProgress;
+                if just_transitioned {
+                    let reason = "exceeded stuck_threshold";
+                    let transition = self
+                        .context_manager
+                        .update_context(job_id, |ctx| ctx.mark_stuck(reason))
+                        .await;
+                    match transition {
+                        Ok(Ok(())) => {}
+                        Ok(Err(e)) => {
+                            tracing::warn!(
+                                job = %job_id,
+                                "Failed to mark InProgress job as Stuck: {}",
+                                e
+                            );
+                            continue;
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                job = %job_id,
+                                "Failed to transition InProgress job to Stuck: {}",
+                                e
+                            );
+                            continue;
+                        }
+                    }
+                }
+
+                // Re-fetch context after potential InProgress->Stuck transition
+                // so that stuck_since picks up the new transition timestamp.
+                let ctx = match self.context_manager.get_context(job_id).await {
+                    Ok(c) => c,
+                    Err(_) => continue,
+                };
+
+                // Use the timestamp of the most recent Stuck transition, not started_at.
+                // A job that ran for hours before becoming stuck should not immediately
+                // exceed the threshold — we measure from when it actually became stuck.
                 let stuck_since = ctx
                     .transitions
                     .iter()
@@ -134,8 +178,10 @@ impl SelfRepair for DefaultSelfRepair {
                     })
                     .unwrap_or_default();
 
-                // Only report jobs that have been stuck long enough
-                if stuck_duration < self.stuck_threshold {
+                // Only report already-Stuck jobs that have been stuck long enough.
+                // Jobs just transitioned from InProgress skip this check — they
+                // were already vetted by find_stuck_jobs_with_threshold.
+                if !just_transitioned && stuck_duration < self.stuck_threshold {
                     continue;
                 }
 
@@ -163,10 +209,17 @@ impl SelfRepair for DefaultSelfRepair {
             });
         }
 
-        // Try to recover the job
+        // Try to recover the job.
+        // If the job is still InProgress (detected via stuck_threshold), transition
+        // it to Stuck first so that attempt_recovery() can move it back to InProgress.
         let result = self
             .context_manager
-            .update_context(job.job_id, |ctx| ctx.attempt_recovery())
+            .update_context(job.job_id, |ctx| {
+                if ctx.state == JobState::InProgress {
+                    ctx.transition_to(JobState::Stuck, Some("exceeded stuck_threshold".into()))?;
+                }
+                ctx.attempt_recovery()
+            })
             .await;
 
         match result {
@@ -490,6 +543,82 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn detect_and_repair_in_progress_job_via_threshold() {
+        let cm = Arc::new(ContextManager::new(10));
+        let job_id = cm.create_job("Long running", "desc").await.unwrap();
+
+        // Transition to InProgress.
+        cm.update_context(job_id, |ctx| ctx.transition_to(JobState::InProgress, None))
+            .await
+            .unwrap()
+            .unwrap();
+
+        // Backdate started_at to simulate a job running for 10 minutes.
+        cm.update_context(job_id, |ctx| {
+            ctx.started_at = Some(Utc::now() - chrono::Duration::seconds(600));
+        })
+        .await
+        .unwrap();
+
+        // Use a 5-minute threshold so the 10-minute job is detected.
+        let repair = DefaultSelfRepair::new(Arc::clone(&cm), Duration::from_secs(300), 3);
+
+        // detect_stuck_jobs should find it and transition InProgress -> Stuck.
+        let stuck = repair.detect_stuck_jobs().await;
+        assert_eq!(stuck.len(), 1);
+        assert_eq!(stuck[0].job_id, job_id);
+
+        // After detection the job should now be in Stuck state.
+        let ctx = cm.get_context(job_id).await.unwrap();
+        assert_eq!(ctx.state, JobState::Stuck);
+
+        // Repair should recover it: Stuck -> InProgress.
+        let result = repair.repair_stuck_job(&stuck[0]).await.unwrap();
+        assert!(
+            matches!(result, RepairResult::Success { .. }),
+            "Expected Success, got: {:?}",
+            result
+        );
+
+        // Job should be back to InProgress after recovery.
+        let ctx = cm.get_context(job_id).await.unwrap();
+        assert_eq!(ctx.state, JobState::InProgress);
+    }
+
+    #[tokio::test]
+    async fn detect_broken_tools_returns_empty_without_store() {
+        let cm = Arc::new(ContextManager::new(10));
+        let repair = DefaultSelfRepair::new(cm, Duration::from_secs(60), 3);
+
+        // No store configured, should return empty.
+        let broken = repair.detect_broken_tools().await;
+        assert!(broken.is_empty());
+    }
+
+    #[tokio::test]
+    async fn repair_broken_tool_returns_manual_without_builder() {
+        let cm = Arc::new(ContextManager::new(10));
+        let repair = DefaultSelfRepair::new(cm, Duration::from_secs(60), 3);
+
+        let broken = BrokenTool {
+            name: "test-tool".to_string(),
+            failure_count: 10,
+            last_error: Some("crash".to_string()),
+            first_failure: Utc::now(),
+            last_failure: Utc::now(),
+            last_build_result: None,
+            repair_attempts: 0,
+        };
+
+        let result = repair.repair_broken_tool(&broken).await.unwrap();
+        assert!(
+            matches!(result, RepairResult::ManualRequired { .. }),
+            "Expected ManualRequired without builder, got: {:?}",
+            result
+        );
+    }
+
+    #[tokio::test]
     async fn detect_stuck_jobs_filters_by_threshold() {
         let cm = Arc::new(ContextManager::new(10));
         let job_id = cm.create_job("Stuck job", "desc").await.unwrap();
@@ -578,39 +707,6 @@ mod tests {
             stuck.is_empty(),
             "Job stuck for <1s should not exceed 5min threshold, \
              but stuck_duration was computed from started_at (2h ago)"
-        );
-    }
-
-    #[tokio::test]
-    async fn detect_broken_tools_returns_empty_without_store() {
-        let cm = Arc::new(ContextManager::new(10));
-        let repair = DefaultSelfRepair::new(cm, Duration::from_secs(60), 3);
-
-        // No store configured, should return empty.
-        let broken = repair.detect_broken_tools().await;
-        assert!(broken.is_empty());
-    }
-
-    #[tokio::test]
-    async fn repair_broken_tool_returns_manual_without_builder() {
-        let cm = Arc::new(ContextManager::new(10));
-        let repair = DefaultSelfRepair::new(cm, Duration::from_secs(60), 3);
-
-        let broken = BrokenTool {
-            name: "test-tool".to_string(),
-            failure_count: 10,
-            last_error: Some("crash".to_string()),
-            first_failure: Utc::now(),
-            last_failure: Utc::now(),
-            last_build_result: None,
-            repair_attempts: 0,
-        };
-
-        let result = repair.repair_broken_tool(&broken).await.unwrap();
-        assert!(
-            matches!(result, RepairResult::ManualRequired { .. }),
-            "Expected ManualRequired without builder, got: {:?}",
-            result
         );
     }
 
@@ -710,7 +806,7 @@ mod tests {
         // Create self-repair with zero threshold (detect immediately),
         // wired with store, builder, and tools.
         let repair = DefaultSelfRepair::new(Arc::clone(&cm), Duration::from_secs(0), 3)
-            .with_store(Arc::clone(&db))
+            .with_store(crate::tenant::AdminScope::new(Arc::clone(&db)))
             .with_builder(
                 Arc::clone(&builder) as Arc<dyn crate::tools::SoftwareBuilder>,
                 tools,
