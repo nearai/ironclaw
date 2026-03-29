@@ -1938,6 +1938,12 @@ async fn inject_agent_review(
     };
 
     if !should_review || !ctx.config.agent_review_enabled {
+        // Successful routine run without review — reset circuit breaker so
+        // a previously-tripped breaker recovers after normal operation resumes.
+        if status == RunStatus::Ok {
+            ctx.agent_review_consecutive_failures
+                .store(0, Ordering::Relaxed);
+        }
         return;
     }
 
@@ -1956,7 +1962,7 @@ async fn inject_agent_review(
         return;
     }
 
-    // Rate limit: sliding hourly window.
+    // Rate limit: tumbling hourly window (resets when wall-clock hour elapses).
     let now_secs = Utc::now().timestamp();
     let window_start = ctx.agent_review_window_start.load(Ordering::Relaxed);
     if now_secs - window_start >= 3600 {
