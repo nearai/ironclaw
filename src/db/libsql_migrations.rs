@@ -469,6 +469,9 @@ CREATE TABLE IF NOT EXISTS routines (
     notify_on_success INTEGER NOT NULL DEFAULT 0,
     notify_on_failure INTEGER NOT NULL DEFAULT 1,
     notify_on_attention INTEGER NOT NULL DEFAULT 1,
+    agent_review_on_success INTEGER NOT NULL DEFAULT 0,
+    agent_review_on_failure INTEGER NOT NULL DEFAULT 0,
+    agent_review_on_attention INTEGER NOT NULL DEFAULT 0,
     state TEXT NOT NULL DEFAULT '{}',
     last_run_at TEXT,
     next_fire_at TEXT,
@@ -782,6 +785,9 @@ CREATE TABLE IF NOT EXISTS routines_new (
     notify_on_success INTEGER NOT NULL DEFAULT 0,
     notify_on_failure INTEGER NOT NULL DEFAULT 1,
     notify_on_attention INTEGER NOT NULL DEFAULT 1,
+    agent_review_on_success INTEGER NOT NULL DEFAULT 0,
+    agent_review_on_failure INTEGER NOT NULL DEFAULT 0,
+    agent_review_on_attention INTEGER NOT NULL DEFAULT 0,
     state TEXT NOT NULL DEFAULT '{}',
     last_run_at TEXT,
     next_fire_at TEXT,
@@ -957,6 +963,16 @@ CREATE TABLE IF NOT EXISTS pairing_requests (
 CREATE INDEX IF NOT EXISTS idx_pairing_requests_channel ON pairing_requests (channel, external_id);
 "#,
     ),
+    (
+        21,
+        "routine_agent_review",
+        // Marked as idempotent (see IDEMPOTENT_ADD_COLUMN_MIGRATIONS below).
+        r#"
+ALTER TABLE routines ADD COLUMN agent_review_on_success INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE routines ADD COLUMN agent_review_on_failure INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE routines ADD COLUMN agent_review_on_attention INTEGER NOT NULL DEFAULT 0;
+"#,
+    ),
 ];
 
 /// Migrations whose ADD COLUMN should be skipped when the column already
@@ -966,6 +982,9 @@ const IDEMPOTENT_ADD_COLUMN_MIGRATIONS: &[(i64, &str, &str)] = &[
     (15, "conversations", "source_channel"),
     (18, "wasm_tools", "scope"),
     (18, "dynamic_tools", "scope"),
+    (21, "routines", "agent_review_on_success"),
+    (21, "routines", "agent_review_on_failure"),
+    (21, "routines", "agent_review_on_attention"),
 ];
 
 /// Check whether `table` already contains `column` via `pragma_table_info`.
