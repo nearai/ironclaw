@@ -31,7 +31,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::bootstrap::ironclaw_base_dir;
-use crate::workspace::{DocumentMetadata, IDENTITY_PATHS, Workspace, is_config_path};
+use crate::workspace::{DocumentMetadata, IDENTITY_PATHS, Workspace, is_config_path, paths};
 
 /// Global guard preventing concurrent hygiene passes.
 static RUNNING: AtomicBool = AtomicBool::new(false);
@@ -234,15 +234,34 @@ impl Drop for RunningGuard {
     }
 }
 
-/// Check if a document path is an identity document that must never be deleted.
+/// Paths that must never be deleted by hygiene, regardless of directory.
+///
+/// This is a superset of `IDENTITY_PATHS` (which is for multi-scope isolation)
+/// and includes additional files like MEMORY.md, HEARTBEAT.md, README.md that
+/// are critical to workspace operation.
+const HYGIENE_PROTECTED_PATHS: &[&str] = &[
+    paths::MEMORY,
+    paths::IDENTITY,
+    paths::SOUL,
+    paths::AGENTS,
+    paths::USER,
+    paths::HEARTBEAT,
+    paths::README,
+    paths::TOOLS,
+    paths::BOOTSTRAP,
+];
+
+/// Check if a document path is a protected file that must never be deleted.
 ///
 /// Performs case-insensitive filename comparison to handle case-insensitive
-/// filesystems (Windows, macOS).
-fn is_identity_document(path: &str) -> bool {
+/// filesystems (Windows, macOS). Also checks against `IDENTITY_PATHS` for
+/// any future additions there that aren't in the hygiene list.
+fn is_protected_document(path: &str) -> bool {
     let file_name = path.rsplit('/').next().unwrap_or(path);
     let file_name_lower = file_name.to_lowercase();
-    IDENTITY_PATHS
+    HYGIENE_PROTECTED_PATHS
         .iter()
+        .chain(IDENTITY_PATHS.iter())
         .any(|&p| p.to_lowercase() == file_name_lower)
 }
 
@@ -269,7 +288,7 @@ async fn cleanup_directory(
         // Safety net: never delete identity documents regardless of directory.
         // This protects MEMORY.md, SOUL.md, IDENTITY.md, etc. even if a
         // misconfigured .config enables hygiene on a directory containing them.
-        if is_identity_document(&entry.path) {
+        if is_protected_document(&entry.path) {
             continue;
         }
         if let Some(updated_at) = entry.updated_at

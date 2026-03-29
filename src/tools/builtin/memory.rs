@@ -352,6 +352,22 @@ impl Tool for MemoryWriteTool {
             path => path.to_string(),
         };
 
+        // Apply metadata BEFORE the write/patch so that metadata-driven flags
+        // (skip_indexing, skip_versioning) take effect for this operation,
+        // not just subsequent ones. See review comments #10-11,15.
+        let metadata_param = params.get("metadata").filter(|m| m.is_object());
+        if let Some(meta) = metadata_param {
+            // get_or_create ensures the document exists; if it's new, content is "".
+            let doc = workspace
+                .get_or_create(&resolved_path)
+                .await
+                .map_err(map_write_err)?;
+            workspace
+                .update_metadata(doc.id, meta)
+                .await
+                .map_err(map_write_err)?;
+        }
+
         // Patch mode: if old_string is provided, do search-and-replace instead of write/append.
         let old_string = params.get("old_string").and_then(|v| v.as_str());
         if let Some(old_str) = old_string {
@@ -382,16 +398,6 @@ impl Tool for MemoryWriteTool {
                 .patch(&resolved_path, old_str, new_str, replace_all)
                 .await
                 .map_err(map_write_err)?;
-
-            // Apply metadata if provided
-            if let Some(meta) = params.get("metadata")
-                && meta.is_object()
-            {
-                workspace
-                    .update_metadata(result.document.id, meta)
-                    .await
-                    .map_err(map_write_err)?;
-            }
 
             let output = serde_json::json!({
                 "status": "patched",
@@ -505,23 +511,8 @@ impl Tool for MemoryWriteTool {
             }
         }
 
-        // Apply metadata if provided (after write/append, works for all targets).
-        // We read the document once to get its ID — this is a hot read right
-        // after the write, so it's effectively free (same DB connection/cache).
-        if let Some(meta) = params.get("metadata")
-            && meta.is_object()
-        {
-            match workspace.read(&resolved_path).await {
-                Ok(doc) => {
-                    if let Err(e) = workspace.update_metadata(doc.id, meta).await {
-                        tracing::warn!(path = %resolved_path, "failed to update metadata: {e}");
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(path = %resolved_path, "failed to read doc for metadata update: {e}");
-                }
-            }
-        }
+        // Metadata was already applied before the write (see above), so
+        // skip_indexing/skip_versioning took effect for this operation.
 
         let mut output = serde_json::json!({
             "status": "written",
@@ -629,10 +620,16 @@ impl Tool for MemoryReadTool {
             .get("list_versions")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
-        let version = params
-            .get("version")
-            .and_then(|v| v.as_i64())
-            .map(|v| v as i32);
+        let version = match params.get("version").and_then(|v| v.as_i64()) {
+            Some(v) if v < 1 || v > i64::from(i32::MAX) => {
+                return Err(ToolError::InvalidParameters(format!(
+                    "version must be between 1 and {}, got {v}",
+                    i32::MAX
+                )));
+            }
+            Some(v) => Some(v as i32),
+            None => None,
+        };
 
         // Read the document first (needed for document_id in all version operations)
         let doc = workspace

@@ -793,6 +793,17 @@ impl Workspace {
             .await
     }
 
+    /// Get or create a document at the given path.
+    ///
+    /// Creates the document with empty content if it doesn't exist.
+    /// Does not trigger reindexing or versioning.
+    pub async fn get_or_create(&self, path: &str) -> Result<MemoryDocument, WorkspaceError> {
+        let path = normalize_path(path);
+        self.storage
+            .get_or_create_document_by_path(&self.user_id, self.agent_id, &path)
+            .await
+    }
+
     // ==================== Metadata ====================
 
     /// Update the metadata JSON on a document by ID (full replacement).

@@ -770,14 +770,23 @@ impl Repository {
                 reason: format!("Failed to start transaction: {e}"),
             })?;
 
+        // Lock the parent document row to serialize concurrent version writes.
+        // We lock memory_documents (which always exists) instead of
+        // memory_document_versions (which may have no rows yet — FOR UPDATE
+        // on an empty result set locks nothing).
+        tx.execute(
+            "SELECT 1 FROM memory_documents WHERE id = $1 FOR UPDATE",
+            &[&document_id],
+        )
+        .await
+        .map_err(|e| WorkspaceError::SearchFailed {
+            reason: format!("Failed to lock document for versioning: {e}"),
+        })?;
+
         let row = tx
             .query_one(
-                r#"
-                SELECT COALESCE(MAX(version), 0) + 1 AS next_version
-                FROM memory_document_versions
-                WHERE document_id = $1
-                FOR UPDATE
-                "#,
+                "SELECT COALESCE(MAX(version), 0) + 1 AS next_version \
+                 FROM memory_document_versions WHERE document_id = $1",
                 &[&document_id],
             )
             .await
