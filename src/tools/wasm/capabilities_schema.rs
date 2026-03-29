@@ -493,6 +493,9 @@ pub struct WebhookCapabilitySchema {
     /// Secret name in secrets store for HMAC-SHA256 signing.
     #[serde(default)]
     pub hmac_secret_name: Option<String>,
+    /// Environment variable name for the HMAC secret.
+    #[serde(default)]
+    pub hmac_secret_env_var: Option<String>,
     /// Signature header for HMAC verification.
     #[serde(default)]
     pub hmac_signature_header: Option<String>,
@@ -511,6 +514,7 @@ impl WebhookCapabilitySchema {
             secret_name: self.secret_name.clone(),
             signature_key_secret_name: self.signature_key_secret_name.clone(),
             hmac_secret_name: self.hmac_secret_name.clone(),
+            hmac_secret_env_var: self.hmac_secret_env_var.clone(),
             hmac_signature_header: self.hmac_signature_header.clone(),
             hmac_timestamp_header: self.hmac_timestamp_header.clone(),
             hmac_prefix: self.hmac_prefix.clone(),
@@ -918,6 +922,7 @@ mod tests {
         let json = r#"{
             "webhook": {
                 "hmac_secret_name": "github_webhook_secret",
+                "hmac_secret_env_var": "GITHUB_WEBHOOK_SECRET",
                 "hmac_signature_header": "x-hub-signature-256",
                 "hmac_prefix": "sha256="
             }
@@ -928,6 +933,10 @@ mod tests {
         assert_eq!(
             webhook.hmac_secret_name.as_deref(),
             Some("github_webhook_secret")
+        );
+        assert_eq!(
+            webhook.hmac_secret_env_var.as_deref(),
+            Some("GITHUB_WEBHOOK_SECRET")
         );
         assert_eq!(
             webhook.hmac_signature_header.as_deref(),
