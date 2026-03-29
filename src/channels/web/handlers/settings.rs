@@ -695,7 +695,6 @@ mod tests {
             prompt_queue: None,
             scheduler: None,
             owner_id: "test".to_string(),
-            default_sender_id: "test".to_string(),
             shutdown_tx: tokio::sync::RwLock::new(None),
             ws_tracker: None,
             llm_provider: None,
@@ -710,6 +709,7 @@ mod tests {
             startup_time: std::time::Instant::now(),
             active_config: crate::channels::web::server::ActiveConfigSnapshot::default(),
             secrets_store: Some(secrets),
+            db_auth: None,
         }
     }
 

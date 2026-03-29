@@ -325,10 +325,6 @@ pub struct ChannelSettings {
     #[serde(default)]
     pub gateway_auth_token: Option<String>,
 
-    /// Web gateway user ID.
-    #[serde(default)]
-    pub gateway_user_id: Option<String>,
-
     /// Whether the CLI channel is enabled.
     #[serde(default = "default_true")]
     pub cli_enabled: bool,
@@ -398,7 +394,6 @@ impl Default for ChannelSettings {
             gateway_host: None,
             gateway_port: None,
             gateway_auth_token: None,
-            gateway_user_id: None,
             cli_enabled: true,
             signal_enabled: false,
             signal_http_url: None,

@@ -1292,11 +1292,23 @@ async fn execute_full_job(
     }
     metadata["notify_user"] = serde_json::json!(&routine.notify.user);
 
+    // Prepend execution context so the LLM knows it's already inside a
+    // routine and should execute the task directly — not set up infrastructure.
+    let contextualized_description = format!(
+        "IMPORTANT: You are executing inside routine \"{routine_name}\". \
+         The routine and its schedule are already configured. \
+         Tools and credentials are already set up. \
+         Do NOT create routines, jobs, or try to discover/install/authenticate tools. \
+         Execute the task directly.\n\n{desc}",
+        routine_name = routine.name,
+        desc = execution.description,
+    );
+
     let job_id = scheduler
         .dispatch_job(
             &routine.user_id,
             execution.title,
-            execution.description,
+            &contextualized_description,
             Some(metadata),
         )
         .await
