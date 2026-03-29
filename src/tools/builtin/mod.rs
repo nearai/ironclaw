@@ -1,5 +1,6 @@
 //! Built-in tools that come with the agent.
 
+pub mod a2a;
 mod echo;
 pub mod extension_tools;
 mod file;
@@ -17,6 +18,7 @@ pub mod skill_tools;
 mod time;
 mod tool_info;
 
+pub use a2a::A2aBridgeTool;
 pub use echo::EchoTool;
 pub use extension_tools::{
     ExtensionInfoTool, ToolActivateTool, ToolAuthTool, ToolInstallTool, ToolListTool,
