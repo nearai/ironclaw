@@ -1715,7 +1715,7 @@ mod tests {
         use jsonwebtoken::{EncodingKey, Header};
         let mut header = Header::new(Algorithm::HS256);
         header.kid = kid.map(|s| s.to_string());
-        jsonwebtoken::encode(&header, &claims, &EncodingKey::from_secret(OIDC_SECRET)).unwrap()
+        jsonwebtoken::encode(&header, &claims, &EncodingKey::from_secret(OIDC_SECRET)).unwrap() // safety: test helper
     }
 
     /// Build a default OIDC config (no issuer/audience validation).
@@ -1735,7 +1735,7 @@ mod tests {
 
     /// Build an OidcState from a custom config with the HS256 test key pre-seeded.
     async fn test_oidc_state_with_config(config: crate::config::GatewayOidcConfig) -> OidcState {
-        let oidc = OidcState::from_config(&config).unwrap();
+        let oidc = OidcState::from_config(&config).unwrap(); // safety: test helper
         oidc.seed_key(
             OIDC_KID,
             DecodingKey::from_secret(OIDC_SECRET),
@@ -2082,7 +2082,10 @@ mod tests {
         );
         let result = validate_oidc_jwt(&oidc, &jwt).await;
         // jsonwebtoken allows missing iss — only rejects mismatches.
-        assert!(result.is_ok(), "missing iss is not rejected by jsonwebtoken: {result:?}");
+        assert!(
+            result.is_ok(),
+            "missing iss is not rejected by jsonwebtoken: {result:?}"
+        );
     }
 
     /// Audience configured and JWT `aud` matches → accepted.
@@ -2138,7 +2141,10 @@ mod tests {
         );
         let result = validate_oidc_jwt(&oidc, &jwt).await;
         // jsonwebtoken allows missing aud — only rejects mismatches.
-        assert!(result.is_ok(), "missing aud is not rejected by jsonwebtoken: {result:?}");
+        assert!(
+            result.is_ok(),
+            "missing aud is not rejected by jsonwebtoken: {result:?}"
+        );
     }
 
     // ── Key cache edge cases ─────────────────────────────────────────────
@@ -2171,7 +2177,10 @@ mod tests {
         {
             let cache = oidc.key_cache.read().await;
             let stale = cache.get("stale-kid").unwrap();
-            assert!(stale.fetched_at.elapsed() > KEY_CACHE_TTL, "entry should be expired");
+            assert!(
+                stale.fetched_at.elapsed() > KEY_CACHE_TTL,
+                "entry should be expired"
+            );
         }
 
         // A JWT using the stale kid should fail (expired cache entry
@@ -2191,7 +2200,10 @@ mod tests {
     /// cache can hold exactly KEY_CACHE_MAX_ENTRIES via seed_key.
     #[tokio::test]
     async fn test_oidc_key_cache_max_entries_constant() {
-        assert_eq!(KEY_CACHE_MAX_ENTRIES, 64, "cache should be bounded to 64 keys");
+        assert_eq!(
+            KEY_CACHE_MAX_ENTRIES, 64,
+            "cache should be bounded to 64 keys"
+        );
 
         let oidc = test_oidc_state().await;
         for i in 0..KEY_CACHE_MAX_ENTRIES {
@@ -2259,9 +2271,7 @@ mod tests {
 
         // This will attempt an actual HTTP fetch (which will fail since the
         // URL is unreachable), but it should NOT be blocked by backoff.
-        let result = oidc
-            .get_or_fetch_key("expired-kid", Algorithm::HS256)
-            .await;
+        let result = oidc.get_or_fetch_key("expired-kid", Algorithm::HS256).await;
         let err_msg = match result {
             Err(e) => format!("{e}"),
             Ok(_) => panic!("expected fetch error (URL unreachable), not success"),
