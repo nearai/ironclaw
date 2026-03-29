@@ -73,6 +73,7 @@ document.getElementById('settings-theme-toggle')?.addEventListener('click', () =
 });
 
 let token = '';
+let oidcProxyAuth = false;
 let eventSource = null;
 let logEventSource = null;
 let currentTab = 'chat';
@@ -140,6 +141,55 @@ let _activityThinking = null;
 
 // --- Auth ---
 
+// Common post-auth initialization shared by token auth and OIDC auto-auth.
+function initApp() {
+  var authScreen = document.getElementById('auth-screen');
+  var app = document.getElementById('app');
+  // Cross-fade: fade out auth screen, then show app
+  if (authScreen) authScreen.style.opacity = '0';
+  // Show app container (invisible — opacity:0 in CSS) so layout computes
+  app.style.display = 'flex';
+  // Position tab indicator instantly (no transition) before fade-in
+  var indicator = document.getElementById('tab-indicator');
+  if (indicator) indicator.style.transition = 'none';
+  updateTabIndicator();
+  // Force layout so the instant position is applied, then restore transition
+  if (indicator) {
+    void indicator.offsetLeft;
+    indicator.style.transition = '';
+  }
+  // Now fade in
+  app.classList.add('visible');
+  // Hide auth screen after fade-out transition completes
+  setTimeout(function() { if (authScreen) authScreen.style.display = 'none'; }, 300);
+  // Strip token and log_level from URL so they're not visible in the address bar
+  var cleaned = new URL(window.location);
+  var urlLogLevel = cleaned.searchParams.get('log_level');
+  cleaned.searchParams.delete('token');
+  cleaned.searchParams.delete('log_level');
+  window.history.replaceState({}, '', cleaned.pathname + cleaned.search);
+  connectSSE();
+  connectLogSSE();
+  startGatewayStatusPolling();
+  // Hide the Users settings tab for non-admin users.
+  apiFetch('/api/profile').then(function(profile) {
+    if (profile && profile.role !== 'admin') {
+      var usersTab = document.querySelector('[data-settings-subtab="users"]');
+      if (usersTab) usersTab.style.display = 'none';
+    }
+  }).catch(function() {});
+  checkTeeStatus();
+  loadThreads();
+  loadMemoryTree();
+  loadJobs();
+  // Apply URL log_level param if present, otherwise just sync the dropdown
+  if (urlLogLevel) {
+    setServerLogLevel(urlLogLevel);
+  } else {
+    loadServerLogLevel();
+  }
+}
+
 function authenticate() {
   token = document.getElementById('token-input').value.trim();
   if (!token) {
@@ -158,51 +208,7 @@ function authenticate() {
   apiFetch('/api/chat/threads')
     .then(() => {
       sessionStorage.setItem('ironclaw_token', token);
-      const authScreen = document.getElementById('auth-screen');
-      const app = document.getElementById('app');
-      // Cross-fade: fade out auth screen, then show app
-      if (authScreen) authScreen.style.opacity = '0';
-      // Show app container (invisible — opacity:0 in CSS) so layout computes
-      app.style.display = 'flex';
-      // Position tab indicator instantly (no transition) before fade-in
-      const indicator = document.getElementById('tab-indicator');
-      if (indicator) indicator.style.transition = 'none';
-      updateTabIndicator();
-      // Force layout so the instant position is applied, then restore transition
-      if (indicator) {
-        void indicator.offsetLeft;
-        indicator.style.transition = '';
-      }
-      // Now fade in
-      app.classList.add('visible');
-      // Hide auth screen after fade-out transition completes
-      setTimeout(() => { if (authScreen) authScreen.style.display = 'none'; }, 300);
-      // Strip token and log_level from URL so they're not visible in the address bar
-      const cleaned = new URL(window.location);
-      const urlLogLevel = cleaned.searchParams.get('log_level');
-      cleaned.searchParams.delete('token');
-      cleaned.searchParams.delete('log_level');
-      window.history.replaceState({}, '', cleaned.pathname + cleaned.search);
-      connectSSE();
-      connectLogSSE();
-      startGatewayStatusPolling();
-      // Hide the Users settings tab for non-admin users.
-      apiFetch('/api/profile').then(function(profile) {
-        if (profile && profile.role !== 'admin') {
-          var usersTab = document.querySelector('[data-settings-subtab="users"]');
-          if (usersTab) usersTab.style.display = 'none';
-        }
-      }).catch(function() {});
-      checkTeeStatus();
-      loadThreads();
-      loadMemoryTree();
-      loadJobs();
-      // Apply URL log_level param if present, otherwise just sync the dropdown
-      if (urlLogLevel) {
-        setServerLogLevel(urlLogLevel);
-      } else {
-        loadServerLogLevel();
-      }
+      initApp();
     })
     .catch(() => {
       sessionStorage.removeItem('ironclaw_token');
@@ -225,7 +231,12 @@ document.getElementById('token-input').addEventListener('keydown', (e) => {
 // Note: main event listener registration is at the bottom of this file (search
 // "Event Listener Registration"). Do NOT add duplicate listeners here.
 
-// Auto-authenticate from URL param or saved session
+// Auto-authenticate from URL param, saved session, or OIDC proxy header.
+//
+// When behind a reverse proxy that injects auth (e.g., AWS ALB with OIDC),
+// the proxy already authenticates every request. We probe /api/gateway/status
+// without a token — if the proxy's header lets us through, skip the login
+// screen entirely.
 (function autoAuth() {
   const params = new URLSearchParams(window.location.search);
   const urlToken = params.get('token');
@@ -234,15 +245,28 @@ document.getElementById('token-input').addEventListener('keydown', (e) => {
     authenticate();
     return;
   }
+  // Restore OIDC proxy mode from session.
+  if (sessionStorage.getItem('ironclaw_oidc') === '1') {
+    oidcProxyAuth = true;
+  }
   const saved = sessionStorage.getItem('ironclaw_token');
   if (saved) {
     document.getElementById('token-input').value = saved;
-    // Hide auth screen immediately to prevent flash, authenticate() will
-    // restore it if the token turns out to be invalid.
     document.getElementById('auth-screen').style.display = 'none';
     document.getElementById('app').style.display = 'flex';
     authenticate();
+    return;
   }
+  // Probe for proxy-injected OIDC auth (no token needed from the client).
+  fetch('/api/gateway/status', { credentials: 'include' }).then(function(r) {
+    if (r.ok) {
+      oidcProxyAuth = true;
+      sessionStorage.setItem('ironclaw_oidc', '1');
+      document.getElementById('auth-screen').style.display = 'none';
+      document.getElementById('app').style.display = 'flex';
+      initApp();
+    }
+  }).catch(function() { /* proxy auth not available, show login */ });
 })();
 
 // --- API helper ---
@@ -250,7 +274,10 @@ document.getElementById('token-input').addEventListener('keydown', (e) => {
 function apiFetch(path, options) {
   const opts = options || {};
   opts.headers = opts.headers || {};
-  opts.headers['Authorization'] = 'Bearer ' + token;
+  // In OIDC mode the reverse proxy provides auth; skip the Authorization header.
+  if (token && !oidcProxyAuth) {
+    opts.headers['Authorization'] = 'Bearer ' + token;
+  }
   if (opts.body && typeof opts.body === 'object') {
     opts.headers['Content-Type'] = 'application/json';
     opts.body = JSON.stringify(opts.body);
@@ -361,7 +388,11 @@ function updateRestartButtonVisibility() {
 function connectSSE() {
   if (eventSource) eventSource.close();
 
-  eventSource = new EventSource('/api/chat/events?token=' + encodeURIComponent(token));
+  // In OIDC mode the reverse proxy provides auth; no query token needed.
+  const chatSseUrl = (token && !oidcProxyAuth)
+    ? '/api/chat/events?token=' + encodeURIComponent(token)
+    : '/api/chat/events';
+  eventSource = new EventSource(chatSseUrl);
 
   eventSource.onopen = () => {
     document.getElementById('sse-dot').classList.remove('disconnected');
@@ -2497,7 +2528,10 @@ let logBuffer = []; // buffer while paused
 function connectLogSSE() {
   if (logEventSource) logEventSource.close();
 
-  logEventSource = new EventSource('/api/logs/events?token=' + encodeURIComponent(token));
+  const logSseUrl = (token && !oidcProxyAuth)
+    ? '/api/logs/events?token=' + encodeURIComponent(token)
+    : '/api/logs/events';
+  logEventSource = new EventSource(logSseUrl);
 
   logEventSource.addEventListener('log', (e) => {
     const entry = JSON.parse(e.data);
