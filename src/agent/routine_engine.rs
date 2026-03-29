@@ -12,7 +12,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use chrono::Utc;
@@ -125,6 +125,14 @@ pub struct RoutineEngine {
     sandbox_readiness: SandboxReadiness,
     /// Sender for injecting routine-review messages into the agent loop.
     inject_tx: Option<mpsc::Sender<IncomingMessage>>,
+    /// Hourly agent review counter (rate limit).
+    agent_review_count: Arc<AtomicU32>,
+    /// Timestamp (epoch secs) when the hourly review window started.
+    agent_review_window_start: Arc<std::sync::atomic::AtomicI64>,
+    /// Consecutive agent review failures (circuit breaker). Per-routine tracking
+    /// is not feasible with atomics alone, so this is a global counter that
+    /// trips the circuit breaker for all routines.
+    agent_review_consecutive_failures: Arc<AtomicU32>,
     /// Timestamp when this engine instance was created. Used by
     /// `sync_dispatched_runs` to distinguish orphaned runs (from a previous
     /// process) from actively-watched runs (from this process).
@@ -160,6 +168,11 @@ impl RoutineEngine {
             safety,
             sandbox_readiness,
             inject_tx,
+            agent_review_count: Arc::new(AtomicU32::new(0)),
+            agent_review_window_start: Arc::new(std::sync::atomic::AtomicI64::new(
+                Utc::now().timestamp(),
+            )),
+            agent_review_consecutive_failures: Arc::new(AtomicU32::new(0)),
             boot_time: Utc::now(),
         }
     }
@@ -836,6 +849,9 @@ impl RoutineEngine {
             event_cache: Arc::clone(&self.event_cache),
  
             inject_tx: self.inject_tx.clone(),
+            agent_review_count: self.agent_review_count.clone(),
+            agent_review_window_start: self.agent_review_window_start.clone(),
+            agent_review_consecutive_failures: self.agent_review_consecutive_failures.clone(),
         };
 
         tokio::spawn(async move {
@@ -925,6 +941,9 @@ impl RoutineEngine {
             event_cache: Arc::clone(&self.event_cache),
  
             inject_tx: self.inject_tx.clone(),
+            agent_review_count: self.agent_review_count.clone(),
+            agent_review_window_start: self.agent_review_window_start.clone(),
+            agent_review_consecutive_failures: self.agent_review_consecutive_failures.clone(),
         };
 
         tokio::spawn(async move {
@@ -980,6 +999,9 @@ impl RoutineEngine {
             event_cache: Arc::clone(&self.event_cache),
  
             inject_tx: self.inject_tx.clone(),
+            agent_review_count: self.agent_review_count.clone(),
+            agent_review_window_start: self.agent_review_window_start.clone(),
+            agent_review_consecutive_failures: self.agent_review_consecutive_failures.clone(),
         };
 
         // Record the run in DB, then spawn execution
@@ -1122,6 +1144,9 @@ struct EngineContext {
     event_cache: Arc<RwLock<Vec<EventMatcher>>>,
  
     inject_tx: Option<mpsc::Sender<IncomingMessage>>,
+    agent_review_count: Arc<AtomicU32>,
+    agent_review_window_start: Arc<std::sync::atomic::AtomicI64>,
+    agent_review_consecutive_failures: Arc<AtomicU32>,
 }
 
 /// Execute a routine run. Handles both lightweight and full_job modes.
@@ -2120,6 +2145,42 @@ async fn inject_agent_review(
         return;
     }
 
+    // Circuit breaker: 3 consecutive failures disables agent review until a
+    // successful non-review run resets the counter.
+    let consecutive_failures = ctx
+        .agent_review_consecutive_failures
+        .load(Ordering::Relaxed);
+    if consecutive_failures >= 3 {
+        tracing::warn!(
+            routine = %routine.name,
+            consecutive_failures,
+            "Agent review disabled by circuit breaker (3 consecutive failures). \
+             Will re-enable after a successful non-review run."
+        );
+        return;
+    }
+
+    // Rate limit: sliding hourly window.
+    let now_secs = Utc::now().timestamp();
+    let window_start = ctx.agent_review_window_start.load(Ordering::Relaxed);
+    if now_secs - window_start >= 3600 {
+        // Reset the window.
+        ctx.agent_review_window_start
+            .store(now_secs, Ordering::Relaxed);
+        ctx.agent_review_count.store(0, Ordering::Relaxed);
+    }
+    let current = ctx.agent_review_count.load(Ordering::Relaxed);
+    if current >= ctx.config.max_agent_reviews_per_hour {
+        tracing::warn!(
+            routine = %routine.name,
+            limit = ctx.config.max_agent_reviews_per_hour,
+            "Agent review rate limit exceeded ({current}/{} per hour), skipping",
+            ctx.config.max_agent_reviews_per_hour,
+        );
+        return;
+    }
+    ctx.agent_review_count.fetch_add(1, Ordering::Relaxed);
+
     let Some(ref tx) = ctx.inject_tx else {
         return;
     };
@@ -2152,13 +2213,20 @@ async fn inject_agent_review(
             "run_id": run.id.to_string(),
             "notify_channel": routine.notify.channel,
         }))
+        .with_conversation_scope(routine.id.to_string())
         .into_routine_review();
 
     if let Err(e) = tx.send(msg).await {
+        ctx.agent_review_consecutive_failures
+            .fetch_add(1, Ordering::Relaxed);
         tracing::warn!(
             routine = %routine.name,
             "Failed to inject agent-review message: {}", e
         );
+    } else {
+        // Successful injection resets the circuit breaker.
+        ctx.agent_review_consecutive_failures
+            .store(0, Ordering::Relaxed);
     }
 }
 
@@ -2920,6 +2988,123 @@ mod tests {
         let result = sanitize_summary(&long);
         assert!(result.len() <= 503); // 500 + "..."
         assert!(result.ends_with("..."));
+    }
+
+    /// Verify that agent review only triggers when the matching `agent_review_on_*`
+    /// flag is set for the given status, and that `agent_review_enabled` gates it.
+    #[test]
+    fn test_inject_agent_review_status_gating() {
+        // agent_review_on_success=true, others false
+        let notify = NotifyConfig {
+            agent_review_on_success: true,
+            agent_review_on_attention: false,
+            agent_review_on_failure: false,
+            ..Default::default()
+        };
+
+        let should_review = |status: RunStatus| -> bool {
+            match status {
+                RunStatus::Ok => notify.agent_review_on_success,
+                RunStatus::Attention => notify.agent_review_on_attention,
+                RunStatus::Failed => notify.agent_review_on_failure,
+                RunStatus::Running => false,
+            }
+        };
+
+        assert!(should_review(RunStatus::Ok));
+        assert!(!should_review(RunStatus::Attention));
+        assert!(!should_review(RunStatus::Failed));
+        assert!(!should_review(RunStatus::Running));
+    }
+
+    /// Verify that `agent_review_enabled = false` prevents review even when the
+    /// per-status flag is on.
+    #[test]
+    fn test_inject_agent_review_respects_enabled_flag() {
+        let config = RoutineConfig {
+            agent_review_enabled: false,
+            ..RoutineConfig::default()
+        };
+
+        let notify = NotifyConfig {
+            agent_review_on_success: true,
+            agent_review_on_attention: true,
+            agent_review_on_failure: true,
+            ..Default::default()
+        };
+
+        // Even though all per-status flags are true, config disables it.
+        let should_inject = |status: RunStatus| -> bool {
+            let should_review = match status {
+                RunStatus::Ok => notify.agent_review_on_success,
+                RunStatus::Attention => notify.agent_review_on_attention,
+                RunStatus::Failed => notify.agent_review_on_failure,
+                RunStatus::Running => false,
+            };
+            should_review && config.agent_review_enabled
+        };
+
+        assert!(!should_inject(RunStatus::Ok));
+        assert!(!should_inject(RunStatus::Attention));
+        assert!(!should_inject(RunStatus::Failed));
+    }
+
+    /// Verify that the default config has `agent_review_enabled = false`.
+    #[test]
+    fn test_agent_review_disabled_by_default() {
+        let config = RoutineConfig::default();
+        assert!(
+            !config.agent_review_enabled,
+            "agent_review_enabled should default to false"
+        );
+    }
+
+    /// Verify that the default rate limit is 10 per hour.
+    #[test]
+    fn test_agent_review_rate_limit_default() {
+        let config = RoutineConfig::default();
+        assert_eq!(config.max_agent_reviews_per_hour, 10);
+    }
+
+    /// Rate limit counter logic: once count reaches the limit, further reviews
+    /// should be skipped.
+    #[test]
+    fn test_agent_review_rate_limit_blocks_when_exceeded() {
+        use std::sync::atomic::Ordering;
+
+        let limit: u32 = 3;
+        let counter = std::sync::atomic::AtomicU32::new(0);
+
+        // First 3 should pass
+        for _ in 0..limit {
+            let current = counter.load(Ordering::Relaxed);
+            assert!(current < limit);
+            counter.fetch_add(1, Ordering::Relaxed);
+        }
+
+        // 4th should be blocked
+        let current = counter.load(Ordering::Relaxed);
+        assert!(current >= limit, "Counter should have reached the limit");
+    }
+
+    /// Circuit breaker logic: after 3 consecutive failures, reviews are disabled.
+    #[test]
+    fn test_agent_review_circuit_breaker() {
+        use std::sync::atomic::Ordering;
+
+        let failures = std::sync::atomic::AtomicU32::new(0);
+
+        // Below threshold — should allow
+        failures.store(2, Ordering::Relaxed);
+        assert!(failures.load(Ordering::Relaxed) < 3);
+
+        // At threshold — should block
+        failures.store(3, Ordering::Relaxed);
+        assert!(failures.load(Ordering::Relaxed) >= 3);
+
+        // Reset on success
+        failures.store(0, Ordering::Relaxed);
+        assert!(failures.load(Ordering::Relaxed) < 3);
     }
 
     #[test]

@@ -291,6 +291,7 @@ impl GatewayWorkflowHarness {
                 lightweight_tools_enabled: true,
                 lightweight_max_iterations: 3,
                 agent_review_enabled: true,
+                max_agent_reviews_per_hour: 10,
             }),
             Some(Arc::clone(&components.context_manager)),
             Some(Arc::clone(&agent_session_manager)),
