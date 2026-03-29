@@ -895,42 +895,81 @@ impl Agent {
             match self.handle_message(&message).await {
                 Ok(Some(response)) if !response.is_empty() => {
                     if message.source == MessageSource::RoutineReview {
-                        // Route via broadcast (not channel.respond) because
-                        // "routine-review" is not a real channel.
-                        let notify_channel = message
-                            .metadata
-                            .get("notify_channel")
-                            .and_then(|v| v.as_str())
-                            .filter(|s| !s.is_empty());
-
-                        let outgoing = OutgoingResponse {
-                            content: response,
-                            thread_id: None,
-                            attachments: Vec::new(),
-                            metadata: message.metadata.clone(),
+                        // Hook: BeforeOutbound — run before broadcasting
+                        let hook_event = crate::hooks::HookEvent::Outbound {
+                            user_id: message.user_id.clone(),
+                            channel: message.channel.clone(),
+                            content: response.clone(),
+                            thread_id: message.thread_id.clone(),
+                        };
+                        let final_content = match self.hooks().run(&hook_event).await {
+                            Err(err) => {
+                                tracing::warn!(
+                                    "BeforeOutbound hook blocked routine review response: {}",
+                                    err
+                                );
+                                None
+                            }
+                            Ok(crate::hooks::HookOutcome::Continue {
+                                modified: Some(new_content),
+                            }) => Some(new_content),
+                            _ => Some(response),
                         };
 
-                        if let Some(channel) = notify_channel {
-                            if let Err(e) = self
-                                .channels
-                                .broadcast(channel, &message.user_id, outgoing.clone())
-                                .await
-                            {
-                                tracing::warn!(
-                                    channel = %channel,
-                                    error = %e,
-                                    "Failed to send routine review response, falling back"
-                                );
+                        if let Some(content) = final_content {
+                            // Route via broadcast (not channel.respond) because
+                            // "routine-review" is not a real channel.
+                            let notify_channel = message
+                                .metadata
+                                .get("notify_channel")
+                                .and_then(|v| v.as_str())
+                                .filter(|s| !s.is_empty());
+
+                            let outgoing = OutgoingResponse {
+                                content,
+                                thread_id: None,
+                                attachments: Vec::new(),
+                                metadata: message.metadata.clone(),
+                            };
+
+                            if let Some(channel) = notify_channel {
+                                if let Err(e) = self
+                                    .channels
+                                    .broadcast(channel, &message.user_id, outgoing.clone())
+                                    .await
+                                {
+                                    tracing::warn!(
+                                        channel = %channel,
+                                        error = %e,
+                                        "Failed to send routine review response, falling back"
+                                    );
+                                    let _ = self
+                                        .channels
+                                        .broadcast_all(&message.user_id, outgoing)
+                                        .await;
+                                }
+                            } else {
+                                // notify_channel was absent or empty — log so
+                                // misconfigured routines are visible.
+                                let raw = message
+                                    .metadata
+                                    .get("notify_channel")
+                                    .and_then(|v| v.as_str());
+                                if raw.is_some() {
+                                    tracing::warn!(
+                                        routine_name = message
+                                            .metadata
+                                            .get("routine_name")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("unknown"),
+                                        "notify_channel is empty, falling back to broadcast_all"
+                                    );
+                                }
                                 let _ = self
                                     .channels
                                     .broadcast_all(&message.user_id, outgoing)
                                     .await;
                             }
-                        } else {
-                            let _ = self
-                                .channels
-                                .broadcast_all(&message.user_id, outgoing)
-                                .await;
                         }
                     } else {
                         // Hook: BeforeOutbound — allow hooks to modify or suppress outbound
