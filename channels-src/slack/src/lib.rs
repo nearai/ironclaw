@@ -23,6 +23,7 @@ wit_bindgen::generate!({
 });
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 
 // Re-export generated types
 use exports::near::agent::channel::{
@@ -129,6 +130,8 @@ const OWNER_ID_PATH: &str = "state/owner_id";
 const DM_POLICY_PATH: &str = "state/dm_policy";
 /// Workspace path for persisting allow_from (JSON array) across WASM callbacks.
 const ALLOW_FROM_PATH: &str = "state/allow_from";
+/// Workspace path for thread timestamps the bot has already joined.
+const ACTIVE_THREADS_PATH: &str = "state/active_threads";
 /// Channel name for pairing store (used by pairing host APIs).
 const CHANNEL_NAME: &str = "slack";
 
@@ -263,9 +266,11 @@ impl Guest for SlackChannel {
             "text": response.content,
         });
 
+        let thread_ts = response.thread_id.clone().or(metadata.thread_ts.clone());
+
         // Add thread_ts for threaded replies
-        if let Some(thread_ts) = response.thread_id.or(metadata.thread_ts) {
-            payload["thread_ts"] = serde_json::Value::String(thread_ts);
+        if let Some(ref thread_ts) = thread_ts {
+            payload["thread_ts"] = serde_json::Value::String(thread_ts.clone());
         }
 
         let payload_bytes = serde_json::to_vec(&payload)
@@ -316,6 +321,10 @@ impl Guest for SlackChannel {
                         slack_response.ts.unwrap_or_default()
                     ),
                 );
+
+                if let Some(thread_ts) = thread_ts {
+                    remember_active_slack_thread(&thread_ts);
+                }
 
                 Ok(())
             }
@@ -496,9 +505,16 @@ fn handle_slack_event(event: SlackEvent, team_id: Option<String>, _event_id: Opt
                 event.text,
                 event.ts.clone(),
             ) {
-                // Only process DMs (channel IDs starting with D)
-                if channel.starts_with('D') {
-                    if !check_sender_permission(&user, &channel, true) {
+                let is_dm = channel.starts_with('D');
+                let is_active_thread = event
+                    .thread_ts
+                    .as_deref()
+                    .is_some_and(is_active_slack_thread);
+
+                // DMs are always processed; channel replies are allowed once
+                // the bot has already joined that thread.
+                if is_dm || is_active_thread {
+                    if !check_sender_permission(&user, &channel, is_dm) {
                         return;
                     }
                     emit_message(
@@ -559,6 +575,45 @@ fn emit_message(
         metadata_json,
         attachments,
     });
+}
+
+fn parse_active_slack_threads(raw: Option<&str>) -> HashSet<String> {
+    raw.and_then(|value| serde_json::from_str::<Vec<String>>(value).ok())
+        .unwrap_or_default()
+        .into_iter()
+        .collect()
+}
+
+fn serialize_active_slack_threads(threads: &HashSet<String>) -> String {
+    let mut sorted: Vec<_> = threads.iter().cloned().collect();
+    sorted.sort();
+    serde_json::to_string(&sorted).unwrap_or_else(|_| "[]".to_string())
+}
+
+fn active_slack_thread_is_known(raw: Option<&str>, thread_ts: &str) -> bool {
+    parse_active_slack_threads(raw)
+        .contains(thread_ts)
+}
+
+fn is_active_slack_thread(thread_ts: &str) -> bool {
+    active_slack_thread_is_known(
+        channel_host::workspace_read(ACTIVE_THREADS_PATH).as_deref(),
+        thread_ts,
+    )
+}
+
+fn remember_active_slack_thread(thread_ts: &str) {
+    let mut threads =
+        parse_active_slack_threads(channel_host::workspace_read(ACTIVE_THREADS_PATH).as_deref());
+    if threads.contains(thread_ts) {
+        return;
+    }
+
+    threads.insert(thread_ts.to_string());
+    let _ = channel_host::workspace_write(
+        ACTIVE_THREADS_PATH,
+        &serialize_active_slack_threads(&threads),
+    );
 }
 
 // ============================================================================
@@ -825,5 +880,22 @@ mod tests {
     fn test_max_download_size_constant() {
         // Verify the constant is 20 MB
         assert_eq!(MAX_DOWNLOAD_SIZE_BYTES, 20 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_active_slack_threads_round_trip() {
+        let raw = r#"["123.45","678.90"]"#;
+        let threads = parse_active_slack_threads(Some(raw));
+        assert!(threads.contains("123.45"));
+        assert!(threads.contains("678.90"));
+        assert!(active_slack_thread_is_known(Some(raw), "123.45"));
+        assert!(!active_slack_thread_is_known(Some(raw), "999.99"));
+        assert_eq!(serialize_active_slack_threads(&threads), raw);
+    }
+
+    #[test]
+    fn test_active_slack_threads_ignore_invalid_json() {
+        assert!(parse_active_slack_threads(Some("not-json")).is_empty());
+        assert!(parse_active_slack_threads(None).is_empty());
     }
 }
