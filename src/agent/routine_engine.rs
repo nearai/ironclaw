@@ -123,6 +123,8 @@ pub struct RoutineEngine {
     safety: Arc<SafetyLayer>,
     /// Sandbox readiness state — only `DockerUnavailable` blocks full-job dispatch.
     sandbox_readiness: SandboxReadiness,
+    /// Sender for injecting routine-review messages into the agent loop.
+    inject_tx: Option<mpsc::Sender<IncomingMessage>>,
     /// Timestamp when this engine instance was created. Used by
     /// `sync_dispatched_runs` to distinguish orphaned runs (from a previous
     /// process) from actively-watched runs (from this process).
@@ -142,6 +144,7 @@ impl RoutineEngine {
         tools: Arc<ToolRegistry>,
         safety: Arc<SafetyLayer>,
         sandbox_readiness: SandboxReadiness,
+        inject_tx: Option<mpsc::Sender<IncomingMessage>>,
     ) -> Self {
         Self {
             config,
@@ -156,6 +159,7 @@ impl RoutineEngine {
             tools,
             safety,
             sandbox_readiness,
+            inject_tx,
             boot_time: Utc::now(),
         }
     }
@@ -828,7 +832,10 @@ impl RoutineEngine {
             tools: self.tools.clone(),
             safety: self.safety.clone(),
             sandbox_readiness: self.sandbox_readiness,
+
             event_cache: Arc::clone(&self.event_cache),
+ 
+            inject_tx: self.inject_tx.clone(),
         };
 
         tokio::spawn(async move {
@@ -914,7 +921,10 @@ impl RoutineEngine {
             tools: self.tools.clone(),
             safety: self.safety.clone(),
             sandbox_readiness: self.sandbox_readiness,
+
             event_cache: Arc::clone(&self.event_cache),
+ 
+            inject_tx: self.inject_tx.clone(),
         };
 
         tokio::spawn(async move {
@@ -966,7 +976,10 @@ impl RoutineEngine {
             tools: self.tools.clone(),
             safety: self.safety.clone(),
             sandbox_readiness: self.sandbox_readiness,
+
             event_cache: Arc::clone(&self.event_cache),
+ 
+            inject_tx: self.inject_tx.clone(),
         };
 
         // Record the run in DB, then spawn execution
@@ -1105,7 +1118,10 @@ struct EngineContext {
     tools: Arc<ToolRegistry>,
     safety: Arc<SafetyLayer>,
     sandbox_readiness: SandboxReadiness,
+
     event_cache: Arc<RwLock<Vec<EventMatcher>>>,
+ 
+    inject_tx: Option<mpsc::Sender<IncomingMessage>>,
 }
 
 /// Execute a routine run. Handles both lightweight and full_job modes.
@@ -1359,6 +1375,9 @@ async fn execute_routine(ctx: EngineContext, mut routine: Routine, run: RoutineR
         thread_id.as_deref(),
     )
     .await;
+
+    // Inject agent-review message if enabled for this status
+    inject_agent_review(&ctx, &routine, &run, status, summary.as_deref()).await;
 }
 
 async fn update_cached_event_runtime(
@@ -2078,6 +2097,68 @@ async fn send_notification(
 
     if let Err(e) = tx.send(response).await {
         tracing::error!(routine = %routine_name, "Failed to send notification: {}", e);
+    }
+}
+
+/// Inject a routine-review message into the agent loop if agent_review is
+/// enabled for this routine and status.
+async fn inject_agent_review(
+    ctx: &EngineContext,
+    routine: &Routine,
+    run: &RoutineRun,
+    status: RunStatus,
+    summary: Option<&str>,
+) {
+    let should_review = match status {
+        RunStatus::Ok => routine.notify.agent_review_on_success,
+        RunStatus::Attention => routine.notify.agent_review_on_attention,
+        RunStatus::Failed => routine.notify.agent_review_on_failure,
+        RunStatus::Running => false,
+    };
+
+    if !should_review || !ctx.config.agent_review_enabled {
+        return;
+    }
+
+    let Some(ref tx) = ctx.inject_tx else {
+        return;
+    };
+
+    let sanitized = ctx
+        .safety
+        .sanitize_tool_output("routine_result", summary.unwrap_or("(no summary)"));
+
+    let content = format!(
+        "[ROUTINE RESULT]\n\
+         Name: {}\n\
+         Status: {}\n\
+         Run ID: {}\n\
+         ---\n\
+         {}\n\
+         ---\n\
+         You received this routine result. Decide what to do:\n\
+         - If useful to the user, summarize and report it\n\
+         - If failed, diagnose the cause and update your memory\n\
+         - If nothing noteworthy, do not send a message",
+        routine.name, status, run.id, sanitized.content
+    );
+
+    let msg = IncomingMessage::new("routine-review", routine.user_id.clone(), content)
+        .with_metadata(serde_json::json!({
+            "source": "routine_completion",
+            "routine_id": routine.id.to_string(),
+            "routine_name": routine.name,
+            "status": status.to_string(),
+            "run_id": run.id.to_string(),
+            "notify_channel": routine.notify.channel,
+        }))
+        .into_routine_review();
+
+    if let Err(e) = tx.send(msg).await {
+        tracing::warn!(
+            routine = %routine.name,
+            "Failed to inject agent-review message: {}", e
+        );
     }
 }
 

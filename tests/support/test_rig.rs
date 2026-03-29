@@ -721,6 +721,7 @@ impl TestRigBuilder {
                     components.tools.clone(),
                     components.safety.clone(),
                     ironclaw::agent::routine_engine::SandboxReadiness::DisabledByConfig,
+                    None,
                 ));
                 components
                     .tools
@@ -863,6 +864,7 @@ impl TestRigBuilder {
                 max_lightweight_tokens: 4096,
                 lightweight_tools_enabled: true,
                 lightweight_max_iterations: 3,
+                agent_review_enabled: true,
             })
         } else {
             None
