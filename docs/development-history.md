@@ -324,7 +324,58 @@ Session 10:   Workspace restructure (human-readable paths, frontmatter,
 Session 11:   E2E test suite (12 tests across 5 files) → found 9 engine bugs
               + HTTP_ALLOW_LOCALHOST + NeedApproval/NeedAuthentication wiring
               + user_id fix + cancel routing fix + host_matches_pattern fix
+Session 12:   Kernel-level auth — pre-flight credential gate, post-install
+              auth pipeline, tool_auth/tool_activate removed from v2 LLM,
+              AuthManager centralizes credential checks + setup instructions
 ```
+
+## Session 12: Kernel-Level Authentication (2026-03-29)
+
+Reworked authentication from a reactive LLM-driven flow to a proactive kernel-level interrupt, based on the design doc in `rework-auth.md`.
+
+### Problem
+
+Auth was a 3-step non-deterministic chain: tool fails with 401 → LLM "decides" to call `tool_auth` → LLM "decides" to retry. Each decision was a coin flip, giving ~50-70% success rate on a flow that should be 100%.
+
+### Solution: Pre-flight Auth Gate
+
+New `AuthManager` (`src/bridge/auth_manager.rs`) centralizes credential checking. The `EffectBridgeAdapter` now checks credentials BEFORE executing tool calls:
+
+```
+LLM calls http(url="https://api.github.com/...") →
+  Pre-flight: extract host → SharedCredentialRegistry.find_for_host() →
+    Secret exists? → execute normally
+    Secret missing? → NeedAuthentication (tool never executes, no 401)
+```
+
+### Key Decisions
+
+1. **Defense in depth, not replacement**: The pre-flight gate is the primary path, but the existing reactive 401 detection and text-based `authentication_required` fallback are kept. Removing fallbacks would create a dead-end where the LLM asks for credentials but the kernel doesn't recognize the auth state.
+
+2. **tool_auth/tool_activate removed from v2 LLM context**: These are now kernel-internal. The LLM never sees them in its tool list and gets an error if it somehow calls them. Auth is fully automatic from the LLM's perspective.
+
+3. **Post-install auth pipeline**: After `tool_install` succeeds, the kernel auto-checks `ExtensionManager::check_tool_auth_status_pub()` and either auto-activates (Ready), initiates auth flow (NeedsAuth), or appends setup instructions (NeedsSetup). The LLM doesn't need to call `tool_auth` → `tool_activate` manually.
+
+4. **NeedsAuth tools stay visible, NeedsSetup tools hidden**: Tools that need OAuth/tokens stay in the LLM's tool list so it can attempt to use them (triggering the pre-flight gate which starts the auth flow). Tools that need admin setup (client_id/secret) are hidden since they can't be resolved in chat.
+
+5. **Setup instruction deduplication**: The skill-registry lookup for credential setup instructions was duplicated in 3 places in `router.rs`. Now centralized in `AuthManager::get_setup_instructions()`.
+
+### Files Changed
+
+| File | Role |
+|------|------|
+| `src/bridge/auth_manager.rs` | **New** — AuthManager, AuthCheckResult, ToolReadiness, credential checking, 8 unit tests |
+| `src/bridge/effect_adapter.rs` | Pre-flight gate, post-install pipeline, v1 auth tool blocking + filtering |
+| `src/bridge/router.rs` | AuthManager wired in init_engine(), deduplicated setup lookups, text fallback tracing |
+| `src/extensions/manager.rs` | Public wrapper for check_tool_auth_status() |
+| `tests/e2e/scenarios/test_v2_kernel_auth_preflight.py` | 5 E2E tests: preflight, retry, persistence, tools hidden, cancel |
+
+### What's NOT Changed
+
+- Engine crate (`crates/ironclaw_engine/`) — `NeedAuthentication` already existed
+- HTTP tool (`src/tools/builtin/http.rs`) — existing 401 detection stays as safety net
+- WASM credential injection — zero-exposure model unchanged
+- `/api/chat/auth-token` endpoint — already bypasses LLM correctly
 
 ## Key Commits
 
@@ -341,3 +392,4 @@ Session 11:   E2E test suite (12 tests across 5 files) → found 9 engine bugs
 | `63756039` | Switch ExecutionLoop to Python orchestrator |
 | `080317aa` | All 177 tests pass with orchestrator |
 | `46fd2b5d` | Versioning, auto-rollback, 189 tests |
+| `606d6571` | Kernel-level pre-flight auth gate for engine v2 |
