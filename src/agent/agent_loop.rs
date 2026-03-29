@@ -1143,7 +1143,7 @@ impl Agent {
                     Ok(SubmissionResult::Error { message: err }) => Ok(Some(err)),
                     Ok(_) => {
                         tracing::debug!("Routine review returned non-standard result");
-                        Ok(None)
+                        Ok(Some(String::new()))
                     }
                     Err(e) => Err(e),
                 };
