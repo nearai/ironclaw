@@ -193,6 +193,8 @@ impl IncomingMessage {
     }
 
     /// Whether this message was generated internally (backward-compat accessor).
+    /// Used by job_monitor tests and channel tests; production code matches on `source` directly.
+    #[allow(dead_code)]
     pub(crate) fn is_internal(&self) -> bool {
         self.source == MessageSource::Internal
     }
