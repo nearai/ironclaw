@@ -96,6 +96,11 @@ pub(crate) async fn kill_shared(proc: &SharedProcess) -> Result<()> {
 pub struct CloudflareTunnelConfig {
     /// Token from the Cloudflare Zero Trust dashboard.
     pub token: String,
+    /// Known public URL for named tunnels (pre-configured DNS route).
+    /// When set, skips URL extraction from cloudflared output and uses
+    /// this directly. Required for named/token tunnels that don't print
+    /// a URL to stderr (unlike quick-tunnels which generate a random URL).
+    pub known_url: Option<String>,
 }
 
 /// Provider-specific config for Tailscale tunnels.
@@ -149,7 +154,10 @@ pub fn create_tunnel(config: &TunnelProviderConfig) -> Result<Option<Box<dyn Tun
             let cf = config.cloudflare.as_ref().ok_or_else(|| {
                 anyhow::anyhow!("TUNNEL_PROVIDER=cloudflare but no TUNNEL_CF_TOKEN configured")
             })?;
-            Ok(Some(Box::new(CloudflareTunnel::new(cf.token.clone()))))
+            Ok(Some(Box::new(CloudflareTunnel::new(
+                cf.token.clone(),
+                cf.known_url.clone(),
+            ))))
         }
 
         "tailscale" => {
@@ -209,7 +217,11 @@ fn resolve_tunnel_target(channels: &crate::config::ChannelsConfig) -> (&str, u16
 pub async fn start_managed_tunnel(
     mut config: crate::config::Config,
 ) -> (crate::config::Config, Option<Box<dyn Tunnel>>) {
-    if config.tunnel.public_url.is_some() {
+    // Short-circuit for a truly static URL (no provider configured at all).
+    // But if a provider is also set, the URL is the *known* public URL for a
+    // named tunnel — we still need to start the managed process.
+    let has_provider = config.tunnel.provider.is_some();
+    if config.tunnel.public_url.is_some() && !has_provider {
         tracing::debug!(
             "Static tunnel URL in use: {}",
             config.tunnel.public_url.as_deref().unwrap_or("?")
@@ -308,6 +320,7 @@ mod tests {
             provider: "cloudflare".into(),
             cloudflare: Some(CloudflareTunnelConfig {
                 token: TEST_BEARER_TOKEN.into(),
+                known_url: None,
             }),
             ..Default::default()
         };

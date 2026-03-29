@@ -50,7 +50,12 @@ impl TunnelConfig {
                 provider: provider_name.clone(),
                 cloudflare: optional_env("TUNNEL_CF_TOKEN")?
                     .or_else(|| settings.tunnel.cf_token.clone())
-                    .map(|token| crate::tunnel::CloudflareTunnelConfig { token }),
+                    .map(|token| crate::tunnel::CloudflareTunnelConfig {
+                        token,
+                        // Pass through the static public_url as the known_url for
+                        // named tunnels so cloudflared doesn't need to print it.
+                        known_url: public_url.clone(),
+                    }),
                 tailscale: Some(crate::tunnel::TailscaleTunnelConfig {
                     funnel: optional_env("TUNNEL_TS_FUNNEL")?
                         .map(|s| s == "true" || s == "1")
@@ -142,6 +147,7 @@ mod tests {
                 provider: "cloudflare".to_string(),
                 cloudflare: Some(CloudflareTunnelConfig {
                     token: "cf-tok".to_string(),
+                    known_url: None,
                 }),
                 tailscale: None,
                 ngrok: None,
@@ -247,6 +253,7 @@ mod tests {
             provider: "cloudflare".to_string(),
             cloudflare: Some(CloudflareTunnelConfig {
                 token: "cf-secret".to_string(),
+                known_url: None,
             }),
             tailscale: None,
             ngrok: None,
@@ -314,5 +321,6 @@ mod tests {
     fn cloudflare_config_defaults() {
         let cf = CloudflareTunnelConfig::default();
         assert!(cf.token.is_empty());
+        assert!(cf.known_url.is_none());
     }
 }

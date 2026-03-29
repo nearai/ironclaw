@@ -10,16 +10,25 @@ use crate::tunnel::{
 };
 
 /// Wraps `cloudflared` with token-based auth from the Zero Trust dashboard.
+///
+/// Two modes:
+/// - **Named tunnel** (`known_url` is `Some`): connects using a pre-configured
+///   DNS route; cloudflared does not print a URL to stderr, so the known URL
+///   is used directly once the process is running.
+/// - **Quick tunnel** (`known_url` is `None`): cloudflared generates a random
+///   `trycloudflare.com` URL and prints it to stderr; we parse it out.
 pub struct CloudflareTunnel {
     token: String,
+    known_url: Option<String>,
     proc: SharedProcess,
     url: SharedUrl,
 }
 
 impl CloudflareTunnel {
-    pub fn new(token: String) -> Self {
+    pub fn new(token: String, known_url: Option<String>) -> Self {
         Self {
             token,
+            known_url,
             proc: new_shared_process(),
             url: new_shared_url(),
         }
@@ -34,16 +43,18 @@ impl Tunnel for CloudflareTunnel {
 
     async fn start(&self, local_host: &str, local_port: u16) -> Result<String> {
         let origin = format!("http://{local_host}:{local_port}");
+
+        // Named tunnels (known_url is set) don't need --url; the route is
+        // pre-configured in the Cloudflare dashboard. Passing --url with a
+        // named tunnel is still valid but not required.
+        let args: Vec<&str> = if self.known_url.is_some() {
+            vec!["tunnel", "--no-autoupdate", "run", "--token", &self.token]
+        } else {
+            vec!["tunnel", "--no-autoupdate", "run", "--token", &self.token, "--url", &origin]
+        };
+
         let mut child = Command::new("cloudflared")
-            .args([
-                "tunnel",
-                "--no-autoupdate",
-                "run",
-                "--token",
-                &self.token,
-                "--url",
-                &origin,
-            ])
+            .args(&args)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true)
@@ -51,14 +62,17 @@ impl Tunnel for CloudflareTunnel {
 
         let stdout = child.stdout.take();
 
-        // cloudflared prints the public URL on stderr
+        // cloudflared prints the public URL on stderr for quick-tunnels.
+        // Named tunnels connect silently — we detect readiness by watching
+        // for a "Registered tunnel connection" log line instead.
         let stderr = child
             .stderr
             .take()
             .ok_or_else(|| anyhow::anyhow!("Failed to capture cloudflared stderr"))?;
 
         let mut reader = tokio::io::BufReader::new(stderr).lines();
-        let mut public_url = String::new();
+        let mut public_url = self.known_url.clone().unwrap_or_default();
+        let is_named = self.known_url.is_some();
 
         let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(30);
         while tokio::time::Instant::now() < deadline {
@@ -68,13 +82,22 @@ impl Tunnel for CloudflareTunnel {
             match line {
                 Ok(Ok(Some(l))) => {
                     tracing::debug!("cloudflared: {l}");
-                    if let Some(idx) = l.find("https://") {
-                        let url_part = &l[idx..];
-                        let end = url_part
-                            .find(|c: char| c.is_whitespace())
-                            .unwrap_or(url_part.len());
-                        public_url = url_part[..end].to_string();
-                        break;
+                    if is_named {
+                        // Named tunnel: wait for first "Registered tunnel connection" to
+                        // confirm the tunnel is up before returning the known URL.
+                        if l.contains("Registered tunnel connection") {
+                            break;
+                        }
+                    } else {
+                        // Quick tunnel: parse the random URL from stderr.
+                        if let Some(idx) = l.find("https://") {
+                            let url_part = &l[idx..];
+                            let end = url_part
+                                .find(|c: char| c.is_whitespace())
+                                .unwrap_or(url_part.len());
+                            public_url = url_part[..end].to_string();
+                            break;
+                        }
                     }
                 }
                 Ok(Ok(None)) => break,
@@ -84,6 +107,7 @@ impl Tunnel for CloudflareTunnel {
         }
 
         if public_url.is_empty() {
+            // Only reached for quick-tunnels that never printed a URL.
             let error_detail = if let Some(stdout) = stdout {
                 let mut out_reader = tokio::io::BufReader::new(stdout).lines();
                 let mut lines = Vec::new();
@@ -167,22 +191,22 @@ mod tests {
 
     #[test]
     fn constructor_stores_token() {
-        let tunnel = CloudflareTunnel::new("cf-token".into());
+        let tunnel = CloudflareTunnel::new("cf-token".into(), None);
         assert_eq!(tunnel.token, "cf-token");
     }
 
     #[test]
     fn public_url_none_before_start() {
-        assert!(CloudflareTunnel::new("tok".into()).public_url().is_none());
+        assert!(CloudflareTunnel::new("tok".into(), None).public_url().is_none());
     }
 
     #[tokio::test]
     async fn stop_without_start_is_ok() {
-        assert!(CloudflareTunnel::new("tok".into()).stop().await.is_ok());
+        assert!(CloudflareTunnel::new("tok".into(), None).stop().await.is_ok());
     }
 
     #[tokio::test]
     async fn health_false_before_start() {
-        assert!(!CloudflareTunnel::new("tok".into()).health_check().await);
+        assert!(!CloudflareTunnel::new("tok".into(), None).health_check().await);
     }
 }
