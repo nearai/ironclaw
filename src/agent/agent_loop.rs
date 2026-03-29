@@ -1061,9 +1061,9 @@ impl Agent {
         // Internal messages (e.g. job-monitor notifications) are already
         // rendered text and should be forwarded directly to the user without
         // entering the normal user-input pipeline (LLM/tool loop).
-        // The `is_internal` field and `into_internal()` setter are pub(crate),
+        // The `source` field and `into_internal()` setter are pub(crate),
         // so external channels cannot spoof this flag.
-        if message.is_internal {
+        if message.is_internal() {
             tracing::debug!(
                 message_id = %message.id,
                 channel = %message.channel,
@@ -1245,7 +1245,7 @@ impl Agent {
             message.content.len()
         );
 
-        if !message.is_internal
+        if !message.is_internal()
             && let Submission::UserInput { ref content } = submission
             && let Some(engine) = self.routine_engine().await
         {
