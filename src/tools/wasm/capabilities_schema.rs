@@ -486,6 +486,7 @@ pub struct WebhookCapabilitySchema {
     /// Secret name in secrets store for HMAC-SHA256 signing.
     #[serde(default)]
     pub hmac_secret_name: Option<String>,
+    /// Environment variable name for the HMAC secret.
     #[serde(default)]
     pub hmac_secret_env_var: Option<String>,
     /// Signature header for HMAC verification.
