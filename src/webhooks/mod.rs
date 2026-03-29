@@ -401,27 +401,48 @@ async fn validate_webhook_auth(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, LazyLock};
+    use std::future::Future;
+    use std::sync::Arc;
     use std::time::Duration;
 
     use async_trait::async_trait;
     use axum::body::Body;
     use tower::ServiceExt;
 
+    use crate::config::helpers::{lock_env, set_runtime_env};
     use crate::context::JobContext;
     use crate::secrets::{CreateSecretParams, InMemorySecretsStore, SecretsCrypto};
     use crate::tools::{Tool, ToolError, ToolOutput, ToolRegistry};
 
     use super::*;
 
-    static HMAC_ENV_LOCK: LazyLock<tokio::sync::Mutex<()>> =
-        LazyLock::new(|| tokio::sync::Mutex::new(()));
-
     struct TestWebhookTool;
     struct ProtectedWebhookTool;
     struct HmacWebhookTool;
     /// Tool that declares webhook_capability() but with no auth mechanism configured.
     struct MisconfiguredWebhookTool;
+
+    struct RuntimeEnvOverrideGuard<'a> {
+        key: &'a str,
+    }
+
+    impl Drop for RuntimeEnvOverrideGuard<'_> {
+        fn drop(&mut self) {
+            set_runtime_env(self.key, "");
+        }
+    }
+
+    fn run_with_locked_runtime_env<F, T>(key: &str, value: &str, future: F) -> T
+    where
+        F: Future<Output = T>,
+    {
+        tokio::task::block_in_place(|| {
+            let _guard = lock_env();
+            set_runtime_env(key, value);
+            let _cleanup = RuntimeEnvOverrideGuard { key };
+            tokio::runtime::Handle::current().block_on(future)
+        })
+    }
 
     #[async_trait]
     impl Tool for TestWebhookTool {
@@ -635,8 +656,6 @@ mod tests {
     async fn accepts_with_valid_hmac_signature() {
         use hmac::Mac;
 
-        let _guard = HMAC_ENV_LOCK.lock().await;
-
         let tools = Arc::new(ToolRegistry::new());
         tools.register(Arc::new(HmacWebhookTool)).await;
 
@@ -678,153 +697,151 @@ mod tests {
             .await
             .expect("response");
         assert_eq!(resp.status(), StatusCode::ACCEPTED);
-
-        unsafe { std::env::remove_var("ICTEST_HMAC_WEBHOOK_SECRET") };
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn accepts_with_valid_hmac_signature_from_env_without_secrets_store() {
         use hmac::Mac;
 
-        let _guard = HMAC_ENV_LOCK.lock().await;
+        run_with_locked_runtime_env(
+            "ICTEST_HMAC_WEBHOOK_SECRET",
+            "github-secret",
+            async {
+                let tools = Arc::new(ToolRegistry::new());
+                tools.register(Arc::new(HmacWebhookTool)).await;
 
-        unsafe { std::env::set_var("ICTEST_HMAC_WEBHOOK_SECRET", "github-secret") };
+                let app = routes(ToolWebhookState {
+                    tools,
+                    routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
+                    user_id: "test".to_string(),
+                    secrets_store: None,
+                });
 
-        let tools = Arc::new(ToolRegistry::new());
-        tools.register(Arc::new(HmacWebhookTool)).await;
+                let payload = br#"{"action":"opened"}"#;
+                let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(b"github-secret")
+                    .expect("hmac key");
+                mac.update(payload);
+                let sig = format!("sha256={}", hex::encode(mac.finalize().into_bytes()));
 
-        let app = routes(ToolWebhookState {
-            tools,
-            routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
-            user_id: "test".to_string(),
-            secrets_store: None,
-        });
-
-        let payload = br#"{"action":"opened"}"#;
-        let mut mac =
-            hmac::Hmac::<sha2::Sha256>::new_from_slice(b"github-secret").expect("hmac key");
-        mac.update(payload);
-        let sig = format!("sha256={}", hex::encode(mac.finalize().into_bytes()));
-
-        let req = axum::http::Request::builder()
-            .method("POST")
-            .uri("/webhook/tools/hmac_webhook")
-            .header("content-type", "application/json")
-            .header("x-hub-signature-256", sig)
-            .body(Body::from(payload.to_vec()))
-            .expect("request");
-        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
-            .await
-            .expect("response");
-        assert_eq!(resp.status(), StatusCode::ACCEPTED);
-
-        unsafe { std::env::remove_var("ICTEST_HMAC_WEBHOOK_SECRET") };
+                let req = axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/webhook/tools/hmac_webhook")
+                    .header("content-type", "application/json")
+                    .header("x-hub-signature-256", sig)
+                    .body(Body::from(payload.to_vec()))
+                    .expect("request");
+                let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+                    .await
+                    .expect("response");
+                assert_eq!(resp.status(), StatusCode::ACCEPTED);
+            },
+        );
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn accepts_with_valid_hmac_signature_from_env_before_secrets_store() {
         use hmac::Mac;
 
-        let _guard = HMAC_ENV_LOCK.lock().await;
+        run_with_locked_runtime_env(
+            "ICTEST_HMAC_WEBHOOK_SECRET",
+            "github-secret",
+            async {
+                let tools = Arc::new(ToolRegistry::new());
+                tools.register(Arc::new(HmacWebhookTool)).await;
 
-        unsafe { std::env::set_var("ICTEST_HMAC_WEBHOOK_SECRET", "github-secret") };
+                let secrets = Arc::new(InMemorySecretsStore::new(Arc::new(
+                    SecretsCrypto::new(secrecy::SecretString::from(
+                        "test-key-at-least-32-chars-long!!".to_string(),
+                    ))
+                    .expect("crypto"),
+                )));
+                secrets
+                    .create(
+                        "test",
+                        CreateSecretParams::new("hmac_secret", "wrong-store-secret"),
+                    )
+                    .await
+                    .expect("secret create");
 
-        let tools = Arc::new(ToolRegistry::new());
-        tools.register(Arc::new(HmacWebhookTool)).await;
+                let app = routes(ToolWebhookState {
+                    tools,
+                    routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
+                    user_id: "test".to_string(),
+                    secrets_store: Some(secrets),
+                });
 
-        let secrets = Arc::new(InMemorySecretsStore::new(Arc::new(
-            SecretsCrypto::new(secrecy::SecretString::from(
-                "test-key-at-least-32-chars-long!!".to_string(),
-            ))
-            .expect("crypto"),
-        )));
-        secrets
-            .create(
-                "test",
-                CreateSecretParams::new("hmac_secret", "wrong-store-secret"),
-            )
-            .await
-            .expect("secret create");
+                let payload = br#"{"action":"opened"}"#;
+                let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(b"github-secret")
+                    .expect("hmac key");
+                mac.update(payload);
+                let sig = format!("sha256={}", hex::encode(mac.finalize().into_bytes()));
 
-        let app = routes(ToolWebhookState {
-            tools,
-            routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
-            user_id: "test".to_string(),
-            secrets_store: Some(secrets),
-        });
-
-        let payload = br#"{"action":"opened"}"#;
-        let mut mac =
-            hmac::Hmac::<sha2::Sha256>::new_from_slice(b"github-secret").expect("hmac key");
-        mac.update(payload);
-        let sig = format!("sha256={}", hex::encode(mac.finalize().into_bytes()));
-
-        let req = axum::http::Request::builder()
-            .method("POST")
-            .uri("/webhook/tools/hmac_webhook")
-            .header("content-type", "application/json")
-            .header("x-hub-signature-256", sig)
-            .body(Body::from(payload.to_vec()))
-            .expect("request");
-        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
-            .await
-            .expect("response");
-        assert_eq!(resp.status(), StatusCode::ACCEPTED);
-
-        unsafe { std::env::remove_var("ICTEST_HMAC_WEBHOOK_SECRET") };
+                let req = axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/webhook/tools/hmac_webhook")
+                    .header("content-type", "application/json")
+                    .header("x-hub-signature-256", sig)
+                    .body(Body::from(payload.to_vec()))
+                    .expect("request");
+                let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+                    .await
+                    .expect("response");
+                assert_eq!(resp.status(), StatusCode::ACCEPTED);
+            },
+        );
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn rejects_when_invalid_env_hmac_secret_overrides_valid_secrets_store() {
         use hmac::Mac;
 
-        let _guard = HMAC_ENV_LOCK.lock().await;
+        run_with_locked_runtime_env(
+            "ICTEST_HMAC_WEBHOOK_SECRET",
+            "wrong-env-secret",
+            async {
+                let tools = Arc::new(ToolRegistry::new());
+                tools.register(Arc::new(HmacWebhookTool)).await;
 
-        unsafe { std::env::set_var("ICTEST_HMAC_WEBHOOK_SECRET", "wrong-env-secret") };
+                let secrets = Arc::new(InMemorySecretsStore::new(Arc::new(
+                    SecretsCrypto::new(secrecy::SecretString::from(
+                        "test-key-at-least-32-chars-long!!".to_string(),
+                    ))
+                    .expect("crypto"),
+                )));
+                secrets
+                    .create(
+                        "test",
+                        CreateSecretParams::new("hmac_secret", "github-secret"),
+                    )
+                    .await
+                    .expect("secret create");
 
-        let tools = Arc::new(ToolRegistry::new());
-        tools.register(Arc::new(HmacWebhookTool)).await;
+                let app = routes(ToolWebhookState {
+                    tools,
+                    routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
+                    user_id: "test".to_string(),
+                    secrets_store: Some(secrets),
+                });
 
-        let secrets = Arc::new(InMemorySecretsStore::new(Arc::new(
-            SecretsCrypto::new(secrecy::SecretString::from(
-                "test-key-at-least-32-chars-long!!".to_string(),
-            ))
-            .expect("crypto"),
-        )));
-        secrets
-            .create(
-                "test",
-                CreateSecretParams::new("hmac_secret", "github-secret"),
-            )
-            .await
-            .expect("secret create");
+                let payload = br#"{"action":"opened"}"#;
+                let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(b"github-secret")
+                    .expect("hmac key");
+                mac.update(payload);
+                let sig = format!("sha256={}", hex::encode(mac.finalize().into_bytes()));
 
-        let app = routes(ToolWebhookState {
-            tools,
-            routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
-            user_id: "test".to_string(),
-            secrets_store: Some(secrets),
-        });
-
-        let payload = br#"{"action":"opened"}"#;
-        let mut mac =
-            hmac::Hmac::<sha2::Sha256>::new_from_slice(b"github-secret").expect("hmac key");
-        mac.update(payload);
-        let sig = format!("sha256={}", hex::encode(mac.finalize().into_bytes()));
-
-        let req = axum::http::Request::builder()
-            .method("POST")
-            .uri("/webhook/tools/hmac_webhook")
-            .header("content-type", "application/json")
-            .header("x-hub-signature-256", sig)
-            .body(Body::from(payload.to_vec()))
-            .expect("request");
-        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
-            .await
-            .expect("response");
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-
-        unsafe { std::env::remove_var("ICTEST_HMAC_WEBHOOK_SECRET") };
+                let req = axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/webhook/tools/hmac_webhook")
+                    .header("content-type", "application/json")
+                    .header("x-hub-signature-256", sig)
+                    .body(Body::from(payload.to_vec()))
+                    .expect("request");
+                let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+                    .await
+                    .expect("response");
+                assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+            },
+        );
     }
 
     #[tokio::test]
