@@ -688,10 +688,7 @@ mod tests {
                 .find_config_documents()
                 .await
                 .expect("find_config_documents");
-            assert!(
-                config_docs.is_empty(),
-                "no .config documents should exist"
-            );
+            assert!(config_docs.is_empty(), "no .config documents should exist");
 
             // Documents should still exist (no cleanup occurred)
             assert!(ws.read("custom/note1.md").await.is_ok());
