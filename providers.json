@@ -78,6 +78,29 @@
     }
   },
   {
+    "id": "github_copilot",
+    "aliases": [
+      "github-copilot",
+      "githubcopilot",
+      "copilot"
+    ],
+    "protocol": "github_copilot",
+    "default_base_url": "https://api.githubcopilot.com",
+    "api_key_env": "GITHUB_COPILOT_TOKEN",
+    "api_key_required": true,
+    "model_env": "GITHUB_COPILOT_MODEL",
+    "default_model": "gpt-4o",
+    "extra_headers_env": "GITHUB_COPILOT_EXTRA_HEADERS",
+    "description": "GitHub Copilot Chat API (OAuth token from IDE sign-in)",
+    "setup": {
+      "kind": "api_key",
+      "secret_name": "llm_github_copilot_token",
+      "key_url": "https://docs.github.com/en/copilot",
+      "display_name": "GitHub Copilot",
+      "can_list_models": false
+    }
+  },
+  {
     "id": "tinfoil",
     "aliases": [],
     "protocol": "open_ai_completions",

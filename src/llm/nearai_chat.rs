@@ -22,7 +22,7 @@ use crate::llm::provider::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider, Role, ToolCall,
     ToolCompletionRequest, ToolCompletionResponse,
 };
-use crate::llm::{costs, retry::cap_retry_after, session::SessionManager};
+use crate::llm::{costs, session::SessionManager};
 
 /// Information about an available model from NEAR AI API.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -33,6 +33,21 @@ pub struct ModelInfo {
     /// Optional provider name.
     #[serde(default)]
     pub provider: Option<String>,
+}
+
+/// Default NEAR AI model used when no model is configured.
+pub const DEFAULT_MODEL: &str = "Qwen/Qwen3.5-122B-A10B";
+
+/// Fallback model list used by the setup wizard when the `/models` API is
+/// unreachable. Returns `(model_id, display_label)` pairs.
+pub fn default_models() -> Vec<(String, String)> {
+    vec![
+        (DEFAULT_MODEL.into(), "Qwen 3.5 122B (default)".into()),
+        (
+            "Qwen/Qwen3-32B".into(),
+            "Qwen 3 32B (smaller, faster)".into(),
+        ),
+    ]
 }
 
 /// NEAR AI provider (Chat Completions API, dual auth).
@@ -243,30 +258,9 @@ impl NearAiChatProvider {
 
         let status = response.status();
         // Extract Retry-After header before consuming the response body.
-        // Supports both delay-seconds (RFC 7231 §7.1.3) and HTTP-date formats.
-        // Falls back to 60s if header is missing or unparseable (prevents "retry after None" errors).
-        let retry_after_header = response
-            .headers()
-            .get("retry-after")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| {
-                // Try delay-seconds first (most common from API providers)
-                if let Ok(secs) = v.trim().parse::<u64>() {
-                    return Some(cap_retry_after(std::time::Duration::from_secs(secs)));
-                }
-                // Try HTTP-date (e.g. "Mon, 02 Mar 2026 18:00:00 GMT")
-                if let Ok(dt) = chrono::DateTime::parse_from_rfc2822(v.trim()) {
-                    let now = chrono::Utc::now();
-                    let delta = dt.signed_duration_since(now);
-                    // Use max(0) so past/present dates yield Duration::ZERO
-                    // rather than None (which would cause an immediate retry).
-                    return Some(cap_retry_after(std::time::Duration::from_secs(
-                        delta.num_seconds().max(0) as u64,
-                    )));
-                }
-                None
-            })
-            .or(Some(std::time::Duration::from_secs(60)));
+        let retry_after_header = Some(crate::llm::retry::parse_retry_after(
+            response.headers().get("retry-after"),
+        ));
         let response_text = response.text().await.map_err(|e| LlmError::RequestFailed {
             provider: "nearai_chat".to_string(),
             reason: format!("Failed to read response body: {}", e),
@@ -469,8 +463,15 @@ impl LlmProvider for NearAiChatProvider {
         let model = req.model.unwrap_or_else(|| self.active_model_name());
         let mut raw_messages = req.messages;
         crate::llm::provider::sanitize_tool_messages(&mut raw_messages);
-        let messages: Vec<ChatCompletionMessage> =
-            raw_messages.into_iter().map(|m| m.into()).collect();
+        let raw: Vec<ChatCompletionMessage> = raw_messages.into_iter().map(|m| m.into()).collect();
+
+        // NEAR AI rejects `role:"tool"` messages even on text-only completion paths.
+        // Apply the same flattening used by complete_with_tools().
+        let messages = if self.flatten_tool_messages {
+            flatten_tool_messages(raw)
+        } else {
+            raw
+        };
 
         let request = ChatCompletionRequest {
             model,
@@ -586,6 +587,7 @@ impl LlmProvider for NearAiChatProvider {
                     id: tc.id,
                     name: tc.function.name,
                     arguments,
+                    reasoning: None,
                 }
             })
             .collect();
@@ -1179,11 +1181,13 @@ mod tests {
                 id: "call_1".to_string(),
                 name: "list_issues".to_string(),
                 arguments: serde_json::json!({"owner": "foo", "repo": "bar"}),
+                reasoning: None,
             },
             ToolCall {
                 id: "call_2".to_string(),
                 name: "search".to_string(),
                 arguments: serde_json::json!({"query": "test"}),
+                reasoning: None,
             },
         ];
 
@@ -1216,6 +1220,7 @@ mod tests {
             id: "call_1".to_string(),
             name: "test".to_string(),
             arguments: serde_json::json!({"key": "value"}),
+            reasoning: None,
         };
         let msg = ChatMessage::assistant_with_tool_calls(None, vec![tc]);
         let chat_msg: ChatCompletionMessage = msg.into();
@@ -1459,6 +1464,7 @@ mod tests {
                     id: tc.id,
                     name: tc.function.name,
                     arguments,
+                    reasoning: None,
                 }
             })
             .collect();
@@ -1508,6 +1514,7 @@ mod tests {
                     id: tc.id,
                     name: tc.function.name,
                     arguments,
+                    reasoning: None,
                 }
             })
             .collect();
@@ -2130,6 +2137,7 @@ mod tests {
                 id: "call_1".to_string(),
                 name: "test".to_string(),
                 arguments: serde_json::json!({}),
+                reasoning: None,
             }],
         );
         let chat_msg: ChatCompletionMessage = msg.into();
@@ -2199,6 +2207,65 @@ mod tests {
         assert_eq!(deserialized.function.arguments, r#"{"city":"London"}"#);
     }
 
+    // -- flatten_tool_messages in complete() path ----------------------------
+
+    #[test]
+    fn test_flatten_applied_on_text_only_path() {
+        // Verify that flatten_tool_messages converts tool-role messages to user
+        // messages (mirrors the complete_with_tools path).
+        let messages = vec![
+            ChatCompletionMessage {
+                role: "user".to_string(),
+                content: Some(MessageContent::Text("run it".to_string())),
+                tool_call_id: None,
+                name: None,
+                tool_calls: None,
+            },
+            ChatCompletionMessage {
+                role: "tool".to_string(),
+                content: Some(MessageContent::Text("ok".to_string())),
+                tool_call_id: Some("call_1".to_string()),
+                name: Some("run_cmd".to_string()),
+                tool_calls: None,
+            },
+        ];
+        let flattened = flatten_tool_messages(messages);
+        assert_eq!(flattened.len(), 2);
+        assert_eq!(flattened[1].role, "user");
+        let text = flattened[1]
+            .content
+            .as_ref()
+            .and_then(|c| c.as_text())
+            .unwrap();
+        assert!(text.contains("run_cmd"), "should reference tool name");
+        assert!(text.contains("ok"), "should include tool result");
+    }
+
+    #[test]
+    fn test_no_flatten_when_no_tool_messages() {
+        // When there are no tool-role messages, flatten_tool_messages is a no-op.
+        let messages = vec![
+            ChatCompletionMessage {
+                role: "user".to_string(),
+                content: Some(MessageContent::Text("hi".to_string())),
+                tool_call_id: None,
+                name: None,
+                tool_calls: None,
+            },
+            ChatCompletionMessage {
+                role: "assistant".to_string(),
+                content: Some(MessageContent::Text("hello".to_string())),
+                tool_call_id: None,
+                name: None,
+                tool_calls: None,
+            },
+        ];
+        let result = flatten_tool_messages(messages);
+        // No tool messages → unchanged roles
+        assert_eq!(result[0].role, "user");
+        assert_eq!(result[1].role, "assistant");
+    }
+
     // -- api_url edge cases ---------------------------------------------------
 
     #[test]
@@ -2217,124 +2284,5 @@ mod tests {
             provider.api_url("chat/completions"),
             "http://example.com/api/proxy/v1/chat/completions"
         );
-    }
-
-    // -- Retry-After header parsing tests (regression for rate limit "None" bug) --
-
-    #[test]
-    fn test_retry_after_parsing_delay_seconds() {
-        // Verify delay-seconds format (most common) is parsed correctly
-        let header_value = "30";
-        let duration = parse_retry_after_for_test(header_value);
-        assert_eq!(duration, Some(std::time::Duration::from_secs(30)));
-    }
-
-    #[test]
-    fn test_retry_after_parsing_rfc2822_date() {
-        // Verify HTTP-date (RFC 2822) format is parsed correctly
-        // Use a date 60 seconds in the future
-        let now = chrono::Utc::now();
-        let future = now + chrono::Duration::seconds(60);
-        let date_str = future.to_rfc2822();
-
-        let duration = parse_retry_after_for_test(&date_str);
-        assert!(duration.is_some());
-        let d = duration.unwrap();
-        // Allow ±5 seconds of drift due to processing time
-        assert!(
-            d.as_secs() >= 55 && d.as_secs() <= 65,
-            "Expected ~60s, got {}s",
-            d.as_secs()
-        );
-    }
-
-    #[test]
-    fn test_retry_after_fallback_missing_header() {
-        // Regression test: When Retry-After header is missing,
-        // should fall back to 60s instead of None
-        let duration = parse_retry_after_for_test("");
-        assert_eq!(
-            duration,
-            Some(std::time::Duration::from_secs(60)),
-            "Missing header should fallback to 60s"
-        );
-    }
-
-    #[test]
-    fn test_retry_after_fallback_invalid_format() {
-        // Regression test: When Retry-After header is in unexpected format,
-        // should fall back to 60s instead of None
-        let invalid_formats = vec![
-            "invalid",
-            "not-a-number",
-            "30.5", // float instead of int
-            "abc123",
-        ];
-
-        for format in invalid_formats {
-            let duration = parse_retry_after_for_test(format);
-            assert_eq!(
-                duration,
-                Some(std::time::Duration::from_secs(60)),
-                "Invalid format '{}' should fallback to 60s",
-                format
-            );
-        }
-    }
-
-    #[test]
-    fn test_retry_after_past_date_returns_zero() {
-        // When HTTP-date is in the past, should return Duration::ZERO
-        // (not None, which would trigger immediate retry)
-        let past = chrono::Utc::now() - chrono::Duration::seconds(60);
-        let past_date_str = past.to_rfc2822();
-
-        let duration = parse_retry_after_for_test(&past_date_str);
-        assert_eq!(
-            duration,
-            Some(std::time::Duration::ZERO),
-            "Past date should return Duration::ZERO, not None"
-        );
-    }
-
-    #[test]
-    fn test_retry_after_zero_seconds_accepted() {
-        // Verify zero seconds is a valid retry delay
-        let duration = parse_retry_after_for_test("0");
-        assert_eq!(duration, Some(std::time::Duration::ZERO));
-    }
-
-    #[test]
-    fn test_retry_after_large_number() {
-        // Verify large numbers are capped to the safe maximum
-        let duration = parse_retry_after_for_test("3600"); // 1 hour
-        assert_eq!(duration, Some(std::time::Duration::from_secs(3600)));
-
-        let huge = parse_retry_after_for_test("18446744073709551615");
-        assert_eq!(
-            huge,
-            Some(std::time::Duration::from_secs(
-                crate::llm::retry::MAX_RETRY_AFTER_SECS
-            ))
-        );
-    }
-
-    /// Helper function to test Retry-After header parsing logic
-    /// (simulates the parsing done in send_request without actual HTTP, including fallback)
-    fn parse_retry_after_for_test(header_value: &str) -> Option<std::time::Duration> {
-        let trimmed = header_value.trim();
-        let parsed = if let Ok(secs) = trimmed.parse::<u64>() {
-            Some(cap_retry_after(std::time::Duration::from_secs(secs)))
-        } else if let Ok(dt) = chrono::DateTime::parse_from_rfc2822(trimmed) {
-            let now = chrono::Utc::now();
-            let delta = dt.signed_duration_since(now);
-            Some(cap_retry_after(std::time::Duration::from_secs(
-                delta.num_seconds().max(0) as u64,
-            )))
-        } else {
-            None
-        };
-        // Apply fallback to 60s if parsing failed (matches actual code behavior)
-        parsed.or(Some(std::time::Duration::from_secs(60)))
     }
 }

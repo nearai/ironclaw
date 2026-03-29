@@ -9,15 +9,18 @@ use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 use crate::agent::task::{Task, TaskContext, TaskOutput};
-use crate::channels::web::types::SseEvent;
 use crate::config::AgentConfig;
 use crate::context::{ContextManager, JobContext, JobState};
-use crate::db::Database;
 use crate::error::{Error, JobError};
+use crate::extensions::ExtensionManager;
 use crate::hooks::HookRegistry;
 use crate::llm::LlmProvider;
 use crate::safety::SafetyLayer;
-use crate::tools::{ApprovalContext, ToolRegistry, prepare_tool_params};
+use crate::tenant::AdminScope;
+use crate::tools::{
+    ApprovalContext, ToolRegistry, autonomous_allowed_tool_names, autonomous_unavailable_error,
+    prepare_tool_params,
+};
 use crate::worker::job::{Worker, WorkerDeps};
 
 /// Message to send to a worker.
@@ -45,6 +48,14 @@ struct ScheduledSubtask {
     handle: JoinHandle<Result<TaskOutput, Error>>,
 }
 
+/// Shared scheduler-owned dependencies that are forwarded into autonomous runs.
+pub struct SchedulerDeps {
+    pub tools: Arc<ToolRegistry>,
+    pub extension_manager: Option<Arc<ExtensionManager>>,
+    pub store: Option<AdminScope>,
+    pub hooks: Arc<HookRegistry>,
+}
+
 /// Schedules and manages parallel job execution.
 pub struct Scheduler {
     config: AgentConfig,
@@ -52,10 +63,11 @@ pub struct Scheduler {
     llm: Arc<dyn LlmProvider>,
     safety: Arc<SafetyLayer>,
     tools: Arc<ToolRegistry>,
-    store: Option<Arc<dyn Database>>,
+    extension_manager: Option<Arc<ExtensionManager>>,
+    store: Option<AdminScope>,
     hooks: Arc<HookRegistry>,
-    /// SSE broadcast sender for live job event streaming.
-    sse_tx: Option<tokio::sync::broadcast::Sender<SseEvent>>,
+    /// SSE manager for live job event streaming.
+    sse_tx: Option<Arc<crate::channels::web::sse::SseManager>>,
     /// HTTP interceptor for trace recording/replay (propagated to workers).
     http_interceptor: Option<Arc<dyn crate::llm::recording::HttpInterceptor>>,
     /// Running jobs (main LLM-driven jobs).
@@ -71,18 +83,17 @@ impl Scheduler {
         context_manager: Arc<ContextManager>,
         llm: Arc<dyn LlmProvider>,
         safety: Arc<SafetyLayer>,
-        tools: Arc<ToolRegistry>,
-        store: Option<Arc<dyn Database>>,
-        hooks: Arc<HookRegistry>,
+        deps: SchedulerDeps,
     ) -> Self {
         Self {
             config,
             context_manager,
             llm,
             safety,
-            tools,
-            store,
-            hooks,
+            tools: deps.tools,
+            extension_manager: deps.extension_manager,
+            store: deps.store,
+            hooks: deps.hooks,
             sse_tx: None,
             http_interceptor: None,
             jobs: Arc::new(RwLock::new(HashMap::new())),
@@ -90,9 +101,9 @@ impl Scheduler {
         }
     }
 
-    /// Set the SSE broadcast sender for live job event streaming.
-    pub fn set_sse_sender(&mut self, tx: tokio::sync::broadcast::Sender<SseEvent>) {
-        self.sse_tx = Some(tx);
+    /// Set the SSE manager for live job event streaming.
+    pub fn set_sse_sender(&mut self, sse: Arc<crate::channels::web::sse::SseManager>) {
+        self.sse_tx = Some(sse);
     }
 
     /// Set the HTTP interceptor for trace recording/replay.
@@ -120,14 +131,21 @@ impl Scheduler {
         description: &str,
         metadata: Option<serde_json::Value>,
     ) -> Result<Uuid, JobError> {
-        self.dispatch_job_inner(user_id, title, description, metadata, None)
-            .await
+        let approval_context = self.autonomous_approval_context(user_id).await;
+        self.dispatch_job_inner(
+            user_id,
+            title,
+            description,
+            metadata,
+            Some(approval_context),
+        )
+        .await
     }
 
     /// Dispatch a job with an explicit approval context for autonomous execution.
     ///
     /// Same as `dispatch_job`, but the worker will use the given `ApprovalContext`
-    /// to determine which tools are pre-approved (instead of blocking all non-`Never` tools).
+    /// to determine the explicit autonomous allowlist for that job.
     pub async fn dispatch_job_with_context(
         &self,
         user_id: &str,
@@ -214,6 +232,13 @@ impl Scheduler {
 
         self.schedule_with_context(job_id, approval_context).await?;
         Ok(job_id)
+    }
+
+    async fn autonomous_approval_context(&self, user_id: &str) -> ApprovalContext {
+        ApprovalContext::autonomous_with_tools(
+            autonomous_allowed_tool_names(&self.tools, self.extension_manager.as_ref(), user_id)
+                .await,
+        )
     }
 
     /// Schedule a job for execution.
@@ -518,19 +543,12 @@ impl Scheduler {
         let blocked =
             ApprovalContext::is_blocked_or_default(&approval_context, tool_name, requirement);
         if blocked {
-            return Err(crate::error::ToolError::AuthRequired {
-                name: tool_name.to_string(),
-            }
-            .into());
+            return Err(autonomous_unavailable_error(tool_name, &job_ctx.user_id).into());
         }
 
         // Delegate to shared tool execution pipeline
         let output_str = crate::tools::execute::execute_tool_with_safety(
-            &tools,
-            &safety,
-            tool_name,
-            &normalized_params,
-            &job_ctx,
+            &tools, &safety, tool_name, params, &job_ctx,
         )
         .await?;
 
@@ -762,10 +780,14 @@ mod tests {
             allow_local_tools: true,
             max_cost_per_day_cents: None,
             max_actions_per_hour: None,
+            max_cost_per_user_per_day_cents: None,
             max_tool_iterations: 10,
             auto_approve_tools: true,
             default_timezone: "UTC".to_string(),
             max_tokens_per_job,
+            multi_tenant: false,
+            max_llm_concurrent_per_user: None,
+            max_jobs_concurrent_per_user: None,
         };
         let cm = Arc::new(ContextManager::new(5));
         let llm: Arc<dyn LlmProvider> = Arc::new(StubLlm);
@@ -776,7 +798,18 @@ mod tests {
         let tools = Arc::new(ToolRegistry::new());
         let hooks = Arc::new(HookRegistry::default());
 
-        Scheduler::new(config, cm, llm, safety, tools, None, hooks)
+        Scheduler::new(
+            config,
+            cm,
+            llm,
+            safety,
+            SchedulerDeps {
+                tools,
+                extension_manager: None,
+                store: None,
+                hooks,
+            },
+        )
     }
 
     #[tokio::test]
@@ -1003,12 +1036,14 @@ mod tests {
     async fn test_execute_tool_task_autonomous_unblocks_soft() {
         let (tools, cm, safety, job_id) = setup_tools_and_job().await;
 
-        // Autonomous context auto-approves UnlessAutoApproved
+        // Autonomous execution only allows tools explicitly in scope.
         let result = Scheduler::execute_tool_task(
             tools.clone(),
             cm.clone(),
             safety.clone(),
-            Some(ApprovalContext::autonomous()),
+            Some(ApprovalContext::autonomous_with_tools([
+                "soft_gate".to_string()
+            ])),
             job_id,
             "soft_gate",
             serde_json::json!({}),
@@ -1040,8 +1075,11 @@ mod tests {
     async fn test_execute_tool_task_autonomous_with_permissions() {
         let (tools, cm, safety, job_id) = setup_tools_and_job().await;
 
-        // Autonomous context with explicit permission for hard_gate
-        let ctx = ApprovalContext::autonomous_with_tools(["hard_gate".to_string()]);
+        // Autonomous context with explicit permission for both tools.
+        let ctx = ApprovalContext::autonomous_with_tools([
+            "soft_gate".to_string(),
+            "hard_gate".to_string(),
+        ]);
 
         let result = Scheduler::execute_tool_task(
             tools.clone(),
