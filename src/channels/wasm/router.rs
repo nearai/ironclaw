@@ -455,55 +455,92 @@ async fn webhook_handler(
     }
 
     // HMAC-SHA256 signature verification (Slack-style)
+    //
+    // Slack's url_verification challenge is sent WITHOUT signing headers —
+    // it is an unauthenticated handshake used only during initial setup.
+    // We detect it by peeking at the JSON body before running the HMAC
+    // check so the challenge can flow through to the WASM handler.
+    //
+    // WHY THIS BUG IS HARD TO SPOT WITH EPHEMERAL TUNNELS
+    // ────────────────────────────────────────────────────
+    // With ephemeral tunnels (e.g. trycloudflare.com random URLs) every
+    // restart produces a new URL, so you must re-enter it in the Slack app
+    // dashboard on every run.  That re-entry triggers a fresh
+    // url_verification handshake *before* you have saved the signing secret
+    // to the DB, so `get_hmac_secret` returns None and the HMAC block is
+    // skipped entirely — the bug never fires.
+    //
+    // With a named/permanent tunnel (e.g. ironclaw.peerpiper.io) the URL
+    // never changes, so:
+    //   • You verify once; Slack never sends url_verification again.
+    //   • The signing secret is already in the DB on subsequent restarts.
+    //   • `get_hmac_secret` now returns Some(_) when the challenge arrives,
+    //     and the old code returned 401 before the request reached WASM.
+    //
+    // The fix therefore only matters when a signing secret is pre-stored
+    // (permanent URL, server restarted) — a combination the ephemeral-tunnel
+    // workflow never exercises.
+    let is_slack_url_verification = serde_json::from_slice::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|v| v.get("type").and_then(|t| t.as_str()).map(|s| s == "url_verification"))
+        .unwrap_or(false);
+
     if let Some(hmac_secret) = state.router.get_hmac_secret(channel_name).await {
-        let timestamp = headers
-            .get("x-slack-request-timestamp")
-            .and_then(|v| v.to_str().ok());
-        let sig_header = headers
-            .get("x-slack-signature")
-            .and_then(|v| v.to_str().ok());
+        if is_slack_url_verification {
+            tracing::info!(
+                channel = %channel_name,
+                "Skipping HMAC check for Slack url_verification challenge"
+            );
+        } else {
+            let timestamp = headers
+                .get("x-slack-request-timestamp")
+                .and_then(|v| v.to_str().ok());
+            let sig_header = headers
+                .get("x-slack-signature")
+                .and_then(|v| v.to_str().ok());
 
-        match (timestamp, sig_header) {
-            (Some(ts), Some(sig)) => {
-                let now_secs = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs() as i64;
+            match (timestamp, sig_header) {
+                (Some(ts), Some(sig)) => {
+                    let now_secs = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs() as i64;
 
-                if !crate::channels::wasm::signature::verify_slack_signature(
-                    &hmac_secret,
-                    ts,
-                    &body,
-                    sig,
-                    now_secs,
-                ) {
+                    if !crate::channels::wasm::signature::verify_slack_signature(
+                        &hmac_secret,
+                        ts,
+                        &body,
+                        sig,
+                        now_secs,
+                    ) {
+                        tracing::warn!(
+                            channel = %channel_name,
+                            "HMAC-SHA256 signature verification failed"
+                        );
+                        return (
+                            StatusCode::UNAUTHORIZED,
+                            Json(serde_json::json!({
+                                "error": "Invalid Slack signature"
+                            })),
+                        );
+                    }
+                    tracing::debug!(channel = %channel_name, "HMAC-SHA256 signature verified");
+                    did_authenticate = true;
+                }
+                _ => {
                     tracing::warn!(
                         channel = %channel_name,
-                        "HMAC-SHA256 signature verification failed"
+                        "Slack signature headers missing but secret is registered"
                     );
                     return (
                         StatusCode::UNAUTHORIZED,
                         Json(serde_json::json!({
-                            "error": "Invalid Slack signature"
+                            "error": "Missing Slack signature headers"
                         })),
                     );
                 }
-                tracing::debug!(channel = %channel_name, "HMAC-SHA256 signature verified");
-                did_authenticate = true;
             }
-            _ => {
-                tracing::warn!(
-                    channel = %channel_name,
-                    "Slack signature headers missing but secret is registered"
-                );
-                return (
-                    StatusCode::UNAUTHORIZED,
-                    Json(serde_json::json!({
-                        "error": "Missing Slack signature headers"
-                    })),
-                );
-            }
-        }
+        } // end !is_slack_url_verification
     }
 
     // Convert headers to HashMap
@@ -1505,6 +1542,43 @@ mod tests {
             resp.status(),
             StatusCode::UNAUTHORIZED,
             "Signature with mismatched timestamp should return 401"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_webhook_hmac_allows_url_verification_without_sig() {
+        // Slack sends the url_verification challenge with NO signing headers.
+        // The host must forward it to WASM (not return 401) so the WASM can
+        // echo the challenge value back to Slack.
+        //
+        // This scenario only arises with a named/permanent tunnel where the
+        // signing secret is already stored in the DB before Slack re-sends
+        // the challenge (e.g. after a server restart).  With ephemeral
+        // tunnels the secret is never in the DB at verification time, so
+        // the HMAC block is skipped and the bug stays hidden.
+        let (wasm_router, app) = setup_slack_router().await;
+
+        // Register an HMAC secret — would normally require signatures.
+        wasm_router
+            .register_hmac_secret("slack", "my-signing-secret")
+            .await;
+
+        let body = r#"{"token":"Jhj5dZrVaK7ZwHHjRyZWjbDl","challenge":"3eZbrw1aBm2rZgRNFdxV2595E9zNFp1j","type":"url_verification"}"#;
+
+        // Send WITHOUT any Slack signature headers (matching what Slack sends)
+        let req = Request::builder()
+            .method("POST")
+            .uri("/webhook/slack")
+            .header("content-type", "application/json")
+            .body(Body::from(body))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        // Must NOT be 401 — the challenge must reach the WASM handler
+        assert_ne!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "url_verification challenge must not be rejected by HMAC check"
         );
     }
 }
