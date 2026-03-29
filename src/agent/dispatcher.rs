@@ -143,6 +143,12 @@ impl Agent {
         if let Some(ctx) = skill_context {
             reasoning = reasoning.with_skill_context(ctx);
         }
+        if let Some(extension_manager) = self.deps.extension_manager.as_ref() {
+            let extension_context = extension_manager.active_extension_summary().await;
+            if !extension_context.is_empty() {
+                reasoning = reasoning.with_extension_context(extension_context);
+            }
+        }
 
         // Create a JobContext for tool execution (chat doesn't have a real job)
         let mut job_ctx =

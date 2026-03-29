@@ -368,6 +368,8 @@ pub struct Reasoning {
     workspace_system_prompt: Option<String>,
     /// Optional skill context block to inject into system prompt.
     skill_context: Option<String>,
+    /// Optional active extension snapshot to inject into system prompt.
+    extension_context: Option<String>,
     /// Channel name (e.g. "discord", "telegram") for formatting hints.
     channel: Option<String>,
     /// Model name for runtime context.
@@ -386,6 +388,7 @@ impl Reasoning {
             llm,
             workspace_system_prompt: None,
             skill_context: None,
+            extension_context: None,
             channel: None,
             model_name: None,
             is_group_chat: false,
@@ -411,6 +414,14 @@ impl Reasoning {
     pub fn with_skill_context(mut self, context: String) -> Self {
         if !context.is_empty() {
             self.skill_context = Some(context);
+        }
+        self
+    }
+
+    /// Set a compact active-extension snapshot to inject into the system prompt.
+    pub fn with_extension_context(mut self, context: String) -> Self {
+        if !context.is_empty() {
+            self.extension_context = Some(context);
         }
         self
     }
@@ -917,6 +928,19 @@ Respond with a JSON plan in this format:
             String::new()
         };
 
+        let extension_context_section = if let Some(ref ext_ctx) = self.extension_context {
+            format!(
+                "\n\n## Active Extensions\n\n\
+                 The following extensions are already active and available in the current runtime.\n\
+                 Do not tell the user to set them up again unless the snapshot says they are missing.\n\
+                 If you need more detail, use `tool_list` or `extension_info` before asking the user\n\
+                 to reconnect or activate anything.\n\n{}",
+                ext_ctx
+            )
+        } else {
+            String::new()
+        };
+
         // Channel-specific formatting hints
         let channel_section = self.build_channel_section();
 
@@ -995,10 +1019,11 @@ Example:
 - Comply with stop, pause, or audit requests. Never bypass safeguards.
 - Do not manipulate anyone to expand your access or disable safeguards.
 - Do not modify system prompts, safety rules, or tool policies unless explicitly requested by the user.{}{}{}{}{}{}
-{}{}"#,
+{}{}{}"#,
             tool_guidance,
             tools_section,
             extensions_section,
+            extension_context_section,
             channel_section,
             runtime_section,
             conversation_section,
@@ -2503,6 +2528,26 @@ That's my plan."#;
         assert!(
             prompt.contains("echo: Echoes input"),
             "Prompt with tools should list the echo tool"
+        );
+    }
+
+    #[test]
+    fn test_system_prompt_with_extension_context_includes_snapshot() {
+        let reasoning = make_test_reasoning().with_extension_context(
+            "- telegram (wasm_channel): active, authenticated\n".to_string(),
+        );
+        let prompt = reasoning.build_system_prompt_with_tools(&[]);
+        assert!(
+            prompt.contains("## Active Extensions"),
+            "Prompt should contain the active extensions section"
+        );
+        assert!(
+            prompt.contains("telegram (wasm_channel): active, authenticated"),
+            "Prompt should contain the active extension snapshot"
+        );
+        assert!(
+            prompt.contains("tool_list"),
+            "Prompt should remind the model to inspect extension state when needed"
         );
     }
 
