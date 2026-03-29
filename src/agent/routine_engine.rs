@@ -1089,48 +1089,134 @@ async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) 
     // Increment running count (atomic: survives panics in the execution below)
     ctx.running_count.fetch_add(1, Ordering::Relaxed);
 
-    let result = match &routine.action {
-        RoutineAction::Lightweight {
-            prompt,
-            context_paths,
-            max_tokens,
-            use_tools,
-            max_tool_rounds,
-        } => {
-            execute_lightweight(
-                &ctx,
-                &routine,
-                prompt,
-                context_paths,
-                *max_tokens,
-                *use_tools,
-                *max_tool_rounds,
-            )
-            .await
+    // Retry constants for transient lightweight execution failures.
+    const MAX_RETRIES: u32 = 3;
+    const BASE_DELAY_MS: u64 = 1000;
+
+    let is_lightweight = matches!(routine.action, RoutineAction::Lightweight { .. });
+
+    // The retry block returns both the execution result and any accumulated
+    // token count so that usage is preserved even on final failure.
+    let (result, accumulated_tokens) = {
+        let mut attempt = 0u32;
+        // Track accumulated tokens as Option to preserve None semantics:
+        // None = no attempt reported tokens; Some(n) = at least one attempt did.
+        let mut accumulated_tokens: Option<i32> = None;
+        let uses_tools = matches!(
+            routine.action,
+            RoutineAction::Lightweight {
+                use_tools: true,
+                ..
+            }
+        ) && ctx.config.lightweight_tools_enabled;
+
+        /// Extract partial_tokens from any RoutineError variant that carries them.
+        fn extract_partial_tokens(e: &RoutineError) -> Option<i32> {
+            match e {
+                RoutineError::LlmFailed {
+                    partial_tokens: Some(t),
+                    ..
+                }
+                | RoutineError::EmptyResponse {
+                    partial_tokens: Some(t),
+                }
+                | RoutineError::TruncatedResponse {
+                    partial_tokens: Some(t),
+                } => Some(*t),
+                _ => None,
+            }
         }
-        RoutineAction::FullJob {
-            title,
-            description,
-            max_iterations,
-        } => {
-            let execution = FullJobExecutionConfig {
-                title,
-                description,
-                max_iterations: *max_iterations,
+
+        /// Merge an optional partial token count into the accumulator,
+        /// only materializing Some when at least one source had Some.
+        fn accumulate(acc: Option<i32>, partial: Option<i32>) -> Option<i32> {
+            match (acc, partial) {
+                (Some(a), Some(p)) => Some(a.saturating_add(p)),
+                (Some(a), None) => Some(a),
+                (None, p) => p,
+            }
+        }
+
+        loop {
+            let execution_result = match &routine.action {
+                RoutineAction::Lightweight {
+                    prompt,
+                    context_paths,
+                    max_tokens,
+                    use_tools,
+                    max_tool_rounds,
+                } => {
+                    execute_lightweight(
+                        &ctx,
+                        &routine,
+                        prompt,
+                        context_paths,
+                        *max_tokens,
+                        *use_tools,
+                        *max_tool_rounds,
+                    )
+                    .await
+                }
+                RoutineAction::FullJob {
+                    title,
+                    description,
+                    max_iterations,
+                } => {
+                    let execution = FullJobExecutionConfig {
+                        title,
+                        description,
+                        max_iterations: *max_iterations,
+                    };
+                    execute_full_job(&ctx, &routine, &run, &execution).await
+                }
             };
-            execute_full_job(&ctx, &routine, &run, &execution).await
+
+            match execution_result {
+                Ok((status, summary, tokens)) => {
+                    // Merge tokens: only produce Some when at least one source had Some.
+                    let total = accumulate(accumulated_tokens, tokens);
+                    break (Ok((status, summary, total)), accumulated_tokens);
+                }
+                Err(ref e)
+                    if is_lightweight
+                        && !uses_tools
+                        && e.is_retryable()
+                        // Skip outer retry for LlmFailed — RetryProvider already
+                        // retries transient LLM errors with its own budget. Retrying
+                        // here would create a multiplicative retry count.
+                        && !matches!(e, RoutineError::LlmFailed { .. })
+                        && attempt < MAX_RETRIES =>
+                {
+                    // Accumulate partial tokens from the failed attempt.
+                    accumulated_tokens = accumulate(accumulated_tokens, extract_partial_tokens(e));
+
+                    attempt += 1;
+
+                    let delay = Duration::from_millis(
+                        BASE_DELAY_MS.saturating_mul(2u64.saturating_pow(attempt - 1)),
+                    );
+                    tracing::event!(target: "transient_routine_errors", tracing::Level::WARN, routine = %routine.name, attempt = attempt, max_retries = MAX_RETRIES, delay_ms = delay.as_millis() as u64, "Transient routine error, retrying: {}", e);
+                    tokio::time::sleep(delay).await;
+                }
+                Err(e) => {
+                    // Accumulate tokens from the final failed attempt.
+                    accumulated_tokens = accumulate(accumulated_tokens, extract_partial_tokens(&e));
+                    break (Err(e), accumulated_tokens);
+                }
+            }
         }
     };
 
     // Decrement running count
     ctx.running_count.fetch_sub(1, Ordering::Relaxed);
 
-    // Process result
+    // Process result — on failure, preserve accumulated token total from
+    // earlier retry attempts so usage reporting stays accurate.
     let (status, summary, tokens) = match result {
         Ok(execution) => execution,
         Err(e) => {
             tracing::error!(routine = %routine.name, "Execution failed: {}", e);
-            (RunStatus::Failed, Some(e.to_string()), None)
+            (RunStatus::Failed, Some(e.to_string()), accumulated_tokens)
         }
     };
 
@@ -1523,13 +1609,14 @@ async fn execute_lightweight_no_tools(
         .with_max_tokens(effective_max_tokens)
         .with_temperature(0.3);
 
-    let response = ctx
-        .llm
-        .complete(request)
-        .await
-        .map_err(|e| RoutineError::LlmFailed {
+    let response = ctx.llm.complete(request).await.map_err(|e| {
+        let retryable = crate::llm::retry::is_retryable(&e);
+        RoutineError::LlmFailed {
             reason: e.to_string(),
-        })?;
+            partial_tokens: None,
+            retryable,
+        }
+    })?;
 
     handle_text_response(
         &response.content,
@@ -1550,12 +1637,18 @@ fn handle_text_response(
 ) -> Result<(RunStatus, Option<String>, Option<i32>), RoutineError> {
     let content = content.trim();
 
-    // Empty content guard
+    // Empty content guard — carry consumed tokens so the retry loop can
+    // accumulate them even when the response shape is invalid.
     if content.is_empty() {
+        let consumed = Some((total_input_tokens + total_output_tokens) as i32);
         return if finish_reason == FinishReason::Length {
-            Err(RoutineError::TruncatedResponse)
+            Err(RoutineError::TruncatedResponse {
+                partial_tokens: consumed,
+            })
         } else {
-            Err(RoutineError::EmptyResponse)
+            Err(RoutineError::EmptyResponse {
+                partial_tokens: consumed,
+            })
         };
     }
 
@@ -1633,13 +1726,15 @@ async fn execute_lightweight_with_tools(
                 .with_max_tokens(effective_max_tokens)
                 .with_temperature(0.3);
 
-            let response =
-                ctx.llm
-                    .complete(request)
-                    .await
-                    .map_err(|e| RoutineError::LlmFailed {
-                        reason: e.to_string(),
-                    })?;
+            let response = ctx.llm.complete(request).await.map_err(|e| {
+                let partial = (total_input_tokens + total_output_tokens) as i32;
+                let retryable = crate::llm::retry::is_retryable(&e);
+                RoutineError::LlmFailed {
+                    reason: e.to_string(),
+                    partial_tokens: if partial > 0 { Some(partial) } else { None },
+                    retryable,
+                }
+            })?;
 
             total_input_tokens += response.input_tokens;
             total_output_tokens += response.output_tokens;
@@ -1666,8 +1761,12 @@ async fn execute_lightweight_with_tools(
                 .with_temperature(0.3);
 
             let response = ctx.llm.complete_with_tools(request).await.map_err(|e| {
+                let partial = (total_input_tokens + total_output_tokens) as i32;
+                let retryable = crate::llm::retry::is_retryable(&e);
                 RoutineError::LlmFailed {
                     reason: e.to_string(),
+                    partial_tokens: if partial > 0 { Some(partial) } else { None },
+                    retryable,
                 }
             })?;
 
@@ -1840,6 +1939,7 @@ async fn execute_routine_tool(
 }
 
 /// Send a notification based on the routine's notify config and run status.
+#[allow(clippy::too_many_arguments)]
 async fn send_notification(
     tx: &mpsc::Sender<OutgoingResponse>,
     notify: &NotifyConfig,
@@ -2522,6 +2622,104 @@ mod tests {
                 "{:?} should not finalize the routine run",
                 state
             );
+        }
+    }
+
+    /// Regression test for #1320: transient errors are retried for lightweight
+    /// routines but not for full-job routines or hard failures.
+    #[test]
+    fn test_retry_classification_for_routine_errors() {
+        use crate::error::RoutineError;
+
+        // Transient errors (retryable for lightweight routines)
+        let transient_errors: Vec<RoutineError> = vec![
+            RoutineError::LlmFailed {
+                reason: "rate limit".into(),
+                partial_tokens: None,
+                retryable: true,
+            },
+            RoutineError::LlmFailed {
+                reason: "network timeout".into(),
+                partial_tokens: Some(42),
+                retryable: true,
+            },
+            RoutineError::EmptyResponse {
+                partial_tokens: None,
+            },
+            RoutineError::TruncatedResponse {
+                partial_tokens: Some(100),
+            },
+        ];
+        for err in &transient_errors {
+            assert!(err.is_retryable(), "{} should be retryable", err);
+        }
+
+        // Permanent LLM failures that should NOT be retried
+        // (retryable: false is set at conversion time by llm::retry::is_retryable)
+        let permanent_llm_errors: Vec<RoutineError> = vec![
+            RoutineError::LlmFailed {
+                reason: "Authentication failed for provider openai".into(),
+                partial_tokens: None,
+                retryable: false,
+            },
+            RoutineError::LlmFailed {
+                reason: "invalid_api_key: bad key".into(),
+                partial_tokens: None,
+                retryable: false,
+            },
+            RoutineError::LlmFailed {
+                reason: "content policy violation".into(),
+                partial_tokens: None,
+                retryable: false,
+            },
+            RoutineError::LlmFailed {
+                reason: "content_filter triggered".into(),
+                partial_tokens: None,
+                retryable: false,
+            },
+            RoutineError::LlmFailed {
+                reason: "context length exceeded: 150000 tokens used, 128000 allowed".into(),
+                partial_tokens: Some(100),
+                retryable: false,
+            },
+            RoutineError::LlmFailed {
+                reason: "model not available on provider anthropic".into(),
+                partial_tokens: None,
+                retryable: false,
+            },
+            RoutineError::LlmFailed {
+                reason: "content moderation flagged".into(),
+                partial_tokens: None,
+                retryable: false,
+            },
+        ];
+        for err in &permanent_llm_errors {
+            assert!(!err.is_retryable(), "{} should NOT be retryable", err);
+        }
+
+        // Hard failures (never retried)
+        let hard_errors: Vec<RoutineError> = vec![
+            RoutineError::Disabled {
+                name: "test".into(),
+            },
+            RoutineError::NotFound {
+                id: uuid::Uuid::new_v4(),
+            },
+            RoutineError::NotAuthorized {
+                id: uuid::Uuid::new_v4(),
+            },
+            RoutineError::MaxConcurrent {
+                name: "test".into(),
+            },
+            RoutineError::JobDispatchFailed {
+                reason: "no docker".into(),
+            },
+            RoutineError::Database {
+                reason: "connection refused".into(),
+            },
+        ];
+        for err in &hard_errors {
+            assert!(!err.is_retryable(), "{} should NOT be retryable", err);
         }
     }
 
