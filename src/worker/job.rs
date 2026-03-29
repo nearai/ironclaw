@@ -402,7 +402,6 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
             drift_monitor: tokio::sync::Mutex::new(crate::agent::drift_monitor::DriftMonitor::new(
                 self.deps.drift_config.clone(),
             )),
-            current_iteration: std::sync::atomic::AtomicUsize::new(0),
         };
 
         let config = AgenticLoopConfig {
@@ -1150,7 +1149,6 @@ struct JobDelegate<'a> {
     /// rather than a retry signal (prevents spurious failures in routines).
     has_text_response: std::sync::atomic::AtomicBool,
     drift_monitor: tokio::sync::Mutex<crate::agent::drift_monitor::DriftMonitor>,
-    current_iteration: std::sync::atomic::AtomicUsize,
 }
 
 impl<'a> JobDelegate<'a> {
@@ -1515,8 +1513,7 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
         // Empty text after a substantive response means the LLM has finished.
         // Treat as successful completion rather than continuing the loop (which
         // would produce "Response contained no message or tool call (empty)").
-        // G1: Do NOT record communication for empty/whitespace backoff responses.
-        if text.trim().is_empty() {
+        if text.is_empty() {
             if self
                 .has_text_response
                 .load(std::sync::atomic::Ordering::Relaxed)
@@ -1685,12 +1682,8 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
 
         // Record tool calls in drift monitor
         {
-            let iteration = self
-                .current_iteration
-                .load(std::sync::atomic::Ordering::Relaxed);
             let mut monitor = self.drift_monitor.lock().await;
-            monitor.record_tool_calls(&drift_records, iteration);
-            // G4: content-as-communication uses non-empty-trimmed check
+            monitor.record_tool_calls(&drift_records);
             if has_nonempty_content {
                 monitor.record_communication();
             }
@@ -2333,7 +2326,6 @@ mod tests {
             drift_monitor: tokio::sync::Mutex::new(
                 crate::agent::drift_monitor::DriftMonitor::disabled(),
             ),
-            current_iteration: std::sync::atomic::AtomicUsize::new(0),
         };
 
         let mut reason_ctx = ReasoningContext::new();

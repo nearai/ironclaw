@@ -570,19 +570,19 @@ impl Default for DriftSettings {
 }
 
 fn default_drift_repetition_threshold() -> usize {
-    3
+    crate::agent::drift_monitor::DEFAULT_REPETITION_THRESHOLD
 }
 fn default_drift_repetition_window() -> usize {
-    10
+    crate::agent::drift_monitor::DEFAULT_REPETITION_WINDOW
 }
 fn default_drift_failure_threshold() -> usize {
-    4
+    crate::agent::drift_monitor::DEFAULT_FAILURE_SPIRAL_THRESHOLD
 }
 fn default_drift_cycling_window() -> usize {
-    6
+    crate::agent::drift_monitor::DEFAULT_CYCLING_WINDOW
 }
 fn default_drift_silence_threshold() -> usize {
-    15
+    crate::agent::drift_monitor::DEFAULT_SILENCE_THRESHOLD
 }
 
 fn default_agent_name() -> String {

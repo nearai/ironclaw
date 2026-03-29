@@ -25,6 +25,7 @@ Core agent logic. This is the most complex subsystem — read this before workin
 | `routine.rs` | `Routine` types: `Trigger` (cron/event/system_event/manual) + `RoutineAction` (lightweight/full_job) + `RoutineGuardrails`. |
 | `routine_engine.rs` | Cron ticker and event matcher. Fires routines when triggers match. Lightweight runs inline; full_job dispatches to `Scheduler`. |
 | `task.rs` | Task types for the scheduler: `Job`, `ToolExec`, `Background`. Used by `spawn_subtask` and `spawn_batch`. |
+| `drift_monitor.rs` | Anti-drift self-checks: detects failure spirals, repetition, tool cycling, silence. Rule-based, zero extra LLM calls. Recovery-gated cooldowns. |
 | `cost_guard.rs` | LLM spend and action-rate enforcement. Tracks daily budget (cents) and hourly call rate. Lives in `AgentDeps`. |
 | `job_monitor.rs` | Subscribes to SSE broadcast and injects Claude Code (container) output back into the agent loop as `IncomingMessage`. |
 

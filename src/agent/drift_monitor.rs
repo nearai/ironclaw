@@ -38,6 +38,13 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 ///
 /// All fields have sensible defaults. The feature can be disabled entirely
 /// by setting `enabled` to `false` (env: `IRONCLAW_DRIFT_ENABLED=false`).
+/// Default threshold constants, shared with `DriftSettings` in settings.rs.
+pub const DEFAULT_REPETITION_THRESHOLD: usize = 3;
+pub const DEFAULT_REPETITION_WINDOW: usize = 10;
+pub const DEFAULT_FAILURE_SPIRAL_THRESHOLD: usize = 4;
+pub const DEFAULT_CYCLING_WINDOW: usize = 6;
+pub const DEFAULT_SILENCE_THRESHOLD: usize = 15;
+
 #[derive(Debug, Clone)]
 pub struct DriftConfig {
     /// Master switch. When false, `check_and_mark` always returns `None`.
@@ -62,12 +69,24 @@ impl Default for DriftConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            repetition_threshold: 3,
-            repetition_window: 10,
-            failure_spiral_threshold: 4,
-            cycling_window: 6,
-            silence_threshold: 15,
+            repetition_threshold: DEFAULT_REPETITION_THRESHOLD,
+            repetition_window: DEFAULT_REPETITION_WINDOW,
+            failure_spiral_threshold: DEFAULT_FAILURE_SPIRAL_THRESHOLD,
+            cycling_window: DEFAULT_CYCLING_WINDOW,
+            silence_threshold: DEFAULT_SILENCE_THRESHOLD,
         }
+    }
+}
+
+impl DriftConfig {
+    /// Clamp thresholds to safe minimums to prevent edge cases.
+    pub fn clamped(mut self) -> Self {
+        self.repetition_threshold = self.repetition_threshold.max(1);
+        self.repetition_window = self.repetition_window.max(self.repetition_threshold);
+        self.failure_spiral_threshold = self.failure_spiral_threshold.max(1);
+        self.cycling_window = self.cycling_window.max(2);
+        self.silence_threshold = self.silence_threshold.max(1);
+        self
     }
 }
 
@@ -160,11 +179,16 @@ pub struct DriftMonitor {
     /// defensive guard — `record_tool_calls()` is called once per
     /// iteration by convention, but the type system doesn't enforce it.
     last_cycling_iteration: Option<usize>,
+    /// Current iteration number, set by `set_iteration()` in
+    /// `before_llm_call()` and read by `record_iteration()`.
+    current_iteration: usize,
 }
 
 impl DriftMonitor {
     /// Create a new monitor with the given configuration.
+    /// Thresholds are clamped to safe minimums.
     pub fn new(config: DriftConfig) -> Self {
+        let config = config.clamped();
         let max_history = config
             .repetition_window
             .max(config.failure_spiral_threshold);
@@ -178,10 +202,12 @@ impl DriftMonitor {
             iteration_tools: VecDeque::with_capacity(iteration_tools_cap + 1),
             iteration_tools_cap,
             last_cycling_iteration: None,
+            current_iteration: 0,
         }
     }
 
     /// Create a monitor that never triggers (for testing / opt-out).
+    #[cfg(test)]
     pub fn disabled() -> Self {
         Self::new(DriftConfig {
             enabled: false,
@@ -189,12 +215,17 @@ impl DriftMonitor {
         })
     }
 
+    /// Set the current iteration number. Called in `before_llm_call()`.
+    pub fn set_iteration(&mut self, iteration: usize) {
+        self.current_iteration = iteration;
+    }
+
     /// Record tool calls from the current iteration.
     ///
     /// Called once per iteration (not once per tool). Increments the
     /// silence counter by 1 and clears suppression flags when recovery
     /// events are detected.
-    pub fn record_tool_calls(&mut self, calls: &[(String, u64, bool)], iteration: usize) {
+    pub fn record_tool_calls(&mut self, calls: &[(String, u64, bool)]) {
         if !self.config.enabled {
             return;
         }
@@ -231,6 +262,7 @@ impl DriftMonitor {
         // tool of each iteration — this is a design choice, not an accident.
         // Defensive: even if record_tool_calls() is called multiple times
         // for the same iteration, only the first call inserts.
+        let iteration = self.current_iteration;
         if Some(iteration) != self.last_cycling_iteration
             && let Some((name, _, _)) = calls.first()
         {
@@ -446,7 +478,8 @@ mod tests {
     }
 
     fn record(monitor: &mut DriftMonitor, name: &str, hash: u64, succeeded: bool, iter: usize) {
-        monitor.record_tool_calls(&[(name.to_string(), hash, succeeded)], iter);
+        monitor.set_iteration(iter);
+        monitor.record_tool_calls(&[(name.to_string(), hash, succeeded)]);
     }
 
     #[test]
@@ -543,17 +576,15 @@ mod tests {
             ..make_config()
         });
         // All in iteration 1 — should not trigger cross-iteration cycling
-        m.record_tool_calls(
-            &[
-                ("tool_a".to_string(), 1, true),
-                ("tool_b".to_string(), 2, true),
-                ("tool_a".to_string(), 1, true),
-                ("tool_b".to_string(), 2, true),
-                ("tool_a".to_string(), 1, true),
-                ("tool_b".to_string(), 2, true),
-            ],
-            1,
-        );
+        m.set_iteration(1);
+        m.record_tool_calls(&[
+            ("tool_a".to_string(), 1, true),
+            ("tool_b".to_string(), 2, true),
+            ("tool_a".to_string(), 1, true),
+            ("tool_b".to_string(), 2, true),
+            ("tool_a".to_string(), 1, true),
+            ("tool_b".to_string(), 2, true),
+        ]);
 
         assert!(m.check_and_mark().is_none());
     }
@@ -881,14 +912,12 @@ mod tests {
         // First tool alternates A-B-A-B-A-B across iterations.
         for i in 1..=6 {
             let first = if i % 2 == 1 { "tool_a" } else { "tool_b" };
-            m.record_tool_calls(
-                &[
-                    (first.to_string(), i as u64, true),
-                    ("helper_1".to_string(), 100, true),
-                    ("helper_2".to_string(), 200, true),
-                ],
-                i,
-            );
+            m.set_iteration(i);
+            m.record_tool_calls(&[
+                (first.to_string(), i as u64, true),
+                ("helper_1".to_string(), 100, true),
+                ("helper_2".to_string(), 200, true),
+            ]);
         }
 
         let correction = m.check_and_mark();

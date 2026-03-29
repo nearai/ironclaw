@@ -145,7 +145,8 @@ fn resolve_drift_config_inner()
             "IRONCLAW_DRIFT_SILENCE_THRESHOLD",
             defaults.silence_threshold,
         )?,
-    })
+    }
+    .clamped())
 }
 
 #[cfg(test)]

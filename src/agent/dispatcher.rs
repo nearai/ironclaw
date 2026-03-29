@@ -183,7 +183,6 @@ impl Agent {
             drift_monitor: tokio::sync::Mutex::new(crate::agent::drift_monitor::DriftMonitor::new(
                 self.config.drift.clone(),
             )),
-            current_iteration: std::sync::atomic::AtomicUsize::new(0),
         };
 
         let mut reason_ctx = ReasoningContext::new()
@@ -263,7 +262,6 @@ struct ChatDelegate<'a> {
     force_text_at: usize,
     user_tz: chrono_tz::Tz,
     drift_monitor: tokio::sync::Mutex<crate::agent::drift_monitor::DriftMonitor>,
-    current_iteration: std::sync::atomic::AtomicUsize,
 }
 
 #[async_trait]
@@ -283,13 +281,10 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
         reason_ctx: &mut ReasoningContext,
         iteration: usize,
     ) -> Option<LoopOutcome> {
-        // Track current iteration for use in execute_tool_calls / handle_text_response
-        self.current_iteration
-            .store(iteration, std::sync::atomic::Ordering::Relaxed);
-
         // Check for drift patterns and inject corrective system message
         {
             let mut monitor = self.drift_monitor.lock().await;
+            monitor.set_iteration(iteration);
             if let Some(correction) = monitor.check_and_mark() {
                 tracing::info!(
                     kind = ?correction.kind(),
@@ -1035,13 +1030,8 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
 
         // Record tool calls in drift monitor
         if !drift_records.is_empty() {
-            let iteration = self
-                .current_iteration
-                .load(std::sync::atomic::Ordering::Relaxed);
             let mut monitor = self.drift_monitor.lock().await;
-            monitor.record_tool_calls(&drift_records, iteration);
-            // G4: content-as-communication uses non-empty-trimmed check
-            // (narrative was extracted from content before the move)
+            monitor.record_tool_calls(&drift_records);
             if has_nonempty_content {
                 monitor.record_communication();
             }

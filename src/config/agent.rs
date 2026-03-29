@@ -159,7 +159,8 @@ impl AgentConfig {
                     "IRONCLAW_DRIFT_SILENCE_THRESHOLD",
                     settings.agent.drift.silence_threshold,
                 )?,
-            },
+            }
+            .clamped(),
         })
     }
 }

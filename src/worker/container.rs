@@ -387,13 +387,10 @@ impl LoopDelegate for ContainerDelegate {
         reason_ctx: &mut ReasoningContext,
         iteration: usize,
     ) -> Option<LoopOutcome> {
-        // Track iteration for drift monitor
-        self.current_iteration
-            .store(iteration, std::sync::atomic::Ordering::Relaxed);
-
         // Check for drift patterns
         {
             let mut monitor = self.drift_monitor.lock().await;
+            monitor.set_iteration(iteration);
             if let Some(correction) = monitor.check_and_mark() {
                 tracing::info!(
                     kind = ?correction.kind(),
@@ -630,12 +627,8 @@ impl LoopDelegate for ContainerDelegate {
 
         // Record tool calls in drift monitor
         {
-            let iteration = self
-                .current_iteration
-                .load(std::sync::atomic::Ordering::Relaxed);
             let mut monitor = self.drift_monitor.lock().await;
-            monitor.record_tool_calls(&drift_records, iteration);
-            // G4: content-as-communication uses non-empty-trimmed check
+            monitor.record_tool_calls(&drift_records);
             if has_nonempty_content {
                 monitor.record_communication();
             }
