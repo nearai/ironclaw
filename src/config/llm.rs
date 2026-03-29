@@ -610,6 +610,7 @@ impl LlmConfig {
             auth_path: codex_auth_path,
             cache_retention,
             unsupported_params,
+            enable_thinking: true,
         })
     }
 }

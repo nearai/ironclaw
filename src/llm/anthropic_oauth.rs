@@ -27,7 +27,11 @@ const ANTHROPIC_API_URL: &str = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_API_VERSION: &str = "2023-06-01";
 /// Required beta flag to enable OAuth Bearer auth on api.anthropic.com.
 /// Without this header, the API returns 401 "OAuth authentication is currently not supported."
-const ANTHROPIC_OAUTH_BETA: &str = "oauth-2025-04-20";
+const ANTHROPIC_OAUTH_BETA: &str =
+    "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14";
+const CLAUDE_CLI_USER_AGENT: &str = "claude-cli/2.1.2 (external, cli)";
+const CLAUDE_CLI_X_APP: &str = "cli";
+const CLAUDE_CODE_SYSTEM_PREFIX: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
 const DEFAULT_MAX_TOKENS: u32 = 8192;
 
 /// Anthropic provider using OAuth Bearer authentication.
@@ -41,6 +45,8 @@ pub struct AnthropicOAuthProvider {
     active_model: std::sync::RwLock<String>,
     /// Parameter names that this provider does not support.
     unsupported_params: HashSet<String>,
+    /// Whether adaptive thinking is enabled.
+    thinking_enabled: bool,
 }
 
 impl AnthropicOAuthProvider {
@@ -69,6 +75,7 @@ impl AnthropicOAuthProvider {
 
         let unsupported_params: HashSet<String> =
             config.unsupported_params.iter().cloned().collect();
+        let thinking_enabled = config.enable_thinking;
 
         Ok(Self {
             client,
@@ -77,7 +84,18 @@ impl AnthropicOAuthProvider {
             base_url,
             active_model,
             unsupported_params,
+            thinking_enabled,
         })
+    }
+
+    fn thinking_config(&self) -> Option<ThinkingConfig> {
+        if self.thinking_enabled {
+            Some(ThinkingConfig {
+                thinking_type: "adaptive".to_string(),
+            })
+        } else {
+            None
+        }
     }
 
     /// Strip unsupported fields from a `CompletionRequest` in place.
@@ -115,13 +133,52 @@ impl AnthropicOAuthProvider {
         }
     }
 
+    /// Build system prompt blocks with required Claude Code identity prefix.
+    /// OAuth tokens require the system prompt to include this identity block.
+    fn build_system_blocks(system: Option<String>) -> Option<Vec<SystemBlock>> {
+        let mut blocks = vec![SystemBlock {
+            block_type: "text".to_string(),
+            text: CLAUDE_CODE_SYSTEM_PREFIX.to_string(),
+        }];
+        if let Some(s) = system {
+            blocks.push(SystemBlock {
+                block_type: "text".to_string(),
+                text: s,
+            });
+        }
+        Some(blocks)
+    }
+
+    /// Validate temperature for the request.
+    /// When thinking is enabled, Anthropic requires temperature to be None or 1.0;
+    /// non-conforming values are dropped with a warning.
+    /// When thinking is disabled, any temperature is passed through as-is.
+    fn validate_temperature(temperature: Option<f32>, thinking_enabled: bool) -> Option<f32> {
+        if !thinking_enabled {
+            return temperature;
+        }
+        match temperature {
+            Some(t) if (t - 1.0).abs() < f32::EPSILON => Some(1.0),
+            Some(t) => {
+                tracing::warn!(
+                    requested_temperature = t,
+                    "temperature {} is not supported when thinking is enabled, defaulting to None \
+                     (only None or 1.0 are allowed)",
+                    t
+                );
+                None
+            }
+            None => None,
+        }
+    }
+
     async fn send_request<R: for<'de> Deserialize<'de>>(
         &self,
         body: &AnthropicRequest,
     ) -> Result<R, LlmError> {
         let url = self.api_url();
 
-        tracing::debug!("Sending request to Anthropic OAuth: {}", url);
+        tracing::debug!(url = %url, "Sending request to Anthropic OAuth");
 
         let response = self
             .client
@@ -129,6 +186,8 @@ impl AnthropicOAuthProvider {
             .bearer_auth(self.current_token())
             .header("anthropic-version", ANTHROPIC_API_VERSION)
             .header("anthropic-beta", ANTHROPIC_OAUTH_BETA)
+            .header("user-agent", CLAUDE_CLI_USER_AGENT)
+            .header("x-app", CLAUDE_CLI_X_APP)
             .header("Content-Type", "application/json")
             .json(body)
             .send()
@@ -169,6 +228,8 @@ impl AnthropicOAuthProvider {
                         .bearer_auth(fresh_token.expose_secret())
                         .header("anthropic-version", ANTHROPIC_API_VERSION)
                         .header("anthropic-beta", ANTHROPIC_OAUTH_BETA)
+                        .header("user-agent", CLAUDE_CLI_USER_AGENT)
+                        .header("x-app", CLAUDE_CLI_X_APP)
                         .header("Content-Type", "application/json")
                         .json(body)
                         .send()
@@ -245,14 +306,17 @@ impl LlmProvider for AnthropicOAuthProvider {
         self.strip_unsupported_completion_params(&mut req);
         let (system, messages) = convert_messages(req.messages);
 
+        let thinking = self.thinking_config();
+
         let request = AnthropicRequest {
             model,
             messages,
-            system,
+            system: Self::build_system_blocks(system),
             max_tokens: req.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
-            temperature: req.temperature,
+            temperature: Self::validate_temperature(req.temperature, self.thinking_enabled),
             tools: None,
             tool_choice: None,
+            thinking,
         };
 
         let response: AnthropicResponse = self.send_request(&request).await?;
@@ -313,14 +377,17 @@ impl LlmProvider for AnthropicOAuthProvider {
             },
         });
 
+        let thinking = self.thinking_config();
+
         let request = AnthropicRequest {
             model,
             messages,
-            system,
+            system: Self::build_system_blocks(system),
             max_tokens: req.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
-            temperature: req.temperature,
+            temperature: Self::validate_temperature(req.temperature, self.thinking_enabled),
             tools: if tools.is_empty() { None } else { Some(tools) },
             tool_choice,
+            thinking,
         };
 
         let response: AnthropicResponse = self.send_request(&request).await?;
@@ -382,11 +449,24 @@ impl LlmProvider for AnthropicOAuthProvider {
 // --- Anthropic Messages API types ---
 
 #[derive(Debug, Serialize)]
+struct SystemBlock {
+    #[serde(rename = "type")]
+    block_type: String,
+    text: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ThinkingConfig {
+    #[serde(rename = "type")]
+    thinking_type: String,
+}
+
+#[derive(Debug, Serialize)]
 struct AnthropicRequest {
     model: String,
     messages: Vec<AnthropicMessage>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    system: Option<String>,
+    system: Option<Vec<SystemBlock>>,
     max_tokens: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
@@ -394,6 +474,8 @@ struct AnthropicRequest {
     tools: Option<Vec<AnthropicTool>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_choice: Option<AnthropicToolChoice>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking: Option<ThinkingConfig>,
 }
 
 #[derive(Debug, Serialize)]
@@ -461,6 +543,13 @@ enum AnthropicResponseBlock {
         id: String,
         name: String,
         input: serde_json::Value,
+    },
+    #[serde(rename = "thinking")]
+    Thinking {
+        #[allow(dead_code)]
+        thinking: String,
+        #[allow(dead_code)]
+        signature: String,
     },
 }
 
@@ -578,6 +667,9 @@ fn extract_response_content(response: &AnthropicResponse) -> (Option<String>, Ve
                     reasoning: None,
                 });
             }
+            AnthropicResponseBlock::Thinking { .. } => {
+                // Skip thinking blocks - they're internal reasoning
+            }
         }
     }
 
@@ -684,6 +776,148 @@ mod tests {
         assert_eq!(content, Some("Let me search.".to_string()));
         assert_eq!(tool_calls.len(), 1);
         assert_eq!(tool_calls[0].name, "search");
+    }
+
+    #[test]
+    fn test_extract_response_with_thinking_blocks() {
+        let response = AnthropicResponse {
+            content: vec![
+                AnthropicResponseBlock::Thinking {
+                    thinking: "Let me consider this...".to_string(),
+                    signature: "sig123".to_string(),
+                },
+                AnthropicResponseBlock::Text {
+                    text: "Here is my answer.".to_string(),
+                },
+            ],
+            stop_reason: Some("end_turn".to_string()),
+            usage: AnthropicUsage {
+                input_tokens: 10,
+                output_tokens: 20,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
+            },
+        };
+        let (content, tool_calls) = extract_response_content(&response);
+        assert_eq!(content, Some("Here is my answer.".to_string()));
+        assert!(tool_calls.is_empty());
+    }
+
+    #[test]
+    fn test_build_system_blocks_with_existing_system() {
+        let blocks =
+            AnthropicOAuthProvider::build_system_blocks(Some("Custom prompt.".to_string()));
+        let blocks = blocks.unwrap();
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].text, CLAUDE_CODE_SYSTEM_PREFIX);
+        assert_eq!(blocks[1].text, "Custom prompt.");
+    }
+
+    #[test]
+    fn test_build_system_blocks_without_system() {
+        let blocks = AnthropicOAuthProvider::build_system_blocks(None);
+        let blocks = blocks.unwrap();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].text, CLAUDE_CODE_SYSTEM_PREFIX);
+    }
+
+    #[test]
+    fn test_validate_temperature_with_thinking_enabled() {
+        assert_eq!(
+            AnthropicOAuthProvider::validate_temperature(None, true),
+            None
+        );
+        assert_eq!(
+            AnthropicOAuthProvider::validate_temperature(Some(1.0), true),
+            Some(1.0)
+        );
+        // non-1.0 values should be rejected when thinking is enabled
+        assert_eq!(
+            AnthropicOAuthProvider::validate_temperature(Some(0.7), true),
+            None
+        );
+    }
+
+    #[test]
+    fn test_validate_temperature_with_thinking_disabled() {
+        // when thinking is disabled, any temperature passes through
+        assert_eq!(
+            AnthropicOAuthProvider::validate_temperature(None, false),
+            None
+        );
+        assert_eq!(
+            AnthropicOAuthProvider::validate_temperature(Some(0.7), false),
+            Some(0.7)
+        );
+        assert_eq!(
+            AnthropicOAuthProvider::validate_temperature(Some(1.0), false),
+            Some(1.0)
+        );
+        assert_eq!(
+            AnthropicOAuthProvider::validate_temperature(Some(0.0), false),
+            Some(0.0)
+        );
+    }
+
+    #[test]
+    fn test_request_serialization_with_thinking() {
+        let request = AnthropicRequest {
+            model: "claude-sonnet-4-6".to_string(),
+            messages: vec![AnthropicMessage {
+                role: "user".to_string(),
+                content: AnthropicContent::Text("Hello".to_string()),
+            }],
+            system: AnthropicOAuthProvider::build_system_blocks(None),
+            max_tokens: DEFAULT_MAX_TOKENS,
+            temperature: None,
+            tools: None,
+            tool_choice: None,
+            thinking: Some(ThinkingConfig {
+                thinking_type: "adaptive".to_string(),
+            }),
+        };
+
+        let json = serde_json::to_value(&request).unwrap();
+        assert_eq!(json["model"], "claude-sonnet-4-6");
+        assert_eq!(json["max_tokens"], DEFAULT_MAX_TOKENS);
+        assert_eq!(json["thinking"]["type"], "adaptive");
+        assert!(json.get("temperature").is_none());
+        assert!(json.get("tools").is_none());
+        assert!(json.get("tool_choice").is_none());
+
+        let system = json["system"].as_array().unwrap();
+        assert_eq!(system.len(), 1);
+        assert_eq!(system[0]["type"], "text");
+        assert_eq!(system[0]["text"], CLAUDE_CODE_SYSTEM_PREFIX);
+    }
+
+    #[test]
+    fn test_request_serialization_without_thinking() {
+        let request = AnthropicRequest {
+            model: "claude-haiku-4-5-20251001".to_string(),
+            messages: vec![AnthropicMessage {
+                role: "user".to_string(),
+                content: AnthropicContent::Text("Hello".to_string()),
+            }],
+            system: AnthropicOAuthProvider::build_system_blocks(Some("Be helpful.".to_string())),
+            max_tokens: 1024,
+            temperature: Some(0.7),
+            tools: None,
+            tool_choice: None,
+            thinking: None,
+        };
+
+        let json = serde_json::to_value(&request).unwrap();
+        assert_eq!(json["model"], "claude-haiku-4-5-20251001");
+        assert_eq!(json["max_tokens"], 1024);
+        let temp = json["temperature"].as_f64().unwrap();
+        assert!((temp - 0.7).abs() < 0.001);
+        // thinking should be absent when None
+        assert!(json.get("thinking").is_none());
+
+        let system = json["system"].as_array().unwrap();
+        assert_eq!(system.len(), 2);
+        assert_eq!(system[1]["text"], "Be helpful.");
     }
 
     /// Regression test for #1136: token field must be mutable via RwLock

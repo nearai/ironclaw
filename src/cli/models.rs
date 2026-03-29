@@ -196,6 +196,7 @@ async fn try_fetch_models(provider_id: &str, config_path: Option<&Path>) -> Opti
                 auth_path: None,
                 cache_retention: Default::default(),
                 unsupported_params: def.unsupported_params.clone(),
+                enable_thinking: true,
             });
         }
     }
