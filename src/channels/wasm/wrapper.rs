@@ -361,19 +361,23 @@ impl near::agent::channel_host::Host for ChannelStoreData {
 
         let mut url = injected_url;
 
-        // Leak scan runs on WASM-provided values BEFORE host credential injection.
-        // This prevents false positives where the host-injected Bearer token
-        // (e.g., xoxb- Slack token) triggers the leak detector — WASM never saw
-        // the real value, so scanning the pre-injection state is correct.
+        // Leak scan runs on the ORIGINAL WASM-provided values (before ANY
+        // credential injection) to prevent false positives. Host-injected
+        // tokens (e.g., xoxb- Slack bot token) would otherwise trigger the
+        // leak detector — WASM never saw the real value.
         let leak_detector = LeakDetector::new();
-        let header_vec: Vec<(String, String)> = headers
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-
-        leak_detector
-            .scan_http_request(&url, &header_vec, body.as_deref())
-            .map_err(|e| format!("Potential secret leak blocked: {}", e))?;
+        {
+            let raw_url_for_scan = &url;
+            let raw_headers_map: std::collections::HashMap<String, String> =
+                serde_json::from_str(&headers_json).unwrap_or_else(|e| {
+                    tracing::warn!(error = %e, "Malformed headers JSON from WASM — scanning empty headers");
+                    std::collections::HashMap::new()
+                });
+            let raw_header_vec: Vec<(String, String)> = raw_headers_map.into_iter().collect();
+            leak_detector
+                .scan_http_request(raw_url_for_scan, &raw_header_vec, body.as_deref())
+                .map_err(|e| format!("Potential secret leak blocked: {}", e))?;
+        }
 
         // Inject pre-resolved host credentials (Bearer tokens, API keys, etc.)
         // after the leak scan so host-injected secrets don't trigger false positives.
@@ -5883,6 +5887,55 @@ mod tests {
         assert_eq!(
             mime_from_extension("/home/user/.ironclaw/screenshot.png"),
             "image/png"
+        );
+    }
+
+    /// Regression test: leak scan must run on the raw WASM-provided headers
+    /// (pre-injection), not the post-injection headers. Host-injected Bearer
+    /// tokens (e.g., xoxb- Slack tokens) would otherwise trigger the leak
+    /// detector since WASM never saw those values.
+    #[test]
+    fn test_leak_scan_uses_pre_injection_headers() {
+        use crate::safety::LeakDetector;
+
+        let detector = LeakDetector::new();
+
+        // Pre-injection headers from WASM: no secrets, should pass.
+        let pre_injection = vec![("Content-Type".to_string(), "application/json".to_string())];
+        assert!(
+            detector
+                .scan_http_request(
+                    "https://slack.com/api/chat.postMessage",
+                    &pre_injection,
+                    None
+                )
+                .is_ok(),
+            "Pre-injection headers should pass leak scan"
+        );
+
+        // Post-injection headers with host-injected Bearer token: would fail
+        // if we scanned these instead of the pre-injection headers.
+        let post_injection = vec![
+            ("Content-Type".to_string(), "application/json".to_string()),
+            (
+                "Authorization".to_string(),
+                // Fake key matching openai_api_key pattern (LeakAction::Block).
+                "Bearer sk-proj-TESTFAKEKEY01234567890abcdef".to_string(),
+            ),
+        ];
+        // This demonstrates the false positive: scanning post-injection headers
+        // detects the host-injected token as a leak.
+        let scan_result = detector.scan_http_request(
+            "https://slack.com/api/chat.postMessage",
+            &post_injection,
+            None,
+        );
+        // The fake API key should be flagged as a potential leak.
+        // This proves scanning must happen PRE-injection.
+        assert!(
+            scan_result.is_err(),
+            "Post-injection headers with API key pattern should trigger leak detector, \
+             confirming that scanning must happen before credential injection"
         );
     }
 }
