@@ -466,6 +466,9 @@ CREATE TABLE IF NOT EXISTS routines (
     notify_on_success INTEGER NOT NULL DEFAULT 0,
     notify_on_failure INTEGER NOT NULL DEFAULT 1,
     notify_on_attention INTEGER NOT NULL DEFAULT 1,
+    agent_review_on_success INTEGER NOT NULL DEFAULT 0,
+    agent_review_on_failure INTEGER NOT NULL DEFAULT 0,
+    agent_review_on_attention INTEGER NOT NULL DEFAULT 0,
     state TEXT NOT NULL DEFAULT '{}',
     last_run_at TEXT,
     next_fire_at TEXT,
@@ -714,6 +717,9 @@ CREATE TABLE IF NOT EXISTS routines_new (
     notify_on_success INTEGER NOT NULL DEFAULT 0,
     notify_on_failure INTEGER NOT NULL DEFAULT 1,
     notify_on_attention INTEGER NOT NULL DEFAULT 1,
+    agent_review_on_success INTEGER NOT NULL DEFAULT 0,
+    agent_review_on_failure INTEGER NOT NULL DEFAULT 0,
+    agent_review_on_attention INTEGER NOT NULL DEFAULT 0,
     state TEXT NOT NULL DEFAULT '{}',
     last_run_at TEXT,
     next_fire_at TEXT,
@@ -785,6 +791,15 @@ CREATE TABLE IF NOT EXISTS api_tokens (
 );
 CREATE INDEX IF NOT EXISTS idx_api_tokens_user ON api_tokens(user_id);
 CREATE INDEX IF NOT EXISTS idx_api_tokens_hash ON api_tokens(token_hash);
+"#,
+    ),
+    (
+        15,
+        "routine_agent_review",
+        r#"
+ALTER TABLE routines ADD COLUMN agent_review_on_success INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE routines ADD COLUMN agent_review_on_failure INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE routines ADD COLUMN agent_review_on_attention INTEGER NOT NULL DEFAULT 0;
 "#,
     ),
 ];

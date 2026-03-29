@@ -39,6 +39,7 @@ pub(crate) const ROUTINE_COLUMNS: &str = "\
     trigger_type, trigger_config, action_type, action_config, \
     cooldown_secs, max_concurrent, dedup_window_secs, \
     notify_channel, notify_user, notify_on_success, notify_on_failure, notify_on_attention, \
+    agent_review_on_success, agent_review_on_failure, agent_review_on_attention, \
     state, last_run_at, next_fire_at, run_count, consecutive_failures, \
     created_at, updated_at";
 
@@ -397,17 +398,17 @@ pub(crate) fn row_to_routine_libsql(row: &libsql::Row) -> Result<Routine, Databa
             on_success: get_i64(row, 14) != 0,
             on_failure: get_i64(row, 15) != 0,
             on_attention: get_i64(row, 16) != 0,
-            agent_review_on_success: false,
-            agent_review_on_attention: false,
-            agent_review_on_failure: false,
+            agent_review_on_success: get_i64(row, 17) != 0,
+            agent_review_on_failure: get_i64(row, 18) != 0,
+            agent_review_on_attention: get_i64(row, 19) != 0,
         },
-        state: get_json(row, 17),
-        last_run_at: get_opt_ts(row, 18),
-        next_fire_at: get_opt_ts(row, 19),
-        run_count: get_i64(row, 20) as u64,
-        consecutive_failures: get_i64(row, 21) as u32,
-        created_at: get_ts(row, 22),
-        updated_at: get_ts(row, 23),
+        state: get_json(row, 20),
+        last_run_at: get_opt_ts(row, 21),
+        next_fire_at: get_opt_ts(row, 22),
+        run_count: get_i64(row, 23) as u64,
+        consecutive_failures: get_i64(row, 24) as u32,
+        created_at: get_ts(row, 25),
+        updated_at: get_ts(row, 26),
     })
 }
 
