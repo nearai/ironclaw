@@ -2000,6 +2000,9 @@ mod tests {
             on_success: false,
             on_failure: true,
             on_attention: true,
+            agent_review_on_success: false,
+            agent_review_on_attention: false,
+            agent_review_on_failure: false,
             ..Default::default()
         };
 
@@ -2092,6 +2095,9 @@ mod tests {
             on_attention: true,
             on_failure: true,
             on_success: false,
+            agent_review_on_success: false,
+            agent_review_on_attention: false,
+            agent_review_on_failure: false,
         };
 
         let prompt = super::build_lightweight_prompt(
@@ -2124,6 +2130,9 @@ mod tests {
     fn test_build_lightweight_prompt_skips_delivery_block_when_attention_notifications_disabled() {
         let notify = NotifyConfig {
             on_attention: false,
+            agent_review_on_success: false,
+            agent_review_on_attention: false,
+            agent_review_on_failure: false,
             ..NotifyConfig::default()
         };
 
@@ -2387,6 +2396,9 @@ mod tests {
             on_success: true,
             on_failure: true,
             on_attention: true,
+            agent_review_on_success: false,
+            agent_review_on_attention: false,
+            agent_review_on_failure: false,
             ..Default::default()
         };
         let should_notify = match RunStatus::Running {
