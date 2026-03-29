@@ -878,6 +878,21 @@ mod tests {
             assert!(schema["properties"]["content"].is_object());
             assert!(schema["properties"]["target"].is_object());
             assert!(schema["properties"]["append"].is_object());
+
+            // Patch mode parameters
+            assert!(schema["properties"]["old_string"].is_object());
+            assert!(schema["properties"]["new_string"].is_object());
+            assert!(schema["properties"]["replace_all"].is_object());
+
+            // Metadata parameter
+            assert!(schema["properties"]["metadata"].is_object());
+
+            // Content is not required (patch mode doesn't need it)
+            let required = schema["required"].as_array().unwrap();
+            assert!(
+                !required.contains(&"content".into()),
+                "content should not be required (patch mode)"
+            );
         }
 
         #[test]
@@ -895,6 +910,10 @@ mod tests {
                     .unwrap()
                     .contains(&"path".into())
             );
+
+            // Version parameters
+            assert!(schema["properties"]["version"].is_object());
+            assert!(schema["properties"]["list_versions"].is_object());
         }
 
         #[test]

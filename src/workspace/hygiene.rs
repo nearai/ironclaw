@@ -649,5 +649,238 @@ mod tests {
             };
             assert!(!no_work.had_work(), "empty report should indicate no work");
         }
+
+        #[tokio::test]
+        async fn no_config_documents_means_no_cleanup() {
+            let (db, _tmp) = create_test_db().await;
+            let ws = create_workspace(&db);
+
+            // Write documents to custom/ but do NOT create a .config
+            ws.write("custom/note1.md", "some content")
+                .await
+                .expect("write note1");
+            ws.write("custom/note2.md", "other content")
+                .await
+                .expect("write note2");
+
+            let config = HygieneConfig {
+                enabled: true,
+                version_keep_count: 50,
+                cadence_hours: 0, // no cadence gate
+                state_dir: _tmp.path().to_path_buf(),
+            };
+
+            let report = run_if_due(&ws, &config).await;
+            assert!(!report.skipped, "run should not be skipped");
+            assert!(
+                report.directories_cleaned.is_empty(),
+                "no directories should be cleaned when there are no .config documents"
+            );
+
+            // Documents should still exist
+            assert!(ws.read("custom/note1.md").await.is_ok());
+            assert!(ws.read("custom/note2.md").await.is_ok());
+        }
+
+        #[tokio::test]
+        async fn config_with_hygiene_disabled_skips_directory() {
+            let (db, _tmp) = create_test_db().await;
+            let ws = create_workspace(&db);
+
+            // Create a .config with hygiene disabled
+            let config_doc = ws
+                .write("test/.config", "")
+                .await
+                .expect("write .config");
+            ws.update_metadata(
+                config_doc.id,
+                &serde_json::json!({
+                    "hygiene": {"enabled": false, "retention_days": 1},
+                    "skip_versioning": true
+                }),
+            )
+            .await
+            .expect("set metadata");
+
+            // Write a document
+            ws.write("test/data.md", "should survive")
+                .await
+                .expect("write data");
+
+            let config = HygieneConfig {
+                enabled: true,
+                version_keep_count: 50,
+                cadence_hours: 0,
+                state_dir: _tmp.path().to_path_buf(),
+            };
+
+            let report = run_if_due(&ws, &config).await;
+            assert!(!report.skipped);
+            // The directory should not appear in cleaned list because hygiene is disabled
+            assert!(
+                report.directories_cleaned.is_empty(),
+                "disabled hygiene should not produce cleanup entries"
+            );
+
+            // Document should still exist
+            let doc = ws.read("test/data.md").await.expect("data.md should exist");
+            assert_eq!(doc.content, "should survive");
+        }
+
+        #[tokio::test]
+        async fn multiple_directories_with_different_retention() {
+            let (db, _tmp) = create_test_db().await;
+            let ws = create_workspace(&db);
+
+            // fast/ has 0-day retention (everything gets deleted)
+            seed_hygiene_config(&ws, "fast/", 0).await;
+            // slow/ has 9999-day retention (nothing gets deleted)
+            seed_hygiene_config(&ws, "slow/", 9999).await;
+
+            ws.write("fast/ephemeral.md", "gone soon")
+                .await
+                .expect("write fast doc");
+            ws.write("slow/durable.md", "here to stay")
+                .await
+                .expect("write slow doc");
+
+            let config = HygieneConfig {
+                enabled: true,
+                version_keep_count: 50,
+                cadence_hours: 0,
+                state_dir: _tmp.path().to_path_buf(),
+            };
+
+            let report = run_if_due(&ws, &config).await;
+            assert!(!report.skipped);
+
+            // fast/ should have deletions, slow/ should have 0
+            let fast_cleaned = report
+                .directories_cleaned
+                .iter()
+                .find(|(d, _)| d == "fast/")
+                .map(|(_, n)| *n)
+                .unwrap_or(0);
+            let slow_cleaned = report
+                .directories_cleaned
+                .iter()
+                .find(|(d, _)| d == "slow/")
+                .map(|(_, n)| *n)
+                .unwrap_or(0);
+
+            assert!(fast_cleaned > 0, "fast/ docs should be deleted");
+            assert_eq!(slow_cleaned, 0, "slow/ docs should be preserved");
+
+            // Verify slow doc still readable
+            let doc = ws
+                .read("slow/durable.md")
+                .await
+                .expect("slow doc should still exist");
+            assert_eq!(doc.content, "here to stay");
+        }
+
+        #[tokio::test]
+        async fn documents_newer_than_retention_not_deleted() {
+            let (db, _tmp) = create_test_db().await;
+            let ws = create_workspace(&db);
+
+            // Very long retention — nothing should expire
+            seed_hygiene_config(&ws, "test/", 9999).await;
+
+            ws.write("test/recent.md", "just created")
+                .await
+                .expect("write recent doc");
+
+            let config = HygieneConfig {
+                enabled: true,
+                version_keep_count: 50,
+                cadence_hours: 0,
+                state_dir: _tmp.path().to_path_buf(),
+            };
+
+            let report = run_if_due(&ws, &config).await;
+            assert!(!report.skipped);
+
+            let test_cleaned = report
+                .directories_cleaned
+                .iter()
+                .find(|(d, _)| d == "test/")
+                .map(|(_, n)| *n)
+                .unwrap_or(0);
+            assert_eq!(test_cleaned, 0, "recent docs should not be deleted");
+
+            let doc = ws
+                .read("test/recent.md")
+                .await
+                .expect("recent doc should still exist");
+            assert_eq!(doc.content, "just created");
+        }
+
+        #[tokio::test]
+        async fn version_pruning_during_hygiene() {
+            let (db, _tmp) = create_test_db().await;
+            let ws = create_workspace(&db);
+
+            // Set up hygiene on versioned/ with long retention (don't delete docs)
+            // but WITHOUT skip_versioning so versions are actually created.
+            let config_doc = ws
+                .write("versioned/.config", "")
+                .await
+                .expect("write .config");
+            ws.update_metadata(
+                config_doc.id,
+                &serde_json::json!({
+                    "hygiene": {"enabled": true, "retention_days": 9999}
+                }),
+            )
+            .await
+            .expect("set metadata");
+
+            // Write multiple times to create versions
+            let doc = ws
+                .write("versioned/evolving.md", "version 1")
+                .await
+                .expect("write v1");
+            let doc_id = doc.id;
+            ws.write("versioned/evolving.md", "version 2")
+                .await
+                .expect("write v2");
+            ws.write("versioned/evolving.md", "version 3")
+                .await
+                .expect("write v3");
+            ws.write("versioned/evolving.md", "version 4")
+                .await
+                .expect("write v4");
+
+            // Verify we have multiple versions before hygiene
+            let versions_before = ws.list_versions(doc_id, 100).await.expect("list versions");
+            assert!(
+                versions_before.len() >= 3,
+                "should have at least 3 versions before pruning, got {}",
+                versions_before.len()
+            );
+
+            let config = HygieneConfig {
+                enabled: true,
+                version_keep_count: 2,
+                cadence_hours: 0,
+                state_dir: _tmp.path().to_path_buf(),
+            };
+
+            let report = run_if_due(&ws, &config).await;
+            assert!(!report.skipped);
+            assert!(
+                report.versions_pruned > 0,
+                "should have pruned some versions"
+            );
+
+            // After pruning, at most 2 versions should remain
+            let versions_after = ws.list_versions(doc_id, 100).await.expect("list versions");
+            assert!(
+                versions_after.len() <= 2,
+                "should have at most 2 versions after pruning, got {}",
+                versions_after.len()
+            );
+        }
     }
 }

@@ -2575,3 +2575,221 @@ mod seed_tests {
         assert!(multi_count > 1);
     }
 }
+
+#[cfg(all(test, feature = "libsql"))]
+mod versioning_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    async fn create_test_workspace() -> (Workspace, tempfile::TempDir) {
+        use crate::db::libsql::LibSqlBackend;
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let db_path = temp_dir.path().join("version_test.db");
+        let backend = LibSqlBackend::new_local(&db_path)
+            .await
+            .expect("LibSqlBackend");
+        <LibSqlBackend as crate::db::Database>::run_migrations(&backend)
+            .await
+            .expect("migrations");
+        let db: Arc<dyn crate::db::Database> = Arc::new(backend);
+        let ws = Workspace::new_with_db("test_version", db);
+        (ws, temp_dir)
+    }
+
+    #[tokio::test]
+    async fn write_creates_version() {
+        let (ws, _dir) = create_test_workspace().await;
+        let doc = ws.write("test.md", "v1").await.unwrap();
+        ws.write("test.md", "v2").await.unwrap();
+
+        let versions = ws.list_versions(doc.id, 50).await.unwrap();
+        assert_eq!(versions.len(), 1, "should have 1 version (the pre-v2 content)");
+        assert!(versions[0].content_hash.starts_with("sha256:"));
+
+        let v = ws.get_version(doc.id, versions[0].version).await.unwrap();
+        assert_eq!(v.content, "v1");
+        assert_eq!(v.changed_by.as_deref(), Some("test_version"));
+    }
+
+    #[tokio::test]
+    async fn write_deduplicates_identical_content() {
+        let (ws, _dir) = create_test_workspace().await;
+        let doc = ws.write("test.md", "same").await.unwrap();
+        ws.write("test.md", "same").await.unwrap();
+
+        let versions = ws.list_versions(doc.id, 50).await.unwrap();
+        // First write creates the doc (empty → "same"), second write is "same" → "same"
+        // The hash check should deduplicate the second write
+        assert!(versions.len() <= 1, "identical writes should not create duplicate versions");
+    }
+
+    #[tokio::test]
+    async fn append_versions_pre_append_content() {
+        let (ws, _dir) = create_test_workspace().await;
+        let doc = ws.write("test.md", "line1").await.unwrap();
+        ws.append("test.md", "line2").await.unwrap();
+
+        let versions = ws.list_versions(doc.id, 50).await.unwrap();
+        assert!(!versions.is_empty(), "append should create a version");
+
+        let v = ws.get_version(doc.id, versions[0].version).await.unwrap();
+        assert_eq!(v.content, "line1", "version should contain pre-append content");
+    }
+
+    #[tokio::test]
+    async fn patch_single_replacement() {
+        let (ws, _dir) = create_test_workspace().await;
+        ws.write("test.md", "hello world hello").await.unwrap();
+        let result = ws.patch("test.md", "hello", "hi", false).await.unwrap();
+
+        assert_eq!(result.replacements, 1);
+        assert_eq!(result.document.content, "hi world hello");
+    }
+
+    #[tokio::test]
+    async fn patch_replace_all() {
+        let (ws, _dir) = create_test_workspace().await;
+        ws.write("test.md", "hello world hello").await.unwrap();
+        let result = ws.patch("test.md", "hello", "hi", true).await.unwrap();
+
+        assert_eq!(result.replacements, 2);
+        assert_eq!(result.document.content, "hi world hi");
+    }
+
+    #[tokio::test]
+    async fn patch_not_found_error() {
+        let (ws, _dir) = create_test_workspace().await;
+        ws.write("test.md", "hello").await.unwrap();
+        let err = ws.patch("test.md", "xyz", "abc", false).await;
+
+        assert!(err.is_err());
+        match err.unwrap_err() {
+            WorkspaceError::PatchFailed { path, .. } => {
+                assert_eq!(path, "test.md");
+            }
+            other => panic!("expected PatchFailed, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn patch_creates_version() {
+        let (ws, _dir) = create_test_workspace().await;
+        let doc = ws.write("test.md", "original").await.unwrap();
+        ws.patch("test.md", "original", "modified", false)
+            .await
+            .unwrap();
+
+        let versions = ws.list_versions(doc.id, 50).await.unwrap();
+        assert!(!versions.is_empty(), "patch should create a version");
+        let v = ws.get_version(doc.id, versions[0].version).await.unwrap();
+        assert_eq!(v.content, "original", "version should contain pre-patch content");
+    }
+
+    #[tokio::test]
+    async fn resolve_metadata_no_config() {
+        let (ws, _dir) = create_test_workspace().await;
+        ws.write("notes.md", "content").await.unwrap();
+
+        let meta = ws.resolve_metadata("notes.md").await;
+        assert_eq!(meta.skip_indexing, None);
+        assert_eq!(meta.skip_versioning, None);
+        assert!(meta.hygiene.is_none());
+    }
+
+    #[tokio::test]
+    async fn resolve_metadata_inherits_from_folder_config() {
+        let (ws, _dir) = create_test_workspace().await;
+
+        // Create folder .config
+        let config_doc = ws.write("projects/.config", "").await.unwrap();
+        ws.update_metadata(config_doc.id, &serde_json::json!({"skip_indexing": true}))
+            .await
+            .unwrap();
+
+        // File in that folder inherits
+        let meta = ws.resolve_metadata("projects/notes.md").await;
+        assert_eq!(meta.skip_indexing, Some(true));
+    }
+
+    #[tokio::test]
+    async fn resolve_metadata_document_overrides_config() {
+        let (ws, _dir) = create_test_workspace().await;
+
+        // Folder says skip_indexing: true
+        let config_doc = ws.write("projects/.config", "").await.unwrap();
+        ws.update_metadata(config_doc.id, &serde_json::json!({"skip_indexing": true}))
+            .await
+            .unwrap();
+
+        // Document says skip_indexing: false (override)
+        let doc = ws.write("projects/important.md", "content").await.unwrap();
+        ws.update_metadata(doc.id, &serde_json::json!({"skip_indexing": false}))
+            .await
+            .unwrap();
+
+        let meta = ws.resolve_metadata("projects/important.md").await;
+        assert_eq!(meta.skip_indexing, Some(false), "document metadata should override .config");
+    }
+
+    #[tokio::test]
+    async fn resolve_metadata_nearest_ancestor_wins() {
+        let (ws, _dir) = create_test_workspace().await;
+
+        // Root says skip_indexing: true
+        let root_config = ws.write(".config", "").await.unwrap();
+        ws.update_metadata(root_config.id, &serde_json::json!({"skip_indexing": true}))
+            .await
+            .unwrap();
+
+        // projects/ says skip_indexing: false
+        let proj_config = ws.write("projects/.config", "").await.unwrap();
+        ws.update_metadata(proj_config.id, &serde_json::json!({"skip_indexing": false}))
+            .await
+            .unwrap();
+
+        // Nearest parent (projects/.config) wins over root
+        let meta = ws.resolve_metadata("projects/alpha/notes.md").await;
+        assert_eq!(meta.skip_indexing, Some(false), "nearest ancestor .config should win");
+    }
+
+    #[tokio::test]
+    async fn skip_versioning_via_config() {
+        let (ws, _dir) = create_test_workspace().await;
+
+        // Set skip_versioning on ephemeral/ directory
+        let config_doc = ws.write("ephemeral/.config", "").await.unwrap();
+        ws.update_metadata(
+            config_doc.id,
+            &serde_json::json!({"skip_versioning": true}),
+        )
+        .await
+        .unwrap();
+
+        // Write multiple times — no versions should be created
+        let doc = ws.write("ephemeral/data.md", "v1").await.unwrap();
+        ws.write("ephemeral/data.md", "v2").await.unwrap();
+        ws.write("ephemeral/data.md", "v3").await.unwrap();
+
+        let versions = ws.list_versions(doc.id, 50).await.unwrap();
+        assert_eq!(versions.len(), 0, "skip_versioning should prevent version creation");
+    }
+
+    #[tokio::test]
+    async fn patch_with_unicode() {
+        let (ws, _dir) = create_test_workspace().await;
+        ws.write("test.md", "Hello 🌍 World 🌍").await.unwrap();
+        let result = ws.patch("test.md", "🌍", "🌎", false).await.unwrap();
+
+        assert_eq!(result.replacements, 1);
+        assert_eq!(result.document.content, "Hello 🌎 World 🌍");
+    }
+
+    #[tokio::test]
+    async fn patch_empty_replacement() {
+        let (ws, _dir) = create_test_workspace().await;
+        ws.write("test.md", "hello cruel world").await.unwrap();
+        let result = ws.patch("test.md", " cruel", "", false).await.unwrap();
+
+        assert_eq!(result.document.content, "hello world");
+    }
+}

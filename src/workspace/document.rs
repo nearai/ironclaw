@@ -609,6 +609,76 @@ mod tests {
     }
 
     #[test]
+    fn test_is_config_path_edge_cases() {
+        assert!(!is_config_path("foo.config"));
+        assert!(!is_config_path(""));
+        // ".config/bar" — the filename component is "bar", not ".config"
+        assert!(!is_config_path(".config/bar"));
+    }
+
+    #[test]
+    fn test_content_sha256_empty_string() {
+        let hash = content_sha256("");
+        assert!(hash.starts_with("sha256:"));
+        // SHA-256 of "" is a known constant
+        assert_eq!(
+            hash,
+            "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+    }
+
+    #[test]
+    fn test_content_sha256_unicode() {
+        let hash1 = content_sha256("Hello 🌍");
+        let hash2 = content_sha256("Hello 🌍");
+        assert_eq!(hash1, hash2);
+        // Different unicode content produces different hashes
+        let hash3 = content_sha256("Hello 🌎");
+        assert_ne!(hash1, hash3);
+    }
+
+    #[test]
+    fn test_document_metadata_merge_null_overlay_value() {
+        // Overlay with null values should overwrite base values
+        let base = serde_json::json!({"skip_indexing": true});
+        let overlay = serde_json::json!({"skip_indexing": null});
+        let merged = DocumentMetadata::merge(&base, &overlay);
+        // null wins over true (shallow merge replaces entire key)
+        assert_eq!(merged.get("skip_indexing"), Some(&serde_json::Value::Null));
+    }
+
+    #[test]
+    fn test_document_metadata_merge_nested_hygiene_replaced_wholesale() {
+        // Nested objects are replaced entirely, not recursively merged
+        let base = serde_json::json!({
+            "hygiene": {"enabled": true, "retention_days": 30}
+        });
+        let overlay = serde_json::json!({
+            "hygiene": {"enabled": false}
+        });
+        let merged = DocumentMetadata::merge(&base, &overlay);
+        let meta = DocumentMetadata::from_value(&merged);
+        let hygiene = meta.hygiene.unwrap();
+        // Overlay replaced the entire hygiene object — retention_days falls back to default
+        assert!(!hygiene.enabled);
+        assert_eq!(hygiene.retention_days, 30); // serde default kicks in
+    }
+
+    #[test]
+    fn test_document_metadata_merge_both_empty() {
+        let merged = DocumentMetadata::merge(&serde_json::json!({}), &serde_json::json!({}));
+        assert_eq!(merged, serde_json::json!({}));
+    }
+
+    #[test]
+    fn test_document_metadata_merge_non_object_base() {
+        // Non-object base is treated as empty
+        let merged =
+            DocumentMetadata::merge(&serde_json::json!("string"), &serde_json::json!({"a": 1}));
+        assert_eq!(merged, serde_json::json!({"a": 1}));
+    }
+
+    #[test]
     fn test_merge_workspace_entries_sorted_by_path() {
         let entries = vec![
             WorkspaceEntry {
