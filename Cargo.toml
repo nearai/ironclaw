@@ -155,6 +155,7 @@ urlencoding = "2"
 matrix-sdk = { version = "0.16", optional = true, default-features = false, features = [
     "rustls-tls",
     "sqlite",
+    "e2e-encryption",
 ] }
 
 # Open URLs in browser
@@ -244,7 +245,7 @@ tempfile = "3"
 insta = { version = "1.46.3", features = ["yaml"] }
 
 [features]
-default = ["postgres", "libsql", "html-to-markdown", "tui", "matrix-sdk-channel"]
+default = ["postgres", "libsql", "html-to-markdown", "tui", "matrix-e2ee"]
 postgres = [
     "dep:deadpool-postgres",
     "dep:tokio-postgres",
@@ -270,10 +271,18 @@ bedrock = ["dep:aws-config", "dep:aws-sdk-bedrockruntime", "dep:aws-smithy-types
 tui = ["dep:ironclaw_tui"]
 import = ["dep:json5", "libsql"]
 # matrix-sdk-channel: use the matrix-sdk event loop for the native Matrix
-# channel instead of the raw reqwest poll loop. Required for E2EE (step 2).
-# Enabled by default; disable with --no-default-features if you want the
-# minimal reqwest-only build.
+# channel instead of the raw reqwest poll loop. Required for E2EE.
+# Enabled by default via matrix-e2ee; can be enabled alone (without E2EE)
+# or disabled entirely with --no-default-features for the minimal reqwest build.
 matrix-sdk-channel = ["dep:matrix-sdk"]
+# matrix-e2ee: enable end-to-end encryption in the Matrix channel.
+# Requires and implies matrix-sdk-channel. Default on.
+# Disable with --no-default-features to build without E2EE (or without matrix-sdk).
+# NOTE: vodozemac has an unpatched identity-element DH vulnerability as of
+# 2026-02-17. The threat model for a personal bot (trusted participants,
+# untrusted homeserver) makes E2EE still strictly better than plaintext.
+# Upgrade matrix-sdk when a patched vodozemac ships.
+matrix-e2ee = ["matrix-sdk-channel"]
 
 [[test]]
 name = "e2e_thread_scheduling"
