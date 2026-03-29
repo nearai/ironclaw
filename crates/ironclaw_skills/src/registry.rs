@@ -622,6 +622,9 @@ async fn load_and_validate_skill(
                 reason: result.failures.join("; "),
             });
         }
+        for warning in &result.warnings {
+            tracing::debug!(skill = %manifest.name, "{}", warning);
+        }
     }
 
     // Check token budget (reject if prompt is > 2x declared budget)
@@ -705,6 +708,9 @@ async fn load_from_content(
                 name: manifest.name.clone(),
                 reason: result.failures.join("; "),
             });
+        }
+        for warning in &result.warnings {
+            tracing::debug!(skill = %manifest.name, "{}", warning);
         }
     }
 

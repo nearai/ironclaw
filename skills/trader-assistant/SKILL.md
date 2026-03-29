@@ -1,6 +1,6 @@
 ---
 name: trader-assistant
-version: 0.1.0
+version: 0.2.0
 description: Commitment tracking tuned for financial traders — real-time alerts, position-aware relevance, decision journaling with outcome tracking.
 activation:
   keywords:
@@ -21,6 +21,14 @@ activation:
     - finance
     - setup
   max_context_tokens: 2500
+metadata:
+  openclaw:
+    requires:
+      skills:
+        - commitment-triage
+        - commitment-digest
+        - decision-capture
+        - delegation-tracker
 ---
 
 # Financial Trader — Commitment System Setup
@@ -33,7 +41,7 @@ You are configuring the commitments system for a financial trader. Their day inv
 
 ## Companion skills
 
-This bundle relies on these skills activating during conversation (they are keyword-triggered, no manual install needed):
+This bundle relies on these skills activating during conversation (keyword-triggered):
 
 | Skill | Activates when | What it does |
 |---|---|---|
@@ -42,7 +50,7 @@ This bundle relies on these skills activating during conversation (they are keyw
 | `decision-capture` | User makes a trade decision ("sold half my AAPL") | Records decision with rationale for journaling |
 | `delegation-tracker` | User delegates research tasks | Tracks delegation follow-ups |
 
-If any of these skills are missing from the `skills/` directory, tell the user which ones are needed.
+If any are missing from `skills/`, tell the user which ones are needed.
 
 ## Step 1: Ask configuration questions
 
@@ -55,17 +63,9 @@ If any of these skills are missing from the `skills/` directory, tell the user w
 
 ## Step 2: Create workspace structure
 
-Run the `commitment-setup` skill's workspace creation procedure. Specifically:
-
 1. Check if `commitments/README.md` exists via `memory_read`. If it does, skip to creating trader-specific files.
-2. Write `commitments/README.md` with the full schema — it must document the frontmatter schemas for signals, commitments, decisions, and parked ideas (see `commitment-setup` skill for the complete content).
-3. Create placeholder READMEs in each subdirectory to establish the structure:
-   - `commitments/open/README.md` — "Active commitments."
-   - `commitments/resolved/README.md` — "Completed commitments archive."
-   - `commitments/signals/pending/README.md` — "Signals awaiting triage."
-   - `commitments/signals/expired/README.md` — "Expired signals."
-   - `commitments/decisions/README.md` — "Captured decisions."
-   - `commitments/parked-ideas/README.md` — "Ideas for later."
+2. Write `commitments/README.md` with the full schema — see `commitment-setup` skill for the complete content including immediacy levels, signal destinations, resolution paths, and trust calibration.
+3. Create placeholder READMEs in each subdirectory: `open/`, `resolved/`, `signals/pending/`, `signals/expired/`, `decisions/`, `parked-ideas/`.
 4. Create trader-specific files:
 
 ```
@@ -76,45 +76,37 @@ memory_write(target="commitments/positions.md", content="# Current Positions\n\n
 memory_write(target="commitments/trade-journal/README.md", content="Daily trade journal entries. Each file: decisions/<date>-<slug>.md with outcome tracking.", append=false)
 ```
 
-## Step 3: Create tuned routines
+## Step 3: Create tuned missions
 
-### Triage routine — market-hours aware, position-sensitive
+### Triage mission — market-hours aware, position-sensitive
 
 ```
-routine_create(
+mission_create(
   name: "commitment-triage",
-  description: "Trader triage — position-aware signal scoring, contradictory signal detection, fast expiration",
-  prompt: "You are triaging commitments for a financial trader. Read commitments/README.md for schema. Read commitments/positions.md for current positions. Priority order: (1) Position-relevant signals — any signal mentioning a ticker in the positions list gets urgency=critical. (2) Contradictory signal detection — if two pending signals point in opposite directions on the same ticker or thesis, flag as CONFLICT and surface both together. (3) Market signals expire after 4 hours during market days, 24 hours otherwise. (4) Research/thesis signals expire after 48 hours. (5) Check for decisions without outcome tracking (in commitments/decisions/) older than 7 days — prompt for outcome assessment. (6) Append triage summary to commitments/triage-log.md. (7) If position-relevant or conflicting signals found, alert immediately.",
-  request: { kind: "cron", schedule: "0 8,10,12,14,16,18 * * MON-FRI", timezone: "<user_timezone>" },
-  execution: { mode: "lightweight", use_tools: true, max_tool_rounds: 7, context_paths: ["commitments/README.md", "commitments/positions.md"] }
+  goal: "Trader triage. Read commitments/README.md for schema. Read commitments/positions.md for current positions. Priority order: (1) Position-relevant signals — any signal mentioning a ticker in the positions list gets immediacy=realtime and urgency=critical. Broadcast immediately via message tool. (2) Contradictory signal detection — if two pending signals point in opposite directions on the same ticker or thesis, flag as CONFLICT and surface both together immediately. (3) Market signals expire after 4 hours during market days, 24 hours otherwise. Research/thesis signals expire after 48 hours. (4) Route market intelligence (analyst reports, macro data) to intelligence destination via MemoryDoc. (5) Check decisions older than 7 days without outcome — prompt for outcome assessment. (6) Append triage summary to commitments/triage-log.md. (7) Alert on any position-relevant or conflicting signals.",
+  cadence: "0 8,10,12,14,16,18 * * 1-5"
 )
 ```
 
 Six runs on market days — every 2 hours from pre-market to post-market close.
 
-### Digest routine — pre-market brief and post-market journal prompt
+### Digest mission — pre-market brief and post-market journal prompt
 
 ```
-routine_create(
+mission_create(
   name: "commitment-digest",
-  description: "Trader digest — pre-market brief with position-relevant signals, post-market journal prompt",
-  prompt: "Compose a trader digest. Read commitments/README.md for schema. Read commitments/positions.md for current positions. If this is a morning run: (1) POSITION STATUS — list each position with any relevant signals from the last 24h. (2) OPEN RESEARCH — commitments tagged 'research' or 'thesis'. (3) PENDING DECISIONS — items needing a trade decision. (4) CONFLICTING SIGNALS — any unresolved conflicts. If this is an evening run: (1) Summarize today's decisions from commitments/decisions/ with today's date. (2) For each decision, note if outcome data is available. (3) Prompt: 'Any trades to journal? Any thesis updates?' Send via message tool.",
-  request: { kind: "cron", schedule: "0 7,18 * * MON-FRI", timezone: "<user_timezone>" },
-  execution: { mode: "lightweight", use_tools: true, max_tool_rounds: 6, context_paths: ["commitments/README.md", "commitments/positions.md"] }
+  goal: "Trader digest. Read commitments/README.md for schema. Read commitments/positions.md for current positions. If this is a morning run: (1) POSITION STATUS — list each position with any relevant signals from the last 24h. (2) OPEN RESEARCH — commitments tagged 'research' or 'thesis'. (3) PENDING DECISIONS — items with resolution_path=needs_decision. (4) CONFLICTING SIGNALS — any unresolved conflicts. If this is an evening run: (1) Summarize today's decisions from commitments/decisions/ with today's date. (2) For each decision, note if outcome data is available. (3) Prompt: 'Any trades to journal? Any thesis updates?' End with 'Did I miss anything?' Send via message tool.",
+  cadence: "0 7,18 * * 1-5"
 )
 ```
 
-7am pre-market brief, 6pm post-market journal prompt.
-
-### Weekly review routine
+### Weekly review mission
 
 ```
-routine_create(
+mission_create(
   name: "trader-weekly-review",
-  description: "Weekly review — decision outcomes, signal source reliability, position thesis check",
-  prompt: "Compose a weekly trading review. Read all files in commitments/decisions/ from the past 7 days. For each decision: (1) What was decided and why. (2) If outcome data exists, was it positive or negative? (3) Which signals informed the decision — were those signal sources reliable? Also check commitments/positions.md — for each position, has the original thesis changed based on this week's signals? Flag any position where contradictory evidence has accumulated. Send via message tool.",
-  request: { kind: "cron", schedule: "0 10 * * SAT", timezone: "<user_timezone>" },
-  execution: { mode: "lightweight", use_tools: true, max_tool_rounds: 6, context_paths: ["commitments/README.md", "commitments/positions.md"] }
+  goal: "Weekly trading review. Read all files in commitments/decisions/ from the past 7 days. For each decision: (1) What was decided and why. (2) If outcome data exists, was it positive or negative? (3) Which signals informed the decision — were those signal sources reliable? Also read commitments/positions.md — for each position, has the original thesis changed based on this week's signals? Flag any position where contradictory evidence has accumulated. Write review summary to context/intel/weekly-review-<date>.md as durable intelligence. Send via message tool.",
+  cadence: "0 10 * * 6"
 )
 ```
 
@@ -123,19 +115,15 @@ routine_create(
 ```
 memory_write(
   target: "commitments/calibration.md",
-  content: "# Trader Calibration\n\n- Always read commitments/positions.md before scoring signal relevance — a headline about AAPL is noise unless you hold AAPL\n- Market signals expire after 4 hours on trading days; research signals after 48 hours\n- When two signals contradict on the same ticker or thesis, flag as CONFLICT — never surface them independently\n- Trade decisions go in commitments/decisions/ with the standard schema, plus an 'outcome' section to be filled later\n- Prompt for outcome assessment on decisions older than 7 days: 'You decided X a week ago. How did it play out?'\n- Pre-market brief leads with position-relevant signals; post-market prompt leads with today's decisions\n- During market hours, position-relevant signals are always urgency=critical\n- Weekly review on Saturday morning assesses signal source reliability and thesis drift\n- The user maintains positions.md manually — do not modify it, only read it",
+  content: "# Trader Calibration\n\n- Always read commitments/positions.md before scoring signal relevance — a headline about AAPL is noise unless you hold AAPL\n- Position-relevant signals get immediacy=realtime — broadcast immediately, do not wait for digest\n- Market signals expire after 4 hours on trading days; research signals after 48 hours\n- When two signals contradict on the same ticker or thesis, flag as CONFLICT — never surface them independently\n- Trade decisions go in commitments/decisions/ with the standard schema, plus outcome tracking\n- Prompt for outcome assessment on decisions older than 7 days: 'You decided X a week ago. How did it play out?'\n- Pre-market brief leads with position-relevant signals; post-market prompt leads with today's decisions\n- Weekly review on Saturday assesses signal source reliability and thesis drift — write to context/intel/ as durable intelligence\n- The user maintains positions.md manually — do not modify it, only read it\n- Start conservative: surface everything, ask before acting on agent_can_handle items",
   append: false
 )
 ```
 
-## Step 5: Explain the positions file
-
-Tell the user: "I've created `commitments/positions.md` — update it with your current positions so I can score signal relevance. Format: `- TICKER: SIZE, entry PRICE, thesis: BRIEF`. I'll read it during every triage run but never modify it."
-
-## Step 6: Confirm
+## Step 5: Confirm
 
 > Your trading commitment system is ready:
-> - **Triage** runs every 2 hours on market days (8am–6pm) — position-aware, contradictory signal detection, 4h market signal expiration
+> - **Triage** runs every 2 hours on market days (8am–6pm) — position-aware, contradictory signal detection, 4h market signal expiration, realtime alerts for position-relevant signals
 > - **Pre-market brief** at 7am — position-relevant signals, open research, pending decisions
 > - **Post-market journal** at 6pm — today's decisions, outcome prompts
 > - **Weekly review** Saturday 10am — decision outcomes, signal reliability, thesis drift

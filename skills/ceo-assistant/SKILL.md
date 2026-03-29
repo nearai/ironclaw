@@ -1,6 +1,6 @@
 ---
 name: ceo-assistant
-version: 0.1.0
+version: 0.2.0
 description: Commitment tracking tuned for executives and managers — delegation-heavy, meeting prep, decision capture, morning and evening digests.
 activation:
   keywords:
@@ -21,6 +21,15 @@ activation:
     - delegation
     - setup
   max_context_tokens: 2000
+metadata:
+  openclaw:
+    requires:
+      skills:
+        - commitment-triage
+        - commitment-digest
+        - decision-capture
+        - delegation-tracker
+        - idea-parking
 ---
 
 # CEO / Manager — Commitment System Setup
@@ -61,53 +70,39 @@ Use reasonable defaults if the user says "just set it up."
 Run the `commitment-setup` skill's workspace creation procedure. Specifically:
 
 1. Check if `commitments/README.md` exists via `memory_read`. If it does, skip to Step 3.
-2. Write `commitments/README.md` with the full schema. Use `memory_read("commitments/README.md")` from the `commitment-setup` skill output, or write it fresh — it must document the frontmatter schemas for signals, commitments, decisions, and parked ideas (see `commitment-setup` skill for the complete content).
-3. Create placeholder READMEs in each subdirectory to establish the structure:
-   - `commitments/open/README.md` — "Active commitments."
-   - `commitments/resolved/README.md` — "Completed commitments archive."
-   - `commitments/signals/pending/README.md` — "Signals awaiting triage."
-   - `commitments/signals/expired/README.md` — "Expired signals."
-   - `commitments/decisions/README.md` — "Captured decisions."
-   - `commitments/parked-ideas/README.md` — "Ideas for later."
+2. Write `commitments/README.md` with the full schema — it must document frontmatter for signals (with immediacy/expires_at/destination), commitments (with resolution_path/stale_after/resolved_by), decisions (with outcome tracking), and parked ideas. See `commitment-setup` skill for the complete content.
+3. Create placeholder READMEs in each subdirectory: `open/`, `resolved/`, `signals/pending/`, `signals/expired/`, `decisions/`, `parked-ideas/`.
 
-## Step 3: Create tuned routines
+## Step 3: Create tuned missions
 
-### Triage routine — faster scan for executives
+### Triage mission — faster scan for executives
 
-Executives generate obligations rapidly. Scan more frequently than the default.
+Executives generate obligations rapidly. Scan 3x daily. Signal expiration shortened to 24 hours.
 
 ```
-routine_create(
+mission_create(
   name: "commitment-triage",
-  description: "Executive triage — scan for obligations, delegation follow-ups, and stale items",
-  prompt: "You are triaging commitments for an executive. Read commitments/README.md for the schema. Priority order: (1) Check delegated items (status=waiting, delegated_to set) — if not updated in 2 days, flag for follow-up. Draft a polite check-in message. (2) Check overdue items. (3) Expire signals older than 24 hours (executives move fast, stale signals are noise). (4) Append triage summary to commitments/triage-log.md. (5) If anything needs attention, send a concise alert — executives scan, not read.",
-  request: { kind: "cron", schedule: "0 9,13,18 * * *", timezone: "<user_timezone>" },
-  execution: { mode: "lightweight", use_tools: true, max_tool_rounds: 6, context_paths: ["commitments/README.md"] }
+  goal: "Executive triage. Read commitments/README.md for schema. Priority order: (1) Check delegated items (status=waiting, delegated_to set) — if not updated in 2 days, flag for follow-up and draft a polite check-in message. (2) Check overdue items — escalate urgency. (3) Expire signals older than 24 hours (executives move fast, stale signals are noise). (4) For signals with immediacy=realtime, broadcast immediately via message tool. (5) Promote high-confidence signals to commitments — default resolution_path to needs_decision for ambiguous items. (6) Route informational signals to intelligence (write MemoryDoc to context/intel/). (7) Append triage summary to commitments/triage-log.md. (8) If anything needs attention, send a concise alert — executives scan, not read.",
+  cadence: "0 9,13,18 * * *"
 )
 ```
 
-Three runs daily: morning, midday, evening. Signal expiration shortened to 24 hours.
-
-### Digest routine — morning and evening, grouped by responsibility
+### Digest mission — morning and evening, grouped by responsibility
 
 ```
-routine_create(
+mission_create(
   name: "commitment-digest",
-  description: "Executive digest — commitments grouped by responsibility type",
-  prompt: "Compose an executive commitments digest. Read commitments/README.md for schema. Gather all open commitments via memory_tree and memory_read. Group by responsibility: (1) DELEGATED — items waiting on others, with days since delegation and follow-up status. (2) OWNED — items you need to act on personally, sorted by urgency. (3) DECISIONS PENDING — items needing a decision from you. (4) RECENT DECISIONS — decisions captured in the last 7 days (from commitments/decisions/). Keep each item to one line. End with pending signal count. Send via message tool.",
-  request: { kind: "cron", schedule: "0 8,17 * * MON-FRI", timezone: "<user_timezone>" },
-  execution: { mode: "lightweight", use_tools: true, max_tool_rounds: 6, context_paths: ["commitments/README.md"] }
+  goal: "Executive commitments digest. Read commitments/README.md for schema. Gather all open commitments via memory_tree and memory_read. Group by responsibility: (1) DELEGATED — items where delegated_to is set, with days since delegation and follow-up status. (2) OWNED — items you need to act on personally, sorted by urgency. For agent_can_handle items, note what the agent would do and ask permission. (3) DECISIONS PENDING — items with resolution_path=needs_decision. (4) RECENT DECISIONS — decisions captured in the last 7 days (from commitments/decisions/), including any needing outcome assessment. Keep each item to one line. End with pending signal count and 'Did I miss anything?' Send via message tool.",
+  cadence: "0 8,17 * * 1-5"
 )
 ```
 
 ## Step 4: Write calibration memories
 
-Write these to the workspace as behavioral guidance that persists across sessions:
-
 ```
 memory_write(
   target: "commitments/calibration.md",
-  content: "# Executive Commitment Calibration\n\n- Group commitments by responsibility type in digests — delegated items shown separately from owned items\n- For delegation follow-ups, draft a polite check-in rather than a blunt status request\n- Only capture explicit decisions, not brainstorming or hypotheticals ('yeah let's do X' = decision; 'maybe we should' = not a decision)\n- Signal expiration is 24 hours — executives move fast, stale signals are noise\n- Most CEO commitments are delegations, not personal tasks — default responsibility to DelegatedTo when someone else is mentioned\n- When capturing decisions, note who was present and what it affects — executives revisit decisions frequently\n- Keep all communications scannable: bullet points, one-liners, no paragraphs",
+  content: "# Executive Commitment Calibration\n\n- Group commitments by responsibility type in digests — delegated items shown separately from owned items\n- For delegation follow-ups, draft a polite check-in rather than a blunt status request\n- Only capture explicit decisions, not brainstorming or hypotheticals ('yeah let's do X' = decision; 'maybe we should' = not a decision)\n- Signal expiration is 24 hours — executives move fast, stale signals are noise\n- Most CEO commitments are delegations, not personal tasks — default delegated_to when someone else is mentioned\n- When capturing decisions, note who was present and what it affects — executives revisit decisions frequently\n- Keep all communications scannable: bullet points, one-liners, no paragraphs\n- Start conservative: surface everything, don't auto-promote signals or auto-dispatch agent_can_handle without approval",
   append: false
 )
 ```
@@ -120,5 +115,6 @@ Tell the user:
 > - **Triage** runs 3x daily (9am, 1pm, 6pm) — delegation follow-ups after 2 days, signals expire after 24h
 > - **Digest** runs morning (8am) and evening (5pm) on weekdays — grouped by delegated vs owned vs decisions pending
 > - I'll capture decisions from our conversations and track delegations automatically
+> - For items I can handle (PR reviews, drafts, research), I'll ask your permission first
 > - Say **"show commitments"** anytime, or **"who owes me what?"** for delegation status
-> - Adjust anything by telling me: "make digests more frequent", "follow up after 1 day instead of 2", etc.
+> - I start conservative — I'll learn your preferences over time as you confirm or override my suggestions

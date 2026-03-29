@@ -1,6 +1,6 @@
 ---
 name: content-creator-assistant
-version: 0.1.0
+version: 0.2.0
 description: Commitment tracking tuned for content creators — content pipeline stages, trend expiration, cross-platform cascades, heavy idea parking.
 activation:
   keywords:
@@ -21,6 +21,14 @@ activation:
     - publishing
     - setup
   max_context_tokens: 2500
+metadata:
+  openclaw:
+    requires:
+      skills:
+        - commitment-triage
+        - commitment-digest
+        - decision-capture
+        - idea-parking
 ---
 
 # Content Creator — Commitment System Setup
@@ -34,7 +42,7 @@ You are configuring the commitments system for a content creator. Their day invo
 
 ## Companion skills
 
-This bundle relies on these skills activating during conversation (they are keyword-triggered, no manual install needed):
+This bundle relies on these skills activating during conversation (keyword-triggered):
 
 | Skill | Activates when | What it does |
 |---|---|---|
@@ -43,7 +51,7 @@ This bundle relies on these skills activating during conversation (they are keyw
 | `decision-capture` | User makes a decision | Records decision with rationale |
 | `idea-parking` | User says "park this idea" | Parks ideas for weekly resurfacing |
 
-If any of these skills are missing from the `skills/` directory, tell the user which ones are needed.
+If any are missing from `skills/`, tell the user which ones are needed.
 
 ## Step 1: Ask configuration questions
 
@@ -55,60 +63,44 @@ If any of these skills are missing from the `skills/` directory, tell the user w
 
 ## Step 2: Create workspace structure
 
-Run the `commitment-setup` skill's workspace creation procedure. Specifically:
-
 1. Check if `commitments/README.md` exists via `memory_read`. If it does, skip to creating the content-pipeline directory.
-2. Write `commitments/README.md` with the full schema — it must document the frontmatter schemas for signals, commitments, decisions, and parked ideas (see `commitment-setup` skill for the complete content).
-3. Create placeholder READMEs in each subdirectory to establish the structure:
-   - `commitments/open/README.md` — "Active commitments."
-   - `commitments/resolved/README.md` — "Completed commitments archive."
-   - `commitments/signals/pending/README.md` — "Signals awaiting triage."
-   - `commitments/signals/expired/README.md` — "Expired signals."
-   - `commitments/decisions/README.md` — "Captured decisions."
-   - `commitments/parked-ideas/README.md` — "Ideas for later."
+2. Write `commitments/README.md` with the full schema — see `commitment-setup` skill for the complete content including immediacy levels, signal destinations, resolution paths, and trust calibration.
+3. Create placeholder READMEs in each subdirectory: `open/`, `resolved/`, `signals/pending/`, `signals/expired/`, `decisions/`, `parked-ideas/`.
 4. Create the content-pipeline directory:
 
 ```
-memory_write(target="commitments/content-pipeline/README.md", content="# Content Pipeline\n\nEach content piece gets its own file tracking its lifecycle:\nidea → research → script → create → edit → thumbnail → publish → distribute → engage\n\nFiles: commitments/content-pipeline/<slug>.md", append=false)
+memory_write(target="commitments/content-pipeline/README.md", content="# Content Pipeline\n\nEach content piece gets its own file tracking its lifecycle:\nidea → research → script → create → edit → thumbnail → publish → distribute → engage\n\nFiles: commitments/content-pipeline/<slug>.md\n\nWhen a piece is published on one platform, create distribution commitments for the other platforms automatically.", append=false)
 ```
 
-## Step 3: Create tuned routines
+## Step 3: Create tuned missions
 
-### Triage routine — trend-aware, fast expiration
+### Triage mission — trend-aware, fast expiration
 
 ```
-routine_create(
+mission_create(
   name: "commitment-triage",
-  description: "Creator triage — expire stale trends, track content pipeline, surface sponsored deadlines",
-  prompt: "You are triaging commitments for a content creator. Read commitments/README.md for the schema. Priority order: (1) Sponsored content with hard deadlines — flag anything due within 3 days. (2) Content pipeline items in commitments/content-pipeline/ — check for stalled stages (not updated in 2+ days). (3) Trend-related signals — expire after 6 hours if not promoted (trends move fast). Non-trend signals expire after 48 hours as normal. (4) Check parked-ideas/ for ideas that might be timely now. (5) Append triage summary to commitments/triage-log.md. (6) Alert if any sponsored deadlines are approaching.",
-  request: { kind: "cron", schedule: "0 8,14,20 * * *", timezone: "<user_timezone>" },
-  execution: { mode: "lightweight", use_tools: true, max_tool_rounds: 6, context_paths: ["commitments/README.md"] }
+  goal: "Creator triage. Read commitments/README.md for schema. Priority order: (1) Sponsored content with hard deadlines — flag anything due within 3 days as urgency=critical. (2) Content pipeline items in commitments/content-pipeline/ — check for stalled stages (not updated in 2+ days). (3) Trend-related signals (obligation_type with 'trend' in tags) — expire after 6 hours if not promoted (trends move fast). Non-trend signals expire after 48 hours. (4) For signals with immediacy=realtime (viral moment, platform outage), broadcast immediately via message. (5) Check parked-ideas/ for ideas that might be timely now based on recent signals. (6) Route informational signals (industry news, competitor moves) to intelligence via MemoryDoc. (7) Append triage summary to commitments/triage-log.md. (8) Alert if any sponsored deadlines are approaching.",
+  cadence: "0 8,14,20 * * *"
 )
 ```
 
-Three runs: morning (planning), afternoon (mid-create check), evening (distribution check).
-
-### Digest routine — pipeline-focused
+### Digest mission — pipeline-focused
 
 ```
-routine_create(
+mission_create(
   name: "commitment-digest",
-  description: "Creator digest — content pipeline status, upcoming deadlines, fresh ideas",
-  prompt: "Compose a content creator digest. Read commitments/README.md for schema. Sections: (1) CONTENT IN PROGRESS — list items from commitments/content-pipeline/ with their current stage and days since last update. (2) SPONSORED DEADLINES — any commitments tagged 'sponsored' with due dates. (3) PUBLISHING QUEUE — items in 'publish' or 'distribute' stage. (4) FRESH IDEAS — count of parked ideas, highlight any high-relevance ones parked in the last week. (5) ENGAGEMENT TASKS — any commitments about responding to comments, collaborations, etc. Keep it visual and scannable. Send via message tool.",
-  request: { kind: "cron", schedule: "0 8 * * *", timezone: "<user_timezone>" },
-  execution: { mode: "lightweight", use_tools: true, max_tool_rounds: 6, context_paths: ["commitments/README.md"] }
+  goal: "Creator digest. Read commitments/README.md for schema. Sections: (1) CONTENT IN PROGRESS — list items from commitments/content-pipeline/ with their current stage and days since last update. Flag stalled items. (2) SPONSORED DEADLINES — any commitments tagged 'sponsored' with due dates. (3) PUBLISHING QUEUE — items in 'publish' or 'distribute' stage. For agent_can_handle items (scheduling posts, writing descriptions), offer to proceed. (4) FRESH IDEAS — count of parked ideas, highlight high-relevance ones from the last week. (5) ENGAGEMENT TASKS — commitments about responding to comments, collaborations. End with 'Did I miss anything?' Send via message tool.",
+  cadence: "0 8 * * *"
 )
 ```
 
-### Idea capture routine — weekly resurface
+### Idea resurface mission — weekly
 
 ```
-routine_create(
+mission_create(
   name: "creator-idea-resurface",
-  description: "Weekly resurfacing of parked content ideas",
-  prompt: "Review parked ideas for the content creator. Read all files in commitments/parked-ideas/ via memory_tree and memory_read. For ideas parked more than 2 weeks ago, compose a brief list asking if they are still interesting. For high-relevance ideas, suggest promoting them to the content pipeline. Send the list via message tool. If no parked ideas exist, skip silently.",
-  request: { kind: "cron", schedule: "0 10 * * MON", timezone: "<user_timezone>" },
-  execution: { mode: "lightweight", use_tools: true, max_tool_rounds: 5, context_paths: ["commitments/README.md"] }
+  goal: "Weekly parked ideas review for content creator. Read all files in commitments/parked-ideas/ via memory_tree and memory_read. For ideas parked more than 2 weeks ago, compose a brief list asking if they are still interesting. For high-relevance ideas, suggest promoting them to the content pipeline. If any parked ideas align with recent trending signals, highlight the match. Send the list via message tool. If no parked ideas exist, skip silently.",
+  cadence: "0 10 * * 1"
 )
 ```
 
@@ -117,22 +109,19 @@ routine_create(
 ```
 memory_write(
   target: "commitments/calibration.md",
-  content: "# Content Creator Calibration\n\n- Content pieces are tracked as pipeline items in commitments/content-pipeline/, not as plain commitments\n- Pipeline stages: idea → research → script → create → edit �� thumbnail → publish → distribute → engage\n- When user publishes on one platform, automatically create commitments for distribution to other platforms: <platforms list>\n- Trend-related signals expire after 6 hours — if it is not acted on quickly, it is stale\n- Sponsored content is always urgency=critical when due within 3 days\n- Ideas flow constantly — park liberally, promote selectively\n- Parked ideas are resurfaced weekly on Monday mornings\n- When a new content piece starts, create a pipeline file with all stages as unchecked items",
+  content: "# Content Creator Calibration\n\n- Content pieces are tracked as pipeline items in commitments/content-pipeline/, not as plain commitments\n- Pipeline stages: idea → research → script → create → edit → thumbnail → publish → distribute → engage\n- When user publishes on one platform, automatically create commitments for distribution to other platforms: <platforms list>\n- Trend-related signals expire after 6 hours — if not acted on quickly, they are stale\n- Sponsored content is always urgency=critical when due within 3 days\n- Ideas flow constantly — park liberally, promote selectively\n- Parked ideas are resurfaced weekly on Monday mornings\n- When a new content piece starts, create a pipeline file with all stages as unchecked items\n- For agent_can_handle items (scheduling, descriptions, thumbnails), ask permission before proceeding\n- Start conservative: surface everything, learn preferences over time",
   append: false
 )
 ```
 
 Replace `<platforms list>` with the platforms the user listed in Step 1.
 
-## Step 5: Explain cross-platform cascades
-
-Tell the user: "When you publish a piece, tell me and I'll automatically create distribution commitments for your other platforms. For example, 'published the API video on YouTube' will create commitments for TikTok clip, Instagram reel, Twitter thread, etc."
-
-## Step 6: Confirm
+## Step 5: Confirm
 
 > Your content creator system is ready:
 > - **Triage** runs 3x daily (8am, 2pm, 8pm) — trend signals expire in 6h, sponsored deadlines flagged at 3 days
 > - **Morning digest** at 8am — pipeline status, deadlines, publishing queue, fresh ideas
 > - **Idea resurface** every Monday morning — reviews parked ideas older than 2 weeks
 > - Pipeline tracking in `commitments/content-pipeline/` — each piece tracks idea through engagement
+> - Cross-platform cascades: tell me when you publish and I'll create distribution commitments
 > - Say **"new content piece: [title]"** to start a pipeline, or **"park this idea"** to save for later

@@ -1,7 +1,7 @@
 ---
 name: decision-capture
-version: 0.1.0
-description: Detect decisions in conversation and record them with rationale, alternatives, and expected outcomes.
+version: 0.2.0
+description: Detect decisions in conversation and record them with rationale, alternatives, and outcome tracking.
 activation:
   keywords:
     - decided
@@ -28,7 +28,7 @@ activation:
 
 # Decision Capture
 
-When a decision is detected in conversation, record it in the commitments workspace. Decisions are durable knowledge — they explain _why_ a path was chosen.
+When a decision is detected in conversation, record it in the commitments workspace. Decisions are durable knowledge — they explain _why_ a path was chosen and enable outcome tracking over time.
 
 ## Detection
 
@@ -56,6 +56,8 @@ context: <topic-slug>
 participants: [<who was involved>]
 confidence: <high if explicit, medium if inferred>
 reversible: <true|false>
+outcome: null
+outcome_positive: null
 tags: [<relevant tags>]
 ---
 # <What was decided>
@@ -70,14 +72,19 @@ tags: [<relevant tags>]
 ## Rationale
 <Why this option was chosen.>
 
-## Expected outcomes
-<What should happen as a result. Include review triggers if applicable.>
+## Outcome
+<To be filled in later when outcome is known.>
 ```
 
 ## Follow-through
 
-If the decision creates an obligation (e.g., "we decided to migrate by Q2"), also create a commitment in `commitments/open/` following the commitment schema.
+1. If the decision creates an obligation (e.g., "we decided to migrate by Q2"), also create a commitment in `commitments/open/` following the commitment schema.
+2. Write an intelligence MemoryDoc to `context/intel/<slug>.md` with a brief summary: "Decided X on <date>. Rationale: <reason>." This makes the decision searchable as durable knowledge.
+
+## Outcome tracking
+
+The triage mission checks for decisions older than 7 days without an outcome. It prompts: "You decided <X> <N> days ago. How did it turn out?" When the user provides an outcome, update the decision file's `outcome` and `outcome_positive` fields.
 
 ## Confirmation
 
-After recording, briefly confirm: "Noted decision: <one-line summary>." Do not over-explain — the user just made the decision, they know what it is.
+After recording, briefly confirm: "Noted decision: <one-line summary>."

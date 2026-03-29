@@ -160,6 +160,15 @@ pub struct GatingRequirements {
     /// Required config file paths that must exist.
     #[serde(default)]
     pub config: Vec<String>,
+    /// Required companion skills that should be installed alongside this one.
+    ///
+    /// Unlike bins/env/config, missing skill dependencies do NOT prevent the
+    /// skill from loading — they produce warnings that the agent can surface
+    /// to the user. This allows bundle/setup skills to declare which sub-skills
+    /// they depend on (e.g., a `ceo-assistant` bundle requires `commitment-triage`,
+    /// `commitment-digest`, `decision-capture`, etc.).
+    #[serde(default)]
+    pub skills: Vec<String>,
 }
 
 /// Where to inject a credential in HTTP requests.
