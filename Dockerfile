@@ -1,45 +1,71 @@
 # Multi-stage Dockerfile for the IronClaw agent (cloud deployment).
 #
+# Uses cargo-chef for dependency caching — only rebuilds deps when
+# Cargo.toml/Cargo.lock change, not on every source edit.
+#
 # Build:
 #   docker build --platform linux/amd64 -t ironclaw:latest .
 #
 # Run:
 #   docker run --env-file .env -p 3000:3000 ironclaw:latest
 
-# Stage 1: Build
-FROM rust:1.92-slim-bookworm AS builder
+# Stage 1: Install cargo-chef
+FROM rust:1.92-slim-bookworm AS chef
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config libssl-dev cmake gcc g++ \
     && rm -rf /var/lib/apt/lists/* \
     && rustup target add wasm32-wasip2 \
-    && cargo install wasm-tools
+    && cargo install cargo-chef wasm-tools
 
 WORKDIR /app
 
-# Copy manifests first for layer caching
+# Stage 2: Generate the dependency recipe (changes only when Cargo.toml/lock change)
+FROM chef AS planner
+
 COPY Cargo.toml Cargo.lock ./
 COPY crates/ crates/
-
-# Copy source, build script, tests, and supporting directories
 COPY build.rs build.rs
 COPY src/ src/
 COPY tests/ tests/
+COPY benches/ benches/
 COPY migrations/ migrations/
 COPY registry/ registry/
 COPY channels-src/ channels-src/
 COPY wit/ wit/
 COPY providers.json providers.json
-# [[bench]] entries in Cargo.toml require bench sources to exist for cargo to parse the manifest
+
+RUN cargo chef prepare --recipe-path recipe.json
+
+# Stage 3: Build dependencies (cached unless Cargo.toml/lock change)
+FROM chef AS deps
+
+COPY --from=planner /app/recipe.json recipe.json
+RUN cargo chef cook --release --recipe-path recipe.json
+
+# Stage 4: Build the actual binary (only recompiles ironclaw source)
+FROM deps AS builder
+
+COPY Cargo.toml Cargo.lock ./
+COPY crates/ crates/
+COPY build.rs build.rs
+COPY src/ src/
+COPY tests/ tests/
 COPY benches/ benches/
+COPY migrations/ migrations/
+COPY registry/ registry/
+COPY channels-src/ channels-src/
+COPY wit/ wit/
+COPY providers.json providers.json
 
 RUN cargo build --release --bin ironclaw
 
-# Stage 2: Runtime
+# Stage 5: Runtime
 FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates libssl3 \
+    && update-ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /app/target/release/ironclaw /usr/local/bin/ironclaw

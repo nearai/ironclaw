@@ -421,6 +421,12 @@ impl PairingStore {
     }
 
     /// Read the allowFrom list for a channel.
+    pub fn has_allow_from_file(&self, channel: &str) -> Result<bool, PairingStoreError> {
+        let path = allow_from_path(&self.base_dir, channel)?;
+        Ok(path.exists())
+    }
+
+    /// Read the allowFrom list for a channel.
     pub fn read_allow_from(&self, channel: &str) -> Result<Vec<String>, PairingStoreError> {
         let path = allow_from_path(&self.base_dir, channel)?;
         let content = match fs::read_to_string(&path) {

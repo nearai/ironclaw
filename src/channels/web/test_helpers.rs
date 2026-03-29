@@ -77,7 +77,6 @@ impl TestGatewayBuilder {
             job_manager: None,
             prompt_queue: None,
             owner_id: self.user_id.clone(),
-            default_sender_id: self.user_id,
             shutdown_tx: tokio::sync::RwLock::new(None),
             ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
             llm_provider: self.llm_provider,
@@ -92,6 +91,8 @@ impl TestGatewayBuilder {
             routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
             startup_time: std::time::Instant::now(),
             active_config: crate::channels::web::server::ActiveConfigSnapshot::default(),
+            secrets_store: None,
+            db_auth: None,
         })
     }
 
@@ -106,7 +107,7 @@ impl TestGatewayBuilder {
         let addr: SocketAddr = "127.0.0.1:0"
             .parse()
             .expect("hard-coded address must parse"); // safety: constant literal
-        let bound = start_server(addr, state.clone(), auth).await?;
+        let bound = start_server(addr, state.clone(), auth.into()).await?;
         Ok((bound, state))
     }
 
@@ -120,7 +121,7 @@ impl TestGatewayBuilder {
         let addr: SocketAddr = "127.0.0.1:0"
             .parse()
             .expect("hard-coded address must parse"); // safety: constant literal
-        let bound = start_server(addr, state.clone(), auth).await?;
+        let bound = start_server(addr, state.clone(), auth.into()).await?;
         Ok((bound, state))
     }
 }

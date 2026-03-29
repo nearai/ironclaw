@@ -5,6 +5,7 @@
 //! handlers can extract it via `AuthenticatedUser`.
 
 use std::collections::HashMap;
+use std::num::NonZeroUsize;
 
 use axum::{
     extract::{FromRequestParts, Request, State},
@@ -13,18 +14,25 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use sha2::{Digest, Sha256};
+use std::sync::Arc;
+use std::time::Instant;
 use subtle::ConstantTimeEq;
+use tokio::sync::RwLock;
+
+use crate::db::Database;
 
 /// Identity resolved from a bearer token.
 #[derive(Debug, Clone)]
 pub struct UserIdentity {
     pub user_id: String,
+    /// `admin` or `member`.
+    pub role: String,
     /// Additional user scopes this identity can read from.
     pub workspace_read_scopes: Vec<String>,
 }
 
 /// Hash a token with SHA-256 for constant-size, timing-safe storage.
-fn hash_token(token: &str) -> [u8; 32] {
+pub fn hash_token(token: &str) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(token.as_bytes());
     hasher.finalize().into()
@@ -56,6 +64,7 @@ impl MultiAuthState {
                 hash,
                 UserIdentity {
                     user_id,
+                    role: "admin".to_string(),
                     workspace_read_scopes: Vec::new(),
                 },
             )],
@@ -64,6 +73,11 @@ impl MultiAuthState {
     }
 
     /// Create a multi-user auth state from a map of tokens to identities.
+    ///
+    /// **Test-only** — production multi-user auth is DB-backed via
+    /// `DbAuthenticator`. This constructor is kept public (not `#[cfg(test)]`)
+    /// because integration tests in `tests/` compile the crate as a library
+    /// where `cfg(test)` is not set.
     pub fn multi(tokens: HashMap<String, UserIdentity>) -> Self {
         let hashed_tokens: Vec<([u8; 32], UserIdentity)> = tokens
             .into_iter()
@@ -108,6 +122,131 @@ impl MultiAuthState {
     }
 }
 
+/// DB-backed token authenticator with a bounded LRU cache.
+///
+/// Checks an LRU cache first (TTL 60s), then falls back to a DB query.
+/// The cache is bounded to `MAX_CACHE_ENTRIES` — when full, the least
+/// recently used entry is evicted regardless of TTL.
+///
+/// Revoking a token or suspending a user has at most 60s of stale
+/// authentication before the cache entry expires.
+#[derive(Clone)]
+#[allow(clippy::type_complexity)]
+pub struct DbAuthenticator {
+    store: Arc<dyn Database>,
+    /// Bounded LRU cache: token_hash → (identity, inserted_at).
+    cache: Arc<RwLock<lru::LruCache<[u8; 32], (UserIdentity, Instant)>>>,
+}
+
+impl DbAuthenticator {
+    /// Cache TTL — how long a successful auth is cached before re-querying the DB.
+    const CACHE_TTL_SECS: u64 = 60;
+    /// Maximum cache entries to prevent unbounded growth.
+    // SAFETY: 1024 is non-zero, so the unwrap in `new()` is infallible.
+    const MAX_CACHE_ENTRIES: NonZeroUsize = match NonZeroUsize::new(1024) {
+        Some(v) => v,
+        None => unreachable!(),
+    };
+
+    pub fn new(store: Arc<dyn Database>) -> Self {
+        Self {
+            store,
+            cache: Arc::new(RwLock::new(lru::LruCache::new(Self::MAX_CACHE_ENTRIES))),
+        }
+    }
+
+    /// Evict all cached entries for a specific user.
+    ///
+    /// Call this after security-critical actions (suspend, activate, role
+    /// change, token revocation) so the change takes effect immediately
+    /// instead of waiting for the 60-second TTL to expire.
+    pub async fn invalidate_user(&self, user_id: &str) {
+        let mut cache = self.cache.write().await;
+        // LruCache doesn't support predicate-based removal, so collect keys
+        // first then remove. The cache is bounded (1024) so this is cheap.
+        let keys_to_remove: Vec<[u8; 32]> = cache
+            .iter()
+            .filter(|(_, (identity, _))| identity.user_id == user_id)
+            .map(|(k, _)| *k)
+            .collect();
+        for key in keys_to_remove {
+            cache.pop(&key);
+        }
+    }
+
+    /// Authenticate a token against the database, using cache when possible.
+    ///
+    /// Returns `Ok(Some(identity))` on success, `Ok(None)` if the token is
+    /// not found, or `Err(())` if the database is unreachable (so the caller
+    /// can return 503 instead of 401).
+    pub async fn authenticate(&self, candidate: &str) -> Result<Option<UserIdentity>, ()> {
+        let hash = hash_token(candidate);
+
+        // Check cache first (promotes to most-recent on hit)
+        {
+            let mut cache = self.cache.write().await;
+            if let Some((identity, inserted_at)) = cache.get(&hash) {
+                if inserted_at.elapsed().as_secs() < Self::CACHE_TTL_SECS {
+                    return Ok(Some(identity.clone()));
+                }
+                // Expired — remove stale entry
+                cache.pop(&hash);
+            }
+        }
+
+        // Cache miss or expired — query DB
+        let (token_record, user_record) = match self.store.authenticate_token(&hash).await {
+            Ok(Some(pair)) => pair,
+            Ok(None) => return Ok(None),
+            Err(e) => {
+                tracing::warn!("DB auth lookup failed: {e}");
+                return Err(());
+            }
+        };
+
+        let identity = UserIdentity {
+            user_id: user_record.id.clone(),
+            role: user_record.role.clone(),
+            workspace_read_scopes: Vec::new(),
+        };
+
+        // Record token usage (best-effort, don't block auth)
+        let store = self.store.clone();
+        let token_id = token_record.id;
+        let user_id = user_record.id;
+        tokio::spawn(async move {
+            let _ = store.record_token_usage(token_id).await;
+            let _ = store.record_login(&user_id).await;
+        });
+
+        // Insert into bounded LRU — if full, least-recently-used entry is evicted
+        {
+            let mut cache = self.cache.write().await;
+            cache.put(hash, (identity.clone(), Instant::now()));
+        }
+
+        Ok(Some(identity))
+    }
+}
+
+/// Combined auth state: tries env-var tokens first, then DB-backed tokens.
+#[derive(Clone)]
+pub struct CombinedAuthState {
+    /// In-memory tokens from GATEWAY_AUTH_TOKEN.
+    pub env_auth: MultiAuthState,
+    /// DB-backed token authenticator (optional — only when a database is available).
+    pub db_auth: Option<DbAuthenticator>,
+}
+
+impl From<MultiAuthState> for CombinedAuthState {
+    fn from(env_auth: MultiAuthState) -> Self {
+        Self {
+            env_auth,
+            db_auth: None,
+        }
+    }
+}
+
 /// Axum extractor that provides the authenticated user identity.
 ///
 /// Only available on routes behind `auth_middleware`. Extracts the
@@ -127,6 +266,31 @@ where
             .cloned()
             .map(AuthenticatedUser)
             .ok_or((StatusCode::UNAUTHORIZED, "Not authenticated"))
+    }
+}
+
+/// Axum extractor that requires the authenticated user to have the `admin` role.
+///
+/// Use instead of `AuthenticatedUser` on endpoints that modify system-wide
+/// state (user management, model selection, extension/skill installation).
+pub struct AdminUser(pub UserIdentity);
+
+impl<S> FromRequestParts<S> for AdminUser
+where
+    S: Send + Sync,
+{
+    type Rejection = (StatusCode, &'static str);
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        let identity = parts
+            .extensions
+            .get::<UserIdentity>()
+            .cloned()
+            .ok_or((StatusCode::UNAUTHORIZED, "Not authenticated"))?;
+        if identity.role != "admin" {
+            return Err((StatusCode::FORBIDDEN, "Admin role required"));
+        }
+        Ok(AdminUser(identity))
     }
 }
 
@@ -166,39 +330,65 @@ fn query_token(request: &Request) -> Option<String> {
 
 /// Auth middleware that validates bearer token from header or query param.
 ///
-/// SSE connections can't set headers from `EventSource`, so we also accept
-/// `?token=xxx` as a query parameter, but only on SSE/WS endpoints.
+/// Tries env-var tokens first (constant-time, in-memory), then falls back
+/// to DB-backed token lookup if configured. SSE connections can't set
+/// headers from `EventSource`, so we also accept `?token=xxx` as a query
+/// parameter, but only on SSE/WS endpoints.
 ///
 /// On successful authentication, inserts the matching `UserIdentity` into
 /// request extensions for downstream extraction via `AuthenticatedUser`.
 pub async fn auth_middleware(
-    State(auth): State<MultiAuthState>,
+    State(auth): State<CombinedAuthState>,
     headers: HeaderMap,
     mut request: Request,
     next: Next,
 ) -> Response {
-    // Try Authorization header first.
-    // RFC 6750 Section 2.1: auth-scheme comparison is case-insensitive.
+    // Extract the candidate token from header or query param.
+    let token = extract_token(&headers, &request);
+
+    if let Some(ref tok) = token {
+        // 1. Try env-var tokens first (fast, constant-time, in-memory).
+        if let Some(identity) = auth.env_auth.authenticate(tok) {
+            request.extensions_mut().insert(identity.clone());
+            return next.run(request).await;
+        }
+
+        // 2. Fall back to DB-backed token lookup.
+        if let Some(ref db_auth) = auth.db_auth {
+            match db_auth.authenticate(tok).await {
+                Ok(Some(identity)) => {
+                    request.extensions_mut().insert(identity);
+                    return next.run(request).await;
+                }
+                Err(()) => {
+                    return (StatusCode::SERVICE_UNAVAILABLE, "Database unavailable")
+                        .into_response();
+                }
+                Ok(None) => {}
+            }
+        }
+    }
+
+    (StatusCode::UNAUTHORIZED, "Invalid or missing auth token").into_response()
+}
+
+/// Extract a bearer token from the Authorization header or query parameter.
+fn extract_token(headers: &HeaderMap, request: &Request) -> Option<String> {
+    // Try Authorization header first (RFC 6750).
     if let Some(auth_header) = headers.get("authorization")
         && let Ok(value) = auth_header.to_str()
         && value.len() > 7
         && value[..7].eq_ignore_ascii_case("Bearer ")
-        && let Some(identity) = auth.authenticate(&value[7..])
     {
-        request.extensions_mut().insert(identity.clone());
-        return next.run(request).await;
+        return Some(value[7..].to_string());
     }
 
-    // Fall back to query parameter, but only for SSE/WS endpoints.
-    if allows_query_token_auth(&request)
-        && let Some(token) = query_token(&request)
-        && let Some(identity) = auth.authenticate(&token)
-    {
-        request.extensions_mut().insert(identity.clone());
-        return next.run(request).await;
+    // Fall back to query parameter for SSE/WS endpoints.
+    if allows_query_token_auth(request) {
+        return query_token(request);
     }
 
-    (StatusCode::UNAUTHORIZED, "Invalid or missing auth token").into_response()
+    None
 }
 
 #[cfg(test)]
@@ -227,6 +417,7 @@ mod tests {
             "tok-alice".to_string(),
             UserIdentity {
                 user_id: "alice".to_string(),
+                role: "admin".to_string(),
                 workspace_read_scopes: Vec::new(),
             },
         );
@@ -234,6 +425,7 @@ mod tests {
             "tok-bob".to_string(),
             UserIdentity {
                 user_id: "bob".to_string(),
+                role: "admin".to_string(),
                 workspace_read_scopes: Vec::new(),
             },
         );
@@ -274,7 +466,10 @@ mod tests {
     /// Router with streaming endpoints (query auth allowed) and regular
     /// endpoints (query auth rejected).
     fn test_app(token: &str) -> Router {
-        let state = MultiAuthState::single(token.to_string(), "test-user".to_string());
+        let state = CombinedAuthState::from(MultiAuthState::single(
+            token.to_string(),
+            "test-user".to_string(),
+        ));
         Router::new()
             .route("/api/chat/events", get(dummy_handler))
             .route("/api/logs/events", get(dummy_handler))
@@ -486,7 +681,7 @@ mod tests {
 
     /// Build a multi-user router where each token maps to a distinct identity.
     fn multi_user_app(tokens: HashMap<String, UserIdentity>) -> Router {
-        let state = MultiAuthState::multi(tokens);
+        let state = CombinedAuthState::from(MultiAuthState::multi(tokens));
         Router::new()
             .route("/api/chat/events", get(identity_handler))
             .route("/api/chat/send", post(identity_handler))
@@ -500,6 +695,7 @@ mod tests {
             "tok-alice".to_string(),
             UserIdentity {
                 user_id: "alice".to_string(),
+                role: "admin".to_string(),
                 workspace_read_scopes: vec!["shared".to_string()],
             },
         );
@@ -507,6 +703,7 @@ mod tests {
             "tok-bob".to_string(),
             UserIdentity {
                 user_id: "bob".to_string(),
+                role: "admin".to_string(),
                 workspace_read_scopes: vec!["shared".to_string(), "alice".to_string()],
             },
         );
@@ -643,7 +840,10 @@ mod tests {
     #[tokio::test]
     async fn test_multi_user_empty_scopes_for_single_user() {
         // Single-user mode creates identity with empty workspace_read_scopes.
-        let state = MultiAuthState::single("tok-only".to_string(), "solo".to_string());
+        let state = CombinedAuthState::from(MultiAuthState::single(
+            "tok-only".to_string(),
+            "solo".to_string(),
+        ));
         let app = Router::new()
             .route("/api/scopes", get(scopes_handler))
             .layer(middleware::from_fn_with_state(state, auth_middleware));
