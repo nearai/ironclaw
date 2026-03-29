@@ -219,6 +219,11 @@ impl Agent {
                 reason: format!("Exceeded maximum tool iterations ({max_tool_iterations})"),
             }
             .into()),
+            LoopOutcome::Failure(reason) => Err(crate::error::LlmError::InvalidResponse {
+                provider: "agent".to_string(),
+                reason,
+            }
+            .into()),
             LoopOutcome::NeedApproval(pending) => Ok(AgenticLoopResult::NeedApproval { pending }),
         }
     }
@@ -462,6 +467,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
     async fn handle_text_response(
         &self,
         text: &str,
+        _metadata: crate::llm::ResponseMetadata,
         _reason_ctx: &mut ReasoningContext,
     ) -> TextAction {
         // Strip internal "[Called tool ...]" text that can leak when

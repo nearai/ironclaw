@@ -52,6 +52,26 @@ pub struct GatewayConfig {
     pub workspace_read_scopes: Vec<String>,
     /// Memory layer definitions (JSON in env var, or from external config).
     pub memory_layers: Vec<crate::workspace::layer::MemoryLayer>,
+    /// OIDC JWT authentication (e.g., behind AWS ALB with Okta).
+    pub oidc: Option<GatewayOidcConfig>,
+}
+
+/// OIDC JWT authentication configuration for the web gateway.
+///
+/// When enabled, the gateway accepts signed JWTs from a configurable HTTP
+/// header (e.g., `x-amzn-oidc-data` from AWS ALB). Keys are fetched from
+/// a JWKS endpoint and cached for 1 hour.
+#[derive(Debug, Clone)]
+pub struct GatewayOidcConfig {
+    /// HTTP header containing the JWT (default: `x-amzn-oidc-data`).
+    pub header: String,
+    /// JWKS URL for key discovery. Supports `{kid}` placeholder for
+    /// ALB-style per-key PEM endpoints, and standard `/.well-known/jwks.json`.
+    pub jwks_url: String,
+    /// Expected `iss` claim. Validated if set.
+    pub issuer: Option<String>,
+    /// Expected `aud` claim. Validated if set.
+    pub audience: Option<String>,
 }
 
 /// Signal channel configuration (signal-cli daemon HTTP/JSON-RPC).
@@ -195,6 +215,24 @@ impl ChannelsConfig {
                     });
                 }
             }
+            let oidc_enabled = parse_bool_env("GATEWAY_OIDC_ENABLED", false)?;
+            let oidc = if oidc_enabled {
+                let jwks_url =
+                    optional_env("GATEWAY_OIDC_JWKS_URL")?.ok_or(ConfigError::InvalidValue {
+                        key: "GATEWAY_OIDC_JWKS_URL".to_string(),
+                        message: "required when GATEWAY_OIDC_ENABLED=true".to_string(),
+                    })?;
+                Some(GatewayOidcConfig {
+                    header: optional_env("GATEWAY_OIDC_HEADER")?
+                        .unwrap_or_else(|| "x-amzn-oidc-data".to_string()),
+                    jwks_url,
+                    issuer: optional_env("GATEWAY_OIDC_ISSUER")?,
+                    audience: optional_env("GATEWAY_OIDC_AUDIENCE")?,
+                })
+            } else {
+                None
+            };
+
             Some(GatewayConfig {
                 host: optional_env("GATEWAY_HOST")?
                     .or_else(|| cs.gateway_host.clone())
@@ -207,6 +245,7 @@ impl ChannelsConfig {
                     .or_else(|| cs.gateway_auth_token.clone()),
                 workspace_read_scopes,
                 memory_layers,
+                oidc,
             })
         } else {
             None
@@ -363,6 +402,7 @@ mod tests {
             auth_token: Some("tok-abc".to_string()),
             workspace_read_scopes: vec![],
             memory_layers: vec![],
+            oidc: None,
         };
         assert_eq!(cfg.host, "127.0.0.1");
         assert_eq!(cfg.port, 3000);
@@ -377,6 +417,7 @@ mod tests {
             auth_token: None,
             workspace_read_scopes: vec![],
             memory_layers: vec![],
+            oidc: None,
         };
         assert!(cfg.auth_token.is_none());
     }
