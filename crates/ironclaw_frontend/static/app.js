@@ -549,6 +549,24 @@ function connectSSE() {
     }
   };
 
+  // Forward all SSE events to registered widget handlers.
+  // Wraps addEventListener to intercept every named event and dispatch
+  // to widget subscribers before the built-in handler runs.
+  var _origAddEventListener = eventSource.addEventListener.bind(eventSource);
+  eventSource.addEventListener = function(type, listener, opts) {
+    _origAddEventListener(type, function(e) {
+      // Dispatch to widget handlers
+      if (IronClaw.api && e.data) {
+        try {
+          var parsed = JSON.parse(e.data);
+          IronClaw.api._dispatch(type, parsed);
+        } catch (_) {}
+      }
+      // Call original handler
+      listener(e);
+    }, opts);
+  };
+
   eventSource.addEventListener('response', (e) => {
     const data = JSON.parse(e.data);
     if (!isCurrentThread(data.thread_id)) {
@@ -6685,6 +6703,21 @@ IronClaw.api = {
     };
   },
 
+  /**
+   * Dispatch an SSE event to registered widget handlers.
+   * Called internally by SSE event listeners — not for widget use.
+   * @private
+   */
+  _dispatch: function(eventType, data) {
+    var handlers = window._widgetEventHandlers && window._widgetEventHandlers[eventType];
+    if (!handlers || handlers.length === 0) return;
+    for (var i = 0; i < handlers.length; i++) {
+      try { handlers[i](data); } catch (e) {
+        console.error('[IronClaw] Widget event handler error (' + eventType + '):', e);
+      }
+    }
+  },
+
   /** Current theme information. */
   theme: {
     get current() { return document.documentElement.dataset.theme || 'dark'; }
@@ -6733,12 +6766,12 @@ function _addWidgetTab(def) {
     tabBar.appendChild(btn);
   }
 
-  // Create container panel
+  // Create container panel (id must match switchTab's `p.id === 'tab-' + tab`)
   var panel = document.createElement('div');
+  panel.id = 'tab-' + def.id;
   panel.className = 'tab-panel';
   panel.dataset.tab = def.id;
   panel.dataset.widget = def.id;
-  panel.style.display = 'none';
   tabContent.appendChild(panel);
 
   // Initialize the widget
@@ -6755,17 +6788,57 @@ function _addWidgetTab(def) {
 if (window.__IRONCLAW_LAYOUT__) {
   (function() {
     var layout = window.__IRONCLAW_LAYOUT__;
+
     // Apply branding title
     if (layout.branding && layout.branding.title) {
       var titleEl = document.querySelector('.app-title');
       if (titleEl) titleEl.textContent = layout.branding.title;
     }
-    // Apply tab visibility
+
+    // Apply tab visibility — hide specified tabs
     if (layout.tabs && layout.tabs.hidden) {
       layout.tabs.hidden.forEach(function(tabId) {
         var btn = document.querySelector('.tab-btn[data-tab="' + tabId + '"]');
         if (btn) btn.style.display = 'none';
       });
+    }
+
+    // Apply tab ordering — reorder tab buttons in the tab bar
+    if (layout.tabs && layout.tabs.order && layout.tabs.order.length > 0) {
+      var tabBar = document.querySelector('.tab-bar');
+      if (tabBar) {
+        var order = layout.tabs.order;
+        // Sort existing buttons by the specified order
+        var buttons = Array.from(tabBar.querySelectorAll('button[data-tab]'));
+        var orderIndex = {};
+        order.forEach(function(id, i) { orderIndex[id] = i; });
+        buttons.sort(function(a, b) {
+          var ai = orderIndex[a.getAttribute('data-tab')];
+          var bi = orderIndex[b.getAttribute('data-tab')];
+          if (ai === undefined) ai = 999;
+          if (bi === undefined) bi = 999;
+          return ai - bi;
+        });
+        buttons.forEach(function(btn) { tabBar.appendChild(btn); });
+        updateTabIndicator();
+      }
+    }
+
+    // Apply default tab — switch to it if no hash navigation overrides
+    if (layout.tabs && layout.tabs.default_tab && !window.location.hash) {
+      switchTab(layout.tabs.default_tab);
+    }
+
+    // Apply chat config
+    if (layout.chat) {
+      if (layout.chat.suggestions === false) {
+        var chips = document.getElementById('suggestion-chips');
+        if (chips) chips.style.display = 'none';
+      }
+      if (layout.chat.image_upload === false) {
+        var imgBtn = document.getElementById('image-upload-btn');
+        if (imgBtn) imgBtn.style.display = 'none';
+      }
     }
   })();
 }

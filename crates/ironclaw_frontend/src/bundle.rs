@@ -82,10 +82,10 @@ pub fn assemble_index(base_html: &str, bundle: &FrontendBundle) -> String {
             }
         }
 
-        // Widget JS as module script served from API
+        // Widget JS inlined (avoids auth issues with <script src> on protected endpoints)
         body_injections.push(format!(
-            "<script type=\"module\" src=\"/api/frontend/widget/{}/index.js\"></script>",
-            widget.manifest.id
+            "<script type=\"module\" data-widget=\"{}\">\n{}\n</script>",
+            widget.manifest.id, widget.js
         ));
     }
 
@@ -219,7 +219,8 @@ mod tests {
             ..Default::default()
         };
         let result = assemble_index(MINIMAL_HTML, &bundle);
-        assert!(result.contains("src=\"/api/frontend/widget/dashboard/index.js\""));
+        assert!(result.contains("data-widget=\"dashboard\""));
+        assert!(result.contains("console.log('hello');"));
         assert!(result.contains("data-widget=\"dashboard\""));
         assert!(result.contains("[data-widget=\"dashboard\"] .panel"));
     }
