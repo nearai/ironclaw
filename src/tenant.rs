@@ -209,6 +209,13 @@ impl TenantScope {
             .await
     }
 
+    // === LLM call recording ===
+
+    /// Record an LLM call to the database for persistent usage tracking.
+    pub async fn record_llm_call(&self, record: &LlmCallRecord<'_>) -> Result<Uuid, DatabaseError> {
+        self.inner.record_llm_call(record).await
+    }
+
     // === Settings ===
 
     pub async fn get_setting(&self, key: &str) -> Result<Option<serde_json::Value>, DatabaseError> {
@@ -330,35 +337,62 @@ impl TenantScope {
 
     /// Add a message to a conversation owned by this tenant.
     ///
-    /// Verifies the conversation belongs to this user before adding.
+    /// Returns `NotFound` if the conversation does not belong to this user.
     pub async fn add_conversation_message(
         &self,
         conversation_id: Uuid,
         role: &str,
         content: &str,
     ) -> Result<Uuid, DatabaseError> {
+        if !self.conversation_belongs_to_user(conversation_id).await? {
+            return Err(DatabaseError::NotFound {
+                entity: "conversation".to_string(),
+                id: conversation_id.to_string(),
+            });
+        }
         self.inner
             .add_conversation_message(conversation_id, role, content)
             .await
     }
 
+    /// Touch a conversation timestamp. Returns `NotFound` if not owned by this user.
     pub async fn touch_conversation(&self, id: Uuid) -> Result<(), DatabaseError> {
+        if !self.conversation_belongs_to_user(id).await? {
+            return Err(DatabaseError::NotFound {
+                entity: "conversation".to_string(),
+                id: id.to_string(),
+            });
+        }
         self.inner.touch_conversation(id).await
     }
 
+    /// List messages in a conversation. Returns `NotFound` if not owned by this user.
     pub async fn list_conversation_messages(
         &self,
         conversation_id: Uuid,
     ) -> Result<Vec<ConversationMessage>, DatabaseError> {
+        if !self.conversation_belongs_to_user(conversation_id).await? {
+            return Err(DatabaseError::NotFound {
+                entity: "conversation".to_string(),
+                id: conversation_id.to_string(),
+            });
+        }
         self.inner.list_conversation_messages(conversation_id).await
     }
 
+    /// Paginated message listing. Returns `NotFound` if not owned by this user.
     pub async fn list_conversation_messages_paginated(
         &self,
         conversation_id: Uuid,
         before: Option<DateTime<Utc>>,
         limit: i64,
     ) -> Result<(Vec<ConversationMessage>, bool), DatabaseError> {
+        if !self.conversation_belongs_to_user(conversation_id).await? {
+            return Err(DatabaseError::NotFound {
+                entity: "conversation".to_string(),
+                id: conversation_id.to_string(),
+            });
+        }
         self.inner
             .list_conversation_messages_paginated(conversation_id, before, limit)
             .await
@@ -374,21 +408,35 @@ impl TenantScope {
             .await
     }
 
+    /// Update metadata on a conversation. Returns `NotFound` if not owned by this user.
     pub async fn update_conversation_metadata_field(
         &self,
         id: Uuid,
         key: &str,
         value: &serde_json::Value,
     ) -> Result<(), DatabaseError> {
+        if !self.conversation_belongs_to_user(id).await? {
+            return Err(DatabaseError::NotFound {
+                entity: "conversation".to_string(),
+                id: id.to_string(),
+            });
+        }
         self.inner
             .update_conversation_metadata_field(id, key, value)
             .await
     }
 
+    /// Get conversation metadata. Returns `NotFound` if not owned by this user.
     pub async fn get_conversation_metadata(
         &self,
         id: Uuid,
     ) -> Result<Option<serde_json::Value>, DatabaseError> {
+        if !self.conversation_belongs_to_user(id).await? {
+            return Err(DatabaseError::NotFound {
+                entity: "conversation".to_string(),
+                id: id.to_string(),
+            });
+        }
         self.inner.get_conversation_metadata(id).await
     }
 }

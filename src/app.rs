@@ -336,17 +336,12 @@ impl AppBuilder {
             ws = ws.with_memory_layers(self.config.workspace.memory_layers.clone());
             let ws = Arc::new(ws);
 
-            // Detect multi-tenant mode: when GATEWAY_USER_TOKENS is configured,
+            // Detect multi-tenant mode: when the database has registered users,
             // each authenticated user needs their own workspace scope. Use
             // WorkspacePool (which implements WorkspaceResolver) to create
             // per-user workspaces on demand instead of sharing the startup
             // workspace across all users.
-            let is_multi_tenant = self
-                .config
-                .channels
-                .gateway
-                .as_ref()
-                .is_some_and(|gw| gw.user_tokens.is_some());
+            let is_multi_tenant = db.has_any_users().await.unwrap_or(false);
 
             if is_multi_tenant {
                 let pool = Arc::new(crate::channels::web::server::WorkspacePool::new(
@@ -862,7 +857,8 @@ impl AppBuilder {
         // Skills system
         let (skill_registry, skill_catalog) = if self.config.skills.enabled {
             let mut registry = SkillRegistry::new(self.config.skills.local_dir.clone())
-                .with_installed_dir(self.config.skills.installed_dir.clone());
+                .with_installed_dir(self.config.skills.installed_dir.clone())
+                .with_max_scan_depth(self.config.skills.max_scan_depth);
             let loaded = registry.discover_all().await;
             if !loaded.is_empty() {
                 tracing::debug!("Loaded {} skill(s): {}", loaded.len(), loaded.join(", "));

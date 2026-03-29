@@ -16,7 +16,6 @@ use axum::routing::{delete, get, post};
 use tower::ServiceExt;
 use uuid::Uuid;
 
-use crate::channels::web::GatewayChannel;
 use crate::channels::web::auth::{
     AuthenticatedUser, MultiAuthState, UserIdentity, auth_middleware,
 };
@@ -24,7 +23,6 @@ use crate::channels::web::server::{
     ActiveConfigSnapshot, GatewayState, PerUserRateLimiter, PromptQueue, RateLimiter, WorkspacePool,
 };
 use crate::channels::web::sse::SseManager;
-use crate::config::GatewayConfig;
 
 // ── Helpers ────────────────────────────────────────────────────────────
 
@@ -35,6 +33,7 @@ fn two_user_auth() -> MultiAuthState {
         "tok-alice".to_string(),
         UserIdentity {
             user_id: "alice".to_string(),
+            role: "admin".to_string(),
             workspace_read_scopes: vec!["shared".to_string()],
         },
     );
@@ -42,6 +41,7 @@ fn two_user_auth() -> MultiAuthState {
         "tok-bob".to_string(),
         UserIdentity {
             user_id: "bob".to_string(),
+            role: "admin".to_string(),
             workspace_read_scopes: vec!["shared".to_string(), "alice".to_string()],
         },
     );
@@ -67,7 +67,6 @@ fn build_state(
         job_manager: None,
         prompt_queue,
         owner_id: "test".to_string(),
-        default_sender_id: "test".to_string(),
         shutdown_tx: tokio::sync::RwLock::new(None),
         ws_tracker: None,
         llm_provider: None,
@@ -82,41 +81,9 @@ fn build_state(
         routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
         startup_time: std::time::Instant::now(),
         active_config: ActiveConfigSnapshot::default(),
+        secrets_store: None,
+        db_auth: None,
     })
-}
-
-fn gateway_config() -> GatewayConfig {
-    GatewayConfig {
-        host: "127.0.0.1".to_string(),
-        port: 3000,
-        auth_token: Some("gateway-auth".to_string()),
-        user_id: "gateway-sender".to_string(),
-        workspace_read_scopes: Vec::new(),
-        memory_layers: Vec::new(),
-        user_tokens: None,
-    }
-}
-
-#[test]
-fn with_owner_scope_updates_gateway_owner_scope_in_multi_user_mode() {
-    let mut gateway = GatewayChannel::new(gateway_config());
-    gateway.auth = two_user_auth();
-    gateway.config.user_tokens = Some(HashMap::new());
-    let gateway = gateway.with_owner_scope("owner-scope");
-
-    assert_eq!(gateway.state.owner_id, "owner-scope");
-    assert_eq!(gateway.state.default_sender_id, "gateway-sender");
-
-    let alice = gateway
-        .auth
-        .authenticate("tok-alice")
-        .expect("alice token should remain valid");
-    let bob = gateway
-        .auth
-        .authenticate("tok-bob")
-        .expect("bob token should remain valid");
-    assert_eq!(alice.user_id, "alice");
-    assert_eq!(bob.user_id, "bob");
 }
 
 /// Create a libSQL-backed test database in a temporary directory.
@@ -225,6 +192,7 @@ mod workspace_pool {
         );
         let identity = UserIdentity {
             user_id: "alice".to_string(),
+            role: "admin".to_string(),
             workspace_read_scopes: vec![],
         };
         let ws = pool.get_or_create(&identity).await;
@@ -253,6 +221,7 @@ mod workspace_pool {
         );
         let identity = UserIdentity {
             user_id: "alice".to_string(),
+            role: "admin".to_string(),
             workspace_read_scopes: vec![],
         };
         let ws = pool.get_or_create(&identity).await;
@@ -276,6 +245,7 @@ mod workspace_pool {
         );
         let identity = UserIdentity {
             user_id: "bob".to_string(),
+            role: "admin".to_string(),
             workspace_read_scopes: vec!["alice".to_string(), "shared".to_string()],
         };
         let ws = pool.get_or_create(&identity).await;
@@ -302,10 +272,12 @@ mod workspace_pool {
         );
         let alice_id = UserIdentity {
             user_id: "alice".to_string(),
+            role: "admin".to_string(),
             workspace_read_scopes: vec![],
         };
         let bob_id = UserIdentity {
             user_id: "bob".to_string(),
+            role: "admin".to_string(),
             workspace_read_scopes: vec![],
         };
 
@@ -337,6 +309,7 @@ mod workspace_pool {
         );
         let identity = UserIdentity {
             user_id: "alice".to_string(),
+            role: "admin".to_string(),
             workspace_read_scopes: vec!["token-scope".to_string()],
         };
         let ws = pool.get_or_create(&identity).await;
@@ -377,7 +350,10 @@ mod jobs_isolation {
             .route("/api/jobs/{id}/cancel", post(jobs_cancel_handler))
             .route("/api/jobs/{id}/restart", post(jobs_restart_handler))
             .route("/api/jobs/{id}/prompt", post(jobs_prompt_handler))
-            .layer(middleware::from_fn_with_state(auth, auth_middleware))
+            .layer(middleware::from_fn_with_state(
+                crate::channels::web::auth::CombinedAuthState::from(auth),
+                auth_middleware,
+            ))
             .with_state(state)
     }
 
@@ -583,7 +559,10 @@ mod routines_isolation {
             .route("/api/routines/{id}", get(routines_detail_handler))
             .route("/api/routines/{id}/toggle", post(routines_toggle_handler))
             .route("/api/routines/{id}", delete(routines_delete_handler))
-            .layer(middleware::from_fn_with_state(auth, auth_middleware))
+            .layer(middleware::from_fn_with_state(
+                crate::channels::web::auth::CombinedAuthState::from(auth),
+                auth_middleware,
+            ))
             .with_state(state)
     }
 
@@ -708,7 +687,10 @@ mod auth_enforcement {
             .route("/api/logs/level", get(authed_handler).put(authed_handler))
             // Gateway status
             .route("/api/gateway/status", get(authed_handler))
-            .layer(middleware::from_fn_with_state(auth, auth_middleware))
+            .layer(middleware::from_fn_with_state(
+                crate::channels::web::auth::CombinedAuthState::from(auth),
+                auth_middleware,
+            ))
             .with_state(state)
     }
 
@@ -829,5 +811,142 @@ mod auth_enforcement {
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Admin Endpoint Role Enforcement Tests
+// ═══════════════════════════════════════════════════════════════════════
+
+mod admin_role_enforcement {
+    use super::*;
+    use crate::channels::web::handlers::users::{
+        users_activate_handler, users_detail_handler, users_list_handler, users_suspend_handler,
+        users_update_handler,
+    };
+    use axum::routing::patch;
+
+    /// Build a router with admin user endpoints behind multi-user auth.
+    /// Uses a member-role token and an admin-role token.
+    fn admin_router() -> Router {
+        let mut tokens = HashMap::new();
+        tokens.insert(
+            "tok-admin".to_string(),
+            UserIdentity {
+                user_id: "admin-user".to_string(),
+                role: "admin".to_string(),
+                workspace_read_scopes: vec![],
+            },
+        );
+        tokens.insert(
+            "tok-member".to_string(),
+            UserIdentity {
+                user_id: "member-user".to_string(),
+                role: "member".to_string(),
+                workspace_read_scopes: vec![],
+            },
+        );
+        let auth = MultiAuthState::multi(tokens);
+        let state = build_state(None, None);
+
+        Router::new()
+            .route("/api/admin/users", get(users_list_handler))
+            .route("/api/admin/users/{id}", get(users_detail_handler))
+            .route("/api/admin/users/{id}", patch(users_update_handler))
+            .route("/api/admin/users/{id}/suspend", post(users_suspend_handler))
+            .route(
+                "/api/admin/users/{id}/activate",
+                post(users_activate_handler),
+            )
+            .layer(middleware::from_fn_with_state(
+                crate::channels::web::auth::CombinedAuthState::from(auth),
+                auth_middleware,
+            ))
+            .with_state(state)
+    }
+
+    /// Assert a request returns FORBIDDEN for a member token.
+    async fn assert_forbidden_for_member(app: &Router, method: Method, uri: &str) {
+        let req = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("Authorization", "Bearer tok-member")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "expected 403 for member on {}",
+            uri
+        );
+    }
+
+    #[tokio::test]
+    async fn test_admin_user_endpoints_reject_member_role() {
+        let app = admin_router();
+
+        assert_forbidden_for_member(&app, Method::GET, "/api/admin/users").await;
+        assert_forbidden_for_member(&app, Method::GET, "/api/admin/users/some-id").await;
+        assert_forbidden_for_member(&app, Method::POST, "/api/admin/users/some-id/suspend").await;
+        assert_forbidden_for_member(&app, Method::POST, "/api/admin/users/some-id/activate").await;
+    }
+
+    #[tokio::test]
+    async fn test_admin_user_endpoints_accept_admin_role() {
+        let app = admin_router();
+
+        // Admin token should pass auth (will get 503 since no DB, but not 403).
+        let req = Request::builder()
+            .uri("/api/admin/users")
+            .header("Authorization", "Bearer tok-admin")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_ne!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "admin should not get 403"
+        );
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// DbAuthenticator Cache Bounded Tests
+// ═══════════════════════════════════════════════════════════════════════
+
+mod db_auth_cache {
+    use super::*;
+    use std::time::Instant;
+
+    #[tokio::test]
+    async fn test_cache_bounded_by_max_entries() {
+        // Access the internal cache and verify LRU eviction.
+        // We can't easily test through `authenticate()` since it hits the DB,
+        // so we test the LRU cache directly.
+        let cap = std::num::NonZeroUsize::new(4).unwrap(); // safety: test-only, 4 is non-zero
+        let cache: lru::LruCache<[u8; 32], (UserIdentity, Instant)> = lru::LruCache::new(cap);
+        let cache = Arc::new(tokio::sync::RwLock::new(cache));
+
+        {
+            let mut c = cache.write().await;
+            for i in 0..10u8 {
+                let mut hash = [0u8; 32];
+                hash[0] = i;
+                c.put(
+                    hash,
+                    (
+                        UserIdentity {
+                            user_id: format!("user-{i}"),
+                            role: "member".to_string(),
+                            workspace_read_scopes: vec![],
+                        },
+                        Instant::now(),
+                    ),
+                );
+            }
+            // Cache must be bounded at capacity, not grown to 10.
+            assert_eq!(c.len(), 4, "cache should be bounded to capacity"); // safety: test assertion
+        }
     }
 }

@@ -267,6 +267,20 @@ impl Scheduler {
                 });
             }
 
+            // Per-user concurrency check — only count jobs consuming a parallel
+            // execution slot (Pending/InProgress/Stuck), not Completed/Submitted.
+            if let Some(max_per_user) = self.config.max_jobs_per_user
+                && let Ok(ctx) = self.context_manager.get_context(job_id).await
+            {
+                let user_blocking = self
+                    .context_manager
+                    .parallel_blocking_count_for(&ctx.user_id)
+                    .await;
+                if user_blocking >= max_per_user {
+                    return Err(JobError::MaxJobsExceeded { max: max_per_user });
+                }
+            }
+
             // Transition job to in_progress
             self.context_manager
                 .update_context(job_id, |ctx| {
@@ -784,6 +798,7 @@ mod tests {
             max_tool_iterations: 10,
             auto_approve_tools: true,
             default_timezone: "UTC".to_string(),
+            max_jobs_per_user: None,
             max_tokens_per_job,
             multi_tenant: false,
             max_llm_concurrent_per_user: None,

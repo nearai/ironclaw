@@ -400,16 +400,21 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
         };
 
         // Record cost and track token usage (global + per-user).
-        // When a model override is active, use the override name for attribution
-        // and let CostGuard look up pricing via costs::model_cost() instead of
-        // using the default provider's cost_per_token (which reflects the wrong model).
-        let (model_name, cost_per_token) = if let Some(ref ovr) = reason_ctx.model_override {
-            (ovr.clone(), None)
+        // Use the provider's effective_model_name so cost attribution matches
+        // the model that actually served the request. When the override is
+        // honoured (e.g. NearAI), this returns the override name; when the
+        // provider ignores overrides (e.g. Rig-based), it returns the active
+        // model, keeping attribution accurate in both cases.
+        let model_name = self
+            .agent
+            .llm()
+            .effective_model_name(reason_ctx.model_override.as_deref());
+        let cost_per_token = if reason_ctx.model_override.is_some() {
+            // Override may use different pricing; let CostGuard fall back to
+            // costs::model_cost() for the effective model.
+            None
         } else {
-            (
-                self.agent.llm().active_model_name(),
-                Some(self.agent.llm().cost_per_token()),
-            )
+            Some(self.agent.llm().cost_per_token())
         };
         let read_discount = self.agent.llm().cache_read_discount();
         let write_multiplier = self.agent.llm().cache_write_multiplier();
@@ -432,6 +437,24 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
             output.usage.output_tokens,
             call_cost,
         );
+
+        // Persist LLM call to DB so usage stats survive restarts.
+        // Chat turns don't create agent_jobs, so job_id is None.
+        if let Some(store) = self.tenant.store() {
+            let record = crate::history::LlmCallRecord {
+                job_id: None,
+                conversation_id: Some(self.thread_id),
+                provider: &self.agent.deps.llm_backend,
+                model: &model_name,
+                input_tokens: output.usage.input_tokens,
+                output_tokens: output.usage.output_tokens,
+                cost: call_cost,
+                purpose: Some("chat"),
+            };
+            if let Err(e) = store.record_llm_call(&record).await {
+                tracing::warn!("Failed to persist LLM call to DB: {}", e);
+            }
+        }
 
         Ok(output)
     }
@@ -1246,6 +1269,14 @@ pub(crate) fn extract_suggestions(text: &str) -> (String, Vec<String>) {
     (cleaned, suggestions)
 }
 
+/// Remove `<suggestions>` tags from a response, returning only the cleaned text.
+///
+/// Convenience wrapper around [`extract_suggestions`] for callers that don't
+/// need the parsed suggestion list (e.g. job worker, plan completion check).
+pub(crate) fn strip_suggestions(text: &str) -> String {
+    extract_suggestions(text).0
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -1360,6 +1391,7 @@ mod tests {
                 max_tool_iterations: 50,
                 auto_approve_tools: false,
                 default_timezone: "UTC".to_string(),
+                max_jobs_per_user: None,
                 max_tokens_per_job: 0,
                 multi_tenant: false,
                 max_llm_concurrent_per_user: None,
@@ -2241,6 +2273,7 @@ mod tests {
                 max_tool_iterations,
                 auto_approve_tools: true,
                 default_timezone: "UTC".to_string(),
+                max_jobs_per_user: None,
                 max_tokens_per_job: 0,
                 multi_tenant: false,
                 max_llm_concurrent_per_user: None,
@@ -2368,6 +2401,7 @@ mod tests {
                     max_tool_iterations: max_iter,
                     auto_approve_tools: true,
                     default_timezone: "UTC".to_string(),
+                    max_jobs_per_user: None,
                     max_tokens_per_job: 0,
                     multi_tenant: false,
                     max_llm_concurrent_per_user: None,
@@ -2511,6 +2545,18 @@ mod tests {
         let input = format!("Answer.\n<suggestions>[\"{}\", \"ok\"]</suggestions>", long);
         let (_, suggestions) = super::extract_suggestions(&input);
         assert_eq!(suggestions, vec!["ok"]); // safety: test
+    }
+
+    #[test]
+    fn test_strip_suggestions_removes_tags() {
+        let input = "The job is complete.\n<suggestions>[\"Check logs\"]</suggestions>";
+        assert_eq!(super::strip_suggestions(input), "The job is complete."); // safety: test
+    }
+
+    #[test]
+    fn test_strip_suggestions_no_tag_passthrough() {
+        let input = "Plain text without tags.";
+        assert_eq!(super::strip_suggestions(input), input); // safety: test
     }
 
     #[test]
