@@ -91,6 +91,34 @@ Browser-facing HTTP API and SSE/WebSocket real-time streaming. Axum-based, singl
 | DELETE | `/api/routines/{id}` | Delete a routine |
 | GET | `/api/routines/{id}/runs` | List runs for a specific routine |
 
+### User Management (admin — requires `admin` role, see `docs/USER_MANAGEMENT_API.md`)
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/api/admin/users` | Create a new user (returns one-time token) |
+| GET | `/api/admin/users` | List all users |
+| GET | `/api/admin/users/{id}` | Get a single user |
+| PATCH | `/api/admin/users/{id}` | Update user profile/metadata |
+| DELETE | `/api/admin/users/{id}` | Delete user and all data |
+| POST | `/api/admin/users/{id}/suspend` | Suspend a user |
+| POST | `/api/admin/users/{id}/activate` | Re-activate a user |
+| GET | `/api/admin/usage` | Per-user LLM usage stats |
+| GET | `/api/admin/users/{user_id}/secrets` | List a user's secrets (names only) |
+| PUT | `/api/admin/users/{user_id}/secrets/{name}` | Create or update a user's secret |
+| DELETE | `/api/admin/users/{user_id}/secrets/{name}` | Delete a user's secret |
+
+### Profile (self-service)
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/profile` | Get own profile |
+| PATCH | `/api/profile` | Update own display name/metadata |
+
+### Tokens (self-service)
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/api/tokens` | Create API token (returns plaintext once) |
+| GET | `/api/tokens` | List own tokens |
+| DELETE | `/api/tokens/{id}` | Revoke a token |
+
 ### Settings
 | Method | Path | Description |
 |--------|------|-------------|

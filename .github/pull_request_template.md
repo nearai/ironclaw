@@ -6,7 +6,7 @@
 
 ## Change Type
 
-<!-- Check one -->
+<!-- Check all that apply. Refactor-only PRs are for core team or maintainer-requested work. -->
 
 - [ ] Bug fix
 - [ ] New feature
@@ -18,16 +18,19 @@
 
 ## Linked Issue
 
-<!-- Closes #N, or "None" -->
+<!-- Closes #N, Fixes #N, Related #N, or "None". New feature PRs must link an approved issue. -->
 
 ## Validation
 
 <!-- How did you verify this works? -->
 
-- [ ] `cargo fmt`
-- [ ] `cargo clippy --all --benches --tests --examples --all-features`
+- [ ] `cargo fmt --all -- --check`
+- [ ] `cargo clippy --all --benches --tests --examples --all-features -- -D warnings`
+- [ ] `cargo build`
 - [ ] Relevant tests pass: <!-- list specific tests -->
+- [ ] `cargo test --features integration` if database-backed or integration behavior changed
 - [ ] Manual testing: <!-- describe what you tested -->
+- [ ] If a coding agent was used and supports it, `review-pr` or `pr-shepherd --fix` was run before requesting review
 
 ## Security Impact
 
@@ -45,6 +48,10 @@
 
 <!-- How to revert if this causes problems? For Track C changes, this is mandatory. -->
 
+## Review Follow-Through
+
+<!-- Review conversations are author-owned. Summarize any known follow-up or areas where reviewer judgment is still needed. -->
+
 ---
 
-**Review track**: <!-- A (docs/tests/chore) | B (feature/refactor) | C (security/runtime/DB/CI) -->
+**Review track**: <!-- A (docs/tests/chore) | B (feature/maintainer-requested refactor) | C (security/runtime/DB/CI) -->

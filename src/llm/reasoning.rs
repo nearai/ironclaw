@@ -1051,8 +1051,11 @@ Example:
 
         "\n\n## Extensions\n\
          You can search, install, and activate extensions to add new capabilities:\n\
-         - **Channels** (Telegram, Slack, Discord) — messaging integrations. \
-         When users ask about connecting a messaging platform, search for it as a channel.\n\
+         - **Channels** (Telegram, Slack, Discord) — connect messaging platforms so users can \
+         talk to you there. When users ask about connecting a messaging platform, search for it \
+         as a channel. Channels are not separate send-message tools; use normal assistant output \
+         to reply in the current conversation, and use the `message` tool only for proactive, \
+         background, or cross-channel outbound sends.\n\
          - **Tools** — sandboxed functions that extend your abilities.\n\
          - **MCP servers** — external API integrations via the Model Context Protocol.\n\n\
          Use `tool_search` to find extensions by name. Refer to them by their kind \
@@ -1093,15 +1096,20 @@ Example:
 
         let message_tool_hint = "\
 \n\n## Proactive Messaging\n\
+For ordinary replies in the current conversation, respond normally without calling `message`.\n\
 Send messages via Signal, Telegram, Slack, or other connected channels:\n\
 - `content` (required): the message text\n\
 - `attachments` (optional): array of file paths to send\n\
 - `channel` (optional): which channel to use (signal, telegram, slack, etc.)\n\
 - `target` (optional): who to send to (phone number, group ID, etc.)\n\
-\nOmit both `channel` and `target` to send to the current conversation.\n\
+\nOmit both `channel` and `target` for a proactive follow-up in the current conversation.\n\
+Target formats:\n\
+- Signal: E.164 phone number (`+1234567890`) or group ID\n\
+- Telegram: username or chat ID\n\
+- Slack: channel name (`#general`) or user ID\n\
 Examples (tool calls use JSON format):\n\
-- Reply here: {\"content\": \"Hi!\"}\n\
-- Send file here: {\"content\": \"Here's the file\", \"attachments\": [\"/path/to/file.txt\"]}\n\
+- Proactive follow-up here: {\"content\": \"Hi again!\"}\n\
+- Send file here proactively: {\"content\": \"Here's the file\", \"attachments\": [\"/path/to/file.txt\"]}\n\
 - Message a different user: {\"channel\": \"signal\", \"target\": \"+1234567890\", \"content\": \"Hi!\"}\n\
 - Message a different group: {\"channel\": \"signal\", \"target\": \"group:abc123\", \"content\": \"Hi!\"}";
 
@@ -1139,7 +1147,9 @@ Examples (tool calls use JSON format):\n\
 
         format!(
             "\n\n## Current Conversation\n\
-             This is who you're talking to (omit 'target' to send here):\n{}",
+             This is who you're talking to in the active conversation. Use normal assistant \
+             output to reply here; only use the `message` tool for proactive, background, or \
+             cross-channel outbound sends:\n{}",
             lines.join("\n")
         )
     }
@@ -2538,6 +2548,54 @@ That's my plan."#;
             prompt.contains("echo: Echoes input"),
             "Prompt with tools should list the echo tool"
         );
+    }
+
+    #[test]
+    fn test_extensions_section_clarifies_channels_are_not_send_tools() {
+        let reasoning = make_test_reasoning();
+        let tool_defs = vec![ToolDefinition {
+            name: "tool_search".to_string(),
+            description: "Search extensions".to_string(),
+            parameters: serde_json::json!({}),
+        }];
+
+        let section = reasoning.build_extensions_section_for_tools(&tool_defs);
+        assert!(section.contains("connect messaging platforms so users can talk to you there"));
+        assert!(section.contains("Channels are not separate send-message tools"));
+        assert!(
+            section.contains("use normal assistant output to reply in the current conversation")
+        );
+        assert!(section.contains(
+            "`message` tool only for proactive, background, or cross-channel outbound sends"
+        ));
+    }
+
+    #[test]
+    fn test_channel_section_separates_normal_replies_from_message_tool() {
+        let reasoning = make_test_reasoning().with_channel("telegram");
+
+        let section = reasoning.build_channel_section();
+        assert!(section.contains("respond normally without calling `message`"));
+        assert!(section.contains("proactive follow-up in the current conversation"));
+        assert!(section.contains("Target formats:"));
+        assert!(section.contains("Signal: E.164 phone number"));
+        assert!(section.contains("Telegram: username or chat ID"));
+        assert!(section.contains("Slack: channel name"));
+        assert!(section.contains("Proactive follow-up here"));
+    }
+
+    #[test]
+    fn test_current_conversation_section_does_not_imply_message_tool_for_replies() {
+        let reasoning = make_test_reasoning()
+            .with_channel("telegram")
+            .with_conversation_data("User", "telegram-user");
+
+        let section = reasoning.build_conversation_section();
+        assert!(section.contains("Use normal assistant output to reply here"));
+        assert!(section.contains(
+            "only use the `message` tool for proactive, background, or cross-channel outbound sends"
+        ));
+        assert!(!section.contains("omit 'target' to send here"));
     }
 
     // ---- plan/evaluate bypass clean_response (Bug #564-2) ----
