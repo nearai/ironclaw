@@ -257,7 +257,10 @@ mod tests {
         assert_eq!(msg.user_id, "user-1");
         assert_eq!(msg.thread_id, Some("thread-1".to_string()));
         assert!(msg.content.contains("I found a bug"));
-        assert!(msg.is_internal, "monitor messages must be marked internal");
+        assert!(
+            msg.is_internal(),
+            "monitor messages must be marked internal"
+        );
     }
 
     #[tokio::test]
@@ -383,15 +386,15 @@ mod tests {
             }),
         );
         assert!(
-            !msg.is_internal,
-            "with_metadata must not set is_internal — only into_internal() can"
+            !msg.is_internal(),
+            "with_metadata must not set source to Internal — only into_internal() can"
         );
     }
 
     #[test]
     fn test_into_internal_sets_flag() {
         let msg = IncomingMessage::new("monitor", "system", "test").into_internal();
-        assert!(msg.is_internal);
+        assert!(msg.is_internal());
     }
 
     // === Regression: fire-and-forget sandbox jobs must transition out of InProgress ===

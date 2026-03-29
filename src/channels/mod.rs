@@ -39,7 +39,7 @@ mod webhook_server;
 
 pub use channel::{
     AttachmentKind, Channel, ChannelSecretUpdater, ChatApprovalPrompt, IncomingAttachment,
-    IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate, ToolDecision,
+    IncomingMessage, MessageSource, MessageStream, OutgoingResponse, StatusUpdate, ToolDecision,
     routing_target_from_metadata,
 };
 pub use http::{HttpChannel, HttpChannelState};

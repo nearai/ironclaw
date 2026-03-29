@@ -2428,7 +2428,7 @@ mod tests {
             metadata: serde_json::Value::Null,
             timezone: None,
             attachments: vec![],
-            is_internal: false,
+            source: crate::channels::MessageSource::User,
         }
     }
 
