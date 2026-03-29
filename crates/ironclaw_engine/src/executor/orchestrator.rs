@@ -626,6 +626,15 @@ async fn handle_execute_code_step(
                                 "parameters": parameters,
                             })
                         }
+                        ThreadOutcome::NeedAuthentication { credential_name, action_name, call_id, parameters } => {
+                            serde_json::json!({
+                                "need_authentication": true,
+                                "credential_name": credential_name,
+                                "action_name": action_name,
+                                "call_id": call_id,
+                                "parameters": parameters,
+                            })
+                        }
                         _ => serde_json::Value::Null,
                     }
                 }),
@@ -818,6 +827,50 @@ async fn handle_execute_action(
                 "output": r.output,
                 "is_error": r.is_error,
                 "duration_ms": r.duration.as_millis(),
+            });
+            ExtFunctionResult::Return(json_to_monty(&result))
+        }
+        Err(EngineError::NeedApproval { .. }) => {
+            let output = serde_json::json!({"status": "awaiting_approval"});
+            emit_and_record(
+                thread,
+                event_tx,
+                EventKind::ApprovalRequested {
+                    action_name: name.clone(),
+                    call_id: call_id.clone(),
+                },
+                &call_id,
+                &name,
+                &output,
+            );
+            let result = serde_json::json!({
+                "need_approval": true,
+                "action_name": name,
+            });
+            ExtFunctionResult::Return(json_to_monty(&result))
+        }
+        Err(EngineError::NeedAuthentication {
+            credential_name, ..
+        }) => {
+            let output = serde_json::json!({"status": "authentication_required", "credential_name": credential_name});
+            emit_and_record(
+                thread,
+                event_tx,
+                EventKind::ActionFailed {
+                    step_id: exec_ctx.step_id,
+                    action_name: name.clone(),
+                    call_id: call_id.clone(),
+                    error: format!("authentication required for credential '{credential_name}'"),
+                    params_summary: ps,
+                },
+                &call_id,
+                &name,
+                &output,
+            );
+            let result = serde_json::json!({
+                "need_authentication": true,
+                "credential_name": credential_name,
+                "action_name": name,
             });
             ExtFunctionResult::Return(json_to_monty(&result))
         }
@@ -1298,6 +1351,27 @@ fn parse_outcome(result: &serde_json::Value) -> ThreadOutcome {
                 .to_string(),
         },
         "need_approval" => ThreadOutcome::NeedApproval {
+            action_name: result
+                .get("action_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            call_id: result
+                .get("call_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            parameters: result
+                .get("parameters")
+                .cloned()
+                .unwrap_or(serde_json::json!({})),
+        },
+        "need_authentication" => ThreadOutcome::NeedAuthentication {
+            credential_name: result
+                .get("credential_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
             action_name: result
                 .get("action_name")
                 .and_then(|v| v.as_str())

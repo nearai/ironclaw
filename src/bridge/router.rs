@@ -637,11 +637,14 @@ pub async fn handle_approval(
         .as_ref()
         .ok_or_else(|| engine_err("init", "engine state is empty"))?;
 
+    // Don't pass the v1 thread_id as a hint — the v1 session uses different
+    // UUIDs from the engine.  The user_id alone is sufficient for single-user
+    // deployments; ambiguity resolution kicks in for multi-user.
     let pending = match resolve_pending_approval_for_thread(
         &state.store,
         &state.pending_approvals,
         &message.user_id,
-        message.thread_id.as_deref(),
+        None,
     )
     .await?
     {
@@ -694,11 +697,12 @@ pub async fn handle_exec_approval(
     }
 
     // Fall back to scanning thread metadata for this user's conversations.
+    // Don't use v1 thread_id as hint (different UUID space from engine).
     let resolution = resolve_pending_approval_for_thread(
         &state.store,
         &state.pending_approvals,
         &message.user_id,
-        message.thread_id.as_deref(),
+        None,
     )
     .await?;
 
@@ -952,7 +956,26 @@ pub async fn handle_with_engine(
         if let Some(pending) = pending {
             let token = content.trim().to_string();
             if token.is_empty() || token.eq_ignore_ascii_case("cancel") {
-                return Ok(Some("Authentication cancelled.".into()));
+                let response = "Authentication cancelled.".to_string();
+                // Write to v1 DB so the history API shows the response.
+                if let Some(ref db) = state.db {
+                    let scope = message.conversation_scope();
+                    let v1_conv_id = if let Some(tid) = scope
+                        && let Ok(uuid) = uuid::Uuid::parse_str(tid)
+                    {
+                        Some(uuid)
+                    } else {
+                        db.get_or_create_assistant_conversation(&message.user_id, &message.channel)
+                            .await
+                            .ok()
+                    };
+                    if let Some(cid) = v1_conv_id {
+                        let _ = db
+                            .add_conversation_message(cid, "assistant", &response)
+                            .await;
+                    }
+                }
+                return Ok(Some(response));
             }
 
             if let Some(ref ss) = state.secrets_store {
@@ -1137,26 +1160,30 @@ async fn await_thread_outcome(
         .await
         .map_err(|e| engine_err("conversation error", e))?;
 
-    if let Some(ref db) = state.db
-        && let ThreadOutcome::Completed {
-            response: Some(ref text),
-        } = outcome
-    {
-        // Write response to the correct v1 conversation (thread-scoped or assistant)
-        let scope = message.conversation_scope();
-        let v1_conv_id = if let Some(tid) = scope
-            && let Ok(uuid) = uuid::Uuid::parse_str(tid)
-        {
-            Some(uuid)
-        } else {
-            db.get_or_create_assistant_conversation(&message.user_id, &message.channel)
-                .await
-                .ok()
-        };
-        if let Some(cid) = v1_conv_id {
-            let _ = db.add_conversation_message(cid, "assistant", text).await;
+    // Helper: write the outcome response to the v1 DB so the history API
+    // shows it correctly (not just for Completed, but for ALL outcomes that
+    // produce a response, including NeedApproval and NeedAuthentication).
+    let write_v1_response = |db: &Arc<dyn crate::db::Database>, text: &str| {
+        let db = Arc::clone(db);
+        let scope = message.conversation_scope().map(String::from);
+        let user_id = message.user_id.clone();
+        let channel = message.channel.clone();
+        let text = text.to_string();
+        async move {
+            let v1_conv_id = if let Some(tid) = scope
+                && let Ok(uuid) = uuid::Uuid::parse_str(&tid)
+            {
+                Some(uuid)
+            } else {
+                db.get_or_create_assistant_conversation(&user_id, &channel)
+                    .await
+                    .ok()
+            };
+            if let Some(cid) = v1_conv_id {
+                let _ = db.add_conversation_message(cid, "assistant", &text).await;
+            }
         }
-    }
+    };
 
     if let Some(ref sse) = state.sse
         && let ThreadOutcome::Completed {
@@ -1172,7 +1199,7 @@ async fn await_thread_outcome(
         );
     }
 
-    match outcome {
+    let result = match outcome {
         ThreadOutcome::Completed { response } => {
             debug!(thread_id = %thread_id, "engine v2: completed");
 
@@ -1300,15 +1327,67 @@ async fn await_thread_outcome(
         ThreadOutcome::NeedAuthentication {
             credential_name, ..
         } => {
-            // This shouldn't reach here in the non-blocking design (the error
-            // flows through the LLM as a normal action result), but handle
-            // gracefully in case it does.
+            // Look up setup instructions from the skill's credential spec.
+            let setup_hint = agent
+                .deps
+                .skill_registry
+                .as_ref()
+                .and_then(|sr| {
+                    let reg = sr.read().ok()?;
+                    reg.skills().iter().find_map(|s| {
+                        s.manifest.credentials.iter().find_map(|c| {
+                            if c.name == credential_name {
+                                c.setup_instructions.clone()
+                            } else {
+                                None
+                            }
+                        })
+                    })
+                })
+                .unwrap_or_else(|| format!("Provide your {} token", credential_name));
+
+            // Enter the guided auth flow — next user message is treated as a token.
+            state.pending_auth.write().await.insert(
+                message.user_id.clone(),
+                PendingAuth {
+                    credential_name: credential_name.clone(),
+                    original_message: message.content.clone(),
+                    user_id: message.user_id.clone(),
+                    channel: message.channel.clone(),
+                    metadata: message.metadata.clone(),
+                },
+            );
+
+            let _ = agent
+                .channels
+                .send_status(
+                    &message.channel,
+                    StatusUpdate::AuthRequired {
+                        extension_name: credential_name.clone(),
+                        instructions: Some(setup_hint),
+                        auth_url: None,
+                        setup_url: None,
+                    },
+                    &message.metadata,
+                )
+                .await;
+
             Ok(Some(format!(
-                "Authentication required for '{}'. Please set up the credential and try again.",
+                "Authentication required for '{}'. Paste your token below (or type 'cancel'):",
                 credential_name
             )))
         }
+    };
+
+    // Write the response to the v1 DB for all outcomes so the history
+    // endpoint shows the correct state (not just for Completed).
+    if let Ok(Some(ref text)) = result
+        && let Some(ref db) = state.db
+    {
+        write_v1_response(db, text).await;
     }
+
+    result
 }
 
 /// Forward an engine ThreadEvent to the channel as a StatusUpdate.

@@ -84,8 +84,21 @@ impl Agent {
             None
         };
 
-        // Select and prepare active skills (if skills system is enabled)
-        let active_skills = self.select_active_skills(&message.content);
+        // Select active skills. Explicit /skill-name mentions are force-activated
+        // and replaced with the skill's description in the rewritten message.
+        let (active_skills, rewritten_content) = self.select_active_skills(&message.content);
+
+        // Use the rewritten message (with /skill-name expanded) for the LLM
+        let user_content = if rewritten_content != message.content {
+            tracing::debug!(
+                original = %message.content,
+                rewritten = %rewritten_content,
+                "expanded /skill-name mentions in message"
+            );
+            rewritten_content
+        } else {
+            message.content.clone()
+        };
 
         // Build skill context block
         let skill_context = if !active_skills.is_empty() {
@@ -188,8 +201,24 @@ impl Agent {
             user_tz,
         };
 
+        // If /skill-name mentions were expanded, rewrite the last user message
+        // in the conversation history so the LLM sees the natural-language version.
+        let messages_for_llm = if user_content != message.content {
+            let mut msgs = initial_messages;
+            if let Some(last_user) = msgs
+                .iter_mut()
+                .rev()
+                .find(|m| m.role == crate::llm::Role::User)
+            {
+                *last_user = ChatMessage::user(&user_content);
+            }
+            msgs
+        } else {
+            initial_messages
+        };
+
         let mut reason_ctx = ReasoningContext::new()
-            .with_messages(initial_messages)
+            .with_messages(messages_for_llm)
             .with_tools(initial_tool_defs)
             .with_system_prompt(delegate.cached_prompt.clone())
             .with_metadata({
