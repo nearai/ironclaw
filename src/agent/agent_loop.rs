@@ -720,6 +720,7 @@ impl Agent {
                         self.tools().clone(),
                         self.safety().clone(),
                         self.deps.sandbox_readiness,
+                        Some(self.channels.inject_sender()),
                     ));
 
                     // Register routine tools
