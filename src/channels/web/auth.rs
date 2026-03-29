@@ -416,6 +416,23 @@ impl OidcState {
         })
     }
 
+    /// Pre-seed the key cache with a known key for testing.
+    ///
+    /// Allows integration tests to exercise the full OIDC middleware path
+    /// without requiring an HTTP JWKS endpoint.
+    #[cfg(test)]
+    pub(crate) async fn seed_key(&self, kid: &str, key: DecodingKey, algorithm: Algorithm) {
+        let mut cache = self.key_cache.write().await;
+        cache.insert(
+            kid.to_string(),
+            CachedKey {
+                decoding_key: key,
+                algorithm,
+                fetched_at: Instant::now(),
+            },
+        );
+    }
+
     /// Header name containing the JWT.
     fn header_name(&self) -> &str {
         &self.config.header
@@ -1685,5 +1702,134 @@ mod tests {
         let state = MultiAuthState::single("long-secret-token".to_string(), "user".to_string());
         assert!(state.authenticate("long-secret").is_none());
         assert!(state.authenticate("long-secret-token-extra").is_none());
+    }
+
+    // ── OIDC middleware integration test ──────────────────────────────────
+
+    /// Regression test: OIDC auth must produce a `UserIdentity` so that
+    /// downstream handlers using `AuthenticatedUser` receive the identity.
+    ///
+    /// Without the identity insertion, the handler returns 401 even though
+    /// OIDC signature validation succeeded — the bug that was caught in
+    /// code review of #1463.
+    #[tokio::test]
+    async fn test_oidc_auth_inserts_user_identity_for_handler() {
+        use jsonwebtoken::{EncodingKey, Header};
+
+        let secret = b"test-secret-at-least-256-bits!!!";
+        let kid = "test-kid-1";
+
+        // Build a valid HS256 JWT with sub=oidc-alice.
+        let mut header = Header::new(Algorithm::HS256);
+        header.kid = Some(kid.to_string());
+        let claims = serde_json::json!({
+            "sub": "oidc-alice",
+            "exp": 9999999999u64,
+        });
+        let jwt = jsonwebtoken::encode(
+            &header,
+            &claims,
+            &EncodingKey::from_secret(secret),
+        )
+        .unwrap();
+
+        // Build an OidcState with the key pre-seeded in cache.
+        let oidc_config = crate::config::GatewayOidcConfig {
+            header: "x-oidc-data".to_string(),
+            jwks_url: "https://unused.example.com/keys".to_string(),
+            issuer: None,
+            audience: None,
+        };
+        let oidc = OidcState::from_config(&oidc_config).unwrap();
+        oidc.seed_key(kid, DecodingKey::from_secret(secret), Algorithm::HS256)
+            .await;
+
+        // Build CombinedAuthState with no bearer tokens, only OIDC.
+        let state = CombinedAuthState {
+            env_auth: MultiAuthState::single("unused-token".to_string(), "unused".to_string()),
+            db_auth: None,
+            oidc: Some(oidc),
+        };
+
+        // The handler extracts AuthenticatedUser — if identity is missing,
+        // this returns 401 instead of the user_id.
+        let app = Router::new()
+            .route("/api/chat/events", get(identity_handler))
+            .layer(middleware::from_fn_with_state(state, auth_middleware));
+
+        let req = Request::builder()
+            .uri("/api/chat/events")
+            .header("x-oidc-data", &jwt)
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "OIDC auth must insert UserIdentity so AuthenticatedUser extractor succeeds"
+        );
+        let body = axum::body::to_bytes(resp.into_body(), 1024).await.unwrap();
+        assert_eq!(
+            body, "oidc-alice",
+            "OIDC sub claim must become the user_id in UserIdentity"
+        );
+    }
+
+    /// Regression test: OIDC-authenticated users get role=member (not admin).
+    #[tokio::test]
+    async fn test_oidc_auth_user_gets_member_role() {
+        use jsonwebtoken::{EncodingKey, Header};
+
+        let secret = b"test-secret-at-least-256-bits!!!";
+        let kid = "test-kid-role";
+
+        let mut header = Header::new(Algorithm::HS256);
+        header.kid = Some(kid.to_string());
+        let claims = serde_json::json!({
+            "sub": "oidc-bob",
+            "exp": 9999999999u64,
+        });
+        let jwt = jsonwebtoken::encode(
+            &header,
+            &claims,
+            &EncodingKey::from_secret(secret),
+        )
+        .unwrap();
+
+        let oidc_config = crate::config::GatewayOidcConfig {
+            header: "x-oidc-data".to_string(),
+            jwks_url: "https://unused.example.com/keys".to_string(),
+            issuer: None,
+            audience: None,
+        };
+        let oidc = OidcState::from_config(&oidc_config).unwrap();
+        oidc.seed_key(kid, DecodingKey::from_secret(secret), Algorithm::HS256)
+            .await;
+
+        let state = CombinedAuthState {
+            env_auth: MultiAuthState::single("unused-token".to_string(), "unused".to_string()),
+            db_auth: None,
+            oidc: Some(oidc),
+        };
+
+        /// Returns the role from the authenticated identity.
+        async fn role_handler(AuthenticatedUser(identity): AuthenticatedUser) -> String {
+            identity.role
+        }
+
+        let app = Router::new()
+            .route("/api/chat/events", get(role_handler))
+            .layer(middleware::from_fn_with_state(state, auth_middleware));
+
+        let req = Request::builder()
+            .uri("/api/chat/events")
+            .header("x-oidc-data", &jwt)
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 1024).await.unwrap();
+        assert_eq!(body, "member", "OIDC users should get member role, not admin");
     }
 }
