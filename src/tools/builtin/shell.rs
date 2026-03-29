@@ -568,7 +568,7 @@ const FILE_READ_COMMANDS: &[&str] = &[
     "cat", "head", "tail", "less", "more", "tac", "nl", "bat", "batcat", "cp", "mv", "scp",
     "rsync", "source", ".", // shell source
     "vim", "vi", "nano", "code", "strings", "xxd", "hexdump", "od", "file", "stat", "wc", "diff",
-    "cmp", "tar", "zip", "gzip", "bzip2", "xz", "zstd", "base64",
+    "cmp", "tar", "zip", "gzip", "bzip2", "xz", "zstd", "base64", "grep", "awk", "sed",
 ];
 
 /// Check if a command attempts to access sensitive credential files.
@@ -656,43 +656,62 @@ fn check_segment_file_commands(segment: &str) -> Option<String> {
         if token.starts_with('-') {
             continue;
         }
-        let expanded = expand_tilde(token);
+        // Strip surrounding quotes that pass through from shell syntax
+        let unquoted = strip_shell_quotes(token);
+        let expanded = expand_tilde(unquoted);
         if is_sensitive_path(&expanded) {
             return Some(format!(
                 "Access denied: '{}' targets a sensitive credential path",
-                token
+                unquoted
             ));
         }
     }
     None
 }
 
-/// Check for I/O redirection (`<`, `>`, `>>`) targeting a sensitive path.
-fn check_redirect_target(segment: &str, operator: char, label: &str) -> Option<String> {
-    // Find the operator, handling `>>` by skipping the second `>`
-    let pos = if operator == '>' {
-        // Find `>` but skip `>>` — we still want the path after `>>`
-        segment.find('>')
-    } else {
-        segment.find(operator)
-    };
-    let pos = pos?;
-
-    let after = &segment[pos + 1..];
-    // Skip a second `>` for append redirection (`>>`)
-    let after = after.strip_prefix('>').unwrap_or(after).trim();
-
-    let path_token = after.split_whitespace().next().unwrap_or("");
-    if path_token.is_empty() {
-        return None;
+/// Strip surrounding single or double quotes from a shell token.
+fn strip_shell_quotes(token: &str) -> &str {
+    let bytes = token.as_bytes();
+    if bytes.len() >= 2 {
+        let first = bytes[0];
+        let last = bytes[bytes.len() - 1];
+        if (first == b'"' && last == b'"') || (first == b'\'' && last == b'\'') {
+            return &token[1..token.len() - 1];
+        }
     }
+    token
+}
 
-    let expanded = expand_tilde(path_token);
-    if is_sensitive_path(&expanded) {
-        return Some(format!(
-            "Access denied: {} targets sensitive path '{}'",
-            label, path_token
-        ));
+/// Check for I/O redirection (`<`, `>`, `>>`) targeting a sensitive path.
+///
+/// Scans for ALL occurrences of the operator in the segment, not just the first.
+fn check_redirect_target(segment: &str, operator: char, label: &str) -> Option<String> {
+    let bytes = segment.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == operator as u8 {
+            let mut after_start = i + 1;
+            // Skip a second `>` for append redirection (`>>`)
+            if operator == '>' && after_start < bytes.len() && bytes[after_start] == b'>' {
+                after_start += 1;
+            }
+            let after = &segment[after_start..];
+            let after = after.trim();
+            let path_token = after.split_whitespace().next().unwrap_or("");
+            if !path_token.is_empty() {
+                let unquoted = strip_shell_quotes(path_token);
+                let expanded = expand_tilde(unquoted);
+                if is_sensitive_path(&expanded) {
+                    return Some(format!(
+                        "Access denied: {} targets sensitive path '{}'",
+                        label, unquoted
+                    ));
+                }
+            }
+            // Advance past the token we just checked
+            i = after_start;
+        }
+        i += 1;
     }
     None
 }
@@ -1733,6 +1752,32 @@ mod tests {
     #[test]
     fn sensitive_file_access_blocks_full_path_commands() {
         assert!(check_sensitive_file_access("/usr/bin/cat /home/user/.ssh/id_rsa").is_some());
+    }
+
+    #[test]
+    fn sensitive_file_access_strips_quotes() {
+        // Quoted paths should still be caught
+        assert!(check_sensitive_file_access(r#"cat "/home/user/.ssh/id_rsa""#).is_some());
+        assert!(check_sensitive_file_access("cat '/home/user/.ssh/id_rsa'").is_some());
+        assert!(check_sensitive_file_access(r#"head "/home/user/.env""#).is_some());
+    }
+
+    #[test]
+    fn sensitive_file_access_blocks_grep_awk_sed() {
+        assert!(check_sensitive_file_access("grep SECRET /home/user/.env").is_some());
+        assert!(check_sensitive_file_access("awk '{print}' /home/user/.ssh/id_rsa").is_some());
+        assert!(check_sensitive_file_access("sed -n '1p' /home/user/.env").is_some());
+    }
+
+    #[test]
+    fn sensitive_file_access_blocks_multiple_redirects() {
+        // Multiple redirects in a single segment — both should be checked
+        assert!(
+            check_sensitive_file_access(
+                "echo ok > /tmp/safe.txt > /home/user/.ssh/authorized_keys"
+            )
+            .is_some()
+        );
     }
 
     #[test]

@@ -537,7 +537,7 @@ fn default_patterns() -> Vec<LeakPattern> {
         // Word boundary prevents false positives on timestamp-keyed log entries.
         LeakPattern {
             name: "telegram_bot_token".to_string(),
-            regex: Regex::new(r"\b\d{8,12}:AA[A-Za-z0-9_-]{30,}").unwrap(), // safety: hardcoded literal
+            regex: Regex::new(r"\b\d{8,12}:AA[A-Za-z0-9_-]{30,}\b").unwrap(), // safety: hardcoded literal
             severity: LeakSeverity::Critical,
             action: LeakAction::Block,
         },

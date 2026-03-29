@@ -122,7 +122,7 @@ impl Tool for ReadFileTool {
         if is_sensitive_path(&path) {
             return Err(ToolError::ExecutionFailed(
                 "Access denied: this file may contain credentials. \
-                 Use the appropriate configuration tools instead."
+                 Use `secret_list` and `secret_create` to manage credentials securely."
                     .to_string(),
             ));
         }
@@ -270,7 +270,7 @@ impl Tool for WriteFileTool {
         if is_sensitive_path(&path) {
             return Err(ToolError::ExecutionFailed(
                 "Access denied: cannot write to credential files. \
-                 Use the appropriate configuration tools instead."
+                 Use `secret_list` and `secret_create` to manage credentials securely."
                     .to_string(),
             ));
         }
@@ -387,7 +387,7 @@ impl Tool for ListDirTool {
         if is_sensitive_path(&path) {
             return Err(ToolError::ExecutionFailed(
                 "Access denied: this directory may contain credentials. \
-                 Use the appropriate configuration tools instead."
+                 Use `secret_list` and `secret_create` to manage credentials securely."
                     .to_string(),
             ));
         }
@@ -603,7 +603,7 @@ impl Tool for ApplyPatchTool {
         if is_sensitive_path(&path) {
             return Err(ToolError::ExecutionFailed(
                 "Access denied: cannot modify credential files. \
-                 Use the appropriate configuration tools instead."
+                 Use `secret_list` and `secret_create` to manage credentials securely."
                     .to_string(),
             ));
         }
@@ -1021,24 +1021,26 @@ mod tests {
 
     #[tokio::test]
     async fn test_list_dir_blocks_sensitive_directory() {
+        let tmp = tempfile::tempdir().expect("create tempdir");
+        let ssh_dir = tmp.path().join(".ssh");
+        std::fs::create_dir(&ssh_dir).expect("create .ssh dir");
+        std::fs::write(ssh_dir.join("id_rsa"), "fake-key").expect("write fake key");
+
         let tool = ListDirTool::new();
         let ctx = JobContext::default();
 
         let err = tool
-            .execute(serde_json::json!({"path": "/home/user/.ssh"}), &ctx)
+            .execute(
+                serde_json::json!({"path": ssh_dir.to_string_lossy().as_ref()}),
+                &ctx,
+            )
             .await;
 
-        // Should fail either because of sensitive path check or because
-        // the directory doesn't exist. Either way, it should not succeed.
-        if let Err(e) = err {
-            let msg = e.to_string();
-            assert!(
-                msg.contains("credentials")
-                    || msg.contains("Access denied")
-                    || msg.contains("Failed to read directory")
-                    || msg.contains("outside allowed directory"),
-                "unexpected error: {msg}"
-            );
-        }
+        assert!(err.is_err(), "listing a .ssh directory should be blocked");
+        let msg = err.unwrap_err().to_string();
+        assert!(
+            msg.contains("Access denied") || msg.contains("credentials"),
+            "expected sensitive path error, got: {msg}"
+        );
     }
 }
