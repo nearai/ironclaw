@@ -70,7 +70,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | WASM channels | ❌ | ✅ | - | IronClaw innovation; host resolves owner scope vs sender identity |
 | WhatsApp | ✅ | ❌ | P1 | Baileys (Web), same-phone mode with echo detection |
 | Telegram | ✅ | ✅ | - | WASM channel(MTProto), DM pairing, caption, /start, bot_username, DM topics, setup-time owner auto-verification, owner-scoped persistence |
-| Discord | ✅ | ❌ | P2 | discord.js, thread parent binding inheritance |
+| Discord | ✅ | 🚧 | P2 | Gateway `MESSAGE_CREATE` intake restored via websocket queue + WASM poll; Gateway DMs now respect pairing; thread parent binding inheritance and reply/thread parity still incomplete |
 | Signal | ✅ | ✅ | P2 | signal-cli daemonPC, SSE listener HTTP/JSON-R, user/group allowlists, DM pairing |
 | Slack | ✅ | ✅ | - | WASM tool |
 | iMessage | ✅ | ❌ | P3 | BlueBubbles or Linq recommended |
