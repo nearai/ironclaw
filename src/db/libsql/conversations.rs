@@ -70,20 +70,35 @@ impl ConversationStore for LibSqlBackend {
     ) -> Result<bool, DatabaseError> {
         let conn = self.connect().await?;
         let now = fmt_ts(&Utc::now());
-        let affected = conn
+
+        // Try to insert; if the row already exists the DO NOTHING path will
+        // result in 0 affected rows. In that case, attempt a guarded update to
+        // touch last_activity only when the existing row belongs to the same
+        // user and channel. This avoids complex ON CONFLICT ... WHERE
+        // constructs which can be unsupported by some SQLite/libsql versions.
+        let inserted = conn
             .execute(
-            r#"
-                INSERT INTO conversations (id, channel, user_id, thread_id, started_at, last_activity)
-                VALUES (?1, ?2, ?3, ?4, ?5, ?5)
-                ON CONFLICT (id) DO UPDATE SET last_activity = excluded.last_activity
-                WHERE conversations.user_id = excluded.user_id
-                  AND conversations.channel = excluded.channel
-                "#,
-            params![id.to_string(), channel, user_id, opt_text(thread_id), now],
-        )
+                "INSERT INTO conversations (id, channel, user_id, thread_id, started_at, last_activity) VALUES (?1, ?2, ?3, ?4, ?5, ?5) ON CONFLICT(id) DO NOTHING",
+                params![id.to_string(), channel, user_id, opt_text(thread_id), now],
+            )
             .await
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
-        Ok(affected > 0)
+
+        if inserted > 0 {
+            return Ok(true);
+        }
+
+        // If insert did nothing, try updating last_activity only if the row
+        // belongs to the same user and channel. Return true if we updated.
+        let updated = conn
+            .execute(
+                "UPDATE conversations SET last_activity = ?2 WHERE id = ?1 AND user_id = ?3 AND channel = ?4",
+                params![id.to_string(), now, user_id, channel],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        Ok(updated > 0)
     }
 
     async fn list_conversations_with_preview(
