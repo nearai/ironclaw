@@ -281,7 +281,7 @@ impl Tool for MemoryWriteTool {
         let has_content = params
             .get("content")
             .and_then(|v| v.as_str())
-            .is_some_and(|s| !s.is_empty());
+            .is_some_and(|s| !s.trim().is_empty());
         if !is_patch_mode && !has_content {
             return Err(ToolError::InvalidParameters(
                 "Either 'content' (for write/append) or 'old_string'+'new_string' (for patch) is required".to_string(),
@@ -355,6 +355,16 @@ impl Tool for MemoryWriteTool {
         // Patch mode: if old_string is provided, do search-and-replace instead of write/append.
         let old_string = params.get("old_string").and_then(|v| v.as_str());
         if let Some(old_str) = old_string {
+            if old_str.is_empty() {
+                return Err(ToolError::InvalidParameters(
+                    "old_string cannot be empty".to_string(),
+                ));
+            }
+            if layer.is_some() {
+                return Err(ToolError::InvalidParameters(
+                    "patch mode (old_string/new_string) cannot be combined with layer".to_string(),
+                ));
+            }
             let new_str = params
                 .get("new_string")
                 .and_then(|v| v.as_str())

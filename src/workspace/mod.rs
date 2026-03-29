@@ -830,10 +830,12 @@ impl Workspace {
     /// then finds the nearest ancestor in-memory — O(1) DB queries instead of
     /// O(depth) serial queries walking up the directory tree.
     pub async fn resolve_metadata(&self, path: &str) -> DocumentMetadata {
+        let path = normalize_path(path);
+
         // 1. Document's own metadata
         let doc_meta = self
             .storage
-            .get_document_by_path(&self.user_id, self.agent_id, path)
+            .get_document_by_path(&self.user_id, self.agent_id, &path)
             .await
             .ok()
             .map(|d| d.metadata);
@@ -844,10 +846,7 @@ impl Workspace {
             .find_config_documents(&self.user_id, self.agent_id)
             .await
             .ok()
-            .and_then(|configs| {
-                let normalized = normalize_path(path);
-                find_nearest_config(&normalized, &configs)
-            });
+            .and_then(|configs| find_nearest_config(&path, &configs));
 
         // 3. Merge: config as base, document metadata as overlay
         let base = config_meta.unwrap_or(serde_json::json!({}));
@@ -932,6 +931,12 @@ impl Workspace {
         new_string: &str,
         replace_all: bool,
     ) -> Result<PatchResult, WorkspaceError> {
+        if old_string.is_empty() {
+            return Err(WorkspaceError::PatchFailed {
+                path: path.to_string(),
+                reason: "old_string cannot be empty".to_string(),
+            });
+        }
         let path = normalize_path(path);
         let doc = self
             .storage
@@ -997,6 +1002,11 @@ impl Workspace {
             .storage
             .get_or_create_document_by_path(&self.user_id, self.agent_id, &path)
             .await?;
+
+        // Short-circuit: skip versioning, update, and reindex if content is unchanged.
+        if doc.content == content {
+            return Ok(doc);
+        }
 
         // Resolve metadata once — shared by versioning and indexing.
         let metadata = self.resolve_metadata(&path).await;
