@@ -235,6 +235,10 @@ pub struct ToolCall {
     /// or derived from the shared response content as a fallback.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<String>,
+    /// Thought signature from Gemini 3.x models. Must be echoed back on the
+    /// `functionCall` part when replaying conversation history.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thought_signature: Option<String>,
 }
 
 /// Generate a tool-call ID that satisfies all providers.
@@ -642,6 +646,7 @@ mod tests {
             name: "echo".to_string(),
             arguments: serde_json::json!({}),
             reasoning: None,
+            thought_signature: None,
         };
         let mut messages = vec![
             ChatMessage::user("hello"),
@@ -686,6 +691,7 @@ mod tests {
             name: "echo".to_string(),
             arguments: serde_json::json!({}),
             reasoning: None,
+            thought_signature: None,
         };
         let mut messages = vec![
             ChatMessage::user("test"),
@@ -712,12 +718,14 @@ mod tests {
             name: "search".to_string(),
             arguments: serde_json::json!({"q": "test"}),
             reasoning: None,
+            thought_signature: None,
         };
         let tc2 = ToolCall {
             id: "call_sel_2".to_string(),
             name: "http".to_string(),
             arguments: serde_json::json!({"url": "https://example.com"}),
             reasoning: None,
+            thought_signature: None,
         };
         let mut messages = vec![
             ChatMessage::system("You are a helpful assistant."),
