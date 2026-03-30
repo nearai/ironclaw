@@ -187,10 +187,51 @@ def match_job_response(messages: list[dict], has_tools: bool) -> dict | None:
     if tool_result_count > 0 and has_tools:
         return {"text": "The job is complete. All requested work has been finished."}
 
+
+def _system_content(messages: list[dict]) -> str:
+    parts: list[str] = []
+    for msg in messages:
+        if msg.get("role") != "system":
+            continue
+        content = msg.get("content", "")
+        if isinstance(content, list):
+            content = " ".join(
+                p.get("text", "") for p in content if p.get("type") == "text"
+            )
+        parts.append(content)
+    return "\n".join(parts)
+
+
+def _has_active_telegram_context(messages: list[dict]) -> bool:
+    system_content = _system_content(messages).lower()
+    return (
+        "current extension state for this user" in system_content
+        and '"name": "telegram"' in system_content
+        and '"active"' in system_content
+    )
+
+
+def match_contextual_response(messages: list[dict]) -> str | None:
+    content = _last_user_content(messages)
+    has_active_telegram = _has_active_telegram_context(messages)
+
+    if re.search(r"is telegram connected|telegram connected", content, re.IGNORECASE):
+        if has_active_telegram:
+            return "Yes, Telegram is already connected and active for this user."
+        return "Telegram does not look active yet. Please activate Telegram first."
+
+    if re.search(r"message me on telegram|send this to me on telegram", content, re.IGNORECASE):
+        if has_active_telegram:
+            return "Telegram is already active here, so I can use it without asking you to reactivate it."
+        return "Please activate Telegram before I try to message you there."
+
     return None
 
 
 def match_response(messages: list[dict]) -> str:
+    contextual = match_contextual_response(messages)
+    if contextual is not None:
+        return contextual
     content = _last_user_content(messages)
     for pattern, response in CANNED_RESPONSES:
         if pattern.search(content):
