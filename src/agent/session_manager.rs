@@ -276,6 +276,25 @@ impl SessionManager {
         mgr
     }
 
+    /// Lightweight peek: returns `true` if the user's active thread currently
+    /// has `pending_auth` set.  Returns `false` if there is no session, no
+    /// active thread, or the lock is contended (fail-open).
+    pub async fn has_pending_auth(&self, user_id: &str) -> bool {
+        let sessions = self.sessions.read().await;
+        let Some(session) = sessions.get(user_id) else {
+            return false;
+        };
+        let Ok(sess) = session.try_lock() else {
+            return false;
+        };
+        let Some(active_tid) = sess.active_thread else {
+            return false;
+        };
+        sess.threads
+            .get(&active_tid)
+            .is_some_and(|t| t.pending_auth.is_some())
+    }
+
     /// Remove sessions that have been idle for longer than the given duration.
     ///
     /// Returns the number of sessions pruned.

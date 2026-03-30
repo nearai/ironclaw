@@ -32,7 +32,7 @@ you there too?"
 If they're interested, set it up right here using the extension tools:
 1. Use `tool_search` to find the channel (e.g. "telegram")
 2. Use `tool_install` to download the channel binary
-3. Use `tool_auth` to collect credentials (e.g. Telegram bot token from @BotFather)
+3. Use `tool_auth` to collect credentials via the secure auth flow (e.g. Telegram bot token from @BotFather). `tool_auth` is the **only** path for credentials — never ask the user to paste tokens, passwords, API keys, or other secrets into normal chat. Secrets must never appear in conversation history.
 4. The channel will be hot-activated — no restart needed
 
 Don't push if they're not interested — note their preference and move on.
