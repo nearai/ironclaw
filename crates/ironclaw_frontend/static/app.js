@@ -95,6 +95,124 @@ let authFlowPending = false;
 let _ghostSuggestion = '';
 let currentSettingsSubtab = 'inference';
 
+// --- Hash-based URL Navigation ---
+//
+// Encodes navigation state in window.location.hash so refreshing
+// the page restores the current tab, thread, memory file, job detail, etc.
+//
+// Hash format: #/{tab}[/{detail}[/{subtab}]]
+//   #/chat                     → chat tab, assistant thread
+//   #/chat/{threadId}          → chat tab, specific thread
+//   #/memory                   → memory tab, tree root
+//   #/memory/{path/to/file}    → memory tab, specific file
+//   #/jobs                     → jobs list
+//   #/jobs/{jobId}             → job detail
+//   #/routines                 → routines list
+//   #/routines/{id}            → routine detail
+//   #/settings/{subtab}        → settings tab with specific sub-tab
+//   #/logs                     → logs tab
+
+/** Suppress hash-change handling while we're programmatically updating. */
+let _suppressHashChange = false;
+
+/** Update the URL hash to reflect current navigation state. */
+function updateHash() {
+  if (_suppressHashChange) return;
+  var parts = [currentTab];
+
+  switch (currentTab) {
+    case 'chat':
+      if (currentThreadId && currentThreadId !== assistantThreadId) {
+        parts.push(currentThreadId);
+      }
+      break;
+    case 'memory':
+      if (typeof currentMemoryPath === 'string' && currentMemoryPath) {
+        parts.push(currentMemoryPath);
+      }
+      break;
+    case 'jobs':
+      if (typeof currentJobId !== 'undefined' && currentJobId) {
+        parts.push(currentJobId);
+      }
+      break;
+    case 'routines':
+      if (typeof currentRoutineId !== 'undefined' && currentRoutineId) {
+        parts.push(currentRoutineId);
+      }
+      break;
+    case 'settings':
+      if (currentSettingsSubtab && currentSettingsSubtab !== 'inference') {
+        parts.push(currentSettingsSubtab);
+      }
+      break;
+  }
+
+  var hash = '#/' + parts.join('/');
+  if (window.location.hash !== hash) {
+    window.history.replaceState(null, '', hash);
+  }
+}
+
+/** Parse the current URL hash into navigation state. */
+function parseHash() {
+  var hash = window.location.hash || '';
+  if (!hash.startsWith('#/')) return null;
+  var parts = hash.substring(2).split('/');
+  return {
+    tab: parts[0] || 'chat',
+    detail: parts.slice(1).join('/') || null,
+  };
+}
+
+/**
+ * Restore navigation state from the URL hash.
+ * Called once after authentication and on hashchange events.
+ */
+function restoreFromHash() {
+  var state = parseHash();
+  if (!state) return;
+
+  // Suppress hash updates while restoring — switchTab/readMemoryFile/etc.
+  // each call updateHash(), which would overwrite the full hash before
+  // the detail part is restored.
+  _suppressHashChange = true;
+
+  // Switch tab
+  if (state.tab && state.tab !== currentTab) {
+    switchTab(state.tab);
+  }
+
+  // Restore detail state within the tab
+  if (state.detail) {
+    switch (state.tab) {
+      case 'chat':
+        // Defer thread switch until threads are loaded
+        window._pendingThreadRestore = state.detail;
+        break;
+      case 'memory':
+        readMemoryFile(state.detail);
+        break;
+      case 'jobs':
+        openJobDetail(state.detail);
+        break;
+      case 'routines':
+        openRoutineDetail(state.detail);
+        break;
+      case 'settings':
+        switchSettingsSubtab(state.detail);
+        break;
+    }
+  }
+
+  _suppressHashChange = false;
+}
+
+window.addEventListener('hashchange', function() {
+  if (_suppressHashChange) return;
+  restoreFromHash();
+});
+
 // --- Streaming Debounce State ---
 let _streamBuffer = '';
 let _streamDebounceTimer = null;
@@ -182,7 +300,7 @@ function authenticate() {
       const urlLogLevel = cleaned.searchParams.get('log_level');
       cleaned.searchParams.delete('token');
       cleaned.searchParams.delete('log_level');
-      window.history.replaceState({}, '', cleaned.pathname + cleaned.search);
+      window.history.replaceState({}, '', cleaned.pathname + cleaned.search + cleaned.hash);
       connectSSE();
       connectLogSSE();
       startGatewayStatusPolling();
@@ -197,6 +315,8 @@ function authenticate() {
       loadThreads();
       loadMemoryTree();
       loadJobs();
+      // Restore navigation state from URL hash (tab, thread, memory file, etc.)
+      restoreFromHash();
       // Apply URL log_level param if present, otherwise just sync the dropdown
       if (urlLogLevel) {
         setServerLogLevel(urlLogLevel);
@@ -427,6 +547,24 @@ function connectSSE() {
         }
       }, 3000);
     }
+  };
+
+  // Forward all SSE events to registered widget handlers.
+  // Wraps addEventListener to intercept every named event and dispatch
+  // to widget subscribers before the built-in handler runs.
+  var _origAddEventListener = eventSource.addEventListener.bind(eventSource);
+  eventSource.addEventListener = function(type, listener, opts) {
+    _origAddEventListener(type, function(e) {
+      // Dispatch to widget handlers
+      if (IronClaw.api && e.data) {
+        try {
+          var parsed = JSON.parse(e.data);
+          IronClaw.api._dispatch(type, parsed);
+        } catch (_) {}
+      }
+      // Call original handler
+      listener(e);
+    }, opts);
   };
 
   eventSource.addEventListener('response', (e) => {
@@ -1018,6 +1156,135 @@ function sanitizeRenderedHtml(html) {
   }
   // DOMPurify not available (CDN unreachable) — return empty string rather than unsanitized HTML
   return '';
+}
+
+// ==================== Structured Data Rendering ====================
+//
+// Detects JSON objects and key-value data in assistant messages and
+// renders them as styled cards instead of raw text. Also supports
+// extensible chat renderers via IronClaw.registerChatRenderer().
+
+/**
+ * Post-process a .message-content element to upgrade structured data into cards.
+ * Runs registered chat renderers first, then falls back to built-in JSON detection.
+ */
+function upgradeStructuredData(contentEl) {
+  // 1. Run registered chat renderers
+  var renderers = (window.IronClaw && IronClaw._chatRenderers) || [];
+  for (var i = 0; i < renderers.length; i++) {
+    try {
+      if (renderers[i].match(contentEl.textContent, contentEl)) {
+        renderers[i].render(contentEl, contentEl.textContent);
+        return; // First matching renderer wins
+      }
+    } catch (e) {
+      console.error('[IronClaw] Chat renderer "' + renderers[i].id + '" failed:', e);
+    }
+  }
+
+  // 2. Built-in: detect and upgrade inline JSON objects
+  upgradeInlineJson(contentEl);
+}
+
+/**
+ * Find JSON-like objects in text nodes and replace them with styled cards.
+ */
+function upgradeInlineJson(contentEl) {
+  // Walk text content looking for JSON objects: {...} patterns
+  // Only process <p> and top-level text, not code blocks
+  var paragraphs = contentEl.querySelectorAll('p');
+  if (paragraphs.length === 0) {
+    // No <p> tags — markdown might have produced bare text
+    paragraphs = [contentEl];
+  }
+
+  paragraphs.forEach(function(p) {
+    // Skip code blocks
+    if (p.closest('pre') || p.closest('code')) return;
+
+    var html = p.innerHTML;
+    if (!html.includes('{')) return; // Fast path: no braces at all
+
+    // Match JSON-like objects: {...} (including Python-style single quotes)
+    var jsonRegex = /(\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\})/g;
+    var match;
+    var replaced = false;
+
+    while ((match = jsonRegex.exec(html)) !== null) {
+      var raw = match[1];
+      // Skip matches inside <code> tags by checking surrounding HTML
+      var before = html.substring(0, match.index);
+      var openCodes = (before.match(/<code/gi) || []).length;
+      var closeCodes = (before.match(/<\/code/gi) || []).length;
+      if (openCodes > closeCodes) continue; // Inside a <code> tag
+      // Normalize Python-style single quotes to double quotes for parsing
+      var normalized = raw.replace(/'/g, '"');
+      try {
+        var obj = JSON.parse(normalized);
+        if (typeof obj === 'object' && obj !== null && !Array.isArray(obj)) {
+          var card = buildDataCard(obj);
+          html = html.substring(0, match.index) + card + html.substring(match.index + match[0].length);
+          replaced = true;
+          // Reset regex since we modified the string
+          jsonRegex.lastIndex = match.index + card.length;
+        }
+      } catch (e) {
+        // Not valid JSON — leave as text
+      }
+    }
+
+    if (replaced) {
+      p.innerHTML = html;
+    }
+  });
+}
+
+/**
+ * Build an HTML data card from a plain object.
+ */
+function buildDataCard(obj) {
+  var keys = Object.keys(obj);
+  if (keys.length === 0) return '';
+
+  var rows = '';
+  for (var i = 0; i < keys.length; i++) {
+    var key = keys[i];
+    var value = obj[key];
+    var displayKey = key.replace(/_/g, ' ');
+    var valueClass = 'data-card-value';
+    var valueHtml;
+
+    // Special rendering for known value types
+    if (key === 'status' || key === 'state') {
+      var badgeClass = 'status-badge';
+      var sv = String(value).toLowerCase();
+      if (sv === 'created' || sv === 'active' || sv === 'success' || sv === 'completed' || sv === 'ok' || sv === 'running') {
+        badgeClass += ' status-success';
+      } else if (sv === 'failed' || sv === 'error' || sv === 'cancelled' || sv === 'rejected') {
+        badgeClass += ' status-error';
+      } else if (sv === 'pending' || sv === 'waiting' || sv === 'queued') {
+        badgeClass += ' status-pending';
+      }
+      valueHtml = '<span class="' + badgeClass + '">' + escapeHtml(String(value)) + '</span>';
+    } else if (typeof value === 'object' && value !== null) {
+      valueHtml = '<code>' + escapeHtml(JSON.stringify(value)) + '</code>';
+    } else {
+      // Check if value looks like a UUID or ID
+      var strVal = String(value);
+      if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(strVal)) {
+        valueHtml = '<code class="data-card-id">' + escapeHtml(strVal) + '</code>';
+      } else {
+        valueHtml = '<span>' + escapeHtml(strVal) + '</span>';
+      }
+    }
+
+    rows += '<div class="data-card-row">' +
+      '<span class="data-card-label">' + escapeHtml(displayKey) + '</span>' +
+      '<span class="' + valueClass + '">' + valueHtml + '</span>' +
+      '</div>';
+  }
+
+  return '<div class="data-card">' + rows + '</div>';
 }
 
 function copyCodeBlock(btn) {
@@ -1824,6 +2091,8 @@ function createMessageElement(role, content) {
   } else {
     div.setAttribute('data-raw', content);
     contentEl.innerHTML = renderMarkdown(content);
+    // Upgrade structured data (JSON objects, etc.) into styled cards
+    upgradeStructuredData(contentEl);
     // Syntax highlighting for code blocks
     if (typeof hljs !== 'undefined') {
       requestAnimationFrame(() => {
@@ -2012,6 +2281,19 @@ function loadThreads() {
       list.appendChild(item);
     }
 
+    // Restore thread from URL hash if pending (deferred from restoreFromHash)
+    if (window._pendingThreadRestore) {
+      var pendingId = window._pendingThreadRestore;
+      window._pendingThreadRestore = null;
+      // Verify the thread exists in the loaded list
+      var found = (pendingId === assistantThreadId) ||
+        threads.some(function(t) { return t.id === pendingId; });
+      if (found) {
+        switchThread(pendingId);
+        return;
+      }
+    }
+
     // Default to assistant thread on first load if no thread selected
     if (!currentThreadId && assistantThreadId) {
       switchToAssistant();
@@ -2051,6 +2333,7 @@ function switchToAssistant() {
   oldestTimestamp = null;
   loadHistory();
   loadThreads();
+  updateHash();
   if (window.innerWidth <= 768) {
     const sidebar = document.getElementById('thread-sidebar');
     sidebar.classList.remove('expanded-mobile');
@@ -2067,6 +2350,7 @@ function switchThread(threadId) {
   oldestTimestamp = null;
   loadHistory();
   loadThreads();
+  updateHash();
   if (window.innerWidth <= 768) {
     const sidebar = document.getElementById('thread-sidebar');
     sidebar.classList.remove('expanded-mobile');
@@ -2080,6 +2364,7 @@ function createNewThread() {
     document.getElementById('chat-messages').innerHTML = '';
     showWelcomeCard();
     loadThreads();
+    updateHash();
   }).catch((err) => {
     showToast('Failed to create thread: ' + err.message, 'error');
   });
@@ -2217,7 +2502,11 @@ function switchTab(tab) {
   });
   applyAriaAttributes();
 
-  if (tab === 'memory') loadMemoryTree();
+  if (tab === 'memory') {
+    loadMemoryTree();
+    // Auto-open README.md on first visit (no file selected yet)
+    if (!currentMemoryPath) readMemoryFile('README.md');
+  }
   if (tab === 'jobs') loadJobs();
   if (tab === 'routines') loadRoutines();
   if (tab === 'logs') applyLogFilters();
@@ -2227,6 +2516,7 @@ function switchTab(tab) {
     stopPairingPoll();
   }
   updateTabIndicator();
+  updateHash();
 }
 
 function updateTabIndicator() {
@@ -2372,6 +2662,7 @@ function toggleExpand(node) {
 
 function readMemoryFile(path) {
   currentMemoryPath = path;
+  updateHash();
   // Update breadcrumb
   document.getElementById('memory-breadcrumb-path').innerHTML = buildBreadcrumb(path);
   document.getElementById('memory-edit-btn').style.display = 'inline-block';
@@ -3685,6 +3976,7 @@ function restartJob(jobId) {
 function openJobDetail(jobId) {
   currentJobId = jobId;
   currentJobSubTab = 'activity';
+  updateHash();
   apiFetch('/api/jobs/' + jobId).then((job) => {
     renderJobDetail(job);
   }).catch((err) => {
@@ -3697,6 +3989,7 @@ function closeJobDetail() {
   currentJobId = null;
   jobFilesTreeState = null;
   loadJobs();
+  updateHash();
 }
 
 function renderJobDetail(job) {
@@ -4193,6 +4486,7 @@ function renderRoutinesList(routines) {
 
 function openRoutineDetail(id) {
   currentRoutineId = id;
+  updateHash();
   apiFetch('/api/routines/' + id).then((routine) => {
     renderRoutineDetail(routine);
   }).catch((err) => {
@@ -4203,6 +4497,7 @@ function openRoutineDetail(id) {
 function closeRoutineDetail() {
   currentRoutineId = null;
   loadRoutines();
+  updateHash();
 }
 
 function renderRoutineDetail(routine) {
@@ -5180,6 +5475,7 @@ function switchSettingsSubtab(subtab) {
     document.querySelector('.settings-layout').classList.add('settings-detail-active');
   }
   loadSettingsSubtab(subtab);
+  updateHash();
 }
 
 function settingsBack() {
@@ -6324,3 +6620,241 @@ document.getElementById('settings-search-input').addEventListener('input', funct
     activePanel.appendChild(empty);
   }
 });
+
+// ==================== Widget Extension System ====================
+//
+// Provides a registration API for frontend widgets. Widgets are self-contained
+// components that plug into named slots in the UI (tabs, sidebar, status bar, etc.).
+//
+// Widget authors call IronClaw.registerWidget({ id, name, slot, init, ... })
+// from their module script. The init() function receives a container DOM element
+// and the IronClaw.api object for authenticated fetch, event subscription, etc.
+
+window.IronClaw = window.IronClaw || {};
+IronClaw.widgets = new Map();
+IronClaw._widgetInitQueue = [];
+IronClaw._chatRenderers = [];
+
+/**
+ * Register a widget component.
+ * @param {Object} def - Widget definition
+ * @param {string} def.id - Unique widget identifier
+ * @param {string} def.name - Display name
+ * @param {string} def.slot - Target slot ('tab', 'chat_header', etc.)
+ * @param {string} [def.icon] - Icon identifier
+ * @param {Function} def.init - Called with (container, api) when widget activates
+ * @param {Function} [def.activate] - Called when widget becomes visible
+ * @param {Function} [def.deactivate] - Called when widget is hidden
+ * @param {Function} [def.destroy] - Called when widget is removed
+ */
+IronClaw.registerWidget = function(def) {
+  if (!def.id || !def.init) {
+    console.error('[IronClaw] Widget registration requires id and init:', def);
+    return;
+  }
+  IronClaw.widgets.set(def.id, def);
+
+  if (def.slot === 'tab') {
+    _addWidgetTab(def);
+  }
+};
+
+/**
+ * Register a chat renderer for custom inline rendering of structured data.
+ *
+ * Chat renderers run against each assistant message. The first renderer
+ * whose `match()` returns true gets to transform the content.
+ *
+ * @param {Object} def - Renderer definition
+ * @param {string} def.id - Unique identifier
+ * @param {Function} def.match - (textContent, element) => boolean
+ * @param {Function} def.render - (element, textContent) => void (mutate element in place)
+ * @param {number} [def.priority=0] - Higher priority runs first
+ */
+IronClaw.registerChatRenderer = function(def) {
+  if (!def.id || !def.match || !def.render) {
+    console.error('[IronClaw] Chat renderer requires id, match, and render:', def);
+    return;
+  }
+  IronClaw._chatRenderers.push(def);
+  // Sort by priority (higher first)
+  IronClaw._chatRenderers.sort(function(a, b) {
+    return (b.priority || 0) - (a.priority || 0);
+  });
+};
+
+/**
+ * API object exposed to widgets for safe interaction with the app.
+ */
+IronClaw.api = {
+  /** Authenticated fetch wrapper — injects the session token. */
+  fetch: function(path, opts) {
+    opts = opts || {};
+    opts.headers = Object.assign({}, opts.headers || {}, {
+      'Authorization': 'Bearer ' + token
+    });
+    return fetch(path, opts);
+  },
+
+  /** Subscribe to an SSE/WebSocket event type. Returns an unsubscribe function. */
+  subscribe: function(eventType, handler) {
+    if (!window._widgetEventHandlers) window._widgetEventHandlers = {};
+    if (!window._widgetEventHandlers[eventType]) window._widgetEventHandlers[eventType] = [];
+    window._widgetEventHandlers[eventType].push(handler);
+    return function() {
+      var handlers = window._widgetEventHandlers[eventType];
+      if (handlers) {
+        var idx = handlers.indexOf(handler);
+        if (idx !== -1) handlers.splice(idx, 1);
+      }
+    };
+  },
+
+  /**
+   * Dispatch an SSE event to registered widget handlers.
+   * Called internally by SSE event listeners — not for widget use.
+   * @private
+   */
+  _dispatch: function(eventType, data) {
+    var handlers = window._widgetEventHandlers && window._widgetEventHandlers[eventType];
+    if (!handlers || handlers.length === 0) return;
+    for (var i = 0; i < handlers.length; i++) {
+      try { handlers[i](data); } catch (e) {
+        console.error('[IronClaw] Widget event handler error (' + eventType + '):', e);
+      }
+    }
+  },
+
+  /** Current theme information. */
+  theme: {
+    get current() { return document.documentElement.dataset.theme || 'dark'; }
+  },
+
+  /** Internationalization helper. */
+  i18n: {
+    t: function(key) { return (window.I18n && window.I18n.t) ? window.I18n.t(key) : key; }
+  },
+
+  /** Navigate to a tab by ID. */
+  navigate: function(tabId) {
+    if (typeof switchTab === 'function') switchTab(tabId);
+  }
+};
+
+/**
+ * Add a widget as a new tab in the tab bar.
+ * @private
+ */
+function _addWidgetTab(def) {
+  var tabBar = document.querySelector('.tab-bar');
+  var tabContent = document.querySelector('.tab-content') || document.getElementById('tab-content');
+  if (!tabBar || !tabContent) {
+    // DOM not ready yet — queue for later
+    IronClaw._widgetInitQueue.push(def);
+    return;
+  }
+
+  // Create tab button
+  var btn = document.createElement('button');
+  btn.className = 'tab-btn';
+  btn.dataset.tab = def.id;
+  btn.textContent = def.name;
+  if (def.icon) {
+    btn.dataset.icon = def.icon;
+  }
+  btn.addEventListener('click', function() {
+    if (typeof switchTab === 'function') switchTab(def.id);
+  });
+  // Insert before the settings tab (last built-in tab) or at the end
+  var settingsBtn = tabBar.querySelector('[data-tab="settings"]');
+  if (settingsBtn) {
+    tabBar.insertBefore(btn, settingsBtn);
+  } else {
+    tabBar.appendChild(btn);
+  }
+
+  // Create container panel (id must match switchTab's `p.id === 'tab-' + tab`)
+  var panel = document.createElement('div');
+  panel.id = 'tab-' + def.id;
+  panel.className = 'tab-panel';
+  panel.dataset.tab = def.id;
+  panel.dataset.widget = def.id;
+  tabContent.appendChild(panel);
+
+  // Initialize the widget
+  try {
+    def.init(panel, IronClaw.api);
+  } catch (e) {
+    console.error('[IronClaw] Widget "' + def.id + '" init failed:', e);
+    panel.innerHTML = '<div style="padding:2rem;color:var(--color-error,red);">Widget "' +
+      def.id + '" failed to load: ' + (e.message || e) + '</div>';
+  }
+}
+
+// Apply layout config if injected by the server
+if (window.__IRONCLAW_LAYOUT__) {
+  (function() {
+    var layout = window.__IRONCLAW_LAYOUT__;
+
+    // Apply branding title
+    if (layout.branding && layout.branding.title) {
+      var titleEl = document.querySelector('.app-title');
+      if (titleEl) titleEl.textContent = layout.branding.title;
+    }
+
+    // Apply tab visibility — hide specified tabs
+    if (layout.tabs && layout.tabs.hidden) {
+      layout.tabs.hidden.forEach(function(tabId) {
+        var btn = document.querySelector('.tab-btn[data-tab="' + tabId + '"]');
+        if (btn) btn.style.display = 'none';
+      });
+    }
+
+    // Apply tab ordering — reorder tab buttons in the tab bar
+    if (layout.tabs && layout.tabs.order && layout.tabs.order.length > 0) {
+      var tabBar = document.querySelector('.tab-bar');
+      if (tabBar) {
+        var order = layout.tabs.order;
+        // Sort existing buttons by the specified order
+        var buttons = Array.from(tabBar.querySelectorAll('button[data-tab]'));
+        var orderIndex = {};
+        order.forEach(function(id, i) { orderIndex[id] = i; });
+        buttons.sort(function(a, b) {
+          var ai = orderIndex[a.getAttribute('data-tab')];
+          var bi = orderIndex[b.getAttribute('data-tab')];
+          if (ai === undefined) ai = 999;
+          if (bi === undefined) bi = 999;
+          return ai - bi;
+        });
+        buttons.forEach(function(btn) { tabBar.appendChild(btn); });
+        updateTabIndicator();
+      }
+    }
+
+    // Apply default tab — switch to it if no hash navigation overrides
+    if (layout.tabs && layout.tabs.default_tab && !window.location.hash) {
+      switchTab(layout.tabs.default_tab);
+    }
+
+    // Apply chat config
+    if (layout.chat) {
+      if (layout.chat.suggestions === false) {
+        var chips = document.getElementById('suggestion-chips');
+        if (chips) chips.style.display = 'none';
+      }
+      if (layout.chat.image_upload === false) {
+        var imgBtn = document.getElementById('image-upload-btn');
+        if (imgBtn) imgBtn.style.display = 'none';
+      }
+    }
+  })();
+}
+
+// Drain any widgets that were registered before the DOM was ready.
+// _addWidgetTab queues them in _widgetInitQueue when tab-bar doesn't exist yet.
+if (IronClaw._widgetInitQueue && IronClaw._widgetInitQueue.length > 0) {
+  IronClaw._widgetInitQueue.forEach(function(def) {
+    _addWidgetTab(def);
+  });
+  IronClaw._widgetInitQueue = [];
+}

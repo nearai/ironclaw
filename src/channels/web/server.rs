@@ -33,6 +33,10 @@ use crate::channels::relay::DEFAULT_RELAY_NAME;
 use crate::channels::web::auth::{
     AuthenticatedUser, CombinedAuthState, UserIdentity, auth_middleware,
 };
+use crate::channels::web::handlers::frontend::{
+    frontend_layout_handler, frontend_layout_update_handler, frontend_widget_file_handler,
+    frontend_widgets_handler,
+};
 use crate::channels::web::handlers::jobs::{
     job_files_list_handler, job_files_read_handler, jobs_cancel_handler, jobs_detail_handler,
     jobs_events_handler, jobs_list_handler, jobs_prompt_handler, jobs_restart_handler,
@@ -580,6 +584,16 @@ pub async fn start_server(
             "/api/tokens/{id}",
             axum::routing::delete(super::handlers::tokens::tokens_revoke_handler),
         )
+        // Frontend extension API
+        .route(
+            "/api/frontend/layout",
+            get(frontend_layout_handler).put(frontend_layout_update_handler),
+        )
+        .route("/api/frontend/widgets", get(frontend_widgets_handler))
+        .route(
+            "/api/frontend/widget/{id}/{*file}",
+            get(frontend_widget_file_handler),
+        )
         // Gateway control plane
         .route("/api/gateway/status", get(gateway_status_handler))
         // OpenAI-compatible API
@@ -725,25 +739,143 @@ pub async fn start_server(
     Ok(bound_addr)
 }
 
-// --- Static file handlers ---
+// --- Frontend bundle assembly ---
 
-async fn index_handler() -> impl IntoResponse {
+use ironclaw_frontend::assets;
+use ironclaw_frontend::{FrontendBundle, LayoutConfig, ResolvedWidget, WidgetManifest};
+
+/// Build customized HTML from workspace frontend config.
+///
+/// Returns `None` if workspace is unavailable or has no customizations,
+/// signaling the caller to serve the embedded default.
+async fn build_frontend_html(state: &GatewayState) -> Option<String> {
+    let ws = state.workspace.as_ref()?;
+
+    // Read layout config
+    let layout: LayoutConfig = match ws.read("frontend/layout.json").await {
+        Ok(doc) => serde_json::from_str(&doc.content).unwrap_or_default(),
+        Err(_) => LayoutConfig::default(),
+    };
+
+    // Read custom CSS
+    let custom_css = ws
+        .read("frontend/custom.css")
+        .await
+        .ok()
+        .map(|doc| doc.content)
+        .filter(|c| !c.trim().is_empty());
+
+    // Discover widgets
+    let mut widgets = Vec::new();
+    if let Ok(entries) = ws.list("frontend/widgets/").await {
+        for entry in entries {
+            if !entry.is_directory {
+                continue;
+            }
+            let name = entry.name().to_string();
+            let manifest_path = format!("frontend/widgets/{}/manifest.json", name);
+            let js_path = format!("frontend/widgets/{}/index.js", name);
+
+            let manifest: WidgetManifest = match ws.read(&manifest_path).await {
+                Ok(doc) => match serde_json::from_str(&doc.content) {
+                    Ok(m) => m,
+                    Err(_) => continue,
+                },
+                Err(_) => continue,
+            };
+
+            let js = match ws.read(&js_path).await {
+                Ok(doc) => doc.content,
+                Err(_) => continue,
+            };
+
+            let css = ws
+                .read(&format!("frontend/widgets/{}/style.css", name))
+                .await
+                .ok()
+                .map(|doc| doc.content)
+                .filter(|c| !c.trim().is_empty());
+
+            // Check if widget is enabled in layout config (default: enabled)
+            let enabled = layout
+                .widgets
+                .get(&manifest.id)
+                .map(|w| w.enabled)
+                .unwrap_or(true);
+
+            if enabled {
+                widgets.push(ResolvedWidget { manifest, js, css });
+            }
+        }
+    }
+
+    // Skip assembly if there's nothing to customize
+    if layout.branding.title.is_none()
+        && layout.branding.colors.is_none()
+        && layout.tabs.order.is_none()
+        && layout.tabs.hidden.is_none()
+        && layout.chat.suggestions.is_none()
+        && layout.widgets.is_empty()
+        && custom_css.is_none()
+        && widgets.is_empty()
+    {
+        return None;
+    }
+
+    let bundle = FrontendBundle {
+        layout,
+        widgets,
+        custom_css,
+    };
+
+    Some(ironclaw_frontend::assemble_index(
+        assets::INDEX_HTML,
+        &bundle,
+    ))
+}
+
+// --- Static file handlers ---
+//
+// All frontend assets are embedded in the `ironclaw_frontend` crate.
+// These handlers serve them with appropriate MIME types and cache headers.
+
+async fn index_handler(State(state): State<Arc<GatewayState>>) -> impl IntoResponse {
+    // Try to assemble customized HTML from workspace frontend config.
+    // Falls back to embedded HTML if workspace is unavailable or has no customizations.
+    let html = match build_frontend_html(&state).await {
+        Some(assembled) => assembled,
+        None => assets::INDEX_HTML.to_string(),
+    };
     (
         [
             (header::CONTENT_TYPE, "text/html; charset=utf-8"),
             (header::CACHE_CONTROL, "no-cache"),
         ],
-        include_str!("static/index.html"),
+        html,
     )
 }
 
-async fn css_handler() -> impl IntoResponse {
+async fn css_handler(State(state): State<Arc<GatewayState>>) -> impl IntoResponse {
+    // Append custom CSS from workspace if it exists
+    let css = match &state.workspace {
+        Some(ws) => match ws.read("frontend/custom.css").await {
+            Ok(doc) if !doc.content.trim().is_empty() => {
+                format!(
+                    "{}\n/* --- custom overrides --- */\n{}",
+                    assets::STYLE_CSS,
+                    doc.content
+                )
+            }
+            _ => assets::STYLE_CSS.to_string(),
+        },
+        None => assets::STYLE_CSS.to_string(),
+    };
     (
         [
             (header::CONTENT_TYPE, "text/css"),
             (header::CACHE_CONTROL, "no-cache"),
         ],
-        include_str!("static/style.css"),
+        css,
     )
 }
 
@@ -753,7 +885,7 @@ async fn js_handler() -> impl IntoResponse {
             (header::CONTENT_TYPE, "application/javascript"),
             (header::CACHE_CONTROL, "no-cache"),
         ],
-        include_str!("static/app.js"),
+        assets::APP_JS,
     )
 }
 
@@ -763,7 +895,7 @@ async fn theme_init_handler() -> impl IntoResponse {
             (header::CONTENT_TYPE, "application/javascript"),
             (header::CACHE_CONTROL, "no-cache"),
         ],
-        include_str!("static/theme-init.js"),
+        assets::THEME_INIT_JS,
     )
 }
 
@@ -773,7 +905,7 @@ async fn favicon_handler() -> impl IntoResponse {
             (header::CONTENT_TYPE, "image/x-icon"),
             (header::CACHE_CONTROL, "public, max-age=86400"),
         ],
-        include_bytes!("static/favicon.ico").as_slice(),
+        assets::FAVICON_ICO,
     )
 }
 
@@ -783,7 +915,7 @@ async fn i18n_index_handler() -> impl IntoResponse {
             (header::CONTENT_TYPE, "application/javascript"),
             (header::CACHE_CONTROL, "no-cache"),
         ],
-        include_str!("static/i18n/index.js"),
+        assets::I18N_INDEX_JS,
     )
 }
 
@@ -793,7 +925,7 @@ async fn i18n_en_handler() -> impl IntoResponse {
             (header::CONTENT_TYPE, "application/javascript"),
             (header::CACHE_CONTROL, "no-cache"),
         ],
-        include_str!("static/i18n/en.js"),
+        assets::I18N_EN_JS,
     )
 }
 
@@ -803,7 +935,7 @@ async fn i18n_zh_handler() -> impl IntoResponse {
             (header::CONTENT_TYPE, "application/javascript"),
             (header::CACHE_CONTROL, "no-cache"),
         ],
-        include_str!("static/i18n/zh-CN.js"),
+        assets::I18N_ZH_CN_JS,
     )
 }
 
@@ -813,7 +945,7 @@ async fn i18n_app_handler() -> impl IntoResponse {
             (header::CONTENT_TYPE, "application/javascript"),
             (header::CACHE_CONTROL, "no-cache"),
         ],
-        include_str!("static/i18n-app.js"),
+        assets::I18N_APP_JS,
     )
 }
 
