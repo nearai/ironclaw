@@ -1014,7 +1014,15 @@ async fn oauth_callback_handler(
             flow.secrets
                 .create(&flow.user_id, params)
                 .await
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| {
+                    tracing::warn!(
+                        extension = %flow.extension_name,
+                        secret_name = %client_id_secret,
+                        error = %e,
+                        "Failed to store OAuth client_id secret after callback"
+                    );
+                    "failed to store client credentials".to_string()
+                })?;
         }
 
         if let (Some(client_secret_name), Some(client_secret)) = (
@@ -1033,7 +1041,15 @@ async fn oauth_callback_handler(
             flow.secrets
                 .create(&flow.user_id, params)
                 .await
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| {
+                    tracing::warn!(
+                        extension = %flow.extension_name,
+                        secret_name = %client_secret_name,
+                        error = %e,
+                        "Failed to store OAuth client_secret secret after callback"
+                    );
+                    "failed to store client credentials".to_string()
+                })?;
         }
 
         Ok(())

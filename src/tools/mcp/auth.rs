@@ -1245,6 +1245,7 @@ pub async fn refresh_access_token(
 
     let token = if let Some(proxy_url) = oauth_defaults::exchange_proxy_url() {
         let resource = canonical_resource_uri(&server_config.url);
+        let provider = format!("mcp:{}", server_config.name);
         let gateway_token = oauth_defaults::oauth_proxy_auth_token().ok_or_else(|| {
             AuthError::RefreshFailed(
                 "OAuth refresh proxy is configured but no proxy auth token is available"
@@ -1260,7 +1261,7 @@ pub async fn refresh_access_token(
                 client_secret: credentials.client_secret.as_deref(),
                 refresh_token: refresh_token.expose(),
                 resource: Some(&resource),
-                provider: Some(&format!("mcp:{}", server_config.name)),
+                provider: Some(provider.as_str()),
             })
             .await
             .map_err(|e| AuthError::RefreshFailed(e.to_string()))?;
