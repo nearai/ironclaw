@@ -140,6 +140,67 @@ impl ContainerRunner {
         Ok(())
     }
 
+    /// Build the sandbox image from a Dockerfile.
+    ///
+    /// This is used when the image is not available from a registry and needs
+    /// to be built locally from source.
+    ///
+    /// # Security
+    ///
+    /// The `dockerfile_path` MUST point to a trusted Dockerfile. Docker builds
+    /// execute arbitrary `RUN` commands from the Dockerfile, which is a code
+    /// execution vector. Callers must ensure the path is not user-controlled
+    /// and points to a known, safe Dockerfile (e.g., bundled with the application).
+    pub async fn build_image(&self, dockerfile_path: &Path) -> Result<()> {
+        use tokio::process::Command;
+
+        let dockerfile_str = dockerfile_path.to_string_lossy();
+
+        // Determine context directory:
+        // - If dockerfile has a parent dir, use it
+        // - Otherwise use current working directory
+        let context_dir = match dockerfile_path.parent() {
+            Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+            _ => std::env::current_dir().map_err(|e| SandboxError::ContainerCreationFailed {
+                reason: format!("cannot determine current directory: {}", e),
+            })?,
+        };
+
+        tracing::info!(
+            "Building sandbox image from {}: {}",
+            dockerfile_str,
+            self.image
+        );
+
+        let output = Command::new("docker")
+            .arg("build")
+            .arg("-f")
+            .arg(dockerfile_path)
+            .arg("-t")
+            .arg(&self.image)
+            .arg(".")
+            .current_dir(context_dir)
+            .output()
+            .await
+            .map_err(|e| SandboxError::ContainerCreationFailed {
+                reason: format!("failed to run docker build: {}", e),
+            })?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(SandboxError::ContainerCreationFailed {
+                reason: format!(
+                    "docker build failed (exit {}): {}",
+                    output.status.code().unwrap_or(-1),
+                    stderr
+                ),
+            });
+        }
+
+        tracing::info!("Successfully built image: {}", self.image);
+        Ok(())
+    }
+
     /// Execute a command in a new container.
     pub async fn execute(
         &self,
