@@ -1502,7 +1502,8 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Test: autonomous runs fail loudly when an extension tool is inactive
+    // Test: autonomous runs deny inactive extension tools at execution time
+    // (job completes but tool is blocked by the approval context)
     // -----------------------------------------------------------------------
 
     #[tokio::test]
@@ -1536,7 +1537,8 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Test: extension tools activated for another owner are not inherited
+    // Test: extension tools activated for another owner are denied at execution
+    // time (job completes but tool is blocked by the approval context)
     // -----------------------------------------------------------------------
 
     #[tokio::test]
