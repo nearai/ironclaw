@@ -2987,10 +2987,8 @@ impl SetupWizard {
         use crate::sandbox::container::{ContainerRunner, connect_docker};
 
         let image_name = self.settings.sandbox.image.clone();
-        let docker = connect_docker()
-            .await
-            .map_err(|e| SetupError::Auth(e.to_string()))?;
-        let runner = ContainerRunner::new(docker, image_name.clone(), 0);
+        let docker = connect_docker().await?;
+        let runner = ContainerRunner::for_image_ops(docker, image_name.clone());
 
         if runner.image_exists().await {
             print_success(&format!("Worker image '{}' found.", image_name));
@@ -3002,7 +3000,8 @@ impl SetupWizard {
         print_info("This image is required for sandboxed job execution.");
         println!();
 
-        // Look for Dockerfile.worker in common locations
+        // Look for Dockerfile.worker in common locations relative to the
+        // current working directory (expected to be the ironclaw repo root).
         let dockerfile_candidates = [
             std::path::PathBuf::from("Dockerfile.worker"),
             std::path::PathBuf::from("docker/sandbox.Dockerfile"),
@@ -3044,7 +3043,7 @@ impl SetupWizard {
                 }
             }
             None => {
-                print_info("No Dockerfile.worker found in current directory.");
+                print_info("No Dockerfile found in current directory.");
                 print_info("To use Docker sandbox, build the worker image manually:");
                 print_info(&format!(
                     "  docker build -f Dockerfile.worker -t {} .",
