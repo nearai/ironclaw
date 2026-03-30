@@ -594,6 +594,21 @@ impl TestRigBuilder {
             ws.take_bootstrap_pending();
         }
 
+        // Always pre-seed the "test-user" workspace scope in the DB.
+        // `tenant_ctx()` creates a per-user Workspace when the message
+        // user_id differs from the owner, and calls `seed_if_empty()`.
+        // Without pre-seeding, the first message triggers BOOTSTRAP.md
+        // creation and an unwanted per-user bootstrap greeting that
+        // throws off response counting and causes message-drain races.
+        // (The `with_bootstrap()` flag controls only the *owner* startup
+        // greeting — per-user bootstrap is always suppressed in tests.)
+        {
+            let test_user_ws =
+                ironclaw::workspace::Workspace::new_with_db("test-user", Arc::clone(&db));
+            let _ = test_user_ws.seed_if_empty().await;
+            test_user_ws.take_bootstrap_pending();
+        }
+
         // AppBuilder may re-resolve config from env/TOML and override test defaults.
         // Force test-rig agent flags to the requested deterministic values.
         components.config.agent.auto_approve_tools = auto_approve_tools.unwrap_or(true);

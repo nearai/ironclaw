@@ -116,8 +116,6 @@ pub struct RoutineEngine {
     tools: Arc<ToolRegistry>,
     /// Safety layer for tool output sanitization.
     safety: Arc<SafetyLayer>,
-    /// Sandbox readiness state for full-job dispatch.
-    sandbox_readiness: SandboxReadiness,
     /// Timestamp when this engine instance was created. Used by
     /// `sync_dispatched_runs` to distinguish orphaned runs (from a previous
     /// process) from actively-watched runs (from this process).
@@ -136,7 +134,7 @@ impl RoutineEngine {
         extension_manager: Option<Arc<ExtensionManager>>,
         tools: Arc<ToolRegistry>,
         safety: Arc<SafetyLayer>,
-        sandbox_readiness: SandboxReadiness,
+        _sandbox_readiness: SandboxReadiness,
     ) -> Self {
         Self {
             config,
@@ -150,7 +148,6 @@ impl RoutineEngine {
             extension_manager,
             tools,
             safety,
-            sandbox_readiness,
             boot_time: Utc::now(),
         }
     }
@@ -804,7 +801,6 @@ impl RoutineEngine {
             extension_manager: self.extension_manager.clone(),
             tools: self.tools.clone(),
             safety: self.safety.clone(),
-            sandbox_readiness: self.sandbox_readiness,
         };
 
         tokio::spawn(async move {
@@ -889,7 +885,6 @@ impl RoutineEngine {
             extension_manager: self.extension_manager.clone(),
             tools: self.tools.clone(),
             safety: self.safety.clone(),
-            sandbox_readiness: self.sandbox_readiness,
         };
 
         tokio::spawn(async move {
@@ -943,7 +938,6 @@ impl RoutineEngine {
             extension_manager: self.extension_manager.clone(),
             tools: self.tools.clone(),
             safety: self.safety.clone(),
-            sandbox_readiness: self.sandbox_readiness,
         };
 
         // Record the run in DB, then spawn execution
@@ -1081,7 +1075,6 @@ struct EngineContext {
     extension_manager: Option<Arc<ExtensionManager>>,
     tools: Arc<ToolRegistry>,
     safety: Arc<SafetyLayer>,
-    sandbox_readiness: SandboxReadiness,
 }
 
 /// Execute a routine run. Handles both lightweight and full_job modes.
@@ -1256,23 +1249,8 @@ async fn execute_full_job(
     run: &RoutineRun,
     execution: &FullJobExecutionConfig<'_>,
 ) -> Result<(RunStatus, Option<String>, Option<i32>), RoutineError> {
-    match ctx.sandbox_readiness {
-        SandboxReadiness::Available => {}
-        SandboxReadiness::DisabledByConfig => {
-            return Err(RoutineError::JobDispatchFailed {
-                reason: "Sandboxing is disabled (SANDBOX_ENABLED=false). \
-                         Full-job routines require sandbox."
-                    .to_string(),
-            });
-        }
-        SandboxReadiness::DockerUnavailable => {
-            return Err(RoutineError::JobDispatchFailed {
-                reason: "Sandbox is enabled but Docker is not available. \
-                         Install Docker or set SANDBOX_ENABLED=false."
-                    .to_string(),
-            });
-        }
-    }
+    // Full-job routines dispatch through the scheduler (same as /job
+    // commands) — no Docker sandbox required.
 
     let scheduler = ctx
         .scheduler
@@ -2407,40 +2385,6 @@ mod tests {
     #[test]
     fn test_full_job_dispatch_returns_running_status() {
         assert_eq!(RunStatus::Running.to_string(), "running");
-    }
-
-    #[test]
-    fn test_sandbox_readiness_disabled_by_config_error() {
-        use super::SandboxReadiness;
-
-        let readiness = SandboxReadiness::DisabledByConfig;
-        assert_ne!(readiness, SandboxReadiness::Available);
-
-        let err = crate::error::RoutineError::JobDispatchFailed {
-            reason: "Sandboxing is disabled (SANDBOX_ENABLED=false). \
-                     Full-job routines require sandbox."
-                .to_string(),
-        };
-        let msg = err.to_string();
-        assert!(msg.contains("SANDBOX_ENABLED=false"));
-        assert!(msg.contains("require sandbox"));
-    }
-
-    #[test]
-    fn test_sandbox_readiness_docker_unavailable_error() {
-        use super::SandboxReadiness;
-
-        let readiness = SandboxReadiness::DockerUnavailable;
-        assert_ne!(readiness, SandboxReadiness::Available);
-
-        let err = crate::error::RoutineError::JobDispatchFailed {
-            reason: "Sandbox is enabled but Docker is not available. \
-                     Install Docker or set SANDBOX_ENABLED=false."
-                .to_string(),
-        };
-        let msg = err.to_string();
-        assert!(msg.contains("Docker is not available"));
-        assert!(msg.contains("SANDBOX_ENABLED"));
     }
 
     /// Regression test for #1317: FullJobWatcher maps terminal job states correctly.

@@ -198,37 +198,46 @@ mod tests {
         }
     }
 
-    fn owner_gate_trace(include_completion: bool) -> LlmTrace {
-        let mut steps = vec![TraceStep {
-            request_hint: None,
-            response: TraceResponse::ToolCalls {
-                tool_calls: vec![TraceToolCall {
-                    id: "call_owner_gate".to_string(),
-                    name: "owner_gate".to_string(),
-                    arguments: serde_json::json!({}),
-                }],
-                input_tokens: 40,
-                output_tokens: 10,
+    fn owner_gate_trace(_include_completion: bool) -> LlmTrace {
+        // The worker calls the LLM which returns a tool_call for owner_gate.
+        // After tool execution (success or blocked-by-approval error), the
+        // worker calls the LLM again. The worker first calls `select_tools()`,
+        // then falls back to `respond_with_tools()` when no tool calls are
+        // returned — both consume a trace step, so we always need two text
+        // responses after the tool call.
+        let steps = vec![
+            TraceStep {
+                request_hint: None,
+                response: TraceResponse::ToolCalls {
+                    tool_calls: vec![TraceToolCall {
+                        id: "call_owner_gate".to_string(),
+                        name: "owner_gate".to_string(),
+                        arguments: serde_json::json!({}),
+                    }],
+                    input_tokens: 40,
+                    output_tokens: 10,
+                },
+                expected_tool_results: vec![],
             },
-            expected_tool_results: vec![],
-        }];
-        if include_completion {
-            // The worker first calls `select_tools()`, then falls back to
-            // `respond_with_tools()` when no tool calls are returned. Both
-            // methods consume a trace step, so the successful completion path
-            // needs two text responses after the tool call.
-            for _ in 0..2 {
-                steps.push(TraceStep {
-                    request_hint: None,
-                    response: TraceResponse::Text {
-                        content: "I have completed the task.".to_string(),
-                        input_tokens: 20,
-                        output_tokens: 5,
-                    },
-                    expected_tool_results: vec![],
-                });
-            }
-        }
+            TraceStep {
+                request_hint: None,
+                response: TraceResponse::Text {
+                    content: "I have completed the task.".to_string(),
+                    input_tokens: 20,
+                    output_tokens: 5,
+                },
+                expected_tool_results: vec![],
+            },
+            TraceStep {
+                request_hint: None,
+                response: TraceResponse::Text {
+                    content: "I have completed the task.".to_string(),
+                    input_tokens: 20,
+                    output_tokens: 5,
+                },
+                expected_tool_results: vec![],
+            },
+        ];
         LlmTrace::single_turn("test-owner-gate", "run owner gate", steps)
     }
 
@@ -1519,17 +1528,11 @@ mod tests {
             .expect("fire manual");
         let run = wait_for_run_completion(&db, routine.id, run_id).await;
 
-        assert_eq!(run.status, RunStatus::Failed);
+        // The job runs (full_job no longer requires sandbox) but the tool is
+        // blocked by the approval context — the LLM receives an error and
+        // completes without executing owner_gate.
+        assert_eq!(run.status, RunStatus::Ok);
         assert_eq!(owner_gate_count(&db).await, 0);
-        let failure_reason = db
-            .get_agent_job_failure_reason(run.job_id.expect("linked job id"))
-            .await
-            .expect("load job failure reason")
-            .expect("missing job failure reason");
-        assert!(
-            failure_reason.contains("owner_gate"),
-            "expected missing-tool failure reason, got {failure_reason}"
-        );
     }
 
     // -----------------------------------------------------------------------
@@ -1559,17 +1562,12 @@ mod tests {
             .expect("fire manual");
         let run = wait_for_run_completion(&db, routine.id, run_id).await;
 
-        assert_eq!(run.status, RunStatus::Failed);
+        // The job runs (full_job no longer requires sandbox) but the tool is
+        // blocked by the approval context (extension belongs to "someone-else",
+        // not "default") — the LLM receives an error and completes without
+        // executing owner_gate.
+        assert_eq!(run.status, RunStatus::Ok);
         assert_eq!(owner_gate_count(&db).await, 0);
-        let failure_reason = db
-            .get_agent_job_failure_reason(run.job_id.expect("linked job id"))
-            .await
-            .expect("load job failure reason")
-            .expect("missing job failure reason");
-        assert!(
-            failure_reason.contains("owner_gate"),
-            "expected owner-mismatch failure reason, got {failure_reason}"
-        );
     }
 
     // -----------------------------------------------------------------------
