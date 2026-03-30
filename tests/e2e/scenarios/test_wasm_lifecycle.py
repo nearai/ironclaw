@@ -421,8 +421,9 @@ async def test_reinstall_after_remove(ironclaw_server, web_search_reinstalled):
     """Extension can be reinstalled after removal without stale activation errors."""
     ext = await _get_extension(ironclaw_server, "web-search")
     assert ext is not None, "web-search not found after reinstall"
-    assert ext["active"] is True, "Reinstalled tool should auto-activate via saved secrets"
-    assert ext["authenticated"] is True, "Saved secret should still authenticate on reinstall"
+    assert ext["active"] is False, "Reinstalled tool should require setup before activation"
+    assert ext["authenticated"] is False, "Reinstalled tool should not reuse deleted secrets"
+    assert ext["needs_setup"] is True, "Reinstalled tool should require setup again"
     # Verify no stale activation error from previous install
     assert ext.get("activation_error") is None or ext.get("activation_error") == "", (
         f"Reinstalled extension should have no stale activation error: {ext}"
