@@ -40,6 +40,7 @@ eula = false
 tokio = { version = "1", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 futures = "0.3"
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-native-roots"] }
 eventsource-stream = "0.2"
 
 # HTTP client
@@ -172,6 +173,7 @@ hyper-util = { version = "0.1", features = ["server", "tokio", "http1", "http2"]
 http-body-util = "0.1"
 bytes = "1"
 base64 = "0.22.1"
+jsonwebtoken = "9"
 mime_guess = "2.0.5"
 clap_complete = "4.5.0"
 lru = "0.16.3"
@@ -201,7 +203,6 @@ zbus = "4"
 [dev-dependencies]
 tokio-test = "0.4"
 tracing-test = "0.2"
-tokio-tungstenite = "0.26"
 testcontainers-modules = { version = "0.11", features = ["postgres"] }
 pretty_assertions = "1"
 tempfile = "3"

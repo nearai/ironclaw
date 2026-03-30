@@ -338,4 +338,110 @@ mod tests {
         harness.shutdown().await;
         mock.shutdown().await;
     }
+
+    /// Regression test for issue #1076: web API toggle must immediately
+    /// invalidate the in-memory event cache so disabled routines stop firing.
+    #[tokio::test]
+    async fn web_toggle_disables_system_event_routine_without_restart() {
+        let mock = MockOpenAiServerBuilder::new()
+            .with_rule(MockOpenAiRule::on_user_contains(
+                "create webhook routine",
+                MockOpenAiResponse::ToolCalls(vec![MockToolCall::new(
+                    "call_create_webhook_1",
+                    "routine_create",
+                    serde_json::json!({
+                        "name": "wf-toggle-system-event",
+                        "description": "System event toggle regression test",
+                        "trigger_type": "system_event",
+                        "event_source": "github",
+                        "event_type": "issue.opened",
+                        "event_filters": {"repository": "nearai/ironclaw"},
+                        "action_type": "lightweight",
+                        "prompt": "summarize issue"
+                    }),
+                )]),
+            ))
+            .with_default_response(MockOpenAiResponse::Text("ack".to_string()))
+            .start()
+            .await;
+
+        let harness =
+            GatewayWorkflowHarness::start_openai_compatible(&mock.openai_base_url(), "mock-model")
+                .await;
+
+        let thread_id = harness.create_thread().await;
+        harness
+            .send_chat(&thread_id, "create webhook routine")
+            .await;
+        harness
+            .wait_for_turns(&thread_id, 1, Duration::from_secs(10))
+            .await;
+
+        let mut routine = None;
+        for _ in 0..30 {
+            routine = harness.routine_by_name("wf-toggle-system-event").await;
+            if routine.is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let routine = routine.expect("routine should exist after retries");
+        let routine_id = routine
+            .get("id")
+            .and_then(|v| v.as_str())
+            .expect("routine id missing");
+
+        let runs_before = harness.routine_runs(routine_id).await;
+        let before_count = runs_before["runs"]
+            .as_array()
+            .map(|a| a.len())
+            .unwrap_or_default();
+
+        // Disable through web API (non-tool mutation path).
+        harness
+            .client
+            .post(format!(
+                "{}/api/routines/{routine_id}/toggle",
+                harness.base_url()
+            ))
+            .bearer_auth(&harness.auth_token)
+            .json(&serde_json::json!({ "enabled": false }))
+            .send()
+            .await
+            .expect("disable toggle request failed")
+            .error_for_status()
+            .expect("disable toggle non-2xx");
+
+        // Fire a webhook that would match the now-disabled routine.
+        let hook = harness
+            .github_webhook(
+                "issues",
+                serde_json::json!({
+                    "action": "opened",
+                    "repository": {"full_name": "nearai/ironclaw"},
+                    "issue": {"number": 881, "title": "Toggle disable regression"}
+                }),
+            )
+            .await;
+        assert_eq!(hook["status"], "accepted");
+        assert_eq!(hook["emitted_events"], 1);
+        assert_eq!(
+            hook["fired_routines"].as_u64().unwrap_or(0),
+            0,
+            "disabled routine should not fire after web toggle"
+        );
+
+        let runs_after = harness.routine_runs(routine_id).await;
+        let after_count = runs_after["runs"]
+            .as_array()
+            .map(|a| a.len())
+            .unwrap_or_default();
+        assert_eq!(
+            after_count, before_count,
+            "run count should not increase for disabled routine"
+        );
+
+        harness.shutdown().await;
+        mock.shutdown().await;
+    }
 }

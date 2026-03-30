@@ -181,11 +181,15 @@ impl Tool for MessageTool {
     }
 
     fn description(&self) -> &str {
-        "Send a message to a channel. If channel/target omitted, uses the current conversation's \
-         channel and sender/group. Use to proactively message users on any connected channel. \
+        "Send a proactive message to a channel. Use normal assistant output to reply in the \
+         active conversation; use this tool for proactive notifications, routine/background \
+         follow-ups, attachments, or sending to a different channel/recipient. If channel/target \
+         are omitted, reuses the current conversation's channel and sender/group when available. \
+         If you provide `target` without `channel` and no scoped channel can be resolved, the \
+         message may be broadcast across connected channels instead of sent to just one. \
          Supports file attachments: first download the file with the http tool using save_to \
-         (e.g., http GET https://picsum.photos/800/600 save_to=/tmp/photo.jpg), then pass \
-         the file path in the attachments array. Images are sent as photos on Telegram. \
+         (e.g., http GET https://picsum.photos/800/600 save_to=/tmp/photo.jpg), then pass the \
+         file path in the attachments array. Images are sent as photos on Telegram. \
          - Signal: target accepts E.164 (+1234567890) or group ID \
          - Telegram: target accepts username or chat ID \
          - Slack: target accepts channel (#general) or user ID"
@@ -460,7 +464,11 @@ mod tests {
     #[test]
     fn message_tool_description() {
         let tool = MessageTool::new(Arc::new(ChannelManager::new()));
-        assert!(!tool.description().is_empty());
+        let description = tool.description();
+        assert!(!description.is_empty());
+        assert!(description.contains("Use normal assistant output to reply"));
+        assert!(description.contains("proactive notifications"));
+        assert!(description.contains("provide `target` without `channel`"));
     }
 
     #[test]
