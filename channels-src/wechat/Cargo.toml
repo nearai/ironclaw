@@ -1,0 +1,27 @@
+[package]
+name = "wechat-channel"
+version = "0.1.0"
+edition = "2021"
+description = "WeChat iLink Bot channel for IronClaw"
+license = "MIT OR Apache-2.0"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = "0.36"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+base64 = "0.22"
+aes = "0.8"
+cipher = "0.4"
+md-5 = "0.10"
+rand = "0.8"
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
+codegen-units = 1
+
+[workspace]

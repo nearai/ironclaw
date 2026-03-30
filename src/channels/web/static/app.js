@@ -3097,16 +3097,17 @@ function showConfigureModal(name) {
     .then((setup) => {
       const secrets = Array.isArray(setup.secrets) ? setup.secrets : [];
       const setupFields = Array.isArray(setup.fields) ? setup.fields : [];
-      if (secrets.length === 0 && setupFields.length === 0) {
-        showToast('No configuration needed for ' + name, 'info');
+      const interactiveLogin = setup.interactive_login || null;
+      if (secrets.length === 0 && setupFields.length === 0 && !interactiveLogin) {
+        showToast(I18n.t('extensions.noConfigNeeded', { name: name }), 'info');
         return;
       }
-      renderConfigureModal(name, secrets, setupFields);
+      renderConfigureModal(name, secrets, setupFields, interactiveLogin);
     })
-    .catch((err) => showToast('Failed to load setup: ' + err.message, 'error'));
+    .catch((err) => showToast(I18n.t('error.loadFailed', { message: err.message }), 'error'));
 }
 
-function renderConfigureModal(name, secrets, setupFields) {
+function renderConfigureModal(name, secrets, setupFields, interactiveLogin) {
   closeConfigureModal();
   const overlay = document.createElement('div');
   overlay.className = 'configure-overlay';
@@ -3129,6 +3130,13 @@ function renderConfigureModal(name, secrets, setupFields) {
     const hint = document.createElement('div');
     hint.className = 'configure-hint';
     hint.textContent = I18n.t('config.telegramOwnerHint');
+    modal.appendChild(hint);
+  }
+
+  if (interactiveLogin) {
+    const hint = document.createElement('div');
+    hint.className = 'configure-hint';
+    hint.textContent = interactiveLoginHintText(name, interactiveLogin);
     modal.appendChild(hint);
   }
 
@@ -3221,7 +3229,13 @@ function renderConfigureModal(name, secrets, setupFields) {
     fields.push({ kind: 'field', name: setupField.name, input: input });
   }
 
-  modal.appendChild(form);
+  if (fields.length > 0) {
+    modal.appendChild(form);
+  }
+
+  if (interactiveLogin) {
+    modal.appendChild(renderInteractiveLoginPanel(name));
+  }
 
   const error = document.createElement('div');
   error.className = 'configure-inline-error';
@@ -3236,11 +3250,23 @@ function renderConfigureModal(name, secrets, setupFields) {
   const actions = document.createElement('div');
   actions.className = 'configure-actions';
 
-  const submitBtn = document.createElement('button');
-  submitBtn.className = 'btn-ext activate';
-  submitBtn.textContent = I18n.t('config.save');
-  submitBtn.addEventListener('click', () => submitConfigureModal(name, fields));
-  actions.appendChild(submitBtn);
+  if (fields.length > 0) {
+    const submitBtn = document.createElement('button');
+    submitBtn.className = 'btn-ext activate';
+    submitBtn.textContent = I18n.t('config.save');
+    submitBtn.addEventListener('click', () => submitConfigureModal(name, fields));
+    actions.appendChild(submitBtn);
+  }
+
+  if (interactiveLogin) {
+    const loginBtn = document.createElement('button');
+    loginBtn.className = 'btn-ext activate';
+    loginBtn.dataset.defaultLabel = interactiveLoginDefaultLabel(name, interactiveLogin);
+    loginBtn.textContent = loginBtn.dataset.defaultLabel;
+    loginBtn.dataset.interactiveLogin = 'true';
+    loginBtn.addEventListener('click', () => startInteractiveLogin(name, overlay));
+    actions.appendChild(loginBtn);
+  }
 
   const cancelBtn = document.createElement('button');
   cancelBtn.className = 'btn-ext remove';
@@ -3252,7 +3278,212 @@ function renderConfigureModal(name, secrets, setupFields) {
   overlay.appendChild(modal);
   document.body.appendChild(overlay);
 
-  if (fields.length > 0) fields[0].input.focus();
+  if (fields.length > 0) {
+    fields[0].input.focus();
+  } else {
+    const loginBtn = overlay.querySelector('.configure-actions button[data-interactive-login="true"]');
+    if (loginBtn) loginBtn.focus();
+  }
+}
+
+function renderInteractiveLoginPanel(name) {
+  const panel = document.createElement('div');
+  panel.className = 'configure-qr-login';
+  panel.style.display = 'none';
+
+  const title = document.createElement('div');
+  title.className = 'configure-verification-title';
+  title.textContent =
+    name === 'wechat' ? I18n.t('config.wechatQrTitle') : I18n.t('auth.connect');
+  panel.appendChild(title);
+
+  const status = document.createElement('div');
+  status.className = 'configure-verification-instructions';
+  status.textContent = interactiveLoginStatusText(name, null);
+  status.dataset.qrStatus = 'true';
+  panel.appendChild(status);
+
+  const link = document.createElement('a');
+  link.className = 'configure-verification-link';
+  link.textContent =
+    name === 'wechat' ? I18n.t('config.wechatQrOpen') : I18n.t('auth.connect');
+  link.target = '_blank';
+  link.rel = 'noreferrer noopener';
+  link.style.display = 'none';
+  link.dataset.qrLink = 'true';
+  panel.appendChild(link);
+
+  return panel;
+}
+
+function interactiveLoginHintText(name, interactiveLogin) {
+  if (name === 'wechat') return I18n.t('config.wechatHint');
+  return (interactiveLogin && interactiveLogin.instructions) || '';
+}
+
+function interactiveLoginDefaultLabel(name, interactiveLogin) {
+  if (name === 'wechat') return I18n.t('config.wechatConnect');
+  return (interactiveLogin && interactiveLogin.button_label) || I18n.t('auth.connect');
+}
+
+function interactiveLoginWaitingLabel(name) {
+  if (name === 'wechat') return I18n.t('config.wechatWaiting');
+  return I18n.t('status.connecting');
+}
+
+function interactiveLoginStatusText(name, res) {
+  if (name !== 'wechat') return (res && res.message) || '';
+  if (!res) return I18n.t('config.wechatQrIntro');
+
+  switch (res.status) {
+    case 'pending':
+      return res.qr_code_url ? I18n.t('config.wechatQrReady') : I18n.t('config.wechatQrWaiting');
+    case 'scanned':
+      return I18n.t('config.wechatQrScanned');
+    case 'refreshed':
+      return I18n.t('config.wechatQrRefreshed');
+    case 'succeeded':
+      return I18n.t('config.wechatConnected');
+    case 'failed':
+      return res.message || I18n.t('config.wechatQrFailed');
+    default:
+      return res.message || I18n.t('config.wechatQrIntro');
+  }
+}
+
+function getInteractiveLoginButton(overlay) {
+  return overlay && overlay.querySelector('.configure-actions button[data-interactive-login="true"]');
+}
+
+function getInteractiveLoginPanel(overlay) {
+  return overlay && overlay.querySelector('.configure-qr-login');
+}
+
+function updateInteractiveLoginPanel(overlay, res) {
+  const panel = getInteractiveLoginPanel(overlay);
+  if (!panel) return;
+  const name = overlay && overlay.dataset ? overlay.dataset.extensionName : '';
+  const status = panel.querySelector('[data-qr-status="true"]');
+  const link = panel.querySelector('[data-qr-link="true"]');
+
+  panel.style.display = '';
+  if (status) {
+    if (name === 'wechat' && res.status === 'refreshed') {
+      status.textContent = I18n.t('config.wechatQrRefreshedHint');
+    } else {
+      status.textContent = interactiveLoginStatusText(name, res);
+    }
+  }
+
+  if (link && res.qr_code_url) {
+    link.href = res.qr_code_url;
+    link.style.display = '';
+  }
+}
+
+function setInteractiveLoginBusy(overlay, busy, label) {
+  const loginBtn = getInteractiveLoginButton(overlay);
+  if (!loginBtn) return;
+  loginBtn.disabled = !!busy;
+  loginBtn.textContent = label || loginBtn.dataset.defaultLabel || I18n.t('auth.connect');
+}
+
+function interactiveLoginPollDelayMs(status) {
+  switch (status) {
+    case 'refreshed':
+      return 2000;
+    case 'pending':
+    case 'scanned':
+      return 3000;
+    default:
+      return 3000;
+  }
+}
+
+function startInteractiveLogin(name, overlay) {
+  if (!overlay || !document.body.contains(overlay)) return;
+  clearConfigureInlineError(overlay);
+  setConfigureInlineStatus(
+    overlay,
+    name === 'wechat' ? I18n.t('config.wechatPreparingQr') : I18n.t('status.connecting'),
+  );
+  setInteractiveLoginBusy(overlay, true, interactiveLoginWaitingLabel(name));
+
+  apiFetch('/api/extensions/' + encodeURIComponent(name) + '/login/start', {
+    method: 'POST',
+    body: { force: true },
+  })
+    .then((res) => {
+      if (!overlay || !document.body.contains(overlay)) return;
+      if (!res.success || !res.session_id) {
+        setInteractiveLoginBusy(overlay, false);
+        setConfigureInlineError(
+          overlay,
+          res.message || I18n.t('config.interactiveLoginStartFailed'),
+        );
+        setConfigureInlineStatus(overlay, '');
+        return;
+      }
+
+      overlay.dataset.interactiveLoginSessionId = res.session_id;
+      updateInteractiveLoginPanel(overlay, res);
+      setConfigureInlineStatus(overlay, interactiveLoginStatusText(name, res));
+      pollInteractiveLogin(name, overlay, res.session_id);
+    })
+    .catch((err) => {
+      if (!overlay || !document.body.contains(overlay)) return;
+      setInteractiveLoginBusy(overlay, false);
+      setConfigureInlineError(
+        overlay,
+        err.message || I18n.t('config.interactiveLoginStartFailed'),
+      );
+      setConfigureInlineStatus(overlay, '');
+    });
+}
+
+function pollInteractiveLogin(name, overlay, sessionId) {
+  if (!overlay || !document.body.contains(overlay)) return;
+  if (overlay.dataset.interactiveLoginSessionId !== sessionId) return;
+
+  apiFetch('/api/extensions/' + encodeURIComponent(name) + '/login/poll', {
+    method: 'POST',
+    body: { session_id: sessionId },
+  })
+    .then((res) => {
+      if (!overlay || !document.body.contains(overlay)) return;
+      if (overlay.dataset.interactiveLoginSessionId !== sessionId) return;
+
+      updateInteractiveLoginPanel(overlay, res);
+      setConfigureInlineStatus(overlay, interactiveLoginStatusText(name, res));
+
+      if (res.status === 'pending' || res.status === 'scanned' || res.status === 'refreshed') {
+        if (res.status === 'refreshed') {
+          setInteractiveLoginBusy(overlay, true, interactiveLoginWaitingLabel(name));
+        }
+        window.setTimeout(function() {
+          pollInteractiveLogin(name, overlay, sessionId);
+        }, interactiveLoginPollDelayMs(res.status));
+        return;
+      }
+
+      if (res.success && res.activated) {
+        closeConfigureModal(name);
+        showToast(res.message || I18n.t('config.connectedSuccess', { name: name }), 'success');
+        refreshCurrentSettingsTab();
+        return;
+      }
+
+      setInteractiveLoginBusy(overlay, false);
+      setConfigureInlineError(overlay, res.message || I18n.t('config.interactiveLoginFailed'));
+      setConfigureInlineStatus(overlay, '');
+    })
+    .catch((err) => {
+      if (!overlay || !document.body.contains(overlay)) return;
+      if (overlay.dataset.interactiveLoginSessionId !== sessionId) return;
+      setInteractiveLoginBusy(overlay, false);
+      setConfigureInlineError(overlay, err.message || I18n.t('config.interactiveLoginFailed'));
+      setConfigureInlineStatus(overlay, '');
+    });
 }
 
 function renderTelegramVerificationChallenge(overlay, verification) {
@@ -3558,9 +3789,9 @@ function renderWasmChannelStepper(ext) {
   var status = ext.activation_status || 'installed';
 
   var steps = [
-    { label: 'Installed', key: 'installed' },
-    { label: 'Configured', key: 'configured' },
-    { label: status === 'pairing' ? 'Awaiting Pairing' : 'Active', key: 'active' },
+    { label: I18n.t('status.installed'), key: 'installed' },
+    { label: I18n.t('status.configured'), key: 'configured' },
+    { label: status === 'pairing' ? I18n.t('status.pairingShort') : I18n.t('status.active'), key: 'active' },
   ];
 
   var reachedIdx;

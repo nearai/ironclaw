@@ -498,6 +498,14 @@ pub async fn start_server(
             "/api/extensions/{name}/setup",
             get(extensions_setup_handler).post(extensions_setup_submit_handler),
         )
+        .route(
+            "/api/extensions/{name}/login/start",
+            post(extensions_login_start_handler),
+        )
+        .route(
+            "/api/extensions/{name}/login/poll",
+            post(extensions_login_poll_handler),
+        )
         // Pairing
         .route("/api/pairing/{channel}", get(pairing_list_handler))
         .route(
@@ -2589,7 +2597,91 @@ async fn extensions_setup_handler(
         kind,
         secrets: setup.secrets,
         fields: setup.fields,
+        interactive_login: setup.interactive_login,
     }))
+}
+
+async fn extensions_login_start_handler(
+    State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
+    Path(name): Path<String>,
+    Json(_req): Json<ExtensionInteractiveLoginStartRequest>,
+) -> Result<Json<ExtensionInteractiveLoginResponse>, (StatusCode, String)> {
+    let ext_mgr = state.extension_manager.as_ref().ok_or((
+        StatusCode::NOT_IMPLEMENTED,
+        "Extension manager not available (secrets store required)".to_string(),
+    ))?;
+
+    match ext_mgr.start_interactive_login(&name, &user.user_id).await {
+        Ok(result) => Ok(Json(ExtensionInteractiveLoginResponse {
+            success: true,
+            status: result.status,
+            message: result.message,
+            session_id: Some(result.session_id),
+            qr_code_url: result.qr_code_url,
+            instructions: result.instructions,
+            activated: None,
+        })),
+        Err(e) => Ok(Json(ExtensionInteractiveLoginResponse {
+            success: false,
+            status: "failed".to_string(),
+            message: e.to_string(),
+            session_id: None,
+            qr_code_url: None,
+            instructions: None,
+            activated: Some(false),
+        })),
+    }
+}
+
+async fn extensions_login_poll_handler(
+    State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
+    Path(name): Path<String>,
+    Json(req): Json<ExtensionInteractiveLoginPollRequest>,
+) -> Result<Json<ExtensionInteractiveLoginResponse>, (StatusCode, String)> {
+    let ext_mgr = state.extension_manager.as_ref().ok_or((
+        StatusCode::NOT_IMPLEMENTED,
+        "Extension manager not available (secrets store required)".to_string(),
+    ))?;
+
+    match ext_mgr
+        .poll_interactive_login(&name, &req.session_id, &user.user_id)
+        .await
+    {
+        Ok(result) => {
+            if result.activated == Some(true) {
+                clear_auth_mode(&state, &user.user_id).await;
+                state.sse.broadcast_for_user(
+                    &user.user_id,
+                    AppEvent::AuthCompleted {
+                        extension_name: name.clone(),
+                        success: true,
+                        message: result.message.clone(),
+                    },
+                );
+            }
+
+            Ok(Json(ExtensionInteractiveLoginResponse {
+                success: result.status != "failed",
+                status: result.status,
+                message: result.message,
+                session_id: Some(result.session_id),
+                qr_code_url: result.qr_code_url,
+                instructions: None,
+                activated: result.activated,
+            }))
+        }
+        Err(e) => Ok(Json(ExtensionInteractiveLoginResponse {
+            success: false,
+            status: "failed".to_string(),
+            message: e.to_string(),
+            session_id: Some(req.session_id),
+            qr_code_url: None,
+            instructions: None,
+            activated: Some(false),
+        })),
+    }
 }
 
 async fn extensions_setup_submit_handler(
@@ -2917,12 +3009,13 @@ mod tests {
             tools: Vec::new(),
             needs_setup: true,
             has_auth: false,
+            requires_binding: true,
             installed: true,
             activation_error: None,
             version: None,
         };
 
-        let owner_bound = classify_wasm_channel_activation(&ext, false, true);
+        let owner_bound = classify_wasm_channel_activation(&ext, false, true, ext.requires_binding);
         if owner_bound != Some(ExtensionActivationStatus::Active) {
             return Err(format!(
                 "owner-bound channel should be active, got {:?}",
@@ -2930,11 +3023,41 @@ mod tests {
             ));
         }
 
-        let unbound = classify_wasm_channel_activation(&ext, false, false);
+        let unbound = classify_wasm_channel_activation(&ext, false, false, ext.requires_binding);
         if unbound != Some(ExtensionActivationStatus::Pairing) {
             return Err(format!(
                 "unbound channel should be pairing, got {:?}",
                 unbound
+            ));
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_wechat_active_channel_does_not_require_pairing_status() -> Result<(), String> {
+        let ext = InstalledExtension {
+            name: "wechat".to_string(),
+            kind: ExtensionKind::WasmChannel,
+            display_name: Some("WeChat".to_string()),
+            description: None,
+            url: None,
+            authenticated: true,
+            active: true,
+            tools: Vec::new(),
+            needs_setup: true,
+            has_auth: false,
+            requires_binding: false,
+            installed: true,
+            activation_error: None,
+            version: None,
+        };
+
+        let status = classify_wasm_channel_activation(&ext, false, false, ext.requires_binding);
+        if status != Some(ExtensionActivationStatus::Active) {
+            return Err(format!(
+                "wechat should be active after QR login, got {:?}",
+                status
             ));
         }
 
@@ -2954,13 +3077,14 @@ mod tests {
             tools: Vec::new(),
             needs_setup: true,
             has_auth: false,
+            requires_binding: false,
             installed: true,
             activation_error: None,
             version: None,
         };
 
         let status = if relay.kind == crate::extensions::ExtensionKind::WasmChannel {
-            classify_wasm_channel_activation(&relay, false, false)
+            classify_wasm_channel_activation(&relay, false, false, relay.requires_binding)
         } else if relay.kind == crate::extensions::ExtensionKind::ChannelRelay {
             Some(if relay.active {
                 ExtensionActivationStatus::Active
@@ -3179,6 +3303,296 @@ mod tests {
             client_id_secret_name: None,
             created_at: std::time::Instant::now(),
         }
+    }
+
+    #[tokio::test]
+    async fn test_extensions_setup_returns_interactive_login_for_wechat() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let secrets = test_secrets_store();
+        let (ext_mgr, _wasm_tools_dir, wasm_channels_dir) = test_ext_mgr(secrets);
+
+        std::fs::write(wasm_channels_dir.path().join("wechat.wasm"), b"\0asm fake")
+            .expect("write fake wechat wasm");
+        let caps = serde_json::json!({
+            "type": "channel",
+            "name": "wechat",
+            "setup": {
+                "required_secrets": [
+                    {"name": "wechat_bot_token", "prompt": "Connect WeChat"}
+                ]
+            }
+        });
+        std::fs::write(
+            wasm_channels_dir.path().join("wechat.capabilities.json"),
+            serde_json::to_string(&caps).expect("serialize wechat caps"),
+        )
+        .expect("write wechat capabilities");
+
+        let state = test_gateway_state(Some(ext_mgr));
+        let app = Router::new()
+            .route(
+                "/api/extensions/{name}/setup",
+                get(extensions_setup_handler),
+            )
+            .with_state(state);
+
+        let mut req = axum::http::Request::builder()
+            .method("GET")
+            .uri("/api/extensions/wechat/setup")
+            .body(Body::empty())
+            .expect("request");
+        req.extensions_mut().insert(UserIdentity {
+            user_id: "test".to_string(),
+            role: "admin".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+            .await
+            .expect("body");
+        let parsed: serde_json::Value = serde_json::from_slice(&body).expect("json response");
+
+        assert_eq!(parsed["name"], "wechat");
+        assert_eq!(parsed["interactive_login"]["method"], "qr_code");
+        assert_eq!(
+            parsed["interactive_login"]["button_label"],
+            "Connect WeChat"
+        );
+        assert_eq!(parsed["secrets"], serde_json::json!([]));
+        assert_eq!(parsed["fields"], serde_json::json!([]));
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_extensions_wechat_login_poll_broadcasts_auth_completed_and_activates() {
+        use axum::body::Body;
+        use tokio::time::{Duration, timeout};
+        use tower::ServiceExt;
+
+        let secrets = test_secrets_store();
+        let (ext_mgr, _wasm_tools_dir, wasm_channels_dir, db, _db_tmp) =
+            test_ext_mgr_with_db(secrets.clone()).await;
+
+        std::fs::write(wasm_channels_dir.path().join("wechat.wasm"), b"\0asm fake")
+            .expect("write fake wechat wasm");
+        let caps = serde_json::json!({
+            "type": "channel",
+            "name": "wechat",
+            "setup": {
+                "required_secrets": [
+                    {"name": "wechat_bot_token", "prompt": "Connect WeChat"}
+                ]
+            },
+            "capabilities": {
+                "channel": {
+                    "allowed_paths": ["/webhook/wechat"]
+                }
+            },
+            "config": {
+                "base_url": "https://ilinkai.weixin.qq.com",
+                "bot_type": "3"
+            }
+        });
+        std::fs::write(
+            wasm_channels_dir.path().join("wechat.capabilities.json"),
+            serde_json::to_string(&caps).expect("serialize wechat caps"),
+        )
+        .expect("write wechat capabilities");
+
+        let channel_manager = Arc::new(crate::channels::ChannelManager::new());
+        let runtime = Arc::new(
+            crate::channels::wasm::WasmChannelRuntime::new(
+                crate::channels::wasm::WasmChannelRuntimeConfig::for_testing(),
+            )
+            .expect("runtime"),
+        );
+        let pairing_store = Arc::new(crate::pairing::PairingStore::new());
+        let router = Arc::new(crate::channels::wasm::WasmChannelRouter::new());
+        ext_mgr
+            .set_channel_runtime(
+                Arc::clone(&channel_manager),
+                Arc::clone(&runtime),
+                Arc::clone(&pairing_store),
+                Arc::clone(&router),
+                std::collections::HashMap::new(),
+            )
+            .await;
+        ext_mgr
+            .set_test_wasm_channel_loader(Arc::new({
+                let runtime = Arc::clone(&runtime);
+                let pairing_store = Arc::clone(&pairing_store);
+                move |name| {
+                    Ok(make_test_loaded_channel(
+                        Arc::clone(&runtime),
+                        name,
+                        Arc::clone(&pairing_store),
+                    ))
+                }
+            }))
+            .await;
+        ext_mgr
+            .set_test_wechat_login_starter(Arc::new(|user_id, base_url, bot_type| {
+                Ok((
+                    crate::extensions::wechat_login::PendingWechatLogin {
+                        user_id: user_id.to_string(),
+                        session_id: "wechat-session-42".to_string(),
+                        qrcode: "qr-42".to_string(),
+                        qr_code_url: "https://qr.example/42".to_string(),
+                        started_at: std::time::Instant::now(),
+                        base_url: base_url.to_string(),
+                        bot_type: bot_type.to_string(),
+                        refresh_count: 0,
+                    },
+                    crate::extensions::InteractiveLoginStartResult {
+                        session_id: "wechat-session-42".to_string(),
+                        status: "pending".to_string(),
+                        message: "Open the WeChat QR page to continue.".to_string(),
+                        qr_code_url: Some("https://qr.example/42".to_string()),
+                        instructions: Some(
+                            "Keep this window open while you scan and confirm on your phone."
+                                .to_string(),
+                        ),
+                    },
+                ))
+            }))
+            .await;
+        ext_mgr
+            .set_test_wechat_login_poller(Arc::new(|session| {
+                if session.session_id != "wechat-session-42" {
+                    return Err(crate::extensions::ExtensionError::Other(format!(
+                        "unexpected session id: {}",
+                        session.session_id
+                    )));
+                }
+
+                Ok(
+                    crate::extensions::wechat_login::WechatLoginPollOutcome::Confirmed(
+                        crate::extensions::wechat_login::ConfirmedWechatLogin {
+                            bot_token: "wechat-token-42".to_string(),
+                            base_url: Some("https://wechat.example".to_string()),
+                            ilink_bot_id: "wx-bot-42".to_string(),
+                        },
+                    ),
+                )
+            }))
+            .await;
+
+        let state = test_gateway_state(Some(ext_mgr.clone()));
+        let mut receiver = state.sse.sender().subscribe();
+        let app = Router::new()
+            .route(
+                "/api/extensions/{name}/login/start",
+                post(extensions_login_start_handler),
+            )
+            .route(
+                "/api/extensions/{name}/login/poll",
+                post(extensions_login_poll_handler),
+            )
+            .with_state(state);
+
+        let mut start_req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/extensions/wechat/login/start")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"force":true}"#))
+            .expect("start request");
+        start_req.extensions_mut().insert(UserIdentity {
+            user_id: "test".to_string(),
+            role: "admin".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
+
+        let start_resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app.clone(), start_req)
+            .await
+            .expect("start response");
+        assert_eq!(start_resp.status(), StatusCode::OK);
+        let start_body = axum::body::to_bytes(start_resp.into_body(), 1024 * 64)
+            .await
+            .expect("start body");
+        let start_json: serde_json::Value =
+            serde_json::from_slice(&start_body).expect("start json response");
+        assert_eq!(start_json["success"], serde_json::Value::Bool(true));
+        assert_eq!(start_json["status"], "pending");
+        assert_eq!(start_json["session_id"], "wechat-session-42");
+        assert_eq!(start_json["qr_code_url"], "https://qr.example/42");
+
+        let mut poll_req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/extensions/wechat/login/poll")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"session_id":"wechat-session-42"}"#))
+            .expect("poll request");
+        poll_req.extensions_mut().insert(UserIdentity {
+            user_id: "test".to_string(),
+            role: "admin".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
+
+        let poll_resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, poll_req)
+            .await
+            .expect("poll response");
+        assert_eq!(poll_resp.status(), StatusCode::OK);
+        let poll_body = axum::body::to_bytes(poll_resp.into_body(), 1024 * 64)
+            .await
+            .expect("poll body");
+        let poll_json: serde_json::Value =
+            serde_json::from_slice(&poll_body).expect("poll json response");
+        assert_eq!(poll_json["success"], serde_json::Value::Bool(true));
+        assert_eq!(poll_json["status"], "succeeded");
+        assert_eq!(poll_json["activated"], serde_json::Value::Bool(true));
+        assert!(
+            poll_json["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("WeChat connected as wx-bot-42"),
+            "unexpected poll message: {poll_json:?}"
+        );
+
+        let auth_completed = timeout(Duration::from_secs(1), async {
+            loop {
+                match receiver.recv().await {
+                    Ok(scoped) => match scoped.event {
+                        crate::channels::web::types::AppEvent::AuthCompleted {
+                            extension_name,
+                            success,
+                            message,
+                        } => break (extension_name, success, message),
+                        _ => continue,
+                    },
+                    Err(error) => panic!("expected auth_completed event, got recv error: {error}"),
+                }
+            }
+        })
+        .await
+        .expect("timed out waiting for auth_completed");
+        assert_eq!(auth_completed.0, "wechat");
+        assert!(auth_completed.1);
+        assert!(auth_completed.2.contains("WeChat connected as wx-bot-42"));
+
+        assert!(
+            secrets
+                .exists("test", "wechat_bot_token")
+                .await
+                .expect("check wechat secret"),
+            "wechat token should be stored after successful poll"
+        );
+        assert!(
+            channel_manager.get_channel("wechat").await.is_some(),
+            "wechat should be hot-added after successful poll"
+        );
+        assert_eq!(
+            db.get_setting("test", "extensions.wechat.base_url")
+                .await
+                .expect("get wechat base_url setting"),
+            Some(serde_json::json!("https://wechat.example"))
+        );
     }
 
     #[tokio::test]
@@ -3408,6 +3822,10 @@ mod tests {
         assert!(
             csp_str.contains("object-src 'none'"),
             "CSP must contain object-src 'none'"
+        );
+        assert!(
+            csp_str.contains("img-src 'self' data:"),
+            "CSP must allow self-hosted and inline images"
         );
         assert!(
             csp_str.contains("frame-ancestors 'none'"),
@@ -4164,6 +4582,66 @@ mod tests {
             vec![],
         ));
         (ext_mgr, wasm_tools_dir, wasm_channels_dir)
+    }
+
+    #[cfg(feature = "libsql")]
+    async fn test_ext_mgr_with_db(
+        secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync>,
+    ) -> (
+        Arc<ExtensionManager>,
+        tempfile::TempDir,
+        tempfile::TempDir,
+        Arc<dyn crate::db::Database>,
+        tempfile::TempDir,
+    ) {
+        let tool_registry = Arc::new(ToolRegistry::new());
+        let mcp_sm = Arc::new(crate::tools::mcp::session::McpSessionManager::new());
+        let mcp_pm = Arc::new(crate::tools::mcp::process::McpProcessManager::new());
+        let wasm_tools_dir = tempfile::tempdir().expect("temp wasm tools dir");
+        let wasm_channels_dir = tempfile::tempdir().expect("temp wasm channels dir");
+        let (db, db_tmp) = crate::testing::test_db().await;
+        let ext_mgr = Arc::new(ExtensionManager::new(
+            mcp_sm,
+            mcp_pm,
+            secrets,
+            tool_registry,
+            None,
+            None,
+            wasm_tools_dir.path().to_path_buf(),
+            wasm_channels_dir.path().to_path_buf(),
+            None,
+            "test".to_string(),
+            Some(db.clone()),
+            vec![],
+        ));
+        (ext_mgr, wasm_tools_dir, wasm_channels_dir, db, db_tmp)
+    }
+
+    #[cfg(feature = "libsql")]
+    fn make_test_loaded_channel(
+        runtime: Arc<crate::channels::wasm::WasmChannelRuntime>,
+        name: &str,
+        pairing_store: Arc<crate::pairing::PairingStore>,
+    ) -> crate::channels::wasm::LoadedChannel {
+        let prepared = Arc::new(crate::channels::wasm::PreparedChannelModule::for_testing(
+            name,
+            format!("Mock channel: {name}"),
+        ));
+        let capabilities = crate::channels::wasm::ChannelCapabilities::for_channel(name)
+            .with_path(format!("/webhook/{name}"));
+
+        crate::channels::wasm::LoadedChannel {
+            channel: crate::channels::wasm::WasmChannel::new(
+                runtime,
+                prepared,
+                capabilities,
+                "default",
+                "{}".to_string(),
+                pairing_store,
+                None,
+            ),
+            capabilities_file: None,
+        }
     }
 
     #[tokio::test]

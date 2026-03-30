@@ -139,6 +139,13 @@ impl ChannelCapabilitiesFile {
         serde_json::to_string(&self.config).unwrap_or_else(|_| "{}".to_string())
     }
 
+    /// Whether this channel declares owner/pairing gating in its config.
+    pub fn requires_binding(&self) -> bool {
+        ["owner_id", "dm_policy", "allow_from"]
+            .iter()
+            .any(|key| self.config.contains_key(*key))
+    }
+
     /// Get the webhook secret header name for this channel.
     ///
     /// Returns the configured header name from capabilities, or a sensible default.
@@ -588,6 +595,34 @@ mod tests {
         let caps = file.to_capabilities();
 
         assert_eq!(caps.workspace_prefix, "integrations/custom/");
+    }
+
+    #[test]
+    fn test_requires_binding_detects_dm_owner_fields() {
+        let telegram = ChannelCapabilitiesFile::from_json(
+            r#"{
+                "name": "telegram",
+                "config": {
+                    "owner_id": null,
+                    "dm_policy": "pairing",
+                    "allow_from": []
+                }
+            }"#,
+        )
+        .unwrap();
+        assert!(telegram.requires_binding());
+
+        let wechat = ChannelCapabilitiesFile::from_json(
+            r#"{
+                "name": "wechat",
+                "config": {
+                    "base_url": "https://ilinkai.weixin.qq.com",
+                    "bot_type": "3"
+                }
+            }"#,
+        )
+        .unwrap();
+        assert!(!wechat.requires_binding());
     }
 
     #[test]

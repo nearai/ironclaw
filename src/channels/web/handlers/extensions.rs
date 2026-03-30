@@ -29,6 +29,7 @@ pub(crate) fn derive_activation_status(
             ext,
             has_paired,
             has_owner_binding || (ext.active && !allowlist_exists),
+            ext.requires_binding,
         )
     } else if ext.kind == crate::extensions::ExtensionKind::ChannelRelay {
         Some(if ext.active {
@@ -182,6 +183,7 @@ mod tests {
             tools: Vec::new(),
             needs_setup: false,
             has_auth: false,
+            requires_binding: true,
             installed: true,
             activation_error: None,
             version: None,

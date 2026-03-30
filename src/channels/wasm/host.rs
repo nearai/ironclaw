@@ -35,6 +35,8 @@ pub struct Attachment {
     pub storage_key: Option<String>,
     /// Extracted text content (e.g., OCR result, PDF text, audio transcript).
     pub extracted_text: Option<String>,
+    /// Extensible metadata from the channel payload.
+    pub extras_json: String,
     /// Raw file bytes (for small files downloaded by the channel).
     pub data: Vec<u8>,
     /// Duration in seconds (for audio/video).
@@ -1099,6 +1101,7 @@ mod tests {
             source_url: None,
             storage_key: None,
             extracted_text: None,
+            extras_json: String::new(),
             data: Vec::new(),
             duration_secs: None,
         }

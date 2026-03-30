@@ -17,9 +17,16 @@ use crate::channels::wasm::{
 use crate::channels::{ChannelManager, OutgoingResponse};
 use crate::extensions::discovery::OnlineDiscovery;
 use crate::extensions::registry::ExtensionRegistry;
+use crate::extensions::wechat_login::{
+    PendingWechatLogin, WECHAT_BASE_URL_SETTING_PATH, WECHAT_CHANNEL_NAME, WECHAT_DEFAULT_BASE_URL,
+    WECHAT_DEFAULT_BOT_TYPE, WechatLoginPollOutcome,
+    interactive_login_info as wechat_interactive_login_info, poll_login as poll_wechat_login,
+    purge_expired_logins as purge_expired_wechat_logins, start_login as start_wechat_login,
+};
 use crate::extensions::{
     ActivateResult, AuthResult, ConfigureResult, ExtensionError, ExtensionKind, ExtensionSource,
-    InstallResult, InstalledExtension, RegistryEntry, ResultSource, SearchResult, ToolAuthState,
+    InstallResult, InstalledExtension, InteractiveLoginInfo, InteractiveLoginPollResult,
+    InteractiveLoginStartResult, RegistryEntry, ResultSource, SearchResult, ToolAuthState,
     UpgradeOutcome, UpgradeResult, VerificationChallenge,
 };
 use crate::hooks::HookRegistry;
@@ -127,6 +134,7 @@ struct ChannelRuntimeState {
 pub struct ExtensionSetupSchema {
     pub secrets: Vec<crate::channels::web::types::SecretFieldInfo>,
     pub fields: Vec<crate::channels::web::types::SetupFieldInfo>,
+    pub interactive_login: Option<InteractiveLoginInfo>,
 }
 
 /// Only these global (non-namespaced) setting paths may be written by extension
@@ -144,6 +152,20 @@ type TestWasmChannelLoader =
 #[cfg(test)]
 type TestTelegramBindingResolver =
     Arc<dyn Fn(&str, Option<i64>) -> Result<TelegramBindingResult, ExtensionError> + Send + Sync>;
+#[cfg(test)]
+type TestWechatLoginStarter = Arc<
+    dyn Fn(
+            &str,
+            &str,
+            &str,
+        ) -> Result<(PendingWechatLogin, InteractiveLoginStartResult), ExtensionError>
+        + Send
+        + Sync,
+>;
+#[cfg(test)]
+type TestWechatLoginPoller = Arc<
+    dyn Fn(&mut PendingWechatLogin) -> Result<WechatLoginPollOutcome, ExtensionError> + Send + Sync,
+>;
 
 const TELEGRAM_OWNER_BIND_TIMEOUT_SECS: u64 = 120;
 const TELEGRAM_OWNER_BIND_CHALLENGE_TTL_SECS: u64 = 300;
@@ -462,10 +484,15 @@ pub struct ExtensionManager {
     /// Set by the web gateway at startup via `enable_gateway_mode()`.
     gateway_base_url: RwLock<Option<String>>,
     pending_telegram_verification: RwLock<HashMap<String, PendingTelegramVerificationChallenge>>,
+    pending_wechat_logins: RwLock<HashMap<String, PendingWechatLogin>>,
     #[cfg(test)]
     test_wasm_channel_loader: RwLock<Option<TestWasmChannelLoader>>,
     #[cfg(test)]
     test_telegram_binding_resolver: RwLock<Option<TestTelegramBindingResolver>>,
+    #[cfg(test)]
+    test_wechat_login_starter: RwLock<Option<TestWechatLoginStarter>>,
+    #[cfg(test)]
+    test_wechat_login_poller: RwLock<Option<TestWechatLoginPoller>>,
 }
 
 /// Sanitize a URL for logging by removing query parameters and credentials.
@@ -575,21 +602,36 @@ impl ExtensionManager {
             gateway_mode: std::sync::atomic::AtomicBool::new(false),
             gateway_base_url: RwLock::new(None),
             pending_telegram_verification: RwLock::new(HashMap::new()),
+            pending_wechat_logins: RwLock::new(HashMap::new()),
             #[cfg(test)]
             test_wasm_channel_loader: RwLock::new(None),
             #[cfg(test)]
             test_telegram_binding_resolver: RwLock::new(None),
+            #[cfg(test)]
+            test_wechat_login_starter: RwLock::new(None),
+            #[cfg(test)]
+            test_wechat_login_poller: RwLock::new(None),
         }
     }
 
     #[cfg(test)]
-    async fn set_test_wasm_channel_loader(&self, loader: TestWasmChannelLoader) {
+    pub(crate) async fn set_test_wasm_channel_loader(&self, loader: TestWasmChannelLoader) {
         *self.test_wasm_channel_loader.write().await = Some(loader);
     }
 
     #[cfg(test)]
     async fn set_test_telegram_binding_resolver(&self, resolver: TestTelegramBindingResolver) {
         *self.test_telegram_binding_resolver.write().await = Some(resolver);
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn set_test_wechat_login_starter(&self, starter: TestWechatLoginStarter) {
+        *self.test_wechat_login_starter.write().await = Some(starter);
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn set_test_wechat_login_poller(&self, poller: TestWechatLoginPoller) {
+        *self.test_wechat_login_poller.write().await = Some(poller);
     }
 
     #[cfg(test)]
@@ -871,6 +913,16 @@ impl ExtensionManager {
             && !username.trim().is_empty()
         {
             overrides.insert("bot_username".to_string(), serde_json::json!(username));
+        }
+
+        if name == WECHAT_CHANNEL_NAME
+            && let Some(store) = self.store.as_ref()
+            && let Ok(Some(serde_json::Value::String(base_url))) = store
+                .get_setting(&self.user_id, WECHAT_BASE_URL_SETTING_PATH)
+                .await
+            && !base_url.trim().is_empty()
+        {
+            overrides.insert("base_url".to_string(), serde_json::json!(base_url));
         }
 
         overrides
@@ -1425,6 +1477,7 @@ impl ExtensionManager {
                             tools,
                             needs_setup: false,
                             has_auth: false,
+                            requires_binding: false,
                             installed: true,
                             activation_error: None,
                             version: None,
@@ -1476,6 +1529,7 @@ impl ExtensionManager {
                             tools: if active { vec![name] } else { Vec::new() },
                             needs_setup: auth_state == ToolAuthState::NeedsSetup,
                             has_auth: auth_state != ToolAuthState::NoAuth,
+                            requires_binding: false,
                             installed: true,
                             activation_error: None,
                             version,
@@ -1505,20 +1559,25 @@ impl ExtensionManager {
                             .get_with_kind(&name, Some(ExtensionKind::WasmChannel))
                             .await;
                         let display_name = registry_entry.as_ref().map(|e| e.display_name.clone());
-                        let version = if let Some(ref cap_path) = discovered.capabilities_path {
-                            tokio::fs::read(cap_path)
-                                .await
-                                .ok()
-                                .and_then(|bytes| {
-                                    crate::channels::wasm::ChannelCapabilitiesFile::from_bytes(
-                                        &bytes,
-                                    )
+                        let (version, requires_binding) =
+                            if let Some(ref cap_path) = discovered.capabilities_path {
+                                tokio::fs::read(cap_path)
+                                    .await
                                     .ok()
-                                })
-                                .and_then(|cap| cap.version)
-                        } else {
-                            None
-                        };
+                                    .and_then(|bytes| {
+                                        crate::channels::wasm::ChannelCapabilitiesFile::from_bytes(
+                                            &bytes,
+                                        )
+                                        .ok()
+                                    })
+                                    .map(|cap| {
+                                        let requires_binding = cap.requires_binding();
+                                        (cap.version, requires_binding)
+                                    })
+                            } else {
+                                None
+                            }
+                            .unwrap_or((None, false));
                         let version =
                             version.or_else(|| registry_entry.and_then(|e| e.version.clone()));
                         extensions.push(InstalledExtension {
@@ -1532,6 +1591,7 @@ impl ExtensionManager {
                             tools: Vec::new(),
                             needs_setup: auth_state == ToolAuthState::NeedsSetup,
                             has_auth: auth_state != ToolAuthState::NoAuth,
+                            requires_binding,
                             installed: true,
                             activation_error,
                             version,
@@ -1570,6 +1630,7 @@ impl ExtensionManager {
                     tools: Vec::new(),
                     needs_setup: false,
                     has_auth: true,
+                    requires_binding: false,
                     installed: true,
                     activation_error,
                     version: None,
@@ -1604,6 +1665,7 @@ impl ExtensionManager {
                     tools: Vec::new(),
                     needs_setup: false,
                     has_auth: false,
+                    requires_binding: false,
                     installed: false,
                     activation_error: None,
                     version: entry.version,
@@ -3957,6 +4019,15 @@ impl ExtensionManager {
             return Ok(AuthResult::authenticated(name, ExtensionKind::WasmChannel));
         }
 
+        if name == WECHAT_CHANNEL_NAME {
+            return Ok(AuthResult::awaiting_token(
+                name,
+                ExtensionKind::WasmChannel,
+                "Open the WeChat channel setup to scan a QR code and connect it.".to_string(),
+                cap_file.setup.setup_url.clone(),
+            ));
+        }
+
         // Prompt for the first missing secret
         let secret = &missing[0];
         Ok(AuthResult::awaiting_token(
@@ -4446,6 +4517,10 @@ impl ExtensionManager {
 
         let webhook_path = format!("/webhook/{}", name);
         let existing_channel = match router.get_channel_for_path(&webhook_path).await {
+            Some(ch) => Some(ch),
+            None => router.get_channel_by_name(name).await,
+        };
+        let existing_channel = match existing_channel {
             Some(ch) => ch,
             None => {
                 return Ok(ActivateResult {
@@ -5093,6 +5168,21 @@ impl ExtensionManager {
             }
             !expired
         });
+
+        let mut wechat_logins = self.pending_wechat_logins.write().await;
+        purge_expired_wechat_logins(&mut wechat_logins);
+    }
+
+    fn interactive_login_info_for_extension(
+        name: &str,
+        kind: ExtensionKind,
+    ) -> Option<InteractiveLoginInfo> {
+        match (kind, name) {
+            (ExtensionKind::WasmChannel, WECHAT_CHANNEL_NAME) => {
+                Some(wechat_interactive_login_info())
+            }
+            _ => None,
+        }
     }
 
     /// Get the setup schema for an extension (secret/text fields and their status).
@@ -5112,6 +5202,10 @@ impl ExtensionManager {
                     return Ok(ExtensionSetupSchema {
                         secrets: Vec::new(),
                         fields: Vec::new(),
+                        interactive_login: Self::interactive_login_info_for_extension(
+                            name,
+                            ExtensionKind::WasmChannel,
+                        ),
                     });
                 }
                 let cap_bytes = tokio::fs::read(&cap_path)
@@ -5120,6 +5214,14 @@ impl ExtensionManager {
                 let cap_file =
                     crate::channels::wasm::ChannelCapabilitiesFile::from_bytes(&cap_bytes)
                         .map_err(|e| ExtensionError::Other(e.to_string()))?;
+
+                if name == WECHAT_CHANNEL_NAME {
+                    return Ok(ExtensionSetupSchema {
+                        secrets: Vec::new(),
+                        fields: Vec::new(),
+                        interactive_login: Some(wechat_interactive_login_info()),
+                    });
+                }
 
                 let mut secrets = Vec::new();
                 for secret in &cap_file.setup.required_secrets {
@@ -5141,6 +5243,7 @@ impl ExtensionManager {
                 Ok(ExtensionSetupSchema {
                     secrets,
                     fields: Vec::new(),
+                    interactive_login: None,
                 })
             }
             ExtensionKind::WasmTool => {
@@ -5148,6 +5251,7 @@ impl ExtensionManager {
                     return Ok(ExtensionSetupSchema {
                         secrets: Vec::new(),
                         fields: Vec::new(),
+                        interactive_login: None,
                     });
                 };
 
@@ -5187,7 +5291,11 @@ impl ExtensionManager {
                         });
                     }
                 }
-                Ok(ExtensionSetupSchema { secrets, fields })
+                Ok(ExtensionSetupSchema {
+                    secrets,
+                    fields,
+                    interactive_login: None,
+                })
             }
             ExtensionKind::ChannelRelay => {
                 let relay_url_key = format!("extensions.{name}.relay_url");
@@ -5222,12 +5330,211 @@ impl ExtensionManager {
                         provided: current_url.is_some(),
                         input_type: crate::tools::wasm::ToolSetupFieldInputType::Text,
                     }],
+                    interactive_login: None,
                 })
             }
             _ => Ok(ExtensionSetupSchema {
                 secrets: Vec::new(),
                 fields: Vec::new(),
+                interactive_login: None,
             }),
+        }
+    }
+
+    async fn resolve_wechat_base_url(&self, user_id: &str) -> String {
+        if let Some(store) = &self.store
+            && let Ok(Some(serde_json::Value::String(value))) = store
+                .get_setting(user_id, WECHAT_BASE_URL_SETTING_PATH)
+                .await
+        {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                return trimmed.to_string();
+            }
+        }
+
+        let cap_path = self
+            .wasm_channels_dir
+            .join(format!("{}.capabilities.json", WECHAT_CHANNEL_NAME));
+        if let Ok(cap_bytes) = tokio::fs::read(&cap_path).await
+            && let Ok(cap_file) =
+                crate::channels::wasm::ChannelCapabilitiesFile::from_bytes(&cap_bytes)
+            && let Some(value) = cap_file
+                .config
+                .get("base_url")
+                .and_then(|value| value.as_str())
+        {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                return trimmed.to_string();
+            }
+        }
+
+        WECHAT_DEFAULT_BASE_URL.to_string()
+    }
+
+    async fn resolve_wechat_bot_type(&self) -> String {
+        let cap_path = self
+            .wasm_channels_dir
+            .join(format!("{}.capabilities.json", WECHAT_CHANNEL_NAME));
+        if let Ok(cap_bytes) = tokio::fs::read(&cap_path).await
+            && let Ok(cap_file) =
+                crate::channels::wasm::ChannelCapabilitiesFile::from_bytes(&cap_bytes)
+            && let Some(value) = cap_file
+                .config
+                .get("bot_type")
+                .and_then(|value| value.as_str())
+        {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                return trimmed.to_string();
+            }
+        }
+
+        WECHAT_DEFAULT_BOT_TYPE.to_string()
+    }
+
+    pub async fn start_interactive_login(
+        &self,
+        name: &str,
+        user_id: &str,
+    ) -> Result<InteractiveLoginStartResult, ExtensionError> {
+        Self::validate_extension_name(name)?;
+        let kind = self.determine_installed_kind(name, user_id).await?;
+        if Self::interactive_login_info_for_extension(name, kind).is_none() {
+            return Err(ExtensionError::AuthNotSupported(format!(
+                "Interactive login is not supported for '{}'",
+                name
+            )));
+        }
+
+        if name != WECHAT_CHANNEL_NAME {
+            return Err(ExtensionError::AuthNotSupported(format!(
+                "Interactive login is not implemented for '{}'",
+                name
+            )));
+        }
+
+        self.cleanup_expired_auths().await;
+
+        let base_url = self.resolve_wechat_base_url(user_id).await;
+        let bot_type = self.resolve_wechat_bot_type().await;
+        #[cfg(test)]
+        let login_result =
+            if let Some(starter) = self.test_wechat_login_starter.read().await.as_ref() {
+                starter(user_id, &base_url, &bot_type)
+            } else {
+                start_wechat_login(user_id, &base_url, &bot_type).await
+            };
+        #[cfg(not(test))]
+        let login_result = start_wechat_login(user_id, &base_url, &bot_type).await;
+
+        let (session, result) = login_result?;
+
+        self.pending_wechat_logins
+            .write()
+            .await
+            .insert(session.session_id.clone(), session);
+
+        Ok(result)
+    }
+
+    pub async fn poll_interactive_login(
+        &self,
+        name: &str,
+        session_id: &str,
+        user_id: &str,
+    ) -> Result<InteractiveLoginPollResult, ExtensionError> {
+        Self::validate_extension_name(name)?;
+        let kind = self.determine_installed_kind(name, user_id).await?;
+        if Self::interactive_login_info_for_extension(name, kind).is_none() {
+            return Err(ExtensionError::AuthNotSupported(format!(
+                "Interactive login is not supported for '{}'",
+                name
+            )));
+        }
+
+        if name != WECHAT_CHANNEL_NAME {
+            return Err(ExtensionError::AuthNotSupported(format!(
+                "Interactive login is not implemented for '{}'",
+                name
+            )));
+        }
+
+        self.cleanup_expired_auths().await;
+
+        let mut sessions = self.pending_wechat_logins.write().await;
+        let Some(session) = sessions.get_mut(session_id) else {
+            return Err(ExtensionError::Other(
+                "This WeChat login session no longer exists. Start again.".to_string(),
+            ));
+        };
+        if session.user_id != user_id {
+            return Err(ExtensionError::AuthFailed(
+                "This WeChat login session belongs to another user".to_string(),
+            ));
+        }
+
+        #[cfg(test)]
+        let outcome = if let Some(poller) = self.test_wechat_login_poller.read().await.as_ref() {
+            poller(session)
+        } else {
+            poll_wechat_login(session).await
+        }?;
+        #[cfg(not(test))]
+        let outcome = poll_wechat_login(session).await?;
+
+        match outcome {
+            WechatLoginPollOutcome::Pending(result) => {
+                if matches!(result.status.as_str(), "failed") {
+                    sessions.remove(session_id);
+                }
+                Ok(result)
+            }
+            WechatLoginPollOutcome::Confirmed(confirmed) => {
+                sessions.remove(session_id);
+                drop(sessions);
+
+                if let Some(base_url) = confirmed.base_url.as_deref()
+                    && let Some(store) = &self.store
+                {
+                    let _ = store
+                        .set_setting(
+                            user_id,
+                            WECHAT_BASE_URL_SETTING_PATH,
+                            &serde_json::Value::String(base_url.to_string()),
+                        )
+                        .await;
+                }
+
+                let mut secrets = std::collections::HashMap::new();
+                secrets.insert("wechat_bot_token".to_string(), confirmed.bot_token);
+                let configure = self
+                    .configure(name, &secrets, &std::collections::HashMap::new(), user_id)
+                    .await?;
+
+                Ok(InteractiveLoginPollResult {
+                    session_id: session_id.to_string(),
+                    status: if configure.activated {
+                        "succeeded".to_string()
+                    } else {
+                        "failed".to_string()
+                    },
+                    message: if configure.activated {
+                        format!(
+                            "WeChat connected as {}. {}",
+                            confirmed.ilink_bot_id, configure.message
+                        )
+                    } else {
+                        format!(
+                            "WeChat login succeeded for {} but activation failed: {}",
+                            confirmed.ilink_bot_id, configure.message
+                        )
+                    },
+                    qr_code_url: None,
+                    activated: Some(configure.activated),
+                })
+            }
         }
     }
 
@@ -6356,9 +6663,13 @@ mod tests {
         normalize_hosted_callback_url, send_telegram_text_message,
         telegram_message_matches_verification_code,
     };
+    use crate::extensions::wechat_login::{
+        ConfirmedWechatLogin, PendingWechatLogin, WECHAT_BASE_URL_SETTING_PATH,
+        WechatLoginPollOutcome,
+    };
     use crate::extensions::{
-        ExtensionError, ExtensionKind, ExtensionSource, InstallResult, ToolAuthState,
-        VerificationChallenge,
+        ExtensionError, ExtensionKind, ExtensionSource, InstallResult, InteractiveLoginStartResult,
+        ToolAuthState, VerificationChallenge,
     };
     use crate::pairing::PairingStore;
     use crate::secrets::CreateSecretParams;
@@ -7337,6 +7648,203 @@ mod tests {
             bot_username_setting,
             Some(serde_json::json!("test_hot_bot")),
             "bot username setting",
+        )
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_wechat_interactive_login_poll_persists_state_and_activates() -> Result<(), String>
+    {
+        let dir = tempfile::tempdir().map_err(|err| format!("temp dir: {err}"))?;
+        let channels_dir = dir.path().join("channels");
+        std::fs::create_dir_all(&channels_dir).map_err(|err| format!("channels dir: {err}"))?;
+        std::fs::write(channels_dir.join("wechat.wasm"), b"mock")
+            .map_err(|err| format!("write wasm: {err}"))?;
+        std::fs::write(
+            channels_dir.join("wechat.capabilities.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "type": "channel",
+                "name": "wechat",
+                "setup": {
+                    "required_secrets": [
+                        {
+                            "name": "wechat_bot_token",
+                            "prompt": "Connect WeChat",
+                            "optional": false
+                        }
+                    ]
+                },
+                "capabilities": {
+                    "channel": {
+                        "allowed_paths": ["/webhook/wechat"]
+                    }
+                },
+                "config": {
+                    "base_url": "https://ilinkai.weixin.qq.com",
+                    "bot_type": "3"
+                }
+            }))
+            .map_err(|err| format!("serialize capabilities: {err}"))?,
+        )
+        .map_err(|err| format!("write capabilities: {err}"))?;
+
+        let (db, _db_tmp) = crate::testing::test_db().await;
+        let manager = {
+            use crate::secrets::{InMemorySecretsStore, SecretsCrypto};
+            use crate::testing::credentials::TEST_CRYPTO_KEY;
+            use crate::tools::ToolRegistry;
+            use crate::tools::mcp::process::McpProcessManager;
+            use crate::tools::mcp::session::McpSessionManager;
+
+            let master_key = secrecy::SecretString::from(TEST_CRYPTO_KEY.to_string());
+            let crypto = Arc::new(
+                SecretsCrypto::new(master_key)
+                    .unwrap_or_else(|err| panic!("failed to construct test crypto: {err}")),
+            );
+
+            Arc::new(ExtensionManager::new(
+                Arc::new(McpSessionManager::new()),
+                Arc::new(McpProcessManager::new()),
+                Arc::new(InMemorySecretsStore::new(crypto)),
+                Arc::new(ToolRegistry::new()),
+                None,
+                None,
+                dir.path().join("tools"),
+                channels_dir.clone(),
+                None,
+                "test".to_string(),
+                Some(db.clone()),
+                Vec::new(),
+            ))
+        };
+
+        let channel_manager = Arc::new(ChannelManager::new());
+        let runtime = Arc::new(
+            WasmChannelRuntime::new(WasmChannelRuntimeConfig::for_testing())
+                .map_err(|err| format!("runtime: {err}"))?,
+        );
+        let pairing_store = Arc::new(PairingStore::with_base_dir(
+            dir.path().join("pairing-state"),
+        ));
+        let router = Arc::new(WasmChannelRouter::new());
+        manager
+            .set_channel_runtime(
+                Arc::clone(&channel_manager),
+                Arc::clone(&runtime),
+                Arc::clone(&pairing_store),
+                Arc::clone(&router),
+                std::collections::HashMap::new(),
+            )
+            .await;
+        manager
+            .set_test_wasm_channel_loader(Arc::new({
+                let runtime = Arc::clone(&runtime);
+                let pairing_store = Arc::clone(&pairing_store);
+                move |name| {
+                    Ok(make_test_loaded_channel(
+                        Arc::clone(&runtime),
+                        name,
+                        Arc::clone(&pairing_store),
+                    ))
+                }
+            }))
+            .await;
+        manager
+            .set_test_wechat_login_starter(Arc::new(|user_id, base_url, bot_type| {
+                Ok((
+                    PendingWechatLogin {
+                        user_id: user_id.to_string(),
+                        session_id: "wechat-session-1".to_string(),
+                        qrcode: "qr-123".to_string(),
+                        qr_code_url: "https://qr.example/one".to_string(),
+                        started_at: std::time::Instant::now(),
+                        base_url: base_url.to_string(),
+                        bot_type: bot_type.to_string(),
+                        refresh_count: 0,
+                    },
+                    InteractiveLoginStartResult {
+                        session_id: "wechat-session-1".to_string(),
+                        status: "pending".to_string(),
+                        message: "Open the WeChat QR page to continue.".to_string(),
+                        qr_code_url: Some("https://qr.example/one".to_string()),
+                        instructions: Some(
+                            "Keep this window open while you scan and confirm on your phone."
+                                .to_string(),
+                        ),
+                    },
+                ))
+            }))
+            .await;
+        manager
+            .set_test_wechat_login_poller(Arc::new(|session| {
+                if session.session_id != "wechat-session-1" {
+                    return Err(ExtensionError::Other(format!(
+                        "unexpected session id: {}",
+                        session.session_id
+                    )));
+                }
+                Ok(WechatLoginPollOutcome::Confirmed(ConfirmedWechatLogin {
+                    bot_token: "wechat-token-123".to_string(),
+                    base_url: Some("https://wechat.example".to_string()),
+                    ilink_bot_id: "wx-bot-1".to_string(),
+                }))
+            }))
+            .await;
+
+        let start = manager
+            .start_interactive_login("wechat", "test")
+            .await
+            .map_err(|err| format!("start interactive login: {err}"))?;
+        require_eq(
+            start.session_id.clone(),
+            "wechat-session-1".to_string(),
+            "start session id",
+        )?;
+        require_eq(start.status, "pending".to_string(), "start status")?;
+
+        let poll = manager
+            .poll_interactive_login("wechat", &start.session_id, "test")
+            .await
+            .map_err(|err| format!("poll interactive login: {err}"))?;
+
+        require_eq(poll.status, "succeeded".to_string(), "poll status")?;
+        require_eq(poll.activated, Some(true), "poll activated")?;
+        require(
+            poll.message.contains("WeChat connected as wx-bot-1"),
+            format!("unexpected poll message: {}", poll.message),
+        )?;
+        require(
+            manager.active_channel_names.read().await.contains("wechat"),
+            "wechat should be marked active after successful login",
+        )?;
+        require(
+            channel_manager.get_channel("wechat").await.is_some(),
+            "wechat should be hot-added to the running channel manager",
+        )?;
+        require_eq(
+            manager.load_persisted_active_channels("test").await,
+            vec!["wechat".to_string()],
+            "persisted active channels",
+        )?;
+        require(
+            manager
+                .secrets
+                .exists("test", "wechat_bot_token")
+                .await
+                .map_err(|err| format!("check stored wechat token: {err}"))?,
+            "wechat bot token should be stored after successful login",
+        )?;
+        let persisted_base_url = manager
+            .store
+            .as_ref()
+            .ok_or_else(|| "db-backed manager missing".to_string())?
+            .get_setting("test", WECHAT_BASE_URL_SETTING_PATH)
+            .await
+            .map_err(|err| format!("wechat base_url setting query: {err}"))?;
+        require_eq(
+            persisted_base_url,
+            Some(serde_json::json!("https://wechat.example")),
+            "wechat base_url setting",
         )
     }
 
