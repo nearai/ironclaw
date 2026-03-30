@@ -1596,15 +1596,16 @@ function showJobCard(data) {
 // --- Auth card ---
 
 function handleAuthRequired(data) {
-  if (data.auth_url) {
-    setAuthFlowPending(true, data.instructions);
-    // OAuth flow: show the global auth prompt with an OAuth button + optional token paste field.
+  setAuthFlowPending(true, data.instructions);
+  if (data.auth_url || data.instructions) {
+    // Token paste flow (with optional OAuth button): show the global auth
+    // prompt card. This handles both OAuth credentials (auth_url present)
+    // and skill-based credentials (instructions present, no auth_url).
     showAuthCard(data);
   } else {
+    // Extension setup flow: fetch the extension's credential schema and show
+    // the multi-field configure modal (Extensions tab "Setup" button UI).
     if (getConfigureOverlay(data.extension_name)) return;
-    setAuthFlowPending(true, data.instructions);
-    // Setup flow: fetch the extension's credential schema and show the multi-field
-    // configure modal (the same UI used by the Extensions tab "Setup" button).
     showConfigureModal(data.extension_name);
   }
 }

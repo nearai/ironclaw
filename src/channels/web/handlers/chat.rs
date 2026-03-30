@@ -199,6 +199,48 @@ pub async fn chat_auth_token_handler(
         }
         Err(e) => {
             let msg = e.to_string();
+
+            // If the extension manager doesn't recognize the name (e.g., it's a
+            // skill credential like "github_token", not an installed extension),
+            // fall back to storing directly in the secrets store. This bridges
+            // the gap between the frontend auth card (which calls this endpoint)
+            // and the v2 engine's skill-based credential system.
+            if msg.contains("not installed") || msg.contains("not found") {
+                let ss = state
+                    .tool_registry
+                    .as_ref()
+                    .and_then(|tr| tr.secrets_store().cloned());
+                if let Some(ref ss) = ss {
+                    let params =
+                        crate::secrets::CreateSecretParams::new(&req.extension_name, &req.token);
+                    match ss.create(&user.user_id, params).await {
+                        Ok(_) => {
+                            clear_auth_mode(&state, &user.user_id).await;
+                            state.sse.broadcast_for_user(
+                                &user.user_id,
+                                AppEvent::AuthCompleted {
+                                    extension_name: req.extension_name.clone(),
+                                    success: true,
+                                    message: format!(
+                                        "Credential '{}' stored successfully.",
+                                        req.extension_name
+                                    ),
+                                },
+                            );
+                            return Ok(Json(ActionResponse::ok(format!(
+                                "Credential '{}' stored.",
+                                req.extension_name
+                            ))));
+                        }
+                        Err(se) => {
+                            return Ok(Json(ActionResponse::fail(format!(
+                                "Failed to store credential: {se}"
+                            ))));
+                        }
+                    }
+                }
+            }
+
             if matches!(e, crate::extensions::ExtensionError::ValidationFailed(_)) {
                 state.sse.broadcast_for_user(
                     &user.user_id,
