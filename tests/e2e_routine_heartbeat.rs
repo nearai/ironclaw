@@ -396,6 +396,37 @@ mod tests {
         }
     }
 
+    /// Wait for a `tool_result` job event with `success: false` for the given tool.
+    /// Job events are persisted via `tokio::spawn`, so they may lag slightly
+    /// behind run completion.
+    async fn wait_for_tool_denial_event(
+        db: &Arc<dyn Database>,
+        job_id: Uuid,
+        tool_name: &str,
+    ) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let events = db
+                .list_job_events(job_id, None)
+                .await
+                .expect("list_job_events");
+            let denied = events.iter().any(|e| {
+                e.event_type == "tool_result"
+                    && e.data.get("tool_name").and_then(|v| v.as_str()) == Some(tool_name)
+                    && e.data.get("success") == Some(&serde_json::json!(false))
+            });
+            if denied {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for tool denial event for '{tool_name}' in job {job_id}. \
+                 Events: {events:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
     async fn wait_for_any_run_completion(db: &Arc<dyn Database>, routine_id: Uuid) -> RoutineRun {
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         loop {
@@ -1534,6 +1565,10 @@ mod tests {
         // completes without executing owner_gate.
         assert_eq!(run.status, RunStatus::Ok);
         assert_eq!(owner_gate_count(&db).await, 0);
+
+        // Verify the tool was actually attempted and denied (not just never called).
+        let job_id = run.job_id.expect("run should be linked to a job");
+        wait_for_tool_denial_event(&db, job_id, "owner_gate").await;
     }
 
     // -----------------------------------------------------------------------
@@ -1570,6 +1605,10 @@ mod tests {
         // executing owner_gate.
         assert_eq!(run.status, RunStatus::Ok);
         assert_eq!(owner_gate_count(&db).await, 0);
+
+        // Verify the tool was actually attempted and denied (not just never called).
+        let job_id = run.job_id.expect("run should be linked to a job");
+        wait_for_tool_denial_event(&db, job_id, "owner_gate").await;
     }
 
     // -----------------------------------------------------------------------
