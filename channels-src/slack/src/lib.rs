@@ -346,7 +346,7 @@ impl Guest for SlackChannel {
             // Actual event callback
             "event_callback" => {
                 if let Some(event) = event_wrapper.event {
-                    handle_slack_event(event, event_wrapper.team_id);
+                    handle_slack_event(event, event_wrapper.team_id, event_wrapper.event_id);
                 }
                 // Always respond 200 quickly to Slack (they have a 3s timeout)
                 json_response(200, serde_json::json!({"ok": true}))

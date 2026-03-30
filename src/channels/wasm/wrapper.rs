@@ -345,9 +345,23 @@ impl near::agent::channel_host::Host for ChannelStoreData {
             })
             .collect();
 
-        // Leak-scan WASM-provided content BEFORE host-side auto-injection.
-        // Auto-injected credentials are trusted host-side values that must not
-        // be flagged by the leak detector.
+        // ── Credential injection & leak-scan ordering ──────────────────
+        //
+        // Two-pass credential injection:
+        //   Pass 1 (above):  WASM-side placeholder substitution ({TOKEN} → value)
+        //   Pass 2a (below): Auto-inject from capability mappings (Bearer/Header)
+        //   Pass 2b (below): inject_host_credentials (pre-resolved host creds)
+        //
+        // Pass 2a skips headers that already exist (no-clobber); Pass 2b
+        // overwrites (host credentials take precedence). This means the two
+        // passes cannot double-inject the same header.
+        //
+        // Leak scan runs HERE, between Pass 1 and Pass 2, so it only sees
+        // WASM-provided content. Pass 2a/2b values are trusted host-side
+        // secrets that must not trigger the leak detector. URL modifications
+        // from inject_host_credentials (query params) are also trusted host
+        // values — they are NOT re-scanned intentionally.
+        // ──────────────────────────────────────────────────────────────────
         {
             let url_for_scan = &injected_url;
             let header_vec: Vec<(String, String)> = headers
@@ -430,9 +444,10 @@ impl near::agent::channel_host::Host for ChannelStoreData {
 
         let mut url = injected_url;
 
-        // Inject pre-resolved host credentials (Bearer tokens, API keys, etc.)
-        // after the first leak scan (lines 348-361) so host-injected secrets
-        // don't trigger false positives.
+        // Pass 2b: Inject pre-resolved host credentials (Bearer tokens, API
+        // keys, query params). Runs after the leak scan so host-injected secrets
+        // don't trigger false positives. Host creds take precedence — they
+        // overwrite any same-named header from Pass 2a.
         if let Some(host) = extract_host_from_url(&url) {
             self.inject_host_credentials(&host, &mut headers, &mut url);
         }

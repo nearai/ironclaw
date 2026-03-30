@@ -324,8 +324,9 @@ pub struct WebhookSchema {
 /// existing WASM `on_http_request` callback.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SocketModeSchema {
-    /// URL for `apps.connections.open` (default: Slack's API).
-    #[serde(default = "default_socket_open_url")]
+    /// URL for obtaining a WebSocket connection URL (e.g., Slack's
+    /// `apps.connections.open`). Required — no default, since this is a
+    /// platform-specific endpoint.
     pub open_url: String,
 
     /// Secret name for the app-level token (xapp-...).
@@ -338,10 +339,6 @@ pub struct SocketModeSchema {
     /// Maximum reconnection attempts before giving up (default: 10).
     #[serde(default = "default_max_reconnects")]
     pub max_reconnect_attempts: u32,
-}
-
-fn default_socket_open_url() -> String {
-    "https://slack.com/api/apps.connections.open".to_string()
 }
 
 fn default_reconnect_delay() -> u64 {

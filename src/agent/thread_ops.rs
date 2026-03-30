@@ -1002,18 +1002,26 @@ impl Agent {
                     }
                 }
                 Some(state) => {
-                    // Resolved thread isn't awaiting approval — search session
-                    // for any thread that is (single-user assistant typically
-                    // has only one pending approval at a time).
-                    let mut awaiting: Vec<Uuid> = Vec::new();
-                    for (&tid, t) in sess.threads.iter() {
-                        if tid != thread_id && t.state == ThreadState::AwaitingApproval {
-                            awaiting.push(tid);
-                        }
-                    }
+                    // Resolved thread isn't awaiting approval — search other
+                    // threads in the session. This handles the common Slack/
+                    // Telegram case where the approval prompt is in a threaded
+                    // reply but the user responds in the main chat.
+                    //
+                    // Security model: sessions are per-user (single-user
+                    // assistant), so all threads belong to the same user.
+                    // We only auto-match when exactly ONE other thread is
+                    // awaiting approval — if multiple are pending the user
+                    // must reply in the correct thread to avoid ambiguity.
+                    let awaiting: Vec<Uuid> = sess
+                        .threads
+                        .iter()
+                        .filter(|(tid, t)| {
+                            **tid != thread_id && t.state == ThreadState::AwaitingApproval
+                        })
+                        .map(|(tid, _)| *tid)
+                        .collect();
 
                     if awaiting.is_empty() {
-                        // Stale or duplicate approval (tool already executed) — silently ignore.
                         tracing::debug!(
                             %thread_id,
                             ?state,
@@ -1025,15 +1033,24 @@ impl Agent {
                     if awaiting.len() > 1 {
                         tracing::warn!(
                             session_id = %sess.id,
+                            source_channel = %message.channel,
                             count = awaiting.len(),
                             thread_ids = ?awaiting,
-                            "Multiple threads awaiting approval; picking earliest by ID"
+                            "Rejecting ambiguous cross-thread approval: multiple threads awaiting"
                         );
+                        return Ok(SubmissionResult::error(
+                            "Multiple pending approvals — please reply in the correct thread.",
+                        ));
                     }
 
-                    // Sort for deterministic selection regardless of HashMap order
-                    awaiting.sort();
                     let target_tid = awaiting[0];
+                    tracing::info!(
+                        session_id = %sess.id,
+                        source_channel = %message.channel,
+                        source_thread = %thread_id,
+                        target_thread = %target_tid,
+                        "Cross-thread approval match: routing to awaiting thread"
+                    );
 
                     let t = sess.threads.get_mut(&target_tid).ok_or_else(|| {
                         Error::from(crate::error::JobError::NotFound { id: target_tid })
