@@ -329,8 +329,8 @@ async fn poll_qr_status(base_url: &str, qrcode: &str) -> Result<QrStatusResponse
 #[cfg(test)]
 mod tests {
     use super::{
-        QrCodeResponse, QrStatusResponse, WechatLoginPollOutcome, build_pending_login,
-        handle_poll_status,
+        MAX_QR_REFRESH_COUNT, QrCodeResponse, QrStatusResponse, WechatLoginPollOutcome,
+        build_pending_login, handle_poll_status,
     };
 
     #[test]
@@ -437,6 +437,48 @@ mod tests {
             }
             WechatLoginPollOutcome::Confirmed(_) => {
                 Err("expected QR refresh before confirmation".to_string())
+            }
+        }
+    }
+
+    #[test]
+    fn test_handle_poll_status_fails_after_qr_refresh_exhaustion() -> Result<(), String> {
+        let (mut session, _) = build_pending_login(
+            "owner",
+            "https://ilink.example",
+            "3",
+            QrCodeResponse {
+                qrcode: "qr-initial".to_string(),
+                qrcode_img_content: "https://qr.example/initial".to_string(),
+            },
+        );
+        session.refresh_count = MAX_QR_REFRESH_COUNT;
+
+        let outcome = handle_poll_status(
+            &mut session,
+            QrStatusResponse {
+                status: "expired".to_string(),
+                bot_token: None,
+                ilink_bot_id: None,
+                baseurl: None,
+            },
+            None,
+        )
+        .map_err(|e| e.to_string())?;
+
+        match outcome {
+            WechatLoginPollOutcome::Pending(result) => {
+                assert_eq!(result.status, "failed");
+                assert_eq!(result.activated, Some(false));
+                assert!(
+                    result.message.contains("expired too many times"),
+                    "unexpected message: {}",
+                    result.message
+                );
+                Ok(())
+            }
+            WechatLoginPollOutcome::Confirmed(_) => {
+                Err("expected refresh exhaustion failure".to_string())
             }
         }
     }

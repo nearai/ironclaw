@@ -1,4 +1,5 @@
 use base64::Engine as _;
+use rand::RngCore;
 
 use crate::near::agent::channel_host;
 use crate::types::{
@@ -23,8 +24,9 @@ fn ensure_trailing_slash(base_url: &str) -> String {
 }
 
 fn random_wechat_uin() -> String {
-    let seed = (channel_host::now_millis() % u32::MAX as u64) as u32;
-    base64::engine::general_purpose::STANDARD.encode(seed.to_string())
+    let mut bytes = [0_u8; 12];
+    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    base64::engine::general_purpose::STANDARD_NO_PAD.encode(bytes)
 }
 
 fn request_headers(body: &[u8]) -> String {

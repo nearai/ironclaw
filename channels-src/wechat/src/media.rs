@@ -675,6 +675,9 @@ fn hex_lower(bytes: Vec<u8>) -> String {
 }
 
 fn encrypt_aes_ecb_pkcs7(plaintext: &[u8], key: &[u8]) -> Result<Vec<u8>, String> {
+    // WeChat's media upload protocol expects AES-128-ECB with PKCS#7 padding for
+    // the encrypted payload. This is protocol-mandated compatibility behavior,
+    // not a general-purpose encryption choice.
     let cipher = Aes128::new_from_slice(key).map_err(|e| format!("Invalid AES key: {e}"))?;
     let mut padded = plaintext.to_vec();
     let pad_len = AES_BLOCK_SIZE - (padded.len() % AES_BLOCK_SIZE);

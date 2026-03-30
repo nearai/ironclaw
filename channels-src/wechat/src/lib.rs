@@ -915,6 +915,36 @@ mod tests {
     }
 
     #[test]
+    fn test_process_incoming_bundle_extends_window_for_attachment_only_follow_up() {
+        let mut pending = HashMap::new();
+        let mut changed = false;
+
+        let emitted = process_incoming_bundle(
+            &mut pending,
+            make_bundle("u1", "", 1),
+            &mut changed,
+            100,
+            5_000,
+        );
+        assert!(emitted.is_empty());
+        assert!(changed);
+        assert_eq!(pending["u1"].flush_at_ms, 5_100);
+
+        changed = false;
+        let emitted = process_incoming_bundle(
+            &mut pending,
+            make_bundle("u1", "", 1),
+            &mut changed,
+            700,
+            5_000,
+        );
+        assert!(emitted.is_empty());
+        assert!(changed);
+        assert_eq!(pending["u1"].attachments.len(), 2);
+        assert_eq!(pending["u1"].flush_at_ms, 5_700);
+    }
+
+    #[test]
     fn test_process_incoming_bundle_emits_text_and_images_together_without_buffering() {
         let mut pending = HashMap::new();
         let mut changed = false;
