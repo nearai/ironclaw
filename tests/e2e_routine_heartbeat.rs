@@ -198,7 +198,7 @@ mod tests {
         }
     }
 
-    fn owner_gate_trace(_include_completion: bool) -> LlmTrace {
+    fn owner_gate_trace() -> LlmTrace {
         // The worker calls the LLM which returns a tool_call for owner_gate.
         // After tool execution (success or blocked-by-approval error), the
         // worker calls the LLM again. The worker first calls `select_tools()`,
@@ -1394,7 +1394,7 @@ mod tests {
         let tools_dir = tmp.path().join("wasm-tools");
         let engine = setup_owner_gate_engine(
             db.clone(),
-            owner_gate_trace(true),
+            owner_gate_trace(),
             tools_dir.as_path(),
             Some("default"),
             true,
@@ -1470,7 +1470,7 @@ mod tests {
         let tools_dir = tmp.path().join("wasm-tools");
         let engine = setup_owner_gate_engine(
             db.clone(),
-            owner_gate_trace(true),
+            owner_gate_trace(),
             tools_dir.as_path(),
             Some("default"),
             true,
@@ -1506,13 +1506,13 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[tokio::test]
-    async fn full_job_blocks_without_active_owner_extension_tool() {
+    async fn full_job_denies_tool_without_active_owner_extension() {
         let (backend, tmp) = create_test_backend().await;
         let db: Arc<dyn Database> = backend;
         let tools_dir = tmp.path().join("wasm-tools");
         let engine = setup_owner_gate_engine(
             db.clone(),
-            owner_gate_trace(false),
+            owner_gate_trace(),
             tools_dir.as_path(),
             Some("default"),
             false,
@@ -1540,13 +1540,13 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[tokio::test]
-    async fn full_job_blocks_when_extension_belongs_to_another_owner() {
+    async fn full_job_denies_tool_when_extension_belongs_to_another_owner() {
         let (backend, tmp) = create_test_backend().await;
         let db: Arc<dyn Database> = backend;
         let tools_dir = tmp.path().join("wasm-tools");
         let engine = setup_owner_gate_engine(
             db.clone(),
-            owner_gate_trace(false),
+            owner_gate_trace(),
             tools_dir.as_path(),
             Some("someone-else"),
             true,
@@ -1621,7 +1621,7 @@ mod tests {
         let tools_dir = tmp.path().join("wasm-tools");
         let engine = setup_owner_gate_engine(
             db.clone(),
-            owner_gate_trace(false),
+            owner_gate_trace(),
             tools_dir.as_path(),
             None,
             false,

@@ -605,7 +605,10 @@ impl TestRigBuilder {
         {
             let test_user_ws =
                 ironclaw::workspace::Workspace::new_with_db("test-user", Arc::clone(&db));
-            let _ = test_user_ws.seed_if_empty().await;
+            test_user_ws
+                .seed_if_empty()
+                .await
+                .expect("failed to seed test-user workspace in test rig setup");
             test_user_ws.take_bootstrap_pending();
         }
 
