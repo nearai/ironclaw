@@ -116,6 +116,8 @@ pub struct RoutineEngine {
     tools: Arc<ToolRegistry>,
     /// Safety layer for tool output sanitization.
     safety: Arc<SafetyLayer>,
+    /// Sandbox readiness state — only `DockerUnavailable` blocks full-job dispatch.
+    sandbox_readiness: SandboxReadiness,
     /// Timestamp when this engine instance was created. Used by
     /// `sync_dispatched_runs` to distinguish orphaned runs (from a previous
     /// process) from actively-watched runs (from this process).
@@ -134,7 +136,7 @@ impl RoutineEngine {
         extension_manager: Option<Arc<ExtensionManager>>,
         tools: Arc<ToolRegistry>,
         safety: Arc<SafetyLayer>,
-        _sandbox_readiness: SandboxReadiness,
+        sandbox_readiness: SandboxReadiness,
     ) -> Self {
         Self {
             config,
@@ -148,6 +150,7 @@ impl RoutineEngine {
             extension_manager,
             tools,
             safety,
+            sandbox_readiness,
             boot_time: Utc::now(),
         }
     }
@@ -801,6 +804,7 @@ impl RoutineEngine {
             extension_manager: self.extension_manager.clone(),
             tools: self.tools.clone(),
             safety: self.safety.clone(),
+            sandbox_readiness: self.sandbox_readiness,
         };
 
         tokio::spawn(async move {
@@ -885,6 +889,7 @@ impl RoutineEngine {
             extension_manager: self.extension_manager.clone(),
             tools: self.tools.clone(),
             safety: self.safety.clone(),
+            sandbox_readiness: self.sandbox_readiness,
         };
 
         tokio::spawn(async move {
@@ -938,6 +943,7 @@ impl RoutineEngine {
             extension_manager: self.extension_manager.clone(),
             tools: self.tools.clone(),
             safety: self.safety.clone(),
+            sandbox_readiness: self.sandbox_readiness,
         };
 
         // Record the run in DB, then spawn execution
@@ -1075,6 +1081,7 @@ struct EngineContext {
     extension_manager: Option<Arc<ExtensionManager>>,
     tools: Arc<ToolRegistry>,
     safety: Arc<SafetyLayer>,
+    sandbox_readiness: SandboxReadiness,
 }
 
 /// Execute a routine run. Handles both lightweight and full_job modes.
@@ -1250,7 +1257,16 @@ async fn execute_full_job(
     execution: &FullJobExecutionConfig<'_>,
 ) -> Result<(RunStatus, Option<String>, Option<i32>), RoutineError> {
     // Full-job routines dispatch through the scheduler (same as /job
-    // commands) — no Docker sandbox required.
+    // commands) — no Docker sandbox required when sandbox is disabled.
+    // However, if sandbox is *enabled* but Docker is unavailable, that's
+    // a misconfiguration we should surface.
+    if matches!(ctx.sandbox_readiness, SandboxReadiness::DockerUnavailable) {
+        return Err(RoutineError::JobDispatchFailed {
+            reason: "Sandbox is enabled but Docker is not available. \
+                     Install Docker or set SANDBOX_ENABLED=false."
+                .to_string(),
+        });
+    }
 
     let scheduler = ctx
         .scheduler
@@ -2385,6 +2401,23 @@ mod tests {
     #[test]
     fn test_full_job_dispatch_returns_running_status() {
         assert_eq!(RunStatus::Running.to_string(), "running");
+    }
+
+    #[test]
+    fn test_sandbox_readiness_docker_unavailable_still_blocks() {
+        use super::SandboxReadiness;
+
+        // DockerUnavailable should still block full-job dispatch.
+        let readiness = SandboxReadiness::DockerUnavailable;
+        assert_ne!(readiness, SandboxReadiness::Available);
+
+        let err = crate::error::RoutineError::JobDispatchFailed {
+            reason: "Sandbox is enabled but Docker is not available. \
+                     Install Docker or set SANDBOX_ENABLED=false."
+                .to_string(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("Docker is not available"));
     }
 
     /// Regression test for #1317: FullJobWatcher maps terminal job states correctly.
