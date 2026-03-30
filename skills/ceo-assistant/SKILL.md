@@ -55,11 +55,10 @@ If any of these skills are missing from the `skills/` directory, tell the user w
 
 Before creating anything, ask the user:
 
-1. **Timezone and channel**: What timezone are you in? Which channel should I send digests to?
-2. **Digest schedule**: Morning + evening works for most executives (8am + 5pm). Want different times?
-3. **Delegation follow-up style**: When I follow up on delegated items, should I draft a polite check-in or a direct status request? (default: polite check-in)
-4. **Channels to watch**: Which communication channels carry actionable messages? (Slack channels, email, etc.)
-5. **Exclusions**: Any channels or message types to ignore?
+1. **Digest schedule**: Morning + evening works for most executives (8am + 5pm). Want different times?
+2. **Delegation follow-up style**: When I follow up on delegated items, should I draft a polite check-in or a direct status request? (default: polite check-in)
+3. **Channels to watch**: Which communication channels carry actionable messages? (Slack channels, email, etc.)
+4. **Exclusions**: Any channels or message types to ignore?
 
 Use reasonable defaults if the user says "just set it up."
 

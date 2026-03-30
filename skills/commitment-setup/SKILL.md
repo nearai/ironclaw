@@ -35,9 +35,8 @@ Call `memory_read(path="commitments/README.md")`. If it exists, tell the user: "
 
 ## Step 2: Gather user context
 
-Read `USER.md` to find the user's timezone and preferred communication channel. If not found, ask:
-1. What timezone are you in? (default: UTC)
-2. Which channel should I send digests to? (default: the current channel)
+The user's timezone is provided by the channel automatically — do not ask for it. Ask only:
+1. Which channel should I send digests to? (default: the current channel)
 
 ## Step 3: Write the schema README
 

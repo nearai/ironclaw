@@ -52,11 +52,10 @@ If any are missing from `skills/`, tell the user which ones are needed.
 
 ## Step 1: Ask configuration questions
 
-1. **Timezone and channel**: What timezone and market hours? Which channel for alerts and digests?
-2. **Markets**: Which markets/asset classes? (US equities, crypto, forex, options, futures)
-3. **Position tracking**: Do you want me to track your current positions? If so, where do you log them? (I'll read from a workspace file you maintain)
-4. **Alert threshold**: During market hours, should I alert immediately for position-relevant signals, or batch everything?
-5. **Journal cadence**: Do you journal daily (post-market) or weekly?
+1. **Markets**: Which markets/asset classes and market hours? (US equities, crypto, forex, options, futures)
+2. **Position tracking**: Do you want me to track your current positions? If so, where do you log them? (I'll read from a workspace file you maintain)
+3. **Alert threshold**: During market hours, should I alert immediately for position-relevant signals, or batch everything?
+4. **Journal cadence**: Do you journal daily (post-market) or weekly?
 6. **Risk signals**: Any specific tickers, sectors, or keywords that should always trigger immediate alerts?
 
 ## Step 2: Create workspace structure

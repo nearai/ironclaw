@@ -53,11 +53,10 @@ If any are missing from `skills/`, tell the user which ones are needed.
 
 ## Step 1: Ask configuration questions
 
-1. **Timezone and channel**: What timezone? Which channel for digests?
-2. **Platforms**: Which platforms do you publish to? (YouTube, TikTok, Instagram, Twitter, blog, podcast, etc.)
-3. **Content cadence**: How often do you publish? (daily, 2-3x/week, weekly)
-4. **Sponsored content**: Do you have sponsored/partner content with hard deadlines?
-5. **Trend sensitivity**: How quickly do trends expire for your niche? (hours, days)
+1. **Platforms**: Which platforms do you publish to? (YouTube, TikTok, Instagram, Twitter, blog, podcast, etc.)
+2. **Content cadence**: How often do you publish? (daily, 2-3x/week, weekly)
+3. **Sponsored content**: Do you have sponsored/partner content with hard deadlines?
+4. **Trend sensitivity**: How quickly do trends expire for your niche? (hours, days)
 
 ## Step 2: Create workspace structure
 
