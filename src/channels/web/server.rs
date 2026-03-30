@@ -1017,6 +1017,25 @@ async fn oauth_callback_handler(
                 .map_err(|e| e.to_string())?;
         }
 
+        if let (Some(client_secret_name), Some(client_secret)) = (
+            flow.client_secret_secret_name.as_ref(),
+            flow.client_secret.as_deref(),
+        ) {
+            let mut params =
+                crate::secrets::CreateSecretParams::new(client_secret_name, client_secret)
+                    .with_provider(flow.provider.as_ref().cloned().unwrap_or_default());
+            if let Some(expires_at) = flow.client_secret_expires_at
+                && let Some(dt) =
+                    chrono::DateTime::<chrono::Utc>::from_timestamp(expires_at as i64, 0)
+            {
+                params = params.with_expiry(dt);
+            }
+            flow.secrets
+                .create(&flow.user_id, params)
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+
         Ok(())
     }
     .await;
@@ -3177,6 +3196,8 @@ mod tests {
             gateway_token: oauth_proxy_auth_token,
             token_exchange_extra_params: std::collections::HashMap::new(),
             client_id_secret_name: None,
+            client_secret_secret_name: None,
+            client_secret_expires_at: None,
             created_at: std::time::Instant::now(),
         }
     }
@@ -3542,6 +3563,8 @@ mod tests {
             gateway_token: None,
             token_exchange_extra_params: std::collections::HashMap::new(),
             client_id_secret_name: None,
+            client_secret_secret_name: None,
+            client_secret_expires_at: None,
             created_at,
         };
 
@@ -3611,6 +3634,8 @@ mod tests {
             gateway_token: None,
             token_exchange_extra_params: std::collections::HashMap::new(),
             client_id_secret_name: None,
+            client_secret_secret_name: None,
+            client_secret_expires_at: None,
             created_at,
         };
 
@@ -3714,6 +3739,8 @@ mod tests {
             gateway_token: None,
             token_exchange_extra_params: std::collections::HashMap::new(),
             client_id_secret_name: None,
+            client_secret_secret_name: None,
+            client_secret_expires_at: None,
             // Expired — handler will reject after lookup (no network I/O)
             created_at,
         };
@@ -3801,6 +3828,8 @@ mod tests {
             gateway_token: None,
             token_exchange_extra_params: std::collections::HashMap::new(),
             client_id_secret_name: None,
+            client_secret_secret_name: None,
+            client_secret_expires_at: None,
             created_at,
         };
 
@@ -3882,6 +3911,8 @@ mod tests {
             gateway_token: None,
             token_exchange_extra_params: std::collections::HashMap::new(),
             client_id_secret_name: None,
+            client_secret_secret_name: None,
+            client_secret_expires_at: None,
             created_at,
         };
 

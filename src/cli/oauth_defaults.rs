@@ -482,6 +482,12 @@ pub struct PendingOAuthFlow {
     /// Secret name for persisting the client ID (MCP OAuth only).
     /// Needed so token refresh can find the client_id after the session ends.
     pub client_id_secret_name: Option<String>,
+    /// Secret name for persisting the client secret (MCP DCR only).
+    /// Needed for providers that return a client secret during DCR and expect
+    /// it to be replayed during later refreshes.
+    pub client_secret_secret_name: Option<String>,
+    /// Absolute UNIX timestamp when the DCR client secret expires, if any.
+    pub client_secret_expires_at: Option<u64>,
     /// When this flow was created (for expiry).
     pub created_at: std::time::Instant,
 }
