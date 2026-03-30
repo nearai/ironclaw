@@ -720,7 +720,7 @@ pub async fn start_server(
                  style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; \
                  font-src https://fonts.gstatic.com; \
                  connect-src 'self'; \
-                 img-src 'self' data: https://liteapp.weixin.qq.com; \
+                 img-src 'self' data:; \
                  object-src 'none'; \
                  frame-ancestors 'none'; \
                  base-uri 'self'; \
@@ -3824,8 +3824,8 @@ mod tests {
             "CSP must contain object-src 'none'"
         );
         assert!(
-            csp_str.contains("img-src 'self' data: https://liteapp.weixin.qq.com"),
-            "CSP must allow WeChat QR images from liteapp.weixin.qq.com"
+            csp_str.contains("img-src 'self' data:"),
+            "CSP must allow self-hosted and inline images"
         );
         assert!(
             csp_str.contains("frame-ancestors 'none'"),

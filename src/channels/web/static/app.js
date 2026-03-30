@@ -3388,6 +3388,18 @@ function setInteractiveLoginBusy(overlay, busy, label) {
   loginBtn.textContent = label || loginBtn.dataset.defaultLabel || I18n.t('auth.connect');
 }
 
+function interactiveLoginPollDelayMs(status) {
+  switch (status) {
+    case 'refreshed':
+      return 2000;
+    case 'pending':
+    case 'scanned':
+      return 3000;
+    default:
+      return 3000;
+  }
+}
+
 function startInteractiveLogin(name, overlay) {
   if (!overlay || !document.body.contains(overlay)) return;
   clearConfigureInlineError(overlay);
@@ -3450,7 +3462,7 @@ function pollInteractiveLogin(name, overlay, sessionId) {
         }
         window.setTimeout(function() {
           pollInteractiveLogin(name, overlay, sessionId);
-        }, 0);
+        }, interactiveLoginPollDelayMs(res.status));
         return;
       }
 

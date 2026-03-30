@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::auth::{
     CONFIG_PATH, CONTEXT_TOKENS_PATH, GET_UPDATES_BUF_PATH, PENDING_INBOUND_PATH,
-    TYPING_TICKETS_PATH,
+    PROCESSED_MESSAGE_IDS_PATH, TYPING_TICKETS_PATH,
 };
 use crate::near::agent::channel_host;
 use crate::types::WechatConfig;
@@ -139,6 +139,44 @@ fn parse_pending_inbound_bundles(
     }
 }
 
+pub fn load_processed_message_ids() -> Result<Vec<i64>, String> {
+    parse_processed_message_ids(channel_host::workspace_read(PROCESSED_MESSAGE_IDS_PATH).as_deref())
+}
+
+pub fn persist_processed_message_ids(message_ids: &[i64]) -> Result<(), String> {
+    let serialized = serde_json::to_string(message_ids)
+        .map_err(|e| format!("Failed to serialize processed message ids: {e}"))?;
+    channel_host::workspace_write(PROCESSED_MESSAGE_IDS_PATH, &serialized).map_err(|e| e.to_string())
+}
+
+pub fn has_processed_message_id(processed_message_ids: &[i64], message_id: i64) -> bool {
+    processed_message_ids.contains(&message_id)
+}
+
+pub fn remember_processed_message_id(
+    processed_message_ids: &mut Vec<i64>,
+    message_id: i64,
+    max_entries: usize,
+) -> bool {
+    if processed_message_ids.contains(&message_id) {
+        return false;
+    }
+    processed_message_ids.push(message_id);
+    if processed_message_ids.len() > max_entries {
+        let excess = processed_message_ids.len() - max_entries;
+        processed_message_ids.drain(0..excess);
+    }
+    true
+}
+
+fn parse_processed_message_ids(raw: Option<&str>) -> Result<Vec<i64>, String> {
+    match raw {
+        None => Ok(Vec::new()),
+        Some(raw) => serde_json::from_str(raw)
+            .map_err(|e| format!("Failed to parse processed message ids: {e}")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -154,5 +192,21 @@ mod tests {
         let error =
             parse_pending_inbound_bundles(Some("{not json")).expect_err("invalid json should err");
         assert!(error.contains("Failed to parse pending inbound bundles"));
+    }
+
+    #[test]
+    fn test_parse_processed_message_ids_missing_file_returns_empty_vec() {
+        let ids = parse_processed_message_ids(None).expect("missing state should be empty");
+        assert!(ids.is_empty());
+    }
+
+    #[test]
+    fn test_remember_processed_message_id_dedups_and_trims() {
+        let mut ids = vec![1, 2];
+        assert!(!remember_processed_message_id(&mut ids, 2, 3));
+        assert_eq!(ids, vec![1, 2]);
+
+        assert!(remember_processed_message_id(&mut ids, 3, 2));
+        assert_eq!(ids, vec![2, 3]);
     }
 }

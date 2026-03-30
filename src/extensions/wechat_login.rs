@@ -17,6 +17,7 @@ const LOGIN_SESSION_TTL: Duration = Duration::from_secs(5 * 60);
 const QR_LONG_POLL_TIMEOUT: Duration = Duration::from_secs(35);
 const QR_FETCH_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_QR_REFRESH_COUNT: u8 = 3;
+const WECHAT_ALLOWED_LOGIN_BASE_DOMAINS: &[&str] = &["weixin.qq.com", "wechat.com"];
 
 #[derive(Debug, Clone)]
 pub(crate) struct PendingWechatLogin {
@@ -60,6 +61,54 @@ struct QrStatusResponse {
     bot_token: Option<String>,
     ilink_bot_id: Option<String>,
     baseurl: Option<String>,
+}
+
+fn is_allowed_wechat_login_host(host: &str) -> bool {
+    WECHAT_ALLOWED_LOGIN_BASE_DOMAINS
+        .iter()
+        .any(|domain| host == *domain || host.ends_with(&format!(".{domain}")))
+}
+
+fn validate_wechat_login_base_url(raw: &str) -> Result<String, ExtensionError> {
+    // Trust model: WeChat QR login trusts the system CA store for HTTPS validation
+    // to allowed WeChat domains. We do not certificate-pin iLink endpoints.
+    let parsed = reqwest::Url::parse(raw).map_err(|e| {
+        ExtensionError::AuthFailed(format!("WeChat login returned an invalid base URL: {e}"))
+    })?;
+
+    if parsed.scheme() != "https" {
+        return Err(ExtensionError::AuthFailed(
+            "WeChat login returned a non-HTTPS base URL".to_string(),
+        ));
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(ExtensionError::AuthFailed(
+            "WeChat login returned a base URL with embedded credentials".to_string(),
+        ));
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(ExtensionError::AuthFailed(
+            "WeChat login returned a base URL with an unexpected query or fragment".to_string(),
+        ));
+    }
+    if parsed.path() != "/" && !parsed.path().is_empty() {
+        return Err(ExtensionError::AuthFailed(
+            "WeChat login returned a base URL with an unexpected path".to_string(),
+        ));
+    }
+
+    let Some(host) = parsed.host_str() else {
+        return Err(ExtensionError::AuthFailed(
+            "WeChat login returned a base URL without a host".to_string(),
+        ));
+    };
+    if !is_allowed_wechat_login_host(host) {
+        return Err(ExtensionError::AuthFailed(format!(
+            "WeChat login returned an untrusted base URL host: {host}"
+        )));
+    }
+
+    Ok(format!("https://{host}"))
 }
 
 pub(crate) fn interactive_login_info() -> InteractiveLoginInfo {
@@ -215,10 +264,17 @@ fn handle_poll_status(
                     "WeChat login succeeded but no bot token was returned".to_string(),
                 )
             })?;
+            let base_url = status
+                .baseurl
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(validate_wechat_login_base_url)
+                .transpose()?;
 
             Ok(WechatLoginPollOutcome::Confirmed(ConfirmedWechatLogin {
                 bot_token,
-                base_url: status.baseurl.filter(|value| !value.trim().is_empty()),
+                base_url,
                 ilink_bot_id,
             }))
         }
@@ -332,6 +388,7 @@ mod tests {
         MAX_QR_REFRESH_COUNT, QrCodeResponse, QrStatusResponse, WechatLoginPollOutcome,
         build_pending_login, handle_poll_status,
     };
+    use crate::extensions::ExtensionError;
 
     #[test]
     fn test_build_pending_login_returns_qr_state_and_result() {
@@ -375,7 +432,7 @@ mod tests {
                 status: "confirmed".to_string(),
                 bot_token: Some("bot-token-123".to_string()),
                 ilink_bot_id: Some("wx-bot-1".to_string()),
-                baseurl: Some("https://override.example".to_string()),
+                baseurl: Some("https://ilinkai.weixin.qq.com".to_string()),
             },
             None,
         )
@@ -387,7 +444,7 @@ mod tests {
                 assert_eq!(confirmed.ilink_bot_id, "wx-bot-1");
                 assert_eq!(
                     confirmed.base_url.as_deref(),
-                    Some("https://override.example")
+                    Some("https://ilinkai.weixin.qq.com")
                 );
                 Ok(())
             }
@@ -480,6 +537,40 @@ mod tests {
             WechatLoginPollOutcome::Confirmed(_) => {
                 Err("expected refresh exhaustion failure".to_string())
             }
+        }
+    }
+
+    #[test]
+    fn test_handle_poll_status_rejects_untrusted_base_url() {
+        let (mut session, _) = build_pending_login(
+            "owner",
+            "https://ilink.example",
+            "3",
+            QrCodeResponse {
+                qrcode: "qr-123".to_string(),
+                qrcode_img_content: "https://qr.example/one".to_string(),
+            },
+        );
+
+        let error = match handle_poll_status(
+            &mut session,
+            QrStatusResponse {
+                status: "confirmed".to_string(),
+                bot_token: Some("bot-token-123".to_string()),
+                ilink_bot_id: Some("wx-bot-1".to_string()),
+                baseurl: Some("https://evil.example".to_string()),
+            },
+            None,
+        ) {
+            Ok(_) => panic!("untrusted host should fail"),
+            Err(error) => error,
+        };
+
+        match error {
+            ExtensionError::AuthFailed(message) => {
+                assert!(message.contains("untrusted base URL host"));
+            }
+            other => panic!("expected AuthFailed, got {other:?}"),
         }
     }
 }

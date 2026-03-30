@@ -2,8 +2,10 @@
 members = [".", "crates/ironclaw_common", "crates/ironclaw_safety"]
 exclude = [
     "channels-src/discord",
+    "channels-src/feishu",
     "channels-src/telegram",
     "channels-src/slack",
+    "channels-src/wechat",
     "channels-src/whatsapp",
     "tools-src/github",
     "tools-src/gmail",

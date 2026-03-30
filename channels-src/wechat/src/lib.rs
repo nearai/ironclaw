@@ -17,10 +17,12 @@ use serde_json::json;
 
 use crate::auth::TOKEN_SECRET_NAME;
 use crate::state::{
-    load_config, load_context_tokens, load_get_updates_buf, load_pending_inbound_bundles,
-    load_typing_tickets, persist_config, persist_context_tokens, persist_get_updates_buf,
-    persist_pending_inbound_bundles, persist_typing_tickets, PendingInboundBundle,
-    StoredInboundAttachment, TypingTicketEntry,
+    has_processed_message_id, load_config, load_context_tokens, load_get_updates_buf,
+    load_pending_inbound_bundles, load_processed_message_ids, load_typing_tickets,
+    persist_config, persist_context_tokens, persist_get_updates_buf,
+    persist_pending_inbound_bundles, persist_processed_message_ids, persist_typing_tickets,
+    remember_processed_message_id, PendingInboundBundle, StoredInboundAttachment,
+    TypingTicketEntry,
 };
 use crate::types::{
     OutboundMetadata, WechatConfig, WechatMessage, MESSAGE_ITEM_TEXT, MESSAGE_TYPE_USER,
@@ -28,6 +30,7 @@ use crate::types::{
 };
 
 const TYPING_TICKET_TTL_MS: u64 = 24 * 60 * 60 * 1000;
+const MAX_PROCESSED_MESSAGE_IDS: usize = 512;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WechatStatusAction {
@@ -86,7 +89,18 @@ impl Guest for WechatChannel {
                 return;
             }
         };
+        let mut processed_message_ids = match load_processed_message_ids() {
+            Ok(message_ids) => message_ids,
+            Err(error) => {
+                channel_host::log(
+                    channel_host::LogLevel::Error,
+                    &format!("Failed to load WeChat processed message ids: {error}"),
+                );
+                return;
+            }
+        };
         let mut pending_inbound_changed = false;
+        let mut processed_message_ids_changed = false;
 
         for bundle in take_due_pending_bundles(&mut pending_inbound, channel_host::now_millis()) {
             pending_inbound_changed = true;
@@ -131,6 +145,12 @@ impl Guest for WechatChannel {
 
                 let mut context_tokens_changed = false;
                 for message in response.msgs {
+                    let message_id = message.message_id;
+                    if let Some(message_id) = message_id {
+                        if has_processed_message_id(&processed_message_ids, message_id) {
+                            continue;
+                        }
+                    }
                     if let Some(from_user_id) = message.from_user_id.as_deref() {
                         if let Some(context_token) = message.context_token.as_deref() {
                             let changed = context_tokens
@@ -142,6 +162,7 @@ impl Guest for WechatChannel {
                     }
                     match incoming_bundle_from_message(&config, message) {
                         Ok(Some(bundle)) => {
+                            let bundle_message_id = bundle.message_id;
                             let emitted = process_incoming_bundle(
                                 &mut pending_inbound,
                                 bundle,
@@ -152,8 +173,23 @@ impl Guest for WechatChannel {
                             for emitted_bundle in emitted {
                                 emit_buffered_bundle(emitted_bundle);
                             }
+                            if let Some(message_id) = bundle_message_id {
+                                processed_message_ids_changed |= remember_processed_message_id(
+                                    &mut processed_message_ids,
+                                    message_id,
+                                    MAX_PROCESSED_MESSAGE_IDS,
+                                );
+                            }
                         }
-                        Ok(None) => {}
+                        Ok(None) => {
+                            if let Some(message_id) = message_id {
+                                processed_message_ids_changed |= remember_processed_message_id(
+                                    &mut processed_message_ids,
+                                    message_id,
+                                    MAX_PROCESSED_MESSAGE_IDS,
+                                );
+                            }
+                        }
                         Err(error) => {
                             channel_host::log(
                                 channel_host::LogLevel::Error,
@@ -170,6 +206,8 @@ impl Guest for WechatChannel {
                     &mut context_tokens_changed,
                     &mut pending_inbound,
                     &mut pending_inbound_changed,
+                    &mut processed_message_ids,
+                    &mut processed_message_ids_changed,
                 );
 
                 for bundle in
@@ -193,6 +231,15 @@ impl Guest for WechatChannel {
                         channel_host::log(
                             channel_host::LogLevel::Warn,
                             &format!("Failed to persist WeChat pending inbound bundles: {error}"),
+                        );
+                    }
+                }
+
+                if processed_message_ids_changed {
+                    if let Err(error) = persist_processed_message_ids(&processed_message_ids) {
+                        channel_host::log(
+                            channel_host::LogLevel::Warn,
+                            &format!("Failed to persist WeChat processed message ids: {error}"),
                         );
                     }
                 }
@@ -356,6 +403,8 @@ fn collect_follow_up_bundles(
     context_tokens_changed: &mut bool,
     pending_inbound: &mut std::collections::HashMap<String, PendingInboundBundle>,
     pending_inbound_changed: &mut bool,
+    processed_message_ids: &mut Vec<i64>,
+    processed_message_ids_changed: &mut bool,
 ) {
     while !pending_inbound.is_empty() {
         let now_ms = channel_host::now_millis();
@@ -408,6 +457,12 @@ fn collect_follow_up_bundles(
 
         let mut saw_relevant_message = false;
         for message in response.msgs {
+            let message_id = message.message_id;
+            if let Some(message_id) = message_id {
+                if has_processed_message_id(processed_message_ids, message_id) {
+                    continue;
+                }
+            }
             if let Some(from_user_id) = message.from_user_id.as_deref() {
                 if let Some(context_token) = message.context_token.as_deref() {
                     let changed = context_tokens
@@ -419,6 +474,7 @@ fn collect_follow_up_bundles(
             }
             match incoming_bundle_from_message(config, message) {
                 Ok(Some(bundle)) => {
+                    let bundle_message_id = bundle.message_id;
                     let emitted = process_incoming_bundle(
                         pending_inbound,
                         bundle,
@@ -426,12 +482,27 @@ fn collect_follow_up_bundles(
                         channel_host::now_millis(),
                         u64::from(config.inbound_merge_window_ms),
                     );
+                    if let Some(message_id) = bundle_message_id {
+                        *processed_message_ids_changed |= remember_processed_message_id(
+                            processed_message_ids,
+                            message_id,
+                            MAX_PROCESSED_MESSAGE_IDS,
+                        );
+                    }
                     for emitted_bundle in emitted {
                         saw_relevant_message = true;
                         emit_buffered_bundle(emitted_bundle);
                     }
                 }
-                Ok(None) => {}
+                Ok(None) => {
+                    if let Some(message_id) = message_id {
+                        *processed_message_ids_changed |= remember_processed_message_id(
+                            processed_message_ids,
+                            message_id,
+                            MAX_PROCESSED_MESSAGE_IDS,
+                        );
+                    }
+                }
                 Err(error) => {
                     channel_host::log(
                         channel_host::LogLevel::Error,
