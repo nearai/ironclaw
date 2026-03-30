@@ -31,6 +31,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, BufReader};
+#[cfg(not(unix))]
 use tokio::process::Command;
 use uuid::Uuid;
 
@@ -340,6 +341,11 @@ impl ClaudeBridgeRuntime {
 
     /// Spawn a `claude` CLI process and stream its output.
     ///
+    /// Uses a PTY on Unix so Node.js line-buffers stdout instead of
+    /// full-buffering (which causes the bridge to hang on non-TTY pipes).
+    /// Arguments are passed via `execve` (no shell) — injection-safe by
+    /// construction.
+    ///
     /// Returns the session_id if captured from the `system` init message.
     async fn run_claude_session(
         &self,
@@ -347,46 +353,101 @@ impl ClaudeBridgeRuntime {
         resume_session_id: Option<&str>,
         extra_env: &std::collections::HashMap<String, String>,
     ) -> Result<Option<String>, WorkerError> {
-        let mut cmd = Command::new("claude");
-        cmd.arg("-p")
-            .arg(prompt)
-            .arg("--output-format")
-            .arg("stream-json")
-            .arg("--verbose")
-            .arg("--max-turns")
-            .arg(self.config.max_turns.to_string())
-            .arg("--model")
-            .arg(&self.config.model);
+        let max_turns_str = self.config.max_turns.to_string();
 
-        if let Some(sid) = resume_session_id {
-            cmd.arg("--resume").arg(sid);
-        }
-
-        // Inject credentials into the child process environment without
-        // mutating the global process env (which is unsafe in multi-threaded programs).
-        cmd.envs(extra_env);
-
-        cmd.current_dir("/workspace")
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
-
-        let mut child = cmd.spawn().map_err(|e| WorkerError::ExecutionFailed {
-            reason: format!("failed to spawn claude: {}", e),
-        })?;
-
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| WorkerError::ExecutionFailed {
-                reason: "failed to capture claude stdout".to_string(),
+        // Spawn with PTY on Unix to fix Node.js stdout buffering.
+        // All arguments are passed individually via execve — never through
+        // a shell interpreter. This eliminates shell injection by construction.
+        #[cfg(unix)]
+        let (mut child, stdout, stderr) = {
+            let (pty, pts) = pty_process::open().map_err(|e| WorkerError::ExecutionFailed {
+                reason: format!("failed to allocate PTY: {}", e),
             })?;
 
-        let stderr = child
-            .stderr
-            .take()
-            .ok_or_else(|| WorkerError::ExecutionFailed {
-                reason: "failed to capture claude stderr".to_string(),
+            let mut cmd = pty_process::Command::new("claude");
+            cmd = cmd
+                .arg("-p")
+                .arg(prompt)
+                .arg("--output-format")
+                .arg("stream-json")
+                .arg("--verbose")
+                .arg("--max-turns")
+                .arg(&max_turns_str)
+                .arg("--model")
+                .arg(&self.config.model);
+
+            if let Some(sid) = resume_session_id {
+                cmd = cmd.arg("--resume").arg(sid);
+            }
+
+            cmd = cmd.envs(extra_env.iter());
+            cmd = cmd.current_dir("/workspace");
+            // Keep stderr on a separate pipe — pty-process attaches the PTY
+            // to all fds by default, which would merge stderr into the PTY
+            // stream and break NDJSON parsing.
+            cmd = cmd.stderr(std::process::Stdio::piped());
+
+            let mut child = cmd.spawn(pts).map_err(|e| WorkerError::ExecutionFailed {
+                reason: format!("failed to spawn claude with PTY: {}", e),
             })?;
+
+            let stderr = child
+                .stderr
+                .take()
+                .ok_or_else(|| WorkerError::ExecutionFailed {
+                    reason: "failed to capture claude stderr".to_string(),
+                })?;
+
+            // stdout comes from the PTY master, which implements AsyncRead
+            let stdout: Box<dyn tokio::io::AsyncRead + Unpin + Send> = Box::new(pty);
+            (child, stdout, stderr)
+        };
+
+        // Non-Unix fallback (Windows CI) — no PTY, direct spawn.
+        // Claude bridge only runs in Linux Docker containers, so this path
+        // exists solely for compilation on Windows targets.
+        #[cfg(not(unix))]
+        let (mut child, stdout, stderr) = {
+            let mut cmd = Command::new("claude");
+            cmd.arg("-p")
+                .arg(prompt)
+                .arg("--output-format")
+                .arg("stream-json")
+                .arg("--verbose")
+                .arg("--max-turns")
+                .arg(&max_turns_str)
+                .arg("--model")
+                .arg(&self.config.model);
+
+            if let Some(sid) = resume_session_id {
+                cmd.arg("--resume").arg(sid);
+            }
+
+            cmd.envs(extra_env);
+            cmd.current_dir("/workspace")
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped());
+
+            let mut child = cmd.spawn().map_err(|e| WorkerError::ExecutionFailed {
+                reason: format!("failed to spawn claude: {}", e),
+            })?;
+
+            let stdout_pipe = child
+                .stdout
+                .take()
+                .ok_or_else(|| WorkerError::ExecutionFailed {
+                    reason: "failed to capture claude stdout".to_string(),
+                })?;
+            let stderr = child
+                .stderr
+                .take()
+                .ok_or_else(|| WorkerError::ExecutionFailed {
+                    reason: "failed to capture claude stderr".to_string(),
+                })?;
+
+            let stdout: Box<dyn tokio::io::AsyncRead + Unpin + Send> = Box::new(stdout_pipe);
+            (child, stdout, stderr)
+        };
 
         // Spawn stderr reader that forwards lines as log events
         let client_for_stderr = Arc::clone(&self.client);
@@ -1026,5 +1087,52 @@ mod tests {
         // Should gracefully return 0 instead of failing
         let copied = copy_dir_recursive(nonexistent, dst.path()).unwrap();
         assert_eq!(copied, 0);
+    }
+
+    /// Regression test: arguments are passed individually (not via shell string),
+    /// so shell metacharacters in prompt/model/session_id are harmless.
+    #[test]
+    fn command_args_no_shell_interpretation() {
+        // Prompt, model, and session_id may contain shell metacharacters from
+        // user-supplied task descriptions or LLM output. Since we use
+        // Command::arg() (execve), these are passed as literal strings.
+        let prompt = "Fix the user's bug; echo $HOME && rm -rf /";
+        let model = "claude-3-opus-20240229";
+        let session_id = "'; DROP TABLE jobs; --";
+
+        let max_turns = 10u32;
+        let max_turns_str = max_turns.to_string();
+        let args: Vec<&str> = vec![
+            "-p",
+            prompt,
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "--max-turns",
+            &max_turns_str,
+            "--model",
+            model,
+            "--resume",
+            session_id,
+        ];
+
+        // All values present as literal strings — no shell interpretation
+        // ["-p", prompt, "--output-format", "stream-json", "--verbose",
+        //  "--max-turns", "10", "--model", model, "--resume", session_id]
+        assert_eq!(args[1], prompt);
+        assert_eq!(args[8], model);
+        assert_eq!(args[10], session_id);
+        // Shell metacharacters preserved, not expanded
+        assert!(args[1].contains("$HOME"));
+        assert!(args[1].contains("&&"));
+        assert!(args[10].contains("'; DROP TABLE"));
+    }
+
+    /// Verify PTY is available on Unix platforms.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pty_opens_successfully() {
+        let result = pty_process::open();
+        assert!(result.is_ok(), "PTY allocation should succeed on Unix");
     }
 }

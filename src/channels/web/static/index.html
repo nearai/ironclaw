@@ -44,6 +44,58 @@
     </div>
   </div>
 
+  <!-- Provider Add/Edit Dialog -->
+  <div id="provider-dialog" class="provider-dialog" style="display:none">
+    <div class="provider-dialog-overlay" id="provider-dialog-overlay"></div>
+    <div class="provider-dialog-content">
+      <div class="provider-dialog-header">
+        <h2 id="provider-form-title" data-i18n="config.newProvider">New Provider</h2>
+        <button class="provider-dialog-close" id="cancel-provider-btn" title="Close">×</button>
+      </div>
+      <div class="provider-dialog-body">
+        <div class="config-form">
+          <div class="config-form-row" id="provider-name-row">
+            <label data-i18n="config.providerName">Display Name</label>
+            <input type="text" id="provider-name" data-i18n="config.providerNamePlaceholder" data-i18n-attr="placeholder" placeholder="My Provider">
+          </div>
+          <div class="config-form-row" id="provider-id-row">
+            <label data-i18n="config.providerId">Provider ID</label>
+            <input type="text" id="provider-id" data-i18n="config.providerIdPlaceholder" data-i18n-attr="placeholder" placeholder="my-provider">
+            <span class="config-form-hint" data-i18n="config.providerIdHint">Lowercase letters, numbers, hyphens, underscores</span>
+          </div>
+          <div class="config-form-row" id="provider-adapter-row">
+            <label data-i18n="config.providerAdapter">API Adapter</label>
+            <select id="provider-adapter">
+              <option value="open_ai_completions" data-i18n="config.adapterOpenAI">OpenAI Compatible</option>
+              <option value="anthropic" data-i18n="config.adapterAnthropic">Anthropic</option>
+              <option value="ollama" data-i18n="config.adapterOllama">Ollama</option>
+            </select>
+          </div>
+          <div class="config-form-row" id="provider-base-url-row">
+            <label data-i18n="config.providerBaseUrl">Base URL</label>
+            <input type="text" id="provider-base-url" placeholder="https://api.example.com/v1">
+          </div>
+          <div class="config-form-row" id="provider-api-key-row">
+            <label data-i18n="config.providerApiKey">API Key</label>
+            <input type="password" id="provider-api-key" placeholder="sk-...">
+          </div>
+          <div class="config-form-row">
+            <label data-i18n="config.providerModel">Default Model</label>
+            <input type="text" id="provider-model" placeholder="gpt-4o">
+            <button id="fetch-models-btn" class="btn-fetch-models" type="button" data-i18n="config.fetchModels">↻ Fetch available models</button>
+            <select id="provider-model-select" style="display:none"></select>
+          </div>
+          <div id="test-connection-result" class="test-connection-result" style="display:none"></div>
+        </div>
+      </div>
+      <div class="provider-dialog-footer">
+        <button id="save-provider-btn" data-i18n="common.save">Save</button>
+        <button id="test-provider-btn" class="btn-secondary" data-i18n="config.testConnection">Test</button>
+        <button id="cancel-provider-footer-btn" class="btn-secondary" data-i18n="common.cancel">Cancel</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Restart Confirmation Modal -->
   <div id="restart-confirm-modal" class="restart-modal" style="display: none;">
     <div class="restart-modal-overlay" id="restart-overlay"></div>
@@ -305,8 +357,23 @@
             <button id="settings-import-btn" class="settings-toolbar-btn" data-i18n="settings.import">Import</button>
           </div>
           <div class="settings-subpanel active" id="settings-inference">
-            <div class="extensions-container" id="settings-inference-content">
-              <div class="empty-state" data-i18n="common.loading">Loading settings...</div>
+            <div class="extensions-container">
+              <div id="settings-inference-content">
+                <div class="empty-state" data-i18n="common.loading">Loading settings...</div>
+              </div>
+              <div class="extensions-section" id="providers-section">
+                <div class="config-section-header">
+                  <h3 data-i18n="config.modelProviders">Model Providers</h3>
+                  <button id="add-provider-btn" class="btn-add-provider" data-i18n="config.addProvider">+ Add Provider</button>
+                </div>
+                <div class="config-notice" id="config-restart-notice" style="display:none">
+                  <span>⚠</span>
+                  <span data-i18n="config.restartNotice">Changes take effect after restart.</span>
+                </div>
+                <div id="providers-list" class="providers-list">
+                  <div class="empty-state" data-i18n="common.loading">Loading...</div>
+                </div>
+              </div>
             </div>
           </div>
           <div class="settings-subpanel" id="settings-agent">
