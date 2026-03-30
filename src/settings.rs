@@ -961,13 +961,13 @@ pub struct SearchSettings {
     #[serde(default = "default_search_rrf_k")]
     pub rrf_k: u32,
 
-    /// FTS weight for fusion.
-    #[serde(default = "default_search_fts_weight")]
-    pub fts_weight: f32,
+    /// FTS weight for fusion. `None` = use per-strategy default.
+    #[serde(default)]
+    pub fts_weight: Option<f32>,
 
-    /// Vector weight for fusion.
-    #[serde(default = "default_search_vector_weight")]
-    pub vector_weight: f32,
+    /// Vector weight for fusion. `None` = use per-strategy default.
+    #[serde(default)]
+    pub vector_weight: Option<f32>,
 }
 
 fn default_search_fusion_strategy() -> String {
@@ -978,21 +978,13 @@ fn default_search_rrf_k() -> u32 {
     60
 }
 
-fn default_search_fts_weight() -> f32 {
-    0.5
-}
-
-fn default_search_vector_weight() -> f32 {
-    0.5
-}
-
 impl Default for SearchSettings {
     fn default() -> Self {
         Self {
             fusion_strategy: default_search_fusion_strategy(),
             rrf_k: default_search_rrf_k(),
-            fts_weight: default_search_fts_weight(),
-            vector_weight: default_search_vector_weight(),
+            fts_weight: None,
+            vector_weight: None,
         }
     }
 }

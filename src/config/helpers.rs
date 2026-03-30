@@ -336,13 +336,16 @@ pub(crate) fn validate_base_url(url: &str, field_name: &str) -> Result<(), Confi
 // ---------------------------------------------------------------------------
 
 /// Log a warning when a DB/TOML setting shadows a set env var.
-fn warn_if_db_shadows_env(env_key: &str, db_value: &dyn std::fmt::Display) {
+///
+/// Values are intentionally NOT logged — some callers handle sensitive
+/// fields (tunnel tokens, API keys) and we must not leak them.
+fn warn_if_db_shadows_env(env_key: &str, _db_value: &dyn std::fmt::Display) {
     if let Ok(env_val) = std::env::var(env_key)
         && !env_val.is_empty()
     {
+        let _ = env_val; // consumed — not logged
         tracing::warn!(
-            db_value = %db_value,
-            env_value = %env_val,
+            env_key = %env_key,
             "{env_key} env var is set but DB/TOML setting takes priority. \
              Remove the setting from the DB to use the env var."
         );

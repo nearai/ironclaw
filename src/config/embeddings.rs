@@ -92,13 +92,15 @@ impl EmbeddingsConfig {
         // ollama_base_url lives on the top-level Settings, not the embeddings
         // sub-struct. Use a manual DB > env > default chain.
         let default_ollama_url = "http://localhost:11434".to_string();
-        let ollama_base_url = settings
+        let ollama_base_url = match settings
             .ollama_base_url
             .as_ref()
             .filter(|s| !s.is_empty())
             .cloned()
-            .or_else(|| optional_env("OLLAMA_BASE_URL").ok().flatten())
-            .unwrap_or(default_ollama_url);
+        {
+            Some(url) => url,
+            None => optional_env("OLLAMA_BASE_URL")?.unwrap_or(default_ollama_url),
+        };
 
         let dim_default = default_dimension_for_model(&model);
         let dimension = db_first_or_default(&dim_default, &dim_default, "EMBEDDING_DIMENSION")?;

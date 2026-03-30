@@ -1,4 +1,4 @@
-use crate::config::helpers::{db_first_bool, db_first_optional_string};
+use crate::config::helpers::{db_first_bool, db_first_optional_string, optional_env};
 use crate::error::ConfigError;
 use crate::settings::{Settings, TunnelSettings};
 
@@ -51,7 +51,8 @@ impl TunnelConfig {
         } else {
             Some(crate::tunnel::TunnelProviderConfig {
                 provider: provider_name.clone(),
-                cloudflare: db_first_optional_string(&settings.tunnel.cf_token, "TUNNEL_CF_TOKEN")?
+                // Security: tunnel auth tokens are env-only (sensitive credentials).
+                cloudflare: optional_env("TUNNEL_CF_TOKEN")?
                     .map(|token| crate::tunnel::CloudflareTunnelConfig { token }),
                 tailscale: Some(crate::tunnel::TailscaleTunnelConfig {
                     funnel: db_first_bool(
@@ -69,11 +70,12 @@ impl TunnelConfig {
                         &settings.tunnel.ngrok_domain,
                         "TUNNEL_NGROK_DOMAIN",
                     )?;
-                    db_first_optional_string(&settings.tunnel.ngrok_token, "TUNNEL_NGROK_TOKEN")?
-                        .map(|auth_token| crate::tunnel::NgrokTunnelConfig {
+                    optional_env("TUNNEL_NGROK_TOKEN")?.map(|auth_token| {
+                        crate::tunnel::NgrokTunnelConfig {
                             auth_token,
                             domain: ngrok_domain,
-                        })
+                        }
+                    })
                 },
                 custom: {
                     let health_url = db_first_optional_string(
