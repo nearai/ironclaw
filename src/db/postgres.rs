@@ -138,6 +138,16 @@ impl ConversationStore for PgBackend {
             .await
     }
 
+    async fn find_routine_conversation(
+        &self,
+        routine_id: Uuid,
+        user_id: &str,
+    ) -> Result<Option<Uuid>, DatabaseError> {
+        self.store
+            .find_routine_conversation(routine_id, user_id)
+            .await
+    }
+
     async fn get_or_create_heartbeat_conversation(
         &self,
         user_id: &str,

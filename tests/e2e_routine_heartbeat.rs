@@ -21,9 +21,7 @@ mod tests {
         NotifyConfig, Routine, RoutineAction, RoutineGuardrails, RoutineRun, RunStatus, Trigger,
     };
     use ironclaw::agent::routine_engine::RoutineEngine;
-    use ironclaw::agent::{
-        HeartbeatConfig, HeartbeatRunner, SandboxReadiness, Scheduler, SchedulerDeps,
-    };
+    use ironclaw::agent::{HeartbeatConfig, HeartbeatRunner, Scheduler, SchedulerDeps};
     use ironclaw::channels::IncomingMessage;
     use ironclaw::config::{AgentConfig, RoutineConfig, SafetyConfig};
     use ironclaw::context::{ContextManager, JobContext};
@@ -352,7 +350,7 @@ mod tests {
             extension_manager,
             registry,
             safety,
-            SandboxReadiness::Available,
+            ironclaw::agent::routine_engine::SandboxReadiness::DisabledByConfig,
         ))
     }
 
@@ -456,7 +454,7 @@ mod tests {
             None,
             tools,
             safety,
-            SandboxReadiness::DisabledByConfig,
+            ironclaw::agent::routine_engine::SandboxReadiness::DisabledByConfig,
         ));
 
         // Insert a cron routine with next_fire_at in the past.
@@ -535,7 +533,7 @@ mod tests {
             None,
             tools,
             safety,
-            SandboxReadiness::DisabledByConfig,
+            ironclaw::agent::routine_engine::SandboxReadiness::DisabledByConfig,
         ));
 
         // Insert an event routine matching "deploy.*production".
@@ -622,7 +620,7 @@ mod tests {
             None,
             tools,
             safety,
-            SandboxReadiness::DisabledByConfig,
+            ironclaw::agent::routine_engine::SandboxReadiness::DisabledByConfig,
         ));
 
         let routine = make_routine(
@@ -731,7 +729,7 @@ mod tests {
             None,
             tools,
             safety,
-            SandboxReadiness::DisabledByConfig,
+            ironclaw::agent::routine_engine::SandboxReadiness::DisabledByConfig,
         ));
 
         let mut filters = std::collections::HashMap::new();
@@ -874,7 +872,7 @@ mod tests {
             None,
             tools,
             safety,
-            SandboxReadiness::DisabledByConfig,
+            ironclaw::agent::routine_engine::SandboxReadiness::DisabledByConfig,
         ));
 
         // Insert an event routine with 1-hour cooldown.
@@ -1057,7 +1055,7 @@ mod tests {
             None,
             tools,
             safety,
-            SandboxReadiness::DisabledByConfig,
+            ironclaw::agent::routine_engine::SandboxReadiness::DisabledByConfig,
         ));
 
         (engine, db, dir)
@@ -1179,7 +1177,7 @@ mod tests {
             None,
             tools,
             safety,
-            SandboxReadiness::DisabledByConfig,
+            ironclaw::agent::routine_engine::SandboxReadiness::DisabledByConfig,
         ));
 
         // Create a full_job routine with max_concurrent = 1
@@ -1287,7 +1285,7 @@ mod tests {
             None,
             tools,
             safety,
-            SandboxReadiness::DisabledByConfig,
+            ironclaw::agent::routine_engine::SandboxReadiness::DisabledByConfig,
         ));
 
         // Insert a due cron routine

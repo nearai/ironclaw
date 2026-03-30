@@ -69,7 +69,8 @@ pub async fn run_skills_command(
 /// Discover skills from all configured directories.
 async fn discover_skills(config: &SkillsConfig) -> SkillRegistry {
     let mut registry = SkillRegistry::new(config.local_dir.clone())
-        .with_installed_dir(config.installed_dir.clone());
+        .with_installed_dir(config.installed_dir.clone())
+        .with_max_scan_depth(config.max_scan_depth);
     registry.discover_all().await;
     registry
 }
