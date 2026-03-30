@@ -616,6 +616,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                 parameters: hook_params,
                 user_id: self.message.user_id.clone(),
                 context: "chat".to_string(),
+                intent: Some(self.message.content.clone()),
             };
             match self.agent.hooks().run(&event).await {
                 Err(crate::hooks::HookError::Rejected { reason }) => {

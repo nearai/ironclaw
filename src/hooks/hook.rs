@@ -54,6 +54,9 @@ pub enum HookEvent {
         user_id: String,
         /// "chat" for interactive, or a job ID string for autonomous jobs.
         context: String,
+        /// Original user message that triggered this tool call.
+        /// `None` for approval-resumed calls (user already authorised the tool).
+        intent: Option<String>,
     },
     /// An outbound response about to be sent.
     Outbound {

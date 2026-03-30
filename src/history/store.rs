@@ -2132,6 +2132,36 @@ impl Store {
 
         Ok(())
     }
+
+    /// Persist a judge verdict record for audit purposes.
+    pub async fn record_judge_verdict(
+        &self,
+        tool_name: &str,
+        verdict: &str,
+        attack_type: Option<&str>,
+        confidence: f64,
+        reasoning: &str,
+        latency_ms: u64,
+    ) -> Result<(), DatabaseError> {
+        let conn = self.conn().await?;
+        let latency_ms_i64 = latency_ms as i64;
+        conn.execute(
+            r#"
+            INSERT INTO judge_verdicts (tool_name, verdict, attack_type, confidence, reasoning, latency_ms)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            "#,
+            &[
+                &tool_name,
+                &verdict,
+                &attack_type,
+                &confidence,
+                &reasoning,
+                &latency_ms_i64,
+            ],
+        )
+        .await?;
+        Ok(())
+    }
 }
 
 // ==================== Settings ====================

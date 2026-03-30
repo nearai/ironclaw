@@ -787,6 +787,29 @@ CREATE INDEX IF NOT EXISTS idx_api_tokens_user ON api_tokens(user_id);
 CREATE INDEX IF NOT EXISTS idx_api_tokens_hash ON api_tokens(token_hash);
 "#,
     ),
+    (
+        15,
+        "judge_verdicts",
+        // Audit trail for LLM-as-Judge evaluations. Append-only; no rows are
+        // ever updated or deleted. confidence=0.0 with reasoning="Judge
+        // unavailable — failing open" is the sentinel for fail-open events.
+        r#"
+CREATE TABLE IF NOT EXISTS judge_verdicts (
+    id          TEXT    PRIMARY KEY,
+    tool_name   TEXT    NOT NULL,
+    verdict     TEXT    NOT NULL,
+    attack_type TEXT,
+    confidence  REAL    NOT NULL,
+    reasoning   TEXT    NOT NULL,
+    latency_ms  INTEGER NOT NULL,
+    created_at  TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_judge_verdicts_tool    ON judge_verdicts(tool_name);
+CREATE INDEX IF NOT EXISTS idx_judge_verdicts_verdict ON judge_verdicts(verdict);
+CREATE INDEX IF NOT EXISTS idx_judge_verdicts_created ON judge_verdicts(created_at DESC);
+"#,
+    ),
 ];
 
 /// Run incremental migrations that haven't been applied yet.
