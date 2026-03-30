@@ -54,6 +54,7 @@ pub async fn run_worker(
         orchestrator_url: orchestrator_url.to_string(),
         max_iterations,
         timeout: std::time::Duration::from_secs(600),
+        drift_config: resolve_drift_config(),
     };
 
     let rt =
@@ -93,4 +94,106 @@ pub async fn run_claude_bridge(
     rt.run()
         .await
         .map_err(|e| anyhow::anyhow!("Claude bridge failed: {}", e))
+}
+
+/// Resolve drift monitor configuration from environment variables.
+///
+/// Uses the same `parse_bool_env` / `parse_optional_env` helpers as the
+/// host-side `AgentConfig::resolve()` to ensure identical parsing semantics.
+/// Logs a warning and falls back to default on parse error (container
+/// startup should not fail over drift config).
+fn resolve_drift_config() -> crate::agent::drift_monitor::DriftConfig {
+    use crate::agent::drift_monitor::DriftConfig;
+
+    match resolve_drift_config_inner() {
+        Ok(config) => config,
+        Err(e) => {
+            tracing::warn!(
+                "Failed to parse drift config from env, using defaults: {}",
+                e
+            );
+            DriftConfig::default()
+        }
+    }
+}
+
+fn resolve_drift_config_inner()
+-> Result<crate::agent::drift_monitor::DriftConfig, crate::error::ConfigError> {
+    use crate::agent::drift_monitor::DriftConfig;
+    use crate::config::helpers::{parse_bool_env, parse_optional_env};
+
+    let defaults = DriftConfig::default();
+    Ok(DriftConfig {
+        enabled: parse_bool_env("IRONCLAW_DRIFT_ENABLED", defaults.enabled)?,
+        repetition_threshold: parse_optional_env(
+            "IRONCLAW_DRIFT_REPETITION_THRESHOLD",
+            defaults.repetition_threshold,
+        )?,
+        repetition_window: parse_optional_env(
+            "IRONCLAW_DRIFT_REPETITION_WINDOW",
+            defaults.repetition_window,
+        )?,
+        failure_spiral_threshold: parse_optional_env(
+            "IRONCLAW_DRIFT_FAILURE_THRESHOLD",
+            defaults.failure_spiral_threshold,
+        )?,
+        cycling_window: parse_optional_env(
+            "IRONCLAW_DRIFT_CYCLING_WINDOW",
+            defaults.cycling_window,
+        )?,
+        silence_threshold: parse_optional_env(
+            "IRONCLAW_DRIFT_SILENCE_THRESHOLD",
+            defaults.silence_threshold,
+        )?,
+    }
+    .clamped())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_container_drift_config_from_env() {
+        let _guard = crate::config::helpers::lock_env();
+        // safety: test-only, guarded by ENV_MUTEX
+        unsafe {
+            std::env::set_var("IRONCLAW_DRIFT_ENABLED", "false");
+            std::env::set_var("IRONCLAW_DRIFT_FAILURE_THRESHOLD", "8");
+            std::env::set_var("IRONCLAW_DRIFT_CYCLING_WINDOW", "12");
+        }
+
+        let config = resolve_drift_config();
+        assert!(!config.enabled);
+        assert_eq!(config.failure_spiral_threshold, 8);
+        assert_eq!(config.cycling_window, 12);
+        // Non-overridden fields keep defaults
+        assert_eq!(config.repetition_threshold, 3);
+
+        unsafe {
+            std::env::remove_var("IRONCLAW_DRIFT_ENABLED");
+            std::env::remove_var("IRONCLAW_DRIFT_FAILURE_THRESHOLD");
+            std::env::remove_var("IRONCLAW_DRIFT_CYCLING_WINDOW");
+        }
+    }
+
+    #[test]
+    fn test_container_drift_config_invalid_env_logs_warning() {
+        let _guard = crate::config::helpers::lock_env();
+        // safety: test-only, guarded by ENV_MUTEX
+        unsafe {
+            std::env::set_var("IRONCLAW_DRIFT_FAILURE_THRESHOLD", "not_a_number");
+        }
+
+        // Should fall back to defaults and not panic
+        let config = resolve_drift_config();
+        assert_eq!(
+            config.failure_spiral_threshold,
+            crate::agent::drift_monitor::DriftConfig::default().failure_spiral_threshold
+        );
+
+        unsafe {
+            std::env::remove_var("IRONCLAW_DRIFT_FAILURE_THRESHOLD");
+        }
+    }
 }
