@@ -741,6 +741,7 @@ mod tests {
             "capabilities": {
                 "channel": {
                     "socket_mode": {
+                        "open_url": "https://slack.com/api/apps.connections.open",
                         "app_token_secret": "slack_app_token"
                     }
                 }
@@ -751,8 +752,9 @@ mod tests {
         let channel = file.capabilities.channel.as_ref().unwrap();
         let sm = channel.socket_mode.as_ref().unwrap();
 
-        assert!(sm.open_url.starts_with("https://slack.com"));
+        assert_eq!(sm.open_url, "https://slack.com/api/apps.connections.open");
         assert_eq!(sm.app_token_secret, "slack_app_token");
+        // reconnect_delay_ms and max_reconnect_attempts still have defaults
         assert_eq!(sm.reconnect_delay_ms, 5000);
         assert_eq!(sm.max_reconnect_attempts, 10);
     }
