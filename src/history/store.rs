@@ -1772,6 +1772,27 @@ impl Store {
         Ok(row.get("id"))
     }
 
+    /// Read-only lookup for an existing routine conversation.
+    pub async fn find_routine_conversation(
+        &self,
+        routine_id: Uuid,
+        user_id: &str,
+    ) -> Result<Option<Uuid>, DatabaseError> {
+        let conn = self.conn().await?;
+        let rid = routine_id.to_string();
+        let row = conn
+            .query_opt(
+                r#"
+                SELECT id FROM conversations
+                WHERE user_id = $1 AND metadata->>'routine_id' = $2
+                LIMIT 1
+                "#,
+                &[&user_id, &rid],
+            )
+            .await?;
+        Ok(row.map(|r| r.get("id")))
+    }
+
     /// Get or create the singleton heartbeat conversation for a user.
     ///
     /// Looks for a conversation where `metadata->>'thread_type' = 'heartbeat'`.

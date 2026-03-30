@@ -83,9 +83,27 @@ impl GatewayChannel {
             bytes.iter().map(|b| format!("{b:02x}")).collect()
         });
 
+        let oidc_state = config.oidc.as_ref().and_then(|oidc_config| {
+            match auth::OidcState::from_config(oidc_config) {
+                Ok(state) => {
+                    tracing::info!(
+                        header = %oidc_config.header,
+                        jwks_url = %oidc_config.jwks_url,
+                        "OIDC JWT authentication enabled"
+                    );
+                    Some(state)
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "Failed to initialize OIDC auth — falling back to token-only auth");
+                    None
+                }
+            }
+        });
+
         let auth = CombinedAuthState {
             env_auth: MultiAuthState::single(auth_token, owner_id.clone()),
             db_auth: None,
+            oidc: oidc_state,
         };
 
         let state = Arc::new(GatewayState {
@@ -347,10 +365,10 @@ impl Channel for GatewayChannel {
         let thread_id = match &msg.thread_id {
             Some(tid) => tid.clone(),
             None => {
-                tracing::warn!(
-                    "Gateway respond with no thread_id — skipping (clients would drop it)"
-                );
-                return Ok(());
+                return Err(ChannelError::MissingRoutingTarget {
+                    name: "gateway".to_string(),
+                    reason: "respond() requires a thread_id on the incoming message".to_string(),
+                });
             }
         };
 
@@ -507,10 +525,10 @@ impl Channel for GatewayChannel {
         let thread_id = match response.thread_id {
             Some(tid) => tid,
             None => {
-                tracing::warn!(
-                    "Gateway broadcast with no thread_id — skipping (clients would drop it)"
-                );
-                return Ok(());
+                return Err(ChannelError::MissingRoutingTarget {
+                    name: "gateway".to_string(),
+                    reason: "broadcast() requires a thread_id on the response".to_string(),
+                });
             }
         };
         self.state.sse.broadcast_for_user(

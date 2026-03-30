@@ -291,6 +291,41 @@ impl ConversationStore for LibSqlBackend {
         result
     }
 
+    async fn find_routine_conversation(
+        &self,
+        routine_id: Uuid,
+        user_id: &str,
+    ) -> Result<Option<Uuid>, DatabaseError> {
+        let conn = self.connect().await?;
+        let rid = routine_id.to_string();
+        let mut rows = conn
+            .query(
+                r#"
+                SELECT id FROM conversations
+                WHERE user_id = ?1 AND json_extract(metadata, '$.routine_id') = ?2
+                LIMIT 1
+                "#,
+                params![user_id, rid],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        if let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        {
+            let id_str: String = row.get(0).map_err(|e| {
+                DatabaseError::Query(format!("Failed to read conversation id: {e}"))
+            })?;
+            let id = id_str
+                .parse()
+                .map_err(|_| DatabaseError::Serialization("Invalid UUID".to_string()))?;
+            return Ok(Some(id));
+        }
+        Ok(None)
+    }
+
     /// Uses BEGIN IMMEDIATE to serialize concurrent writers and prevent
     /// duplicate heartbeat conversations (TOCTOU race).
     async fn get_or_create_heartbeat_conversation(

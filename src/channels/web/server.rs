@@ -38,6 +38,9 @@ use crate::channels::web::handlers::jobs::{
     jobs_events_handler, jobs_list_handler, jobs_prompt_handler, jobs_restart_handler,
     jobs_summary_handler,
 };
+use crate::channels::web::handlers::llm::{
+    llm_list_models_handler, llm_providers_handler, llm_test_connection_handler,
+};
 use crate::channels::web::handlers::memory::{
     memory_list_handler, memory_read_handler, memory_search_handler, memory_tree_handler,
     memory_write_handler,
@@ -45,6 +48,10 @@ use crate::channels::web::handlers::memory::{
 use crate::channels::web::handlers::routines::{
     routines_delete_handler, routines_detail_handler, routines_list_handler,
     routines_summary_handler, routines_toggle_handler, routines_trigger_handler,
+};
+use crate::channels::web::handlers::settings::{
+    settings_delete_handler, settings_export_handler, settings_get_handler,
+    settings_import_handler, settings_list_handler, settings_set_handler,
 };
 use crate::channels::web::handlers::skills::{
     skills_install_handler, skills_list_handler, skills_remove_handler, skills_search_handler,
@@ -529,6 +536,13 @@ pub async fn start_server(
             "/api/settings/{key}",
             axum::routing::delete(settings_delete_handler),
         )
+        // LLM utilities
+        .route(
+            "/api/llm/test_connection",
+            post(llm_test_connection_handler),
+        )
+        .route("/api/llm/list_models", post(llm_list_models_handler))
+        .route("/api/llm/providers", get(llm_providers_handler))
         // User management (admin)
         .route(
             "/api/admin/users",
@@ -2159,27 +2173,12 @@ async fn extensions_list_handler(
     let extensions = installed
         .into_iter()
         .map(|ext| {
-            let activation_status = if ext.kind == crate::extensions::ExtensionKind::WasmChannel {
-                let has_paired = pairing_store
-                    .read_allow_from(&ext.name)
-                    .map(|list| !list.is_empty())
-                    .unwrap_or(false);
-                crate::channels::web::types::classify_wasm_channel_activation(
+            let activation_status =
+                crate::channels::web::handlers::extensions::derive_activation_status(
                     &ext,
-                    has_paired,
+                    &pairing_store,
                     owner_bound_channels.contains(&ext.name),
-                )
-            } else if ext.kind == crate::extensions::ExtensionKind::ChannelRelay {
-                Some(if ext.active {
-                    ExtensionActivationStatus::Active
-                } else if ext.authenticated {
-                    ExtensionActivationStatus::Configured
-                } else {
-                    ExtensionActivationStatus::Installed
-                })
-            } else {
-                None
-            };
+                );
             ExtensionInfo {
                 name: ext.name,
                 display_name: ext.display_name,
@@ -2737,135 +2736,6 @@ async fn routines_runs_handler(
         "routine_id": routine_id,
         "runs": run_infos,
     })))
-}
-
-// --- Settings handlers ---
-
-async fn settings_list_handler(
-    State(state): State<Arc<GatewayState>>,
-    AuthenticatedUser(user): AuthenticatedUser,
-) -> Result<Json<SettingsListResponse>, StatusCode> {
-    let store = state
-        .store
-        .as_ref()
-        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
-    let rows = store.list_settings(&user.user_id).await.map_err(|e| {
-        tracing::error!("Failed to list settings: {}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-
-    let settings = rows
-        .into_iter()
-        .map(|r| SettingResponse {
-            key: r.key,
-            value: r.value,
-            updated_at: r.updated_at.to_rfc3339(),
-        })
-        .collect();
-
-    Ok(Json(SettingsListResponse { settings }))
-}
-
-async fn settings_get_handler(
-    State(state): State<Arc<GatewayState>>,
-    AuthenticatedUser(user): AuthenticatedUser,
-    Path(key): Path<String>,
-) -> Result<Json<SettingResponse>, StatusCode> {
-    let store = state
-        .store
-        .as_ref()
-        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
-    let row = store
-        .get_setting_full(&user.user_id, &key)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to get setting '{}': {}", key, e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?
-        .ok_or(StatusCode::NOT_FOUND)?;
-
-    Ok(Json(SettingResponse {
-        key: row.key,
-        value: row.value,
-        updated_at: row.updated_at.to_rfc3339(),
-    }))
-}
-
-async fn settings_set_handler(
-    State(state): State<Arc<GatewayState>>,
-    AuthenticatedUser(user): AuthenticatedUser,
-    Path(key): Path<String>,
-    Json(body): Json<SettingWriteRequest>,
-) -> Result<StatusCode, StatusCode> {
-    let store = state
-        .store
-        .as_ref()
-        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
-    store
-        .set_setting(&user.user_id, &key, &body.value)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to set setting '{}': {}", key, e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-
-    Ok(StatusCode::NO_CONTENT)
-}
-
-async fn settings_delete_handler(
-    State(state): State<Arc<GatewayState>>,
-    AuthenticatedUser(user): AuthenticatedUser,
-    Path(key): Path<String>,
-) -> Result<StatusCode, StatusCode> {
-    let store = state
-        .store
-        .as_ref()
-        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
-    store
-        .delete_setting(&user.user_id, &key)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to delete setting '{}': {}", key, e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-
-    Ok(StatusCode::NO_CONTENT)
-}
-
-async fn settings_export_handler(
-    State(state): State<Arc<GatewayState>>,
-    AuthenticatedUser(user): AuthenticatedUser,
-) -> Result<Json<SettingsExportResponse>, StatusCode> {
-    let store = state
-        .store
-        .as_ref()
-        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
-    let settings = store.get_all_settings(&user.user_id).await.map_err(|e| {
-        tracing::error!("Failed to export settings: {}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-
-    Ok(Json(SettingsExportResponse { settings }))
-}
-
-async fn settings_import_handler(
-    State(state): State<Arc<GatewayState>>,
-    AuthenticatedUser(user): AuthenticatedUser,
-    Json(body): Json<SettingsImportRequest>,
-) -> Result<StatusCode, StatusCode> {
-    let store = state
-        .store
-        .as_ref()
-        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
-    store
-        .set_all_settings(&user.user_id, &body.settings)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to import settings: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-
-    Ok(StatusCode::NO_CONTENT)
 }
 
 // --- Gateway control plane handlers ---

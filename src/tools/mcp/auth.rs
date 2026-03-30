@@ -954,16 +954,22 @@ pub async fn store_tokens(
     server_config: &McpServerConfig,
     token: &AccessToken,
 ) -> Result<(), AuthError> {
-    // Store access token
-    let params = CreateSecretParams::new(server_config.token_secret_name(), &token.access_token)
-        .with_provider(format!("mcp:{}", server_config.name));
+    // Store access token (with expiry if provided)
+    let mut params =
+        CreateSecretParams::new(server_config.token_secret_name(), &token.access_token)
+            .with_provider(format!("mcp:{}", server_config.name));
+
+    if let Some(secs) = token.expires_in {
+        let expires_at = chrono::Utc::now() + chrono::Duration::seconds(secs as i64);
+        params = params.with_expiry(expires_at);
+    }
 
     secrets
         .create(user_id, params)
         .await
         .map_err(|e| AuthError::Secrets(e.to_string()))?;
 
-    // Store refresh token if present
+    // Store refresh token if present (no expiry — long-lived)
     if let Some(ref refresh_token) = token.refresh_token {
         let params =
             CreateSecretParams::new(server_config.refresh_token_secret_name(), refresh_token)
@@ -1064,11 +1070,26 @@ pub async fn refresh_access_token(
     // Get client_id (from config or stored DCR)
     let client_id = get_client_id(server_config, secrets, user_id).await?;
 
-    // Get the refresh token
-    let refresh_token = secrets
+    // Get the refresh token (try current name, fall back to legacy name for
+    // users who authenticated before the naming convention was fixed).
+    // Only fall back on NotFound/Expired — propagate real errors (DB, decryption).
+    let refresh_token = match secrets
         .get_decrypted(user_id, &server_config.refresh_token_secret_name())
         .await
-        .map_err(|e| AuthError::RefreshFailed(format!("No refresh token: {}", e)))?;
+    {
+        Ok(token) => token,
+        Err(crate::secrets::SecretError::NotFound(_) | crate::secrets::SecretError::Expired) => {
+            secrets
+                .get_decrypted(user_id, &server_config.legacy_refresh_token_secret_name())
+                .await
+                .map_err(|e| AuthError::RefreshFailed(format!("No refresh token: {}", e)))?
+        }
+        Err(e) => {
+            return Err(AuthError::RefreshFailed(format!(
+                "Failed to read refresh token: {e}"
+            )));
+        }
+    };
 
     // Discover the token endpoint
     let token_url = if let Some(ref oauth) = server_config.oauth {
