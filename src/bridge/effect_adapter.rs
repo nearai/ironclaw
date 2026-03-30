@@ -395,6 +395,19 @@ impl EffectExecutor for EffectBridgeAdapter {
         // interception point; post-execution 401 detection and text-based
         // fallback remain as defense-in-depth.
 
+        {
+            let has_mgr = self.auth_manager.read().await.is_some();
+            let has_reg = self.tools.credential_registry().is_some();
+            // Use warn! so this is visible in E2E test logs (debug may be filtered)
+            if !has_mgr || !has_reg {
+                tracing::warn!(
+                    tool = %lookup_name,
+                    has_auth_manager = has_mgr,
+                    has_credential_registry = has_reg,
+                    "Pre-flight auth gate SKIPPED — missing dependency"
+                );
+            }
+        }
         if let Some(auth_mgr) = self.auth_manager.read().await.as_ref()
             && let Some(registry) = self.tools.credential_registry()
         {
@@ -408,7 +421,7 @@ impl EffectExecutor for EffectBridgeAdapter {
                         credential = %cred.credential_name,
                         tool = %lookup_name,
                         user = %context.user_id,
-                        "Pre-flight auth: credential missing"
+                        "Pre-flight auth: credential missing — blocking tool call"
                     );
                     self.emit_auth_required(&cred.credential_name, action_name)
                         .await;
@@ -419,7 +432,10 @@ impl EffectExecutor for EffectBridgeAdapter {
                         parameters,
                     });
                 }
-                AuthCheckResult::Ready | AuthCheckResult::NoAuthRequired => {}
+                AuthCheckResult::Ready => {
+                    debug!(tool = %lookup_name, "Pre-flight auth: credentials present");
+                }
+                AuthCheckResult::NoAuthRequired => {}
             }
         }
 
@@ -884,5 +900,88 @@ mod tests {
         assert!(!is_v1_auth_tool("http"));
         assert!(!is_v1_auth_tool("tool_search"));
         assert!(!is_v1_auth_tool("tool_list"));
+    }
+
+    // ── Pre-flight auth gate integration test ─────────────────
+
+    #[tokio::test]
+    async fn preflight_gate_blocks_missing_credential() {
+        use crate::secrets::CredentialMapping;
+        use crate::testing::credentials::test_secrets_store;
+        use crate::tools::wasm::SharedCredentialRegistry;
+
+        let secrets = Arc::new(test_secrets_store());
+        let cred_reg = Arc::new(SharedCredentialRegistry::new());
+        cred_reg.add_mappings(vec![CredentialMapping::bearer(
+            "github_token",
+            "api.github.com",
+        )]);
+
+        // Build adapter with credential registry
+        let tools =
+            Arc::new(ToolRegistry::new().with_credentials(Arc::clone(&cred_reg), secrets.clone()));
+        tools.register_builtin_tools();
+
+        use ironclaw_safety::SafetyConfig;
+        let adapter = EffectBridgeAdapter::new(
+            tools,
+            Arc::new(SafetyLayer::new(&SafetyConfig {
+                max_output_length: 10_000,
+                injection_check_enabled: false,
+            })),
+            Arc::new(HookRegistry::default()),
+        );
+
+        // Set auth manager
+        let auth_mgr = Arc::new(AuthManager::new(secrets, None, None));
+        adapter.set_auth_manager(auth_mgr).await;
+
+        // Verify adapter has both dependencies
+        assert!(
+            adapter.auth_manager.read().await.is_some(),
+            "auth_manager should be set"
+        );
+        assert!(
+            adapter.tools.credential_registry().is_some(),
+            "credential_registry should be set"
+        );
+
+        // Call execute_action with http tool params pointing to api.github.com
+        let params = serde_json::json!({
+            "url": "https://api.github.com/repos/nearai/ironclaw/issues",
+            "method": "GET"
+        });
+        let lease = ironclaw_engine::CapabilityLease {
+            id: ironclaw_engine::types::capability::LeaseId::new(),
+            thread_id: ironclaw_engine::ThreadId::new(),
+            capability_name: "tools".into(),
+            granted_actions: vec![],
+            granted_at: chrono::Utc::now(),
+            expires_at: None,
+            max_uses: None,
+            uses_remaining: None,
+            revoked: false,
+        };
+        let ctx = ironclaw_engine::ThreadExecutionContext {
+            thread_id: ironclaw_engine::ThreadId::new(),
+            thread_type: ironclaw_engine::types::thread::ThreadType::Foreground,
+            project_id: ironclaw_engine::ProjectId::new(),
+            user_id: "test_user".to_string(),
+            step_id: ironclaw_engine::StepId::new(),
+        };
+
+        let result = adapter.execute_action("http", params, &lease, &ctx).await;
+
+        // Should return NeedAuthentication, NOT execute the tool
+        match result {
+            Err(EngineError::NeedAuthentication {
+                credential_name, ..
+            }) => {
+                assert_eq!(credential_name, "github_token");
+            }
+            other => {
+                panic!("Expected NeedAuthentication for missing github_token, got: {other:?}");
+            }
+        }
     }
 }

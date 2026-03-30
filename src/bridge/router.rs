@@ -156,6 +156,13 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
     }
 
     // Build centralized auth manager for pre-flight credential checks.
+    let has_secrets = agent.tools().secrets_store().is_some();
+    let has_cred_reg = agent.tools().credential_registry().is_some();
+    debug!(
+        has_secrets_store = has_secrets,
+        has_credential_registry = has_cred_reg,
+        "engine v2: auth manager init check"
+    );
     let auth_manager = if let Some(ss) = agent.tools().secrets_store().cloned() {
         let mgr = Arc::new(AuthManager::new(
             ss,
@@ -163,8 +170,10 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
             agent.deps.extension_manager.clone(),
         ));
         effect_adapter.set_auth_manager(Arc::clone(&mgr)).await;
+        debug!("engine v2: auth manager set on effect adapter");
         Some(mgr)
     } else {
+        debug!("engine v2: no secrets store — auth manager NOT created");
         None
     };
 

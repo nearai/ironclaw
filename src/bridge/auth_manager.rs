@@ -87,9 +87,6 @@ impl AuthManager {
         user_id: &str,
         credential_registry: &SharedCredentialRegistry,
     ) -> AuthCheckResult {
-        // The credential registry covers both the built-in HTTP tool and
-        // WASM extension tools (which register host→secret mappings at
-        // activation time). Extract the target host from params.
         let lookup_name = action_name.replace('_', "-");
         let is_http = action_name == "http"
             || action_name == "http_request"
