@@ -243,8 +243,9 @@ pub async fn routines_toggle_handler(
 
     // Refresh the in-memory event trigger cache so event/system_event
     // routines reflect the new enabled state immediately (issue #1076).
-    // Clone the Arc so the RwLockReadGuard is dropped before the async call.
-    if let Some(engine) = state.routine_engine.read().await.as_ref().cloned() {
+    // Extract into a block so the RwLockReadGuard is dropped before the async call.
+    let engine = { state.routine_engine.read().await.as_ref().cloned() };
+    if let Some(engine) = engine {
         engine.refresh_event_cache().await;
     }
 
@@ -286,8 +287,9 @@ pub async fn routines_delete_handler(
     if deleted {
         // Refresh the in-memory event trigger cache so deleted event/system_event
         // routines stop firing immediately (issue #1076).
-        // Clone the Arc so the RwLockReadGuard is dropped before the async call.
-        if let Some(engine) = state.routine_engine.read().await.as_ref().cloned() {
+        // Extract into a block so the RwLockReadGuard is dropped before the async call.
+        let engine = { state.routine_engine.read().await.as_ref().cloned() };
+        if let Some(engine) = engine {
             engine.refresh_event_cache().await;
         }
 

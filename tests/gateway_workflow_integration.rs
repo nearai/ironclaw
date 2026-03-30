@@ -377,10 +377,15 @@ mod tests {
             .wait_for_turns(&thread_id, 1, Duration::from_secs(10))
             .await;
 
-        let routine = harness
-            .routine_by_name("wf-toggle-system-event")
-            .await
-            .expect("routine should exist");
+        let mut routine = None;
+        for _ in 0..30 {
+            routine = harness.routine_by_name("wf-toggle-system-event").await;
+            if routine.is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let routine = routine.expect("routine should exist after retries");
         let routine_id = routine
             .get("id")
             .and_then(|v| v.as_str())
