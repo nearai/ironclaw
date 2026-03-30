@@ -79,17 +79,16 @@ fn create_job_tool_summary() -> ToolDiscoverySummary {
     ToolDiscoverySummary {
         always_required: vec!["title".into(), "description".into()],
         conditional_requirements: vec![
-            "mode='claude_code' uses Claude Code CLI for complex software engineering tasks.".into(),
             "credentials requires each secret to already exist in the secrets store (via 'ironclaw tool auth' or web UI).".into(),
-            "project_dir must be an existing directory under ~/.ironclaw/projects/. Auto-created if omitted.".into(),
         ],
         notes: vec![
             "wait defaults to true (blocks up to 10 minutes for completion).".into(),
             "Set wait=false to start the job and return immediately; poll with job_status or job_events.".into(),
-            "mode defaults to 'worker' (IronClaw sub-agent with shell, file, and patch tools).".into(),
+            "mode defaults to 'worker' (IronClaw sub-agent with shell, file, and patch tools). Use 'claude_code' for complex software engineering tasks.".into(),
+            "project_dir must be under ~/.ironclaw/projects/. Auto-created if omitted.".into(),
             "Credential env var names must be uppercase: [A-Z_][A-Z0-9_]* (e.g. GITHUB_TOKEN). Max 20 grants per job.".into(),
             "Certain env var names are denied (PATH, HOME, LD_PRELOAD, etc.) to prevent process hijacking.".into(),
-            "Rate limit: 5 job creations per 30-second window.".into(),
+            "Rate limit: 5 per minute, 30 per hour.".into(),
         ],
         examples: vec![
             serde_json::json!({"title": "Build landing page", "description": "Create a responsive landing page using React and Tailwind CSS"}),
@@ -2306,16 +2305,19 @@ mod tests {
             summary
                 .conditional_requirements
                 .iter()
-                .any(|r| r.contains("claude_code"))
+                .any(|r| r.contains("credentials")),
+            "should explain credential requirement",
         );
         assert!(
-            summary
-                .conditional_requirements
-                .iter()
-                .any(|r| r.contains("credentials"))
+            summary.notes.iter().any(|n| n.contains("claude_code")),
+            "should explain claude_code mode",
         );
         assert!(summary.notes.iter().any(|n| n.contains("wait")));
         assert!(summary.notes.iter().any(|n| n.contains("uppercase")));
+        assert!(
+            summary.notes.iter().any(|n| n.contains("5 per minute")),
+            "should state correct rate limit",
+        );
         assert_eq!(summary.examples.len(), 3);
     }
 }

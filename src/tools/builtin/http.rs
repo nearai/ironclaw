@@ -64,7 +64,7 @@ fn http_tool_summary() -> ToolDiscoverySummary {
             "Response body capped at 5 MB (text) or 50 MB (save_to file downloads).".into(),
             "Credentials in headers (Authorization, X-API-Key, etc.) or URL query params trigger approval.".into(),
             "GET with no credentials or custom headers does not require approval.".into(),
-            "Redirects are followed only for simple GETs (max 3 hops); non-GET redirects are blocked.".into(),
+            "Redirects are followed only for GETs with no custom headers and no body (max 3 hops); non-GET redirects are blocked.".into(),
         ],
         examples: vec![
             serde_json::json!({"method": "GET", "url": "https://api.example.com/data"}),

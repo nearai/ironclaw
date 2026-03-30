@@ -9,13 +9,14 @@ use crate::tools::tool::{Tool, ToolDiscoverySummary, ToolError, ToolOutput};
 
 fn time_tool_summary() -> ToolDiscoverySummary {
     ToolDiscoverySummary {
-        always_required: vec!["operation".into()],
+        always_required: vec![],
         conditional_requirements: vec![
             "parse/convert/format/diff require 'input' (or legacy alias 'timestamp').".into(),
             "convert requires 'to_timezone'.".into(),
             "diff requires 'timestamp2'.".into(),
         ],
         notes: vec![
+            "'operation' defaults to 'now' if omitted. Valid values: now, parse, convert, format, diff.".into(),
             "'input' and 'timestamp' are aliases; prefer 'input'.".into(),
             "Timezones use IANA names (e.g. 'America/New_York', 'Europe/London').".into(),
             "Naive timestamps (no UTC offset) require 'timezone' or 'from_timezone' to interpret.".into(),
@@ -622,18 +623,25 @@ mod tests {
     #[test]
     fn time_discovery_summary_explains_operations_and_requirements() {
         let summary = time_tool_summary();
-        assert_eq!(summary.always_required, vec!["operation".to_string()]);
         assert!(
-            summary
-                .conditional_requirements
-                .iter()
-                .any(|r| r.contains("to_timezone"))
+            summary.always_required.is_empty(),
+            "operation defaults to 'now', so nothing is always required",
+        );
+        assert!(
+            summary.notes.iter().any(|n| n.contains("defaults to 'now'")),
+            "should explain operation defaults to now",
         );
         assert!(
             summary
                 .conditional_requirements
                 .iter()
-                .any(|r| r.contains("timestamp2"))
+                .any(|r| r.contains("to_timezone")),
+        );
+        assert!(
+            summary
+                .conditional_requirements
+                .iter()
+                .any(|r| r.contains("timestamp2")),
         );
         assert!(summary.notes.iter().any(|n| n.contains("IANA")));
         assert_eq!(summary.examples.len(), 5);
