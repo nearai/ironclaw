@@ -339,6 +339,7 @@ async def test_hosted_mcp_oauth_refresh_uses_proxy(hosted_oauth_refresh_server):
     assert last_refresh["form"]["client_id"] == "mock-mcp-client-id"
     assert last_refresh["form"]["client_secret"] == "mock-mcp-client-secret"
     assert last_refresh["form"]["token_url"].endswith("/oauth/token")
+    assert last_refresh["form"]["resource"] == mcp_url
 
     refreshed_user_id, expires_after, updated_after = _find_secret_row(
         db_path, "mcp_mock-mcp_access_token"

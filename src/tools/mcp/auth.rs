@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 use std::net::IpAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -38,21 +38,36 @@ fn oauth_http_client() -> Result<&'static reqwest::Client, AuthError> {
         .map_err(Clone::clone)
 }
 
-fn refresh_lock_key(server_name: &str, user_id: &str) -> String {
-    format!("{user_id}:{server_name}")
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct RefreshLockKey {
+    server_name: String,
+    user_id: String,
+}
+
+fn refresh_lock_key(server_name: &str, user_id: &str) -> RefreshLockKey {
+    RefreshLockKey {
+        server_name: server_name.to_string(),
+        user_id: user_id.to_string(),
+    }
 }
 
 async fn refresh_lock(server_name: &str, user_id: &str) -> Arc<tokio::sync::Mutex<()>> {
     static LOCKS: std::sync::OnceLock<
-        tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+        tokio::sync::Mutex<HashMap<RefreshLockKey, Weak<tokio::sync::Mutex<()>>>>,
     > = std::sync::OnceLock::new();
 
     let registry = LOCKS.get_or_init(|| tokio::sync::Mutex::new(HashMap::new()));
     let mut locks = registry.lock().await;
-    locks
-        .entry(refresh_lock_key(server_name, user_id))
-        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-        .clone()
+    locks.retain(|_, lock| lock.strong_count() > 0);
+
+    let key = refresh_lock_key(server_name, user_id);
+    if let Some(lock) = locks.get(&key).and_then(Weak::upgrade) {
+        return lock;
+    }
+
+    let lock = Arc::new(tokio::sync::Mutex::new(()));
+    locks.insert(key, Arc::downgrade(&lock));
+    lock
 }
 
 /// Log a debug message when a discovery/auth response is a redirect.
@@ -1229,6 +1244,7 @@ pub async fn refresh_access_token(
     validate_url_safe(&token_url).await?;
 
     let token = if let Some(proxy_url) = oauth_defaults::exchange_proxy_url() {
+        let resource = canonical_resource_uri(&server_config.url);
         let gateway_token = oauth_defaults::oauth_proxy_auth_token().ok_or_else(|| {
             AuthError::RefreshFailed(
                 "OAuth refresh proxy is configured but no proxy auth token is available"
@@ -1243,6 +1259,7 @@ pub async fn refresh_access_token(
                 client_id: &credentials.client_id,
                 client_secret: credentials.client_secret.as_deref(),
                 refresh_token: refresh_token.expose(),
+                resource: Some(&resource),
                 provider: Some(&format!("mcp:{}", server_config.name)),
             })
             .await
@@ -1250,10 +1267,12 @@ pub async fn refresh_access_token(
 
         AccessToken {
             access_token: token_response.access_token,
-            token_type: "Bearer".to_string(),
+            token_type: token_response
+                .token_type
+                .unwrap_or_else(|| "Bearer".to_string()),
             expires_in: token_response.expires_in,
             refresh_token: token_response.refresh_token,
-            scope: None,
+            scope: token_response.scope,
         }
     } else {
         let client = oauth_http_client()?;
@@ -2192,6 +2211,10 @@ mod tests {
             requests[0].form.get("client_secret").map(String::as_str),
             Some("stored-client-secret")
         );
+        assert_eq!(
+            requests[0].form.get("resource").map(String::as_str),
+            Some("https://mcp.notion.com/mcp")
+        );
     }
 
     #[tokio::test]
@@ -2237,6 +2260,17 @@ mod tests {
 
         assert!(Arc::ptr_eq(&first, &second));
         assert!(!Arc::ptr_eq(&first, &other_user));
+    }
+
+    #[tokio::test]
+    async fn test_refresh_lock_recreates_dropped_entry() {
+        let first = refresh_lock("notion", "user-a").await;
+        let first_ptr = Arc::as_ptr(&first);
+        drop(first);
+
+        let second = refresh_lock("notion", "user-a").await;
+
+        assert_ne!(Arc::as_ptr(&second), first_ptr);
     }
 
     struct EnvVarGuard {

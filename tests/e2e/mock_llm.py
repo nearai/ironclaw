@@ -422,6 +422,8 @@ async def oauth_refresh(request: web.Request) -> web.Response:
             return web.json_response({"error": "missing_mcp_client_secret"}, status=400)
         if not data.get("token_url", "").endswith("/oauth/token"):
             return web.json_response({"error": "invalid_mcp_token_url"}, status=400)
+        if data.get("resource") != f"http://127.0.0.1:{request.app['port']}/mcp":
+            return web.json_response({"error": "missing_mcp_resource"}, status=400)
     else:
         if data.get("client_id") != "hosted-google-client-id":
             return web.json_response({"error": "invalid_client_id"}, status=400)
@@ -430,8 +432,10 @@ async def oauth_refresh(request: web.Request) -> web.Response:
 
     return web.json_response({
         "access_token": "mock-refreshed-access-token",
+        "token_type": "Bearer",
         "refresh_token": "mock-rotated-refresh-token",
         "expires_in": 3600,
+        "scope": "mock-scope",
     })
 
 

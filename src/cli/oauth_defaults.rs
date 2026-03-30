@@ -102,6 +102,8 @@ pub struct OAuthTokenResponse {
     pub access_token: String,
     pub refresh_token: Option<String>,
     pub expires_in: Option<u64>,
+    pub token_type: Option<String>,
+    pub scope: Option<String>,
 }
 
 /// Result of building an OAuth 2.0 authorization URL.
@@ -294,6 +296,14 @@ pub async fn exchange_oauth_code_with_params(
         access_token,
         refresh_token,
         expires_in,
+        token_type: token_data
+            .get("token_type")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        scope: token_data
+            .get("scope")
+            .and_then(|v| v.as_str())
+            .map(String::from),
     })
 }
 
@@ -775,6 +785,7 @@ pub struct ProxyRefreshTokenRequest<'a> {
     pub client_id: &'a str,
     pub client_secret: Option<&'a str>,
     pub refresh_token: &'a str,
+    pub resource: Option<&'a str>,
     pub provider: Option<&'a str>,
 }
 
@@ -807,6 +818,14 @@ fn oauth_token_response_from_json(
         access_token,
         refresh_token,
         expires_in,
+        token_type: token_data
+            .get("token_type")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        scope: token_data
+            .get("scope")
+            .and_then(|v| v.as_str())
+            .map(String::from),
     })
 }
 
@@ -906,6 +925,9 @@ pub async fn refresh_token_via_proxy(
     if let Some(secret) = request.client_secret {
         params.push(("client_secret", secret.to_string()));
     }
+    if let Some(resource) = request.resource {
+        params.push(("resource", resource.to_string()));
+    }
     if let Some(provider) = request.provider {
         params.push(("provider", provider.to_string()));
     }
@@ -994,8 +1016,10 @@ mod tests {
                 });
                 Json(json!({
                     "access_token": "proxy-access-token",
+                    "token_type": "Bearer",
                     "refresh_token": "proxy-refresh-token",
-                    "expires_in": 7200
+                    "expires_in": 7200,
+                    "scope": "scope-a scope-b"
                 }))
             }
 
@@ -1171,6 +1195,8 @@ mod tests {
             Some("proxy-refresh-token")
         );
         assert_eq!(response.expires_in, Some(7200));
+        assert_eq!(response.token_type.as_deref(), Some("Bearer"));
+        assert_eq!(response.scope.as_deref(), Some("scope-a scope-b"));
 
         let requests = server.requests().await;
         assert_eq!(requests.len(), 1);
@@ -1228,6 +1254,7 @@ mod tests {
             client_id: TEST_OAUTH_CLIENT_ID,
             client_secret: Some(TEST_OAUTH_CLIENT_SECRET),
             refresh_token: "refresh-token-123",
+            resource: Some("https://mcp.notion.com"),
             provider: Some("google"),
         })
         .await
@@ -1239,6 +1266,8 @@ mod tests {
             Some("proxy-refresh-token")
         );
         assert_eq!(response.expires_in, Some(7200));
+        assert_eq!(response.token_type.as_deref(), Some("Bearer"));
+        assert_eq!(response.scope.as_deref(), Some("scope-a scope-b"));
 
         let requests = server.requests().await;
         assert_eq!(requests.len(), 1);
@@ -1265,6 +1294,10 @@ mod tests {
         assert_eq!(
             requests[0].form.get("provider").map(String::as_str),
             Some("google")
+        );
+        assert_eq!(
+            requests[0].form.get("resource").map(String::as_str),
+            Some("https://mcp.notion.com")
         );
 
         server.shutdown().await;
@@ -1309,6 +1342,7 @@ mod tests {
             client_id: TEST_OAUTH_CLIENT_ID,
             client_secret: Some(TEST_OAUTH_CLIENT_SECRET),
             refresh_token: "refresh-token-123",
+            resource: Some("https://mcp.notion.com"),
             provider: Some("google"),
         })
         .await
