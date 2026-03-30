@@ -11,9 +11,106 @@ mod tests {
     use std::time::Duration;
 
     use ironclaw::agent::routine::{RoutineAction, Trigger};
+    use ironclaw::context::{JobContext, JobState};
+    use uuid::Uuid;
 
-    use crate::support::test_rig::TestRigBuilder;
-    use crate::support::trace_llm::{LlmTrace, TraceResponse, TraceStep, TraceToolCall, TraceTurn};
+    use crate::support::test_rig::{TestRig, TestRigBuilder};
+    use crate::support::trace_llm::{
+        LlmTrace, RequestHint, TraceResponse, TraceStep, TraceToolCall, TraceTurn,
+    };
+
+    fn text_step(content: &str) -> TraceStep {
+        TraceStep {
+            request_hint: None,
+            response: TraceResponse::Text {
+                content: content.to_string(),
+                input_tokens: 10,
+                output_tokens: 5,
+            },
+            expected_tool_results: Vec::new(),
+        }
+    }
+
+    fn hinted_text_step(content: &str, last_user_message_contains: &str) -> TraceStep {
+        TraceStep {
+            request_hint: Some(RequestHint {
+                last_user_message_contains: Some(last_user_message_contains.to_string()),
+                min_message_count: None,
+            }),
+            response: TraceResponse::Text {
+                content: content.to_string(),
+                input_tokens: 10,
+                output_tokens: 5,
+            },
+            expected_tool_results: Vec::new(),
+        }
+    }
+
+    fn extract_job_id(response: &str) -> Option<Uuid> {
+        response
+            .split(|c: char| !(c.is_ascii_hexdigit() || c == '-'))
+            .find_map(|token| Uuid::parse_str(token).ok())
+    }
+
+    async fn resolve_created_job_id(
+        rig: &TestRig,
+        responses: &[ironclaw::channels::OutgoingResponse],
+        expected_title: &str,
+    ) -> Uuid {
+        if let Some(job_id) = responses
+            .iter()
+            .find_map(|response| extract_job_id(&response.content))
+        {
+            return job_id;
+        }
+
+        rig.database()
+            .list_agent_jobs_for_user("test-user")
+            .await
+            .expect("list_agent_jobs_for_user should succeed")
+            .into_iter()
+            .find(|job| job.title == expected_title)
+            .map(|job| job.id)
+            .unwrap_or_else(|| {
+                panic!(
+                    "failed to resolve job id for title {expected_title:?}; responses were: {:?}",
+                    responses
+                        .iter()
+                        .map(|response| &response.content)
+                        .collect::<Vec<_>>()
+                )
+            })
+    }
+
+    async fn wait_for_job_state(rig: &TestRig, job_id: Uuid, expected: JobState) -> JobContext {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+
+        loop {
+            if let Some(job) = rig
+                .database()
+                .get_job(job_id)
+                .await
+                .expect("get_job should succeed")
+                && job.state == expected
+            {
+                return job;
+            }
+
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "job {job_id} did not reach state {expected:?} before timeout"
+            );
+
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    fn requests_contain(requests: &[Vec<ironclaw::llm::ChatMessage>], needle: &str) -> bool {
+        requests
+            .iter()
+            .flatten()
+            .any(|message| message.content.contains(needle))
+    }
 
     // -----------------------------------------------------------------------
     // Test 1: time_parse_and_diff
@@ -680,6 +777,159 @@ mod tests {
             status_result.1.contains("Test analysis job"),
             "job_status should return the job title: {:?}",
             status_result.1
+        );
+
+        rig.shutdown();
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 8a: command_job_fails_fast_on_repeated_empty_tool_completions
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn command_job_fails_fast_on_repeated_empty_tool_completions() {
+        let trace = LlmTrace::single_turn(
+            "test-empty-tool-recovery-fail",
+            "(worker only)",
+            vec![
+                text_step(""),
+                text_step(""),
+                hinted_text_step("", "valid arguments"),
+                text_step(""),
+                hinted_text_step("", "Do not call any more tools in the next reply."),
+            ],
+        );
+
+        let rig = TestRigBuilder::new()
+            .with_trace(trace)
+            .with_auto_approve_tools(true)
+            .build()
+            .await;
+
+        rig.send_message("/job reproduce empty tool completion loop")
+            .await;
+        let create_responses = rig.wait_for_responses(1, Duration::from_secs(15)).await;
+        let job_id = resolve_created_job_id(
+            &rig,
+            &create_responses,
+            "reproduce empty tool completion loop",
+        )
+        .await;
+
+        let job = wait_for_job_state(&rig, job_id, JobState::Failed).await;
+        assert_eq!(job.title, "reproduce empty tool completion loop");
+
+        let failure_reason = rig
+            .database()
+            .get_agent_job_failure_reason(job_id)
+            .await
+            .expect("get_agent_job_failure_reason should succeed")
+            .expect("failed job should persist a failure reason");
+        assert!(
+            failure_reason
+                .contains("repeatedly returned empty or malformed tool-completion responses"),
+            "unexpected failure reason: {failure_reason}"
+        );
+        assert!(
+            !failure_reason.contains("max iterations"),
+            "failure should not surface as iteration exhaustion: {failure_reason}"
+        );
+
+        assert_eq!(
+            rig.llm_call_count(),
+            5,
+            "worker should stop after the bounded recovery flow"
+        );
+        assert!(
+            !rig.collect_metrics().await.hit_iteration_limit,
+            "bounded recovery should stop before iteration-limit reporting"
+        );
+
+        let requests = rig.captured_llm_requests();
+        assert!(
+            requests_contain(&requests, "call it now with valid arguments"),
+            "expected targeted tool-mode recovery nudge in worker requests"
+        );
+        assert!(
+            requests_contain(&requests, "Do not call any more tools in the next reply."),
+            "expected forced text-only recovery prompt in worker requests"
+        );
+
+        rig.clear().await;
+        rig.send_message(&format!("/status {}", job_id)).await;
+        let status_responses = rig.wait_for_responses(1, Duration::from_secs(5)).await;
+        assert!(
+            status_responses[0].content.contains("Status: Failed"),
+            "unexpected status response: {:?}",
+            status_responses[0].content
+        );
+
+        rig.shutdown();
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 8b: command_job_text_recovery_can_complete
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn command_job_text_recovery_can_complete() {
+        let trace = LlmTrace::single_turn(
+            "test-empty-tool-recovery-success",
+            "(worker only)",
+            vec![
+                text_step(""),
+                text_step(""),
+                hinted_text_step("", "valid arguments"),
+                text_step(""),
+                hinted_text_step(
+                    "The job is complete. I finished the requested work and there is nothing left to do.",
+                    "Do not call any more tools in the next reply.",
+                ),
+            ],
+        );
+
+        let rig = TestRigBuilder::new()
+            .with_trace(trace)
+            .with_auto_approve_tools(true)
+            .build()
+            .await;
+
+        rig.send_message("/job recover after malformed tool completions")
+            .await;
+        let create_responses = rig.wait_for_responses(1, Duration::from_secs(15)).await;
+        let job_id = resolve_created_job_id(
+            &rig,
+            &create_responses,
+            "recover after empty tool completions",
+        )
+        .await;
+
+        let job = wait_for_job_state(&rig, job_id, JobState::Completed).await;
+        assert_eq!(job.title, "recover after malformed tool completions");
+
+        assert_eq!(
+            rig.llm_call_count(),
+            5,
+            "worker should complete within the bounded recovery flow"
+        );
+
+        let requests = rig.captured_llm_requests();
+        assert!(
+            requests_contain(&requests, "call it now with valid arguments"),
+            "expected targeted tool-mode recovery nudge in worker requests"
+        );
+        assert!(
+            requests_contain(&requests, "Do not call any more tools in the next reply."),
+            "expected forced text-only recovery prompt in worker requests"
+        );
+
+        rig.clear().await;
+        rig.send_message(&format!("/status {}", job_id)).await;
+        let status_responses = rig.wait_for_responses(1, Duration::from_secs(5)).await;
+        assert!(
+            status_responses[0].content.contains("Status: Completed"),
+            "unexpected status response: {:?}",
+            status_responses[0].content
         );
 
         rig.shutdown();

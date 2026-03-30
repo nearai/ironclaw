@@ -127,7 +127,8 @@ async fn list_settings(
         }
 
         let display_value = if value.len() > 60 {
-            format!("{}...", &value[..57])
+            let end = crate::util::floor_char_boundary(&value, 57);
+            format!("{}...", &value[..end])
         } else {
             value
         };
