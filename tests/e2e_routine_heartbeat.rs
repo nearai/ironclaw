@@ -360,6 +360,7 @@ mod tests {
             registry,
             safety,
             ironclaw::agent::routine_engine::SandboxReadiness::DisabledByConfig,
+            None,
         ))
     }
 
@@ -491,6 +492,7 @@ mod tests {
             tools,
             safety,
             ironclaw::agent::routine_engine::SandboxReadiness::DisabledByConfig,
+            None,
         ));
 
         // Insert a cron routine with next_fire_at in the past.
@@ -570,6 +572,7 @@ mod tests {
             tools,
             safety,
             ironclaw::agent::routine_engine::SandboxReadiness::DisabledByConfig,
+            None,
         ));
 
         // Insert an event routine matching "deploy.*production".
@@ -657,6 +660,7 @@ mod tests {
             tools,
             safety,
             ironclaw::agent::routine_engine::SandboxReadiness::DisabledByConfig,
+            None,
         ));
 
         let routine = make_routine(
@@ -766,6 +770,7 @@ mod tests {
             tools,
             safety,
             ironclaw::agent::routine_engine::SandboxReadiness::DisabledByConfig,
+            None,
         ));
 
         let mut filters = std::collections::HashMap::new();
@@ -909,6 +914,7 @@ mod tests {
             tools,
             safety,
             ironclaw::agent::routine_engine::SandboxReadiness::DisabledByConfig,
+            None,
         ));
 
         // Insert an event routine with 1-hour cooldown.
@@ -1092,6 +1098,7 @@ mod tests {
             tools,
             safety,
             ironclaw::agent::routine_engine::SandboxReadiness::DisabledByConfig,
+            None,
         ));
 
         (engine, db, dir)
@@ -1214,6 +1221,7 @@ mod tests {
             tools,
             safety,
             ironclaw::agent::routine_engine::SandboxReadiness::DisabledByConfig,
+            None,
         ));
 
         // Create a full_job routine with max_concurrent = 1
@@ -1322,6 +1330,7 @@ mod tests {
             tools,
             safety,
             ironclaw::agent::routine_engine::SandboxReadiness::DisabledByConfig,
+            None,
         ));
 
         // Insert a due cron routine

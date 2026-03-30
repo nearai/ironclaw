@@ -436,6 +436,12 @@ pub struct NotifyConfig {
     pub on_failure: bool,
     /// Notify when routine runs with no findings.
     pub on_success: bool,
+    /// Trigger agent review when routine completes successfully.
+    pub agent_review_on_success: bool,
+    /// Trigger agent review when routine produces actionable findings.
+    pub agent_review_on_attention: bool,
+    /// Trigger agent review when routine errors.
+    pub agent_review_on_failure: bool,
 }
 
 impl Default for NotifyConfig {
@@ -446,6 +452,9 @@ impl Default for NotifyConfig {
             on_attention: true,
             on_failure: true,
             on_success: false,
+            agent_review_on_success: false,
+            agent_review_on_attention: false,
+            agent_review_on_failure: false,
         }
     }
 }

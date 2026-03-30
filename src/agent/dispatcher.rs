@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 use crate::agent::Agent;
 use crate::agent::session::{PendingApproval, Session, ThreadState};
-use crate::channels::{IncomingMessage, StatusUpdate};
+use crate::channels::{IncomingMessage, MessageSource, StatusUpdate};
 use crate::context::JobContext;
 use crate::error::Error;
 use async_trait::async_trait;
@@ -173,6 +173,7 @@ impl Agent {
             session: session.clone(),
             thread_id,
             message,
+            message_source: message.source,
             job_ctx,
             active_skills,
             cached_prompt,
@@ -251,6 +252,7 @@ struct ChatDelegate<'a> {
     session: Arc<Mutex<Session>>,
     thread_id: Uuid,
     message: &'a IncomingMessage,
+    message_source: MessageSource,
     job_ctx: JobContext,
     active_skills: Vec<crate::skills::LoadedSkill>,
     cached_prompt: String,
@@ -305,6 +307,18 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                 "Tool attenuation applied"
             );
             result.tools
+        } else {
+            tool_defs
+        };
+
+        // Filter out routine management tools during agent review turns
+        // to prevent recursive loops (routine review triggering more routines).
+        let tool_defs = if self.message_source == MessageSource::RoutineReview {
+            use crate::tools::is_autonomous_tool_denylisted;
+            tool_defs
+                .into_iter()
+                .filter(|t| !is_autonomous_tool_denylisted(&t.name))
+                .collect()
         } else {
             tool_defs
         };
@@ -678,6 +692,24 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                 };
 
                 if needs_approval {
+                    // Routine review turns have no interactive user to
+                    // approve tools — auto-deny to prevent the thread
+                    // from wedging in AwaitingApproval state.
+                    if self.message_source == MessageSource::RoutineReview {
+                        tracing::info!(
+                            tool = %tc.name,
+                            "Auto-denying approval-requiring tool in routine review turn"
+                        );
+                        let reject_msg = format!(
+                            "Tool '{}' requires approval and cannot run during \
+                             routine review (no interactive user to approve). \
+                             Consider using tools that don't require approval.",
+                            tc.name
+                        );
+                        preflight.push((tc, PreflightOutcome::Rejected(reject_msg)));
+                        continue;
+                    }
+
                     // In non-DM relay channels, auto-deny approval-
                     // requiring tools to prevent stuck AwaitingApproval
                     // state and prompt injection from other users.
