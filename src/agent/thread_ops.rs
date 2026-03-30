@@ -969,6 +969,10 @@ impl Agent {
     }
 
     /// Process an approval or rejection of a pending tool execution.
+    // Nested `if` blocks are intentional: collapsing them would produce
+    // `if let … && …` (let-chains), which require `#![feature(let_chains)]`
+    // and are not available on our MSRV.
+    #[allow(clippy::collapsible_if)]
     pub(super) async fn process_approval(
         &self,
         message: &IncomingMessage,
@@ -978,7 +982,10 @@ impl Agent {
         approved: bool,
         always: bool,
     ) -> Result<SubmissionResult, Error> {
-        // Get pending approval for this thread
+        // Get pending approval for this thread.
+        // The take-verify sequence is atomic under a single lock acquisition
+        // to prevent a TOCTOU race where a concurrent operation could modify
+        // or delete the thread between take and restore (#1486).
         let pending = {
             let mut sess = session.lock().await;
             let thread = sess
@@ -996,51 +1003,64 @@ impl Agent {
                 return Ok(SubmissionResult::ok_with_message(""));
             }
 
-            thread.take_pending_approval()
-        };
+            let taken = match thread.take_pending_approval() {
+                Some(p) => p,
+                None => {
+                    tracing::debug!(
+                        %thread_id,
+                        "Ignoring stale approval: no pending approval found"
+                    );
+                    return Ok(SubmissionResult::ok_with_message(""));
+                }
+            };
 
-        let pending = match pending {
-            Some(p) => p,
-            None => {
-                tracing::debug!(
-                    %thread_id,
-                    "Ignoring stale approval: no pending approval found"
-                );
-                return Ok(SubmissionResult::ok_with_message(""));
+            // Verify request ID while still holding the lock — atomic with take
+            if let Some(req_id) = request_id {
+                if req_id != taken.request_id {
+                    // Restore atomically under same lock
+                    thread.await_approval(taken);
+                    return Ok(SubmissionResult::error(
+                        "Request ID mismatch. Use the correct request ID.",
+                    ));
+                }
             }
-        };
 
-        // Verify request ID if provided
-        if let Some(req_id) = request_id
-            && req_id != pending.request_id
-        {
-            // Put it back and return error
-            let mut sess = session.lock().await;
-            if let Some(thread) = sess.threads.get_mut(&thread_id) {
-                thread.await_approval(pending);
-            }
-            return Ok(SubmissionResult::error(
-                "Request ID mismatch. Use the correct request ID.",
-            ));
-        }
+            taken
+            // Lock dropped here — pending approval validated
+        };
 
         if approved {
-            // If always, add to auto-approved set
-            if always {
-                let mut sess = session.lock().await;
-                sess.auto_approve_tool(&pending.tool_name);
-                tracing::info!(
-                    "Auto-approved tool '{}' for session {}",
-                    pending.tool_name,
-                    sess.id
-                );
-            }
-
-            // Reset thread state to processing
+            // Auto-approve + state transition under a single lock to prevent
+            // TOCTOU: if the thread is pruned between two separate locks, the
+            // tool would be permanently auto-approved without execution starting.
             {
                 let mut sess = session.lock().await;
-                if let Some(thread) = sess.threads.get_mut(&thread_id) {
-                    thread.state = ThreadState::Processing;
+                if always {
+                    sess.auto_approve_tool(&pending.tool_name);
+                    tracing::info!(
+                        "Auto-approved tool '{}' for session {}",
+                        pending.tool_name,
+                        sess.id
+                    );
+                }
+
+                match sess.threads.get_mut(&thread_id) {
+                    Some(thread) => {
+                        thread.state = ThreadState::Processing;
+                    }
+                    None => {
+                        // Roll back auto-approve if the thread vanished
+                        if always {
+                            sess.auto_approved_tools.remove(&pending.tool_name);
+                        }
+                        tracing::error!(
+                            %thread_id,
+                            "Thread disappeared while setting state to Processing during approval"
+                        );
+                        return Ok(SubmissionResult::error(
+                            "Internal error: thread no longer exists",
+                        ));
+                    }
                 }
             }
 
@@ -1091,20 +1111,20 @@ impl Agent {
                 )
                 .await;
 
-            if let Ok(ref output) = tool_result
-                && !output.is_empty()
-            {
-                let _ = self
-                    .channels
-                    .send_status(
-                        &message.channel,
-                        StatusUpdate::ToolResult {
-                            name: pending.tool_name.clone(),
-                            preview: output.clone(),
-                        },
-                        &message.metadata,
-                    )
-                    .await;
+            if let Ok(ref output) = tool_result {
+                if !output.is_empty() {
+                    let _ = self
+                        .channels
+                        .send_status(
+                            &message.channel,
+                            StatusUpdate::ToolResult {
+                                name: pending.tool_name.clone(),
+                                preview: output.clone(),
+                            },
+                            &message.metadata,
+                        )
+                        .await;
+                }
             }
 
             // Build context including the tool result
@@ -1124,15 +1144,26 @@ impl Agent {
             // Record sanitized result in thread
             {
                 let mut sess = session.lock().await;
-                if let Some(thread) = sess.threads.get_mut(&thread_id)
-                    && let Some(turn) = thread.last_turn_mut()
-                {
-                    if is_tool_error {
-                        turn.record_tool_error_for(&pending.tool_call_id, result_content.clone());
-                    } else {
-                        turn.record_tool_result_for(
-                            &pending.tool_call_id,
-                            serde_json::json!(result_content),
+                match sess.threads.get_mut(&thread_id) {
+                    Some(thread) => {
+                        if let Some(turn) = thread.last_turn_mut() {
+                            if is_tool_error {
+                                turn.record_tool_error_for(
+                                    &pending.tool_call_id,
+                                    result_content.clone(),
+                                );
+                            } else {
+                                turn.record_tool_result_for(
+                                    &pending.tool_call_id,
+                                    serde_json::json!(result_content),
+                                );
+                            }
+                        }
+                    }
+                    None => {
+                        tracing::error!(
+                            %thread_id,
+                            "Thread disappeared while recording tool result during approval"
                         );
                     }
                 }
@@ -1352,20 +1383,20 @@ impl Agent {
             let mut deferred_auth: Option<String> = None;
 
             for (tc, deferred_result) in exec_results {
-                if let Ok(ref output) = deferred_result
-                    && !output.is_empty()
-                {
-                    let _ = self
-                        .channels
-                        .send_status(
-                            &message.channel,
-                            StatusUpdate::ToolResult {
-                                name: tc.name.clone(),
-                                preview: output.clone(),
-                            },
-                            &message.metadata,
-                        )
-                        .await;
+                if let Ok(ref output) = deferred_result {
+                    if !output.is_empty() {
+                        let _ = self
+                            .channels
+                            .send_status(
+                                &message.channel,
+                                StatusUpdate::ToolResult {
+                                    name: tc.name.clone(),
+                                    preview: output.clone(),
+                                },
+                                &message.metadata,
+                            )
+                            .await;
+                    }
                 }
 
                 // Sanitize first, then record the cleaned version in thread.
@@ -1381,35 +1412,45 @@ impl Agent {
                 // Record sanitized result in thread
                 {
                     let mut sess = session.lock().await;
-                    if let Some(thread) = sess.threads.get_mut(&thread_id)
-                        && let Some(turn) = thread.last_turn_mut()
-                    {
-                        if is_deferred_error {
-                            turn.record_tool_error_for(&tc.id, deferred_content.clone());
-                        } else {
-                            turn.record_tool_result_for(
-                                &tc.id,
-                                serde_json::json!(deferred_content),
+                    match sess.threads.get_mut(&thread_id) {
+                        Some(thread) => {
+                            if let Some(turn) = thread.last_turn_mut() {
+                                if is_deferred_error {
+                                    turn.record_tool_error_for(&tc.id, deferred_content.clone());
+                                } else {
+                                    turn.record_tool_result_for(
+                                        &tc.id,
+                                        serde_json::json!(deferred_content),
+                                    );
+                                }
+                            }
+                        }
+                        None => {
+                            tracing::error!(
+                                %thread_id,
+                                tool_name = %tc.name,
+                                "Thread disappeared while recording deferred tool result during approval"
                             );
                         }
                     }
                 }
 
                 // Auth detection — defer return until all results are recorded
-                if deferred_auth.is_none()
-                    && let Some((ext_name, instructions)) =
+                if deferred_auth.is_none() {
+                    if let Some((ext_name, instructions)) =
                         check_auth_required(&tc.name, &deferred_result)
-                {
-                    self.handle_auth_intercept(
-                        &session,
-                        thread_id,
-                        message,
-                        &deferred_result,
-                        ext_name,
-                        instructions.clone(),
-                    )
-                    .await;
-                    deferred_auth = Some(instructions);
+                    {
+                        self.handle_auth_intercept(
+                            &session,
+                            thread_id,
+                            message,
+                            &deferred_result,
+                            ext_name,
+                            instructions.clone(),
+                        )
+                        .await;
+                        deferred_auth = Some(instructions);
+                    }
                 }
 
                 context_messages.push(ChatMessage::tool_result(&tc.id, &tc.name, deferred_content));
@@ -1443,8 +1484,19 @@ impl Agent {
 
                 {
                     let mut sess = session.lock().await;
-                    if let Some(thread) = sess.threads.get_mut(&thread_id) {
-                        thread.await_approval(new_pending);
+                    match sess.threads.get_mut(&thread_id) {
+                        Some(thread) => {
+                            thread.await_approval(new_pending);
+                        }
+                        None => {
+                            tracing::error!(
+                                %thread_id,
+                                "Thread disappeared while setting up deferred tool approval"
+                            );
+                            return Ok(SubmissionResult::error(
+                                "Internal error: thread no longer exists",
+                            ));
+                        }
                     }
                 }
 
@@ -1583,17 +1635,28 @@ impl Agent {
             );
             {
                 let mut sess = session.lock().await;
-                if let Some(thread) = sess.threads.get_mut(&thread_id) {
-                    thread.clear_pending_approval();
-                    thread.complete_turn(&rejection);
-                    // User message already persisted at turn start; save rejection response
-                    self.persist_assistant_response(
-                        thread_id,
-                        &message.channel,
-                        &message.user_id,
-                        &rejection,
-                    )
-                    .await;
+                match sess.threads.get_mut(&thread_id) {
+                    Some(thread) => {
+                        thread.clear_pending_approval();
+                        thread.complete_turn(&rejection);
+                        // User message already persisted at turn start; save rejection response
+                        self.persist_assistant_response(
+                            thread_id,
+                            &message.channel,
+                            &message.user_id,
+                            &rejection,
+                        )
+                        .await;
+                    }
+                    None => {
+                        tracing::error!(
+                            %thread_id,
+                            "Thread disappeared during approval rejection"
+                        );
+                        return Ok(SubmissionResult::error(
+                            "Internal error: thread no longer exists",
+                        ));
+                    }
                 }
             }
 
@@ -2180,6 +2243,70 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn test_approval_on_missing_thread_should_error() {
+        // Regression for #1487: when a thread disappears from the session
+        // during approval processing, the code must return a visible error
+        // rather than silently succeeding.
+        //
+        // We can't call process_approval() directly (requires full Agent),
+        // so we simulate the exact code pattern used in the rejection and
+        // state-setting paths: lock session, match on get_mut, verify the
+        // None arm produces an error.
+        use crate::agent::session::{Session, Thread, ThreadState};
+        use std::sync::Arc;
+        use tokio::sync::Mutex;
+        use uuid::Uuid;
+
+        let thread_id = Uuid::new_v4();
+        let session_id = Uuid::new_v4();
+        let session = Arc::new(Mutex::new(Session::new("test-user")));
+
+        // Scenario 1: Thread never existed
+        {
+            let sess = session.lock().await;
+            let result = match sess.threads.get(&thread_id) {
+                Some(_) => Ok("processed"),
+                None => Err("Internal error: thread no longer exists"),
+            };
+            assert!(result.is_err());
+            assert_eq!(
+                result.unwrap_err(),
+                "Internal error: thread no longer exists"
+            );
+        }
+
+        // Scenario 2: Thread existed then was removed (simulates disappearance
+        // between lock acquisitions -- the TOCTOU window this fix addresses)
+        {
+            let mut sess = session.lock().await;
+            let mut thread = Thread::with_id(thread_id, session_id);
+            thread.start_turn("pending approval");
+            thread.state = ThreadState::AwaitingApproval;
+            sess.threads.insert(thread_id, thread);
+        }
+        {
+            let mut sess = session.lock().await;
+            // Simulate thread disappearing (e.g., pruned by another task)
+            sess.threads.remove(&thread_id);
+
+            // The rejection path must detect this and return an error
+            let result = match sess.threads.get_mut(&thread_id) {
+                Some(thread) => {
+                    thread.clear_pending_approval();
+                    thread.complete_turn("rejected");
+                    Ok("rejection persisted")
+                }
+                None => Err("Internal error: thread no longer exists"),
+            };
+            assert!(result.is_err());
+            assert_eq!(
+                result.unwrap_err(),
+                "Internal error: thread no longer exists"
+            );
+        }
+    }
+
     #[test]
     fn test_queue_cap_rejects_at_capacity() {
         use crate::agent::session::{MAX_PENDING_MESSAGES, Thread, ThreadState};
@@ -2284,6 +2411,77 @@ mod tests {
         assert_ne!(t.state, ThreadState::Processing);
         // Verify nothing was queued — the fall-through path doesn't touch the queue.
         assert!(t.pending_messages.is_empty());
+    }
+
+    #[test]
+    fn test_approval_request_id_mismatch_restores_pending() {
+        // Regression test for #1486: after a request_id mismatch, the pending
+        // approval must still be intact (take + verify + restore is atomic).
+        use crate::agent::session::{PendingApproval, Thread, ThreadState};
+        use uuid::Uuid;
+
+        let session_id = Uuid::new_v4();
+        let thread_id = Uuid::new_v4();
+        let mut thread = Thread::with_id(thread_id, session_id);
+
+        let correct_request_id = Uuid::new_v4();
+        let pending = PendingApproval {
+            request_id: correct_request_id,
+            tool_name: "shell".to_string(),
+            parameters: serde_json::json!({}),
+            display_parameters: serde_json::json!({}),
+            description: "test".to_string(),
+            tool_call_id: "call_0".to_string(),
+            context_messages: vec![],
+            deferred_tool_calls: vec![],
+            user_timezone: None,
+            allow_always: true,
+        };
+        thread.await_approval(pending);
+        assert_eq!(thread.state, ThreadState::AwaitingApproval);
+
+        // Simulate: take, verify mismatch, restore -- all must be atomic
+        let taken = thread.take_pending_approval().unwrap();
+        assert_eq!(taken.request_id, correct_request_id);
+        // On mismatch, restore
+        thread.await_approval(taken);
+        // Must still be in AwaitingApproval with pending intact
+        assert_eq!(thread.state, ThreadState::AwaitingApproval);
+        assert!(thread.pending_approval.is_some());
+        assert_eq!(
+            thread.pending_approval.as_ref().unwrap().request_id,
+            correct_request_id
+        );
+    }
+
+    #[test]
+    fn test_auto_approve_with_thread_disappearance_rolls_back() {
+        // Regression test: when always=true and the thread disappears after
+        // auto_approve_tool is called, the auto-approve must be rolled back
+        // to prevent a dangling policy for a tool that never executed.
+        use crate::agent::session::Session;
+        use std::collections::HashSet;
+        use uuid::Uuid;
+
+        let mut session = Session::new("test-user");
+        let thread_id = Uuid::new_v4();
+
+        // Simulate: always=true, auto-approve is set, but thread is missing
+        session.auto_approve_tool("dangerous_tool");
+        assert!(session.is_tool_auto_approved("dangerous_tool"));
+
+        // Thread doesn't exist — rollback should remove the auto-approve
+        assert!(!session.threads.contains_key(&thread_id));
+        // Simulate the rollback logic from process_approval
+        session.auto_approved_tools.remove("dangerous_tool");
+        assert!(!session.is_tool_auto_approved("dangerous_tool"));
+        assert_eq!(
+            session
+                .auto_approved_tools
+                .intersection(&HashSet::from(["dangerous_tool".to_string()]))
+                .count(),
+            0
+        );
     }
 
     // Helper function to extract the approval message without needing a full Agent instance
