@@ -149,6 +149,7 @@ const TELEGRAM_OWNER_BIND_TIMEOUT_SECS: u64 = 120;
 const TELEGRAM_OWNER_BIND_CHALLENGE_TTL_SECS: u64 = 300;
 const TELEGRAM_GET_UPDATES_TIMEOUT_SECS: u64 = 25;
 const TELEGRAM_OWNER_BIND_CODE_LEN: usize = 8;
+const LLM_EXTENSION_STATE_SUMMARY_CACHE_MAX_USERS: usize = 128;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TelegramBindingData {
@@ -606,16 +607,24 @@ impl ExtensionManager {
         self.llm_extension_state_summaries.write().await.clear();
     }
 
+    async fn cache_llm_extension_state_summary(&self, user_id: &str, summary: Option<String>) {
+        let mut cache = self.llm_extension_state_summaries.write().await;
+        if !cache.contains_key(user_id)
+            && cache.len() >= LLM_EXTENSION_STATE_SUMMARY_CACHE_MAX_USERS
+        {
+            cache.clear();
+        }
+        cache.insert(user_id.to_string(), summary);
+    }
+
     #[cfg(test)]
     pub(crate) async fn set_test_llm_extension_state_summary(
         &self,
         user_id: &str,
         summary: Option<String>,
     ) {
-        self.llm_extension_state_summaries
-            .write()
-            .await
-            .insert(user_id.to_string(), summary);
+        self.cache_llm_extension_state_summary(user_id, summary)
+            .await;
     }
 
     #[cfg(test)]
@@ -1707,15 +1716,13 @@ impl ExtensionManager {
             None
         } else {
             Some(
-                serde_json::to_string_pretty(&serde_json::Value::Object(sections))
+                serde_json::to_string(&serde_json::Value::Object(sections))
                     .map_err(|err| ExtensionError::Other(err.to_string()))?,
             )
         };
 
-        self.llm_extension_state_summaries
-            .write()
-            .await
-            .insert(user_id.to_string(), summary.clone());
+        self.cache_llm_extension_state_summary(user_id, summary.clone())
+            .await;
 
         Ok(summary)
     }
@@ -5966,6 +5973,7 @@ impl ExtensionManager {
         if kind == ExtensionKind::WasmTool {
             match self.activate_wasm_tool(name, user_id).await {
                 Ok(result) => {
+                    self.invalidate_llm_extension_state_summary(user_id).await;
                     // Delete existing OAuth token so auth() starts a fresh flow.
                     // Done AFTER activation succeeds to avoid losing tokens on failure.
                     // This covers Reconfigure: user wants to re-auth (switch account, update creds).
@@ -6047,6 +6055,7 @@ impl ExtensionManager {
 
         match activate_result {
             Ok(result) => {
+                self.invalidate_llm_extension_state_summary(user_id).await;
                 self.activation_errors.write().await.remove(name);
                 self.broadcast_extension_status(name, "active", None).await;
                 if name == TELEGRAM_CHANNEL_NAME {
@@ -7648,6 +7657,10 @@ mod tests {
             .await
             .map_err(|err| format!("summary: {err}"))?
             .ok_or_else(|| "expected extension summary".to_string())?;
+        require(
+            !summary.contains('\n'),
+            "summary should use compact JSON formatting",
+        )?;
 
         let parsed: serde_json::Value =
             serde_json::from_str(&summary).map_err(|err| format!("parse summary: {err}"))?;
@@ -7702,6 +7715,33 @@ mod tests {
         );
         assert_eq!(parsed["loaded_tool_count"], serde_json::json!(6));
         assert!(!parsed.to_string().contains("alpha"));
+    }
+
+    #[tokio::test]
+    async fn test_llm_extension_state_summary_cache_is_bounded() {
+        let manager = make_manager_with_temp_dirs();
+
+        for idx in 0..=super::LLM_EXTENSION_STATE_SUMMARY_CACHE_MAX_USERS {
+            manager
+                .set_test_llm_extension_state_summary(
+                    &format!("user-{idx}"),
+                    Some(format!("summary-{idx}")),
+                )
+                .await;
+        }
+
+        let cache = manager.llm_extension_state_summaries.read().await;
+        assert_eq!(cache.len(), 1);
+        assert_eq!(
+            cache.get(&format!(
+                "user-{}",
+                super::LLM_EXTENSION_STATE_SUMMARY_CACHE_MAX_USERS
+            )),
+            Some(&Some(format!(
+                "summary-{}",
+                super::LLM_EXTENSION_STATE_SUMMARY_CACHE_MAX_USERS
+            )))
+        );
     }
 
     #[tokio::test]

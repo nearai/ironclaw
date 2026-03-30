@@ -5,7 +5,6 @@ import json
 import os
 import shutil
 import signal
-import socket
 import sqlite3
 import subprocess
 import tempfile
@@ -16,6 +15,7 @@ import httpx
 import pytest
 from playwright.async_api import async_playwright
 
+from conftest import _forward_coverage_env, _reserve_loopback_sockets, _stop_process
 from helpers import (
     AUTH_TOKEN,
     HTTP_WEBHOOK_SECRET,
@@ -25,12 +25,6 @@ from helpers import (
 )
 
 ROOT = Path(__file__).resolve().parents[3]
-
-
-def _find_free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
 
 
 def _main_worktree_root() -> Path | None:
@@ -156,8 +150,9 @@ async def _send_and_get_response(
 
 @pytest.fixture(scope="module")
 async def telegram_prompt_server(ironclaw_binary, mock_llm_server):
-    gateway_port = _find_free_port()
-    http_port = _find_free_port()
+    reserved = _reserve_loopback_sockets(2)
+    gateway_port = reserved[0].getsockname()[1]
+    http_port = reserved[1].getsockname()[1]
 
     home_tmpdir = tempfile.TemporaryDirectory(prefix="ironclaw-e2e-telegram-home-")
     db_tmpdir = tempfile.TemporaryDirectory(prefix="ironclaw-e2e-telegram-db-")
@@ -205,6 +200,11 @@ async def telegram_prompt_server(ironclaw_binary, mock_llm_server):
         "IRONCLAW_OAUTH_CALLBACK_URL": "https://oauth.test.example/oauth/callback",
         "IRONCLAW_OAUTH_EXCHANGE_URL": mock_llm_server,
     }
+    _forward_coverage_env(env)
+
+    for sock in reserved:
+        if sock.fileno() != -1:
+            sock.close()
 
     proc = await asyncio.create_subprocess_exec(
         ironclaw_binary,
@@ -216,12 +216,16 @@ async def telegram_prompt_server(ironclaw_binary, mock_llm_server):
     )
 
     base_url = f"http://127.0.0.1:{gateway_port}"
+    startup_kill_attempted = False
     try:
         await wait_for_ready(f"{base_url}/api/health", timeout=60)
         _seed_telegram_owner_binding(db_path)
         await _wait_for_authed_threads(base_url, timeout=30)
         yield base_url
     except TimeoutError:
+        if proc.returncode is None:
+            startup_kill_attempted = True
+            await _stop_process(proc, timeout=2)
         returncode = proc.returncode
         stderr_bytes = b""
         if proc.stderr:
@@ -230,18 +234,21 @@ async def telegram_prompt_server(ironclaw_binary, mock_llm_server):
             except (asyncio.TimeoutError, Exception):
                 pass
         stderr_text = stderr_bytes.decode("utf-8", errors="replace")
-        proc.kill()
         pytest.fail(
             "telegram prompt server failed to start on "
             f"port {gateway_port} (returncode={returncode}).\nstderr:\n{stderr_text}"
         )
     finally:
+        for sock in reserved:
+            if sock.fileno() != -1:
+                sock.close()
         if proc.returncode is None:
-            proc.send_signal(signal.SIGINT)
-            try:
-                await asyncio.wait_for(proc.wait(), timeout=10)
-            except asyncio.TimeoutError:
-                proc.kill()
+            if startup_kill_attempted:
+                await _stop_process(proc, timeout=2)
+            else:
+                await _stop_process(proc, sig=signal.SIGINT, timeout=10)
+                if proc.returncode is None:
+                    await _stop_process(proc, timeout=2)
         home_tmpdir.cleanup()
         db_tmpdir.cleanup()
         wasm_tools_tmpdir.cleanup()
