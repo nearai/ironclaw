@@ -19,6 +19,9 @@ pub struct SkillsConfig {
     pub max_active_skills: usize,
     /// Maximum total context tokens allocated to skill prompts.
     pub max_context_tokens: usize,
+    /// Maximum recursion depth when scanning skill directories for bundle layouts.
+    /// Subdirectories without `SKILL.md` are recursed into up to this depth.
+    pub max_scan_depth: usize,
 }
 
 impl Default for SkillsConfig {
@@ -29,6 +32,7 @@ impl Default for SkillsConfig {
             installed_dir: default_installed_skills_dir(),
             max_active_skills: 3,
             max_context_tokens: 4000,
+            max_scan_depth: 3,
         }
     }
 }
@@ -55,6 +59,7 @@ impl SkillsConfig {
                 .unwrap_or_else(default_installed_skills_dir),
             max_active_skills: parse_optional_env("SKILLS_MAX_ACTIVE", 3)?,
             max_context_tokens: parse_optional_env("SKILLS_MAX_CONTEXT_TOKENS", 4000)?,
+            max_scan_depth: parse_optional_env("SKILLS_MAX_SCAN_DEPTH", 3)?,
         })
     }
 }
