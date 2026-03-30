@@ -79,7 +79,7 @@ impl ConversationStore for LibSqlBackend {
         let inserted = conn
             .execute(
                 "INSERT INTO conversations (id, channel, user_id, thread_id, started_at, last_activity) VALUES (?1, ?2, ?3, ?4, ?5, ?5) ON CONFLICT(id) DO NOTHING",
-                params![id.to_string(), channel, user_id, opt_text(thread_id), now],
+                params![id.to_string(), channel, user_id, opt_text(thread_id), now.clone()],
             )
             .await
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
