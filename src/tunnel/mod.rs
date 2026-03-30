@@ -175,7 +175,7 @@ pub fn create_tunnel(config: &TunnelProviderConfig) -> Result<Option<Box<dyn Tun
                 cu.start_command.clone(),
                 cu.health_url.clone(),
                 cu.url_pattern.clone(),
-            ))))
+            )?)))
         }
 
         other => bail!(
