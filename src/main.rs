@@ -900,6 +900,17 @@ async fn async_main() -> anyhow::Result<()> {
     // Clone context_manager for the reaper before it's moved into Agent::new()
     let reaper_context_manager = Arc::clone(&components.context_manager);
 
+    // Load channel routing config from database before components.db is moved
+    let channel_routing_config = if let Some(ref db) = components.db {
+        ironclaw::agent::channel_routing::ChannelRoutingConfig::load_from_store(
+            db.as_ref(),
+            "default",
+        )
+        .await
+    } else {
+        None
+    };
+
     // Capture db reference for SIGHUP handler before it's moved into AgentDeps (Unix only)
     #[cfg(unix)]
     let sighup_settings_store: Option<Arc<dyn ironclaw::db::SettingsStore>> = components
@@ -944,6 +955,7 @@ async fn async_main() -> anyhow::Result<()> {
             config.agent.max_llm_concurrent_per_user.unwrap_or(4),
             config.agent.max_jobs_concurrent_per_user.unwrap_or(3),
         )),
+        channel_routing: Arc::new(tokio::sync::RwLock::new(channel_routing_config)),
     };
 
     let channels_for_warnings = Arc::clone(&channels);

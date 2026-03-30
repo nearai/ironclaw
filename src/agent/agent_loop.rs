@@ -184,6 +184,9 @@ pub struct AgentDeps {
     pub llm_backend: String,
     /// Per-tenant rate limiting registry (lazily creates rate state per user).
     pub tenant_rates: Arc<crate::tenant::TenantRateRegistry>,
+    /// Per-channel tool routing config. Wrapped in RwLock for hot-reload support.
+    pub channel_routing:
+        Arc<tokio::sync::RwLock<Option<crate::agent::channel_routing::ChannelRoutingConfig>>>,
 }
 
 /// The main agent that coordinates all components.
