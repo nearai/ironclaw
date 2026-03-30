@@ -121,6 +121,75 @@ def _last_user_content(messages: list[dict]) -> str:
     return ""
 
 
+def _is_job_mode(messages: list[dict]) -> bool:
+    """Detect if this conversation is a background job (not chat)."""
+    for msg in messages:
+        if msg.get("role") == "system":
+            content = msg.get("content", "")
+            if "autonomous agent working on a job" in content:
+                return True
+    return False
+
+
+def _count_tool_results(messages: list[dict]) -> int:
+    """Count how many tool result messages are in the conversation."""
+    return sum(1 for m in messages if m.get("role") == "tool")
+
+
+def match_job_response(messages: list[dict], has_tools: bool) -> dict | None:
+    """Handle background job conversations.
+
+    Returns a dict with either {"text": ...} or {"tool_call": ...},
+    or None if this isn't a job conversation.
+    """
+    if not _is_job_mode(messages):
+        return None
+
+    last_user = _last_user_content(messages)
+    tool_result_count = _count_tool_results(messages)
+
+    # Planning call (no tools available = complete() not complete_with_tools())
+    if "create a plan" in last_user.lower():
+        return {"text": json.dumps({
+            "goal": "Complete the requested routine job",
+            "actions": [
+                {
+                    "tool_name": "echo",
+                    "parameters": {"message": "job-step-1"},
+                    "reasoning": "First step: echo a test message",
+                    "expected_outcome": "Echo returns the message",
+                },
+                {
+                    "tool_name": "time",
+                    "parameters": {"operation": "now"},
+                    "reasoning": "Second step: get the current time",
+                    "expected_outcome": "Returns current timestamp",
+                },
+            ],
+            "estimated_cost": 0.001,
+            "estimated_time_secs": 5,
+            "confidence": 0.95,
+        })}
+
+    # Post-plan completion check: after tool results, say complete
+    if "planned actions" in last_user.lower() and tool_result_count >= 2:
+        return {"text": "The job is complete. All tasks are done."}
+
+    # Continuation prompt (from our fix): the plan didn't fully complete,
+    # now the agentic loop should call tools
+    if "continue executing now" in last_user.lower() and has_tools:
+        return {"tool_call": {
+            "tool_name": "echo",
+            "arguments": {"message": "continuation-step"},
+        }}
+
+    # After a tool result in the agentic loop, signal completion
+    if tool_result_count > 0 and has_tools:
+        return {"text": "The job is complete. All requested work has been finished."}
+
+    return None
+
+
 def match_response(messages: list[dict]) -> str:
     content = _last_user_content(messages)
     for pattern, response in CANNED_RESPONSES:
@@ -192,6 +261,19 @@ async def chat_completions(request: web.Request) -> web.StreamResponse:
     stream = body.get("stream", False)
     has_tools = bool(body.get("tools"))
     cid = f"mock-{uuid.uuid4().hex[:8]}"
+
+    # Job-mode conversations (background routine/job execution)
+    job_resp = match_job_response(messages, has_tools)
+    if job_resp:
+        if "tool_call" in job_resp:
+            tc = job_resp["tool_call"]
+            if not stream:
+                return _tool_call_response(cid, tc)
+            return await _stream_tool_call(request, cid, tc)
+        text = job_resp["text"]
+        if not stream:
+            return _text_response(cid, text)
+        return await _stream_text(request, cid, text)
 
     # Tool result in messages -> text summary
     tr = _find_tool_result(messages)

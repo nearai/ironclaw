@@ -73,6 +73,7 @@ document.getElementById('settings-theme-toggle')?.addEventListener('click', () =
 });
 
 let token = '';
+let oidcProxyAuth = false;
 let eventSource = null;
 let logEventSource = null;
 let currentTab = 'chat';
@@ -140,6 +141,55 @@ let _activityThinking = null;
 
 // --- Auth ---
 
+// Common post-auth initialization shared by token auth and OIDC auto-auth.
+function initApp() {
+  var authScreen = document.getElementById('auth-screen');
+  var app = document.getElementById('app');
+  // Cross-fade: fade out auth screen, then show app
+  if (authScreen) authScreen.style.opacity = '0';
+  // Show app container (invisible — opacity:0 in CSS) so layout computes
+  app.style.display = 'flex';
+  // Position tab indicator instantly (no transition) before fade-in
+  var indicator = document.getElementById('tab-indicator');
+  if (indicator) indicator.style.transition = 'none';
+  updateTabIndicator();
+  // Force layout so the instant position is applied, then restore transition
+  if (indicator) {
+    void indicator.offsetLeft;
+    indicator.style.transition = '';
+  }
+  // Now fade in
+  app.classList.add('visible');
+  // Hide auth screen after fade-out transition completes
+  setTimeout(function() { if (authScreen) authScreen.style.display = 'none'; }, 300);
+  // Strip token and log_level from URL so they're not visible in the address bar
+  var cleaned = new URL(window.location);
+  var urlLogLevel = cleaned.searchParams.get('log_level');
+  cleaned.searchParams.delete('token');
+  cleaned.searchParams.delete('log_level');
+  window.history.replaceState({}, '', cleaned.pathname + cleaned.search);
+  connectSSE();
+  connectLogSSE();
+  startGatewayStatusPolling();
+  // Hide the Users settings tab for non-admin users.
+  apiFetch('/api/profile').then(function(profile) {
+    if (profile && profile.role !== 'admin') {
+      var usersTab = document.querySelector('[data-settings-subtab="users"]');
+      if (usersTab) usersTab.style.display = 'none';
+    }
+  }).catch(function() {});
+  checkTeeStatus();
+  loadThreads();
+  loadMemoryTree();
+  loadJobs();
+  // Apply URL log_level param if present, otherwise just sync the dropdown
+  if (urlLogLevel) {
+    setServerLogLevel(urlLogLevel);
+  } else {
+    loadServerLogLevel();
+  }
+}
+
 function authenticate() {
   token = document.getElementById('token-input').value.trim();
   if (!token) {
@@ -158,44 +208,7 @@ function authenticate() {
   apiFetch('/api/chat/threads')
     .then(() => {
       sessionStorage.setItem('ironclaw_token', token);
-      const authScreen = document.getElementById('auth-screen');
-      const app = document.getElementById('app');
-      // Cross-fade: fade out auth screen, then show app
-      if (authScreen) authScreen.style.opacity = '0';
-      // Show app container (invisible — opacity:0 in CSS) so layout computes
-      app.style.display = 'flex';
-      // Position tab indicator instantly (no transition) before fade-in
-      const indicator = document.getElementById('tab-indicator');
-      if (indicator) indicator.style.transition = 'none';
-      updateTabIndicator();
-      // Force layout so the instant position is applied, then restore transition
-      if (indicator) {
-        void indicator.offsetLeft;
-        indicator.style.transition = '';
-      }
-      // Now fade in
-      app.classList.add('visible');
-      // Hide auth screen after fade-out transition completes
-      setTimeout(() => { if (authScreen) authScreen.style.display = 'none'; }, 300);
-      // Strip token and log_level from URL so they're not visible in the address bar
-      const cleaned = new URL(window.location);
-      const urlLogLevel = cleaned.searchParams.get('log_level');
-      cleaned.searchParams.delete('token');
-      cleaned.searchParams.delete('log_level');
-      window.history.replaceState({}, '', cleaned.pathname + cleaned.search);
-      connectSSE();
-      connectLogSSE();
-      startGatewayStatusPolling();
-      checkTeeStatus();
-      loadThreads();
-      loadMemoryTree();
-      loadJobs();
-      // Apply URL log_level param if present, otherwise just sync the dropdown
-      if (urlLogLevel) {
-        setServerLogLevel(urlLogLevel);
-      } else {
-        loadServerLogLevel();
-      }
+      initApp();
     })
     .catch(() => {
       sessionStorage.removeItem('ironclaw_token');
@@ -218,7 +231,12 @@ document.getElementById('token-input').addEventListener('keydown', (e) => {
 // Note: main event listener registration is at the bottom of this file (search
 // "Event Listener Registration"). Do NOT add duplicate listeners here.
 
-// Auto-authenticate from URL param or saved session
+// Auto-authenticate from URL param, saved session, or OIDC proxy header.
+//
+// When behind a reverse proxy that injects auth (e.g., AWS ALB with OIDC),
+// the proxy already authenticates every request. We probe /api/gateway/status
+// without a token — if the proxy's header lets us through, skip the login
+// screen entirely.
 (function autoAuth() {
   const params = new URLSearchParams(window.location.search);
   const urlToken = params.get('token');
@@ -227,15 +245,28 @@ document.getElementById('token-input').addEventListener('keydown', (e) => {
     authenticate();
     return;
   }
+  // Restore OIDC proxy mode from session.
+  if (sessionStorage.getItem('ironclaw_oidc') === '1') {
+    oidcProxyAuth = true;
+  }
   const saved = sessionStorage.getItem('ironclaw_token');
   if (saved) {
     document.getElementById('token-input').value = saved;
-    // Hide auth screen immediately to prevent flash, authenticate() will
-    // restore it if the token turns out to be invalid.
     document.getElementById('auth-screen').style.display = 'none';
     document.getElementById('app').style.display = 'flex';
     authenticate();
+    return;
   }
+  // Probe for proxy-injected OIDC auth (no token needed from the client).
+  fetch('/api/gateway/status', { credentials: 'include' }).then(function(r) {
+    if (r.ok) {
+      oidcProxyAuth = true;
+      sessionStorage.setItem('ironclaw_oidc', '1');
+      document.getElementById('auth-screen').style.display = 'none';
+      document.getElementById('app').style.display = 'flex';
+      initApp();
+    }
+  }).catch(function() { /* proxy auth not available, show login */ });
 })();
 
 // --- API helper ---
@@ -243,7 +274,10 @@ document.getElementById('token-input').addEventListener('keydown', (e) => {
 function apiFetch(path, options) {
   const opts = options || {};
   opts.headers = opts.headers || {};
-  opts.headers['Authorization'] = 'Bearer ' + token;
+  // In OIDC mode the reverse proxy provides auth; skip the Authorization header.
+  if (token && !oidcProxyAuth) {
+    opts.headers['Authorization'] = 'Bearer ' + token;
+  }
   if (opts.body && typeof opts.body === 'object') {
     opts.headers['Content-Type'] = 'application/json';
     opts.body = JSON.stringify(opts.body);
@@ -354,7 +388,11 @@ function updateRestartButtonVisibility() {
 function connectSSE() {
   if (eventSource) eventSource.close();
 
-  eventSource = new EventSource('/api/chat/events?token=' + encodeURIComponent(token));
+  // In OIDC mode the reverse proxy provides auth; no query token needed.
+  const chatSseUrl = (token && !oidcProxyAuth)
+    ? '/api/chat/events?token=' + encodeURIComponent(token)
+    : '/api/chat/events';
+  eventSource = new EventSource(chatSseUrl);
 
   eventSource.onopen = () => {
     document.getElementById('sse-dot').classList.remove('disconnected');
@@ -2490,7 +2528,10 @@ let logBuffer = []; // buffer while paused
 function connectLogSSE() {
   if (logEventSource) logEventSource.close();
 
-  logEventSource = new EventSource('/api/logs/events?token=' + encodeURIComponent(token));
+  const logSseUrl = (token && !oidcProxyAuth)
+    ? '/api/logs/events?token=' + encodeURIComponent(token)
+    : '/api/logs/events';
+  logEventSource = new EventSource(logSseUrl);
 
   logEventSource.addEventListener('log', (e) => {
     const entry = JSON.parse(e.data);
@@ -4258,6 +4299,13 @@ function renderRoutineDetail(routine) {
   html += '<div class="job-description"><h3>Action</h3>'
     + '<pre class="action-json">' + escapeHtml(JSON.stringify(routine.action, null, 2)) + '</pre></div>';
 
+  // Conversation thread link
+  if (routine.conversation_id) {
+    html += '<div class="job-description">'
+      + '<a href="#" data-action="view-routine-thread" data-id="' + escapeHtml(routine.conversation_id) + '" class="btn-primary" style="display:inline-block;margin:0.5rem 0">'
+      + 'View Execution Thread</a></div>';
+  }
+
   // Recent runs
   if (routine.recent_runs && routine.recent_runs.length > 0) {
     html += '<div class="job-timeline-section"><h3>Recent Runs</h3>'
@@ -4338,6 +4386,165 @@ function formatRelativeTime(isoString) {
   const days = Math.floor(absDiff / 86400000);
   return future ? I18n.t('time.daysFromNow', { n: days }) : I18n.t('time.daysAgo', { n: days });
 }
+
+// --- Users (admin) ---
+
+function loadUsers() {
+  apiFetch('/api/admin/users').then(function(data) {
+    renderUsersList(data.users || []);
+  }).catch(function(err) {
+    var tbody = document.getElementById('users-tbody');
+    var empty = document.getElementById('users-empty');
+    if (tbody) tbody.innerHTML = '';
+    if (empty) {
+      empty.style.display = 'block';
+      if (err.status === 403 || err.status === 401) {
+        empty.textContent = I18n.t('users.adminRequired');
+      } else {
+        empty.textContent = I18n.t('users.failedToLoad') + ': ' + err.message;
+      }
+    }
+  });
+}
+
+function renderUsersList(users) {
+  var tbody = document.getElementById('users-tbody');
+  var empty = document.getElementById('users-empty');
+  if (!users || users.length === 0) {
+    tbody.innerHTML = '';
+    empty.style.display = 'block';
+    empty.textContent = I18n.t('users.emptyState');
+    return;
+  }
+  empty.style.display = 'none';
+  tbody.innerHTML = users.map(function(u) {
+    var statusClass = u.status === 'active' ? 'active' : 'failed';
+    var roleLabel = u.role === 'admin' ? '<span class="badge badge-admin">' + I18n.t('users.roleAdmin') + '</span>' : '<span class="badge">' + I18n.t('users.roleMember') + '</span>';
+    var actions = '';
+    if (u.status === 'active') {
+      actions += '<button class="btn-small btn-danger" data-action="suspend-user" data-user-id="' + escapeHtml(u.id) + '">' + I18n.t('users.suspend') + '</button> ';
+    } else {
+      actions += '<button class="btn-small btn-primary" data-action="activate-user" data-user-id="' + escapeHtml(u.id) + '">' + I18n.t('users.activate') + '</button> ';
+    }
+    if (u.role === 'member') {
+      actions += '<button class="btn-small" data-action="change-role" data-user-id="' + escapeHtml(u.id) + '" data-role="admin">' + I18n.t('users.makeAdmin') + '</button> ';
+    } else {
+      actions += '<button class="btn-small" data-action="change-role" data-user-id="' + escapeHtml(u.id) + '" data-role="member">' + I18n.t('users.makeMember') + '</button> ';
+    }
+    actions += '<button class="btn-small" data-action="create-token" data-user-id="' + escapeHtml(u.id) + '" data-user-name="' + escapeHtml(u.display_name) + '">' + I18n.t('users.addToken') + '</button>';
+    return '<tr>'
+      + '<td class="user-id" title="' + escapeHtml(u.id) + '">' + escapeHtml(u.id.substring(0, 8)) + '…</td>'
+      + '<td>' + escapeHtml(u.display_name) + '</td>'
+      + '<td>' + escapeHtml(u.email || '—') + '</td>'
+      + '<td>' + roleLabel + '</td>'
+      + '<td><span class="status-badge ' + statusClass + '">' + escapeHtml(u.status) + '</span></td>'
+      + '<td>' + (u.job_count || 0) + '</td>'
+      + '<td>' + formatCost(u.total_cost) + '</td>'
+      + '<td>' + (u.last_active_at ? formatRelativeTime(u.last_active_at) : '—') + '</td>'
+      + '<td>' + formatRelativeTime(u.created_at) + '</td>'
+      + '<td>' + actions + '</td>'
+      + '</tr>';
+  }).join('');
+}
+
+function suspendUser(userId) {
+  apiFetch('/api/admin/users/' + userId + '/suspend', { method: 'POST' })
+    .then(function() { loadUsers(); })
+    .catch(function(e) { alert(I18n.t('users.failedSuspend') + ': ' + e.message); });
+}
+
+function activateUser(userId) {
+  apiFetch('/api/admin/users/' + userId + '/activate', { method: 'POST' })
+    .then(function() { loadUsers(); })
+    .catch(function(e) { alert(I18n.t('users.failedActivate') + ': ' + e.message); });
+}
+
+function changeUserRole(userId, newRole) {
+  apiFetch('/api/admin/users/' + userId, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ role: newRole })
+  })
+    .then(function() { loadUsers(); })
+    .catch(function(e) { alert(I18n.t('users.failedRoleChange') + ': ' + e.message); });
+}
+
+function createTokenForUser(userId, displayName) {
+  var tokenName = prompt('Token name for ' + displayName + ':', 'api-token');
+  if (!tokenName) return;
+  apiFetch('/api/tokens', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: tokenName, user_id: userId }),
+  }).then(function(data) {
+    showTokenBanner(data.token, I18n.t('users.tokenCreated'));
+  }).catch(function(e) { alert(I18n.t('users.failedCreate') + ': ' + e.message); });
+}
+
+function showTokenBanner(tokenValue, title) {
+  var banner = document.getElementById('users-token-result');
+  if (!banner) return;
+  var heading = title || I18n.t('users.tokenCreated');
+  var loginUrl = window.location.origin + '/?token=' + encodeURIComponent(tokenValue);
+  banner.style.display = 'block';
+  banner.innerHTML = '<strong>' + escapeHtml(heading) + '</strong> ' + I18n.t('users.tokenShareMessage') + '<br>'
+    + '<code class="token-display" id="token-copy-value">' + escapeHtml(loginUrl) + '</code>'
+    + '<button class="btn-small" id="token-copy-link">Copy Link</button>'
+    + '<br><span style="font-size:0.8em;color:var(--text-muted)">' + I18n.t('users.rawToken') + ' ' + escapeHtml(tokenValue) + '</span>';
+  document.getElementById('token-copy-link').addEventListener('click', function() {
+    navigator.clipboard.writeText(loginUrl);
+    this.textContent = I18n.t('users.copied');
+  });
+}
+
+// Delegated click handler for user action buttons (CSP-safe, no inline onclick)
+document.getElementById('users-table')?.addEventListener('click', function(e) {
+  var btn = e.target.closest('[data-action]');
+  if (!btn) return;
+  var action = btn.getAttribute('data-action');
+  var userId = btn.getAttribute('data-user-id');
+  var userName = btn.getAttribute('data-user-name');
+  if (action === 'suspend-user') suspendUser(userId);
+  else if (action === 'activate-user') activateUser(userId);
+  else if (action === 'change-role') changeUserRole(userId, btn.getAttribute('data-role'));
+  else if (action === 'create-token') createTokenForUser(userId, userName || '');
+});
+
+// Wire up Users tab create form
+document.getElementById('users-create-btn')?.addEventListener('click', function() {
+  document.getElementById('users-create-form').style.display = 'flex';
+  document.getElementById('users-token-result').style.display = 'none';
+  document.getElementById('user-display-name').focus();
+});
+
+document.getElementById('users-create-cancel')?.addEventListener('click', function() {
+  document.getElementById('users-create-form').style.display = 'none';
+});
+
+document.getElementById('users-create-submit')?.addEventListener('click', function() {
+  var displayName = document.getElementById('user-display-name').value.trim();
+  var email = document.getElementById('user-email').value.trim();
+  var role = document.getElementById('user-role').value;
+  if (!displayName) { alert(I18n.t('users.displayNameRequired')); return; }
+
+  apiFetch('/api/admin/users', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      display_name: displayName,
+      email: email || undefined,
+      role: role,
+    }),
+  }).then(function(data) {
+    document.getElementById('users-create-form').style.display = 'none';
+    document.getElementById('user-display-name').value = '';
+    document.getElementById('user-email').value = '';
+    if (data.token) {
+      showTokenBanner(data.token, I18n.t('users.userCreated'));
+    }
+    loadUsers();
+  }).catch(function(e) { alert(I18n.t('users.failedCreate') + ': ' + e.message); });
+});
 
 // --- Gateway status widget ---
 
@@ -5028,31 +5235,13 @@ function loadSettingsSubtab(subtab) {
   else if (subtab === 'extensions') { loadExtensions(); startPairingPoll(); }
   else if (subtab === 'mcp') loadMcpServers();
   else if (subtab === 'skills') loadSkills();
+  else if (subtab === 'users') loadUsers();
   if (subtab !== 'extensions' && subtab !== 'channels') stopPairingPoll();
 }
 
 // --- Structured Settings Definitions ---
 
 var INFERENCE_SETTINGS = [
-  {
-    group: 'cfg.group.llm',
-    settings: [
-      { key: 'llm_backend', label: 'cfg.llm_backend.label', description: 'cfg.llm_backend.desc',
-        type: 'select', options: ['nearai', 'anthropic', 'openai', 'ollama', 'openai_compatible', 'tinfoil', 'bedrock'] },
-      { key: 'selected_model', label: 'cfg.selected_model.label', description: 'cfg.selected_model.desc', type: 'text' },
-      { key: 'ollama_base_url', label: 'cfg.ollama_base_url.label', description: 'cfg.ollama_base_url.desc', type: 'text',
-        showWhen: { key: 'llm_backend', value: 'ollama' } },
-      { key: 'openai_compatible_base_url', label: 'cfg.openai_compatible_base_url.label', description: 'cfg.openai_compatible_base_url.desc', type: 'text',
-        showWhen: { key: 'llm_backend', value: 'openai_compatible' } },
-      { key: 'bedrock_region', label: 'cfg.bedrock_region.label', description: 'cfg.bedrock_region.desc', type: 'text',
-        showWhen: { key: 'llm_backend', value: 'bedrock' } },
-      { key: 'bedrock_cross_region', label: 'cfg.bedrock_cross_region.label', description: 'cfg.bedrock_cross_region.desc',
-        type: 'select', options: ['us', 'eu', 'apac', 'global'],
-        showWhen: { key: 'llm_backend', value: 'bedrock' } },
-      { key: 'bedrock_profile', label: 'cfg.bedrock_profile.label', description: 'cfg.bedrock_profile.desc', type: 'text',
-        showWhen: { key: 'llm_backend', value: 'bedrock' } },
-    ]
-  },
   {
     group: 'cfg.group.embeddings',
     settings: [
@@ -5175,31 +5364,64 @@ function loadInferenceSettings() {
   Promise.all([
     apiFetch('/api/settings/export'),
     apiFetch('/api/gateway/status').catch(function() { return {}; }),
-    apiFetch('/v1/models').catch(function() { return { data: [] }; })
   ]).then(function(results) {
     var settings = results[0].settings || {};
     var status = results[1];
-    var modelsData = results[2];
-    var activeValues = {
-      'llm_backend': status.llm_backend,
-      'selected_model': status.llm_model
-    };
-    // Inject available model IDs as suggestions for the selected_model field
-    var modelIds = (modelsData.data || []).map(function(m) { return m.id; }).filter(Boolean);
-    if (modelIds.length > 0) {
-      var llmGroup = INFERENCE_SETTINGS[0];
-      for (var i = 0; i < llmGroup.settings.length; i++) {
-        if (llmGroup.settings[i].key === 'selected_model') {
-          llmGroup.settings[i].suggestions = modelIds;
-          break;
-        }
-      }
-    }
     container.innerHTML = '';
-    renderStructuredSettingsInto(container, INFERENCE_SETTINGS, settings, activeValues);
+
+    // LLM Provider display — derived from active Model Provider
+    var activeBackend = settings['llm_backend'] || status.llm_backend || 'nearai';
+    var activeModel = settings['selected_model'] || status.llm_model || '';
+    var allP = _builtinProviders;
+    var customP = [];
+    try {
+      var cpVal = settings['llm_custom_providers'];
+      customP = Array.isArray(cpVal) ? cpVal : (cpVal ? JSON.parse(cpVal) : []);
+    } catch (e) { customP = []; }
+    var provider = allP.concat(customP).find(function(p) { return p.id === activeBackend; });
+    var providerName = provider ? (provider.name || provider.id) : activeBackend;
+    if (!activeModel && provider) activeModel = provider.default_model || '';
+
+    var group = document.createElement('div');
+    group.className = 'settings-group';
+    var title = document.createElement('div');
+    title.className = 'settings-group-title';
+    title.textContent = I18n.t('cfg.group.llm');
+    group.appendChild(title);
+
+    var notice = document.createElement('div');
+    notice.className = 'config-notice';
+    notice.id = 'llm-restart-notice';
+    var restartNoticeEl = document.getElementById('config-restart-notice');
+    notice.style.display = (restartNoticeEl && restartNoticeEl.style.display !== 'none') ? 'flex' : 'none';
+    notice.innerHTML = '<span>\u26A0</span><span>' + escapeHtml(I18n.t('config.restartNotice')) + '</span>';
+    group.appendChild(notice);
+
+    var backendRow = document.createElement('div');
+    backendRow.className = 'settings-row';
+    backendRow.innerHTML =
+      '<div class="settings-label-wrap"><label class="settings-label">' + escapeHtml(I18n.t('cfg.llm_backend.label')) + '</label>' +
+      '<div class="settings-description">' + escapeHtml(I18n.t('cfg.llm_backend.desc')) + '</div></div>' +
+      '<div class="settings-display-value">' + escapeHtml(providerName) + '</div>';
+    group.appendChild(backendRow);
+
+    var modelRow = document.createElement('div');
+    modelRow.className = 'settings-row';
+    modelRow.innerHTML =
+      '<div class="settings-label-wrap"><label class="settings-label">' + escapeHtml(I18n.t('cfg.selected_model.label')) + '</label>' +
+      '<div class="settings-description">' + escapeHtml(I18n.t('cfg.selected_model.desc')) + '</div></div>' +
+      '<div class="settings-display-value">' + escapeHtml(activeModel || '\u2014') + '</div>';
+    group.appendChild(modelRow);
+
+    container.appendChild(group);
+
+    // Remaining editable settings (embeddings, etc.)
+    renderStructuredSettingsInto(container, INFERENCE_SETTINGS, settings, {});
+    loadConfig();
   }).catch(function(err) {
     container.innerHTML = '<div class="empty-state">' + I18n.t('common.loadFailed') + ': '
       + escapeHtml(err.message) + '</div>';
+    loadConfig();
   });
 }
 
@@ -5443,8 +5665,7 @@ function renderStructuredSettingsRow(def, value, activeValue) {
   return row;
 }
 
-var RESTART_REQUIRED_KEYS = ['llm_backend', 'selected_model', 'ollama_base_url', 'openai_compatible_base_url',
-  'bedrock_region', 'bedrock_cross_region', 'bedrock_profile', 'embeddings.enabled', 'embeddings.provider', 'embeddings.model',
+var RESTART_REQUIRED_KEYS = ['embeddings.enabled', 'embeddings.provider', 'embeddings.model',
   'agent.auto_approve_tools', 'tunnel.provider', 'tunnel.public_url', 'gateway.rate_limit', 'gateway.max_connections'];
 
 var _settingsSavedTimers = {};
@@ -6023,11 +6244,28 @@ document.addEventListener('click', function(e) {
       switchTab('jobs');
       openJobDetail(el.dataset.id);
       break;
+    case 'view-routine-thread':
+      e.preventDefault();
+      switchTab('chat');
+      switchThread(el.dataset.id);
+      break;
     case 'copy-tee-report':
       copyTeeReport();
       break;
     case 'switch-language':
       if (typeof switchLanguage === 'function') switchLanguage(el.dataset.lang);
+      break;
+    case 'set-active-provider':
+      setActiveProvider(el.dataset.id);
+      break;
+    case 'delete-custom-provider':
+      deleteCustomProvider(el.dataset.id);
+      break;
+    case 'edit-custom-provider':
+      editCustomProvider(el.dataset.id);
+      break;
+    case 'configure-builtin-provider':
+      configureBuiltinProvider(el.dataset.id);
       break;
   }
 });
@@ -6069,6 +6307,9 @@ document.getElementById('confirm-modal').addEventListener('click', function(e) {
 document.addEventListener('keydown', function(e) {
   if (e.key === 'Escape' && document.getElementById('confirm-modal').style.display === 'flex') {
     closeConfirmModal();
+  }
+  if (e.key === 'Escape' && document.getElementById('provider-dialog').style.display === 'flex') {
+    resetProviderForm();
   }
 });
 
@@ -6156,4 +6397,581 @@ document.getElementById('settings-search-input').addEventListener('input', funct
     empty.textContent = I18n.t('settings.noMatchingSettings', { query: this.value });
     activePanel.appendChild(empty);
   }
+});
+
+
+// --- Config Tab ---
+
+// Like apiFetch but for endpoints that return 204 No Content
+// Like apiFetch but discards the response body (for 204 No Content endpoints).
+function apiFetchVoid(path, options) {
+  return apiFetch(path, options).then(function() {});
+}
+
+/** Sentinel value meaning "key is unchanged, don't touch it". Must match backend. */
+const API_KEY_UNCHANGED = '\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022';
+
+const ADAPTER_LABELS = {
+  open_ai_completions: 'OpenAI Compatible',
+  anthropic: 'Anthropic',
+  ollama: 'Ollama',
+  bedrock: 'AWS Bedrock',
+  nearai: 'NEAR AI',
+};
+
+let _builtinProviders = [];
+let _customProviders = [];
+let _activeLlmBackend = '';
+let _selectedModel = '';
+let _builtinOverrides = {};
+let _editingProviderId = null;
+let _configuringBuiltinId = null;
+let _configLoaded = false;
+
+function loadConfig() {
+  const list = document.getElementById('providers-list');
+  list.innerHTML = '<div class="empty-state">' + I18n.t('common.loading') + '</div>';
+
+  Promise.all([
+    apiFetch('/api/settings/export'),
+    apiFetch('/api/llm/providers').catch(function() { return []; }),
+  ]).then(function(results) {
+    const s = (results[0] && results[0].settings) ? results[0].settings : {};
+    _builtinProviders = Array.isArray(results[1]) ? results[1] : [];
+    _activeLlmBackend = s['llm_backend'] ? String(s['llm_backend']) : 'nearai';
+    _selectedModel = s['selected_model'] ? String(s['selected_model']) : '';
+    try {
+      const val = s['llm_custom_providers'];
+      _customProviders = Array.isArray(val) ? val : (val ? JSON.parse(val) : []);
+    } catch (e) {
+      _customProviders = [];
+    }
+    try {
+      const val = s['llm_builtin_overrides'];
+      _builtinOverrides = (val && typeof val === 'object' && !Array.isArray(val)) ? val : {};
+    } catch (e) {
+      _builtinOverrides = {};
+    }
+    _configLoaded = true;
+    renderProviders();
+  }).catch(function() {
+    _activeLlmBackend = 'nearai';
+    _selectedModel = '';
+    _builtinProviders = [];
+    _customProviders = [];
+    _builtinOverrides = {};
+    _configLoaded = true;
+    renderProviders();
+  });
+}
+
+function scrollToProviders() {
+  const section = document.getElementById('providers-section');
+  if (section) section.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function renderProviders() {
+  const list = document.getElementById('providers-list');
+  const allProviders = [..._builtinProviders, ..._customProviders].sort((a, b) => {
+    if (a.id === _activeLlmBackend) return -1;
+    if (b.id === _activeLlmBackend) return 1;
+    return 0;
+  });
+
+  if (allProviders.length === 0) {
+    list.innerHTML = '<div class="empty-state">No providers</div>';
+    return;
+  }
+
+  list.innerHTML = allProviders.map((p) => {
+    const isActive = p.id === _activeLlmBackend;
+    const adapterLabel = ADAPTER_LABELS[p.adapter] || p.adapter;
+    const activeBadge = isActive
+      ? '<span class="provider-badge provider-badge-active">' + I18n.t('status.active') + '</span>'
+      : '';
+    const builtinBadge = p.builtin
+      ? '<span class="provider-badge provider-badge-builtin">' + I18n.t('config.builtin') + '</span>'
+      : '';
+    const deleteBtn = !p.builtin && !isActive
+      ? '<button class="provider-action-btn provider-delete-btn" data-action="delete-custom-provider" data-id="' + escapeHtml(p.id) + '">' + I18n.t('common.delete') + '</button>'
+      : '';
+    const editBtn = !p.builtin
+      ? '<button class="provider-action-btn" data-action="edit-custom-provider" data-id="' + escapeHtml(p.id) + '">' + I18n.t('common.edit') + '</button>'
+      : '';
+    // Show Configure for built-in providers that support it (not bedrock — uses AWS credential chain)
+    const configureBtn = p.builtin && p.id !== 'bedrock'
+      ? '<button class="provider-action-btn" data-action="configure-builtin-provider" data-id="' + escapeHtml(p.id) + '">' + I18n.t('config.configureProvider') + '</button>'
+      : '';
+    const useBtn = !isActive
+      ? '<button class="provider-action-btn" data-action="set-active-provider" data-id="' + escapeHtml(p.id) + '">' + I18n.t('config.useProvider') + '</button>'
+      : '';
+    const overrideBaseUrl = p.builtin && _builtinOverrides[p.id] ? (_builtinOverrides[p.id].base_url || '') : '';
+    const effectiveBaseUrl = overrideBaseUrl || p.env_base_url || p.base_url;
+    const baseUrlText = effectiveBaseUrl
+      ? '<span class="provider-url">' + escapeHtml(effectiveBaseUrl) + '</span>'
+      : '';
+    // Show configured model: for active provider use _selectedModel, for others check _builtinOverrides then env defaults
+    const overrideModel = p.builtin && _builtinOverrides[p.id] ? (_builtinOverrides[p.id].model || '') : '';
+    const displayModel = isActive
+      ? (_selectedModel || p.env_model || '')
+      : (overrideModel || p.env_model || '');
+    const modelText = displayModel
+      ? '<span class="provider-current-model">' + escapeHtml(I18n.t('config.currentModel', { model: displayModel })) + '</span>'
+      : '';
+
+    return '<div class="provider-card' + (isActive ? ' provider-card-active' : '') + '">'
+      + '<div class="provider-card-header">'
+      +   '<span class="provider-name">' + escapeHtml(p.name || p.id) + '</span>'
+      +   '<span class="provider-id-label">' + escapeHtml(p.id) + '</span>'
+      +   activeBadge + builtinBadge
+      + '</div>'
+      + '<div class="provider-card-meta">'
+      +   '<span class="provider-adapter">' + escapeHtml(adapterLabel) + '</span>'
+      +   baseUrlText
+      +   modelText
+      + '</div>'
+      + '<div class="provider-card-actions">'
+      +   useBtn + configureBtn + editBtn + deleteBtn
+      + '</div>'
+      + '</div>';
+  }).join('');
+}
+
+function setActiveProvider(id) {
+  const provider = [..._builtinProviders, ..._customProviders].find((p) => p.id === id);
+  // Restore the last-configured model for this provider, falling back to the provider's default
+  const restoredModel =
+    (_builtinOverrides[id] && _builtinOverrides[id].model) ||
+    (provider && provider.default_model) ||
+    null;
+  const defaultModel = restoredModel;
+  const modelUpdate = () => defaultModel
+    ? apiFetchVoid('/api/settings/selected_model', { method: 'PUT', body: { value: defaultModel } })
+    : apiFetchVoid('/api/settings/selected_model', { method: 'DELETE' });
+  apiFetchVoid('/api/settings/llm_backend', { method: 'PUT', body: { value: id } })
+    .then(() => modelUpdate())
+    .then(() => {
+      _activeLlmBackend = id;
+      _selectedModel = defaultModel || '';
+      renderProviders();
+      loadInferenceSettings();
+      scrollToProviders();
+      document.getElementById('config-restart-notice').style.display = 'flex';
+      var llmNotice = document.getElementById('llm-restart-notice');
+      if (llmNotice) llmNotice.style.display = 'flex';
+      showToast(I18n.t('config.providerActivated', { name: id }));
+    })
+    .catch((e) => showToast(I18n.t('error.unknown') + ': ' + e.message, 'error'));
+}
+
+function deleteCustomProvider(id) {
+  if (id === _activeLlmBackend) {
+    showToast(I18n.t('config.cannotDeleteActiveProvider'), 'error');
+    return;
+  }
+  if (!confirm(I18n.t('config.confirmDeleteProvider', { id }))) return;
+  const originalProviders = _customProviders;
+  _customProviders = _customProviders.filter((p) => p.id !== id);
+  saveCustomProviders().then(() => {
+    renderProviders();
+    showToast(I18n.t('config.providerDeleted'));
+  }).catch((e) => {
+    _customProviders = originalProviders;
+    showToast(I18n.t('error.unknown') + ': ' + e.message, 'error');
+  });
+}
+
+function saveCustomProviders() {
+  return apiFetchVoid('/api/settings/llm_custom_providers', { method: 'PUT', body: { value: _customProviders } });
+}
+
+function editCustomProvider(id) {
+  const p = _customProviders.find((p) => p.id === id);
+  if (!p) return;
+  _editingProviderId = id;
+  const titleEl = document.getElementById('provider-form-title');
+  titleEl.textContent = I18n.t('config.editProvider');
+  titleEl.removeAttribute('data-i18n');
+  document.getElementById('provider-name').value = p.name || '';
+  const idField = document.getElementById('provider-id');
+  idField.value = p.id;
+  idField.readOnly = true;
+  idField.style.opacity = '0.6';
+  document.getElementById('provider-adapter').value = p.adapter || 'open_ai_completions';
+  document.getElementById('provider-base-url').value = p.base_url || '';
+  const editApiKeyInput = document.getElementById('provider-api-key');
+  if (p.api_key === API_KEY_UNCHANGED) {
+    editApiKeyInput.value = '';
+    editApiKeyInput.placeholder = I18n.t('config.apiKeyConfigured');
+  } else {
+    editApiKeyInput.value = '';
+    editApiKeyInput.placeholder = I18n.t('config.apiKeyEnter');
+  }
+  document.getElementById('provider-model').value = p.default_model || '';
+  openProviderDialog(true);
+  document.getElementById('provider-name').focus();
+}
+
+function configureBuiltinProvider(id) {
+  const p = _builtinProviders.find((p) => p.id === id);
+  if (!p) return;
+  _configuringBuiltinId = id;
+  const titleEl = document.getElementById('provider-form-title');
+  titleEl.textContent = I18n.t('config.configureProvider') + ': ' + (p.name || id);
+  titleEl.removeAttribute('data-i18n');
+  // Hide name/id/adapter rows; show base-url as editable
+  document.getElementById('provider-name-row').style.display = 'none';
+  document.getElementById('provider-id-row').style.display = 'none';
+  document.getElementById('provider-adapter-row').style.display = 'none';
+  const baseUrlInput = document.getElementById('provider-base-url');
+  const override = _builtinOverrides[id] || {};
+  // Priority: db override > env > hardcoded default
+  const effectiveBaseUrl = override.base_url || p.env_base_url || p.base_url;
+  document.getElementById('provider-base-url-row').style.display = '';
+  baseUrlInput.value = effectiveBaseUrl || '';
+  baseUrlInput.readOnly = false;
+  baseUrlInput.style.opacity = '';
+  baseUrlInput.placeholder = p.base_url || '';
+  document.getElementById('provider-api-key-row').style.display = p.api_key_required !== false ? '' : 'none';
+  document.getElementById('fetch-models-btn').style.display = p.can_list_models ? '' : 'none';
+  const apiKeyInput = document.getElementById('provider-api-key');
+  const hasDbKey = override.api_key === API_KEY_UNCHANGED;
+  const hasEnvKey = p.has_api_key === true;
+  apiKeyInput.value = '';
+  if (hasDbKey) {
+    apiKeyInput.placeholder = I18n.t('config.apiKeyConfigured');
+  } else if (hasEnvKey) {
+    apiKeyInput.placeholder = I18n.t('config.apiKeyFromEnv');
+  } else {
+    apiKeyInput.placeholder = I18n.t('config.apiKeyEnter');
+  }
+  document.getElementById('provider-model').value = override.model || p.env_model || p.default_model || '';
+  openProviderDialog(true);
+  document.getElementById('provider-model').focus();
+}
+
+// Add provider form
+
+document.getElementById('add-provider-btn').addEventListener('click', () => {
+  openProviderDialog(false);
+});
+
+document.getElementById('cancel-provider-btn').addEventListener('click', () => {
+  resetProviderForm();
+});
+
+document.getElementById('cancel-provider-footer-btn').addEventListener('click', () => {
+  resetProviderForm();
+});
+
+document.getElementById('provider-dialog-overlay').addEventListener('click', () => {
+  resetProviderForm();
+});
+
+function openProviderDialog(isEdit) {
+  if (!isEdit) {
+    // Add mode: ensure all rows visible
+    ['provider-name-row', 'provider-id-row', 'provider-adapter-row',
+     'provider-base-url-row', 'provider-api-key-row'].forEach((id) => {
+      document.getElementById(id).style.display = '';
+    });
+    document.getElementById('fetch-models-btn').style.display = '';
+  }
+  document.getElementById('provider-dialog').style.display = 'flex';
+  if (!isEdit) {
+    document.getElementById('provider-name').focus();
+  }
+}
+
+document.getElementById('test-provider-btn').addEventListener('click', () => {
+  let adapter = document.getElementById('provider-adapter').value;
+  let baseUrl = document.getElementById('provider-base-url').value.trim();
+  const apiKey = document.getElementById('provider-api-key').value.trim();
+  const model = document.getElementById('provider-model').value.trim();
+
+  // For built-in providers, use the adapter from the registry.
+  // base_url comes from the form which already reflects: env > hardcoded default.
+  if (_configuringBuiltinId) {
+    const p = _builtinProviders.find((x) => x.id === _configuringBuiltinId);
+    if (p) {
+      adapter = p.adapter;
+      if (!baseUrl) baseUrl = p.base_url;
+    }
+  }
+
+  const btn = document.getElementById('test-provider-btn');
+  const result = document.getElementById('test-connection-result');
+
+  btn.disabled = true;
+  btn.textContent = I18n.t('config.testing');
+  result.style.display = 'none';
+  result.className = 'test-connection-result';
+
+  // Resolve provider_id so the backend can look up vaulted API keys.
+  const providerId = _configuringBuiltinId || document.getElementById('provider-id').value.trim();
+
+  if (!model) {
+    result.textContent = I18n.t('config.modelRequired') || 'Model is required for connection test';
+    result.className = 'test-connection-result test-fail';
+    result.style.display = '';
+    btn.disabled = false;
+    btn.textContent = I18n.t('config.testConnection');
+    return;
+  }
+
+  apiFetch('/api/llm/test_connection', {
+    method: 'POST',
+    body: {
+      adapter, base_url: baseUrl,
+      api_key: apiKey || undefined,
+      model,
+      provider_id: providerId || undefined,
+      provider_type: _configuringBuiltinId ? 'builtin' : 'custom',
+    },
+  })
+    .then((data) => {
+      result.textContent = data.message;
+      result.className = 'test-connection-result ' + (data.ok ? 'test-ok' : 'test-fail');
+      result.style.display = '';
+    })
+    .catch((e) => {
+      result.textContent = e.message;
+      result.className = 'test-connection-result test-fail';
+      result.style.display = '';
+    })
+    .finally(() => {
+      btn.disabled = false;
+      btn.textContent = I18n.t('config.testConnection');
+    });
+});
+
+document.getElementById('save-provider-btn').addEventListener('click', () => {
+  // Built-in configure mode: save api_key + model to llm_builtin_overrides
+  if (_configuringBuiltinId) {
+    const apiKey = document.getElementById('provider-api-key').value.trim();
+    const model = document.getElementById('provider-model').value.trim();
+    const baseUrl = document.getElementById('provider-base-url').value.trim();
+    const id = _configuringBuiltinId;
+    const prevOverride = _builtinOverrides[id] || {};
+    const hadKey = prevOverride.api_key === API_KEY_UNCHANGED;
+    const override = {};
+    if (apiKey) {
+      override.api_key = apiKey;  // New key entered — backend will encrypt it
+    } else if (hadKey) {
+      override.api_key = API_KEY_UNCHANGED;  // Sentinel: keep existing encrypted key
+    }
+    // If neither — key is cleared (no key configured)
+    if (model) override.model = model;
+    if (baseUrl) override.base_url = baseUrl;
+    const prev = _builtinOverrides[id];
+    _builtinOverrides[id] = override;
+    const isActive = id === _activeLlmBackend;
+    const modelUpdate = () => {
+      if (!isActive) return Promise.resolve();
+      if (model) {
+        return apiFetchVoid('/api/settings/selected_model', { method: 'PUT', body: { value: model } });
+      }
+      return apiFetchVoid('/api/settings/selected_model', { method: 'DELETE' });
+    };
+    apiFetchVoid('/api/settings/llm_builtin_overrides', { method: 'PUT', body: { value: _builtinOverrides } })
+      .then(() => modelUpdate())
+      .then(() => {
+        if (isActive) _selectedModel = model;
+        renderProviders();
+        if (isActive) loadInferenceSettings();
+        resetProviderForm();
+        scrollToProviders();
+        if (isActive) {
+          document.getElementById('config-restart-notice').style.display = 'flex';
+          var llmNotice = document.getElementById('llm-restart-notice');
+          if (llmNotice) llmNotice.style.display = 'flex';
+        }
+        showToast(I18n.t('config.providerConfigured', { name: id }));
+      })
+      .catch((e) => {
+        if (prev !== undefined) { _builtinOverrides[id] = prev; } else { delete _builtinOverrides[id]; }
+        showToast(I18n.t('error.unknown') + ': ' + e.message, 'error');
+      });
+    return;
+  }
+
+  const name = document.getElementById('provider-name').value.trim();
+  const id = document.getElementById('provider-id').value.trim();
+  const adapter = document.getElementById('provider-adapter').value;
+  const baseUrl = document.getElementById('provider-base-url').value.trim();
+  const apiKey = document.getElementById('provider-api-key').value.trim();
+  const model = document.getElementById('provider-model').value.trim();
+
+  if (!id || !name) {
+    showToast(I18n.t('config.providerFieldsRequired'), 'error');
+    return;
+  }
+
+  if (_editingProviderId) {
+    // Update existing provider
+    const idx = _customProviders.findIndex((p) => p.id === _editingProviderId);
+    if (idx === -1) return;
+    const original = _customProviders[idx];
+    const hadCustomKey = original.api_key === API_KEY_UNCHANGED;
+    let effectiveApiKey;
+    if (apiKey) {
+      effectiveApiKey = apiKey;  // New key — backend will encrypt it
+    } else if (hadCustomKey) {
+      effectiveApiKey = API_KEY_UNCHANGED;  // Sentinel: keep existing encrypted key
+    } else {
+      effectiveApiKey = undefined;  // No key
+    }
+    _customProviders[idx] = { ...original, name, adapter, base_url: baseUrl, default_model: model || undefined, api_key: effectiveApiKey };
+    const isActive = _editingProviderId === _activeLlmBackend;
+    const modelUpdate = () => {
+      if (!isActive) return Promise.resolve();
+      if (model) {
+        return apiFetchVoid('/api/settings/selected_model', { method: 'PUT', body: { value: model } });
+      }
+      return apiFetchVoid('/api/settings/selected_model', { method: 'DELETE' });
+    };
+    saveCustomProviders().then(() => modelUpdate()).then(() => {
+      if (isActive) _selectedModel = model;
+      renderProviders();
+      if (isActive) loadInferenceSettings();
+      resetProviderForm();
+      scrollToProviders();
+      if (isActive) {
+        document.getElementById('config-restart-notice').style.display = 'flex';
+        var llmNotice = document.getElementById('llm-restart-notice');
+        if (llmNotice) llmNotice.style.display = 'flex';
+      }
+      showToast(I18n.t('config.providerUpdated', { name }));
+    }).catch((e) => {
+      _customProviders[idx] = original;
+      showToast(I18n.t('error.unknown') + ': ' + e.message, 'error');
+    });
+    return;
+  }
+
+  if (!/^[a-z0-9_-]+$/.test(id)) {
+    showToast(I18n.t('config.providerIdInvalid'), 'error');
+    return;
+  }
+  const allIds = [..._builtinProviders.map((p) => p.id), ..._customProviders.map((p) => p.id)];
+  if (allIds.includes(id)) {
+    showToast(I18n.t('config.providerIdTaken', { id }), 'error');
+    return;
+  }
+
+  const newProvider = { id, name, adapter, base_url: baseUrl, default_model: model, api_key: apiKey || undefined, builtin: false };
+  _customProviders.push(newProvider);
+
+  saveCustomProviders().then(() => {
+    renderProviders();
+    resetProviderForm();
+    scrollToProviders();
+    showToast(I18n.t('config.providerAdded', { name }));
+  }).catch((e) => {
+    _customProviders.pop();
+    showToast(I18n.t('error.unknown') + ': ' + e.message, 'error');
+  });
+});
+
+function resetProviderForm() {
+  _editingProviderId = null;
+  _configuringBuiltinId = null;
+  document.getElementById('provider-dialog').style.display = 'none';
+  // Restore all hidden rows and buttons
+  ['provider-name-row', 'provider-id-row', 'provider-adapter-row',
+   'provider-base-url-row', 'provider-api-key-row'].forEach((id) => {
+    document.getElementById(id).style.display = '';
+  });
+  document.getElementById('fetch-models-btn').style.display = '';
+  const titleEl = document.getElementById('provider-form-title');
+  titleEl.setAttribute('data-i18n', 'config.newProvider');
+  titleEl.textContent = I18n.t('config.newProvider');
+  const idField = document.getElementById('provider-id');
+  idField.readOnly = false;
+  idField.style.opacity = '';
+  delete idField.dataset.edited;
+  const baseUrlField = document.getElementById('provider-base-url');
+  baseUrlField.readOnly = false;
+  baseUrlField.style.opacity = '';
+  ['provider-name', 'provider-id', 'provider-base-url', 'provider-api-key', 'provider-model'].forEach((id) => {
+    document.getElementById(id).value = '';
+  });
+  document.getElementById('provider-adapter').selectedIndex = 0;
+  const sel = document.getElementById('provider-model-select');
+  sel.innerHTML = '';
+  sel.style.display = 'none';
+  document.getElementById('test-connection-result').style.display = 'none';
+}
+
+document.getElementById('provider-model-select').addEventListener('change', (e) => {
+  document.getElementById('provider-model').value = e.target.value;
+});
+
+document.getElementById('fetch-models-btn').addEventListener('click', () => {
+  let adapter = document.getElementById('provider-adapter').value;
+  let baseUrl = document.getElementById('provider-base-url').value.trim();
+  const apiKey = document.getElementById('provider-api-key').value.trim();
+
+  // For built-in providers, use the adapter from the registry.
+  // base_url comes from the form which already reflects: env > hardcoded default.
+  if (_configuringBuiltinId) {
+    const p = _builtinProviders.find((x) => x.id === _configuringBuiltinId);
+    if (p) {
+      adapter = p.adapter;
+      if (!baseUrl) baseUrl = p.base_url;
+    }
+  }
+
+  if (!baseUrl) {
+    showToast(I18n.t('config.providerBaseUrlRequired'), 'error');
+    return;
+  }
+
+  const btn = document.getElementById('fetch-models-btn');
+  btn.disabled = true;
+  btn.textContent = I18n.t('config.fetchingModels');
+
+  // Resolve provider_id so the backend can look up vaulted API keys.
+  const providerId = _configuringBuiltinId || document.getElementById('provider-id').value.trim();
+
+  apiFetch('/api/llm/list_models', {
+    method: 'POST',
+    body: {
+      adapter, base_url: baseUrl,
+      api_key: apiKey || undefined,
+      provider_id: providerId || undefined,
+      provider_type: _configuringBuiltinId ? 'builtin' : 'custom',
+    },
+  })
+    .then((data) => {
+      const select = document.getElementById('provider-model-select');
+      if (data.ok && data.models && data.models.length > 0) {
+        const currentModel = document.getElementById('provider-model').value;
+        select.innerHTML = data.models
+          .map((m) => `<option value="${escapeHtml(m)}"${m === currentModel ? ' selected' : ''}>${escapeHtml(m)}</option>`)
+          .join('');
+        select.style.display = '';
+        btn.style.display = 'none';
+        showToast(I18n.t('config.modelsFetched', { count: data.models.length }));
+      } else {
+        showToast(data.message || I18n.t('config.modelsFetchFailed'), 'error');
+      }
+    })
+    .catch((e) => showToast(e.message, 'error'))
+    .finally(() => {
+      btn.disabled = false;
+      btn.textContent = I18n.t('config.fetchModels');
+    });
+});
+
+// Auto-fill provider ID from name
+document.getElementById('provider-name').addEventListener('input', (e) => {
+  const idField = document.getElementById('provider-id');
+  if (!idField.dataset.edited) {
+    idField.value = e.target.value.toLowerCase().replace(/[^a-z0-9_]+/g, '-').replace(/^-|-$/g, '');
+  }
+});
+
+document.getElementById('provider-id').addEventListener('input', (e) => {
+  e.target.dataset.edited = e.target.value ? '1' : '';
 });

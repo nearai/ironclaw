@@ -972,7 +972,7 @@ impl GeminiOauthProvider {
             None => return,
         };
 
-        // For each model turn in the active loop, ensure the first functionCall has a thoughtSignature.
+        // For each model turn in the active loop, ensure functionCall parts have a thoughtSignature.
         for item in contents.iter_mut().skip(start) {
             let is_model = item.get("role").and_then(|r| r.as_str()) == Some("model");
             if !is_model {
@@ -992,7 +992,6 @@ impl GeminiOauthProvider {
                             );
                         }
                         modified = true;
-                        break; // Only the first functionCall
                     }
                 }
                 if modified {
@@ -1622,12 +1621,20 @@ impl GeminiOauthProvider {
                     }
                     if let Some(ref calls) = msg.tool_calls {
                         for call in calls {
-                            parts.push(serde_json::json!({
+                            let mut part = serde_json::json!({
                                 "functionCall": {
                                     "name": call.name,
                                     "args": call.arguments
                                 }
-                            }));
+                            });
+                            // Echo back the original thoughtSignature if present.
+                            if let Some(ref sig) = call.thought_signature {
+                                part.as_object_mut().unwrap().insert(
+                                    "thoughtSignature".to_string(),
+                                    serde_json::Value::String(sig.clone()),
+                                );
+                            }
+                            parts.push(part);
                         }
                     }
                     // Fallback: if no parts at all, add empty text to avoid
@@ -1893,12 +1900,19 @@ impl GeminiOauthProvider {
                         .and_then(|i| i.as_str())
                         .map(|s| s.to_string())
                         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+                    // Capture thoughtSignature (sibling of functionCall in the part)
+                    // so it can be echoed back when replaying history.
+                    let thought_signature = part
+                        .get("thoughtSignature")
+                        .and_then(|s| s.as_str())
+                        .map(|s| s.to_string());
 
                     tool_calls.push(ToolCall {
                         id,
                         name,
                         arguments: args,
                         reasoning: None,
+                        thought_signature,
                     });
                 }
             }
@@ -2582,5 +2596,162 @@ mod tests {
         assert_eq!(curated.len(), 2, "Invalid model turn should be dropped");
         assert_eq!(curated[0]["parts"][0]["text"], "hello");
         assert_eq!(curated[1]["parts"][0]["text"], "again");
+    }
+
+    #[test]
+    fn test_ensure_thought_signatures_adds_signatures_to_all_function_calls() {
+        let mut contents = vec![
+            serde_json::json!({
+                "role": "user",
+                "parts": [{ "text": "call tools" }]
+            }),
+            serde_json::json!({
+                "role": "model",
+                "parts": [
+                    { "functionCall": { "name": "memory_write", "args": { "key": "a" } } },
+                    { "functionCall": { "name": "memory_write", "args": { "key": "b" } } }
+                ]
+            }),
+        ];
+
+        GeminiOauthProvider::ensure_thought_signatures(&mut contents);
+
+        let parts = contents[1]
+            .get("parts")
+            .and_then(|p| p.as_array())
+            .expect("model turn should have parts");
+
+        let signed_calls = parts
+            .iter()
+            .filter(|part| part.get("functionCall").is_some())
+            .filter(|part| part.get("thoughtSignature").is_some())
+            .count();
+
+        assert_eq!(signed_calls, 2); // safety: test-only assertion
+    }
+
+    #[test]
+    fn test_from_gemini_response_captures_thought_signature() {
+        let body = serde_json::json!({
+            "candidates": [{
+                "content": {
+                    "parts": [{
+                        "thoughtSignature": "abc123sig",
+                        "functionCall": {
+                            "name": "read_file",
+                            "args": { "path": "/tmp/test.txt" }
+                        }
+                    }]
+                },
+                "finishReason": "STOP"
+            }],
+            "usageMetadata": {
+                "promptTokenCount": 10,
+                "candidatesTokenCount": 5
+            }
+        });
+
+        let (_resp, tool_calls) = GeminiOauthProvider::from_gemini_response(body).unwrap();
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(
+            tool_calls[0].thought_signature.as_deref(),
+            Some("abc123sig")
+        );
+    }
+
+    #[test]
+    fn test_from_gemini_response_no_thought_signature_yields_none() {
+        let body = serde_json::json!({
+            "candidates": [{
+                "content": {
+                    "parts": [{
+                        "functionCall": {
+                            "name": "echo",
+                            "args": {}
+                        }
+                    }]
+                },
+                "finishReason": "STOP"
+            }],
+            "usageMetadata": {
+                "promptTokenCount": 5,
+                "candidatesTokenCount": 3
+            }
+        });
+
+        let (_resp, tool_calls) = GeminiOauthProvider::from_gemini_response(body).unwrap();
+        assert_eq!(tool_calls.len(), 1);
+        assert!(tool_calls[0].thought_signature.is_none());
+    }
+
+    #[test]
+    fn test_to_gemini_request_echoes_thought_signature_on_function_call() {
+        let messages = vec![
+            ChatMessage::user("call a tool"),
+            ChatMessage::assistant_with_tool_calls(
+                None,
+                vec![ToolCall {
+                    id: "call_1".to_string(),
+                    name: "read_file".to_string(),
+                    arguments: serde_json::json!({"path": "/tmp/x"}),
+                    reasoning: None,
+                    thought_signature: Some("sig_from_gemini".to_string()),
+                }],
+            ),
+            ChatMessage::tool_result("call_1", "read_file", r#"{"output":"hello"}"#),
+        ];
+
+        let req = GeminiOauthProvider::to_gemini_request(
+            &messages,
+            None,
+            None,
+            None,
+            None,
+            None,
+            "gemini-3-flash-preview",
+        );
+
+        let contents = req["contents"].as_array().unwrap();
+        // The model turn (index 1) should have the thoughtSignature on its functionCall part.
+        let model_turn = &contents[1];
+        assert_eq!(model_turn["role"], "model");
+        let fc_part = &model_turn["parts"][0];
+        assert!(fc_part.get("functionCall").is_some());
+        assert_eq!(fc_part["thoughtSignature"], "sig_from_gemini");
+    }
+
+    #[test]
+    fn test_to_gemini_request_omits_thought_signature_when_none() {
+        let messages = vec![
+            ChatMessage::user("call a tool"),
+            ChatMessage::assistant_with_tool_calls(
+                None,
+                vec![ToolCall {
+                    id: "call_1".to_string(),
+                    name: "echo".to_string(),
+                    arguments: serde_json::json!({}),
+                    reasoning: None,
+                    thought_signature: None,
+                }],
+            ),
+            ChatMessage::tool_result("call_1", "echo", r#"{"output":"ok"}"#),
+        ];
+
+        let req = GeminiOauthProvider::to_gemini_request(
+            &messages,
+            None,
+            None,
+            None,
+            None,
+            None,
+            "gemini-2.0-flash",
+        );
+
+        let contents = req["contents"].as_array().unwrap();
+        let model_turn = &contents[1];
+        let fc_part = &model_turn["parts"][0];
+        assert!(fc_part.get("functionCall").is_some());
+        // No thoughtSignature should be present when the ToolCall had None.
+        assert!(fc_part.get("thoughtSignature").is_none());
     }
 }

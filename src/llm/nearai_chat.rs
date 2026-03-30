@@ -451,7 +451,7 @@ impl NearAiChatProvider {
             provider: "nearai_chat".to_string(),
             reason: format!(
                 "No model names found in response: {}",
-                &response_text[..response_text.len().min(300)]
+                &response_text[..crate::util::floor_char_boundary(&response_text, 300)]
             ),
         })
     }
@@ -490,9 +490,8 @@ impl LlmProvider for NearAiChatProvider {
                 .choices
                 .into_iter()
                 .next()
-                .ok_or_else(|| LlmError::InvalidResponse {
+                .ok_or_else(|| LlmError::EmptyResponse {
                     provider: "nearai_chat".to_string(),
-                    reason: "No choices in response".to_string(),
                 })?;
 
         // Fall back to reasoning_content when content is null (same as
@@ -570,9 +569,8 @@ impl LlmProvider for NearAiChatProvider {
                 .choices
                 .into_iter()
                 .next()
-                .ok_or_else(|| LlmError::InvalidResponse {
+                .ok_or_else(|| LlmError::EmptyResponse {
                     provider: "nearai_chat".to_string(),
-                    reason: "No choices in response".to_string(),
                 })?;
 
         let tool_calls: Vec<ToolCall> = choice
@@ -588,6 +586,7 @@ impl LlmProvider for NearAiChatProvider {
                     name: tc.function.name,
                     arguments,
                     reasoning: None,
+                    thought_signature: None,
                 }
             })
             .collect();
@@ -1182,12 +1181,14 @@ mod tests {
                 name: "list_issues".to_string(),
                 arguments: serde_json::json!({"owner": "foo", "repo": "bar"}),
                 reasoning: None,
+                thought_signature: None,
             },
             ToolCall {
                 id: "call_2".to_string(),
                 name: "search".to_string(),
                 arguments: serde_json::json!({"query": "test"}),
                 reasoning: None,
+                thought_signature: None,
             },
         ];
 
@@ -1221,6 +1222,7 @@ mod tests {
             name: "test".to_string(),
             arguments: serde_json::json!({"key": "value"}),
             reasoning: None,
+            thought_signature: None,
         };
         let msg = ChatMessage::assistant_with_tool_calls(None, vec![tc]);
         let chat_msg: ChatCompletionMessage = msg.into();
@@ -1465,6 +1467,7 @@ mod tests {
                     name: tc.function.name,
                     arguments,
                     reasoning: None,
+                    thought_signature: None,
                 }
             })
             .collect();
@@ -1515,6 +1518,7 @@ mod tests {
                     name: tc.function.name,
                     arguments,
                     reasoning: None,
+                    thought_signature: None,
                 }
             })
             .collect();
@@ -2138,6 +2142,7 @@ mod tests {
                 name: "test".to_string(),
                 arguments: serde_json::json!({}),
                 reasoning: None,
+                thought_signature: None,
             }],
         );
         let chat_msg: ChatCompletionMessage = msg.into();

@@ -15,7 +15,9 @@ use crate::channels::IncomingMessage;
 use crate::channels::web::auth::AuthenticatedUser;
 use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::*;
-use crate::channels::web::util::{build_turns_from_db_messages, truncate_preview};
+use crate::channels::web::util::{
+    build_turns_from_db_messages, tool_error_for_display, truncate_preview,
+};
 
 pub async fn chat_send_handler(
     State(state): State<Arc<GatewayState>>,
@@ -397,7 +399,7 @@ pub async fn chat_history_handler(
                                 };
                                 truncate_preview(&s, 500)
                             }),
-                            error: tc.error.clone(),
+                            error: tc.error.as_deref().map(tool_error_for_display),
                             rationale: tc.rationale.clone(),
                         })
                         .collect(),
@@ -533,7 +535,7 @@ pub async fn chat_threads_handler(
     // Fallback: in-memory only (no assistant thread without DB)
     let sess = session.lock().await;
     let mut sorted_threads: Vec<_> = sess.threads.values().collect();
-    sorted_threads.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    sorted_threads.sort_by_key(|t| std::cmp::Reverse(t.updated_at));
     let threads: Vec<ThreadInfo> = sorted_threads
         .into_iter()
         .map(|t| ThreadInfo {

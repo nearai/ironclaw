@@ -231,9 +231,8 @@ impl LlmProvider for GithubCopilotProvider {
                 .choices
                 .into_iter()
                 .next()
-                .ok_or_else(|| LlmError::InvalidResponse {
+                .ok_or_else(|| LlmError::EmptyResponse {
                     provider: "github_copilot".to_string(),
-                    reason: "No choices in response".to_string(),
                 })?;
 
         let (content, _tool_calls) = extract_choice_content(&choice);
@@ -309,9 +308,8 @@ impl LlmProvider for GithubCopilotProvider {
                 .choices
                 .into_iter()
                 .next()
-                .ok_or_else(|| LlmError::InvalidResponse {
+                .ok_or_else(|| LlmError::EmptyResponse {
                     provider: "github_copilot".to_string(),
-                    reason: "No choices in response".to_string(),
                 })?;
 
         let (content, tool_calls) = extract_choice_content(&choice);
@@ -597,6 +595,7 @@ fn extract_choice_content(choice: &OpenAiChoice) -> (Option<String>, Vec<ToolCal
                     arguments: serde_json::from_str(&tc.function.arguments)
                         .unwrap_or(serde_json::Value::Object(serde_json::Map::new())),
                     reasoning: None,
+                    thought_signature: None,
                 })
                 .collect()
         })
@@ -630,6 +629,7 @@ mod tests {
             name: "search".to_string(),
             arguments: serde_json::json!({"q": "test"}),
             reasoning: None,
+            thought_signature: None,
         }];
         let messages = vec![
             ChatMessage::user("Search"),

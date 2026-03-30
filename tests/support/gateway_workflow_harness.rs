@@ -227,7 +227,6 @@ impl GatewayWorkflowHarness {
             prompt_queue: None,
             scheduler: Some(scheduler_slot.clone()),
             owner_id: user_id.clone(),
-            default_sender_id: user_id.clone(),
             shutdown_tx: tokio::sync::RwLock::new(None),
             ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
             llm_provider: Some(Arc::clone(&components.llm)),
@@ -241,6 +240,8 @@ impl GatewayWorkflowHarness {
             routine_engine: Arc::clone(&routine_slot),
             startup_time: Instant::now(),
             active_config: ironclaw::channels::web::server::ActiveConfigSnapshot::default(),
+            secrets_store: None,
+            db_auth: None,
         });
 
         let mut agent = Agent::new(
@@ -263,7 +264,8 @@ impl GatewayWorkflowHarness {
                 http_interceptor: None,
                 transcription: None,
                 document_extraction: None,
-                sandbox_readiness: ironclaw::agent::SandboxReadiness::DisabledByConfig,
+                sandbox_readiness:
+                    ironclaw::agent::routine_engine::SandboxReadiness::DisabledByConfig,
                 builder: None,
                 llm_backend: "nearai".to_string(),
                 tenant_rates: std::sync::Arc::new(ironclaw::tenant::TenantRateRegistry::new(4, 3)),
@@ -299,7 +301,7 @@ impl GatewayWorkflowHarness {
         let addr = start_server(
             "127.0.0.1:0".parse().expect("valid localhost addr"),
             Arc::clone(&gateway_state),
-            auth,
+            auth.into(),
         )
         .await
         .expect("failed to start gateway server");

@@ -40,6 +40,7 @@ eula = false
 tokio = { version = "1", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 futures = "0.3"
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-native-roots"] }
 eventsource-stream = "0.2"
 
 # HTTP client
@@ -57,6 +58,7 @@ refinery = { version = "0.8", features = ["tokio-postgres"], optional = true }
 tokio-postgres-rustls = { version = "0.13", optional = true }
 rustls = { version = "0.23", optional = true, default-features = false }
 rustls-native-certs = { version = "0.8", optional = true }
+webpki-roots = { version = "0.26", optional = true }
 
 # Database - libSQL/Turso (optional embedded database)
 libsql = { version = "0.6", optional = true, default-features = false, features = ["core", "replication", "remote", "tls"] }
@@ -95,7 +97,7 @@ termimad = "0.34"
 # Channel integrations
 axum = { version = "0.8", features = ["ws"] }
 tower = "0.5"
-tower-http = { version = "0.6", features = ["trace", "cors", "set-header"] }
+tower-http = { version = "0.6", features = ["trace", "cors", "set-header", "catch-panic"] }
 
 # Cron scheduling for routines
 cron = "0.13"
@@ -171,6 +173,7 @@ hyper-util = { version = "0.1", features = ["server", "tokio", "http1", "http2"]
 http-body-util = "0.1"
 bytes = "1"
 base64 = "0.22.1"
+jsonwebtoken = "9"
 mime_guess = "2.0.5"
 clap_complete = "4.5.0"
 lru = "0.16.3"
@@ -188,6 +191,10 @@ json5 = { version = "0.4", optional = true }
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = "3"
 
+# PTY allocation for Claude CLI stdout buffering fix (Unix only)
+[target.'cfg(unix)'.dependencies]
+pty-process = { version = "0.5", features = ["async"] }
+
 # Linux secret-service (GNOME Keyring, KWallet)
 [target.'cfg(target_os = "linux")'.dependencies]
 secret-service = { version = "4", features = ["rt-tokio-crypto-rust"] }
@@ -196,7 +203,6 @@ zbus = "4"
 [dev-dependencies]
 tokio-test = "0.4"
 tracing-test = "0.2"
-tokio-tungstenite = "0.26"
 testcontainers-modules = { version = "0.11", features = ["postgres"] }
 pretty_assertions = "1"
 tempfile = "3"
@@ -219,6 +225,7 @@ postgres = [
     "dep:tokio-postgres-rustls",
     "dep:rustls",
     "dep:rustls-native-certs",
+    "dep:webpki-roots",
     "dep:postgres-types",
     "dep:refinery",
     "dep:pgvector",
@@ -246,8 +253,7 @@ strip = true          # Remove debug symbols from release binaries
 # The profile that 'cargo dist' will build with
 [profile.dist]
 inherits = "release"
-lto = "fat"           # Full cross-crate LTO (slow build, better codegen)
-codegen-units = 1     # Single codegen unit for maximum optimization
+lto = "thin"
 
 # Config for 'dist'
 [workspace.metadata.dist]

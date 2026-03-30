@@ -1,13 +1,11 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use secrecy::SecretString;
-use serde::Deserialize;
-
 use crate::bootstrap::ironclaw_base_dir;
 use crate::config::helpers::{optional_env, parse_bool_env, parse_optional_env};
 use crate::error::ConfigError;
 use crate::settings::Settings;
+use secrecy::SecretString;
 
 /// Channel configurations.
 #[derive(Debug, Clone)]
@@ -45,27 +43,35 @@ pub struct GatewayConfig {
     pub port: u16,
     /// Bearer token for authentication. Random hex generated at startup if unset.
     pub auth_token: Option<String>,
-    pub user_id: String,
     /// Additional user scopes for workspace reads.
     ///
     /// When set, the workspace will be able to read (search, read, list) from
-    /// these additional user scopes while writes remain isolated to `user_id`.
+    /// these additional user scopes while writes remain isolated to the
+    /// authenticated user's own scope.
     /// Parsed from `WORKSPACE_READ_SCOPES` (comma-separated).
     pub workspace_read_scopes: Vec<String>,
     /// Memory layer definitions (JSON in env var, or from external config).
     pub memory_layers: Vec<crate::workspace::layer::MemoryLayer>,
-    /// Multi-user token map. When set, each token maps to a user identity.
-    /// Parsed from `GATEWAY_USER_TOKENS` (JSON string). When absent, falls back
-    /// to single-user mode via `auth_token` + `user_id`.
-    pub user_tokens: Option<HashMap<String, UserTokenConfig>>,
+    /// OIDC JWT authentication (e.g., behind AWS ALB with Okta).
+    pub oidc: Option<GatewayOidcConfig>,
 }
 
-/// Per-user token configuration for multi-user mode.
-#[derive(Debug, Clone, Deserialize)]
-pub struct UserTokenConfig {
-    pub user_id: String,
-    #[serde(default)]
-    pub workspace_read_scopes: Vec<String>,
+/// OIDC JWT authentication configuration for the web gateway.
+///
+/// When enabled, the gateway accepts signed JWTs from a configurable HTTP
+/// header (e.g., `x-amzn-oidc-data` from AWS ALB). Keys are fetched from
+/// a JWKS endpoint and cached for 1 hour.
+#[derive(Debug, Clone)]
+pub struct GatewayOidcConfig {
+    /// HTTP header containing the JWT (default: `x-amzn-oidc-data`).
+    pub header: String,
+    /// JWKS URL for key discovery. Supports `{kid}` placeholder for
+    /// ALB-style per-key PEM endpoints, and standard `/.well-known/jwks.json`.
+    pub jwks_url: String,
+    /// Expected `iss` claim. Validated if set.
+    pub issuer: Option<String>,
+    /// Expected `aud` claim. Validated if set.
+    pub audience: Option<String>,
 }
 
 /// Signal channel configuration (signal-cli daemon HTTP/JSON-RPC).
@@ -132,10 +138,6 @@ impl ChannelsConfig {
 
         let gateway_enabled = parse_bool_env("GATEWAY_ENABLED", cs.gateway_enabled)?;
         let gateway = if gateway_enabled {
-            let user_id = optional_env("GATEWAY_USER_ID")?
-                .or_else(|| cs.gateway_user_id.clone())
-                .unwrap_or_else(|| owner_id.to_string());
-
             let memory_layers: Vec<crate::workspace::layer::MemoryLayer> =
                 match optional_env("MEMORY_LAYERS")? {
                     Some(json_str) => {
@@ -144,7 +146,7 @@ impl ChannelsConfig {
                             message: format!("must be valid JSON array of layer objects: {e}"),
                         })?
                     }
-                    None => crate::workspace::layer::MemoryLayer::default_for_user(&user_id),
+                    None => crate::workspace::layer::MemoryLayer::default_for_user(owner_id),
                 };
 
             // Validate layer names and scopes
@@ -196,41 +198,6 @@ impl ChannelsConfig {
                 }
             }
 
-            let user_tokens: Option<HashMap<String, UserTokenConfig>> =
-                match optional_env("GATEWAY_USER_TOKENS")? {
-                    Some(json_str) => {
-                        let tokens: HashMap<String, UserTokenConfig> = serde_json::from_str(
-                            &json_str,
-                        )
-                        .map_err(|e| ConfigError::InvalidValue {
-                            key: "GATEWAY_USER_TOKENS".to_string(),
-                            message: format!(
-                                "must be valid JSON object mapping tokens to user configs: {e}"
-                            ),
-                        })?;
-                        if tokens.is_empty() {
-                            return Err(ConfigError::InvalidValue {
-                            key: "GATEWAY_USER_TOKENS".to_string(),
-                            message:
-                                "token map is empty — remove the variable to use single-user mode"
-                                    .to_string(),
-                        });
-                        }
-                        for (tok, cfg) in &tokens {
-                            if cfg.user_id.trim().is_empty() {
-                                return Err(ConfigError::InvalidValue {
-                                    key: "GATEWAY_USER_TOKENS".to_string(),
-                                    message: format!(
-                                        "token '{}...' has an empty user_id",
-                                        &tok[..tok.len().min(8)]
-                                    ),
-                                });
-                            }
-                        }
-                        Some(tokens)
-                    }
-                    None => None,
-                };
             let workspace_read_scopes: Vec<String> = optional_env("WORKSPACE_READ_SCOPES")?
                 .map(|s| {
                     s.split(',')
@@ -248,6 +215,24 @@ impl ChannelsConfig {
                     });
                 }
             }
+            let oidc_enabled = parse_bool_env("GATEWAY_OIDC_ENABLED", false)?;
+            let oidc = if oidc_enabled {
+                let jwks_url =
+                    optional_env("GATEWAY_OIDC_JWKS_URL")?.ok_or(ConfigError::InvalidValue {
+                        key: "GATEWAY_OIDC_JWKS_URL".to_string(),
+                        message: "required when GATEWAY_OIDC_ENABLED=true".to_string(),
+                    })?;
+                Some(GatewayOidcConfig {
+                    header: optional_env("GATEWAY_OIDC_HEADER")?
+                        .unwrap_or_else(|| "x-amzn-oidc-data".to_string()),
+                    jwks_url,
+                    issuer: optional_env("GATEWAY_OIDC_ISSUER")?,
+                    audience: optional_env("GATEWAY_OIDC_AUDIENCE")?,
+                })
+            } else {
+                None
+            };
+
             Some(GatewayConfig {
                 host: optional_env("GATEWAY_HOST")?
                     .or_else(|| cs.gateway_host.clone())
@@ -258,10 +243,9 @@ impl ChannelsConfig {
                 )?,
                 auth_token: optional_env("GATEWAY_AUTH_TOKEN")?
                     .or_else(|| cs.gateway_auth_token.clone()),
-                user_id,
                 workspace_read_scopes,
                 memory_layers,
-                user_tokens,
+                oidc,
             })
         } else {
             None
@@ -416,15 +400,13 @@ mod tests {
             host: "127.0.0.1".to_string(),
             port: 3000,
             auth_token: Some("tok-abc".to_string()),
-            user_id: "default".to_string(),
             workspace_read_scopes: vec![],
             memory_layers: vec![],
-            user_tokens: None,
+            oidc: None,
         };
         assert_eq!(cfg.host, "127.0.0.1");
         assert_eq!(cfg.port, 3000);
         assert_eq!(cfg.auth_token.as_deref(), Some("tok-abc"));
-        assert_eq!(cfg.user_id, "default");
     }
 
     #[test]
@@ -433,10 +415,9 @@ mod tests {
             host: "0.0.0.0".to_string(),
             port: 3001,
             auth_token: None,
-            user_id: "anon".to_string(),
             workspace_read_scopes: vec![],
             memory_layers: vec![],
-            user_tokens: None,
+            oidc: None,
         };
         assert!(cfg.auth_token.is_none());
     }
@@ -563,7 +544,6 @@ mod tests {
         assert_eq!(gateway.host, "127.0.0.3");
         assert_eq!(gateway.port, 9191);
         assert_eq!(gateway.auth_token.as_deref(), Some("tok"));
-        assert_eq!(gateway.user_id, "owner-scope");
 
         let signal = cfg.signal.expect("signal config");
         assert_eq!(signal.account, "+15551234567");

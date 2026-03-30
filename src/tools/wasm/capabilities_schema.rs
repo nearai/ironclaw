@@ -75,6 +75,10 @@ pub struct CapabilitiesFile {
     #[serde(default)]
     pub webhook: Option<WebhookCapabilitySchema>,
 
+    /// Arbitrary websocket configuration preserved for runtime consumers.
+    #[serde(default)]
+    pub websocket: Option<serde_json::Value>,
+
     /// Authentication setup instructions.
     /// Used by `ironclaw config` to guide users through auth setup.
     #[serde(default)]
@@ -155,6 +159,7 @@ impl CapabilitiesFile {
             self.tool_invoke = self.tool_invoke.or(inner.tool_invoke);
             self.workspace = self.workspace.or(inner.workspace);
             self.webhook = self.webhook.or(inner.webhook);
+            self.websocket = self.websocket.or(inner.websocket);
             self.auth = self.auth.or(inner.auth);
             self.setup = self.setup.or(inner.setup);
         }
@@ -249,6 +254,8 @@ impl CapabilitiesFile {
         if let Some(webhook) = &self.webhook {
             caps.webhook = Some(webhook.to_webhook_capability());
         }
+
+        caps.websocket = self.websocket.clone();
 
         caps
     }
@@ -745,6 +752,8 @@ fn default_tool_setup_field_input_type() -> ToolSetupFieldInputType {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use crate::tools::wasm::capabilities_schema::{CapabilitiesFile, CredentialLocationSchema};
 
     #[test]
@@ -1399,6 +1408,48 @@ mod tests {
         assert_eq!(
             http.allowlist[0].host, "preserved.example.com",
             "Empty inner capabilities should not clobber outer http"
+        );
+    }
+
+    #[test]
+    fn test_discord_websocket_config_preserved_in_runtime_capabilities() {
+        let json = r#"{
+            "capabilities": {
+                "http": {
+                    "allowlist": [{ "host": "discord.com", "path_prefix": "/api/v10" }]
+                },
+                "websocket": {
+                    "url": "wss://gateway.discord.gg/?v=10&encoding=json",
+                    "connect_on_start": true,
+                    "identify": {
+                        "intents": 513,
+                        "properties": {
+                            "os": "linux",
+                            "browser": "ironclaw",
+                            "device": "ironclaw"
+                        }
+                    }
+                }
+            }
+        }"#;
+
+        let file = CapabilitiesFile::from_json(json).unwrap();
+        let caps = file.to_capabilities();
+
+        assert_eq!(
+            caps.websocket,
+            Some(json!({
+                "url": "wss://gateway.discord.gg/?v=10&encoding=json",
+                "connect_on_start": true,
+                "identify": {
+                    "intents": 513,
+                    "properties": {
+                        "os": "linux",
+                        "browser": "ironclaw",
+                        "device": "ironclaw"
+                    }
+                }
+            }))
         );
     }
 
