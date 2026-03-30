@@ -13,6 +13,7 @@ mod restart;
 pub mod routine;
 pub mod secrets_tools;
 pub(crate) mod shell;
+mod shell_credential;
 pub mod skill_tools;
 mod time;
 mod tool_info;
@@ -37,7 +38,7 @@ pub use routine::{
     RoutineListTool, RoutineUpdateTool,
 };
 pub use secrets_tools::{SecretDeleteTool, SecretListTool};
-pub use shell::ShellTool;
+pub use shell_credential::ShellTool;
 pub use skill_tools::{SkillInstallTool, SkillListTool, SkillRemoveTool, SkillSearchTool};
 pub use time::TimeTool;
 pub use tool_info::ToolInfoTool;
