@@ -196,13 +196,24 @@ pub fn create_tunnel(config: &TunnelProviderConfig) -> Result<Option<Box<dyn Tun
 
 /// Determine which local address the tunnel should forward traffic to.
 ///
-/// Prefers the webhook server (`HTTP_PORT`) since that's where webhook routes
-/// (Telegram, etc.) are served. Falls back to the gateway port if configured,
-/// otherwise defaults to 0.0.0.0:8080 (the same fallback the webhook server
-/// uses in main.rs when no HTTP config is present).
+/// Priority order:
+/// 1. HTTP channel config (`HTTP_PORT`) — the explicit webhook server port.
+/// 2. WASM channels enabled — the webhook server fallback port (8080), because
+///    WASM channel webhooks (Slack, Telegram, etc.) are served there, NOT on
+///    the gateway port. Routing the tunnel to the gateway would make webhooks
+///    unreachable even though the gateway web UI works.
+/// 3. Gateway config only (no WASM channels) — route to the gateway port so
+///    the web UI is reachable via the tunnel.
+/// 4. Absolute fallback — 0.0.0.0:8080 (matches the webhook server's own
+///    fallback in main.rs).
 fn resolve_tunnel_target(channels: &crate::config::ChannelsConfig) -> (&str, u16) {
     if let Some(ref http) = channels.http {
         return (http.host.as_str(), http.port);
+    }
+    // When WASM channels are active the webhook server binds 0.0.0.0:8080.
+    // Route the tunnel there so Slack/Telegram/etc. webhooks are reachable.
+    if channels.wasm_channels_enabled {
+        return ("0.0.0.0", 8080);
     }
     if let Some(ref gw) = channels.gateway {
         return (gw.host.as_str(), gw.port);
@@ -459,6 +470,12 @@ mod tests {
         c
     }
 
+    fn channels_gateway_and_wasm(host: &str, port: u16) -> crate::config::ChannelsConfig {
+        let mut c = channels_gateway_only(host, port);
+        c.wasm_channels_enabled = true;
+        c
+    }
+
     fn channels_neither() -> crate::config::ChannelsConfig {
         base_channels()
     }
@@ -473,10 +490,22 @@ mod tests {
 
     #[test]
     fn tunnel_target_falls_back_to_gateway() {
+        // wasm_channels_enabled=false: only gateway, no WASM
         let channels = channels_gateway_only("10.0.0.1", 4000);
         let (host, port) = resolve_tunnel_target(&channels);
         assert_eq!(host, "10.0.0.1"); // safety: test-only
         assert_eq!(port, 4000); // safety: test-only
+    }
+
+    #[test]
+    fn tunnel_target_wasm_channels_beats_gateway() {
+        // When WASM channels are enabled (e.g. Slack), the webhook server runs
+        // on 0.0.0.0:8080, not the gateway port. The tunnel must target 8080
+        // so that POST /webhook/slack is reachable from the internet.
+        let channels = channels_gateway_and_wasm("127.0.0.1", 3000);
+        let (host, port) = resolve_tunnel_target(&channels);
+        assert_eq!(host, "0.0.0.0"); // safety: test-only
+        assert_eq!(port, 8080); // safety: test-only
     }
 
     #[test]
