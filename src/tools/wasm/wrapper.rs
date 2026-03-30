@@ -431,12 +431,14 @@ impl near::agent::host::Host for StoreData {
                 _ => return Err(format!("Unsupported HTTP method: {}", method)),
             };
 
-            for (key, value) in headers {
-                request = request.header(&key, &value);
+            for (key, value) in &headers {
+                request = request.header(key, value);
             }
 
             if let Some(body_bytes) = body {
                 request = request.body(body_bytes);
+            } else if needs_content_length_zero(&method, &headers) {
+                request = request.header("content-length", "0");
             }
 
             // Caller-specified timeout (default 30s, max 5min)
@@ -1758,6 +1760,20 @@ fn build_tool_usage_hint(tool_name: &str, schema: &serde_json::Value) -> String 
     }
 
     hint
+}
+
+/// Methods with side effects require `Content-Length` even when no body is
+/// sent — some APIs (e.g. Gmail) return 411 without it. Returns `true` when
+/// the host should inject a `Content-Length: 0` header.
+fn needs_content_length_zero(method: &str, headers: &HashMap<String, String>) -> bool {
+    let mutating = matches!(
+        method.to_uppercase().as_str(),
+        "POST" | "PUT" | "PATCH" | "DELETE"
+    );
+    mutating
+        && !headers
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("content-length"))
 }
 
 #[cfg(test)]
@@ -3258,5 +3274,58 @@ mod tests {
 
         // Should return empty since credential can't be found anywhere
         assert!(result.is_empty(), "no credentials found"); // safety: test code only
+    }
+
+    // --- needs_content_length_zero (regression for #1529) ---
+
+    #[test]
+    fn post_no_body_needs_content_length() {
+        let headers = HashMap::new();
+        assert!(
+            super::needs_content_length_zero("POST", &headers),
+            "POST with no body must get Content-Length: 0 to avoid 411"
+        );
+    }
+
+    #[test]
+    fn put_no_body_needs_content_length() {
+        assert!(super::needs_content_length_zero("PUT", &HashMap::new()));
+    }
+
+    #[test]
+    fn delete_no_body_needs_content_length() {
+        assert!(super::needs_content_length_zero("DELETE", &HashMap::new()));
+    }
+
+    #[test]
+    fn patch_no_body_needs_content_length() {
+        assert!(super::needs_content_length_zero("PATCH", &HashMap::new()));
+    }
+
+    #[test]
+    fn get_no_body_skips_content_length() {
+        assert!(!super::needs_content_length_zero("GET", &HashMap::new()));
+    }
+
+    #[test]
+    fn head_no_body_skips_content_length() {
+        assert!(!super::needs_content_length_zero("HEAD", &HashMap::new()));
+    }
+
+    #[test]
+    fn post_no_body_respects_explicit_content_length() {
+        let mut headers = HashMap::new();
+        headers.insert("Content-Length".to_string(), "0".to_string());
+        assert!(
+            !super::needs_content_length_zero("POST", &headers),
+            "should not double-add when tool already sets Content-Length"
+        );
+    }
+
+    #[test]
+    fn content_length_check_is_case_insensitive() {
+        let mut headers = HashMap::new();
+        headers.insert("content-length".to_string(), "0".to_string());
+        assert!(!super::needs_content_length_zero("POST", &headers));
     }
 }
