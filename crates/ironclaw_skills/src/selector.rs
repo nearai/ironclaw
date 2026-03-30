@@ -147,6 +147,86 @@ fn score_skill(skill: &LoadedSkill, message_lower: &str, message_original: &str)
     score
 }
 
+/// Extract explicit `/skill-name` mentions from a message.
+///
+/// Users can write `/github` or `/file-issues` anywhere in their message to
+/// force-activate a skill. Returns the matched skills and a rewritten message
+/// where each `/skill-name` is replaced with the skill's description (so the
+/// sentence still reads naturally for the LLM).
+///
+/// Example: `"fetch issues from /github"` with a skill named `github`
+/// (description "GitHub API") → rewritten to `"fetch issues from GitHub API"`,
+/// and the github skill is force-included.
+pub fn extract_skill_mentions<'a>(
+    message: &str,
+    available_skills: &'a [LoadedSkill],
+) -> (Vec<&'a LoadedSkill>, String) {
+    let mut matched = Vec::new();
+    let mut rewritten = message.to_string();
+
+    // Build a name→skill lookup (case-insensitive)
+    let skill_map: std::collections::HashMap<String, &'a LoadedSkill> = available_skills
+        .iter()
+        .map(|s| (s.manifest.name.to_lowercase(), s))
+        .collect();
+
+    // Find /word patterns that match skill names. Scan from end to avoid
+    // index shifts when replacing.
+    let mut replacements: Vec<(usize, usize, String)> = Vec::new();
+    let bytes = message.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'/' {
+            // Check that / is at start or preceded by whitespace/punctuation
+            let is_boundary = i == 0
+                || bytes[i - 1] == b' '
+                || bytes[i - 1] == b'\n'
+                || bytes[i - 1] == b'\t'
+                || bytes[i - 1] == b'"'
+                || bytes[i - 1] == b'(';
+
+            if is_boundary {
+                // Extract the name: [a-z0-9-]+
+                let start = i + 1;
+                let mut end = start;
+                while end < bytes.len()
+                    && (bytes[end].is_ascii_lowercase()
+                        || bytes[end].is_ascii_digit()
+                        || bytes[end] == b'-')
+                {
+                    end += 1;
+                }
+                if end > start {
+                    let name = &message[start..end];
+                    if let Some(skill) = skill_map.get(name) {
+                        let replacement = if skill.manifest.description.is_empty() {
+                            // No description — just remove the slash
+                            name.replace('-', " ")
+                        } else {
+                            skill.manifest.description.clone()
+                        };
+                        replacements.push((i, end, replacement));
+                        if !matched
+                            .iter()
+                            .any(|s: &&LoadedSkill| s.manifest.name == skill.manifest.name)
+                        {
+                            matched.push(*skill);
+                        }
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+
+    // Apply replacements in reverse order to preserve indices
+    for (start, end, replacement) in replacements.into_iter().rev() {
+        rewritten.replace_range(start..end, &replacement);
+    }
+
+    (matched, rewritten)
+}
+
 /// Apply confidence factor to a base score.
 ///
 /// Authored skills always get factor 1.0 (no adjustment).
@@ -518,5 +598,91 @@ mod tests {
         assert_eq!(apply_confidence_factor(100, -0.5, false), 50);
         // Over 1.0 clamped to 1.0
         assert_eq!(apply_confidence_factor(100, 1.5, false), 100);
+    }
+
+    // ── extract_skill_mentions tests ──────────────────────────
+
+    #[test]
+    fn test_extract_no_mentions() {
+        let skills = vec![make_skill("github", &["github"], &[], &[])];
+        let (matched, rewritten) = extract_skill_mentions("fetch issues from github", &skills);
+        assert!(matched.is_empty());
+        assert_eq!(rewritten, "fetch issues from github");
+    }
+
+    #[test]
+    fn test_extract_slash_mention() {
+        let skills = vec![make_skill("github", &["github"], &[], &[])];
+        let (matched, rewritten) = extract_skill_mentions("fetch issues from /github", &skills);
+        assert_eq!(matched.len(), 1);
+        assert_eq!(matched[0].manifest.name, "github");
+        assert_eq!(rewritten, "fetch issues from github skill");
+    }
+
+    #[test]
+    fn test_extract_slash_mention_with_description() {
+        let mut skill = make_skill("github", &["github"], &[], &[]);
+        skill.manifest.description = "GitHub API".to_string();
+        let skills = vec![skill];
+        let (matched, rewritten) = extract_skill_mentions("fetch issues from /github", &skills);
+        assert_eq!(matched.len(), 1);
+        assert_eq!(rewritten, "fetch issues from GitHub API");
+    }
+
+    #[test]
+    fn test_extract_hyphenated_skill_name() {
+        let mut skill = make_skill("file-issues", &["file", "issues"], &[], &[]);
+        skill.manifest.description = "file detailed GitHub issues".to_string();
+        let skills = vec![skill];
+        let (matched, rewritten) =
+            extract_skill_mentions("please /file-issues for all found bugs", &skills);
+        assert_eq!(matched.len(), 1);
+        assert_eq!(
+            rewritten,
+            "please file detailed GitHub issues for all found bugs"
+        );
+    }
+
+    #[test]
+    fn test_extract_multiple_mentions() {
+        let mut gh = make_skill("github", &["github"], &[], &[]);
+        gh.manifest.description = "GitHub API".to_string();
+        let mut linear = make_skill("linear", &["linear"], &[], &[]);
+        linear.manifest.description = "Linear project management".to_string();
+        let skills = vec![gh, linear];
+        let (matched, rewritten) =
+            extract_skill_mentions("sync /github issues to /linear", &skills);
+        assert_eq!(matched.len(), 2);
+        assert_eq!(
+            rewritten,
+            "sync GitHub API issues to Linear project management"
+        );
+    }
+
+    #[test]
+    fn test_extract_unknown_slash_not_replaced() {
+        let skills = vec![make_skill("github", &["github"], &[], &[])];
+        let (matched, rewritten) = extract_skill_mentions("run /unknown-thing now", &skills);
+        assert!(matched.is_empty());
+        assert_eq!(rewritten, "run /unknown-thing now");
+    }
+
+    #[test]
+    fn test_extract_slash_at_start_of_message() {
+        let mut skill = make_skill("github", &["github"], &[], &[]);
+        skill.manifest.description = "GitHub API".to_string();
+        let skills = vec![skill];
+        let (matched, rewritten) = extract_skill_mentions("/github list my repos", &skills);
+        assert_eq!(matched.len(), 1);
+        assert_eq!(rewritten, "GitHub API list my repos");
+    }
+
+    #[test]
+    fn test_extract_url_not_matched() {
+        let skills = vec![make_skill("github", &["github"], &[], &[])];
+        let (matched, rewritten) = extract_skill_mentions("open https://github.com/repo", &skills);
+        // The /github.com won't match because '.' breaks the name pattern
+        assert!(matched.is_empty());
+        assert_eq!(rewritten, "open https://github.com/repo");
     }
 }

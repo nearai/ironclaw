@@ -194,12 +194,14 @@ def select_skills(skills, goal, max_candidates=3, max_tokens=4000):
 def format_skills(skills):
     """Format selected skills for system prompt injection."""
     parts = ["\n## Active Skills\n"]
+    skill_names = []
     for skill in skills:
         meta = skill.get("metadata", {})
         name = meta.get("name", "unknown")
         version = meta.get("version", "?")
         trust = meta.get("trust", "trusted").upper()
         content = skill.get("content", "")
+        skill_names.append(str(name))
 
         parts.append('<skill name="' + str(name) + '" version="' +
                       str(version) + '" trust="' + trust + '">')
@@ -215,6 +217,14 @@ def format_skills(skills):
             for sn in snippets:
                 parts.append("- `" + sn.get("name", "?") + "()` — " +
                               sn.get("description", "") + "\n")
+
+    if skill_names:
+        names_str = ", ".join(skill_names)
+        parts.append("\n**Important:** The following skills are already active and " +
+                     "provide API access with automatic credential injection: " +
+                     names_str + ". Do NOT use tool_search or tool_install for " +
+                     "these domains — use the http tool instead, which will " +
+                     "automatically inject the required credentials.\n")
 
     return "\n".join(parts)
 
@@ -332,13 +342,22 @@ def run_loop(context, goal, actions, state, config):
                 __transition_to__("completed", "FINAL() in code")
                 return {"outcome": "completed", "response": result["final_answer"]}
 
-            # Check for approval needed
+            # Check for approval or authentication needed
             if result.get("need_approval") is not None:
                 approval = result["need_approval"]
                 __save_checkpoint__(state, {
                     "nudge_count": nudge_count,
                     "consecutive_errors": consecutive_errors,
                 })
+                if approval.get("need_authentication"):
+                    __transition_to__("waiting", "authentication needed")
+                    return {
+                        "outcome": "need_authentication",
+                        "credential_name": approval.get("credential_name", ""),
+                        "action_name": approval.get("action_name", ""),
+                        "call_id": approval.get("call_id", ""),
+                        "parameters": approval.get("parameters", {}),
+                    }
                 __transition_to__("waiting", "approval needed")
                 return {
                     "outcome": "need_approval",
@@ -377,6 +396,20 @@ def run_loop(context, goal, actions, state, config):
                 # __execute_action__ handles event emission, message addition,
                 # and lease consumption in Rust — no duplicate logic needed here.
                 r = __execute_action__(name, params, call_id=call_id)
+
+                if r.get("need_authentication"):
+                    __save_checkpoint__(state, {
+                        "nudge_count": nudge_count,
+                        "consecutive_errors": consecutive_errors,
+                    })
+                    __transition_to__("waiting", "authentication needed")
+                    return {
+                        "outcome": "need_authentication",
+                        "credential_name": r.get("credential_name", ""),
+                        "action_name": name,
+                        "call_id": call_id,
+                        "parameters": params,
+                    }
 
                 if r.get("need_approval"):
                     __save_checkpoint__(state, {

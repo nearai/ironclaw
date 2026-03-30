@@ -1366,6 +1366,108 @@ body {
   font-style: italic;
 }
 
+/* Plan checklist */
+.plan-container {
+  align-self: flex-start;
+  max-width: 80%;
+  background: var(--bg-secondary);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-lg);
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.plan-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.plan-title {
+  font-size: var(--text-base);
+  font-weight: 600;
+  color: var(--text);
+}
+
+.plan-status-badge {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.plan-status-draft { background: var(--bg-tertiary); color: var(--text-secondary); }
+.plan-status-approved { background: var(--accent); color: var(--text-on-accent); }
+.plan-status-executing { background: var(--warning); color: var(--text-on-accent); }
+.plan-status-completed { background: var(--success); color: var(--text-on-accent); }
+.plan-status-failed { background: var(--danger); color: var(--text-on-danger); }
+
+.plan-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.plan-step {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  padding: 4px 0;
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+
+.plan-step[data-status="completed"] { color: var(--success); }
+.plan-step[data-status="in_progress"] { color: var(--text); font-weight: 500; }
+.plan-step[data-status="failed"] { color: var(--danger); }
+
+.plan-step-icon {
+  flex-shrink: 0;
+  width: 18px;
+  text-align: center;
+  font-size: 14px;
+}
+
+.plan-step-text {
+  flex: 1;
+}
+
+.plan-step-result {
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-style: italic;
+  margin-left: 4px;
+}
+
+.plan-step-result::before {
+  content: '\2014 ';
+}
+
+.plan-spinner {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: plan-spin 0.8s linear infinite;
+}
+
+@keyframes plan-spin {
+  to { transform: rotate(360deg); }
+}
+
+.plan-summary {
+  font-size: 12px;
+  color: var(--text-secondary);
+  padding-top: 4px;
+  border-top: 1px solid var(--border);
+}
+
 /* Tool calls summary (persisted between user/assistant messages) */
 .tool-calls-summary {
   background: var(--bg-secondary);

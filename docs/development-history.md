@@ -194,6 +194,116 @@ Three fixes driven by analyzing a live engine trace (`engine_trace_20260328T0305
 
 **Test coverage**: 2 new tests (platform info injection + absence). 195 engine tests pass, zero clippy warnings.
 
+## Session 10: Workspace Restructure, /expected Command, Cleanup (2026-03-28)
+
+Large quality-of-life session focused on making the engine's internal state inspectable and the self-improvement loop actionable.
+
+### Workspace Storage Overhaul
+
+The engine stores all v2 state (threads, missions, knowledge, orchestrator code) in the workspace `memory_documents` table. Previously: 227 files with opaque UUID filenames, JSON-wrapped content, no cleanup, no index.
+
+**New layout** (`src/bridge/store_adapter.rs` — full rewrite):
+
+```
+engine/
+├── README.md                              (auto-generated index)
+├── knowledge/                             (frontmatter+markdown, human-readable)
+│   ├── lessons/{slug}--{id8}.md
+│   ├── skills/{slug}--{id8}.md
+│   └── summaries/{slug}--{id8}.md
+├── orchestrator/
+│   ├── v0.py                              (compiled-in default, auto-synced)
+│   ├── codeact-preamble-overlay.md        (runtime prompt patches)
+│   └── failures.json
+├── projects/{slug}/
+│   ├── project.json
+│   └── missions/{slug}/
+│       └── mission.json                   (working files can go alongside)
+└── .runtime/                              (internal, hidden from browsing)
+    ├── threads/active/, threads/archive/
+    ├── leases/, events/, steps/, conversations/
+```
+
+Key design decisions:
+- **Slugified filenames** from titles — `validate-tool-names-before-call--65c9f5cd.md` instead of UUID.json
+- **Frontmatter+markdown** for knowledge docs — YAML metadata header + raw content body. `memory_read` returns human-readable markdown, not wrapped JSON
+- **Orchestrator + prompts together** — both are self-modifiable runtime code; prompt overlays sit alongside Python versions
+- **Missions under projects** — each mission gets a named folder where the self-improvement agent can store working files
+- **`.runtime/` prefix** for internal state — threads, leases, events hidden from casual `memory_tree` browsing
+- **Terminal state cleanup** — completed/failed threads archived to compact JSON summaries, dead leases deleted. Runs at startup and periodically
+- **Auto-generated README** at `engine/README.md` with knowledge doc counts, mission status, active thread count
+
+### /expected Command (User Feedback Loop)
+
+New submission command: `/expected <what should have happened>`. Captures recent conversation turns (last 5: user input, tool calls, responses, errors) and fires a `user_feedback:expected_behavior` system event into the self-improvement pipeline.
+
+**Flow**: User → `/expected should have logged in via GitHub OAuth` → handler packages recent context → fires via both v2 MissionManager and v1 RoutineEngine → expected-behavior learning mission investigates gap, classifies root cause (MISSING_CAPABILITY / WRONG_TOOL_CHOICE / PROMPT_GAP / CONFIG_ISSUE / BUG), applies fix.
+
+Files: `src/agent/submission.rs` (parser), `src/agent/commands.rs` (handler), `src/agent/agent_loop.rs` (mission_manager slot + dispatch), `src/bridge/router.rs` (wiring), `crates/ironclaw_engine/src/runtime/mission.rs` (4th learning mission), `crates/ironclaw_engine/prompts/mission_expected_behavior.md` (goal prompt).
+
+### Other Fixes
+
+- **NeedApproval state transition** — orchestrator Python now calls `__transition_to__("waiting")` before returning approval outcomes. Rust safety net in loop_engine.rs. Previously: denying a tool use errored with "thread not resumable from Running".
+- **Monty runtime limitations documented** in CodeAct preamble — no stdlib, single imports, no classes/with/match. Agent no longer tries `import csv, io, math`.
+- **`MONTY.md` tracking file** — pin version, all limitations, upgrade process.
+- **Gateway new-thread fix** — `createNewThread()` now eagerly resets read-only state.
+- **Glob re-exports removed** — `pub use ironclaw_safety::*` and `pub use ironclaw_skills::*` deleted; ~35 files migrated to direct imports.
+- **Clippy cleanup** — collapsible ifs, shadow imports, missing SkillActivated match arm, duplicate repl.rs arms. Zero warnings across all crates.
+- **Mission prompt templates extracted** to `crates/ironclaw_engine/prompts/mission_*.md` from inline Rust strings.
+
+## Session 11: E2E Test Suite + Engine Hardening (2026-03-28 to 2026-03-29)
+
+Analyzed two production traces (`engine_trace_20260329T011339.json`, `engine_trace_20260329T052431.json`) that revealed 5 silent failures in the v2 engine. Built comprehensive E2E tests that exposed 9 additional engine bugs, all fixed in this session.
+
+### Trace-Driven Fixes (before E2E tests)
+
+1. **Tool result desync on RequireApproval** — `handle_execute_action()` returned without calling `emit_and_record()` for RequireApproval, leaving orphaned `tool_calls` in the OpenAI message history. On thread resume → 400 "No tool output found for function call" → 3 retries → thread failure.
+
+2. **LLM installs WASM tool instead of using skill** — `## Extensions` section told LLM to `tool_search`, competing with `## Active Skills`. Added skill-aware guidance to both v1 `Reasoning` and v2 `default.py` `format_skills()`.
+
+3. **HTTP tool blocks unauthenticated requests** — Credential lookup returned `authentication_required` immediately when secret was missing. Changed to inject-if-available: proceed without auth, only error on 401/403.
+
+4. **NeedAuthentication not wired in CodeAct** — `EffectBridgeAdapter` returned `Ok(ActionResult { is_error: true })` instead of `Err(NeedAuthentication)`. Wired `NeedAuthentication` through scripting.rs `DispatchResult`, orchestrator.rs `handle_execute_action`, default.py, loop_engine.rs safety net, and router.rs NeedAuthentication handler.
+
+5. **CodeAct gives up after one tool error** — Added error recovery section to `codeact_postamble.md`.
+
+### E2E Test Suite (5 files, 12 tests)
+
+Built a v2-engine-specific E2E test framework: mock API servers (aiohttp), mock LLM tool call patterns, dedicated ironclaw server fixtures with `ENGINE_V2=true`, `HTTP_ALLOW_LOCALHOST=true`, `SECRETS_MASTER_KEY`.
+
+| File | Tests | Coverage |
+|------|-------|---------|
+| `test_v2_engine_auth_flow.py` | 4 | Skill activation, NeedAuthentication → auth prompt → token → retry → mock API receives token, credential persistence |
+| `test_v2_engine_auth_cancel.py` | 2 | Cancel during auth prompt, server responsive after cancel |
+| `test_v2_engine_approval_flow.py` | 4 | Approve yes/no/always (text-based), approval prompt mentions tool name |
+| `test_v2_engine_error_handling.py` | 2 | Max iterations (30 step limit), tool intent nudge recovery |
+
+### Bugs Found and Fixed by Running E2E Tests
+
+6. **`HTTP_ALLOW_LOCALHOST` flag** — HTTP tool's SSRF protection blocked `http://127.0.0.1`, making mock-server-based testing impossible. Added `OnceLock`-backed env var check.
+
+7. **`EngineError::NeedApproval`** — Effect adapter returned `LeaseDenied` for tools needing approval (not auto-approved, no credential backing). Engine treated it as generic error → thread failed. Added `NeedApproval` variant and wired through orchestrator and scripting dispatch.
+
+8. **v1 DB write for non-Completed outcomes** — `await_thread_outcome` only wrote to v1 DB for `Completed { response }`. NeedApproval/NeedAuthentication responses were invisible in history API → `state=Failed`. Moved write to cover all outcomes.
+
+9. **`pending_approval` thread ID mismatch** — History endpoint passed v1 session UUID as hint to engine pending approval lookup (different UUID space). Cache miss every time. Removed hint.
+
+10. **`SECRETS_MASTER_KEY` required** — Without it, `init_secrets()` returns early → no SecretsStore → HttpTool has no credential injection → NeedAuthentication never triggers. Test fixtures now set the key.
+
+11. **`user_id: "orchestrator"` hardcoded** — `ThreadExecutionContext` used `"orchestrator"` for secrets lookup, but credentials stored under real user_id. Changed to read from `thread.metadata["user_id"]`.
+
+12. **`host_matches_pattern` port matching** — Skill hosts like `"127.0.0.1:8080"` didn't match `host_str()` output `"127.0.0.1"`. Added port-stripping logic.
+
+13. **Cancel during auth stored message as credential** — `SubmissionParser` parsed `"cancel"` as `ApprovalResponse { approved: false }`, bypassing `handle_with_engine`'s PendingAuth check. Next `UserInput` message was treated as token and stored. Added `has_pending_auth()` check to route approval-like submissions through `handle_with_engine` when auth is pending.
+
+14. **Cancel doesn't stop engine thread** — Added `engine_thread_id` to `PendingAuth`, call `stop_thread` on cancel. Also added v1 DB write for cancel response.
+
+### Infrastructure
+
+- **`mock_llm.py`** — Added runtime-configurable `_github_api_url` via `POST /__mock/set_github_api_url`, tool call patterns for `list.*issues`, `loop forever`, `list.*drive.*files`, canned responses for tool intent nudge.
+- **Mock API servers** — Per-test aiohttp servers with strict Bearer token validation (`ghp_*` prefix), token tracking, reset endpoints.
+- **`HTTP_ALLOW_LOCALHOST`** — New env var flag that relaxes HTTPS-only and SSRF checks for `http://` and `127.0.0.1` targets. For E2E testing only.
+
 ## Architecture Evolution
 
 ```
@@ -209,7 +319,135 @@ Session 8:    Skills-based OAuth (credential specs in YAML frontmatter)
               + HTTP tool zero-leak hardening + mission capability leases
 Session 9:    CodeAct event pipeline fix (ActionExecuted events were lost)
               + Monty globals() builtin + platform self-awareness injection
+Session 10:   Workspace restructure (human-readable paths, frontmatter,
+              cleanup, README) + /expected feedback loop + approval fix
+Session 11:   E2E test suite (12 tests across 5 files) → found 9 engine bugs
+              + HTTP_ALLOW_LOCALHOST + NeedApproval/NeedAuthentication wiring
+              + user_id fix + cancel routing fix + host_matches_pattern fix
+Session 12:   Kernel-level auth — pre-flight credential gate, post-install
+              auth pipeline, tool_auth/tool_activate removed from v2 LLM,
+              AuthManager centralizes credential checks + setup instructions
+Session 13:   Plan mode — autonomous long-running tasks via composing
+              existing v2 primitives (MemoryDoc, Mission, SSE events)
+              + /plan command + plan-mode skill + live checklist UI
 ```
+
+## Session 12: Kernel-Level Authentication (2026-03-29)
+
+Reworked authentication from a reactive LLM-driven flow to a proactive kernel-level interrupt, based on the design doc in `rework-auth.md`.
+
+### Problem
+
+Auth was a 3-step non-deterministic chain: tool fails with 401 → LLM "decides" to call `tool_auth` → LLM "decides" to retry. Each decision was a coin flip, giving ~50-70% success rate on a flow that should be 100%.
+
+### Solution: Pre-flight Auth Gate
+
+New `AuthManager` (`src/bridge/auth_manager.rs`) centralizes credential checking. The `EffectBridgeAdapter` now checks credentials BEFORE executing tool calls:
+
+```
+LLM calls http(url="https://api.github.com/...") →
+  Pre-flight: extract host → SharedCredentialRegistry.find_for_host() →
+    Secret exists? → execute normally
+    Secret missing? → NeedAuthentication (tool never executes, no 401)
+```
+
+### Key Decisions
+
+1. **Defense in depth, not replacement**: The pre-flight gate is the primary path, but the existing reactive 401 detection and text-based `authentication_required` fallback are kept. Removing fallbacks would create a dead-end where the LLM asks for credentials but the kernel doesn't recognize the auth state.
+
+2. **tool_auth/tool_activate removed from v2 LLM context**: These are now kernel-internal. The LLM never sees them in its tool list and gets an error if it somehow calls them. Auth is fully automatic from the LLM's perspective.
+
+3. **Post-install auth pipeline**: After `tool_install` succeeds, the kernel auto-checks `ExtensionManager::check_tool_auth_status_pub()` and either auto-activates (Ready), initiates auth flow (NeedsAuth), or appends setup instructions (NeedsSetup). The LLM doesn't need to call `tool_auth` → `tool_activate` manually.
+
+4. **NeedsAuth tools stay visible, NeedsSetup tools hidden**: Tools that need OAuth/tokens stay in the LLM's tool list so it can attempt to use them (triggering the pre-flight gate which starts the auth flow). Tools that need admin setup (client_id/secret) are hidden since they can't be resolved in chat.
+
+5. **Setup instruction deduplication**: The skill-registry lookup for credential setup instructions was duplicated in 3 places in `router.rs`. Now centralized in `AuthManager::get_setup_instructions()`.
+
+### Files Changed
+
+| File | Role |
+|------|------|
+| `src/bridge/auth_manager.rs` | **New** — AuthManager, AuthCheckResult, ToolReadiness, credential checking, 8 unit tests |
+| `src/bridge/effect_adapter.rs` | Pre-flight gate, post-install pipeline, v1 auth tool blocking + filtering |
+| `src/bridge/router.rs` | AuthManager wired in init_engine(), deduplicated setup lookups, text fallback tracing |
+| `src/extensions/manager.rs` | Public wrapper for check_tool_auth_status() |
+| `tests/e2e/scenarios/test_v2_kernel_auth_preflight.py` | 5 E2E tests: preflight, retry, persistence, tools hidden, cancel |
+
+### What's NOT Changed
+
+- Engine crate (`crates/ironclaw_engine/`) — `NeedAuthentication` already existed
+- HTTP tool (`src/tools/builtin/http.rs`) — existing 401 detection stays as safety net
+- WASM credential injection — zero-exposure model unchanged
+- `/api/chat/auth-token` endpoint — already bypasses LLM correctly
+
+## Session 13: Plan Mode — Autonomous Long-Running Tasks (2026-03-29)
+
+Designed and built plan mode for autonomous task execution, inspired by OpenAI Codex's `update_plan` checklist and Claude Code's file-based plan mode. The key insight: both systems enforce plan mode restrictions entirely through prompting, not tool removal. IronClaw's implementation composes existing v2 primitives (MemoryDoc, Mission, SSE events) with a skill and thin command shim.
+
+### Research
+
+Studied two external references:
+- **OpenAI Codex** (`github.com/openai/codex`) — Three collaboration modes (Plan/Default/Execute), `update_plan` tool for structured checklist rendering, `<proposed_plan>` tag parsing. Plan restrictions are prompt-based, not tool-level.
+- **Claude Code plan mode** ([lucumr.pocoo.org](https://lucumr.pocoo.org/2025/12/17/what-is-plan-mode/)) — Plans written to filesystem as markdown. Phased approach (Understand/Design/Review/Final). `ExitPlanMode` tool signals completion. All enforcement is prompt-based.
+
+### Design: Compose, Don't Build
+
+Rather than adding engine states or new worker modes, plan mode maps to existing v2 primitives:
+
+| Concept | V2 Primitive |
+|---------|-------------|
+| Plan document | `MemoryDoc` with `DocType::Plan` |
+| Execution | `Mission` (Manual cadence) → spawns `ThreadType::Mission` threads |
+| Progress | `AppEvent::PlanUpdate` SSE event → live UI checklist |
+| Learning | Existing learning missions (auto-fire after thread completion) |
+| Behavior | `skills/plan-mode/SKILL.md` (prompt engineering) |
+
+### Implementation
+
+1. **`DocType::Plan`** — Added to engine's `MemoryDoc` enum. Plans are project-scoped, retrievable via `RetrievalEngine`, and injected into mission threads by `build_meta_prompt()`.
+
+2. **`AppEvent::PlanUpdate`** — New SSE event carrying a full checklist snapshot (`PlanStepDto` with index, title, status, result). Modeled after Codex's `update_plan` — always sends the full list (not diffs) so the UI is idempotent.
+
+3. **`plan_update` tool** (`src/tools/builtin/plan.rs`) — Like Codex's `update_plan`, "this function doesn't do anything useful — it gives the model a structured way to record its plan that clients can render." Broadcasts `PlanUpdate` SSE event. Registered in `register_builtin_tools()` without SSE, then upgraded with SSE manager in `main.rs` post-gateway-init.
+
+4. **`/plan` command** — `PlanSubcommand` enum (Create/Approve/Status/Revise/List) parsed in `submission.rs`. All subcommands rewrite to `Submission::UserInput` with `[PLAN MODE]` prefix, which activates the plan-mode skill. No new handler methods — the LLM + skill use existing tools (`memory_write`, `mission_create`, `mission_fire`, `plan_update`).
+
+5. **Plan-mode skill** (`skills/plan-mode/SKILL.md`) — Trusted skill activated on `[PLAN MODE]` keyword. Defines the full protocol: plan document format (markdown with checkboxes), creation flow (search context → write plan → emit checklist), approval flow (create mission → fire → track), execution protocol (update steps, handle failures), and revision flow.
+
+6. **Web UI** — `plan_update` SSE listener + `renderPlanChecklist()` in `app.js`. Inline chat widget with status badge, step checklist (checkmarks/spinners/circles), and progress summary. CSS reuses existing activity card patterns.
+
+7. **E2E tests** — 5 scenarios in `test_plan_mode.py`: create renders checklist, approve changes status, status shows progress, list via API, command parsing. Mock LLM patterns return `plan_update` tool calls for plan-related messages.
+
+### Key Design Decisions
+
+1. **`/plan` rewrites to `UserInput`, not a new handler** — The skill handles all logic using existing tools. The command is pure UX sugar. This means zero new methods in `commands.rs` (only help text).
+
+2. **Full checklist snapshots, not diffs** — Each `PlanUpdate` SSE event carries the entire step list. The UI replaces the DOM on every event. This avoids client-side state synchronization bugs.
+
+3. **Plan execution via Mission, not Job** — Missions track `current_focus` (which step to work on next), `approach_history` (what was tried), and `thread_history` (all execution threads). The outcome watcher updates these automatically. Jobs don't have this evolving-strategy primitive.
+
+4. **No tool restriction in plan mode** — Unlike Codex which prompts the LLM not to mutate, IronClaw's plan-mode skill naturally guides the LLM to only use read/search/write tools during planning. During execution (mission thread), all tools are available per capability leases.
+
+### Files Changed
+
+| File | Role |
+|------|------|
+| `crates/ironclaw_engine/src/types/memory.rs` | `DocType::Plan` variant |
+| `crates/ironclaw_common/src/event.rs` | `PlanStepDto`, `AppEvent::PlanUpdate`, tests |
+| `src/tools/builtin/plan.rs` | **New** — `PlanUpdateTool` (SSE broadcast) |
+| `src/tools/builtin/mod.rs` | Module + export registration |
+| `src/tools/registry.rs` | `register_plan_tools()`, auto-register in builtins |
+| `src/main.rs` | Wire SSE into plan tool post-gateway-init |
+| `src/tools/schema_validator.rs` | Added to schema validation test |
+| `src/agent/submission.rs` | `PlanSubcommand` enum, `Submission::Plan`, parsing |
+| `src/agent/agent_loop.rs` | `Submission::Plan` match arm (rewrite to UserInput) |
+| `src/agent/commands.rs` | Help text for /plan commands |
+| `skills/plan-mode/SKILL.md` | **New** — Full plan protocol skill |
+| `src/channels/web/static/app.js` | SSE listener + `renderPlanChecklist()` |
+| `src/channels/web/static/style.css` | Plan checklist component styles |
+| `tests/e2e/mock_llm.py` | Plan mode tool call patterns |
+| `tests/e2e/helpers.py` | Plan DOM selectors |
+| `tests/e2e/scenarios/test_plan_mode.py` | **New** — 5 E2E tests |
 
 ## Key Commits
 
@@ -226,3 +464,4 @@ Session 9:    CodeAct event pipeline fix (ActionExecuted events were lost)
 | `63756039` | Switch ExecutionLoop to Python orchestrator |
 | `080317aa` | All 177 tests pass with orchestrator |
 | `46fd2b5d` | Versioning, auto-rollback, 189 tests |
+| `606d6571` | Kernel-level pre-flight auth gate for engine v2 |

@@ -14,6 +14,7 @@ use ironclaw_engine::{
 use ironclaw_common::AppEvent;
 
 use crate::agent::Agent;
+use crate::bridge::auth_manager::AuthManager;
 use crate::bridge::effect_adapter::EffectBridgeAdapter;
 use crate::bridge::llm_adapter::LlmBridgeAdapter;
 use crate::bridge::store_adapter::HybridStore;
@@ -66,6 +67,9 @@ struct PendingAuth {
     user_id: String,
     channel: String,
     metadata: serde_json::Value,
+    /// Engine thread that is waiting for the credential.
+    /// Used to stop the thread on cancel.
+    engine_thread_id: Option<ironclaw_engine::ThreadId>,
 }
 
 /// Persistent engine state that lives across messages.
@@ -85,6 +89,8 @@ struct EngineState {
     db: Option<Arc<dyn Database>>,
     /// Secrets store for storing credentials after auth flow.
     secrets_store: Option<Arc<dyn crate::secrets::SecretsStore + Send + Sync>>,
+    /// Centralized auth manager for setup instruction lookup and credential checks.
+    auth_manager: Option<Arc<AuthManager>>,
 }
 
 /// Global engine state, initialized on first use.
@@ -149,8 +155,32 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
             .await;
     }
 
+    // Build centralized auth manager for pre-flight credential checks.
+    let auth_manager = if let Some(ss) = agent.tools().secrets_store().cloned() {
+        let mgr = Arc::new(AuthManager::new(
+            ss,
+            agent.deps.skill_registry.clone(),
+            agent.deps.extension_manager.clone(),
+        ));
+        effect_adapter.set_auth_manager(Arc::clone(&mgr)).await;
+        Some(mgr)
+    } else {
+        None
+    };
+
     let store = Arc::new(HybridStore::new(agent.workspace().cloned()));
     store.load_state_from_workspace().await;
+
+    // Clean up completed threads and dead leases from prior runs
+    let cleaned = store
+        .cleanup_terminal_state(chrono::Duration::minutes(5))
+        .await;
+    if cleaned > 0 {
+        debug!("engine v2: cleaned {cleaned} terminal state entries on startup");
+    }
+
+    // Generate the engine workspace README
+    store.generate_engine_readme().await;
 
     // Build capability registry from available tools
     let mut capabilities = CapabilityRegistry::new();
@@ -380,6 +410,7 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
         sse: agent.deps.sse_tx.clone(),
         db: agent.deps.store.clone(),
         secrets_store: agent.tools().secrets_store().cloned(),
+        auth_manager,
     });
 
     Ok(())
@@ -626,11 +657,14 @@ pub async fn handle_approval(
         .as_ref()
         .ok_or_else(|| engine_err("init", "engine state is empty"))?;
 
+    // Don't pass the v1 thread_id as a hint — the v1 session uses different
+    // UUIDs from the engine.  The user_id alone is sufficient for single-user
+    // deployments; ambiguity resolution kicks in for multi-user.
     let pending = match resolve_pending_approval_for_thread(
         &state.store,
         &state.pending_approvals,
         &message.user_id,
-        message.thread_id.as_deref(),
+        None,
     )
     .await?
     {
@@ -683,11 +717,12 @@ pub async fn handle_exec_approval(
     }
 
     // Fall back to scanning thread metadata for this user's conversations.
+    // Don't use v1 thread_id as hint (different UUID space from engine).
     let resolution = resolve_pending_approval_for_thread(
         &state.store,
         &state.pending_approvals,
         &message.user_id,
-        message.thread_id.as_deref(),
+        None,
     )
     .await?;
 
@@ -911,6 +946,23 @@ async fn clear_engine_conversation(agent: &Agent, message: &IncomingMessage) -> 
     Ok(())
 }
 
+/// Check if a user has a pending auth flow (PendingAuth in the engine state).
+///
+/// Used by the agent loop to route "cancel"/"no" through `handle_with_engine`
+/// instead of `handle_approval` when the user is in auth mode.
+pub async fn has_pending_auth(user_id: &str) -> bool {
+    let Some(lock) = ENGINE_STATE.get() else {
+        return false;
+    };
+    let Ok(guard) = lock.try_read() else {
+        return false;
+    };
+    let Some(state) = guard.as_ref() else {
+        return false;
+    };
+    state.pending_auth.read().await.contains_key(user_id)
+}
+
 /// Handle a user message through the engine v2 pipeline.
 pub async fn handle_with_engine(
     agent: &Agent,
@@ -941,7 +993,30 @@ pub async fn handle_with_engine(
         if let Some(pending) = pending {
             let token = content.trim().to_string();
             if token.is_empty() || token.eq_ignore_ascii_case("cancel") {
-                return Ok(Some("Authentication cancelled.".into()));
+                // Stop the waiting engine thread so it doesn't leak.
+                if let Some(engine_tid) = pending.engine_thread_id {
+                    let _ = state.thread_manager.stop_thread(engine_tid).await;
+                }
+                let response = "Authentication cancelled.".to_string();
+                // Write to v1 DB so the history API shows the response.
+                if let Some(ref db) = state.db {
+                    let scope = message.conversation_scope();
+                    let v1_conv_id = if let Some(tid) = scope
+                        && let Ok(uuid) = uuid::Uuid::parse_str(tid)
+                    {
+                        Some(uuid)
+                    } else {
+                        db.get_or_create_assistant_conversation(&message.user_id, &message.channel)
+                            .await
+                            .ok()
+                    };
+                    if let Some(cid) = v1_conv_id {
+                        let _ = db
+                            .add_conversation_message(cid, "assistant", &response)
+                            .await;
+                    }
+                }
+                return Ok(Some(response));
             }
 
             if let Some(ref ss) = state.secrets_store {
@@ -1126,26 +1201,30 @@ async fn await_thread_outcome(
         .await
         .map_err(|e| engine_err("conversation error", e))?;
 
-    if let Some(ref db) = state.db
-        && let ThreadOutcome::Completed {
-            response: Some(ref text),
-        } = outcome
-    {
-        // Write response to the correct v1 conversation (thread-scoped or assistant)
-        let scope = message.conversation_scope();
-        let v1_conv_id = if let Some(tid) = scope
-            && let Ok(uuid) = uuid::Uuid::parse_str(tid)
-        {
-            Some(uuid)
-        } else {
-            db.get_or_create_assistant_conversation(&message.user_id, &message.channel)
-                .await
-                .ok()
-        };
-        if let Some(cid) = v1_conv_id {
-            let _ = db.add_conversation_message(cid, "assistant", text).await;
+    // Helper: write the outcome response to the v1 DB so the history API
+    // shows it correctly (not just for Completed, but for ALL outcomes that
+    // produce a response, including NeedApproval and NeedAuthentication).
+    let write_v1_response = |db: &Arc<dyn crate::db::Database>, text: &str| {
+        let db = Arc::clone(db);
+        let scope = message.conversation_scope().map(String::from);
+        let user_id = message.user_id.clone();
+        let channel = message.channel.clone();
+        let text = text.to_string();
+        async move {
+            let v1_conv_id = if let Some(tid) = scope
+                && let Ok(uuid) = uuid::Uuid::parse_str(&tid)
+            {
+                Some(uuid)
+            } else {
+                db.get_or_create_assistant_conversation(&user_id, &channel)
+                    .await
+                    .ok()
+            };
+            if let Some(cid) = v1_conv_id {
+                let _ = db.add_conversation_message(cid, "assistant", &text).await;
+            }
         }
-    }
+    };
 
     if let Some(ref sse) = state.sse
         && let ThreadOutcome::Completed {
@@ -1161,16 +1240,21 @@ async fn await_thread_outcome(
         );
     }
 
-    match outcome {
+    let result = match outcome {
         ThreadOutcome::Completed { response } => {
             debug!(thread_id = %thread_id, "engine v2: completed");
 
-            // Detect authentication_required in the response and enter auth mode.
-            // The user sees a prompt to paste their token; the next message stores
-            // it and retries the original request.
+            // Text-based auth fallback: detect authentication_required in the
+            // response and enter auth mode. This is a defense-in-depth safety net
+            // — the pre-flight auth gate should catch most cases before execution.
             if let Some(ref text) = response
                 && text.contains("authentication_required")
             {
+                debug!(
+                    thread_id = %thread_id,
+                    "text-based auth fallback triggered — pre-flight gate did not catch this"
+                );
+
                 // Extract credential name from the response text
                 let cred_name = text
                     .split("credential_name")
@@ -1183,23 +1267,11 @@ async fn await_thread_outcome(
                     .unwrap_or("unknown")
                     .to_string();
 
-                // Find setup instructions from skill credential spec
-                let setup_hint = agent
-                    .deps
-                    .skill_registry
+                // Look up setup instructions via AuthManager (or fall back to inline lookup)
+                let setup_hint = state
+                    .auth_manager
                     .as_ref()
-                    .and_then(|sr| {
-                        let reg = sr.read().ok()?;
-                        reg.skills().iter().find_map(|s| {
-                            s.manifest.credentials.iter().find_map(|c| {
-                                if c.name == cred_name {
-                                    c.setup_instructions.clone()
-                                } else {
-                                    None
-                                }
-                            })
-                        })
-                    })
+                    .and_then(|mgr| mgr.get_setup_instructions(&cred_name))
                     .unwrap_or_else(|| format!("Provide your {} token", cred_name));
 
                 // Store pending auth for this user
@@ -1211,6 +1283,7 @@ async fn await_thread_outcome(
                         user_id: message.user_id.clone(),
                         channel: message.channel.clone(),
                         metadata: message.metadata.clone(),
+                        engine_thread_id: None, // Completed path — thread already finished
                     },
                 );
 
@@ -1289,15 +1362,57 @@ async fn await_thread_outcome(
         ThreadOutcome::NeedAuthentication {
             credential_name, ..
         } => {
-            // This shouldn't reach here in the non-blocking design (the error
-            // flows through the LLM as a normal action result), but handle
-            // gracefully in case it does.
+            // Look up setup instructions from the skill's credential spec.
+            // Look up setup instructions via AuthManager (or fall back to default).
+            let setup_hint = state
+                .auth_manager
+                .as_ref()
+                .and_then(|mgr| mgr.get_setup_instructions(&credential_name))
+                .unwrap_or_else(|| format!("Provide your {} token", credential_name));
+
+            // Enter the guided auth flow — next user message is treated as a token.
+            state.pending_auth.write().await.insert(
+                message.user_id.clone(),
+                PendingAuth {
+                    credential_name: credential_name.clone(),
+                    original_message: message.content.clone(),
+                    user_id: message.user_id.clone(),
+                    channel: message.channel.clone(),
+                    metadata: message.metadata.clone(),
+                    engine_thread_id: Some(thread_id),
+                },
+            );
+
+            let _ = agent
+                .channels
+                .send_status(
+                    &message.channel,
+                    StatusUpdate::AuthRequired {
+                        extension_name: credential_name.clone(),
+                        instructions: Some(setup_hint),
+                        auth_url: None,
+                        setup_url: None,
+                    },
+                    &message.metadata,
+                )
+                .await;
+
             Ok(Some(format!(
-                "Authentication required for '{}'. Please set up the credential and try again.",
+                "Authentication required for '{}'. Paste your token below (or type 'cancel'):",
                 credential_name
             )))
         }
+    };
+
+    // Write the response to the v1 DB for all outcomes so the history
+    // endpoint shows the correct state (not just for Completed).
+    if let Ok(Some(ref text)) = result
+        && let Some(ref db) = state.db
+    {
+        write_v1_response(db, text).await;
     }
+
+    result
 }
 
 /// Forward an engine ThreadEvent to the channel as a StatusUpdate.

@@ -4,6 +4,7 @@
 //! route through the engine instead of the existing agentic loop. All
 //! existing behavior is unchanged when the flag is off.
 
+pub mod auth_manager;
 mod effect_adapter;
 mod llm_adapter;
 mod router;
@@ -30,6 +31,7 @@ pub use router::{
     handle_interrupt,
     handle_new_thread,
     handle_with_engine,
+    has_pending_auth,
     // Initialization
     init_engine,
     is_engine_v2_enabled,

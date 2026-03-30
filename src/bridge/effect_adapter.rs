@@ -19,6 +19,7 @@ use ironclaw_engine::{
     ActionDef, ActionResult, CapabilityLease, EffectExecutor, EngineError, ThreadExecutionContext,
 };
 
+use crate::bridge::auth_manager::{AuthCheckResult, AuthManager};
 use crate::context::JobContext;
 use crate::hooks::{HookEvent, HookOutcome, HookRegistry};
 use crate::tools::rate_limiter::RateLimiter;
@@ -48,6 +49,8 @@ pub struct EffectBridgeAdapter {
     mission_manager: RwLock<Option<Arc<ironclaw_engine::MissionManager>>>,
     /// Optional callback for when a credential is missing (emits AuthRequired SSE).
     auth_required_callback: RwLock<Option<Arc<AuthRequiredCallback>>>,
+    /// Centralized auth manager for pre-flight credential checks.
+    auth_manager: RwLock<Option<Arc<AuthManager>>>,
 }
 
 impl EffectBridgeAdapter {
@@ -65,6 +68,7 @@ impl EffectBridgeAdapter {
             rate_limiter: RateLimiter::new(),
             mission_manager: RwLock::new(None),
             auth_required_callback: RwLock::new(None),
+            auth_manager: RwLock::new(None),
         }
     }
 
@@ -86,6 +90,11 @@ impl EffectBridgeAdapter {
             .write()
             .await
             .insert(tool_name.to_string());
+    }
+
+    /// Set the auth manager for pre-flight credential checks.
+    pub async fn set_auth_manager(&self, mgr: Arc<AuthManager>) {
+        *self.auth_manager.write().await = Some(mgr);
     }
 
     /// Set the mission manager (called after engine init).
@@ -307,6 +316,17 @@ impl EffectExecutor for EffectBridgeAdapter {
             });
         }
 
+        // ── 0c. Block v1 auth management tools (auth is kernel-level in v2) ──
+        if is_v1_auth_tool(lookup_name) {
+            return Err(EngineError::Effect {
+                reason: format!(
+                    "Tool '{}' is not available in engine v2. \
+                     Authentication is handled automatically by the kernel.",
+                    action_name
+                ),
+            });
+        }
+
         // ── 1. Check tool approval (v1: Tool::requires_approval) ──
 
         if let Some(tool) = self.tools.get(lookup_name).await {
@@ -334,12 +354,10 @@ impl EffectExecutor for EffectBridgeAdapter {
                             });
 
                         if !has_credential_backing {
-                            return Err(EngineError::LeaseDenied {
-                                reason: format!(
-                                    "Tool '{}' requires approval. \
-                                     Use a read-only tool instead, or ask the user to approve this action.",
-                                    action_name
-                                ),
+                            return Err(EngineError::NeedApproval {
+                                action_name: action_name.to_string(),
+                                call_id: String::new(),
+                                parameters,
                             });
                         }
                     }
@@ -366,6 +384,42 @@ impl EffectExecutor for EffectBridgeAdapter {
                         retry_after.as_secs_f64()
                     ),
                 });
+            }
+        }
+
+        // ── 1.7. Pre-flight auth check (credential gate) ──
+        //
+        // Before executing any tool, check if required credentials exist.
+        // If missing, return NeedAuthentication immediately — the tool never
+        // executes and the user never sees a 401. This is the primary auth
+        // interception point; post-execution 401 detection and text-based
+        // fallback remain as defense-in-depth.
+
+        if let Some(auth_mgr) = self.auth_manager.read().await.as_ref() {
+            if let Some(registry) = self.tools.credential_registry() {
+                match auth_mgr
+                    .check_action_auth(lookup_name, &parameters, &context.user_id, registry)
+                    .await
+                {
+                    AuthCheckResult::MissingCredentials(missing) => {
+                        let cred = &missing[0];
+                        debug!(
+                            credential = %cred.credential_name,
+                            tool = %lookup_name,
+                            user = %context.user_id,
+                            "Pre-flight auth: credential missing"
+                        );
+                        self.emit_auth_required(&cred.credential_name, action_name)
+                            .await;
+                        return Err(EngineError::NeedAuthentication {
+                            credential_name: cred.credential_name.clone(),
+                            action_name: action_name.to_string(),
+                            call_id: String::new(),
+                            parameters,
+                        });
+                    }
+                    AuthCheckResult::Ready | AuthCheckResult::NoAuthRequired => {}
+                }
             }
         }
 
@@ -435,6 +489,71 @@ impl EffectExecutor for EffectBridgeAdapter {
                 let output_value = serde_json::from_str::<serde_json::Value>(&output)
                     .unwrap_or(serde_json::Value::String(wrapped));
 
+                // ── 4a. Post-install auth pipeline ──
+                //
+                // After tool_install succeeds, check whether the installed
+                // extension needs credentials. If so, return NeedAuthentication
+                // to trigger the auth flow. The router stores the original
+                // message and retries after credentials are provided.
+                if (lookup_name == "tool_install" || lookup_name == "tool-install")
+                    && let Some(auth_mgr) = self.auth_manager.read().await.as_ref()
+                    && let Some(ext_name) = output_value.get("name").and_then(|v| v.as_str())
+                {
+                    use crate::bridge::auth_manager::ToolReadiness;
+                    match auth_mgr
+                        .check_tool_readiness(ext_name, &context.user_id)
+                        .await
+                    {
+                        ToolReadiness::NeedsAuth {
+                            credential_name, ..
+                        } => {
+                            debug!(
+                                extension = %ext_name,
+                                credential = %credential_name,
+                                "Post-install: extension needs auth — entering auth flow"
+                            );
+                            self.emit_auth_required(&credential_name, ext_name).await;
+                            return Err(EngineError::NeedAuthentication {
+                                credential_name,
+                                action_name: action_name.to_string(),
+                                call_id: String::new(),
+                                parameters,
+                            });
+                        }
+                        ToolReadiness::NeedsSetup { ref message } => {
+                            // Can't auto-resolve — append setup info to install result.
+                            debug!(
+                                extension = %ext_name,
+                                "Post-install: extension needs setup"
+                            );
+                            let mut enriched = output_value.clone();
+                            if let Some(obj) = enriched.as_object_mut() {
+                                obj.insert(
+                                    "auth_status".to_string(),
+                                    serde_json::json!("needs_setup"),
+                                );
+                                obj.insert(
+                                    "setup_message".to_string(),
+                                    serde_json::Value::String(message.clone()),
+                                );
+                            }
+                            return Ok(ActionResult {
+                                call_id: String::new(),
+                                action_name: action_name.to_string(),
+                                output: enriched,
+                                is_error: false,
+                                duration,
+                            });
+                        }
+                        ToolReadiness::Ready => {
+                            debug!(
+                                extension = %ext_name,
+                                "Post-install: extension ready — no auth needed"
+                            );
+                        }
+                    }
+                }
+
                 Ok(ActionResult {
                     call_id: String::new(),
                     action_name: action_name.to_string(),
@@ -447,10 +566,8 @@ impl EffectExecutor for EffectBridgeAdapter {
                 let error_msg = format!("Tool '{}' failed: {}", lookup_name, e);
 
                 // Detect authentication_required errors from the HTTP tool.
-                // Emit an AuthRequired SSE event as a side effect (for connected
-                // frontends) but return the error normally — the LLM sees it and
-                // tells the user. This avoids blocking mission/sub-threads that
-                // have no channel context.
+                // Return NeedAuthentication so the engine pauses the thread
+                // and the router can prompt the user for credentials.
                 if error_msg.contains("authentication_required")
                     && let Some(cred_name) = extract_credential_name(&error_msg)
                 {
@@ -458,9 +575,15 @@ impl EffectExecutor for EffectBridgeAdapter {
                         credential = %cred_name,
                         tool = %lookup_name,
                         user = %context.user_id,
-                        "Credential missing — emitting auth_required event"
+                        "Credential missing — returning NeedAuthentication"
                     );
                     self.emit_auth_required(&cred_name, action_name).await;
+                    return Err(EngineError::NeedAuthentication {
+                        credential_name: cred_name,
+                        action_name: action_name.to_string(),
+                        call_id: String::new(),
+                        parameters,
+                    });
                 }
 
                 let sanitized = self.safety.sanitize_tool_output(lookup_name, &error_msg);
@@ -482,11 +605,16 @@ impl EffectExecutor for EffectBridgeAdapter {
     ) -> Result<Vec<ActionDef>, EngineError> {
         let tool_defs = self.tools.tool_definitions().await;
 
-        // Build action defs, excluding v1-only tools
+        // Build action defs, excluding v1-only tools and v1 auth tools
         let mut actions = Vec::with_capacity(tool_defs.len());
         for td in tool_defs {
             // Skip tools that can't work in engine v2
             if is_v1_only_tool(&td.name) {
+                continue;
+            }
+
+            // Skip v1 auth management tools — auth is kernel-level in v2
+            if is_v1_auth_tool(&td.name) {
                 continue;
             }
 
@@ -584,6 +712,15 @@ fn is_v1_only_tool(name: &str) -> bool {
             | "routine_resume"
             | "routine_update"
             | "routine_delete"
+    )
+}
+
+/// Auth management tools from v1 that are now kernel-internal in v2.
+/// The LLM should not see or call these — auth is handled automatically.
+fn is_v1_auth_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "tool_auth" | "tool-auth" | "tool_activate" | "tool-activate"
     )
 }
 
@@ -728,5 +865,24 @@ mod tests {
         assert!(!is_v1_only_tool("mission_fire"));
         assert!(!is_v1_only_tool("http"));
         assert!(!is_v1_only_tool("web_search"));
+    }
+
+    // ── is_v1_auth_tool tests ─────────────────────────────────
+
+    #[test]
+    fn auth_tools_are_v1_auth() {
+        assert!(is_v1_auth_tool("tool_auth"));
+        assert!(is_v1_auth_tool("tool-auth"));
+        assert!(is_v1_auth_tool("tool_activate"));
+        assert!(is_v1_auth_tool("tool-activate"));
+    }
+
+    #[test]
+    fn non_auth_tools_are_not_v1_auth() {
+        assert!(!is_v1_auth_tool("tool_install"));
+        assert!(!is_v1_auth_tool("tool-install"));
+        assert!(!is_v1_auth_tool("http"));
+        assert!(!is_v1_auth_tool("tool_search"));
+        assert!(!is_v1_auth_tool("tool_list"));
     }
 }

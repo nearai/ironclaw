@@ -1,8 +1,27 @@
 //! Hybrid store adapter — workspace-backed persistence for engine state.
 //!
-//! Reflection docs, projects, threads, steps, events, leases, and missions are
-//! cached in memory and mirrored to the workspace as JSON. This keeps the
-//! engine restart-safe without introducing dedicated DB tables yet.
+//! Knowledge docs use frontmatter+markdown for human readability.
+//! Runtime state uses JSON under `.runtime/` to stay out of the way.
+//!
+//! ## Workspace layout
+//!
+//! ```text
+//! engine/
+//! ├── README.md                            (auto-generated index)
+//! ├── knowledge/{type}/{slug}--{id8}.md    (frontmatter + content)
+//! ├── orchestrator/v{N}.py                 (Python orchestrator versions)
+//! ├── orchestrator/failures.json
+//! ├── orchestrator/codeact-preamble-overlay.md  (runtime prompt patches)
+//! ├── missions/{slug}--{id8}.json
+//! ├── projects/{slug}--{id8}.json
+//! └── .runtime/                            (internal, not for browsing)
+//!     ├── threads/active/{id}.json
+//!     ├── threads/archive/{slug}.json      (compacted summaries)
+//!     ├── conversations/{id}.json
+//!     ├── leases/{id}.json
+//!     ├── events/{thread_id}.json
+//!     └── steps/{thread_id}.json
+//! ```
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -19,14 +38,25 @@ use ironclaw_engine::{
 
 use crate::workspace::{Workspace, WorkspaceEntry};
 
-const ENGINE_DOCS_PREFIX: &str = "engine/docs";
-const PROJECTS_PREFIX: &str = "engine/state/projects";
-const CONVERSATIONS_PREFIX: &str = "engine/state/conversations";
-const THREADS_PREFIX: &str = "engine/state/threads";
-const STEPS_PREFIX: &str = "engine/state/steps";
-const EVENTS_PREFIX: &str = "engine/state/events";
-const LEASES_PREFIX: &str = "engine/state/leases";
-const MISSIONS_PREFIX: &str = "engine/state/missions";
+// ── Path constants ──────────────────────────────────────────
+
+const KNOWLEDGE_PREFIX: &str = "engine/knowledge";
+const ORCHESTRATOR_PREFIX: &str = "engine/orchestrator";
+const PROJECTS_PREFIX: &str = "engine/projects";
+
+const THREADS_PREFIX: &str = "engine/.runtime/threads/active";
+const THREAD_ARCHIVE_PREFIX: &str = "engine/.runtime/threads/archive";
+const STEPS_PREFIX: &str = "engine/.runtime/steps";
+const EVENTS_PREFIX: &str = "engine/.runtime/events";
+const LEASES_PREFIX: &str = "engine/.runtime/leases";
+const CONVERSATIONS_PREFIX: &str = "engine/.runtime/conversations";
+
+// Well-known titles for special-case routing (must match engine crate constants)
+const ORCHESTRATOR_MAIN_TITLE: &str = "orchestrator:main";
+const ORCHESTRATOR_FAILURES_TITLE: &str = "orchestrator:failures";
+const PREAMBLE_OVERLAY_TITLE: &str = "prompt:codeact_preamble";
+const ORCHESTRATOR_CODE_TAG: &str = "orchestrator_code";
+const FIX_PATTERN_TITLE: &str = "fix_pattern_database";
 
 /// Workspace-backed engine store.
 pub struct HybridStore {
@@ -38,6 +68,8 @@ pub struct HybridStore {
     leases: RwLock<HashMap<LeaseId, CapabilityLease>>,
     missions: RwLock<HashMap<MissionId, Mission>>,
     docs: RwLock<HashMap<DocId, MemoryDoc>>,
+    /// Tracks current workspace path for each doc so renames can delete the old file.
+    doc_paths: RwLock<HashMap<DocId, String>>,
     workspace: Option<Arc<Workspace>>,
 }
 
@@ -52,6 +84,7 @@ impl HybridStore {
             leases: RwLock::new(HashMap::new()),
             missions: RwLock::new(HashMap::new()),
             docs: RwLock::new(HashMap::new()),
+            doc_paths: RwLock::new(HashMap::new()),
             workspace,
         }
     }
@@ -62,7 +95,7 @@ impl HybridStore {
             return;
         };
 
-        self.load_docs(ws).await;
+        self.load_knowledge_docs(ws).await;
         self.load_map(ws, PROJECTS_PREFIX, |project: Project| async {
             self.projects.write().await.insert(project.id, project);
         })
@@ -98,10 +131,8 @@ impl HybridStore {
             self.leases.write().await.insert(lease.id, lease);
         })
         .await;
-        self.load_map(ws, MISSIONS_PREFIX, |mission: Mission| async {
-            self.missions.write().await.insert(mission.id, mission);
-        })
-        .await;
+        // Missions live under each project: engine/projects/{slug}/missions/{slug}/mission.json
+        self.load_missions_from_projects(ws).await;
 
         let projects = self.projects.read().await.len();
         let conversations = self.conversations.read().await.len();
@@ -125,16 +156,198 @@ impl HybridStore {
         );
     }
 
-    async fn load_docs(&self, ws: &Workspace) {
-        for entry in self.json_entries(ws, ENGINE_DOCS_PREFIX).await {
-            match ws.read(&entry.path).await {
-                Ok(doc) => match serde_json::from_str::<MemoryDoc>(&doc.content) {
-                    Ok(memory_doc) => {
-                        self.docs.write().await.insert(memory_doc.id, memory_doc);
+    /// Clean up terminal (Done/Failed) threads and dead leases.
+    ///
+    /// Archives terminal threads older than `min_age` as compact summaries and
+    /// deletes their full state (messages, events, steps, leases). Returns the
+    /// number of items cleaned.
+    pub async fn cleanup_terminal_state(&self, min_age: chrono::Duration) -> usize {
+        let mut cleaned = 0;
+        let now = chrono::Utc::now();
+
+        // 1. Archive terminal threads
+        let terminal: Vec<Thread> = self
+            .threads
+            .read()
+            .await
+            .values()
+            .filter(|t| {
+                matches!(
+                    t.state,
+                    ThreadState::Done | ThreadState::Failed | ThreadState::Completed
+                ) && t
+                    .completed_at
+                    .or(Some(t.updated_at))
+                    .is_some_and(|at| (now - at) > min_age)
+            })
+            .cloned()
+            .collect();
+
+        for thread in &terminal {
+            // Write compact archive summary
+            let slug = slugify(&thread.goal, &thread.id.0.to_string());
+            let archive_path = format!("{THREAD_ARCHIVE_PREFIX}/{slug}.json");
+            let summary = compact_thread_summary(thread);
+            self.persist_json(archive_path, &summary).await;
+
+            // Delete full state files
+            self.delete_workspace_file(&thread_path(thread.id)).await;
+            self.delete_workspace_file(&event_path(thread.id)).await;
+            self.delete_workspace_file(&step_path(thread.id)).await;
+
+            // Delete associated leases
+            let lease_ids: Vec<LeaseId> = self
+                .leases
+                .read()
+                .await
+                .values()
+                .filter(|l| l.thread_id == thread.id)
+                .map(|l| l.id)
+                .collect();
+            for lid in &lease_ids {
+                self.delete_workspace_file(&lease_path(*lid)).await;
+                self.leases.write().await.remove(lid);
+            }
+
+            self.threads.write().await.remove(&thread.id);
+            self.events.write().await.remove(&thread.id);
+            self.steps.write().await.remove(&thread.id);
+            cleaned += 1;
+        }
+
+        // 2. Delete revoked/expired leases not associated with archived threads
+        let dead_leases: Vec<LeaseId> = self
+            .leases
+            .read()
+            .await
+            .iter()
+            .filter(|(_, l)| l.revoked || !l.is_valid())
+            .map(|(id, _)| *id)
+            .collect();
+        for lid in &dead_leases {
+            self.delete_workspace_file(&lease_path(*lid)).await;
+            self.leases.write().await.remove(lid);
+            cleaned += 1;
+        }
+
+        if cleaned > 0 {
+            debug!(
+                threads_archived = terminal.len(),
+                leases_cleaned = dead_leases.len(),
+                "cleaned up terminal engine state"
+            );
+        }
+
+        cleaned
+    }
+
+    /// Generate `engine/README.md` with a summary of current engine state.
+    pub async fn generate_engine_readme(&self) {
+        let docs = self.docs.read().await;
+        let threads = self.threads.read().await;
+        let missions = self.missions.read().await;
+        let leases = self.leases.read().await;
+
+        let count_by_type = |dt: DocType| docs.values().filter(|d| d.doc_type == dt).count();
+        let active_threads = threads
+            .values()
+            .filter(|t| !matches!(t.state, ThreadState::Done | ThreadState::Failed))
+            .count();
+        let active_leases = leases.values().filter(|l| l.is_valid()).count();
+
+        // Count orchestrator versions
+        let orch_versions = docs
+            .values()
+            .filter(|d| {
+                d.title == ORCHESTRATOR_MAIN_TITLE
+                    && d.tags.contains(&ORCHESTRATOR_CODE_TAG.to_string())
+            })
+            .count();
+
+        let mut readme = format!(
+            "# Engine State\n\n\
+             Last updated: {}\n\n",
+            chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ")
+        );
+
+        readme.push_str("## Knowledge (`engine/knowledge/`)\n\n");
+        readme.push_str(&format!(
+            "- **{} lessons** — learned rules\n",
+            count_by_type(DocType::Lesson)
+        ));
+        readme.push_str(&format!(
+            "- **{} skills** — extracted procedures\n",
+            count_by_type(DocType::Skill)
+        ));
+        readme.push_str(&format!(
+            "- **{} summaries** — thread completion records\n",
+            count_by_type(DocType::Summary)
+        ));
+        readme.push_str(&format!(
+            "- **{} specs** — specifications\n",
+            count_by_type(DocType::Spec)
+        ));
+        readme.push_str(&format!(
+            "- **{} issues** — known problems\n",
+            count_by_type(DocType::Issue)
+        ));
+
+        readme.push_str(&format!(
+            "\n## Orchestrator (`engine/orchestrator/`)\n\n\
+             - {} version(s) stored\n",
+            orch_versions
+        ));
+
+        readme.push_str("\n## Missions (`engine/missions/`)\n\n");
+        for m in missions.values() {
+            readme.push_str(&format!(
+                "- **{}** ({:?}) — {}\n",
+                m.name,
+                m.status,
+                truncate_for_readme(&m.goal, 80)
+            ));
+        }
+
+        readme.push_str(&format!(
+            "\n## Runtime (`engine/.runtime/`)\n\n\
+             - {} active thread(s)\n\
+             - {} active lease(s)\n",
+            active_threads, active_leases,
+        ));
+
+        self.persist_text("engine/README.md".to_string(), &readme)
+            .await;
+    }
+
+    // ── Internal helpers ────────────────────────────────────
+
+    async fn load_knowledge_docs(&self, ws: &Workspace) {
+        // Knowledge docs can be .md (frontmatter) or .json (legacy).
+        // Also load special docs from orchestrator/ and prompts/ paths.
+        let search_prefixes = [KNOWLEDGE_PREFIX, ORCHESTRATOR_PREFIX];
+
+        for prefix in search_prefixes {
+            for entry in self
+                .file_entries(ws, prefix, &[".md", ".json", ".py"])
+                .await
+            {
+                match ws.read(&entry.path).await {
+                    Ok(doc) => {
+                        // Try frontmatter format first, then JSON
+                        let parsed = deserialize_knowledge_doc(&doc.content)
+                            .or_else(|| serde_json::from_str::<MemoryDoc>(&doc.content).ok());
+                        if let Some(memory_doc) = parsed {
+                            self.doc_paths
+                                .write()
+                                .await
+                                .insert(memory_doc.id, entry.path.clone());
+                            self.docs.write().await.insert(memory_doc.id, memory_doc);
+                        } else {
+                            debug!(path = %entry.path, "skipped non-doc file in engine");
+                        }
                     }
-                    Err(e) => debug!(path = %entry.path, "failed to parse engine doc: {e}"),
-                },
-                Err(e) => debug!(path = %entry.path, "failed to read engine doc: {e}"),
+                    Err(e) => debug!(path = %entry.path, "failed to read engine doc: {e}"),
+                }
             }
         }
     }
@@ -145,7 +358,7 @@ impl HybridStore {
         F: Fn(T) -> Fut,
         Fut: std::future::Future<Output = ()>,
     {
-        for entry in self.json_entries(ws, directory).await {
+        for entry in self.file_entries(ws, directory, &[".json"]).await {
             match ws.read(&entry.path).await {
                 Ok(doc) => match serde_json::from_str::<T>(&doc.content) {
                     Ok(value) => on_value(value).await,
@@ -156,7 +369,13 @@ impl HybridStore {
         }
     }
 
-    async fn json_entries(&self, ws: &Workspace, directory: &str) -> Vec<WorkspaceEntry> {
+    /// List files under a directory, recursing one level into subdirectories.
+    async fn file_entries(
+        &self,
+        ws: &Workspace,
+        directory: &str,
+        extensions: &[&str],
+    ) -> Vec<WorkspaceEntry> {
         let top = match ws.list(directory).await {
             Ok(entries) => entries,
             Err(_) => return Vec::new(),
@@ -166,13 +385,12 @@ impl HybridStore {
         for entry in top {
             if entry.is_directory {
                 if let Ok(children) = ws.list(&entry.path).await {
-                    files.extend(
-                        children
-                            .into_iter()
-                            .filter(|child| !child.is_directory && child.path.ends_with(".json")),
-                    );
+                    files.extend(children.into_iter().filter(|child| {
+                        !child.is_directory
+                            && extensions.iter().any(|ext| child.path.ends_with(ext))
+                    }));
                 }
-            } else if entry.path.ends_with(".json") {
+            } else if extensions.iter().any(|ext| entry.path.ends_with(ext)) {
                 files.push(entry);
             }
         }
@@ -196,9 +414,146 @@ impl HybridStore {
             debug!(path = %path, "failed to persist engine state: {e}");
         }
     }
+
+    async fn persist_text(&self, path: String, content: &str) {
+        let Some(ws) = self.workspace.as_ref() else {
+            return;
+        };
+        if let Err(e) = ws.write(&path, content).await {
+            debug!(path = %path, "failed to persist engine text: {e}");
+        }
+    }
+
+    /// Load missions from within each project directory.
+    ///
+    /// Scans `engine/projects/*/missions/*/mission.json`.
+    async fn load_missions_from_projects(&self, ws: &Workspace) {
+        let project_dirs = match ws.list(PROJECTS_PREFIX).await {
+            Ok(entries) => entries,
+            Err(_) => return,
+        };
+
+        for proj_entry in project_dirs {
+            if !proj_entry.is_directory {
+                continue;
+            }
+            let missions_dir = format!("{}/missions", proj_entry.path);
+            let mission_dirs = match ws.list(&missions_dir).await {
+                Ok(entries) => entries,
+                Err(_) => continue,
+            };
+            for mission_entry in mission_dirs {
+                if !mission_entry.is_directory {
+                    continue;
+                }
+                let mission_file = format!("{}/mission.json", mission_entry.path);
+                match ws.read(&mission_file).await {
+                    Ok(doc) => match serde_json::from_str::<Mission>(&doc.content) {
+                        Ok(mission) => {
+                            self.missions.write().await.insert(mission.id, mission);
+                        }
+                        Err(e) => {
+                            debug!(path = %mission_file, "failed to parse mission: {e}")
+                        }
+                    },
+                    Err(_) => {} // mission.json might not exist in every subdir
+                }
+            }
+        }
+    }
+
+    /// Get the project slug for a project_id, falling back to a short UUID.
+    async fn project_slug(&self, project_id: ProjectId) -> String {
+        self.projects
+            .read()
+            .await
+            .get(&project_id)
+            .map(|p| slugify(&p.name, &p.id.0.to_string()))
+            .unwrap_or_else(|| {
+                let short = &project_id.0.to_string()[..8];
+                format!("unknown--{short}")
+            })
+    }
+
+    async fn delete_workspace_file(&self, path: &str) {
+        let Some(ws) = self.workspace.as_ref() else {
+            return;
+        };
+        if let Err(e) = ws.delete(path).await {
+            debug!(path = %path, "failed to delete engine file: {e}");
+        }
+    }
+
+    /// Persist a MemoryDoc to workspace. Knowledge docs use frontmatter+markdown,
+    /// special docs (orchestrator, prompts) use their native format, and internal
+    /// docs use JSON.
+    async fn persist_doc(&self, doc: &MemoryDoc) {
+        let new_path = doc_workspace_path(doc);
+
+        // If the doc previously existed at a different path, delete the old one
+        if let Some(ref old) = self.doc_paths.read().await.get(&doc.id).cloned()
+            && *old != new_path
+        {
+            self.delete_workspace_file(old).await;
+        }
+
+        // Choose serialization format based on path
+        let content = if is_orchestrator_code_path(&new_path) {
+            // Orchestrator Python: store raw content (the Python source code)
+            doc.content.clone()
+        } else if new_path.ends_with(".md") {
+            // Knowledge docs and prompt overlays: frontmatter + content
+            serialize_knowledge_doc(doc)
+        } else {
+            // Everything else: JSON
+            match serde_json::to_string_pretty(doc) {
+                Ok(json) => json,
+                Err(e) => {
+                    debug!(path = %new_path, "failed to serialize doc: {e}");
+                    return;
+                }
+            }
+        };
+
+        self.persist_text(new_path.clone(), &content).await;
+        self.doc_paths.write().await.insert(doc.id, new_path);
+    }
 }
 
+// ── Path helpers ────────────────────────────────────────────
+
+/// Map a MemoryDoc to its workspace path based on title and type.
 fn doc_workspace_path(doc: &MemoryDoc) -> String {
+    let id_str = doc.id.0.to_string();
+
+    // Orchestrator code versions → engine/orchestrator/v{N}.py
+    if doc.title == ORCHESTRATOR_MAIN_TITLE && doc.tags.contains(&ORCHESTRATOR_CODE_TAG.to_string())
+    {
+        let version = doc
+            .metadata
+            .get("version")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        return format!("{ORCHESTRATOR_PREFIX}/v{version}.py");
+    }
+
+    // Orchestrator failure tracker → engine/orchestrator/failures.json
+    if doc.title == ORCHESTRATOR_FAILURES_TITLE {
+        return format!("{ORCHESTRATOR_PREFIX}/failures.json");
+    }
+
+    // Prompt overlays → engine/prompts/{slug}.md
+    if doc.title == PREAMBLE_OVERLAY_TITLE {
+        return format!("{ORCHESTRATOR_PREFIX}/codeact-preamble-overlay.md");
+    }
+
+    // Fix pattern database → engine/knowledge/notes/{slug}.md
+    if doc.title == FIX_PATTERN_TITLE {
+        let slug = slugify(&doc.title, &id_str);
+        return format!("{KNOWLEDGE_PREFIX}/notes/{slug}.md");
+    }
+
+    // Knowledge docs → engine/knowledge/{type}/{slug}.md
     let type_dir = match doc.doc_type {
         DocType::Summary => "summaries",
         DocType::Lesson => "lessons",
@@ -206,12 +561,23 @@ fn doc_workspace_path(doc: &MemoryDoc) -> String {
         DocType::Spec => "specs",
         DocType::Note => "notes",
         DocType::Skill => "skills",
+        DocType::Plan => "plans",
     };
-    format!("{ENGINE_DOCS_PREFIX}/{type_dir}/{}.json", doc.id.0)
+    let slug = slugify(&doc.title, &id_str);
+    format!("{KNOWLEDGE_PREFIX}/{type_dir}/{slug}.md")
 }
 
-fn project_path(project_id: ProjectId) -> String {
-    format!("{PROJECTS_PREFIX}/{}.json", project_id.0)
+fn is_orchestrator_code_path(path: &str) -> bool {
+    path.starts_with(ORCHESTRATOR_PREFIX) && path.ends_with(".py")
+}
+
+fn project_dir(name: &str, project_id: ProjectId) -> String {
+    let slug = slugify(name, &project_id.0.to_string());
+    format!("{PROJECTS_PREFIX}/{slug}")
+}
+
+fn project_path(name: &str, project_id: ProjectId) -> String {
+    format!("{}/project.json", project_dir(name, project_id))
 }
 
 fn thread_path(thread_id: ThreadId) -> String {
@@ -234,9 +600,234 @@ fn lease_path(lease_id: LeaseId) -> String {
     format!("{LEASES_PREFIX}/{}.json", lease_id.0)
 }
 
-fn mission_path(mission_id: MissionId) -> String {
-    format!("{MISSIONS_PREFIX}/{}.json", mission_id.0)
+fn mission_dir(project_slug: &str, name: &str, mission_id: MissionId) -> String {
+    let slug = slugify(name, &mission_id.0.to_string());
+    format!("{PROJECTS_PREFIX}/{project_slug}/missions/{slug}")
 }
+
+fn mission_path(project_slug: &str, name: &str, mission_id: MissionId) -> String {
+    format!(
+        "{}/mission.json",
+        mission_dir(project_slug, name, mission_id)
+    )
+}
+
+// ── Slugify ─────────────────────────────────────────────────
+
+/// Create a human-readable filename slug from a title with a short ID suffix.
+///
+/// `"Validate tool names before first call"` + `"65c9f5cd-..."` →
+/// `"validate-tool-names-before-first-call--65c9f5cd"`
+fn slugify(title: &str, id: &str) -> String {
+    let slug: String = title
+        .to_lowercase()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+
+    // Collapse runs of dashes and trim
+    let mut collapsed = String::with_capacity(slug.len());
+    let mut prev_dash = false;
+    for c in slug.chars() {
+        if c == '-' {
+            if !prev_dash && !collapsed.is_empty() {
+                collapsed.push('-');
+            }
+            prev_dash = true;
+        } else {
+            collapsed.push(c);
+            prev_dash = false;
+        }
+    }
+    let collapsed = collapsed.trim_end_matches('-');
+
+    // Truncate slug to 60 chars, append 8-char ID suffix
+    let max_slug = 60;
+    let truncated = if collapsed.len() > max_slug {
+        // Don't cut in the middle of a word — find last dash before limit
+        match collapsed[..max_slug].rfind('-') {
+            Some(pos) if pos > 20 => &collapsed[..pos],
+            _ => &collapsed[..max_slug],
+        }
+    } else {
+        collapsed
+    };
+
+    let short_id = if id.len() >= 8 { &id[..8] } else { id };
+    format!("{truncated}--{short_id}")
+}
+
+// ── Frontmatter serialization ───────────────────────────────
+
+/// Serialize a MemoryDoc as YAML frontmatter + markdown content.
+fn serialize_knowledge_doc(doc: &MemoryDoc) -> String {
+    let mut frontmatter = String::from("---\n");
+    frontmatter.push_str(&format!("id: \"{}\"\n", doc.id.0));
+    frontmatter.push_str(&format!("doc_type: \"{:?}\"\n", doc.doc_type));
+    frontmatter.push_str(&format!("title: \"{}\"\n", doc.title.replace('"', "\\\"")));
+    if !doc.tags.is_empty() {
+        frontmatter.push_str(&format!(
+            "tags: [{}]\n",
+            doc.tags
+                .iter()
+                .map(|t| format!("\"{t}\""))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    if let Some(ref tid) = doc.source_thread_id {
+        frontmatter.push_str(&format!("source_thread: \"{}\"\n", tid.0));
+    }
+    frontmatter.push_str(&format!("created: \"{}\"\n", doc.created_at.to_rfc3339()));
+    frontmatter.push_str(&format!("updated: \"{}\"\n", doc.updated_at.to_rfc3339()));
+    if doc.metadata != serde_json::json!({})
+        && let Ok(meta_str) = serde_json::to_string(&doc.metadata)
+    {
+        frontmatter.push_str(&format!("metadata: {meta_str}\n"));
+    }
+    frontmatter.push_str("---\n\n");
+    frontmatter.push_str(&doc.content);
+    frontmatter
+}
+
+/// Deserialize a frontmatter+markdown string back to a MemoryDoc.
+fn deserialize_knowledge_doc(content: &str) -> Option<MemoryDoc> {
+    let content = content.trim_start();
+    if !content.starts_with("---") {
+        return None;
+    }
+
+    // Find closing ---
+    let after_first = &content[3..];
+    let after_first_line = after_first.find('\n').map(|pos| &after_first[pos + 1..])?;
+    let yaml_end = after_first_line.find("\n---")?;
+    let yaml_str = &after_first_line[..yaml_end];
+    let body_start = yaml_end + 4; // skip \n---
+    let body = after_first_line[body_start..].trim_start_matches('\n');
+
+    // Parse YAML frontmatter
+    let yaml: serde_json::Value = serde_yml::from_str(yaml_str).ok()?;
+
+    let id_str = yaml.get("id")?.as_str()?;
+    let id = uuid::Uuid::parse_str(id_str).ok()?;
+    let title = yaml.get("title")?.as_str()?.to_string();
+
+    let doc_type_str = yaml
+        .get("doc_type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Note");
+    let doc_type = match doc_type_str {
+        "Summary" => DocType::Summary,
+        "Lesson" => DocType::Lesson,
+        "Issue" => DocType::Issue,
+        "Spec" => DocType::Spec,
+        "Skill" => DocType::Skill,
+        _ => DocType::Note,
+    };
+
+    let tags: Vec<String> = yaml
+        .get("tags")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let source_thread_id = yaml
+        .get("source_thread")
+        .and_then(|v| v.as_str())
+        .and_then(|s| uuid::Uuid::parse_str(s).ok())
+        .map(ThreadId);
+
+    let created_at = yaml
+        .get("created")
+        .and_then(|v| v.as_str())
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map(|dt| dt.with_timezone(&chrono::Utc))
+        .unwrap_or_else(chrono::Utc::now);
+
+    let updated_at = yaml
+        .get("updated")
+        .and_then(|v| v.as_str())
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map(|dt| dt.with_timezone(&chrono::Utc))
+        .unwrap_or_else(chrono::Utc::now);
+
+    let metadata = yaml
+        .get("metadata")
+        .cloned()
+        .unwrap_or(serde_json::json!({}));
+
+    // project_id is not in frontmatter — use nil UUID (assigned at load time)
+    Some(MemoryDoc {
+        id: DocId(id),
+        project_id: ProjectId(uuid::Uuid::nil()),
+        doc_type,
+        title,
+        content: body.to_string(),
+        source_thread_id,
+        tags,
+        metadata,
+        created_at,
+        updated_at,
+    })
+}
+
+// ── Thread archival ─────────────────────────────────────────
+
+/// Compact summary of a completed thread for archival.
+#[derive(serde::Serialize)]
+struct ThreadArchiveSummary {
+    thread_id: String,
+    goal: String,
+    state: String,
+    created_at: String,
+    completed_at: Option<String>,
+    step_count: usize,
+    total_tokens: u64,
+    outcome_preview: String,
+}
+
+fn compact_thread_summary(thread: &Thread) -> ThreadArchiveSummary {
+    // Extract last assistant message as outcome preview
+    let outcome = thread
+        .messages
+        .iter()
+        .rev()
+        .find(|m| matches!(m.role, ironclaw_engine::MessageRole::Assistant))
+        .map(|m| truncate_for_readme(&m.content, 200))
+        .unwrap_or_default();
+
+    ThreadArchiveSummary {
+        thread_id: thread.id.0.to_string(),
+        goal: truncate_for_readme(&thread.goal, 200),
+        state: format!("{:?}", thread.state),
+        created_at: thread.created_at.to_rfc3339(),
+        completed_at: thread.completed_at.map(|dt| dt.to_rfc3339()),
+        step_count: thread.step_count,
+        total_tokens: thread.total_tokens_used,
+        outcome_preview: outcome,
+    }
+}
+
+fn truncate_for_readme(s: &str, max: usize) -> String {
+    let trimmed = s.trim().replace('\n', " ");
+    if trimmed.len() <= max {
+        trimmed
+    } else {
+        format!("{}...", &trimmed[..max.min(trimmed.len())])
+    }
+}
+
+// ── Store trait implementation ───────────────────────────────
 
 #[async_trait::async_trait]
 impl Store for HybridStore {
@@ -352,7 +943,8 @@ impl Store for HybridStore {
             .write()
             .await
             .insert(project.id, project.clone());
-        self.persist_json(project_path(project.id), project).await;
+        self.persist_json(project_path(&project.name, project.id), project)
+            .await;
         Ok(())
     }
 
@@ -400,7 +992,7 @@ impl Store for HybridStore {
 
     async fn save_memory_doc(&self, doc: &MemoryDoc) -> Result<(), EngineError> {
         self.docs.write().await.insert(doc.id, doc.clone());
-        self.persist_json(doc_workspace_path(doc), doc).await;
+        self.persist_doc(doc).await;
         Ok(())
     }
 
@@ -456,11 +1048,13 @@ impl Store for HybridStore {
     }
 
     async fn save_mission(&self, mission: &Mission) -> Result<(), EngineError> {
+        let proj_slug = self.project_slug(mission.project_id).await;
         self.missions
             .write()
             .await
             .insert(mission.id, mission.clone());
-        self.persist_json(mission_path(mission.id), mission).await;
+        self.persist_json(mission_path(&proj_slug, &mission.name, mission.id), mission)
+            .await;
         Ok(())
     }
 
@@ -495,7 +1089,9 @@ impl Store for HybridStore {
             }
         };
         if let Some(mission) = updated.as_ref() {
-            self.persist_json(mission_path(id), mission).await;
+            let proj_slug = self.project_slug(mission.project_id).await;
+            self.persist_json(mission_path(&proj_slug, &mission.name, id), mission)
+                .await;
         }
         Ok(())
     }

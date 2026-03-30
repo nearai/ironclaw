@@ -66,6 +66,13 @@ pub enum EngineError {
         call_id: String,
         parameters: serde_json::Value,
     },
+
+    #[error("approval required for action '{action_name}'")]
+    NeedApproval {
+        action_name: String,
+        call_id: String,
+        parameters: serde_json::Value,
+    },
 }
 
 use crate::types::project::ProjectId;

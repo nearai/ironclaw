@@ -560,6 +560,9 @@ impl MissionManager {
     /// conversation insights missions. This is the preferred entry point —
     /// call once at project bootstrap.
     pub async fn ensure_learning_missions(&self, project_id: ProjectId) -> Result<(), EngineError> {
+        // 0. Seed compiled-in orchestrator v0 so it's visible in workspace
+        self.seed_orchestrator_v0(project_id).await?;
+
         // 1. Error diagnosis (self-improvement) — existing
         self.ensure_self_improvement_mission(project_id).await?;
 
@@ -608,6 +611,55 @@ impl MissionManager {
         )
         .await?;
 
+        Ok(())
+    }
+
+    /// Seed the compiled-in orchestrator as v0 in the Store.
+    ///
+    /// This makes v0 visible in the workspace memory tree and provides a base
+    /// for the self-improvement mission to diff against when patching. If the
+    /// compiled-in code has changed (different content hash), the stored v0 is
+    /// updated to match — runtime patches (v1+) are left untouched.
+    async fn seed_orchestrator_v0(&self, project_id: ProjectId) -> Result<(), EngineError> {
+        use crate::executor::orchestrator::{
+            DEFAULT_ORCHESTRATOR, ORCHESTRATOR_TAG, ORCHESTRATOR_TITLE,
+        };
+        use crate::types::memory::{DocType, MemoryDoc};
+
+        let docs = self.store.list_memory_docs(project_id).await?;
+        let existing_v0 = docs.iter().find(|d| {
+            d.title == ORCHESTRATOR_TITLE
+                && d.tags.contains(&ORCHESTRATOR_TAG.to_string())
+                && d.metadata
+                    .get("version")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0)
+                    == 0
+        });
+
+        if let Some(doc) = existing_v0 {
+            // Update if compiled-in code changed (rebuild with new default.py)
+            if doc.content != DEFAULT_ORCHESTRATOR {
+                let mut updated = doc.clone();
+                updated.content = DEFAULT_ORCHESTRATOR.to_string();
+                updated.updated_at = chrono::Utc::now();
+                self.store.save_memory_doc(&updated).await?;
+                debug!("updated orchestrator v0 to match compiled-in default");
+            }
+            return Ok(());
+        }
+
+        // Create v0 doc
+        let mut doc = MemoryDoc::new(
+            project_id,
+            DocType::Note,
+            ORCHESTRATOR_TITLE,
+            DEFAULT_ORCHESTRATOR,
+        )
+        .with_tags(vec![ORCHESTRATOR_TAG.to_string()]);
+        doc.metadata = serde_json::json!({"version": 0, "source": "compiled_in"});
+        self.store.save_memory_doc(&doc).await?;
+        debug!("seeded orchestrator v0 in workspace");
         Ok(())
     }
 

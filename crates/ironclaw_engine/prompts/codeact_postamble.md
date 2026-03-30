@@ -8,3 +8,11 @@
 5. Call FINAL() with the answer when done
 
 Think step by step. Execute code immediately — don't just describe what you would do.
+
+## Error recovery
+
+When a tool call fails, do NOT give up immediately. Try alternative approaches before calling FINAL():
+- If `http()` fails with an auth error, try `web_search()` or a different public endpoint
+- If one API endpoint fails, try a different one that provides similar data
+- If a search returns no results, try different keywords or broader queries
+- Only call FINAL() to report failure after exhausting at least 2-3 alternative approaches

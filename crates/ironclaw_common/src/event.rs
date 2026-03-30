@@ -7,6 +7,17 @@
 
 use serde::{Deserialize, Serialize};
 
+/// A single step in a plan progress update (SSE DTO).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlanStepDto {
+    pub index: usize,
+    pub title: String,
+    /// One of: "pending", "in_progress", "completed", "failed".
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<String>,
+}
+
 /// A single tool decision in a reasoning update (SSE DTO).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolDecisionDto {
@@ -241,6 +252,28 @@ pub enum AppEvent {
         thread_id: String,
         mission_name: String,
     },
+
+    /// Plan progress update — full checklist snapshot.
+    ///
+    /// Emitted when a plan is created, approved, or when any step changes
+    /// status. The UI replaces the entire step list on each event.
+    #[serde(rename = "plan_update")]
+    PlanUpdate {
+        /// Plan identifier (MemoryDoc ID or slug).
+        plan_id: String,
+        /// Plan title.
+        title: String,
+        /// Overall status: "draft", "approved", "executing", "completed", "failed".
+        status: String,
+        /// Full step checklist (not incremental — UI replaces entire list).
+        steps: Vec<PlanStepDto>,
+        /// Associated mission ID (once approved and executing).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        mission_id: Option<String>,
+        /// Thread scope for SSE filtering.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
+    },
 }
 
 impl AppEvent {
@@ -275,6 +308,7 @@ impl AppEvent {
             Self::ThreadStateChanged { .. } => "thread_state_changed",
             Self::ChildThreadSpawned { .. } => "child_thread_spawned",
             Self::MissionThreadSpawned { .. } => "mission_thread_spawned",
+            Self::PlanUpdate { .. } => "plan_update",
         }
     }
 }
@@ -424,6 +458,14 @@ mod tests {
                 mission_id: String::new(),
                 thread_id: String::new(),
                 mission_name: String::new(),
+            },
+            AppEvent::PlanUpdate {
+                plan_id: String::new(),
+                title: String::new(),
+                status: String::new(),
+                steps: vec![],
+                mission_id: None,
+                thread_id: None,
             },
         ];
 

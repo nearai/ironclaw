@@ -860,6 +860,11 @@ async fn async_main() -> anyhow::Result<()> {
         ext_mgr.set_sse_sender(Arc::clone(sse)).await;
     }
 
+    // Wire SSE into plan_update tool for live plan progress broadcasting.
+    if let Some(ref sse) = sse_manager {
+        components.tools.register_plan_tools(Some(Arc::clone(sse)));
+    }
+
     // Snapshot memory for trace recording before the agent starts
     if let Some(ref recorder) = components.recording_handle
         && let Some(ref ws) = components.workspace

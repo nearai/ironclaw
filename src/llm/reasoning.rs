@@ -368,6 +368,8 @@ pub struct Reasoning {
     workspace_system_prompt: Option<String>,
     /// Optional skill context block to inject into system prompt.
     skill_context: Option<String>,
+    /// Names of active skills (used to suppress extension search for covered domains).
+    active_skill_names: Vec<String>,
     /// Channel name (e.g. "discord", "telegram") for formatting hints.
     channel: Option<String>,
     /// Model name for runtime context.
@@ -388,6 +390,7 @@ impl Reasoning {
             llm,
             workspace_system_prompt: None,
             skill_context: None,
+            active_skill_names: Vec::new(),
             channel: None,
             model_name: None,
             is_group_chat: false,
@@ -415,6 +418,13 @@ impl Reasoning {
         if !context.is_empty() {
             self.skill_context = Some(context);
         }
+        self
+    }
+
+    /// Set active skill names so the extensions section can avoid recommending
+    /// installation for domains already covered by active skills.
+    pub fn with_active_skill_names(mut self, names: Vec<String>) -> Self {
+        self.active_skill_names = names;
         self
     }
 
@@ -1024,15 +1034,27 @@ Example:
             return String::new();
         }
 
-        "\n\n## Extensions\n\
+        let mut section = "\n\n## Extensions\n\
          You can search, install, and activate extensions to add new capabilities:\n\
          - **Channels** (Telegram, Slack, Discord) — messaging integrations. \
          When users ask about connecting a messaging platform, search for it as a channel.\n\
-         - **Tools** — sandboxed functions that extend your abilities.\n\
+         - **Tools** �� sandboxed functions that extend your abilities.\n\
          - **MCP servers** — external API integrations via the Model Context Protocol.\n\n\
          Use `tool_search` to find extensions by name. Refer to them by their kind \
          (channel, tool, or server) — not as \"MCP server\" generically."
-            .to_string()
+            .to_string();
+
+        if !self.active_skill_names.is_empty() {
+            let names = self.active_skill_names.join(", ");
+            section.push_str(&format!(
+                "\n\n**Important:** The following skills are already active and provide \
+                 API access with automatic credential injection: {names}. \
+                 Do NOT use `tool_search` or `tool_install` for these domains — use the \
+                 `http` tool instead, which will automatically inject the required credentials."
+            ));
+        }
+
+        section
     }
 
     fn build_channel_section(&self) -> String {

@@ -3483,6 +3483,15 @@ impl ExtensionManager {
         }
     }
 
+    /// Public wrapper for `check_tool_auth_status()`.
+    ///
+    /// Used by the auth manager to query tool readiness without
+    /// exposing internal extension state. Returns `NoAuth` if the
+    /// extension is not found or has no capabilities file.
+    pub async fn check_tool_auth_status_pub(&self, name: &str, user_id: &str) -> ToolAuthState {
+        self.check_tool_auth_status(name, user_id).await
+    }
+
     /// Determine the auth readiness of a WASM tool.
     async fn check_tool_auth_status(&self, name: &str, user_id: &str) -> ToolAuthState {
         let Some(cap_file) = self.load_tool_capabilities(name).await else {

@@ -71,6 +71,7 @@ fn format_docs_as_context(docs: &[MemoryDoc]) -> String {
             crate::types::memory::DocType::Summary => "CONTEXT",
             crate::types::memory::DocType::Note => "NOTE",
             crate::types::memory::DocType::Skill => "SKILL",
+            crate::types::memory::DocType::Plan => "PLAN",
         };
         // Truncate long docs to avoid context bloat
         let content: String = doc.content.chars().take(500).collect();

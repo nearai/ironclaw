@@ -42,6 +42,8 @@ pub enum DocType {
     Note,
     /// Reusable skill with activation metadata and optional code snippets.
     Skill,
+    /// Structured execution plan with steps, status, and progress tracking.
+    Plan,
 }
 
 /// A memory document — structured durable knowledge.

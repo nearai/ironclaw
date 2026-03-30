@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -105,6 +105,19 @@ fn validate_save_to_path(save_to: &str) -> Result<std::path::PathBuf, ToolError>
     Ok(validated)
 }
 
+/// Whether the HTTP tool allows localhost/HTTP URLs (for E2E testing).
+///
+/// Set `HTTP_ALLOW_LOCALHOST=true` to bypass HTTPS-only and SSRF checks for
+/// `http://127.0.0.1` targets.  **Never enable in production.**
+fn allow_localhost() -> bool {
+    static ALLOW: OnceLock<bool> = OnceLock::new();
+    *ALLOW.get_or_init(|| {
+        std::env::var("HTTP_ALLOW_LOCALHOST")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false)
+    })
+}
+
 /// Parse and validate a URL without DNS resolution.
 ///
 /// Checks scheme (HTTPS only), rejects localhost and private/link-local IP
@@ -113,6 +126,16 @@ fn validate_save_to_path(save_to: &str) -> Result<std::path::PathBuf, ToolError>
 pub(crate) fn validate_url(url: &str) -> Result<reqwest::Url, ToolError> {
     let parsed = reqwest::Url::parse(url)
         .map_err(|e| ToolError::InvalidParameters(format!("invalid URL: {}", e)))?;
+
+    // In test mode, allow http:// and localhost/127.0.0.1 targets.
+    if allow_localhost() {
+        if parsed.scheme() != "https" && parsed.scheme() != "http" {
+            return Err(ToolError::NotAuthorized(
+                "only http(s) URLs are allowed".to_string(),
+            ));
+        }
+        return Ok(parsed);
+    }
 
     if parsed.scheme() != "https" {
         return Err(ToolError::NotAuthorized(
@@ -173,13 +196,15 @@ pub(crate) async fn validate_and_resolve_url(
         )));
     }
 
-    for addr in &addrs {
-        if is_disallowed_ip(&addr.ip()) {
-            return Err(ToolError::NotAuthorized(format!(
-                "hostname '{}' resolves to disallowed IP {}",
-                host,
-                addr.ip()
-            )));
+    if !allow_localhost() {
+        for addr in &addrs {
+            if is_disallowed_ip(&addr.ip()) {
+                return Err(ToolError::NotAuthorized(format!(
+                    "hostname '{}' resolves to disallowed IP {}",
+                    host,
+                    addr.ip()
+                )));
+            }
         }
     }
 
@@ -540,19 +565,37 @@ impl Tool for HttpTool {
             None
         };
 
-        // Credential injection from shared registry
+        // Credential injection from shared registry.
+        // If a credential is registered but not yet configured, we proceed
+        // without auth and check the response status — many endpoints (e.g.
+        // GitHub public repo search) work without authentication.  Only if
+        // the server returns 401/403 do we raise `authentication_required`.
+        let mut missing_credential: Option<String> = None;
         if let (Some(registry), Some(store)) = (
             self.credential_registry.as_ref(),
             self.secrets_store.as_ref(),
         ) {
-            let cred_host = parsed_url.host_str().unwrap_or("");
-            let matched: Vec<crate::secrets::CredentialMapping> = registry.find_for_host(cred_host);
+            let cred_host = parsed_url.host_str().unwrap_or("").to_string();
+            let matched: Vec<crate::secrets::CredentialMapping> =
+                registry.find_for_host(&cred_host);
+            tracing::debug!(
+                host = %cred_host,
+                matched_count = matched.len(),
+                url = %parsed_url,
+                "HTTP tool credential lookup"
+            );
             for mapping in &matched {
                 match store
                     .get_decrypted(&ctx.user_id, &mapping.secret_name)
                     .await
                 {
                     Ok(secret) => {
+                        tracing::debug!(
+                            user_id = %ctx.user_id,
+                            secret_name = %mapping.secret_name,
+                            secret_len = secret.len(),
+                            "HTTP tool: credential found and injecting"
+                        );
                         let mut injected = InjectedCredentials::empty();
                         inject_credential(&mut injected, &mapping.location, &secret);
                         for (name, value) in &injected.headers {
@@ -565,18 +608,12 @@ impl Tool for HttpTool {
                         }
                     }
                     Err(crate::secrets::SecretError::NotFound(_)) => {
-                        return Err(ToolError::ExecutionFailed(
-                            serde_json::json!({
-                                "error": "authentication_required",
-                                "credential_name": mapping.secret_name,
-                                "message": format!(
-                                    "Credential '{}' is not configured. \
-                                     Use the auth_setup tool to set up credentials before making this request.",
-                                    mapping.secret_name
-                                )
-                            })
-                            .to_string(),
-                        ));
+                        tracing::debug!(
+                            secret = %mapping.secret_name,
+                            host = %cred_host,
+                            "Credential not configured — proceeding without auth"
+                        );
+                        missing_credential = Some(mapping.secret_name.clone());
                     }
                     Err(e) => {
                         tracing::warn!(
@@ -737,6 +774,25 @@ impl Tool for HttpTool {
         };
 
         let status = response.status().as_u16();
+
+        // If the server returned 401/403 and we had a missing credential,
+        // surface the authentication_required error so the auth flow triggers.
+        if matches!(status, 401 | 403) {
+            if let Some(ref cred_name) = missing_credential {
+                return Err(ToolError::ExecutionFailed(
+                    serde_json::json!({
+                        "error": "authentication_required",
+                        "credential_name": cred_name,
+                        "message": format!(
+                            "Credential '{}' is not configured. \
+                             The server returned HTTP {}. Set up credentials to access this endpoint.",
+                            cred_name, status
+                        )
+                    })
+                    .to_string(),
+                ));
+            }
+        }
 
         // Strip sensitive response headers before they reach the LLM context.
         // These headers may contain tokens, session cookies, or auth challenges

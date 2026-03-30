@@ -306,19 +306,24 @@ impl ExecutionLoop {
                 }
                 let _ = &orch_result.tokens_used;
 
-                // Safety net: if the orchestrator returned NeedApproval but
-                // didn't transition to Waiting, do it now so resume_thread works.
-                if matches!(orch_result.outcome, ThreadOutcome::NeedApproval { .. })
-                    && self.thread.state != ThreadState::Waiting
+                // Safety net: if the orchestrator returned NeedApproval or
+                // NeedAuthentication but didn't transition to Waiting, do it
+                // now so resume_thread works.
+                if matches!(
+                    orch_result.outcome,
+                    ThreadOutcome::NeedApproval { .. } | ThreadOutcome::NeedAuthentication { .. }
+                ) && self.thread.state != ThreadState::Waiting
                 {
                     debug!(
                         thread_id = %self.thread.id,
                         state = ?self.thread.state,
-                        "orchestrator returned NeedApproval without transitioning to Waiting"
+                        outcome = ?std::mem::discriminant(&orch_result.outcome),
+                        "orchestrator returned pause outcome without transitioning to Waiting"
                     );
-                    let _ = self
-                        .thread
-                        .transition_to(ThreadState::Waiting, Some("approval needed".into()));
+                    let _ = self.thread.transition_to(
+                        ThreadState::Waiting,
+                        Some("waiting for credentials".into()),
+                    );
                 }
 
                 self.clear_runtime_checkpoint();

@@ -295,7 +295,10 @@ async fn engine_pending_approval(user_id: &str, thread_id: Uuid) -> Option<Pendi
         return None;
     }
 
-    crate::bridge::pending_approval_for_user_thread(user_id, Some(&thread_id.to_string()))
+    // Don't pass thread_id as a hint — the history uses v1 session UUIDs
+    // while the engine uses its own thread UUIDs. Passing the v1 UUID as a
+    // hint causes the cache to miss when the engine UUID doesn't match.
+    crate::bridge::pending_approval_for_user_thread(user_id, None)
         .await
         .ok()
         .flatten()

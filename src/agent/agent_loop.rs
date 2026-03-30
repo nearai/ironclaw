@@ -415,43 +415,67 @@ impl Agent {
     }
 
     /// Select active skills for a message using deterministic prefiltering.
+    /// Select skills for a message. Returns (active skills, rewritten message).
+    ///
+    /// Skills are selected in two ways:
+    /// 1. **Explicit**: `/skill-name` in the message force-activates that skill.
+    ///    The `/skill-name` is replaced with the skill's description so the
+    ///    sentence reads naturally for the LLM.
+    /// 2. **Implicit**: keyword/pattern scoring against the message content.
     pub(super) fn select_active_skills(
         &self,
         message_content: &str,
-    ) -> Vec<ironclaw_skills::LoadedSkill> {
-        if let Some(registry) = self.skill_registry() {
-            let guard = match registry.read() {
-                Ok(g) => g,
-                Err(e) => {
-                    tracing::error!("Skill registry lock poisoned: {}", e);
-                    return vec![];
-                }
-            };
-            let available = guard.skills();
-            let skills_cfg = &self.deps.skills_config;
-            let selected = ironclaw_skills::prefilter_skills(
-                message_content,
-                available,
-                skills_cfg.max_active_skills,
-                skills_cfg.max_context_tokens,
-            );
-
-            if !selected.is_empty() {
-                tracing::debug!(
-                    "Selected {} skill(s) for message: {}",
-                    selected.len(),
-                    selected
-                        .iter()
-                        .map(|s| s.name())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                );
+    ) -> (Vec<ironclaw_skills::LoadedSkill>, String) {
+        let Some(registry) = self.skill_registry() else {
+            return (vec![], message_content.to_string());
+        };
+        let guard = match registry.read() {
+            Ok(g) => g,
+            Err(e) => {
+                tracing::error!("Skill registry lock poisoned: {}", e);
+                return (vec![], message_content.to_string());
             }
+        };
+        let available = guard.skills();
 
-            selected.into_iter().cloned().collect()
-        } else {
-            vec![]
+        // Phase 1: Extract explicit /skill-name mentions
+        let (explicit, rewritten) =
+            ironclaw_skills::extract_skill_mentions(message_content, available);
+
+        // Phase 2: Score-based selection on the rewritten message
+        let skills_cfg = &self.deps.skills_config;
+        let scored = ironclaw_skills::prefilter_skills(
+            &rewritten,
+            available,
+            skills_cfg.max_active_skills,
+            skills_cfg.max_context_tokens,
+        );
+
+        // Merge: explicit mentions first, then scored (dedup by name)
+        let mut selected: Vec<ironclaw_skills::LoadedSkill> =
+            explicit.into_iter().cloned().collect();
+        for skill in scored {
+            if !selected
+                .iter()
+                .any(|s| s.manifest.name == skill.manifest.name)
+            {
+                selected.push(skill.clone());
+            }
         }
+
+        if !selected.is_empty() {
+            tracing::debug!(
+                "Selected {} skill(s) for message: {}",
+                selected.len(),
+                selected
+                    .iter()
+                    .map(|s| s.name())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+
+        (selected, rewritten)
     }
 
     /// Run the agent main loop.
@@ -1150,6 +1174,13 @@ impl Agent {
                     return crate::bridge::handle_with_engine(self, message, content).await;
                 }
                 Submission::ApprovalResponse { approved, always } => {
+                    // If there's a pending auth, "cancel"/"no" should clear the
+                    // auth flow, not be treated as an approval response.
+                    // Route through handle_with_engine so PendingAuth is checked.
+                    if crate::bridge::has_pending_auth(&message.user_id).await {
+                        let content = &message.content;
+                        return crate::bridge::handle_with_engine(self, message, content).await;
+                    }
                     return crate::bridge::handle_approval(self, message, *approved, *always).await;
                 }
                 Submission::ExecApproval {
@@ -1520,6 +1551,41 @@ impl Agent {
             }
             Submission::ApprovalResponse { approved, always } => {
                 self.process_approval(message, session, thread_id, None, approved, always)
+                    .await
+            }
+            Submission::Plan { sub } => {
+                use crate::agent::submission::PlanSubcommand;
+                let rewritten = match sub {
+                    PlanSubcommand::Create { description } => {
+                        format!("[PLAN MODE] Create a plan for: {description}")
+                    }
+                    PlanSubcommand::Approve { plan_ref } => {
+                        let r = plan_ref.as_deref().unwrap_or("the most recent plan");
+                        format!(
+                            "[PLAN MODE] Approve and execute plan {r}. \
+                             Create a mission from the plan content using mission_create, \
+                             then fire it with mission_fire."
+                        )
+                    }
+                    PlanSubcommand::Status { plan_ref } => {
+                        let r = plan_ref.as_deref().unwrap_or("the most recent plan");
+                        format!(
+                            "[PLAN MODE] Show status of plan {r}. \
+                             Check the associated mission's thread_history, \
+                             current_focus, and approach_history."
+                        )
+                    }
+                    PlanSubcommand::Revise { plan_ref, feedback } => {
+                        let r = plan_ref.as_deref().unwrap_or("the most recent plan");
+                        format!("[PLAN MODE] Revise plan {r} based on: {feedback}")
+                    }
+                    PlanSubcommand::List => {
+                        "[PLAN MODE] List all plans. Search memory for plan documents \
+                         and show their status."
+                            .to_string()
+                    }
+                };
+                self.process_user_input(message, tenant, session, thread_id, &rewritten)
                     .await
             }
         };

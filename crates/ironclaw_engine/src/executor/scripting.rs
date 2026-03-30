@@ -486,6 +486,30 @@ pub async fn execute_code_with_skills(
                                     had_error,
                                 });
                             }
+                            DispatchResult::NeedAuthentication {
+                                credential_name,
+                                action_name,
+                                call_id,
+                                parameters,
+                            } => {
+                                return Ok(CodeExecutionResult {
+                                    return_value: serde_json::Value::Null,
+                                    stdout,
+                                    action_results,
+                                    events,
+                                    need_approval: Some(
+                                        crate::runtime::messaging::ThreadOutcome::NeedAuthentication {
+                                            credential_name,
+                                            action_name,
+                                            call_id,
+                                            parameters,
+                                        },
+                                    ),
+                                    recursive_tokens,
+                                    final_answer: None,
+                                    had_error,
+                                });
+                            }
                         }
                     }
                 };
@@ -966,6 +990,12 @@ pub(crate) fn monty_to_string(obj: &MontyObject) -> String {
 enum DispatchResult {
     Ok(ExtFunctionResult),
     NeedApproval,
+    NeedAuthentication {
+        credential_name: String,
+        action_name: String,
+        call_id: String,
+        parameters: serde_json::Value,
+    },
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1036,6 +1066,7 @@ async fn dispatch_action(
     }
 
     let ps = crate::types::event::summarize_params(action_name, &params);
+    let params_for_auth = params.clone();
 
     match effects
         .execute_action(action_name, params, &lease, context)
@@ -1052,6 +1083,30 @@ async fn dispatch_action(
             let monty_obj = json_to_monty(&result.output);
             action_results.push(result);
             DispatchResult::Ok(ExtFunctionResult::Return(monty_obj))
+        }
+        Err(EngineError::NeedApproval { .. }) => {
+            events.push(EventKind::ApprovalRequested {
+                action_name: action_name.into(),
+                call_id: call_id.into(),
+            });
+            DispatchResult::NeedApproval
+        }
+        Err(EngineError::NeedAuthentication {
+            credential_name, ..
+        }) => {
+            events.push(EventKind::ActionFailed {
+                step_id: context.step_id,
+                action_name: action_name.into(),
+                call_id: call_id.into(),
+                error: format!("authentication required for credential '{credential_name}'"),
+                params_summary: ps,
+            });
+            DispatchResult::NeedAuthentication {
+                credential_name,
+                action_name: action_name.into(),
+                call_id: call_id.into(),
+                parameters: params_for_auth,
+            }
         }
         Err(e) => {
             action_results.push(ActionResult {

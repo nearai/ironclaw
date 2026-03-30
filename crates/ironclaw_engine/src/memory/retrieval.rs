@@ -122,6 +122,7 @@ fn doc_type_weight(doc_type: DocType) -> f64 {
         DocType::Issue => 0.2,   // Known problems
         DocType::Summary => 0.1, // Background context
         DocType::Note => 0.05,   // Scratch notes, lowest priority
+        DocType::Plan => 0.3,    // Execution plans with structured steps
     }
 }
 
