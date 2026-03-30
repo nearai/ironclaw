@@ -62,7 +62,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: staging
+          ref: ${{ github.sha }}
           fetch-depth: 0
           fetch-tags: true
 
@@ -117,6 +117,8 @@ jobs:
     needs: check-changes
     if: needs.check-changes.outputs.has_changes == 'true'
     uses: ./.github/workflows/test.yml
+    with:
+      ref: ${{ needs.check-changes.outputs.current_head }}
 
   # ── Run E2E browser tests ────────────────────────────────────────
   e2e:
@@ -124,6 +126,8 @@ jobs:
     needs: check-changes
     if: needs.check-changes.outputs.has_changes == 'true'
     uses: ./.github/workflows/e2e.yml
+    with:
+      ref: ${{ needs.check-changes.outputs.current_head }}
 
   # ── Create promotion PR (triggers claude-review.yml on the PR) ──
   create-promotion-pr:
@@ -137,7 +141,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: staging
+          ref: ${{ needs.check-changes.outputs.current_head }}
           fetch-depth: 0
 
       - name: Generate GitHub App token
@@ -163,7 +167,7 @@ jobs:
           PROMOTION_BASE: ${{ needs.resolve-promotion-base.outputs.promotion_base }}
         run: |
           git fetch origin "${PROMOTION_BASE}"
-          AHEAD=$(git rev-list --count "origin/${PROMOTION_BASE}..origin/staging")
+          AHEAD=$(git rev-list --count "origin/${PROMOTION_BASE}..HEAD")
           echo "commits_ahead=${AHEAD}" >> "$GITHUB_OUTPUT"
           if [ "$AHEAD" -eq 0 ]; then
             echo "Staging is not ahead of ${PROMOTION_BASE}. Nothing to promote."

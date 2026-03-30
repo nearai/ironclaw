@@ -79,6 +79,13 @@ pub enum Trigger {
         #[serde(default)]
         filters: std::collections::HashMap<String, String>,
     },
+    /// Fire on incoming webhook POST to /api/webhooks/{path}.
+    Webhook {
+        /// Optional webhook path suffix (defaults to routine id).
+        path: Option<String>,
+        /// Optional shared secret for HMAC validation.
+        secret: Option<String>,
+    },
     /// Only fires via tool call or CLI.
     Manual,
 }
@@ -90,6 +97,7 @@ impl Trigger {
             Trigger::Cron { .. } => "cron",
             Trigger::Event { .. } => "event",
             Trigger::SystemEvent { .. } => "system_event",
+            Trigger::Webhook { .. } => "webhook",
             Trigger::Manual => "manual",
         }
     }
@@ -171,6 +179,17 @@ impl Trigger {
                     filters,
                 })
             }
+            "webhook" => {
+                let path = config
+                    .get("path")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                let secret = config
+                    .get("secret")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                Ok(Trigger::Webhook { path, secret })
+            }
             "manual" => Ok(Trigger::Manual),
             other => Err(RoutineError::UnknownTriggerType {
                 trigger_type: other.to_string(),
@@ -197,6 +216,10 @@ impl Trigger {
                 "source": source,
                 "event_type": event_type,
                 "filters": filters,
+            }),
+            Trigger::Webhook { path, secret } => serde_json::json!({
+                "path": path,
+                "secret": secret,
             }),
             Trigger::Manual => serde_json::json!({}),
         }
@@ -235,11 +258,6 @@ pub enum RoutineAction {
         /// Max reasoning iterations (default: 10).
         #[serde(default = "default_max_iterations")]
         max_iterations: u32,
-        /// Tool names pre-authorized for `Always`-approval tools (e.g. destructive
-        /// shell commands, cross-channel messaging). `UnlessAutoApproved` tools are
-        /// automatically permitted in routine jobs without listing them here.
-        #[serde(default)]
-        tool_permissions: Vec<String>,
     },
 }
 
@@ -247,8 +265,13 @@ fn default_max_tokens() -> u32 {
     4096
 }
 
+/// Default max agentic loop iterations for full_job routines.
+///
+/// Raised from 10 to 25 to accommodate multi-step tool chains that
+/// stalled at the old cap. Worst-case LLM cost is 2.5x higher per run;
+/// callers needing tighter budgets should set `max_iterations` explicitly.
 fn default_max_iterations() -> u32 {
-    10
+    25
 }
 
 fn default_max_tool_rounds() -> u32 {
@@ -262,19 +285,6 @@ pub(crate) const MAX_TOOL_ROUNDS_LIMIT: u32 = 20;
 /// Accepts u64 to avoid truncation before clamping.
 fn clamp_max_tool_rounds(value: u64) -> u32 {
     value.clamp(1, MAX_TOOL_ROUNDS_LIMIT as u64) as u32
-}
-
-/// Parse a `tool_permissions` JSON array into a `Vec<String>`.
-pub fn parse_tool_permissions(value: &serde_json::Value) -> Vec<String> {
-    value
-        .get("tool_permissions")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect()
-        })
-        .unwrap_or_default()
 }
 
 impl RoutineAction {
@@ -351,12 +361,10 @@ impl RoutineAction {
                     .and_then(|v| v.as_u64())
                     .unwrap_or(default_max_iterations() as u64)
                     as u32;
-                let tool_permissions = parse_tool_permissions(&config);
                 Ok(RoutineAction::FullJob {
                     title,
                     description,
                     max_iterations,
-                    tool_permissions,
                 })
             }
             other => Err(RoutineError::UnknownActionType {
@@ -385,12 +393,10 @@ impl RoutineAction {
                 title,
                 description,
                 max_iterations,
-                tool_permissions,
             } => serde_json::json!({
                 "title": title,
                 "description": description,
                 "max_iterations": max_iterations,
-                "tool_permissions": tool_permissions,
             }),
         }
     }
@@ -516,16 +522,36 @@ pub fn content_hash(content: &str) -> u64 {
     hasher.finish()
 }
 
+/// Normalize a cron expression to the 7-field format expected by the `cron` crate.
+///
+/// The `cron` crate requires: `sec min hour day-of-month month day-of-week year`.
+/// Standard cron uses 5 fields: `min hour day-of-month month day-of-week`.
+/// This function auto-expands:
+/// - 5-field → prepend `0` (seconds) and append `*` (year)
+/// - 6-field → append `*` (year)
+/// - 7-field → pass through unchanged
+pub fn normalize_cron_expression(schedule: &str) -> String {
+    let trimmed = schedule.trim();
+    let fields: Vec<&str> = trimmed.split_whitespace().collect();
+    match fields.len() {
+        5 => format!("0 {} *", fields.join(" ")),
+        6 => format!("{} *", fields.join(" ")),
+        _ => trimmed.to_string(),
+    }
+}
+
 /// Parse a cron expression and compute the next fire time from now.
 ///
+/// Accepts standard 5-field, 6-field, or 7-field cron expressions (auto-normalized).
 /// When `timezone` is provided and valid, the schedule is evaluated in that
 /// timezone and the result is converted back to UTC. Otherwise UTC is used.
 pub fn next_cron_fire(
     schedule: &str,
     timezone: Option<&str>,
 ) -> Result<Option<DateTime<Utc>>, RoutineError> {
+    let normalized = normalize_cron_expression(schedule);
     let cron_schedule =
-        cron::Schedule::from_str(schedule).map_err(|e| RoutineError::InvalidCron {
+        cron::Schedule::from_str(&normalized).map_err(|e| RoutineError::InvalidCron {
             reason: e.to_string(),
         })?;
     if let Some(tz) = timezone.and_then(crate::timezone::parse_timezone) {
@@ -705,7 +731,7 @@ pub fn describe_cron(schedule: &str, timezone: Option<&str>) -> String {
 mod tests {
     use crate::agent::routine::{
         MAX_TOOL_ROUNDS_LIMIT, RoutineAction, RoutineGuardrails, RunStatus, Trigger, content_hash,
-        describe_cron, next_cron_fire,
+        describe_cron, next_cron_fire, normalize_cron_expression,
     };
 
     #[test]
@@ -772,13 +798,47 @@ mod tests {
             title: "Deploy review".to_string(),
             description: "Review and deploy pending changes".to_string(),
             max_iterations: 5,
-            tool_permissions: vec!["shell".to_string()],
         };
         let json = action.to_config_json();
         let parsed = RoutineAction::from_db("full_job", json).expect("parse full_job");
         assert!(
-            matches!(parsed, RoutineAction::FullJob { title, max_iterations, tool_permissions, .. }
-            if title == "Deploy review" && max_iterations == 5 && tool_permissions == vec!["shell".to_string()])
+            matches!(parsed, RoutineAction::FullJob { title, max_iterations, .. }
+            if title == "Deploy review"
+                && max_iterations == 5)
+        );
+    }
+
+    #[test]
+    fn test_action_full_job_ignores_legacy_permission_fields() {
+        let parsed = RoutineAction::from_db(
+            "full_job",
+            serde_json::json!({
+                "title": "Deploy review",
+                "description": "Review and deploy pending changes",
+                "max_iterations": 5,
+                "tool_permissions": ["shell"],
+                "permission_mode": "inherit_owner"
+            }),
+        )
+        .expect("parse full_job");
+        assert!(matches!(
+            parsed,
+            RoutineAction::FullJob {
+                ref title,
+                ref description,
+                max_iterations,
+                ..
+            } if title == "Deploy review"
+                && description == "Review and deploy pending changes"
+                && max_iterations == 5
+        ));
+        assert_eq!(
+            parsed.to_config_json(),
+            serde_json::json!({
+                "title": "Deploy review",
+                "description": "Review and deploy pending changes",
+                "max_iterations": 5,
+            })
         );
     }
 
@@ -930,7 +990,64 @@ mod tests {
             .type_tag(),
             "system_event"
         );
+        assert_eq!(
+            Trigger::Webhook {
+                path: None,
+                secret: None,
+            }
+            .type_tag(),
+            "webhook"
+        );
         assert_eq!(Trigger::Manual.type_tag(), "manual");
+    }
+
+    #[test]
+    fn test_normalize_cron_5_field() {
+        // Standard cron: min hour dom month dow
+        assert_eq!(normalize_cron_expression("0 9 * * 1"), "0 0 9 * * 1 *");
+        assert_eq!(
+            normalize_cron_expression("0 9 * * MON-FRI"),
+            "0 0 9 * * MON-FRI *"
+        );
+    }
+
+    #[test]
+    fn test_normalize_cron_6_field() {
+        // 6-field: sec min hour dom month dow
+        assert_eq!(
+            normalize_cron_expression("0 0 9 * * MON-FRI"),
+            "0 0 9 * * MON-FRI *"
+        );
+    }
+
+    #[test]
+    fn test_normalize_cron_7_field_passthrough() {
+        // Already 7-field: no change
+        assert_eq!(
+            normalize_cron_expression("0 0 9 * * MON-FRI *"),
+            "0 0 9 * * MON-FRI *"
+        );
+    }
+
+    #[test]
+    fn test_next_cron_fire_5_field_accepted() {
+        // Standard 5-field cron should now work through normalization
+        let result = next_cron_fire("0 9 * * 1", None);
+        assert!(
+            result.is_ok(),
+            "5-field cron should be accepted: {result:?}"
+        );
+        assert!(result.unwrap().is_some());
+    }
+
+    #[test]
+    fn test_next_cron_fire_5_field_with_timezone() {
+        let result = next_cron_fire("0 9 * * MON-FRI", Some("America/New_York"));
+        assert!(
+            result.is_ok(),
+            "5-field cron with timezone should be accepted: {result:?}"
+        );
+        assert!(result.unwrap().is_some());
     }
 
     #[test]

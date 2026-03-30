@@ -11,9 +11,106 @@ mod tests {
     use std::time::Duration;
 
     use ironclaw::agent::routine::{RoutineAction, Trigger};
+    use ironclaw::context::{JobContext, JobState};
+    use uuid::Uuid;
 
-    use crate::support::test_rig::TestRigBuilder;
-    use crate::support::trace_llm::LlmTrace;
+    use crate::support::test_rig::{TestRig, TestRigBuilder};
+    use crate::support::trace_llm::{
+        LlmTrace, RequestHint, TraceResponse, TraceStep, TraceToolCall, TraceTurn,
+    };
+
+    fn text_step(content: &str) -> TraceStep {
+        TraceStep {
+            request_hint: None,
+            response: TraceResponse::Text {
+                content: content.to_string(),
+                input_tokens: 10,
+                output_tokens: 5,
+            },
+            expected_tool_results: Vec::new(),
+        }
+    }
+
+    fn hinted_text_step(content: &str, last_user_message_contains: &str) -> TraceStep {
+        TraceStep {
+            request_hint: Some(RequestHint {
+                last_user_message_contains: Some(last_user_message_contains.to_string()),
+                min_message_count: None,
+            }),
+            response: TraceResponse::Text {
+                content: content.to_string(),
+                input_tokens: 10,
+                output_tokens: 5,
+            },
+            expected_tool_results: Vec::new(),
+        }
+    }
+
+    fn extract_job_id(response: &str) -> Option<Uuid> {
+        response
+            .split(|c: char| !(c.is_ascii_hexdigit() || c == '-'))
+            .find_map(|token| Uuid::parse_str(token).ok())
+    }
+
+    async fn resolve_created_job_id(
+        rig: &TestRig,
+        responses: &[ironclaw::channels::OutgoingResponse],
+        expected_title: &str,
+    ) -> Uuid {
+        if let Some(job_id) = responses
+            .iter()
+            .find_map(|response| extract_job_id(&response.content))
+        {
+            return job_id;
+        }
+
+        rig.database()
+            .list_agent_jobs_for_user("test-user")
+            .await
+            .expect("list_agent_jobs_for_user should succeed")
+            .into_iter()
+            .find(|job| job.title == expected_title)
+            .map(|job| job.id)
+            .unwrap_or_else(|| {
+                panic!(
+                    "failed to resolve job id for title {expected_title:?}; responses were: {:?}",
+                    responses
+                        .iter()
+                        .map(|response| &response.content)
+                        .collect::<Vec<_>>()
+                )
+            })
+    }
+
+    async fn wait_for_job_state(rig: &TestRig, job_id: Uuid, expected: JobState) -> JobContext {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+
+        loop {
+            if let Some(job) = rig
+                .database()
+                .get_job(job_id)
+                .await
+                .expect("get_job should succeed")
+                && job.state == expected
+            {
+                return job;
+            }
+
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "job {job_id} did not reach state {expected:?} before timeout"
+            );
+
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    fn requests_contain(requests: &[Vec<ironclaw::llm::ChatMessage>], needle: &str) -> bool {
+        requests
+            .iter()
+            .flatten()
+            .any(|message| message.content.contains(needle))
+    }
 
     // -----------------------------------------------------------------------
     // Test 1: time_parse_and_diff
@@ -134,7 +231,7 @@ mod tests {
 
         match &routine.trigger {
             Trigger::Cron { schedule, timezone } => {
-                assert_eq!(schedule, "0 0 9 * * *");
+                assert_eq!(schedule, "0 0 9 * * * *");
                 assert_eq!(timezone.as_deref(), Some("America/New_York"));
             }
             other => panic!("expected cron trigger, got {other:?}"),
@@ -142,16 +239,18 @@ mod tests {
 
         match &routine.action {
             RoutineAction::Lightweight {
+                prompt,
                 context_paths,
                 use_tools,
                 max_tool_rounds,
                 ..
             } => {
+                assert!(prompt.contains("Check system status"));
                 assert_eq!(context_paths, &vec!["context/priorities.md".to_string()]);
                 assert!(*use_tools, "lightweight routine should keep use_tools=true");
                 assert_eq!(*max_tool_rounds, 2);
             }
-            other => panic!("expected lightweight action, got {other:?}"),
+            other => panic!("expected lightweight routine action, got {other:?}"),
         }
 
         assert_eq!(routine.notify.channel.as_deref(), Some("telegram"));
@@ -203,11 +302,48 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Test 5: routine_manual_create
+    // Test 5: routine_update_fail_delete_fallback
     // -----------------------------------------------------------------------
 
     #[tokio::test]
-    async fn routine_manual_create() {
+    async fn routine_update_fail_delete_fallback() {
+        let trace = LlmTrace::from_file(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/llm_traces/tools/routine_update_fail_delete_fallback.json"
+        ))
+        .expect("failed to load routine_update_fail_delete_fallback.json");
+
+        let rig = TestRigBuilder::new()
+            .with_trace(trace.clone())
+            .with_auto_approve_tools(true)
+            .build()
+            .await;
+
+        rig.send_message("Try converting a routine trigger, then recover by deleting it")
+            .await;
+        let responses = rig.wait_for_responses(1, Duration::from_secs(15)).await;
+
+        rig.verify_trace_expects(&trace, &responses);
+
+        let completed = rig.tool_calls_completed();
+        assert!(
+            completed.iter().any(|(n, ok)| n == "routine_update" && !ok),
+            "routine_update should fail in this regression path: {completed:?}"
+        );
+        assert!(
+            completed.iter().any(|(n, ok)| n == "routine_delete" && *ok),
+            "routine_delete should recover successfully via preserved routine identity: {completed:?}"
+        );
+
+        rig.shutdown();
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 6: routine_manual_create_defaults_to_tools_enabled
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn routine_manual_create_defaults_to_tools_enabled() {
         let trace = LlmTrace::from_file(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/tests/fixtures/llm_traces/tools/routine_manual_create.json"
@@ -235,8 +371,8 @@ mod tests {
 
         assert!(matches!(routine.trigger, Trigger::Manual));
         assert!(
-            matches!(&routine.action, RoutineAction::Lightweight { use_tools, .. } if !*use_tools),
-            "manual routine should default to lightweight without tools: {:?}",
+            matches!(&routine.action, RoutineAction::Lightweight { use_tools, .. } if *use_tools),
+            "manual routine should default to lightweight with tools enabled: {:?}",
             routine.action
         );
 
@@ -244,7 +380,48 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Test 6: routine_history
+    // Test 7: routine_manual_create_explicit_no_tools
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn routine_manual_create_explicit_no_tools() {
+        let trace = LlmTrace::from_file(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/llm_traces/tools/routine_manual_create_no_tools.json"
+        ))
+        .expect("failed to load routine_manual_create_no_tools.json");
+
+        let rig = TestRigBuilder::new()
+            .with_trace(trace.clone())
+            .with_auto_approve_tools(true)
+            .build()
+            .await;
+
+        rig.send_message("Create a manual routine for quiet text-only bug triage")
+            .await;
+        let responses = rig.wait_for_responses(1, Duration::from_secs(15)).await;
+
+        rig.verify_trace_expects(&trace, &responses);
+
+        let routine = rig
+            .database()
+            .get_routine_by_name("test-user", "manual-triage-no-tools")
+            .await
+            .expect("get_routine_by_name")
+            .expect("manual-triage-no-tools should exist");
+
+        assert!(matches!(routine.trigger, Trigger::Manual));
+        assert!(
+            matches!(&routine.action, RoutineAction::Lightweight { use_tools, .. } if !*use_tools),
+            "manual routine should preserve explicit use_tools=false: {:?}",
+            routine.action
+        );
+
+        rig.shutdown();
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 8: routine_history
     // -----------------------------------------------------------------------
 
     #[tokio::test]
@@ -281,7 +458,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Test 7: routine_system_event_emit
+    // Test 8: routine_system_event_emit
     // -----------------------------------------------------------------------
 
     #[tokio::test]
@@ -354,13 +531,8 @@ mod tests {
         }
 
         match &routine.action {
-            RoutineAction::FullJob {
-                description,
-                tool_permissions,
-                ..
-            } => {
+            RoutineAction::FullJob { description, .. } => {
                 assert!(description.contains("Summarize the new issue"));
-                assert_eq!(tool_permissions, &vec!["shell".to_string()]);
             }
             other => panic!("expected full_job action, got {other:?}"),
         }
@@ -369,7 +541,124 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Test 8: skill_install_routine_webhook_sim
+    // Test 8: routine_create_grouped
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn routine_create_grouped() {
+        let trace = LlmTrace::from_file(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/llm_traces/tools/routine_create_grouped.json"
+        ))
+        .expect("failed to load routine_create_grouped.json");
+
+        let rig = TestRigBuilder::new()
+            .with_trace(trace.clone())
+            .with_auto_approve_tools(true)
+            .build()
+            .await;
+
+        rig.send_message("Create a grouped cron routine with delivery settings")
+            .await;
+        let responses = rig.wait_for_responses(1, Duration::from_secs(15)).await;
+
+        rig.verify_trace_expects(&trace, &responses);
+
+        let routine = rig
+            .database()
+            .get_routine_by_name("test-user", "weekday-digest")
+            .await
+            .expect("get_routine_by_name")
+            .expect("weekday-digest should exist");
+
+        match &routine.trigger {
+            Trigger::Cron { schedule, timezone } => {
+                assert_eq!(schedule, "0 0 9 * * MON-FRI *");
+                assert_eq!(timezone.as_deref(), Some("UTC"));
+            }
+            other => panic!("expected cron trigger, got {other:?}"),
+        }
+
+        match &routine.action {
+            RoutineAction::FullJob { description, .. } => {
+                assert!(description.contains("Prepare the morning digest"));
+            }
+            other => panic!("expected full_job action, got {other:?}"),
+        }
+
+        assert_eq!(routine.notify.channel.as_deref(), Some("telegram"));
+        assert_eq!(routine.notify.user.as_deref(), Some("ops-team"));
+        assert_eq!(routine.guardrails.cooldown.as_secs(), 30);
+
+        rig.shutdown();
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 9: routine_system_event_emit_grouped
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn routine_system_event_emit_grouped() {
+        let trace = LlmTrace::from_file(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/llm_traces/tools/routine_system_event_emit_grouped.json"
+        ))
+        .expect("failed to load routine_system_event_emit_grouped.json");
+
+        let rig = TestRigBuilder::new()
+            .with_trace(trace.clone())
+            .with_auto_approve_tools(true)
+            .build()
+            .await;
+
+        rig.send_message("Create a grouped system-event routine and emit a matching event")
+            .await;
+        let responses = rig.wait_for_responses(1, Duration::from_secs(15)).await;
+
+        rig.verify_trace_expects(&trace, &responses);
+
+        let routine = rig
+            .database()
+            .get_routine_by_name("test-user", "grouped-gh-issue-watch")
+            .await
+            .expect("get_routine_by_name")
+            .expect("grouped-gh-issue-watch should exist");
+
+        match &routine.trigger {
+            Trigger::SystemEvent {
+                source,
+                event_type,
+                filters,
+            } => {
+                assert_eq!(source, "github");
+                assert_eq!(event_type, "issue.opened");
+                assert_eq!(
+                    filters.get("repository").map(String::as_str),
+                    Some("nearai/ironclaw")
+                );
+                assert_eq!(filters.get("priority").map(String::as_str), Some("p1"));
+            }
+            other => panic!("expected system_event trigger, got {other:?}"),
+        }
+
+        let results = rig.tool_results();
+        let emit_result = results
+            .iter()
+            .find(|(n, _)| n == "event_emit")
+            .expect("event_emit result missing");
+        let emit_json: serde_json::Value =
+            serde_json::from_str(&emit_result.1).expect("event_emit result should be valid JSON");
+        assert!(
+            emit_json["fired_routines"].as_u64().unwrap_or(0) > 0,
+            "event_emit should have fired at least one grouped routine: {:?}",
+            emit_result.1
+        );
+
+        rig.shutdown();
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 10: skill_install_routine_webhook_sim
     // -----------------------------------------------------------------------
 
     #[tokio::test]
@@ -494,6 +783,159 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // Test 8a: command_job_fails_fast_on_repeated_empty_tool_completions
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn command_job_fails_fast_on_repeated_empty_tool_completions() {
+        let trace = LlmTrace::single_turn(
+            "test-empty-tool-recovery-fail",
+            "(worker only)",
+            vec![
+                text_step(""),
+                text_step(""),
+                hinted_text_step("", "valid arguments"),
+                text_step(""),
+                hinted_text_step("", "Do not call any more tools in the next reply."),
+            ],
+        );
+
+        let rig = TestRigBuilder::new()
+            .with_trace(trace)
+            .with_auto_approve_tools(true)
+            .build()
+            .await;
+
+        rig.send_message("/job reproduce empty tool completion loop")
+            .await;
+        let create_responses = rig.wait_for_responses(1, Duration::from_secs(15)).await;
+        let job_id = resolve_created_job_id(
+            &rig,
+            &create_responses,
+            "reproduce empty tool completion loop",
+        )
+        .await;
+
+        let job = wait_for_job_state(&rig, job_id, JobState::Failed).await;
+        assert_eq!(job.title, "reproduce empty tool completion loop");
+
+        let failure_reason = rig
+            .database()
+            .get_agent_job_failure_reason(job_id)
+            .await
+            .expect("get_agent_job_failure_reason should succeed")
+            .expect("failed job should persist a failure reason");
+        assert!(
+            failure_reason
+                .contains("repeatedly returned empty or malformed tool-completion responses"),
+            "unexpected failure reason: {failure_reason}"
+        );
+        assert!(
+            !failure_reason.contains("max iterations"),
+            "failure should not surface as iteration exhaustion: {failure_reason}"
+        );
+
+        assert_eq!(
+            rig.llm_call_count(),
+            5,
+            "worker should stop after the bounded recovery flow"
+        );
+        assert!(
+            !rig.collect_metrics().await.hit_iteration_limit,
+            "bounded recovery should stop before iteration-limit reporting"
+        );
+
+        let requests = rig.captured_llm_requests();
+        assert!(
+            requests_contain(&requests, "call it now with valid arguments"),
+            "expected targeted tool-mode recovery nudge in worker requests"
+        );
+        assert!(
+            requests_contain(&requests, "Do not call any more tools in the next reply."),
+            "expected forced text-only recovery prompt in worker requests"
+        );
+
+        rig.clear().await;
+        rig.send_message(&format!("/status {}", job_id)).await;
+        let status_responses = rig.wait_for_responses(1, Duration::from_secs(5)).await;
+        assert!(
+            status_responses[0].content.contains("Status: Failed"),
+            "unexpected status response: {:?}",
+            status_responses[0].content
+        );
+
+        rig.shutdown();
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 8b: command_job_text_recovery_can_complete
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn command_job_text_recovery_can_complete() {
+        let trace = LlmTrace::single_turn(
+            "test-empty-tool-recovery-success",
+            "(worker only)",
+            vec![
+                text_step(""),
+                text_step(""),
+                hinted_text_step("", "valid arguments"),
+                text_step(""),
+                hinted_text_step(
+                    "The job is complete. I finished the requested work and there is nothing left to do.",
+                    "Do not call any more tools in the next reply.",
+                ),
+            ],
+        );
+
+        let rig = TestRigBuilder::new()
+            .with_trace(trace)
+            .with_auto_approve_tools(true)
+            .build()
+            .await;
+
+        rig.send_message("/job recover after malformed tool completions")
+            .await;
+        let create_responses = rig.wait_for_responses(1, Duration::from_secs(15)).await;
+        let job_id = resolve_created_job_id(
+            &rig,
+            &create_responses,
+            "recover after empty tool completions",
+        )
+        .await;
+
+        let job = wait_for_job_state(&rig, job_id, JobState::Completed).await;
+        assert_eq!(job.title, "recover after malformed tool completions");
+
+        assert_eq!(
+            rig.llm_call_count(),
+            5,
+            "worker should complete within the bounded recovery flow"
+        );
+
+        let requests = rig.captured_llm_requests();
+        assert!(
+            requests_contain(&requests, "call it now with valid arguments"),
+            "expected targeted tool-mode recovery nudge in worker requests"
+        );
+        assert!(
+            requests_contain(&requests, "Do not call any more tools in the next reply."),
+            "expected forced text-only recovery prompt in worker requests"
+        );
+
+        rig.clear().await;
+        rig.send_message(&format!("/status {}", job_id)).await;
+        let status_responses = rig.wait_for_responses(1, Duration::from_secs(5)).await;
+        assert!(
+            status_responses[0].content.contains("Status: Completed"),
+            "unexpected status response: {:?}",
+            status_responses[0].content
+        );
+
+        rig.shutdown();
+    }
+
+    // -----------------------------------------------------------------------
     // Test 9: job_list_cancel
     // -----------------------------------------------------------------------
     // Uses {{call_cj_lc.job_id}} template to forward the dynamic UUID from
@@ -571,10 +1013,11 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Test: tool_info_discovery (two-level detail)
+    // Test: tool_info_discovery (three-level detail)
     // -----------------------------------------------------------------------
     // Verifies the tool_info built-in returns:
     // - Default (no include_schema): name, description, parameter names array
+    // - `detail: "summary"`: curated summary guidance
     // - With include_schema: true: adds full typed JSON Schema
 
     #[tokio::test]
@@ -597,13 +1040,13 @@ mod tests {
 
         rig.verify_trace_expects(&trace, &responses);
 
-        // tool_info should have been called twice (echo + time), both succeeding.
+        // tool_info should have been called three times (echo + routine_create + time), all succeeding.
         let completed = rig.tool_calls_completed();
         let tool_info_calls: Vec<_> = completed.iter().filter(|(n, _)| n == "tool_info").collect();
         assert_eq!(
             tool_info_calls.len(),
-            2,
-            "Expected 2 tool_info calls, got {tool_info_calls:?}"
+            3,
+            "Expected 3 tool_info calls, got {tool_info_calls:?}"
         );
         assert!(
             tool_info_calls.iter().all(|(_, ok)| *ok),
@@ -613,44 +1056,179 @@ mod tests {
         // Verify the results contain expected fields.
         let results = rig.tool_results();
         let info_results: Vec<_> = results.iter().filter(|(n, _)| n == "tool_info").collect();
+        let info_json: Vec<serde_json::Value> = info_results
+            .iter()
+            .map(|(_, preview)| {
+                serde_json::from_str(preview)
+                    .expect("tool_info result preview should be valid JSON")
+            })
+            .collect();
 
         // First call was for "echo" (default, no include_schema) — result should
         // contain "echo" and "parameters" as an array of names (not full schema).
-        let echo_result = info_results
+        let echo_json = info_json
             .iter()
-            .find(|(_, preview)| preview.contains("echo"))
+            .find(|info| info["name"] == "echo")
             .expect("tool_info result should contain 'echo'");
         assert!(
-            echo_result.1.contains("message"),
+            echo_json["parameters"]
+                .as_array()
+                .is_some_and(|params| params.iter().any(|param| param == "message")),
             "echo default result should list 'message' parameter name: {:?}",
-            echo_result.1
+            echo_json
         );
         // Default mode should NOT include the full "schema" key
-        let echo_json: serde_json::Value = serde_json::from_str(&echo_result.1)
-            .expect("echo tool_info result should be valid JSON");
         assert!(
             echo_json.get("schema").is_none(),
             "Default tool_info should not include schema field: {:?}",
-            echo_result.1
+            echo_json
         );
 
-        // Second call was for "time" with include_schema: true — result should
-        // contain "time", "schema" field with full object.
-        let time_result = info_results
+        // Second call was for "routine_create" with detail: "summary" — result
+        // should contain a summary object with rules/examples.
+        let routine_json = info_json
             .iter()
-            .find(|(_, preview)| preview.contains("time"))
+            .find(|info| info["name"] == "routine_create")
+            .expect("tool_info result should contain 'routine_create'");
+        assert!(
+            routine_json.get("summary").is_some(),
+            "detail: summary should include summary field: {:?}",
+            routine_json
+        );
+        assert!(
+            routine_json["summary"]["conditional_requirements"]
+                .as_array()
+                .is_some_and(|rules| rules.iter().any(|rule| {
+                    rule.as_str()
+                        .is_some_and(|rule| rule.contains("request.kind='cron'"))
+                })),
+            "routine_create summary should mention cron requirement: {:?}",
+            routine_json
+        );
+
+        // Third call was for "time" with include_schema: true — result should
+        // contain "time", "schema" field with full object.
+        let time_json = info_json
+            .iter()
+            .find(|info| info["name"] == "time")
             .expect("tool_info result should contain 'time'");
-        let time_json: serde_json::Value = serde_json::from_str(&time_result.1)
-            .expect("time tool_info result should be valid JSON");
         assert!(
             time_json.get("schema").is_some(),
             "include_schema: true should include schema field: {:?}",
-            time_result.1
+            time_json
         );
         assert!(
             time_json["schema"]["properties"].is_object(),
             "schema should have properties: {:?}",
-            time_result.1
+            time_json
+        );
+
+        rig.shutdown();
+    }
+
+    #[tokio::test]
+    async fn tool_info_clarifies_message_and_channel_setup_roles() {
+        let trace = LlmTrace::new(
+            "test-tool-info-channel-message-clarity",
+            vec![TraceTurn {
+                user_input: "How do message and channels differ?".to_string(),
+                steps: vec![
+                    TraceStep {
+                        request_hint: None,
+                        response: TraceResponse::ToolCalls {
+                            tool_calls: vec![TraceToolCall {
+                                id: "call_tool_info_message".to_string(),
+                                name: "tool_info".to_string(),
+                                arguments: serde_json::json!({"name": "message"}),
+                            }],
+                            input_tokens: 100,
+                            output_tokens: 20,
+                        },
+                        expected_tool_results: Vec::new(),
+                    },
+                    TraceStep {
+                        request_hint: None,
+                        response: TraceResponse::ToolCalls {
+                            tool_calls: vec![TraceToolCall {
+                                id: "call_tool_info_tool_search".to_string(),
+                                name: "tool_info".to_string(),
+                                arguments: serde_json::json!({"name": "tool_search"}),
+                            }],
+                            input_tokens: 140,
+                            output_tokens: 20,
+                        },
+                        expected_tool_results: Vec::new(),
+                    },
+                    TraceStep {
+                        request_hint: None,
+                        response: TraceResponse::Text {
+                            content: "I checked both tool descriptions.".to_string(),
+                            input_tokens: 220,
+                            output_tokens: 30,
+                        },
+                        expected_tool_results: Vec::new(),
+                    },
+                ],
+                expects: Default::default(),
+            }],
+        );
+
+        let rig = TestRigBuilder::new()
+            .with_trace(trace.clone())
+            .with_auto_approve_tools(true)
+            .build()
+            .await;
+
+        rig.send_message("How do message and channels differ?")
+            .await;
+        let responses = rig.wait_for_responses(1, Duration::from_secs(15)).await;
+
+        rig.verify_trace_expects(&trace, &responses);
+
+        let results = rig.tool_results();
+        let info_results: Vec<_> = results.iter().filter(|(n, _)| n == "tool_info").collect();
+        assert_eq!(info_results.len(), 2, "Expected two tool_info results");
+
+        let info_json: Vec<serde_json::Value> = info_results
+            .iter()
+            .map(|(_, preview)| {
+                serde_json::from_str(preview)
+                    .expect("tool_info result preview should be valid JSON")
+            })
+            .collect();
+
+        let message_json = info_json
+            .iter()
+            .find(|info| info["name"] == "message")
+            .expect("tool_info result should contain 'message'");
+        let message_description = message_json["description"]
+            .as_str()
+            .expect("message description should be a string");
+        assert!(
+            message_description.contains("Use normal assistant output to reply"),
+            "message description should distinguish normal replies: {message_description}"
+        );
+        assert!(
+            message_description.contains("proactive notifications"),
+            "message description should describe proactive sends: {message_description}"
+        );
+
+        let tool_search_json = info_json
+            .iter()
+            .find(|info| info["name"] == "tool_search")
+            .expect("tool_info result should contain 'tool_search'");
+        let tool_search_description = tool_search_json["description"]
+            .as_str()
+            .expect("tool_search description should be a string");
+        assert!(
+            tool_search_description.contains("`tool_install`")
+                && tool_search_description.contains("`tool_activate`"),
+            "tool_search description should describe setup/activation via tool_install and \
+             tool_activate: {tool_search_description}"
+        );
+        assert!(
+            tool_search_description.contains("use the `message` tool for proactive outbound sends"),
+            "tool_search description should point outbound sends to message: {tool_search_description}"
         );
 
         rig.shutdown();

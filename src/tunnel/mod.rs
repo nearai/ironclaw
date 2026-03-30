@@ -66,6 +66,10 @@ pub trait Tunnel: Send + Sync {
 /// Wraps a spawned tunnel child process.
 pub(crate) struct TunnelProcess {
     pub child: tokio::process::Child,
+    /// Background task that drains the process's output pipe (stdout or stderr).
+    /// Must stay alive or the process dies (SIGPIPE from closed pipe) or hangs
+    /// (OS pipe buffer fills up, blocking the process's writes).
+    pub _pipe_drain: Option<tokio::task::JoinHandle<()>>,
 }
 
 pub(crate) type SharedProcess = Arc<Mutex<Option<TunnelProcess>>>;
@@ -182,6 +186,22 @@ pub fn create_tunnel(config: &TunnelProviderConfig) -> Result<Option<Box<dyn Tun
 
 // ── Managed tunnel startup ───────────────────────────────────────
 
+/// Determine which local address the tunnel should forward traffic to.
+///
+/// Prefers the webhook server (`HTTP_PORT`) since that's where webhook routes
+/// (Telegram, etc.) are served. Falls back to the gateway port if configured,
+/// otherwise defaults to 0.0.0.0:8080 (the same fallback the webhook server
+/// uses in main.rs when no HTTP config is present).
+fn resolve_tunnel_target(channels: &crate::config::ChannelsConfig) -> (&str, u16) {
+    if let Some(ref http) = channels.http {
+        return (http.host.as_str(), http.port);
+    }
+    if let Some(ref gw) = channels.gateway {
+        return (gw.host.as_str(), gw.port);
+    }
+    ("0.0.0.0", 8080)
+}
+
 /// Start a managed tunnel if configured and no static URL is already set.
 ///
 /// Returns the (potentially mutated) config with `tunnel.public_url` set,
@@ -190,7 +210,7 @@ pub async fn start_managed_tunnel(
     mut config: crate::config::Config,
 ) -> (crate::config::Config, Option<Box<dyn Tunnel>>) {
     if config.tunnel.public_url.is_some() {
-        tracing::info!(
+        tracing::debug!(
             "Static tunnel URL in use: {}",
             config.tunnel.public_url.as_deref().unwrap_or("?")
         );
@@ -201,30 +221,19 @@ pub async fn start_managed_tunnel(
         return (config, None);
     };
 
-    let gateway_port = config
-        .channels
-        .gateway
-        .as_ref()
-        .map(|g| g.port)
-        .unwrap_or(3000);
-    let gateway_host = config
-        .channels
-        .gateway
-        .as_ref()
-        .map(|g| g.host.as_str())
-        .unwrap_or("127.0.0.1");
+    let (tunnel_host, tunnel_port) = resolve_tunnel_target(&config.channels);
 
     match create_tunnel(provider_config) {
         Ok(Some(tunnel)) => {
-            tracing::info!(
+            tracing::debug!(
                 "Starting {} tunnel on {}:{}...",
                 tunnel.name(),
-                gateway_host,
-                gateway_port
+                tunnel_host,
+                tunnel_port
             );
-            match tunnel.start(gateway_host, gateway_port).await {
+            match tunnel.start(tunnel_host, tunnel_port).await {
                 Ok(url) => {
-                    tracing::info!("Tunnel started: {}", url);
+                    tracing::debug!("Tunnel started: {}", url);
                     config.tunnel.public_url = Some(url);
                     (config, Some(tunnel))
                 }
@@ -383,10 +392,109 @@ mod tests {
 
         {
             let mut guard = proc.lock().await;
-            *guard = Some(TunnelProcess { child });
+            *guard = Some(TunnelProcess {
+                child,
+                _pipe_drain: None,
+            });
         }
 
         kill_shared(&proc).await.unwrap();
         assert!(proc.lock().await.is_none());
+    }
+
+    // ── Port selection regression tests ──────────────────────────────
+
+    fn base_channels() -> crate::config::ChannelsConfig {
+        crate::config::ChannelsConfig {
+            cli: crate::config::CliConfig { enabled: false },
+            http: None,
+            gateway: None,
+            signal: None,
+            wasm_channels_dir: std::env::temp_dir().join("ironclaw-test-channels"),
+            wasm_channels_enabled: false,
+            wasm_channel_owner_ids: std::collections::HashMap::new(),
+        }
+    }
+
+    fn channels_with_http(host: &str, port: u16) -> crate::config::ChannelsConfig {
+        let mut c = base_channels();
+        c.http = Some(crate::config::HttpConfig {
+            host: host.to_string(),
+            port,
+            webhook_secret: None,
+            user_id: "test".to_string(),
+        });
+        c.gateway = Some(crate::config::GatewayConfig {
+            host: "127.0.0.1".to_string(),
+            port: 3000,
+            auth_token: None,
+            workspace_read_scopes: Vec::new(),
+            oidc: None,
+            memory_layers: Vec::new(),
+        });
+        c
+    }
+
+    fn channels_gateway_only(host: &str, port: u16) -> crate::config::ChannelsConfig {
+        let mut c = base_channels();
+        c.gateway = Some(crate::config::GatewayConfig {
+            host: host.to_string(),
+            port,
+            auth_token: None,
+            workspace_read_scopes: Vec::new(),
+            memory_layers: Vec::new(),
+            oidc: None,
+        });
+        c
+    }
+
+    fn channels_neither() -> crate::config::ChannelsConfig {
+        base_channels()
+    }
+
+    #[test]
+    fn tunnel_target_prefers_http_port() {
+        let channels = channels_with_http("0.0.0.0", 8080);
+        let (host, port) = resolve_tunnel_target(&channels);
+        assert_eq!(host, "0.0.0.0"); // safety: test-only
+        assert_eq!(port, 8080); // safety: test-only
+    }
+
+    #[test]
+    fn tunnel_target_falls_back_to_gateway() {
+        let channels = channels_gateway_only("10.0.0.1", 4000);
+        let (host, port) = resolve_tunnel_target(&channels);
+        assert_eq!(host, "10.0.0.1"); // safety: test-only
+        assert_eq!(port, 4000); // safety: test-only
+    }
+
+    #[test]
+    fn tunnel_target_defaults_to_webhook_fallback() {
+        let channels = channels_neither();
+        let (host, port) = resolve_tunnel_target(&channels);
+        // Matches the webhook server's hardcoded fallback in main.rs
+        assert_eq!(host, "0.0.0.0"); // safety: test-only
+        assert_eq!(port, 8080); // safety: test-only
+    }
+
+    #[test]
+    fn tunnel_target_http_takes_priority_over_gateway() {
+        let channels = channels_with_http("192.168.1.1", 9090);
+        let (host, port) = resolve_tunnel_target(&channels);
+        // Should use HTTP config, not gateway's 127.0.0.1:3000
+        assert_eq!(host, "192.168.1.1"); // safety: test-only
+        assert_eq!(port, 9090); // safety: test-only
+    }
+
+    #[test]
+    fn tunnel_target_no_http_no_gateway_matches_webhook_fallback() {
+        // When HTTP_PORT is not set and gateway is not configured (e.g. WASM
+        // channels exist but no explicit HTTP config), the webhook server in
+        // main.rs binds to 0.0.0.0:8080 as a hardcoded fallback. The tunnel
+        // must target the same address so webhook traffic reaches the right
+        // server.
+        let channels = channels_neither();
+        let (host, port) = resolve_tunnel_target(&channels);
+        assert_eq!((host, port), ("0.0.0.0", 8080)); // safety: test-only
     }
 }

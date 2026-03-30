@@ -1,0 +1,74 @@
+{
+  "model_name": "test-routine-system-event-emit-grouped",
+  "expects": {
+    "tools_used": ["routine_create", "event_emit"],
+    "all_tools_succeeded": true,
+    "tool_results_contain": {
+      "event_emit": "fired_routines"
+    }
+  },
+  "steps": [
+    {
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_rc_grouped_system_1",
+            "name": "routine_create",
+            "arguments": {
+              "name": "grouped-gh-issue-watch",
+              "prompt": "Summarize the new issue and propose next steps.",
+              "description": "React to important GitHub issue.opened events",
+              "request": {
+                "kind": "system_event",
+                "source": "github",
+                "event_type": "issue.opened",
+                "filters": {
+                  "repository": "nearai/ironclaw",
+                  "priority": "p1"
+                }
+              },
+              "execution": {
+                "mode": "full_job",
+                "tool_permissions": ["shell"]
+              }
+            }
+          }
+        ],
+        "input_tokens": 120,
+        "output_tokens": 40
+      }
+    },
+    {
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_ee_grouped_1",
+            "name": "event_emit",
+            "arguments": {
+              "event_source": "github",
+              "event_type": "issue.opened",
+              "payload": {
+                "repository": "nearai/ironclaw",
+                "priority": "p1",
+                "issue_number": 123,
+                "title": "Support grouped routine create requests"
+              }
+            }
+          }
+        ],
+        "input_tokens": 180,
+        "output_tokens": 30
+      }
+    },
+    {
+      "response": {
+        "type": "text",
+        "content": "Created the grouped system-event routine and emitted a matching GitHub event.",
+        "input_tokens": 230,
+        "output_tokens": 18
+      }
+    }
+  ]
+}

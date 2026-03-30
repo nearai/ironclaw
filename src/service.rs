@@ -94,6 +94,7 @@ fn macos_plist_content(exe: &str, stdout: &str, stderr: &str) -> String {
   <true/>
   <key>KeepAlive</key>
   <true/>
+  <!-- Disable interactive CLI/REPL in daemon mode to prevent blocking on stdin -->
   <key>EnvironmentVariables</key>
   <dict>
     <key>CLI_ENABLED</key>
@@ -127,6 +128,7 @@ fn install_linux() -> Result<()> {
          \n\
          [Service]\n\
          Type=simple\n\
+         # Disable interactive CLI/REPL in daemon mode to prevent blocking on stdin\n\
          Environment=\"CLI_ENABLED=false\"\n\
          ExecStart=\"{exe}\" run\n\
          Restart=always\n\

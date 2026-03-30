@@ -1,13 +1,71 @@
 //! User settings persistence.
 //!
-//! Stores user preferences in ~/.ironclaw/settings.json.
-//! Settings are loaded with env var > settings.json > default priority.
+//! Stores user preferences in `~/.ironclaw` (JSON/TOML) and, for some values,
+//! in the database. At runtime, precedence between database values,
+//! environment variables, on-disk config, and built-in defaults is determined
+//! on a per-setting basis by the corresponding resolver.
+//! LLM backend and related settings in particular may prefer DB values over
+//! environment variables, as documented on their respective types.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
 use crate::bootstrap::ironclaw_base_dir;
+
+/// A custom LLM provider defined by the user through the web UI.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CustomLlmProviderSettings {
+    /// Unique identifier (used as `llm_backend` value).
+    pub id: String,
+    /// Display name.
+    pub name: String,
+    /// Adapter protocol: "open_ai_completions", "anthropic", "ollama".
+    pub adapter: String,
+    /// Base URL for the API endpoint.
+    #[serde(default)]
+    pub base_url: Option<String>,
+    /// Default model identifier.
+    #[serde(default)]
+    pub default_model: Option<String>,
+    /// Optional API key stored inline.
+    #[serde(default)]
+    pub api_key: Option<String>,
+    /// Whether this is a built-in provider (should always be false for custom).
+    #[serde(default)]
+    pub builtin: bool,
+}
+
+/// Per-provider overrides for built-in LLM providers (API key and/or model).
+///
+/// Stored as `llm_builtin_overrides` in the settings store, keyed by provider ID
+/// (e.g. `"openai"`, `"gemini"`). Resolved at startup during `LlmConfig::resolve()`.
+///
+/// Note: The global `selected_model` (if set) takes precedence over these
+/// per-provider overrides, which in turn take precedence over environment variables.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LlmBuiltinOverride {
+    /// API key override. Takes precedence over environment variables.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+    /// Model override. Takes precedence over environment variables but not `selected_model`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Base URL override. Takes precedence over environment variables.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+}
+
+/// Canonical secret name for a built-in provider's API key.
+pub fn builtin_secret_name(provider_id: &str) -> String {
+    format!("llm_builtin_{provider_id}_api_key")
+}
+
+/// Canonical secret name for a custom provider's API key.
+pub fn custom_secret_name(provider_id: &str) -> String {
+    format!("llm_custom_{provider_id}_api_key")
+}
 
 /// User settings persisted to disk.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -55,9 +113,17 @@ pub struct Settings {
     pub secrets_master_key_hex: Option<String>,
 
     // === Step 3: Inference Provider ===
-    /// LLM backend: "nearai", "anthropic", "openai", "ollama", "openai_compatible", "tinfoil", "bedrock".
+    /// LLM backend: "nearai", "anthropic", "openai", "github_copilot", "ollama", "openai_compatible", "tinfoil", "bedrock".
     #[serde(default)]
     pub llm_backend: Option<String>,
+
+    /// Custom LLM providers defined by the user through the web UI.
+    #[serde(default)]
+    pub llm_custom_providers: Vec<CustomLlmProviderSettings>,
+
+    /// Per-provider overrides for built-in providers (API key and/or model).
+    #[serde(default)]
+    pub llm_builtin_overrides: HashMap<String, LlmBuiltinOverride>,
 
     /// Ollama base URL (when llm_backend = "ollama").
     #[serde(default)]
@@ -102,6 +168,17 @@ pub struct Settings {
     /// Heartbeat configuration.
     #[serde(default)]
     pub heartbeat: HeartbeatSettings,
+
+    // === Conversational Profile Onboarding ===
+    /// Whether the conversational profile onboarding has been completed.
+    ///
+    /// Set during the user's first interaction with the running assistant
+    /// (not during the setup wizard), after the agent builds a psychographic
+    /// profile via `memory_write`. Used by the agent loop (via workspace
+    /// system-prompt wiring) to suppress BOOTSTRAP.md injection once
+    /// onboarding is complete.
+    #[serde(default, alias = "personal_onboarding_completed")]
+    pub profile_onboarding_completed: bool,
 
     // === Advanced Settings (not asked during setup, editable via CLI) ===
     /// Agent behavior configuration.
@@ -258,10 +335,6 @@ pub struct ChannelSettings {
     #[serde(default)]
     pub gateway_auth_token: Option<String>,
 
-    /// Web gateway user ID.
-    #[serde(default)]
-    pub gateway_user_id: Option<String>,
-
     /// Whether the CLI channel is enabled.
     #[serde(default = "default_true")]
     pub cli_enabled: bool,
@@ -331,7 +404,6 @@ impl Default for ChannelSettings {
             gateway_host: None,
             gateway_port: None,
             gateway_auth_token: None,
-            gateway_user_id: None,
             cli_enabled: true,
             signal_enabled: false,
             signal_http_url: None,
@@ -835,7 +907,8 @@ impl Settings {
         let content = format!(
             "# IronClaw configuration file.\n\
              #\n\
-             # Priority: env var > this file > database settings > defaults.\n\
+             # Priority varies by subsystem. LLM: DB > env > this file > defaults.\n\
+             # Most others: env > DB > this file > defaults.\n\
              # Uncomment and edit values to override defaults.\n\
              # Run `ironclaw config init` to regenerate this file.\n\
              #\n\
@@ -1286,6 +1359,89 @@ mod tests {
         assert_eq!(loaded.heartbeat.interval_secs, 900);
     }
 
+    /// Regression: /model writes a single key ("selected_model") to the DB via
+    /// set_setting(). On restart, get_all_settings() returns ALL keys including
+    /// wizard-written defaults. The single-key update must survive the full
+    /// from_db_map() round trip.
+    #[test]
+    fn db_single_key_model_update_survives_roundtrip() {
+        // Step 1: Wizard writes full settings to DB (including selected_model
+        // from initial setup).
+        let wizard_settings = Settings {
+            llm_backend: Some("nearai".to_string()),
+            selected_model: Some("old-wizard-model".to_string()),
+            ..Default::default()
+        };
+        let mut db: std::collections::HashMap<String, serde_json::Value> =
+            wizard_settings.to_db_map();
+
+        // Step 2: User runs /model new-model — persist_selected_model writes
+        // a single key, overwriting the wizard value.
+        db.insert(
+            "selected_model".to_string(),
+            serde_json::Value::String("new-model".to_string()),
+        );
+
+        // Step 3: On restart, from_db_map() rebuilds Settings from the full
+        // DB map.
+        let restored = Settings::from_db_map(&db);
+        assert_eq!(
+            restored.selected_model,
+            Some("new-model".to_string()),
+            "/model change must survive DB round trip"
+        );
+    }
+
+    /// TOML is loaded as a base, then DB is merged on top (DB wins).
+    /// When both agree, the result matches.
+    #[test]
+    fn toml_and_db_matching_model_preserved() {
+        // from_db_with_toml: TOML base, then DB merged on top.
+        let mut toml_base = Settings {
+            selected_model: Some("new-model".to_string()),
+            ..Default::default()
+        };
+
+        let db_overlay = Settings {
+            llm_backend: Some("nearai".to_string()),
+            selected_model: Some("new-model".to_string()),
+            ..Default::default()
+        };
+
+        toml_base.merge_from(&db_overlay);
+        assert_eq!(
+            toml_base.selected_model,
+            Some("new-model".to_string()),
+            "matching values: result should be the shared value"
+        );
+    }
+
+    /// Regression: when TOML has a stale model but DB has been updated via
+    /// /model command, DB must win. This matches from_db_with_toml where
+    /// TOML is loaded first as base, then DB is merged on top.
+    #[test]
+    fn db_model_wins_over_stale_toml() {
+        // TOML base with old model.
+        let mut toml_base = Settings {
+            selected_model: Some("old-model".to_string()),
+            ..Default::default()
+        };
+
+        // DB has the new model from /model command.
+        let db_overlay = Settings {
+            selected_model: Some("new-model".to_string()),
+            ..Default::default()
+        };
+
+        // from_db_with_toml: TOML first, then DB merged on top.
+        toml_base.merge_from(&db_overlay);
+        assert_eq!(
+            toml_base.selected_model,
+            Some("new-model".to_string()),
+            "DB selected_model must win over stale TOML value"
+        );
+    }
+
     /// Regression test: /model command must persist selected_model to TOML config.
     /// Prior to the fix, `set_model()` only changed the in-memory provider and the
     /// choice was lost on restart.
@@ -1309,6 +1465,24 @@ mod tests {
         // Verify the change survived a reload.
         let reloaded = Settings::load_toml(&path).unwrap().unwrap();
         assert_eq!(reloaded.selected_model, Some("new-model".to_string()));
+    }
+
+    /// save_toml / load_toml round-trip for selected_model.
+    #[test]
+    fn toml_save_and_load_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+
+        assert!(Settings::load_toml(&path).unwrap().is_none());
+
+        let settings = Settings {
+            selected_model: Some("new-model".to_string()),
+            ..Default::default()
+        };
+        settings.save_toml(&path).unwrap();
+
+        let loaded = Settings::load_toml(&path).unwrap().unwrap();
+        assert_eq!(loaded.selected_model, Some("new-model".to_string()));
     }
 
     #[test]
@@ -2263,5 +2437,66 @@ mod tests {
         assert!(current.embeddings.enabled);
         assert_eq!(current.embeddings.provider, "nearai");
         assert_eq!(current.embeddings.model, "text-embedding-3-large");
+    }
+
+    /// DB values must win over TOML values when both set the same field.
+    ///
+    /// This mirrors the merge order in `Config::from_db_with_toml`:
+    /// TOML is loaded as the base, then DB is merged on top.
+    #[test]
+    fn db_settings_win_over_toml_settings() {
+        // Simulate TOML base: has llm_backend and selected_model
+        let mut base = Settings {
+            llm_backend: Some("openai".to_string()),
+            selected_model: Some("toml-model".to_string()),
+            ..Default::default()
+        };
+
+        // Simulate DB overlay: has different llm_backend and selected_model
+        let db = Settings {
+            llm_backend: Some("anthropic".to_string()),
+            selected_model: Some("db-model".to_string()),
+            ..Default::default()
+        };
+
+        // Merge DB on top of TOML (same order as from_db_with_toml)
+        base.merge_from(&db);
+
+        assert_eq!(
+            base.llm_backend.as_deref(),
+            Some("anthropic"),
+            "DB llm_backend must win over TOML"
+        );
+        assert_eq!(
+            base.selected_model.as_deref(),
+            Some("db-model"),
+            "DB selected_model must win over TOML"
+        );
+    }
+
+    /// When DB has no value (default), TOML value should be preserved.
+    #[test]
+    fn toml_settings_used_when_db_has_no_value() {
+        let mut base = Settings {
+            llm_backend: Some("openai".to_string()),
+            selected_model: Some("toml-model".to_string()),
+            ..Default::default()
+        };
+
+        // DB has no llm_backend or selected_model (both default/None)
+        let db = Settings::default();
+
+        base.merge_from(&db);
+
+        assert_eq!(
+            base.llm_backend.as_deref(),
+            Some("openai"),
+            "TOML llm_backend should be preserved when DB has no value"
+        );
+        assert_eq!(
+            base.selected_model.as_deref(),
+            Some("toml-model"),
+            "TOML selected_model should be preserved when DB has no value"
+        );
     }
 }

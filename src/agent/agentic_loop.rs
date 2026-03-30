@@ -6,10 +6,13 @@
 //! via the `LoopDelegate` trait.
 
 use async_trait::async_trait;
+use std::borrow::Cow;
 
 use crate::agent::session::PendingApproval;
 use crate::error::Error;
-use crate::llm::{ChatMessage, Reasoning, ReasoningContext, RespondResult};
+use crate::llm::{
+    ChatMessage, FinishReason, Reasoning, ReasoningContext, RespondResult, ResponseMetadata,
+};
 
 /// Signal from the delegate indicating how the loop should proceed.
 pub enum LoopSignal {
@@ -37,6 +40,8 @@ pub enum LoopOutcome {
     Stopped,
     /// Max iterations exceeded.
     MaxIterations,
+    /// Loop terminated early with a clear failure reason.
+    Failure(String),
     /// A tool requires user approval before continuing (chat delegate only).
     NeedApproval(Box<PendingApproval>),
 }
@@ -102,6 +107,7 @@ pub trait LoopDelegate: Send + Sync {
     async fn handle_text_response(
         &self,
         text: &str,
+        metadata: ResponseMetadata,
         reason_ctx: &mut ReasoningContext,
     ) -> TextAction;
 
@@ -133,6 +139,9 @@ pub async fn run_agentic_loop(
     config: &AgenticLoopConfig,
 ) -> Result<LoopOutcome, Error> {
     let mut consecutive_tool_intent_nudges: u32 = 0;
+    // Accumulates across all iterations (not reset by text responses) so
+    // non-consecutive truncations still escalate to force_text.
+    let mut truncation_count: u32 = 0;
 
     for iteration in 1..=config.max_iterations {
         // Check for external signals (stop, cancellation, user messages)
@@ -205,7 +214,10 @@ pub async fn run_agentic_loop(
                     consecutive_tool_intent_nudges = 0;
                 }
 
-                match delegate.handle_text_response(&text, reason_ctx).await {
+                match delegate
+                    .handle_text_response(&text, output.metadata, reason_ctx)
+                    .await
+                {
                     TextAction::Return(outcome) => return Ok(outcome),
                     TextAction::Continue => {}
                 }
@@ -214,7 +226,35 @@ pub async fn run_agentic_loop(
                 tool_calls,
                 content,
             } => {
+                // If the response was truncated, tool call parameters are likely
+                // incomplete. Discard them and tell the LLM to try a different
+                // approach rather than executing malformed tool calls.
+                if output.finish_reason == FinishReason::Length {
+                    truncation_count += 1;
+                    let names: Vec<&str> = tool_calls.iter().map(|tc| tc.name.as_str()).collect();
+                    tracing::warn!(
+                        iteration,
+                        tools = ?names,
+                        truncation_count,
+                        "Discarding truncated tool calls (finish_reason=Length)"
+                    );
+                    if let Some(ref text) = content {
+                        reason_ctx.messages.push(ChatMessage::assistant(text));
+                    }
+                    reason_ctx
+                        .messages
+                        .push(ChatMessage::user(crate::llm::TRUNCATED_TOOL_CALL_NOTICE));
+                    // After repeated truncations, force text-only mode so the LLM
+                    // stops attempting tool calls it can't fit in the output budget.
+                    if truncation_count >= 3 {
+                        reason_ctx.force_text = true;
+                    }
+                    delegate.after_iteration(iteration).await;
+                    continue;
+                }
+
                 consecutive_tool_intent_nudges = 0;
+                truncation_count = 0;
 
                 if let Some(outcome) = delegate
                     .execute_tool_calls(tool_calls, content, reason_ctx)
@@ -235,19 +275,19 @@ pub async fn run_agentic_loop(
 ///
 /// `max` is a byte budget. The result is truncated at the last valid char
 /// boundary at or before `max` bytes, so it is always valid UTF-8.
-pub fn truncate_for_preview(s: &str, max: usize) -> String {
+pub fn truncate_for_preview(s: &str, max: usize) -> Cow<'_, str> {
     if s.len() <= max {
-        s.to_string()
+        Cow::Borrowed(s)
     } else {
         let end = crate::util::floor_char_boundary(s, max);
-        format!("{}...", &s[..end])
+        Cow::Owned(format!("{}...", &s[..end]))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::llm::{RespondOutput, TokenUsage, ToolCall};
+    use crate::llm::{RespondOutput, ResponseAnomaly, ResponseMetadata, TokenUsage, ToolCall};
     use crate::testing::StubLlm;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -270,6 +310,8 @@ mod tests {
         RespondOutput {
             result: RespondResult::Text(text.to_string()),
             usage: zero_usage(),
+            finish_reason: FinishReason::Stop,
+            metadata: ResponseMetadata::default(),
         }
     }
 
@@ -280,6 +322,8 @@ mod tests {
                 content: None,
             },
             usage: zero_usage(),
+            finish_reason: FinishReason::ToolUse,
+            metadata: ResponseMetadata::default(),
         }
     }
 
@@ -357,6 +401,7 @@ mod tests {
         async fn handle_text_response(
             &self,
             text: &str,
+            _metadata: ResponseMetadata,
             _reason_ctx: &mut ReasoningContext,
         ) -> TextAction {
             TextAction::Return(LoopOutcome::Response(text.to_string()))
@@ -413,6 +458,7 @@ mod tests {
             id: "call_1".to_string(),
             name: "echo".to_string(),
             arguments: serde_json::json!({}),
+            reasoning: None,
         };
         let delegate = MockDelegate::new(vec![
             tool_calls_output(vec![tool_call]),
@@ -474,6 +520,79 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_text_response_metadata_can_fail_fast() {
+        struct FailOnMalformedResponse;
+
+        #[async_trait]
+        impl LoopDelegate for FailOnMalformedResponse {
+            async fn check_signals(&self) -> LoopSignal {
+                LoopSignal::Continue
+            }
+
+            async fn before_llm_call(
+                &self,
+                _: &mut ReasoningContext,
+                _: usize,
+            ) -> Option<LoopOutcome> {
+                None
+            }
+
+            async fn call_llm(
+                &self,
+                _: &Reasoning,
+                _: &mut ReasoningContext,
+                _: usize,
+            ) -> Result<crate::llm::RespondOutput, crate::error::Error> {
+                Ok(RespondOutput {
+                    result: RespondResult::Text("fallback".to_string()),
+                    usage: zero_usage(),
+                    finish_reason: FinishReason::Stop,
+                    metadata: ResponseMetadata {
+                        anomaly: Some(ResponseAnomaly::EmptyToolCompletion),
+                    },
+                })
+            }
+
+            async fn handle_text_response(
+                &self,
+                _: &str,
+                metadata: ResponseMetadata,
+                _: &mut ReasoningContext,
+            ) -> TextAction {
+                assert_eq!(metadata.anomaly, Some(ResponseAnomaly::EmptyToolCompletion));
+                TextAction::Return(LoopOutcome::Failure(
+                    "malformed tool completion".to_string(),
+                ))
+            }
+
+            async fn execute_tool_calls(
+                &self,
+                _: Vec<ToolCall>,
+                _: Option<String>,
+                _: &mut ReasoningContext,
+            ) -> Result<Option<LoopOutcome>, crate::error::Error> {
+                Ok(None)
+            }
+        }
+
+        let delegate = FailOnMalformedResponse;
+        let reasoning = stub_reasoning();
+        let mut ctx = ReasoningContext::new();
+        let outcome = run_agentic_loop(
+            &delegate,
+            &reasoning,
+            &mut ctx,
+            &AgenticLoopConfig::default(),
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            matches!(outcome, LoopOutcome::Failure(ref reason) if reason == "malformed tool completion")
+        );
+    }
+
+    #[tokio::test]
     async fn test_max_iterations_reached() {
         struct ContinueDelegate;
 
@@ -500,6 +619,7 @@ mod tests {
             async fn handle_text_response(
                 &self,
                 _: &str,
+                _: ResponseMetadata,
                 ctx: &mut ReasoningContext,
             ) -> TextAction {
                 ctx.messages.push(ChatMessage::assistant("still working"));
@@ -598,14 +718,119 @@ mod tests {
     }
 
     #[test]
+    fn test_truncate_short_string_borrows() {
+        let result = truncate_for_preview("hello", 10);
+        assert!(matches!(result, Cow::Borrowed("hello")));
+    }
+
+    #[test]
     fn test_truncate_long_string_adds_ellipsis() {
         let result = truncate_for_preview("hello world", 5);
         assert_eq!(result, "hello...");
     }
 
     #[test]
+    fn test_truncate_long_string_owns() {
+        let result = truncate_for_preview("hello world", 5);
+        assert!(matches!(result, Cow::Owned(_)));
+    }
+
+    #[test]
     fn test_truncate_multibyte_safe() {
         let result = truncate_for_preview("café", 4);
         assert_eq!(result, "caf...");
+    }
+
+    #[tokio::test]
+    async fn test_truncated_tool_calls_discarded_on_length() {
+        let truncated_tool_call = ToolCall {
+            id: "call_1".to_string(),
+            name: "memory_write".to_string(),
+            arguments: serde_json::json!({}), // empty — truncated
+            reasoning: None,
+        };
+        let truncated_output = RespondOutput {
+            result: RespondResult::ToolCalls {
+                tool_calls: vec![truncated_tool_call],
+                content: Some("I'll write the report.".to_string()),
+            },
+            usage: zero_usage(),
+            finish_reason: FinishReason::Length, // response was truncated
+            metadata: ResponseMetadata::default(),
+        };
+        let delegate = MockDelegate::new(vec![truncated_output, text_output("Summarized it.")]);
+        let reasoning = stub_reasoning();
+        let mut ctx = ReasoningContext::new();
+        let config = AgenticLoopConfig {
+            max_iterations: 5,
+            ..Default::default()
+        };
+
+        let outcome = run_agentic_loop(&delegate, &reasoning, &mut ctx, &config)
+            .await
+            .unwrap();
+
+        // Tool calls should NOT have been executed
+        assert_eq!(delegate.tool_exec_count.load(Ordering::SeqCst), 0);
+        // The loop should have continued and returned the text response
+        assert!(matches!(outcome, LoopOutcome::Response(ref t) if t == "Summarized it."));
+        // A truncation notice should have been injected into context
+        assert!(
+            ctx.messages
+                .iter()
+                .any(|m| m.role == crate::llm::Role::User && m.content.contains("truncated")),
+            "Should inject truncation notice into context"
+        );
+        // The partial assistant content should have been preserved
+        assert!(
+            ctx.messages
+                .iter()
+                .any(|m| m.role == crate::llm::Role::Assistant
+                    && m.content.contains("write the report")),
+            "Should preserve partial assistant content"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_repeated_truncations_force_text_mode() {
+        let make_truncated = || RespondOutput {
+            result: RespondResult::ToolCalls {
+                tool_calls: vec![ToolCall {
+                    id: "call_1".to_string(),
+                    name: "memory_write".to_string(),
+                    arguments: serde_json::json!({}),
+                    reasoning: None,
+                }],
+                content: None,
+            },
+            usage: zero_usage(),
+            finish_reason: FinishReason::Length,
+            metadata: ResponseMetadata::default(),
+        };
+        // Three truncated responses, then a text response
+        let delegate = MockDelegate::new(vec![
+            make_truncated(),
+            make_truncated(),
+            make_truncated(),
+            text_output("Gave up on tool calls."),
+        ]);
+        let reasoning = stub_reasoning();
+        let mut ctx = ReasoningContext::new();
+        let config = AgenticLoopConfig {
+            max_iterations: 5,
+            ..Default::default()
+        };
+
+        let outcome = run_agentic_loop(&delegate, &reasoning, &mut ctx, &config)
+            .await
+            .unwrap();
+
+        assert!(matches!(outcome, LoopOutcome::Response(_)));
+        assert_eq!(delegate.tool_exec_count.load(Ordering::SeqCst), 0);
+        // After 3 truncations, force_text should be set
+        assert!(
+            ctx.force_text,
+            "Should escalate to force_text after repeated truncations"
+        );
     }
 }

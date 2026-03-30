@@ -2,28 +2,26 @@
 
 use crate::channels::web::types::{ToolCallInfo, TurnInfo};
 
-/// Truncate a string to at most `max_bytes` bytes at a char boundary, appending "...".
-///
-/// If the input is wrapped in `<tool_output …>…</tool_output>` and truncation
-/// removes the closing tag, the tag is re-appended so downstream XML parsers
-/// never see an unclosed element.
-pub fn truncate_preview(s: &str, max_bytes: usize) -> String {
-    if s.len() <= max_bytes {
-        return s.to_string();
-    }
-    // Walk backwards from max_bytes to find a valid char boundary
-    let mut end = max_bytes;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    let mut result = format!("{}...", &s[..end]);
+pub use ironclaw_common::truncate_preview;
 
-    // Re-close <tool_output> if truncation cut through the closing tag.
-    if s.starts_with("<tool_output") && !result.ends_with("</tool_output>") {
-        result.push_str("\n</tool_output>");
-    }
+/// Convert stored tool errors into plain text suitable for UI display.
+pub fn tool_error_for_display(error: &str) -> String {
+    ironclaw_safety::SafetyLayer::unwrap_tool_output(error).unwrap_or_else(|| error.to_string())
+}
 
-    result
+/// Parse tool call summary JSON objects into `ToolCallInfo` structs.
+fn parse_tool_call_infos(calls: &[serde_json::Value]) -> Vec<ToolCallInfo> {
+    calls
+        .iter()
+        .map(|c| ToolCallInfo {
+            name: c["name"].as_str().unwrap_or("unknown").to_string(),
+            has_result: c.get("result_preview").is_some_and(|v| !v.is_null()),
+            has_error: c.get("error").is_some_and(|v| !v.is_null()),
+            result_preview: c["result_preview"].as_str().map(String::from),
+            error: c["error"].as_str().map(tool_error_for_display),
+            rationale: c["rationale"].as_str().map(String::from),
+        })
+        .collect()
 }
 
 /// Build TurnInfo pairs from flat DB messages (user/tool_calls/assistant triples).
@@ -49,6 +47,7 @@ pub fn build_turns_from_db_messages(
                 started_at: msg.created_at.to_rfc3339(),
                 completed_at: None,
                 tool_calls: Vec::new(),
+                narrative: None,
             };
 
             // Check if next message is a tool_calls record
@@ -56,18 +55,28 @@ pub fn build_turns_from_db_messages(
                 && next.role == "tool_calls"
             {
                 let tc_msg = iter.next().expect("peeked");
-                match serde_json::from_str::<Vec<serde_json::Value>>(&tc_msg.content) {
-                    Ok(calls) => {
-                        turn.tool_calls = calls
-                            .iter()
-                            .map(|c| ToolCallInfo {
-                                name: c["name"].as_str().unwrap_or("unknown").to_string(),
-                                has_result: c.get("result_preview").is_some(),
-                                has_error: c.get("error").is_some(),
-                                result_preview: c["result_preview"].as_str().map(String::from),
-                                error: c["error"].as_str().map(String::from),
-                            })
-                            .collect();
+                // Parse tool_calls JSON — supports two formats:
+                // safety: no byte-index slicing; comment describes JSON shape
+                match serde_json::from_str::<serde_json::Value>(&tc_msg.content) {
+                    Ok(serde_json::Value::Array(calls)) => {
+                        // Old format: plain array
+                        turn.tool_calls = parse_tool_call_infos(&calls);
+                    }
+                    Ok(serde_json::Value::Object(obj)) => {
+                        // New wrapped format with narrative
+                        turn.narrative = obj
+                            .get("narrative")
+                            .and_then(|v| v.as_str())
+                            .map(String::from);
+                        if let Some(serde_json::Value::Array(calls)) = obj.get("calls") {
+                            turn.tool_calls = parse_tool_call_infos(calls);
+                        }
+                    }
+                    Ok(_) => {
+                        tracing::warn!(
+                            message_id = %tc_msg.id,
+                            "Unexpected tool_calls JSON shape in DB, skipping"
+                        );
                     }
                     Err(e) => {
                         tracing::warn!(
@@ -105,6 +114,7 @@ pub fn build_turns_from_db_messages(
                 started_at: msg.created_at.to_rfc3339(),
                 completed_at: Some(msg.created_at.to_rfc3339()),
                 tool_calls: Vec::new(),
+                narrative: None,
             });
             turn_number += 1;
         }
@@ -117,88 +127,6 @@ pub fn build_turns_from_db_messages(
 mod tests {
     use super::*;
     use uuid::Uuid;
-
-    // ---- truncate_preview tests ----
-
-    #[test]
-    fn test_truncate_preview_short_string() {
-        assert_eq!(truncate_preview("hello", 10), "hello");
-    }
-
-    #[test]
-    fn test_truncate_preview_exact_boundary() {
-        assert_eq!(truncate_preview("hello", 5), "hello");
-    }
-
-    #[test]
-    fn test_truncate_preview_truncates_ascii() {
-        assert_eq!(truncate_preview("hello world", 5), "hello...");
-    }
-
-    #[test]
-    fn test_truncate_preview_empty_string() {
-        assert_eq!(truncate_preview("", 10), "");
-    }
-
-    #[test]
-    fn test_truncate_preview_multibyte_char_boundary() {
-        // '€' is 3 bytes (E2 82 AC). "a€b" = [61, E2, 82, AC, 62] = 5 bytes
-        // Truncating at max_bytes=3 should not split the euro sign.
-        let s = "a€b";
-        let result = truncate_preview(s, 3);
-        // max_bytes=3 lands mid-€, so it walks back to byte 1 ("a")
-        assert_eq!(result, "a...");
-    }
-
-    #[test]
-    fn test_truncate_preview_emoji() {
-        // '🦀' is 4 bytes. "hi🦀" = 6 bytes
-        let s = "hi🦀";
-        let result = truncate_preview(s, 4);
-        // max_bytes=4 lands mid-🦀, walks back to byte 2 ("hi")
-        assert_eq!(result, "hi...");
-    }
-
-    #[test]
-    fn test_truncate_preview_cjk() {
-        // CJK characters are 3 bytes each. "你好世界" = 12 bytes
-        let s = "你好世界";
-        let result = truncate_preview(s, 7);
-        // max_bytes=7 lands mid-character (byte 7 is inside 世), walks back to 6 ("你好")
-        assert_eq!(result, "你好...");
-    }
-
-    #[test]
-    fn test_truncate_preview_zero_max_bytes() {
-        assert_eq!(truncate_preview("hello", 0), "...");
-    }
-
-    #[test]
-    fn test_truncate_preview_closes_tool_output_tag() {
-        let s = "<tool_output name=\"search\" sanitized=\"true\">\nSome very long content here\n</tool_output>";
-        // Truncate so it cuts before the closing tag
-        let result = truncate_preview(s, 60);
-        assert!(result.ends_with("</tool_output>"));
-        assert!(result.contains("..."));
-    }
-
-    #[test]
-    fn test_truncate_preview_no_extra_close_when_intact() {
-        let s = "<tool_output name=\"echo\" sanitized=\"false\">\nshort\n</tool_output>";
-        // The string is short enough not to be truncated
-        let result = truncate_preview(s, 500);
-        assert_eq!(result, s);
-        // Should not have a duplicate closing tag
-        assert_eq!(result.matches("</tool_output>").count(), 1);
-    }
-
-    #[test]
-    fn test_truncate_preview_non_xml_unaffected() {
-        let s = "Just a plain long string that gets truncated";
-        let result = truncate_preview(s, 10);
-        assert_eq!(result, "Just a pla...");
-        assert!(!result.contains("</tool_output>"));
-    }
 
     // ---- build_turns_from_db_messages tests ----
 
@@ -259,6 +187,29 @@ mod tests {
     }
 
     #[test]
+    fn test_build_turns_unwrap_wrapped_tool_error_for_display() {
+        let tc_json = serde_json::json!([
+            {
+                "name": "http",
+                "error": "<tool_output name=\"http\">\nTool 'http' failed: timeout\n</tool_output>"
+            }
+        ]);
+        let messages = vec![
+            make_msg("user", "Run it", 0),
+            make_msg("tool_calls", &tc_json.to_string(), 500),
+        ];
+
+        let turns = build_turns_from_db_messages(&messages);
+
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].tool_calls.len(), 1);
+        assert_eq!(
+            turns[0].tool_calls[0].error.as_deref(),
+            Some("Tool 'http' failed: timeout")
+        );
+    }
+
+    #[test]
     fn test_build_turns_malformed_tool_calls() {
         let messages = vec![
             make_msg("user", "Hello", 0),
@@ -304,5 +255,53 @@ mod tests {
         assert_eq!(turns.len(), 1);
         assert!(turns[0].tool_calls.is_empty());
         assert_eq!(turns[0].state, "Completed");
+    }
+
+    #[test]
+    fn test_build_turns_with_wrapped_tool_calls_format() {
+        let tc_json = serde_json::json!({
+            "narrative": "Searching memory for context before proceeding.",
+            "calls": [
+                {"name": "memory_search", "result_preview": "found 3 items", "rationale": "consult prior context"},
+                {"name": "shell", "error": "permission denied"}
+            ]
+        });
+        let messages = vec![
+            make_msg("user", "Find info", 0),
+            make_msg("tool_calls", &tc_json.to_string(), 500),
+            make_msg("assistant", "Here's what I found", 1000),
+        ];
+        let turns = build_turns_from_db_messages(&messages);
+        assert_eq!(turns.len(), 1);
+        assert_eq!(
+            turns[0].narrative.as_deref(),
+            Some("Searching memory for context before proceeding.")
+        );
+        assert_eq!(turns[0].tool_calls.len(), 2);
+        assert_eq!(turns[0].tool_calls[0].name, "memory_search");
+        assert_eq!(
+            turns[0].tool_calls[0].rationale.as_deref(),
+            Some("consult prior context")
+        );
+        assert!(turns[0].tool_calls[0].has_result);
+        assert_eq!(turns[0].tool_calls[1].name, "shell");
+        assert!(turns[0].tool_calls[1].has_error);
+        assert_eq!(turns[0].response.as_deref(), Some("Here's what I found"));
+    }
+
+    #[test]
+    fn test_build_turns_wrapped_format_without_narrative() {
+        let tc_json = serde_json::json!({
+            "calls": [{"name": "echo", "result_preview": "hello"}]
+        });
+        let messages = vec![
+            make_msg("user", "Say hi", 0),
+            make_msg("tool_calls", &tc_json.to_string(), 500),
+            make_msg("assistant", "Done", 1000),
+        ];
+        let turns = build_turns_from_db_messages(&messages);
+        assert_eq!(turns.len(), 1);
+        assert!(turns[0].narrative.is_none());
+        assert_eq!(turns[0].tool_calls.len(), 1);
     }
 }
