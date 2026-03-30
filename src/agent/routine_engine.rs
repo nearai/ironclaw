@@ -2167,6 +2167,9 @@ async fn inject_agent_review(
     }
 
     // Rate limit: tumbling hourly window (resets when wall-clock hour elapses).
+    // Note: the load/check/increment is not atomic — concurrent tokio tasks from
+    // full_job routines could both pass the check and overshoot the limit by 1-2.
+    // Acceptable for a soft rate limit with a default of 10/hour.
     let now_secs = Utc::now().timestamp();
     let window_start = ctx.agent_review_window_start.load(Ordering::Relaxed);
     if now_secs - window_start >= 3600 {
@@ -2222,6 +2225,13 @@ async fn inject_agent_review(
         .with_conversation_scope(routine.id.to_string())
         .into_routine_review();
 
+    // Note: the circuit breaker tracks injection failures (mpsc send), not
+    // downstream LLM failures from the agent-review turn. The injection is
+    // fire-and-forget — the LLM call happens asynchronously in handle_message.
+    // Tracking downstream failures would require a feedback channel from the
+    // agent loop back to the routine engine, which is a larger architectural
+    // change. The current circuit breaker protects against the inject_tx channel
+    // being broken (receiver dropped), not against LLM errors.
     if let Err(e) = tx.send(msg).await {
         ctx.agent_review_consecutive_failures
             .fetch_add(1, Ordering::Relaxed);
@@ -2230,7 +2240,6 @@ async fn inject_agent_review(
             "Failed to inject agent-review message: {}", e
         );
     } else {
-        // Successful injection resets the circuit breaker.
         ctx.agent_review_consecutive_failures
             .store(0, Ordering::Relaxed);
     }
