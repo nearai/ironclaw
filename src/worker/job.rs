@@ -952,6 +952,7 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                         } else {
                             Some(action.reasoning.clone())
                         },
+                        thought_signature: None,
                     }],
                 ));
 
@@ -1709,6 +1710,7 @@ fn selections_to_tool_calls(selections: &[ToolSelection]) -> Vec<ToolCall> {
             } else {
                 Some(s.reasoning.clone())
             },
+            thought_signature: None,
         })
         .collect()
 }

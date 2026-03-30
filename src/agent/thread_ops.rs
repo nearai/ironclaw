@@ -1932,6 +1932,7 @@ fn rebuild_chat_messages_from_db(
                                     .get("rationale")
                                     .and_then(|v| v.as_str())
                                     .map(String::from),
+                                thought_signature: None,
                             })
                             .collect();
 
