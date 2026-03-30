@@ -3174,4 +3174,246 @@ mod tests {
             "prompt should mention configured delivery target: {prompt}",
         );
     }
+    /// Integration test: inject_agent_review sends a RoutineReview message through
+    /// a real mpsc channel when agent_review_on_failure is enabled.
+    #[tokio::test]
+    async fn test_inject_agent_review_sends_message_on_failure() {
+        use crate::channels::IncomingMessage;
+
+        use crate::testing::StubLlm;
+
+        // Set up a real mpsc channel to capture the injected message
+        let (inject_tx, mut inject_rx) = tokio::sync::mpsc::channel::<IncomingMessage>(16);
+        let (notify_tx, _notify_rx) =
+            tokio::sync::mpsc::channel::<crate::channels::OutgoingResponse>(16);
+
+        // Build a minimal libsql backend for AdminScope
+        let dir = tempfile::tempdir().expect("tempdir"); // safety: test code
+        let db_path = dir.path().join("test_inject.db");
+        let backend = crate::db::libsql::LibSqlBackend::new_local(&db_path)
+            .await
+            .expect("libsql"); // safety: test code
+        crate::db::Database::run_migrations(&backend)
+            .await
+            .expect("migrations"); // safety: test code
+        let db: Arc<dyn crate::db::Database> = Arc::new(backend);
+
+        let safety = Arc::new(ironclaw_safety::SafetyLayer::new(
+            &crate::config::SafetyConfig {
+                max_output_length: 100_000,
+                injection_check_enabled: false,
+            },
+        ));
+        let llm: Arc<dyn crate::llm::LlmProvider> = Arc::new(StubLlm::default());
+        let ws = Arc::new(crate::workspace::Workspace::new_with_db(
+            "default",
+            db.clone(),
+        ));
+        let tools = Arc::new(crate::tools::ToolRegistry::new());
+
+        let mut config = RoutineConfig::default();
+        config.agent_review_enabled = true;
+
+        let ctx = super::EngineContext {
+            config,
+            store: crate::tenant::AdminScope::new(db.clone()),
+            llm,
+            workspace: ws,
+            notify_tx,
+            running_count: Arc::new(AtomicUsize::new(0)),
+            scheduler: None,
+            extension_manager: None,
+            tools,
+            safety,
+            sandbox_readiness: super::SandboxReadiness::DisabledByConfig,
+            inject_tx: Some(inject_tx),
+            agent_review_count: Arc::new(AtomicU32::new(0)),
+            agent_review_window_start: Arc::new(std::sync::atomic::AtomicI64::new(0)),
+            agent_review_consecutive_failures: Arc::new(AtomicU32::new(0)),
+        };
+
+        // Create a routine with agent_review_on_failure = true
+        let routine = Routine {
+            id: uuid::Uuid::new_v4(),
+            name: "test-routine".to_string(),
+            description: String::new(),
+            user_id: "default".to_string(),
+            enabled: true,
+            trigger: Trigger::Manual,
+            action: RoutineAction::Lightweight {
+                prompt: "test".to_string(),
+                context_paths: vec![],
+                max_tokens: 1024,
+                use_tools: false,
+                max_tool_rounds: 0,
+            },
+            guardrails: RoutineGuardrails::default(),
+            notify: NotifyConfig {
+                agent_review_on_failure: true,
+                ..NotifyConfig::default()
+            },
+            last_run_at: None,
+            next_fire_at: None,
+            run_count: 0,
+            consecutive_failures: 0,
+            state: serde_json::Value::Null,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+
+        let run = RoutineRun {
+            id: uuid::Uuid::new_v4(),
+            routine_id: routine.id,
+            trigger_type: "manual".to_string(),
+            trigger_detail: None,
+            started_at: chrono::Utc::now(),
+            completed_at: None,
+            status: RunStatus::Failed,
+            result_summary: None,
+            tokens_used: None,
+            job_id: None,
+            created_at: chrono::Utc::now(),
+        };
+
+        // Inject with Failed status — should send a message
+        super::inject_agent_review(
+            &ctx,
+            &routine,
+            &run,
+            RunStatus::Failed,
+            Some("test failure"),
+        )
+        .await;
+
+        // Verify message was received
+        let msg = inject_rx
+            .try_recv()
+            .expect("should have received a message"); // safety: test code
+        assert_eq!(msg.channel, "routine-review");
+        assert!(msg.content.contains("test-routine"));
+        assert!(msg.content.contains("test failure"));
+        assert!(msg.content.contains("failed"));
+
+        // Verify rate limit counter incremented
+        assert_eq!(ctx.agent_review_count.load(Ordering::Relaxed), 1);
+
+        // Now test: Ok status with agent_review_on_success = false should NOT send
+        super::inject_agent_review(&ctx, &routine, &run, RunStatus::Ok, Some("ok result")).await;
+        assert!(
+            inject_rx.try_recv().is_err(),
+            "should NOT send for Ok when flag is false"
+        );
+    }
+
+    /// Integration test: inject_agent_review respects rate limit.
+    #[tokio::test]
+    async fn test_inject_agent_review_rate_limit_integration() {
+        use crate::channels::IncomingMessage;
+
+        use crate::testing::StubLlm;
+
+        let (inject_tx, mut inject_rx) = tokio::sync::mpsc::channel::<IncomingMessage>(64);
+        let (notify_tx, _notify_rx) =
+            tokio::sync::mpsc::channel::<crate::channels::OutgoingResponse>(16);
+
+        let dir = tempfile::tempdir().expect("tempdir"); // safety: test code
+        let db_path = dir.path().join("test_rate.db");
+        let backend = crate::db::libsql::LibSqlBackend::new_local(&db_path)
+            .await
+            .expect("libsql"); // safety: test code
+        crate::db::Database::run_migrations(&backend)
+            .await
+            .expect("migrations"); // safety: test code
+        let db: Arc<dyn crate::db::Database> = Arc::new(backend);
+
+        let mut config = RoutineConfig::default();
+        config.agent_review_enabled = true;
+        config.max_agent_reviews_per_hour = 3; // low limit for testing
+
+        let ctx = super::EngineContext {
+            config,
+            store: crate::tenant::AdminScope::new(db.clone()),
+            llm: Arc::new(StubLlm::default()) as Arc<dyn crate::llm::LlmProvider>,
+            workspace: Arc::new(crate::workspace::Workspace::new_with_db(
+                "default",
+                db.clone(),
+            )),
+            notify_tx,
+            running_count: Arc::new(AtomicUsize::new(0)),
+            scheduler: None,
+            extension_manager: None,
+            tools: Arc::new(crate::tools::ToolRegistry::new()),
+            safety: Arc::new(ironclaw_safety::SafetyLayer::new(
+                &crate::config::SafetyConfig {
+                    max_output_length: 100_000,
+                    injection_check_enabled: false,
+                },
+            )),
+            sandbox_readiness: super::SandboxReadiness::DisabledByConfig,
+            inject_tx: Some(inject_tx),
+            agent_review_count: Arc::new(AtomicU32::new(0)),
+            agent_review_window_start: Arc::new(std::sync::atomic::AtomicI64::new(0)),
+            agent_review_consecutive_failures: Arc::new(AtomicU32::new(0)),
+        };
+
+        let routine = Routine {
+            id: uuid::Uuid::new_v4(),
+            name: "rate-test".to_string(),
+            description: String::new(),
+            user_id: "default".to_string(),
+            enabled: true,
+            trigger: Trigger::Manual,
+            action: RoutineAction::Lightweight {
+                prompt: "test".to_string(),
+                context_paths: vec![],
+                max_tokens: 1024,
+                use_tools: false,
+                max_tool_rounds: 0,
+            },
+            guardrails: RoutineGuardrails::default(),
+            notify: NotifyConfig {
+                agent_review_on_failure: true,
+                ..NotifyConfig::default()
+            },
+            last_run_at: None,
+            next_fire_at: None,
+            run_count: 0,
+            consecutive_failures: 0,
+            state: serde_json::Value::Null,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+
+        let run = RoutineRun {
+            id: uuid::Uuid::new_v4(),
+            routine_id: routine.id,
+            trigger_type: "manual".to_string(),
+            trigger_detail: None,
+            started_at: chrono::Utc::now(),
+            completed_at: None,
+            status: RunStatus::Failed,
+            result_summary: None,
+            tokens_used: None,
+            job_id: None,
+            created_at: chrono::Utc::now(),
+        };
+
+        // Send 3 (at the limit) — all should succeed
+        for _ in 0..3 {
+            super::inject_agent_review(&ctx, &routine, &run, RunStatus::Failed, Some("fail")).await;
+        }
+        // Drain the 3 messages
+        for _ in 0..3 {
+            assert!(inject_rx.try_recv().is_ok());
+        }
+
+        // 4th should be rate-limited — no message sent
+        super::inject_agent_review(&ctx, &routine, &run, RunStatus::Failed, Some("fail")).await;
+        assert!(
+            inject_rx.try_recv().is_err(),
+            "4th call should be rate-limited"
+        );
+
+        assert_eq!(ctx.agent_review_count.load(Ordering::Relaxed), 3);
+    }
 }
