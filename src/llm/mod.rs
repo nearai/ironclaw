@@ -21,6 +21,7 @@ pub mod failover;
 pub mod gemini_oauth;
 mod github_copilot;
 pub(crate) mod github_copilot_auth;
+pub mod nearai_auth;
 mod nearai_chat;
 pub mod oauth_helpers;
 pub mod openai_codex_provider;
@@ -53,6 +54,7 @@ pub use config::{
 pub use error::LlmError;
 pub use failover::{CooldownConfig, FailoverProvider};
 pub use gemini_oauth::GeminiOauthProvider;
+pub use nearai_auth::{resolve_nearai_bearer_token, resolve_nearai_bearer_token_if_available};
 pub use nearai_chat::{DEFAULT_MODEL, ModelInfo, NearAiChatProvider, default_models};
 pub use openai_codex_provider::OpenAiCodexProvider;
 pub use openai_codex_session::{OpenAiCodexSession, OpenAiCodexSessionManager};

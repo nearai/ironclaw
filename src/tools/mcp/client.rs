@@ -8,12 +8,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
+use secrecy::SecretString;
 use tokio::sync::RwLock;
 
 use crate::context::JobContext;
 use crate::secrets::SecretsStore;
 use crate::tools::mcp::auth::refresh_access_token;
-use crate::tools::mcp::config::McpServerConfig;
+use crate::tools::mcp::config::{McpAuthSource, McpServerConfig};
 use crate::tools::mcp::http_transport::HttpMcpTransport;
 use crate::tools::mcp::protocol::{
     CallToolResult, InitializeResult, ListToolsResult, McpRequest, McpResponse, McpTool,
@@ -45,6 +46,13 @@ pub struct McpClient {
 
     /// Session manager (shared across clients).
     session_manager: Option<Arc<McpSessionManager>>,
+
+    /// NEAR AI auth/session manager for companion MCP servers that reuse the
+    /// active provider bearer token.
+    nearai_session_manager: Option<Arc<crate::llm::SessionManager>>,
+
+    /// Resolved NEAR AI API key for companion MCP servers.
+    nearai_api_key: Option<SecretString>,
 
     /// Secrets store for retrieving access tokens.
     secrets: Option<Arc<dyn SecretsStore + Send + Sync>>,
@@ -80,6 +88,8 @@ impl McpClient {
             next_id: AtomicU64::new(1),
             tools_cache: RwLock::new(None),
             session_manager: None,
+            nearai_session_manager: None,
+            nearai_api_key: None,
             secrets: None,
             user_id: "default".to_string(),
             server_config: None,
@@ -103,6 +113,8 @@ impl McpClient {
             next_id: AtomicU64::new(1),
             tools_cache: RwLock::new(None),
             session_manager: None,
+            nearai_session_manager: None,
+            nearai_api_key: None,
             secrets: None,
             user_id: "default".to_string(),
             server_config: None,
@@ -123,6 +135,9 @@ impl McpClient {
     /// the transport with session tracking.
     #[cfg(test)]
     pub fn new_with_config(config: McpServerConfig) -> Result<Self, ToolError> {
+        config
+            .validate()
+            .map_err(|e| ToolError::InvalidParameters(e.to_string()))?;
         if !matches!(
             config.effective_transport(),
             crate::tools::mcp::config::EffectiveTransport::Http
@@ -144,6 +159,8 @@ impl McpClient {
             next_id: AtomicU64::new(1),
             tools_cache: RwLock::new(None),
             session_manager: None,
+            nearai_session_manager: None,
+            nearai_api_key: None,
             secrets: None,
             user_id: "default".to_string(),
             custom_headers: config.headers.clone(),
@@ -175,6 +192,8 @@ impl McpClient {
             next_id: AtomicU64::new(1),
             tools_cache: RwLock::new(None),
             session_manager: Some(session_manager),
+            nearai_session_manager: None,
+            nearai_api_key: None,
             secrets: Some(secrets),
             user_id: user_id.into(),
             server_config: Some(config),
@@ -211,6 +230,8 @@ impl McpClient {
             next_id: AtomicU64::new(1),
             tools_cache: RwLock::new(None),
             session_manager,
+            nearai_session_manager: None,
+            nearai_api_key: None,
             secrets,
             user_id: user_id.into(),
             server_config,
@@ -229,6 +250,21 @@ impl McpClient {
     #[cfg(test)]
     pub fn with_session_manager(mut self, session_manager: Arc<McpSessionManager>) -> Self {
         self.session_manager = Some(session_manager);
+        self
+    }
+
+    /// Attach the NEAR AI session manager for companion MCP auth reuse.
+    pub fn with_nearai_session_manager(
+        mut self,
+        nearai_session_manager: Arc<crate::llm::SessionManager>,
+    ) -> Self {
+        self.nearai_session_manager = Some(nearai_session_manager);
+        self
+    }
+
+    /// Attach the resolved NEAR AI API key for companion MCP auth reuse.
+    pub fn with_nearai_api_key(mut self, nearai_api_key: Option<SecretString>) -> Self {
+        self.nearai_api_key = nearai_api_key;
         self
     }
 
@@ -269,6 +305,9 @@ impl McpClient {
         let Some(ref config) = self.server_config else {
             return Ok(None);
         };
+        if config.uses_runtime_auth_source() {
+            return Ok(None);
+        }
         match secrets
             .get_decrypted(&self.user_id, &config.token_secret_name())
             .await
@@ -309,6 +348,36 @@ impl McpClient {
         }
     }
 
+    /// Resolve a runtime-provided auth token for companion MCP servers.
+    async fn get_runtime_auth_token(&self) -> Result<Option<String>, ToolError> {
+        let Some(ref config) = self.server_config else {
+            return Ok(None);
+        };
+
+        match config.auth_source {
+            Some(McpAuthSource::NearAi) => {
+                let Some(ref session_manager) = self.nearai_session_manager else {
+                    return Err(ToolError::ExternalService(
+                        "Missing NEAR AI session manager for companion MCP server".to_string(),
+                    ));
+                };
+
+                crate::llm::resolve_nearai_bearer_token_if_available(
+                    self.nearai_api_key.as_ref(),
+                    session_manager,
+                )
+                .await
+                .map_err(|e| {
+                    ToolError::ExternalService(format!(
+                        "Failed to resolve NEAR AI token for MCP server '{}': {}",
+                        self.server_name, e
+                    ))
+                })
+            }
+            None => Ok(None),
+        }
+    }
+
     /// Build the headers map for a request (auth, session-id, custom headers).
     ///
     /// Custom headers are applied first. OAuth token injection is skipped if the
@@ -322,6 +391,9 @@ impl McpClient {
             .custom_headers
             .keys()
             .any(|k| k.eq_ignore_ascii_case("authorization"));
+        if !has_custom_auth && let Some(token) = self.get_runtime_auth_token().await? {
+            headers.insert("Authorization".to_string(), format!("Bearer {}", token));
+        }
         if !has_custom_auth && let Some(token) = self.get_access_token().await? {
             let trimmed = token.trim();
             if !trimmed.is_empty() {
@@ -542,13 +614,12 @@ impl McpClient {
             )));
         }
 
-        response
+        let raw_result = response
             .result
-            .ok_or_else(|| ToolError::ExternalService("No result in MCP response".to_string()))
-            .and_then(|r| {
-                serde_json::from_value(r)
-                    .map_err(|e| ToolError::ExternalService(format!("Invalid tool result: {}", e)))
-            })
+            .ok_or_else(|| ToolError::ExternalService("No result in MCP response".to_string()))?;
+
+        serde_json::from_value(raw_result)
+            .map_err(|e| ToolError::ExternalService(format!("Invalid tool result: {}", e)))
     }
 
     /// Clear the tools cache.
@@ -595,6 +666,8 @@ impl Clone for McpClient {
             next_id: AtomicU64::new(self.next_id.load(Ordering::SeqCst)),
             tools_cache: RwLock::new(None),
             session_manager: self.session_manager.clone(),
+            nearai_session_manager: self.nearai_session_manager.clone(),
+            nearai_api_key: self.nearai_api_key.clone(),
             secrets: self.secrets.clone(),
             user_id: self.user_id.clone(),
             server_config: self.server_config.clone(),
@@ -642,7 +715,7 @@ impl Tool for McpToolWrapper {
         // Strip top-level null values before forwarding — LLMs often emit
         // `"field": null` for optional params, but many MCP servers reject
         // explicit nulls for fields that should simply be absent.
-        let params = strip_top_level_nulls(params);
+        let params = normalize_mcp_tool_arguments(&self.tool.name, strip_top_level_nulls(params));
 
         let result = self.client.call_tool(&self.tool.name, params).await?;
         let content: String = result
@@ -684,6 +757,31 @@ fn strip_top_level_nulls(value: serde_json::Value) -> serde_json::Value {
         }
         other => other,
     }
+}
+
+fn normalize_mcp_tool_arguments(tool_name: &str, value: serde_json::Value) -> serde_json::Value {
+    if tool_name != "web_search" {
+        return value;
+    }
+
+    let serde_json::Value::Object(mut map) = value else {
+        return value;
+    };
+
+    // Keep this intentionally narrow: only strip optional fields that the
+    // model frequently emits as empty strings. Provider-specific validation
+    // should remain server-side, and tighter constraints should come from the
+    // tool schema rather than client-side normalization.
+    map.retain(|key, value| match key.as_str() {
+        // Only strip known optional string fields. Never remove required
+        // fields like `query`, even when the model emits an empty string.
+        "country" | "freshness" | "goggles" | "result_filter" | "search_lang" | "ui_lang" => {
+            !value.as_str().is_some_and(|s| s.trim().is_empty())
+        }
+        _ => true,
+    });
+
+    serde_json::Value::Object(map)
 }
 
 #[cfg(test)]
@@ -851,6 +949,138 @@ mod tests {
         let client = client.with_session_manager(session_manager);
 
         assert!(client.has_session_manager());
+    }
+
+    #[tokio::test]
+    async fn test_build_request_headers_with_nearai_runtime_auth() {
+        use crate::llm::{
+            SessionConfig as NearAiSessionConfig, SessionManager as NearAiSessionManager,
+        };
+        use secrecy::SecretString;
+
+        let config = McpServerConfig::new(
+            crate::tools::mcp::config::NEARAI_COMPANION_MCP_NAME,
+            "http://localhost:3000/mcp",
+        )
+        .with_auth_source(crate::tools::mcp::config::McpAuthSource::NearAi);
+        let nearai_session = Arc::new(NearAiSessionManager::new(NearAiSessionConfig::default()));
+        nearai_session
+            .set_token(SecretString::from("sess_test_token"))
+            .await;
+
+        let client = McpClient::new_with_config(config)
+            .expect("valid MCP config")
+            .with_nearai_session_manager(nearai_session);
+        let headers = client.build_request_headers().await.expect("headers");
+
+        assert_eq!(
+            headers.get("Authorization").map(String::as_str),
+            Some("Bearer sess_test_token")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_build_request_headers_without_nearai_auth_does_not_trigger_login() {
+        use crate::llm::{
+            SessionConfig as NearAiSessionConfig, SessionManager as NearAiSessionManager,
+        };
+
+        let config = McpServerConfig::new(
+            crate::tools::mcp::config::NEARAI_COMPANION_MCP_NAME,
+            "http://localhost:3000/mcp",
+        )
+        .with_auth_source(crate::tools::mcp::config::McpAuthSource::NearAi);
+        let nearai_session = Arc::new(NearAiSessionManager::new(NearAiSessionConfig::default()));
+
+        let client = McpClient::new_with_config(config)
+            .expect("valid MCP config")
+            .with_nearai_session_manager(nearai_session);
+        let headers = client.build_request_headers().await.expect("headers");
+
+        assert!(
+            !headers.contains_key("Authorization"),
+            "runtime auth should stay absent when no token is available"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_build_request_headers_runtime_auth_ignores_persisted_mcp_token() {
+        use crate::llm::{
+            SessionConfig as NearAiSessionConfig, SessionManager as NearAiSessionManager,
+        };
+        use crate::secrets::{CreateSecretParams, DecryptedSecret, Secret, SecretError, SecretRef};
+        use secrecy::SecretString;
+        use uuid::Uuid;
+
+        struct PersistedTokenStore;
+
+        #[async_trait]
+        impl crate::secrets::SecretsStore for PersistedTokenStore {
+            async fn create(
+                &self,
+                _user_id: &str,
+                _params: CreateSecretParams,
+            ) -> Result<Secret, SecretError> {
+                unimplemented!()
+            }
+            async fn get(&self, _user_id: &str, _name: &str) -> Result<Secret, SecretError> {
+                unimplemented!()
+            }
+            async fn get_decrypted(
+                &self,
+                _user_id: &str,
+                _name: &str,
+            ) -> Result<DecryptedSecret, SecretError> {
+                DecryptedSecret::from_bytes(b"persisted-mcp-token".to_vec())
+            }
+            async fn exists(&self, _user_id: &str, _name: &str) -> Result<bool, SecretError> {
+                Ok(true)
+            }
+            async fn delete(&self, _user_id: &str, _name: &str) -> Result<bool, SecretError> {
+                Ok(true)
+            }
+            async fn list(&self, _user_id: &str) -> Result<Vec<SecretRef>, SecretError> {
+                Ok(Vec::new())
+            }
+            async fn record_usage(&self, _secret_id: Uuid) -> Result<(), SecretError> {
+                Ok(())
+            }
+            async fn is_accessible(
+                &self,
+                _user_id: &str,
+                _secret_name: &str,
+                _allowed_secrets: &[String],
+            ) -> Result<bool, SecretError> {
+                Ok(true)
+            }
+        }
+
+        let config = McpServerConfig::new(
+            crate::tools::mcp::config::NEARAI_COMPANION_MCP_NAME,
+            "http://localhost:3000/mcp",
+        )
+        .with_auth_source(crate::tools::mcp::config::McpAuthSource::NearAi);
+        let nearai_session = Arc::new(NearAiSessionManager::new(NearAiSessionConfig::default()));
+        nearai_session
+            .set_token(SecretString::from("sess_runtime_token"))
+            .await;
+
+        let secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> =
+            Arc::new(PersistedTokenStore);
+        let client = McpClient::new_authenticated(
+            config,
+            Arc::new(McpSessionManager::new()),
+            secrets,
+            "test-user",
+        )
+        .with_nearai_session_manager(nearai_session);
+        let headers = client.build_request_headers().await.expect("headers");
+
+        assert_eq!(
+            headers.get("Authorization").map(String::as_str),
+            Some("Bearer sess_runtime_token"),
+            "runtime auth must win even if a persisted MCP token exists"
+        );
     }
 
     #[test]
@@ -1234,6 +1464,20 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_new_with_config_rejects_invalid_runtime_auth_name() {
+        let config = McpServerConfig::new("chat_api", "http://localhost:3000/mcp")
+            .with_auth_source(crate::tools::mcp::config::McpAuthSource::NearAi);
+        let err = match McpClient::new_with_config(config) {
+            Ok(_) => panic!("invalid runtime-auth config must be rejected"),
+            Err(err) => err.to_string(),
+        };
+        assert!(
+            err.contains(crate::tools::mcp::config::NEARAI_COMPANION_MCP_NAME),
+            "error should mention reserved companion requirement: {err}"
+        );
+    }
+
     // --- Issue 13: McpToolWrapper unit tests ---
 
     fn make_test_mcp_tool(destructive: bool) -> McpTool {
@@ -1463,5 +1707,64 @@ mod tests {
             "Bearer gho_abc123",
             "Token must be trimmed before use in Authorization header"
         );
+    }
+
+    #[test]
+    fn test_normalize_web_search_arguments_removes_empty_optional_fields() {
+        let input = serde_json::json!({
+            "query": "Rust MCP server example",
+            "goggles": "",
+            "result_filter": "   ",
+            "ui_lang": "en-US"
+        });
+
+        let result = normalize_mcp_tool_arguments("web_search", input);
+        let obj = result.as_object().unwrap();
+        assert_eq!(obj["query"], "Rust MCP server example");
+        assert_eq!(obj["ui_lang"], "en-US");
+        assert!(!obj.contains_key("goggles"));
+        assert!(!obj.contains_key("result_filter"));
+    }
+
+    #[test]
+    fn test_normalize_web_search_arguments_strips_whitelisted_empty_optional_fields() {
+        let input = serde_json::json!({
+            "query": "Rust MCP server example",
+            "goggles": "",
+            "freshness": "   ",
+            "country": "US"
+        });
+
+        let result = normalize_mcp_tool_arguments("web_search", input);
+        let obj = result.as_object().unwrap();
+        assert_eq!(obj["country"], "US");
+        assert!(!obj.contains_key("freshness"));
+        assert!(!obj.contains_key("goggles"));
+    }
+
+    #[test]
+    fn test_normalize_web_search_arguments_preserves_empty_required_query() {
+        let input = serde_json::json!({
+            "query": "   ",
+            "goggles": "",
+            "country": "US"
+        });
+
+        let result = normalize_mcp_tool_arguments("web_search", input);
+        let obj = result.as_object().unwrap();
+        assert_eq!(obj["query"], "   ");
+        assert_eq!(obj["country"], "US");
+        assert!(!obj.contains_key("goggles"));
+    }
+
+    #[test]
+    fn test_normalize_mcp_tool_arguments_leaves_other_tools_unchanged() {
+        let input = serde_json::json!({
+            "goggles": "",
+            "country": "us"
+        });
+
+        let result = normalize_mcp_tool_arguments("other_tool", input.clone());
+        assert_eq!(result, input);
     }
 }

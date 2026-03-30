@@ -21,6 +21,8 @@ pub enum McpFactoryError {
     UnixNotSupported { name: String },
     #[error("Invalid configuration for MCP server '{name}': {reason}")]
     InvalidConfig { name: String, reason: String },
+    #[error("Missing runtime auth context for MCP server '{name}': {reason}")]
+    MissingRuntimeAuthContext { name: String, reason: String },
 }
 
 /// Create an `McpClient` from a server configuration, dispatching on the
@@ -28,6 +30,8 @@ pub enum McpFactoryError {
 pub async fn create_client_from_config(
     server: McpServerConfig,
     session_manager: &Arc<McpSessionManager>,
+    nearai_session_manager: Option<Arc<crate::llm::SessionManager>>,
+    nearai_api_key: Option<secrecy::SecretString>,
     process_manager: &Arc<McpProcessManager>,
     secrets: Option<Arc<dyn SecretsStore + Send + Sync>>,
     user_id: &str,
@@ -79,7 +83,31 @@ pub async fn create_client_from_config(
             Err(McpFactoryError::UnixNotSupported { name: server_name })
         }
         EffectiveTransport::Http => {
-            // Authenticated (OAuth) path: tokens exist or server requires auth.
+            if server.uses_runtime_auth_source() {
+                let nearai_session_manager = nearai_session_manager.ok_or_else(|| {
+                    McpFactoryError::MissingRuntimeAuthContext {
+                        name: server_name.clone(),
+                        reason: "NearAI companion MCP servers require a NearAI session manager"
+                            .to_string(),
+                    }
+                })?;
+
+                let transport = Arc::new(
+                    HttpMcpTransport::new(server.url.clone(), server.name.clone())
+                        .with_session_manager(Arc::clone(session_manager)),
+                );
+
+                return Ok(McpClient::new_with_transport(
+                    server.name.clone(),
+                    transport,
+                    Some(Arc::clone(session_manager)),
+                    secrets,
+                    user_id,
+                    Some(server),
+                )
+                .with_nearai_session_manager(nearai_session_manager)
+                .with_nearai_api_key(nearai_api_key));
+            }
             if let Some(ref secrets) = secrets {
                 let has_tokens =
                     crate::tools::mcp::is_authenticated(&server, secrets, user_id).await;
@@ -127,6 +155,8 @@ mod tests {
         let client = create_client_from_config(
             server,
             &session_manager,
+            None,
+            None,
             &process_manager,
             None,
             "test-user",
@@ -185,6 +215,8 @@ mod tests {
         let client = create_client_from_config(
             server,
             &session_manager,
+            None,
+            None,
             &process_manager,
             None,
             "test-user",

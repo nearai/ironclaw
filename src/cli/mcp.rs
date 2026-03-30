@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use clap::{Args, Subcommand};
 
-use crate::config::Config;
+use crate::config::{Config, LlmConfig};
 use crate::db::Database;
 use crate::secrets::SecretsStore;
 use crate::tools::mcp::{
@@ -173,6 +173,13 @@ async fn add_server(args: McpAddArgs) -> anyhow::Result<()> {
         description,
     } = args;
 
+    if config::is_nearai_companion_server_name(&name) {
+        anyhow::bail!(
+            "Server name '{}' is reserved for the NEAR AI companion MCP server",
+            name
+        );
+    }
+
     let transport_lower = transport.to_lowercase();
 
     let mut config = match transport_lower.as_str() {
@@ -244,7 +251,7 @@ async fn add_server(args: McpAddArgs) -> anyhow::Result<()> {
 
     // Save (DB if available, else disk)
     let db = connect_db().await;
-    let mut servers = load_servers(db.as_deref()).await?;
+    let mut servers = load_persisted_servers(db.as_deref()).await?;
     servers.upsert(config);
     save_servers(db.as_deref(), &servers).await?;
 
@@ -281,8 +288,15 @@ async fn add_server(args: McpAddArgs) -> anyhow::Result<()> {
 
 /// Remove an MCP server.
 async fn remove_server(name: String) -> anyhow::Result<()> {
+    if config::is_nearai_companion_server_name(&name) {
+        anyhow::bail!(
+            "Server '{}' is derived from the active NEAR AI provider and cannot be removed directly",
+            name
+        );
+    }
+
     let db = connect_db().await;
-    let mut servers = load_servers(db.as_deref()).await?;
+    let mut servers = load_persisted_servers(db.as_deref()).await?;
     if !servers.remove(&name) {
         anyhow::bail!("Server '{}' not found", name);
     }
@@ -298,7 +312,7 @@ async fn remove_server(name: String) -> anyhow::Result<()> {
 /// List configured MCP servers.
 async fn list_servers(verbose: bool) -> anyhow::Result<()> {
     let db = connect_db().await;
-    let servers = load_servers(db.as_deref()).await?;
+    let servers = load_servers_with_derived(db.as_deref()).await?;
 
     if servers.servers.is_empty() {
         println!();
@@ -404,11 +418,22 @@ async fn list_servers(verbose: bool) -> anyhow::Result<()> {
 async fn auth_server(name: String, user_id: String) -> anyhow::Result<()> {
     // Get server config
     let db = connect_db().await;
-    let servers = load_servers(db.as_deref()).await?;
+    let servers = load_servers_with_derived(db.as_deref()).await?;
     let server = servers
         .get(&name)
         .cloned()
         .ok_or_else(|| anyhow::anyhow!("Server '{}' not found", name))?;
+
+    if server.uses_runtime_auth_source() {
+        println!();
+        println!(
+            "  Server '{}' reuses your active NEAR AI authentication and does not support separate MCP OAuth.",
+            name
+        );
+        println!("  Configure NEAR AI auth (API key or session login) instead.");
+        println!();
+        return Ok(());
+    }
 
     // Initialize secrets store
     let secrets = get_secrets_store().await?;
@@ -477,7 +502,7 @@ async fn auth_server(name: String, user_id: String) -> anyhow::Result<()> {
 async fn test_server(name: String, user_id: String) -> anyhow::Result<()> {
     // Get server config
     let db = connect_db().await;
-    let servers = load_servers(db.as_deref()).await?;
+    let servers = load_servers_with_derived(db.as_deref()).await?;
     let server = servers
         .get(&name)
         .cloned()
@@ -488,35 +513,66 @@ async fn test_server(name: String, user_id: String) -> anyhow::Result<()> {
 
     // Create client
     let session_manager = Arc::new(McpSessionManager::new());
-
-    // Always check for stored tokens (from either pre-configured OAuth or DCR)
-    let secrets = get_secrets_store().await?;
-    let has_tokens = is_authenticated(&server, &secrets, &user_id).await;
-
-    let client = if has_tokens {
-        // We have stored tokens, use authenticated client
-        McpClient::new_authenticated(server.clone(), session_manager.clone(), secrets, user_id)
-    } else if server.requires_auth() {
-        // OAuth configured but no tokens - need to authenticate
-        println!();
-        println!(
-            "  ✗ Not authenticated. Run 'ironclaw mcp auth {}' first.",
-            name
-        );
-        println!();
-        return Ok(());
-    } else {
-        // Use the factory to dispatch on transport type (HTTP, stdio, unix)
+    let (client, has_tokens) = if server.uses_runtime_auth_source() {
         let process_manager = Arc::new(McpProcessManager::new());
-        create_client_from_config(
-            server.clone(),
-            &session_manager,
-            &process_manager,
-            None,
-            "default",
+        let llm = resolve_llm_for_cli(as_settings_store(db.as_deref())).await?;
+        let nearai_session = crate::llm::create_session_manager(llm.session.clone()).await;
+        (
+            create_client_from_config(
+                server.clone(),
+                &session_manager,
+                Some(nearai_session),
+                llm.nearai.api_key.clone(),
+                &process_manager,
+                None,
+                "default",
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", e))?,
+            false,
         )
-        .await
-        .map_err(|e| anyhow::anyhow!("{}", e))?
+    } else {
+        // Only initialize the secrets store for non-runtime-auth servers that
+        // can actually use persisted OAuth/DCR tokens.
+        let secrets = get_secrets_store().await?;
+        let has_tokens = is_authenticated(&server, &secrets, &user_id).await;
+
+        if has_tokens {
+            (
+                McpClient::new_authenticated(
+                    server.clone(),
+                    session_manager.clone(),
+                    secrets,
+                    user_id,
+                ),
+                true,
+            )
+        } else if server.requires_auth() {
+            println!();
+            println!(
+                "  ✗ Not authenticated. Run 'ironclaw mcp auth {}' first.",
+                name
+            );
+            println!();
+            return Ok(());
+        } else {
+            // Use the factory to dispatch on transport type (HTTP, stdio, unix)
+            let process_manager = Arc::new(McpProcessManager::new());
+            (
+                create_client_from_config(
+                    server.clone(),
+                    &session_manager,
+                    None,
+                    None,
+                    &process_manager,
+                    None,
+                    "default",
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("{}", e))?,
+                false,
+            )
+        }
     };
 
     // Test connection
@@ -581,8 +637,15 @@ async fn test_server(name: String, user_id: String) -> anyhow::Result<()> {
 
 /// Toggle server enabled/disabled state.
 async fn toggle_server(name: String, enable: bool, disable: bool) -> anyhow::Result<()> {
+    if config::is_nearai_companion_server_name(&name) {
+        anyhow::bail!(
+            "Server '{}' is derived from the active NEAR AI provider and cannot be toggled directly",
+            name
+        );
+    }
+
     let db = connect_db().await;
-    let mut servers = load_servers(db.as_deref()).await?;
+    let mut servers = load_persisted_servers(db.as_deref()).await?;
 
     let server = servers
         .get_mut(&name)
@@ -615,13 +678,30 @@ async fn connect_db() -> Option<Arc<dyn Database>> {
     crate::db::connect_from_config(&config.database).await.ok()
 }
 
-/// Load MCP servers (DB if available, else disk).
-async fn load_servers(db: Option<&dyn Database>) -> Result<McpServersFile, config::ConfigError> {
-    if let Some(db) = db {
-        config::load_mcp_servers_from_db(db, DEFAULT_USER_ID).await
+/// Load only persisted MCP servers (DB if available, else disk).
+async fn load_persisted_servers(
+    db: Option<&dyn Database>,
+) -> Result<McpServersFile, config::ConfigError> {
+    Ok(if let Some(db) = db {
+        config::load_mcp_servers_from_db(db, DEFAULT_USER_ID).await?
     } else {
-        config::load_mcp_servers().await
+        config::load_mcp_servers().await?
+    })
+}
+
+/// Load MCP servers plus any derived runtime companions.
+async fn load_servers_with_derived(
+    db: Option<&dyn Database>,
+) -> Result<McpServersFile, config::ConfigError> {
+    let mut servers = load_persisted_servers(db).await?;
+
+    if let Ok(llm) = resolve_llm_for_cli(as_settings_store(db)).await
+        && let Some(companion) = config::derive_nearai_companion_mcp_server_from_llm(&llm)
+    {
+        servers.insert_if_absent(companion);
     }
+
+    Ok(servers)
 }
 
 /// Save MCP servers (DB if available, else disk).
@@ -629,10 +709,15 @@ async fn save_servers(
     db: Option<&dyn Database>,
     servers: &McpServersFile,
 ) -> Result<(), config::ConfigError> {
+    let mut persisted = servers.clone();
+    persisted
+        .servers
+        .retain(|server| !config::is_nearai_companion_server_name(&server.name));
+
     if let Some(db) = db {
-        config::save_mcp_servers_to_db(db, DEFAULT_USER_ID, servers).await
+        config::save_mcp_servers_to_db(db, DEFAULT_USER_ID, &persisted).await
     } else {
-        config::save_mcp_servers(servers).await
+        config::save_mcp_servers(&persisted).await
     }
 }
 
@@ -641,9 +726,83 @@ async fn get_secrets_store() -> anyhow::Result<Arc<dyn SecretsStore + Send + Syn
     crate::cli::init_secrets_store().await
 }
 
+fn as_settings_store(db: Option<&dyn Database>) -> Option<&(dyn crate::db::SettingsStore + Sync)> {
+    db.map(|db| db as &(dyn crate::db::SettingsStore + Sync))
+}
+
+async fn resolve_llm_for_cli(
+    store: Option<&(dyn crate::db::SettingsStore + Sync)>,
+) -> Result<LlmConfig, crate::error::ConfigError> {
+    resolve_llm_for_cli_with_toml(store, None).await
+}
+
+async fn resolve_llm_for_cli_with_toml(
+    store: Option<&(dyn crate::db::SettingsStore + Sync)>,
+    toml_path: Option<&std::path::Path>,
+) -> Result<LlmConfig, crate::error::ConfigError> {
+    if let Some(store) = store {
+        let _ = dotenvy::dotenv();
+        crate::bootstrap::load_ironclaw_env();
+
+        let mut settings = match store.get_all_settings(DEFAULT_USER_ID).await {
+            Ok(map) => crate::settings::Settings::from_db_map(&map),
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to load CLI settings from DB, falling back to defaults before env/TOML resolution: {}",
+                    e
+                );
+                crate::settings::Settings::default()
+            }
+        };
+
+        apply_cli_toml_overlay(&mut settings, toml_path)?;
+        return LlmConfig::resolve(&settings);
+    }
+
+    let settings = crate::config::load_bootstrap_settings(toml_path)?;
+    LlmConfig::resolve(&settings)
+}
+
+fn apply_cli_toml_overlay(
+    settings: &mut crate::settings::Settings,
+    explicit_path: Option<&std::path::Path>,
+) -> Result<(), crate::error::ConfigError> {
+    let path = explicit_path
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(crate::settings::Settings::default_toml_path);
+
+    match crate::settings::Settings::load_toml(&path) {
+        Ok(Some(toml_settings)) => {
+            settings.merge_from(&toml_settings);
+        }
+        Ok(None) => {
+            if explicit_path.is_some() {
+                return Err(crate::error::ConfigError::ParseError(format!(
+                    "Config file not found: {}",
+                    path.display()
+                )));
+            }
+        }
+        Err(e) => {
+            return Err(crate::error::ConfigError::ParseError(e));
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use std::collections::HashMap;
+
+    use async_trait::async_trait;
+
+    use crate::error::DatabaseError;
+    use crate::history::SettingRow;
+    #[cfg(feature = "libsql")]
+    use tempfile::NamedTempFile;
 
     #[test]
     fn test_mcp_command_parsing() {
@@ -700,5 +859,130 @@ mod tests {
         let result = parse_env_var("no-equals-here");
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("invalid env var format"));
+    }
+
+    #[cfg(feature = "libsql")]
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn test_resolve_llm_for_cli_uses_db_backed_selected_model() {
+        struct MockSettingsStore {
+            settings: HashMap<String, serde_json::Value>,
+        }
+
+        #[async_trait]
+        impl crate::db::SettingsStore for MockSettingsStore {
+            async fn get_setting(
+                &self,
+                _user_id: &str,
+                key: &str,
+            ) -> Result<Option<serde_json::Value>, DatabaseError> {
+                Ok(self.settings.get(key).cloned())
+            }
+
+            async fn get_setting_full(
+                &self,
+                _user_id: &str,
+                _key: &str,
+            ) -> Result<Option<SettingRow>, DatabaseError> {
+                Ok(None)
+            }
+
+            async fn set_setting(
+                &self,
+                _user_id: &str,
+                _key: &str,
+                _value: &serde_json::Value,
+            ) -> Result<(), DatabaseError> {
+                Err(DatabaseError::Query("unused in test".to_string()))
+            }
+
+            async fn delete_setting(
+                &self,
+                _user_id: &str,
+                _key: &str,
+            ) -> Result<bool, DatabaseError> {
+                Err(DatabaseError::Query("unused in test".to_string()))
+            }
+
+            async fn list_settings(
+                &self,
+                _user_id: &str,
+            ) -> Result<Vec<SettingRow>, DatabaseError> {
+                Ok(Vec::new())
+            }
+
+            async fn get_all_settings(
+                &self,
+                _user_id: &str,
+            ) -> Result<HashMap<String, serde_json::Value>, DatabaseError> {
+                Ok(self.settings.clone())
+            }
+
+            async fn set_all_settings(
+                &self,
+                _user_id: &str,
+                _settings: &HashMap<String, serde_json::Value>,
+            ) -> Result<(), DatabaseError> {
+                Err(DatabaseError::Query("unused in test".to_string()))
+            }
+
+            async fn has_settings(&self, _user_id: &str) -> Result<bool, DatabaseError> {
+                Ok(!self.settings.is_empty())
+            }
+        }
+
+        struct EnvGuard(&'static str, Option<String>);
+
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                // SAFETY: Protected by ENV_MUTEX for the duration of the test.
+                unsafe {
+                    match &self.1 {
+                        Some(value) => std::env::set_var(self.0, value),
+                        None => std::env::remove_var(self.0),
+                    }
+                }
+            }
+        }
+
+        let _mutex = crate::config::helpers::ENV_MUTEX.lock().expect("env mutex");
+        let prev_backend = std::env::var("LLM_BACKEND").ok();
+        let prev_base_url = std::env::var("NEARAI_BASE_URL").ok();
+        let prev_auth_url = std::env::var("NEARAI_AUTH_URL").ok();
+        let prev_model = std::env::var("NEARAI_MODEL").ok();
+
+        // SAFETY: Protected by ENV_MUTEX for the duration of the test.
+        unsafe {
+            std::env::set_var("LLM_BACKEND", "");
+            std::env::set_var("NEARAI_BASE_URL", "http://127.0.0.1:11434/v1");
+            std::env::set_var("NEARAI_AUTH_URL", "http://127.0.0.1:11435");
+            std::env::set_var("NEARAI_MODEL", "");
+        }
+
+        let _backend_guard = EnvGuard("LLM_BACKEND", prev_backend);
+        let _base_url_guard = EnvGuard("NEARAI_BASE_URL", prev_base_url);
+        let _auth_url_guard = EnvGuard("NEARAI_AUTH_URL", prev_auth_url);
+        let _model_guard = EnvGuard("NEARAI_MODEL", prev_model);
+
+        let empty_toml = NamedTempFile::new().expect("temp toml");
+        let store = MockSettingsStore {
+            settings: HashMap::from([
+                ("llm_backend".to_string(), serde_json::json!("nearai")),
+                (
+                    "selected_model".to_string(),
+                    serde_json::json!("db-backed-nearai-model"),
+                ),
+            ]),
+        };
+
+        let llm = resolve_llm_for_cli_with_toml(Some(&store), Some(empty_toml.path()))
+            .await
+            .expect("resolve llm");
+        assert_eq!(llm.backend, "nearai");
+        assert_eq!(llm.nearai.model, "db-backed-nearai-model");
+
+        let companion =
+            config::derive_nearai_companion_mcp_server_from_llm(&llm).expect("derived companion");
+        assert_eq!(companion.url, "http://127.0.0.1:11434/mcp");
     }
 }

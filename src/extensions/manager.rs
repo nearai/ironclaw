@@ -398,6 +398,8 @@ pub struct ExtensionManager {
     // MCP infrastructure
     mcp_session_manager: Arc<McpSessionManager>,
     mcp_process_manager: Arc<crate::tools::mcp::process::McpProcessManager>,
+    nearai_session_manager: Option<Arc<crate::llm::SessionManager>>,
+    nearai_api_key: Option<secrecy::SecretString>,
     /// Active MCP clients keyed by server name.
     mcp_clients: RwLock<HashMap<String, Arc<McpClient>>>,
 
@@ -421,6 +423,8 @@ pub struct ExtensionManager {
     user_id: String,
     /// Optional database store for DB-backed MCP config.
     store: Option<Arc<dyn crate::db::Database>>,
+    /// Companion MCP server derived from the active provider config.
+    companion_mcp_server: Option<McpServerConfig>,
     /// Names of WASM channels that were successfully loaded at startup.
     active_channel_names: RwLock<HashSet<String>>,
     /// Installed channel-relay extensions (no on-disk artifact, tracked in memory).
@@ -529,6 +533,8 @@ impl ExtensionManager {
     pub fn new(
         mcp_session_manager: Arc<McpSessionManager>,
         mcp_process_manager: Arc<crate::tools::mcp::process::McpProcessManager>,
+        nearai_session_manager: Option<Arc<crate::llm::SessionManager>>,
+        nearai_api_key: Option<secrecy::SecretString>,
         secrets: Arc<dyn SecretsStore + Send + Sync>,
         tool_registry: Arc<ToolRegistry>,
         hooks: Option<Arc<HookRegistry>>,
@@ -538,6 +544,7 @@ impl ExtensionManager {
         tunnel_url: Option<String>,
         user_id: String,
         store: Option<Arc<dyn crate::db::Database>>,
+        companion_mcp_server: Option<McpServerConfig>,
         catalog_entries: Vec<RegistryEntry>,
     ) -> Self {
         let registry = if catalog_entries.is_empty() {
@@ -550,6 +557,8 @@ impl ExtensionManager {
             discovery: OnlineDiscovery::new(),
             mcp_session_manager,
             mcp_process_manager,
+            nearai_session_manager,
+            nearai_api_key,
             mcp_clients: RwLock::new(HashMap::new()),
             wasm_tool_runtime,
             wasm_tools_dir,
@@ -563,6 +572,7 @@ impl ExtensionManager {
             tunnel_url,
             user_id,
             store,
+            companion_mcp_server,
             active_channel_names: RwLock::new(HashSet::new()),
             installed_relay_extensions: RwLock::new(HashSet::new()),
             activation_errors: RwLock::new(HashMap::new()),
@@ -1301,6 +1311,12 @@ impl ExtensionManager {
         tracing::info!(extension = %name, url = ?sanitized_url, kind = ?kind_hint, "Installing extension");
         Self::validate_extension_name(name)?;
 
+        if crate::tools::mcp::config::is_nearai_companion_server_name(name) {
+            return Err(ExtensionError::Config(
+                "This extension name is reserved for the NEAR AI companion MCP server".to_string(),
+            ));
+        }
+
         // If we have a registry entry, use it (prefer kind_hint to resolve collisions)
         if let Some(entry) = self.registry.get_with_kind(name, kind_hint).await {
             return self.install_from_entry(&entry, user_id).await.map_err(|e| {
@@ -1376,6 +1392,32 @@ impl ExtensionManager {
         }
     }
 
+    /// Activate the derived NEAR AI companion MCP server if auth is already
+    /// available and the companion is not active yet.
+    ///
+    /// Returns `Ok(true)` only when this call performed an activation.
+    pub async fn ensure_nearai_companion_active_if_ready(&self) -> Result<bool, ExtensionError> {
+        let Some(companion) = self.companion_mcp_server.as_ref() else {
+            return Ok(false);
+        };
+
+        let companion_name = companion.name.clone();
+
+        {
+            let clients = self.mcp_clients.read().await;
+            if clients.contains_key(&companion_name) {
+                return Ok(false);
+            }
+        }
+
+        if !self.is_runtime_authenticated(companion).await {
+            return Ok(false);
+        }
+
+        self.activate(&companion_name, &self.user_id).await?;
+        Ok(true)
+    }
+
     /// List extensions with their status.
     ///
     /// When `include_available` is `true`, registry entries that are not yet
@@ -1393,7 +1435,11 @@ impl ExtensionManager {
             match self.load_mcp_servers(user_id).await {
                 Ok(servers) => {
                     for server in &servers.servers {
-                        let authenticated = is_authenticated(server, &self.secrets, user_id).await;
+                        let authenticated = if server.uses_runtime_auth_source() {
+                            self.is_runtime_authenticated(server).await
+                        } else {
+                            is_authenticated(server, &self.secrets, user_id).await
+                        };
                         let clients = self.mcp_clients.read().await;
                         let active = clients.contains_key(&server.name);
 
@@ -1409,11 +1455,17 @@ impl ExtensionManager {
                             Vec::new()
                         };
 
-                        let display_name = self
-                            .registry
-                            .get_with_kind(&server.name, Some(ExtensionKind::McpServer))
-                            .await
-                            .map(|e| e.display_name);
+                        let display_name =
+                            if crate::tools::mcp::config::is_nearai_companion_server_name(
+                                &server.name,
+                            ) {
+                                Some("NEAR AI Companion".to_string())
+                            } else {
+                                self.registry
+                                    .get_with_kind(&server.name, Some(ExtensionKind::McpServer))
+                                    .await
+                                    .map(|e| e.display_name)
+                            };
                         extensions.push(InstalledExtension {
                             name: server.name.clone(),
                             kind: ExtensionKind::McpServer,
@@ -1424,7 +1476,10 @@ impl ExtensionManager {
                             active,
                             tools,
                             needs_setup: false,
-                            has_auth: false,
+                            has_auth: server.requires_auth(),
+                            derived: crate::tools::mcp::config::is_nearai_companion_server_name(
+                                &server.name,
+                            ),
                             installed: true,
                             activation_error: None,
                             version: None,
@@ -1476,6 +1531,7 @@ impl ExtensionManager {
                             tools: if active { vec![name] } else { Vec::new() },
                             needs_setup: auth_state == ToolAuthState::NeedsSetup,
                             has_auth: auth_state != ToolAuthState::NoAuth,
+                            derived: false,
                             installed: true,
                             activation_error: None,
                             version,
@@ -1532,6 +1588,7 @@ impl ExtensionManager {
                             tools: Vec::new(),
                             needs_setup: auth_state == ToolAuthState::NeedsSetup,
                             has_auth: auth_state != ToolAuthState::NoAuth,
+                            derived: false,
                             installed: true,
                             activation_error,
                             version,
@@ -1570,6 +1627,7 @@ impl ExtensionManager {
                     tools: Vec::new(),
                     needs_setup: false,
                     has_auth: true,
+                    derived: false,
                     installed: true,
                     activation_error,
                     version: None,
@@ -1604,6 +1662,7 @@ impl ExtensionManager {
                     tools: Vec::new(),
                     needs_setup: false,
                     has_auth: false,
+                    derived: false,
                     installed: false,
                     activation_error: None,
                     version: entry.version,
@@ -1634,6 +1693,12 @@ impl ExtensionManager {
 
         match kind {
             ExtensionKind::McpServer => {
+                if crate::tools::mcp::config::is_nearai_companion_server_name(name) {
+                    return Err(ExtensionError::Config(
+                        "This MCP server is derived from the active NEAR AI provider and cannot be removed directly".to_string(),
+                    ));
+                }
+
                 let cleanup_plan = self
                     .collect_secret_cleanup_plan(name, kind, user_id)
                     .await?;
@@ -2112,10 +2177,39 @@ impl ExtensionManager {
         user_id: &str,
     ) -> Result<crate::tools::mcp::config::McpServersFile, crate::tools::mcp::config::ConfigError>
     {
-        if let Some(ref store) = self.store {
-            crate::tools::mcp::config::load_mcp_servers_from_db(store.as_ref(), user_id).await
+        let mut servers = if let Some(ref store) = self.store {
+            crate::tools::mcp::config::load_mcp_servers_from_db(store.as_ref(), user_id).await?
         } else {
-            crate::tools::mcp::config::load_mcp_servers().await
+            crate::tools::mcp::config::load_mcp_servers().await?
+        };
+
+        if let Some(ref companion) = self.companion_mcp_server {
+            servers.insert_if_absent(companion.clone());
+        }
+
+        Ok(servers)
+    }
+
+    async fn is_runtime_authenticated(&self, server: &McpServerConfig) -> bool {
+        match server.auth_source {
+            Some(crate::tools::mcp::config::McpAuthSource::NearAi) => {
+                if self.nearai_api_key.is_some() {
+                    return true;
+                }
+
+                if let Some(key) = crate::config::helpers::env_or_override("NEARAI_API_KEY")
+                    && !key.trim().is_empty()
+                {
+                    return true;
+                }
+
+                if let Some(ref session) = self.nearai_session_manager {
+                    return session.has_token().await;
+                }
+
+                false
+            }
+            None => false,
         }
     }
 
@@ -2676,6 +2770,20 @@ impl ExtensionManager {
             .get_mcp_server(name, user_id)
             .await
             .map_err(|e| ExtensionError::NotInstalled(e.to_string()))?;
+
+        if server.uses_runtime_auth_source() {
+            if self.is_runtime_authenticated(&server).await {
+                return Ok(AuthResult::authenticated(name, ExtensionKind::McpServer));
+            }
+
+            return Ok(AuthResult::needs_setup(
+                name,
+                ExtensionKind::McpServer,
+                "This MCP server reuses your active NEAR AI authentication. Configure a NEAR AI API key or sign in to NEAR AI first, then try again."
+                    .to_string(),
+                None,
+            ));
+        }
 
         // Check if already authenticated
         if is_authenticated(&server, &self.secrets, user_id).await {
@@ -4002,6 +4110,8 @@ impl ExtensionManager {
         let client = crate::tools::mcp::create_client_from_config(
             server.clone(),
             &self.mcp_session_manager,
+            self.nearai_session_manager.clone(),
+            self.nearai_api_key.clone(),
             &self.mcp_process_manager,
             Some(Arc::clone(&self.secrets)),
             user_id,
@@ -5622,6 +5732,12 @@ impl ExtensionManager {
                     .get_mcp_server(name, user_id)
                     .await
                     .map_err(|e| ExtensionError::NotInstalled(e.to_string()))?;
+                if server.uses_runtime_auth_source() {
+                    return Err(ExtensionError::Other(format!(
+                        "Server '{}' reuses your active NEAR AI authentication and does not accept manually configured MCP tokens",
+                        name
+                    )));
+                }
                 let mut names = std::collections::HashSet::new();
                 names.insert(server.token_secret_name());
                 (names, Vec::new())
@@ -6629,6 +6745,8 @@ mod tests {
         tools_dir: std::path::PathBuf,
         channels_dir: std::path::PathBuf,
         store: Option<Arc<dyn crate::db::Database>>,
+        companion_mcp_server: Option<crate::tools::mcp::config::McpServerConfig>,
+        nearai_session_manager: Option<Arc<crate::llm::SessionManager>>,
     ) -> crate::extensions::manager::ExtensionManager {
         use crate::secrets::{InMemorySecretsStore, SecretsCrypto};
         use crate::tools::mcp::process::McpProcessManager;
@@ -6647,15 +6765,18 @@ mod tests {
         crate::extensions::manager::ExtensionManager::new(
             mcp,
             Arc::new(McpProcessManager::new()),
+            nearai_session_manager,
+            None,
             secrets,
             tools,
             None, // hooks
             wasm_runtime,
             tools_dir,
             channels_dir,
-            None,               // tunnel_url
-            "test".to_string(), // user_id
+            None, // tunnel_url
+            "test".to_string(),
             store,
+            companion_mcp_server,
             vec![],
         )
     }
@@ -6664,7 +6785,7 @@ mod tests {
         wasm_runtime: Option<Arc<crate::tools::wasm::WasmToolRuntime>>,
         tools_dir: std::path::PathBuf,
     ) -> crate::extensions::manager::ExtensionManager {
-        make_test_manager_with_dirs(wasm_runtime, tools_dir.clone(), tools_dir, None)
+        make_test_manager_with_dirs(wasm_runtime, tools_dir.clone(), tools_dir, None, None, None)
     }
 
     fn write_test_tool(
@@ -6757,6 +6878,8 @@ mod tests {
             dir.path().join("tools"),
             dir.path().join("channels"),
             Some(Arc::clone(&store)),
+            None,
+            None,
         );
         let field = crate::tools::wasm::ToolFieldSetupSchema {
             name: "provider".to_string(),
@@ -6798,8 +6921,14 @@ mod tests {
         );
         let channels_dir = dir.path().join("channels");
 
-        let mgr =
-            make_test_manager_with_dirs(None, tools_dir, channels_dir, Some(Arc::clone(&store)));
+        let mgr = make_test_manager_with_dirs(
+            None,
+            tools_dir,
+            channels_dir,
+            Some(Arc::clone(&store)),
+            None,
+            None,
+        );
         let mut fields = std::collections::HashMap::new();
         fields.insert("llm_backend".to_string(), "openai".to_string());
 
@@ -6851,8 +6980,14 @@ mod tests {
         );
         let channels_dir = dir.path().join("channels");
 
-        let mgr =
-            make_test_manager_with_dirs(None, tools_dir, channels_dir, Some(Arc::clone(&store)));
+        let mgr = make_test_manager_with_dirs(
+            None,
+            tools_dir,
+            channels_dir,
+            Some(Arc::clone(&store)),
+            None,
+            None,
+        );
         let mut fields = std::collections::HashMap::new();
         fields.insert("session".to_string(), "overwrite".to_string());
 
@@ -6923,6 +7058,272 @@ mod tests {
             msg.contains("WASM runtime not available"),
             "Expected runtime not available error, got: {msg}"
         );
+    }
+
+    #[tokio::test]
+    async fn test_install_rejects_reserved_nearai_companion_name() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let manager = make_test_manager(None, dir.path().to_path_buf());
+
+        let err = manager
+            .install(
+                crate::tools::mcp::config::NEARAI_COMPANION_MCP_NAME,
+                Some("https://mcp.example.com"),
+                Some(ExtensionKind::McpServer),
+                "test",
+            )
+            .await
+            .expect_err("reserved companion name should be rejected");
+
+        assert!(
+            matches!(err, ExtensionError::Config(_)),
+            "Expected config error, got: {err:?}"
+        );
+        assert!(
+            err.to_string().contains("reserved"),
+            "Expected reserved-name message, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_ensure_nearai_companion_active_if_ready_skips_without_auth() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let companion = crate::tools::mcp::config::McpServerConfig::new(
+            crate::tools::mcp::config::NEARAI_COMPANION_MCP_NAME,
+            "https://private.near.ai/mcp",
+        )
+        .with_auth_source(crate::tools::mcp::config::McpAuthSource::NearAi);
+        let manager = make_test_manager_with_dirs(
+            None,
+            dir.path().join("tools"),
+            dir.path().join("channels"),
+            None,
+            Some(companion),
+            None,
+        );
+
+        let activated = manager
+            .ensure_nearai_companion_active_if_ready()
+            .await
+            .expect("helper should not fail when auth is missing");
+
+        assert!(!activated, "companion should not activate without auth");
+        assert!(
+            !manager
+                .mcp_clients
+                .read()
+                .await
+                .contains_key(crate::tools::mcp::config::NEARAI_COMPANION_MCP_NAME)
+        );
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn test_runtime_auth_detects_runtime_nearai_api_key_override() {
+        struct EnvGuard(&'static str, Option<String>);
+
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                // SAFETY: Protected by ENV_MUTEX for the duration of the test.
+                unsafe {
+                    match &self.1 {
+                        Some(value) => std::env::set_var(self.0, value),
+                        None => std::env::remove_var(self.0),
+                    }
+                }
+                crate::config::helpers::set_runtime_env(self.0, "");
+            }
+        }
+
+        let _mutex = crate::config::helpers::ENV_MUTEX.lock().expect("env mutex");
+        let prev = std::env::var("NEARAI_API_KEY").ok();
+        // SAFETY: Protected by ENV_MUTEX for the duration of the test.
+        unsafe { std::env::remove_var("NEARAI_API_KEY") };
+        let _env_guard = EnvGuard("NEARAI_API_KEY", prev);
+
+        crate::config::helpers::set_runtime_env("NEARAI_API_KEY", "runtime-overlay-key");
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let companion = crate::tools::mcp::config::McpServerConfig::new(
+            crate::tools::mcp::config::NEARAI_COMPANION_MCP_NAME,
+            "https://private.near.ai/mcp",
+        )
+        .with_auth_source(crate::tools::mcp::config::McpAuthSource::NearAi);
+        let manager = make_test_manager_with_dirs(
+            None,
+            dir.path().join("tools"),
+            dir.path().join("channels"),
+            None,
+            Some(companion.clone()),
+            None,
+        );
+
+        assert!(
+            manager.is_runtime_authenticated(&companion).await,
+            "runtime NEARAI_API_KEY override should count as authenticated"
+        );
+    }
+
+    async fn start_runtime_auth_mock_mcp_server() -> (String, tokio::task::JoinHandle<()>) {
+        use axum::extract::State;
+        use axum::http::{HeaderMap, StatusCode};
+        use axum::response::IntoResponse;
+        use axum::routing::post;
+        use axum::{Json, Router};
+        use std::sync::Arc;
+
+        #[derive(Clone)]
+        struct MockState {
+            auth_token: &'static str,
+        }
+
+        #[derive(serde::Deserialize)]
+        struct JsonRpcRequest {
+            id: Option<serde_json::Value>,
+            method: String,
+        }
+
+        async fn handle_mcp(
+            State(state): State<Arc<MockState>>,
+            headers: HeaderMap,
+            Json(req): Json<JsonRpcRequest>,
+        ) -> impl IntoResponse {
+            let auth = headers
+                .get("authorization")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("");
+
+            if auth != format!("Bearer {}", state.auth_token) {
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    Json(serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": req.id,
+                        "error": {"code": -32000, "message": "Unauthorized"}
+                    })),
+                )
+                    .into_response();
+            }
+
+            if req.id.is_none() {
+                return StatusCode::OK.into_response();
+            }
+
+            let body = match req.method.as_str() {
+                "initialize" => serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": req.id,
+                    "result": {
+                        "protocolVersion": "2024-11-05",
+                        "serverInfo": {
+                            "name": "mock-mcp-server",
+                            "version": "1.0.0"
+                        },
+                        "capabilities": {
+                            "tools": {}
+                        }
+                    }
+                }),
+                "tools/list" => serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": req.id,
+                    "result": {
+                        "tools": [{
+                            "name": "echo",
+                            "description": "Mock companion tool",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {}
+                            }
+                        }]
+                    }
+                }),
+                _ => serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": req.id,
+                    "error": {
+                        "code": -32601,
+                        "message": format!("Method not found: {}", req.method)
+                    }
+                }),
+            };
+
+            Json(body).into_response()
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock MCP server");
+        let addr = listener.local_addr().expect("local addr");
+        let base_url = format!("http://127.0.0.1:{}", addr.port());
+        let app = Router::new()
+            .route("/mcp", post(handle_mcp))
+            .with_state(Arc::new(MockState {
+                auth_token: "mock-access-token",
+            }));
+
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve mock MCP");
+        });
+
+        (format!("{base_url}/mcp"), handle)
+    }
+
+    #[tokio::test]
+    async fn test_ensure_nearai_companion_active_if_ready_activates_after_auth_becomes_available() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let (mcp_url, server_handle) = start_runtime_auth_mock_mcp_server().await;
+        let session = Arc::new(crate::llm::SessionManager::new(
+            crate::llm::SessionConfig::default(),
+        ));
+        let companion = crate::tools::mcp::config::McpServerConfig::new(
+            crate::tools::mcp::config::NEARAI_COMPANION_MCP_NAME,
+            mcp_url,
+        )
+        .with_auth_source(crate::tools::mcp::config::McpAuthSource::NearAi);
+        let manager = make_test_manager_with_dirs(
+            None,
+            dir.path().join("tools"),
+            dir.path().join("channels"),
+            None,
+            Some(companion),
+            Some(session.clone()),
+        );
+
+        let first = manager
+            .ensure_nearai_companion_active_if_ready()
+            .await
+            .expect("helper should skip cleanly before auth exists");
+        assert!(!first, "companion should not activate before auth exists");
+
+        session
+            .set_token(secrecy::SecretString::from("mock-access-token"))
+            .await;
+
+        let second = manager
+            .ensure_nearai_companion_active_if_ready()
+            .await
+            .expect("helper should activate once auth becomes available");
+
+        assert!(second, "companion should activate after auth appears");
+        assert!(
+            manager
+                .mcp_clients
+                .read()
+                .await
+                .contains_key(crate::tools::mcp::config::NEARAI_COMPANION_MCP_NAME)
+        );
+        assert!(
+            manager.tool_registry.list().await.into_iter().any(|name| {
+                name == format!(
+                    "{}_echo",
+                    crate::tools::mcp::config::NEARAI_COMPANION_MCP_NAME
+                )
+            }),
+            "expected companion tool to be registered after delayed activation"
+        );
+
+        server_handle.abort();
     }
 
     #[test]
@@ -7047,6 +7448,8 @@ mod tests {
         ExtensionManager::new(
             Arc::new(McpSessionManager::new()),
             Arc::new(McpProcessManager::new()),
+            None,
+            None,
             Arc::new(InMemorySecretsStore::new(crypto)),
             Arc::new(ToolRegistry::new()),
             None,
@@ -7055,6 +7458,7 @@ mod tests {
             channels_dir,
             None,
             "test".to_string(),
+            None,
             None,
             Vec::new(),
         )
@@ -7197,6 +7601,8 @@ mod tests {
             ExtensionManager::new(
                 Arc::new(McpSessionManager::new()),
                 Arc::new(McpProcessManager::new()),
+                None,
+                None,
                 Arc::new(InMemorySecretsStore::new(crypto)),
                 Arc::new(ToolRegistry::new()),
                 None,
@@ -7206,6 +7612,7 @@ mod tests {
                 None,
                 "test".to_string(),
                 Some(db),
+                None,
                 Vec::new(),
             )
         };
@@ -7459,6 +7866,8 @@ mod tests {
         let manager = ExtensionManager::new(
             Arc::new(McpSessionManager::new()),
             Arc::new(McpProcessManager::new()),
+            None,
+            None,
             Arc::new(InMemorySecretsStore::new(crypto)),
             Arc::new(ToolRegistry::new()),
             None,
@@ -7468,6 +7877,7 @@ mod tests {
             None,
             "test".to_string(),
             Some(db.clone() as Arc<dyn crate::db::Database>),
+            None,
             Vec::new(),
         );
 
@@ -7791,6 +8201,8 @@ mod tests {
             dir.path().join("tools"),
             dir.path().join("channels"),
             Some(store),
+            None,
+            None,
         );
 
         // Set up relay channel manager with a stub channel
@@ -8006,7 +8418,14 @@ mod tests {
                 }
             }"#,
         );
-        let mgr = make_test_manager_with_dirs(None, tools_dir, dir.path().join("channels"), None);
+        let mgr = make_test_manager_with_dirs(
+            None,
+            tools_dir,
+            dir.path().join("channels"),
+            None,
+            None,
+            None,
+        );
 
         store_test_secret(&mgr, "github_token", "access-token").await;
         store_test_secret(&mgr, "github_token_refresh_token", "refresh-token").await;
@@ -8050,7 +8469,14 @@ mod tests {
         );
         std::fs::write(tools_dir.join("broken.wasm"), b"fake-tool").expect("write tool");
 
-        let mgr = make_test_manager_with_dirs(None, tools_dir, dir.path().join("channels"), None);
+        let mgr = make_test_manager_with_dirs(
+            None,
+            tools_dir,
+            dir.path().join("channels"),
+            None,
+            None,
+            None,
+        );
         store_test_secret(&mgr, "shared_token", "access-token").await;
         store_test_secret(&mgr, "shared_token_refresh_token", "refresh-token").await;
         store_test_secret(&mgr, "shared_token_scopes", "repo").await;
@@ -8105,7 +8531,14 @@ mod tests {
                 }
             }"#,
         );
-        let mgr = make_test_manager_with_dirs(None, tools_dir, dir.path().join("channels"), None);
+        let mgr = make_test_manager_with_dirs(
+            None,
+            tools_dir,
+            dir.path().join("channels"),
+            None,
+            None,
+            None,
+        );
 
         for (secret_name, value) in [
             ("google_oauth_token", "access-token"),
@@ -8163,7 +8596,8 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
         let tools_dir = dir.path().join("tools");
         let channels_dir = dir.path().join("channels");
-        let mgr = make_test_manager_with_dirs(None, tools_dir, channels_dir.clone(), None);
+        let mgr =
+            make_test_manager_with_dirs(None, tools_dir, channels_dir.clone(), None, None, None);
 
         let wasm_path = channels_dir.join("telegram.wasm");
         let cap_path = channels_dir.join("telegram.capabilities.json");
@@ -8227,7 +8661,14 @@ mod tests {
                 }
             }"#,
         );
-        let mgr = make_test_manager_with_dirs(None, dir.path().join("tools"), channels_dir, None);
+        let mgr = make_test_manager_with_dirs(
+            None,
+            dir.path().join("tools"),
+            channels_dir,
+            None,
+            None,
+            None,
+        );
 
         store_test_secret(&mgr, "telegram_bot_token", "123:telegram-token").await;
         store_test_secret(&mgr, "telegram_service_token", "tenant-service-token").await;
@@ -8261,6 +8702,8 @@ mod tests {
             dir.path().join("tools"),
             dir.path().join("channels"),
             Some(Arc::clone(&store)),
+            None,
+            None,
         );
         let server = McpServerConfig::new("notion", "https://example.com/mcp");
         mgr.add_mcp_server(server.clone(), "test")
@@ -8405,6 +8848,8 @@ mod tests {
         ExtensionManager::new(
             mcp,
             Arc::new(McpProcessManager::new()),
+            None,
+            None,
             secrets,
             tools,
             None,
@@ -8413,6 +8858,7 @@ mod tests {
             dir,
             tunnel_url,
             "test".to_string(),
+            None,
             None,
             vec![],
         )
@@ -8693,6 +9139,46 @@ mod tests {
                 .await
                 .unwrap_or(false),
             "configure_token should have stored SECRET_B (the first missing secret)"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_configure_token_rejects_runtime_auth_companion() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let companion = crate::tools::mcp::config::McpServerConfig::new(
+            crate::tools::mcp::config::NEARAI_COMPANION_MCP_NAME,
+            "https://private.near.ai/mcp",
+        )
+        .with_auth_source(crate::tools::mcp::config::McpAuthSource::NearAi);
+        let token_secret_name = companion.token_secret_name();
+        let mgr = make_test_manager_with_dirs(
+            None,
+            dir.path().join("tools"),
+            dir.path().join("channels"),
+            None,
+            Some(companion),
+            None,
+        );
+
+        let err = mgr
+            .configure_token(
+                crate::tools::mcp::config::NEARAI_COMPANION_MCP_NAME,
+                "manual-token",
+                "test",
+            )
+            .await
+            .expect_err("runtime-auth companion should reject manual token configuration");
+
+        assert!(
+            err.to_string().contains("active NEAR AI authentication"),
+            "expected runtime-auth rejection message, got: {err}"
+        );
+        assert!(
+            !mgr.secrets
+                .exists("test", &token_secret_name)
+                .await
+                .unwrap_or(false),
+            "configure_token must not persist a manual MCP token for the runtime-auth companion"
         );
     }
 

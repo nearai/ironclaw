@@ -1198,7 +1198,7 @@ function addToolCard(name) {
 
   const toolName = document.createElement('span');
   toolName.className = 'activity-tool-name';
-  toolName.textContent = name;
+  toolName.textContent = humanizeToolName(name);
 
   const duration = document.createElement('span');
   duration.className = 'activity-tool-duration';
@@ -1382,12 +1382,18 @@ function finalizeActivityGroup() {
 
 function humanizeToolName(rawName) {
   if (!rawName) return '';
-  return String(rawName)
+  return stripDerivedCompanionToolPrefix(String(rawName))
     .replace(/[_-]+/g, ' ')
     .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
     .replace(/^tool([a-zA-Z])/, 'tool $1')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+function stripDerivedCompanionToolPrefix(rawName) {
+  if (!rawName) return '';
+  const prefix = '_nearai_companion_mcp_';
+  return rawName.startsWith(prefix) ? rawName.slice(prefix.length) : rawName;
 }
 
 function shouldShowChannelConnectedMessage(extensionName, success) {
@@ -1909,7 +1915,7 @@ function createToolCallsSummaryElement(toolCalls) {
     const icon = tc.has_error ? '\u2717' : '\u2713';
     const nameSpan = document.createElement('span');
     nameSpan.className = 'tool-call-name';
-    nameSpan.textContent = icon + ' ' + tc.name;
+    nameSpan.textContent = icon + ' ' + humanizeToolName(tc.name);
     item.appendChild(nameSpan);
 
     if (tc.result_preview) {
@@ -2947,7 +2953,12 @@ function renderExtensionCard(ext) {
   if (ext.tools && ext.tools.length > 0) {
     const tools = document.createElement('div');
     tools.className = 'ext-tools';
-    tools.textContent = 'Tools: ' + ext.tools.join(', ');
+    const toolNames = ext.tools.map((toolName) => (
+      ext.derived && ext.kind === 'mcp_server'
+        ? stripDerivedCompanionToolPrefix(toolName)
+        : toolName
+    ));
+    tools.textContent = 'Tools: ' + toolNames.join(', ');
     card.appendChild(tools);
   }
 
@@ -3008,7 +3019,7 @@ function renderExtensionCard(ext) {
     // Skip when has_auth is true but needs_setup is false and not yet authenticated —
     // this means OAuth credentials resolve automatically (builtin/env) and the user
     // just needs to complete the OAuth flow, not fill in a config form.
-    if (ext.needs_setup || (ext.has_auth && ext.authenticated)) {
+    if (!ext.derived && (ext.needs_setup || (ext.has_auth && ext.authenticated))) {
       const configBtn = document.createElement('button');
       configBtn.className = 'btn-ext configure';
       configBtn.textContent = ext.authenticated ? I18n.t('ext.reconfigure') : I18n.t('ext.configure');
@@ -3017,11 +3028,13 @@ function renderExtensionCard(ext) {
     }
   }
 
-  const removeBtn = document.createElement('button');
-  removeBtn.className = 'btn-ext remove';
-  removeBtn.textContent = I18n.t('ext.remove');
-  removeBtn.addEventListener('click', () => removeExtension(ext.name));
-  actions.appendChild(removeBtn);
+  if (!ext.derived) {
+    const removeBtn = document.createElement('button');
+    removeBtn.className = 'btn-ext remove';
+    removeBtn.textContent = I18n.t('ext.remove');
+    removeBtn.addEventListener('click', () => removeExtension(ext.name));
+    actions.appendChild(removeBtn);
+  }
 
   card.appendChild(actions);
 

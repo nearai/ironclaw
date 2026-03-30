@@ -47,6 +47,15 @@ impl Agent {
         thread_id: Uuid,
         initial_messages: Vec<ChatMessage>,
     ) -> Result<AgenticLoopResult, Error> {
+        if let Some(ext_mgr) = self.deps.extension_manager.as_ref()
+            && let Err(e) = ext_mgr.ensure_nearai_companion_active_if_ready().await
+        {
+            tracing::debug!(
+                "Failed to auto-activate NEAR AI companion MCP before turn: {}",
+                e
+            );
+        }
+
         // Detect group chat from channel metadata (needed before loading system prompt)
         let is_group_chat = message
             .metadata

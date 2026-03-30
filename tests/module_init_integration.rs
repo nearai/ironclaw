@@ -203,6 +203,8 @@ async fn extension_manager_with_process_manager_constructs() {
     let manager = ExtensionManager::new(
         Arc::new(McpSessionManager::new()),
         Arc::new(McpProcessManager::new()),
+        None,
+        None,
         secrets,
         tools,
         None,
@@ -211,6 +213,7 @@ async fn extension_manager_with_process_manager_constructs() {
         channels_dir.path().to_path_buf(),
         None,
         "test".to_string(),
+        None,
         None,
         Vec::new(),
     );
