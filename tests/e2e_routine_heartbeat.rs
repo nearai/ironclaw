@@ -399,11 +399,7 @@ mod tests {
     /// Wait for a `tool_result` job event with `success: false` for the given tool.
     /// Job events are persisted via `tokio::spawn`, so they may lag slightly
     /// behind run completion.
-    async fn wait_for_tool_denial_event(
-        db: &Arc<dyn Database>,
-        job_id: Uuid,
-        tool_name: &str,
-    ) {
+    async fn wait_for_tool_denial_event(db: &Arc<dyn Database>, job_id: Uuid, tool_name: &str) {
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         loop {
             let events = db
