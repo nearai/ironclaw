@@ -22,14 +22,17 @@ fn message_tool_summary() -> ToolDiscoverySummary {
         conditional_requirements: vec![
             "Omitting 'channel' defaults to the current conversation's channel.".into(),
             "Omitting 'target' defaults to the current sender/group.".into(),
-            "Attachments must be files under ~/.ironclaw or /tmp/ (download with http tool first).".into(),
+            "Attachments must be files under ~/.ironclaw or /tmp/ (download with http tool first)."
+                .into(),
         ],
         notes: vec![
             "Signal targets: E.164 phone number (+1234567890) or group ID.".into(),
             "Telegram targets: username (@alice), bare username, or chat ID (numeric).".into(),
             "Slack targets: channel name (#general) or user ID (U1234567890).".into(),
-            "For interactive chat, omit channel and target to reply in the current conversation.".into(),
-            "Images are sent as photos on Telegram; other file types pass through as attachments.".into(),
+            "For interactive chat, omit channel and target to reply in the current conversation."
+                .into(),
+            "Images are sent as photos on Telegram; other file types pass through as attachments."
+                .into(),
             "Rate limit: 10/min, 100/hour.".into(),
         ],
         examples: vec![
@@ -1101,7 +1104,12 @@ mod tests {
         assert!(summary.notes.iter().any(|n| n.contains("Signal")));
         assert!(summary.notes.iter().any(|n| n.contains("Telegram")));
         assert!(summary.notes.iter().any(|n| n.contains("Slack")));
-        assert!(summary.conditional_requirements.iter().any(|r| r.contains("channel")));
+        assert!(
+            summary
+                .conditional_requirements
+                .iter()
+                .any(|r| r.contains("channel"))
+        );
         assert_eq!(summary.examples.len(), 3);
     }
 }

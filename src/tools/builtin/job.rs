@@ -2298,9 +2298,22 @@ mod tests {
     #[test]
     fn create_job_discovery_summary_explains_modes_and_credentials() {
         let summary = create_job_tool_summary();
-        assert_eq!(summary.always_required, vec!["title".to_string(), "description".to_string()]);
-        assert!(summary.conditional_requirements.iter().any(|r| r.contains("claude_code")));
-        assert!(summary.conditional_requirements.iter().any(|r| r.contains("credentials")));
+        assert_eq!(
+            summary.always_required,
+            vec!["title".to_string(), "description".to_string()]
+        );
+        assert!(
+            summary
+                .conditional_requirements
+                .iter()
+                .any(|r| r.contains("claude_code"))
+        );
+        assert!(
+            summary
+                .conditional_requirements
+                .iter()
+                .any(|r| r.contains("credentials"))
+        );
         assert!(summary.notes.iter().any(|n| n.contains("wait")));
         assert!(summary.notes.iter().any(|n| n.contains("uppercase")));
         assert_eq!(summary.examples.len(), 3);

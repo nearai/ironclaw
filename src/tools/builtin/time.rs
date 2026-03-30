@@ -623,8 +623,18 @@ mod tests {
     fn time_discovery_summary_explains_operations_and_requirements() {
         let summary = time_tool_summary();
         assert_eq!(summary.always_required, vec!["operation".to_string()]);
-        assert!(summary.conditional_requirements.iter().any(|r| r.contains("to_timezone")));
-        assert!(summary.conditional_requirements.iter().any(|r| r.contains("timestamp2")));
+        assert!(
+            summary
+                .conditional_requirements
+                .iter()
+                .any(|r| r.contains("to_timezone"))
+        );
+        assert!(
+            summary
+                .conditional_requirements
+                .iter()
+                .any(|r| r.contains("timestamp2"))
+        );
         assert!(summary.notes.iter().any(|n| n.contains("IANA")));
         assert_eq!(summary.examples.len(), 5);
     }
