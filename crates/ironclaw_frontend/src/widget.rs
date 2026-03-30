@@ -82,7 +82,7 @@ pub fn scope_css(css: &str, widget_id: &str) -> String {
     let mut in_block = false;
     let mut current_selector = String::new();
 
-    while let Some(ch) = chars.next() {
+    for ch in chars {
         match ch {
             '{' if !in_block => {
                 // Scope each comma-separated selector

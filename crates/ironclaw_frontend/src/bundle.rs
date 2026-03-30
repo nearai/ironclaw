@@ -109,10 +109,10 @@ pub fn assemble_index(base_html: &str, bundle: &FrontendBundle) -> String {
     }
 
     // Custom CSS
-    if let Some(ref custom_css) = bundle.custom_css {
-        if !custom_css.trim().is_empty() {
-            body_injections.push(format!("<style data-custom-css>{}</style>", custom_css));
-        }
+    if let Some(ref custom_css) = bundle.custom_css
+        && !custom_css.trim().is_empty()
+    {
+        body_injections.push(format!("<style data-custom-css>{}</style>", custom_css));
     }
 
     // --- Assemble ---
@@ -128,16 +128,15 @@ pub fn assemble_index(base_html: &str, bundle: &FrontendBundle) -> String {
     }
 
     // Override <title> if branding title is set (HTML-escaped to prevent XSS)
-    if let Some(ref title) = bundle.layout.branding.title {
-        if let Some(start) = result.find("<title>") {
-            if let Some(end) = result[start..].find("</title>") {
-                let end = start + end + "</title>".len();
-                result.replace_range(
-                    start..end,
-                    &format!("<title>{}</title>", escape_html(title)),
-                );
-            }
-        }
+    if let Some(ref title) = bundle.layout.branding.title
+        && let Some(start) = result.find("<title>")
+        && let Some(end) = result[start..].find("</title>")
+    {
+        let end = start + end + "</title>".len();
+        result.replace_range(
+            start..end,
+            &format!("<title>{}</title>", escape_html(title)),
+        );
     }
 
     // Inject before </body>
