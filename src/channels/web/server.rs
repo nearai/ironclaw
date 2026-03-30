@@ -2775,6 +2775,8 @@ async fn gateway_status_handler(
         .map(|v| v.to_lowercase() == "true")
         .unwrap_or(false);
 
+    let clawhub_enabled = state.skill_catalog.is_some();
+
     Json(GatewayStatusResponse {
         version: env!("CARGO_PKG_VERSION").to_string(),
         sse_connections,
@@ -2788,6 +2790,7 @@ async fn gateway_status_handler(
         llm_backend: state.active_config.llm_backend.clone(),
         llm_model: state.active_config.llm_model.clone(),
         enabled_channels: state.active_config.enabled_channels.clone(),
+        clawhub_enabled,
     })
 }
 
@@ -2816,6 +2819,7 @@ struct GatewayStatusResponse {
     llm_backend: String,
     llm_model: String,
     enabled_channels: Vec<String>,
+    clawhub_enabled: bool,
 }
 
 #[cfg(test)]
@@ -2985,9 +2989,12 @@ mod tests {
 
     // --- OAuth callback handler tests ---
 
-    /// Build a minimal `GatewayState` for testing the OAuth callback handler.
-    fn test_gateway_state(ext_mgr: Option<Arc<ExtensionManager>>) -> Arc<GatewayState> {
-        Arc::new(GatewayState {
+    /// Build a minimal `GatewayState` with all optional fields set to `None`.
+    ///
+    /// Returns the raw struct so callers can override fields before wrapping
+    /// in `Arc`. Use `test_gateway_state()` for the common Arc-wrapped case.
+    fn test_gateway_state_base() -> GatewayState {
+        GatewayState {
             msg_tx: tokio::sync::RwLock::new(None),
             sse: Arc::new(SseManager::new()),
             workspace: None,
@@ -2995,7 +3002,7 @@ mod tests {
             session_manager: None,
             log_broadcaster: None,
             log_level_handle: None,
-            extension_manager: ext_mgr,
+            extension_manager: None,
             tool_registry: None,
             store: None,
             job_manager: None,
@@ -3017,7 +3024,14 @@ mod tests {
             active_config: ActiveConfigSnapshot::default(),
             secrets_store: None,
             db_auth: None,
-        })
+        }
+    }
+
+    /// Build a minimal `GatewayState` for testing the OAuth callback handler.
+    fn test_gateway_state(ext_mgr: Option<Arc<ExtensionManager>>) -> Arc<GatewayState> {
+        let mut state = test_gateway_state_base();
+        state.extension_manager = ext_mgr;
+        Arc::new(state)
     }
 
     /// Build a test router with just the OAuth callback route.
@@ -4327,5 +4341,67 @@ mod tests {
     fn test_is_local_origin_rejects_garbage() {
         assert!(!is_local_origin("not-a-url"));
         assert!(!is_local_origin(""));
+    }
+
+    #[test]
+    fn gateway_status_response_serializes_clawhub_enabled() {
+        let resp = GatewayStatusResponse {
+            version: "0.0.0".to_string(),
+            sse_connections: 0,
+            ws_connections: 0,
+            total_connections: 0,
+            uptime_secs: 0,
+            restart_enabled: false,
+            daily_cost: None,
+            actions_this_hour: None,
+            model_usage: None,
+            llm_backend: "test".to_string(),
+            llm_model: "test".to_string(),
+            enabled_channels: vec![],
+            clawhub_enabled: false,
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["clawhub_enabled"], false);
+
+        let resp_enabled = GatewayStatusResponse {
+            clawhub_enabled: true,
+            ..resp
+        };
+        let json = serde_json::to_value(&resp_enabled).unwrap();
+        assert_eq!(json["clawhub_enabled"], true);
+    }
+
+    #[tokio::test]
+    async fn skills_search_returns_501_when_catalog_disabled() {
+        use crate::channels::web::auth::{AuthenticatedUser, UserIdentity};
+        use crate::channels::web::handlers::skills::skills_search_handler;
+
+        let dir = tempfile::tempdir().unwrap();
+        let registry = Arc::new(std::sync::RwLock::new(
+            crate::skills::SkillRegistry::new(dir.path().join("skills"))
+                .with_installed_dir(dir.path().join("installed")),
+        ));
+
+        // Skills enabled (registry present) but ClawHub disabled (catalog None).
+        let mut state = test_gateway_state_base();
+        state.skill_registry = Some(registry);
+        let state = Arc::new(state);
+
+        let result = skills_search_handler(
+            axum::extract::State(state),
+            AuthenticatedUser(UserIdentity {
+                user_id: "test".into(),
+                role: "admin".into(),
+                workspace_read_scopes: vec![],
+            }),
+            axum::Json(crate::channels::web::types::SkillSearchRequest {
+                query: "test".into(),
+            }),
+        )
+        .await;
+
+        let err = result.expect_err("should fail with 501 when catalog is None");
+        assert_eq!(err.0, axum::http::StatusCode::NOT_IMPLEMENTED);
+        assert!(err.1.contains("catalog"));
     }
 }

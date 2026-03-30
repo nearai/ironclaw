@@ -470,22 +470,36 @@ impl ToolRegistry {
     /// Register skill management tools (list, search, install, remove).
     ///
     /// These allow the LLM to manage prompt-level skills through conversation.
+    /// When `catalog` is `None` (ClawHub disabled), `skill_search` is omitted
+    /// and `skill_install` only accepts direct URL or content.
     pub fn register_skill_tools(
         &self,
         registry: Arc<std::sync::RwLock<SkillRegistry>>,
-        catalog: Arc<SkillCatalog>,
+        catalog: Option<Arc<SkillCatalog>>,
     ) {
         self.register_sync(Arc::new(SkillListTool::new(Arc::clone(&registry))));
-        self.register_sync(Arc::new(SkillSearchTool::new(
-            Arc::clone(&registry),
-            Arc::clone(&catalog),
-        )));
+        self.register_sync(Arc::new(SkillRemoveTool::new(Arc::clone(&registry))));
         self.register_sync(Arc::new(SkillInstallTool::new(
             Arc::clone(&registry),
-            Arc::clone(&catalog),
+            catalog.clone(),
         )));
-        self.register_sync(Arc::new(SkillRemoveTool::new(registry)));
-        tracing::debug!("Registered 4 skill management tools");
+
+        // Base tools: list, remove, install
+        let mut count = 3;
+
+        if let Some(ref catalog) = catalog {
+            self.register_sync(Arc::new(SkillSearchTool::new(
+                registry,
+                Arc::clone(catalog),
+            )));
+            count += 1;
+        }
+
+        tracing::debug!(
+            "Registered {} skill management tools (clawhub={})",
+            count,
+            catalog.is_some()
+        );
     }
 
     /// Register routine management tools.
@@ -1097,5 +1111,22 @@ mod tests {
         registry.retain_only(&[]).await;
         let after = registry.list().await.len();
         assert_eq!(before, after);
+    }
+
+    #[tokio::test]
+    async fn test_register_skill_tools_without_catalog() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = ToolRegistry::new();
+        let sr = Arc::new(std::sync::RwLock::new(crate::skills::SkillRegistry::new(
+            dir.path().to_path_buf(),
+        )));
+        registry.register_skill_tools(sr, None);
+        assert!(registry.has("skill_list").await);
+        assert!(registry.has("skill_remove").await);
+        assert!(registry.has("skill_install").await);
+        assert!(
+            !registry.has("skill_search").await,
+            "skill_search should not be registered without catalog"
+        );
     }
 }

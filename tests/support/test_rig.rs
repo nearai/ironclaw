@@ -415,6 +415,7 @@ pub struct TestRigBuilder {
     injection_check: bool,
     auto_approve_tools: Option<bool>,
     enable_skills: bool,
+    clawhub_disabled: bool,
     enable_routines: bool,
     http_exchanges: Vec<HttpExchange>,
     extra_tools: Vec<Arc<dyn Tool>>,
@@ -432,6 +433,7 @@ impl TestRigBuilder {
             injection_check: false,
             auto_approve_tools: Some(true),
             enable_skills: false,
+            clawhub_disabled: false,
             enable_routines: false,
             http_exchanges: Vec::new(),
             extra_tools: Vec::new(),
@@ -509,6 +511,13 @@ impl TestRigBuilder {
         self
     }
 
+    /// Disable ClawHub catalog while keeping local skill management.
+    /// Must be combined with `.with_skills()` to have any effect.
+    pub fn with_clawhub_disabled(mut self) -> Self {
+        self.clawhub_disabled = true;
+        self
+    }
+
     /// Enable the routines system so the scheduler is wired with a `RoutineEngine`,
     /// allowing routine jobs to actually execute. Routine tools are always registered
     /// but require the engine to dispatch jobs.
@@ -551,6 +560,7 @@ impl TestRigBuilder {
             injection_check,
             auto_approve_tools,
             enable_skills,
+            clawhub_disabled,
             enable_routines,
             http_exchanges: explicit_http_exchanges,
             extra_tools,
@@ -719,12 +729,17 @@ impl TestRigBuilder {
                     ironclaw::skills::SkillRegistry::new(temp_dir.path().join("skills"))
                         .with_installed_dir(temp_dir.path().join("installed_skills")),
                 ));
-                let catalog = ironclaw::skills::catalog::shared_catalog();
+                let catalog = if clawhub_disabled {
+                    None
+                } else {
+                    Some(ironclaw::skills::catalog::shared_catalog())
+                };
                 components
                     .tools
-                    .register_skill_tools(Arc::clone(&registry), Arc::clone(&catalog));
+                    .register_skill_tools(Arc::clone(&registry), catalog.clone());
                 components.skill_registry = Some(registry);
-                components.skill_catalog = Some(catalog);
+                components.skill_catalog = catalog;
+                components.config.skills.clawhub_enabled = !clawhub_disabled;
             }
 
             // Register any extra test-specific tools.

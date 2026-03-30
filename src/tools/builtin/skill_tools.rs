@@ -247,13 +247,13 @@ impl Tool for SkillSearchTool {
 
 pub struct SkillInstallTool {
     registry: Arc<std::sync::RwLock<SkillRegistry>>,
-    catalog: Arc<SkillCatalog>,
+    catalog: Option<Arc<SkillCatalog>>,
 }
 
 impl SkillInstallTool {
     pub fn new(
         registry: Arc<std::sync::RwLock<SkillRegistry>>,
-        catalog: Arc<SkillCatalog>,
+        catalog: Option<Arc<SkillCatalog>>,
     ) -> Self {
         Self { registry, catalog }
     }
@@ -299,20 +299,21 @@ impl Tool for SkillInstallTool {
         let name = require_str(&params, "name")?;
 
         let content = if let Some(raw) = params.get("content").and_then(|v| v.as_str()) {
-            // Direct content provided
             raw.to_string()
         } else if let Some(url) = params
             .get("url")
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
         {
-            // Fetch from explicit URL
             fetch_skill_content(url).await?
-        } else {
-            // Look up in catalog and fetch
+        } else if let Some(ref catalog) = self.catalog {
             let download_url =
-                crate::skills::catalog::skill_download_url(self.catalog.registry_url(), name);
+                crate::skills::catalog::skill_download_url(catalog.registry_url(), name);
             fetch_skill_content(&download_url).await?
+        } else {
+            return Err(ToolError::ExecutionFailed(
+                "ClawHub registry is disabled. Provide a 'url' or 'content' parameter.".into(),
+            ));
         };
 
         // Check for duplicates and get install_dir under a brief read lock.
@@ -823,7 +824,7 @@ mod tests {
     #[test]
     fn test_skill_install_schema() {
         use crate::tools::tool::ApprovalRequirement;
-        let tool = SkillInstallTool::new(test_registry(), test_catalog());
+        let tool = SkillInstallTool::new(test_registry(), Some(test_catalog()));
         assert_eq!(tool.name(), "skill_install");
         assert_eq!(
             tool.requires_approval(&serde_json::json!({})),
@@ -833,6 +834,32 @@ mod tests {
         assert!(schema["properties"].get("name").is_some());
         assert!(schema["properties"].get("url").is_some());
         assert!(schema["properties"].get("content").is_some());
+    }
+
+    #[test]
+    fn test_skill_install_schema_without_catalog() {
+        use crate::tools::tool::ApprovalRequirement;
+        let tool = SkillInstallTool::new(test_registry(), None);
+        assert_eq!(tool.name(), "skill_install");
+        assert_eq!(
+            tool.requires_approval(&serde_json::json!({})),
+            ApprovalRequirement::UnlessAutoApproved
+        );
+    }
+
+    #[tokio::test]
+    async fn test_skill_install_without_catalog_rejects_name_only() {
+        let tool = SkillInstallTool::new(test_registry(), None);
+        let ctx = crate::context::JobContext::default();
+        let result = tool
+            .execute(serde_json::json!({"name": "some-skill"}), &ctx)
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("ClawHub") || err.contains("disabled"),
+            "Expected ClawHub disabled error, got: {err}"
+        );
     }
 
     #[test]
