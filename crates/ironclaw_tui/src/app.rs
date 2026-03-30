@@ -51,6 +51,8 @@ pub struct TuiAppConfig {
     pub version: String,
     pub model: String,
     pub layout: TuiLayout,
+    /// Maximum context window size in tokens (e.g., 128_000, 200_000).
+    pub context_window: u64,
 }
 
 /// Start the TUI application. Returns a handle for bi-directional communication.
@@ -109,6 +111,7 @@ async fn run_tui(
         version: config.version,
         model: config.model,
         sidebar_visible: config.layout.sidebar.visible,
+        context_window: config.context_window,
         ..AppState::default()
     };
 

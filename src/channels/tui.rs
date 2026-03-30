@@ -79,6 +79,7 @@ impl Channel for TuiChannel {
             version: self.version.clone(),
             model: self.model.clone(),
             layout: self.layout.clone(),
+            context_window: 128_000,
         };
 
         let ironclaw_tui::TuiAppHandle {

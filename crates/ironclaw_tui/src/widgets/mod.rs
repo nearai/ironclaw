@@ -91,6 +91,9 @@ pub struct AppState {
     /// Scroll offset in the logs view (0 = bottom / most recent).
     pub log_scroll: u16,
 
+    /// Maximum context window size in tokens for the active model.
+    pub context_window: u64,
+
     /// Command palette state.
     pub command_palette: CommandPaletteState,
 }
@@ -117,6 +120,7 @@ impl Default for AppState {
             active_tab: ActiveTab::default(),
             log_entries: LogRingBuffer::new(500),
             log_scroll: 0,
+            context_window: 128_000,
             command_palette: CommandPaletteState::default(),
         }
     }
