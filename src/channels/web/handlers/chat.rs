@@ -206,15 +206,21 @@ pub async fn chat_auth_token_handler(
             // the gap between the frontend auth card (which calls this endpoint)
             // and the v2 engine's skill-based credential system.
             if msg.contains("not installed") || msg.contains("not found") {
+                // Try storing directly in the secrets store (skill credential path).
                 let ss = state
                     .tool_registry
                     .as_ref()
                     .and_then(|tr| tr.secrets_store().cloned());
+
                 if let Some(ref ss) = ss {
                     let params =
                         crate::secrets::CreateSecretParams::new(&req.extension_name, &req.token);
                     match ss.create(&user.user_id, params).await {
                         Ok(_) => {
+                            tracing::debug!(
+                                credential = %req.extension_name,
+                                "Stored skill credential via auth-token fallback"
+                            );
                             clear_auth_mode(&state, &user.user_id).await;
                             state.sse.broadcast_for_user(
                                 &user.user_id,
@@ -238,6 +244,11 @@ pub async fn chat_auth_token_handler(
                             ))));
                         }
                     }
+                } else {
+                    tracing::warn!(
+                        credential = %req.extension_name,
+                        "Cannot store skill credential: no secrets store available"
+                    );
                 }
             }
 
