@@ -31,11 +31,9 @@ activation:
   tags:
     - "devops"
   max_context_tokens: 2000
-metadata:
-  openclaw:
-    requires:
-      bins: [docker, kubectl]
-      env: [KUBECONFIG]
+requires:
+  bins: [docker, kubectl]
+  env: [KUBECONFIG]
 ---
 
 # Skill instructions here...

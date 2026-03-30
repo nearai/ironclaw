@@ -56,7 +56,7 @@ fn make_skill(
             description: format!("{} skill", name),
             activation: ActivationCriteria::default(),
             credentials,
-            metadata: None,
+            requires: ironclaw_skills::GatingRequirements::default(),
         },
         prompt_content: prompt.to_string(),
         trust: SkillTrust::Trusted,

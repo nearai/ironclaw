@@ -123,29 +123,13 @@ pub struct SkillManifest {
     /// Parsed at load time; values are never in the LLM context.
     #[serde(default)]
     pub credentials: Vec<SkillCredentialSpec>,
-    /// Optional OpenClaw metadata.
+    /// Gating requirements (binaries, env vars, config files, companion skills).
     #[serde(default)]
-    pub metadata: Option<SkillMetadata>,
+    pub requires: GatingRequirements,
 }
 
 fn default_version() -> String {
     "0.0.0".to_string()
-}
-
-/// Optional metadata section in SKILL.md frontmatter.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct SkillMetadata {
-    /// OpenClaw-specific metadata.
-    #[serde(default)]
-    pub openclaw: Option<OpenClawMeta>,
-}
-
-/// OpenClaw-specific metadata.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct OpenClawMeta {
-    /// Gating requirements that must be met for the skill to load.
-    #[serde(default)]
-    pub requires: GatingRequirements,
 }
 
 /// Requirements that must be satisfied for a skill to load.
@@ -160,6 +144,15 @@ pub struct GatingRequirements {
     /// Required config file paths that must exist.
     #[serde(default)]
     pub config: Vec<String>,
+    /// Required companion skills that should be installed alongside this one.
+    ///
+    /// Unlike bins/env/config, missing skill dependencies do NOT prevent the
+    /// skill from loading — they produce warnings that the agent can surface
+    /// to the user. This allows bundle/setup skills to declare which sub-skills
+    /// they depend on (e.g., a `ceo-assistant` bundle requires `commitment-triage`,
+    /// `commitment-digest`, `decision-capture`, etc.).
+    #[serde(default)]
+    pub skills: Vec<String>,
 }
 
 /// Where to inject a credential in HTTP requests.
@@ -435,22 +428,23 @@ activation:
     }
 
     #[test]
-    fn test_parse_openclaw_metadata() {
+    fn test_parse_requires() {
         let yaml = r#"
 name: test-skill
-metadata:
-  openclaw:
-    requires:
-      bins: ["vale"]
-      env: ["VALE_CONFIG"]
-      config: ["/etc/vale.ini"]
+requires:
+  bins: ["vale"]
+  env: ["VALE_CONFIG"]
+  config: ["/etc/vale.ini"]
+  skills: ["commitment-triage", "commitment-digest"]
 "#;
         let manifest: SkillManifest = serde_yml::from_str(yaml).expect("parse failed");
-        let meta = manifest.metadata.unwrap();
-        let openclaw = meta.openclaw.unwrap();
-        assert_eq!(openclaw.requires.bins, vec!["vale"]);
-        assert_eq!(openclaw.requires.env, vec!["VALE_CONFIG"]);
-        assert_eq!(openclaw.requires.config, vec!["/etc/vale.ini"]);
+        assert_eq!(manifest.requires.bins, vec!["vale"]);
+        assert_eq!(manifest.requires.env, vec!["VALE_CONFIG"]);
+        assert_eq!(manifest.requires.config, vec!["/etc/vale.ini"]);
+        assert_eq!(
+            manifest.requires.skills,
+            vec!["commitment-triage", "commitment-digest"]
+        );
     }
 
     #[test]
@@ -462,7 +456,7 @@ metadata:
                 description: String::new(),
                 activation: ActivationCriteria::default(),
                 credentials: vec![],
-                metadata: None,
+                requires: GatingRequirements::default(),
             },
             prompt_content: "test prompt".to_string(),
             trust: SkillTrust::Trusted,

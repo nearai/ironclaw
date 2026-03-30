@@ -12,6 +12,9 @@ pub struct GatingResult {
     pub passed: bool,
     /// Descriptions of failed requirements.
     pub failures: Vec<String>,
+    /// Descriptions of missing optional dependencies (e.g., companion skills).
+    /// These do not prevent loading but should be surfaced to the user.
+    pub warnings: Vec<String>,
 }
 
 /// Async wrapper around [`check_requirements_sync`] that offloads blocking
@@ -33,6 +36,7 @@ pub async fn check_requirements(requirements: &GatingRequirements) -> GatingResu
             GatingResult {
                 passed: false,
                 failures: vec![message],
+                warnings: Vec::new(),
             }
         })
 }
@@ -49,6 +53,7 @@ pub async fn check_requirements(requirements: &GatingRequirements) -> GatingResu
 /// wrapper when calling from async contexts to avoid blocking the tokio runtime.
 pub fn check_requirements_sync(requirements: &GatingRequirements) -> GatingResult {
     let mut failures = Vec::new();
+    let mut warnings = Vec::new();
 
     for bin in &requirements.bins {
         if !binary_exists(bin) {
@@ -68,9 +73,18 @@ pub fn check_requirements_sync(requirements: &GatingRequirements) -> GatingResul
         }
     }
 
+    // Skill dependencies are warnings, not failures — the skill still loads
+    // but the agent should tell the user which companion skills are needed.
+    // Actual presence checking happens at a higher level (SkillRegistry) since
+    // the gating module doesn't have access to the registry.
+    for skill in &requirements.skills {
+        warnings.push(format!("requires companion skill: {}", skill));
+    }
+
     GatingResult {
         passed: failures.is_empty(),
         failures,
+        warnings,
     }
 }
 
@@ -158,9 +172,28 @@ mod tests {
             bins: vec!["__no_such_bin__".to_string()],
             env: vec!["__NO_SUCH_VAR__".to_string()],
             config: vec!["/no/such/file".to_string()],
+            ..Default::default()
         };
         let result = check_requirements_sync(&req);
         assert!(!result.passed);
         assert_eq!(result.failures.len(), 3);
+    }
+
+    #[test]
+    fn test_skill_dependencies_produce_warnings() {
+        let req = GatingRequirements {
+            skills: vec![
+                "commitment-triage".to_string(),
+                "commitment-digest".to_string(),
+            ],
+            ..Default::default()
+        };
+        let result = check_requirements_sync(&req);
+        // Skills are warnings, not failures — the skill should still load
+        assert!(result.passed);
+        assert!(result.failures.is_empty());
+        assert_eq!(result.warnings.len(), 2);
+        assert!(result.warnings[0].contains("commitment-triage"));
+        assert!(result.warnings[1].contains("commitment-digest"));
     }
 }

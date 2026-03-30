@@ -349,18 +349,82 @@ impl Tool for SkillInstallTool {
             .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
 
         // Commit the in-memory addition under a brief write lock.
-        let installed_name = {
+        let (installed_name, required_skills) = {
             let mut guard = self
                 .registry
                 .write()
                 .map_err(|e| ToolError::ExecutionFailed(format!("Lock poisoned: {}", e)))?;
+            let reqs = loaded_skill.manifest.requires.clone();
             guard
                 .commit_install(&skill_name, loaded_skill)
                 .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
-            skill_name
+            (skill_name, reqs.skills)
         };
 
-        let output = serde_json::json!({
+        // Chain-install missing skill dependencies.
+        // Cap at 10 to bound total fetch time from malicious/large manifests.
+        const MAX_CHAIN_DEPS: usize = 10;
+        let mut chain_installed: Vec<String> = Vec::new();
+        let mut chain_failed: Vec<String> = Vec::new();
+        let mut chain_need_approval: Vec<String> = Vec::new();
+
+        if !required_skills.is_empty() {
+            // Batch lookups under a single read lock to avoid per-iteration
+            // lock thrashing: filter missing deps and grab install dir once.
+            let (missing_deps, user_dir) = {
+                let guard = self
+                    .registry
+                    .read()
+                    .map_err(|e| ToolError::ExecutionFailed(format!("Lock poisoned: {}", e)))?;
+                let missing: Vec<String> = required_skills
+                    .iter()
+                    .filter(|name| !guard.has(name))
+                    .take(MAX_CHAIN_DEPS)
+                    .cloned()
+                    .collect();
+                (missing, guard.install_target_dir().to_path_buf())
+            };
+
+            for dep_name in &missing_deps {
+                let download_url = ironclaw_skills::catalog::skill_download_url(
+                    self.catalog.registry_url(),
+                    dep_name,
+                );
+                match fetch_skill_content(&download_url).await {
+                    Ok(dep_content) => {
+                        let normalized = ironclaw_skills::normalize_line_endings(&dep_content);
+                        match ironclaw_skills::registry::SkillRegistry::prepare_install_to_disk(
+                            &user_dir,
+                            dep_name,
+                            &normalized,
+                        )
+                        .await
+                        {
+                            Ok((name, skill)) => {
+                                // Re-check under write lock to handle TOCTOU race
+                                // with concurrent installs.
+                                let mut guard = self.registry.write().map_err(|e| {
+                                    ToolError::ExecutionFailed(format!("Lock poisoned: {}", e))
+                                })?;
+                                if guard.has(&name) {
+                                    continue;
+                                }
+                                match guard.commit_install(&name, skill) {
+                                    Ok(()) => chain_installed.push(name),
+                                    Err(e) => chain_failed.push(format!("{}: {}", dep_name, e)),
+                                }
+                            }
+                            Err(e) => chain_failed.push(format!("{}: {}", dep_name, e)),
+                        }
+                    }
+                    Err(_) => {
+                        chain_need_approval.push(dep_name.clone());
+                    }
+                }
+            }
+        }
+
+        let mut output = serde_json::json!({
             "name": installed_name,
             "status": "installed",
             "trust": "installed",
@@ -369,6 +433,20 @@ impl Tool for SkillInstallTool {
                 installed_name
             ),
         });
+
+        if !chain_installed.is_empty() {
+            output["chain_installed"] = serde_json::json!(chain_installed);
+        }
+        if !chain_failed.is_empty() {
+            output["chain_install_failed"] = serde_json::json!(chain_failed);
+        }
+        if !chain_need_approval.is_empty() {
+            output["missing_dependencies"] = serde_json::json!(chain_need_approval);
+            output["missing_dependencies_message"] = serde_json::json!(format!(
+                "These required skills could not be found in the catalog and need manual installation: {}",
+                chain_need_approval.join(", ")
+            ));
+        }
 
         Ok(ToolOutput::success(output, start.elapsed()))
     }

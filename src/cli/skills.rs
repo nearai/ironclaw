@@ -309,18 +309,19 @@ async fn cmd_info(config: &SkillsConfig, name: &str, json: bool) -> anyhow::Resu
     }
     println!("  Max tokens:  {}", act.max_context_tokens);
 
-    if let Some(ref meta) = skill.manifest.metadata
-        && let Some(ref oc) = meta.openclaw
     {
-        let reqs = &oc.requires;
+        let reqs = &skill.manifest.requires;
         if !reqs.bins.is_empty() {
-            println!("  Requires bins: {}", reqs.bins.join(", "));
+            println!("  Requires bins:    {}", reqs.bins.join(", "));
         }
         if !reqs.env.is_empty() {
-            println!("  Requires env:  {}", reqs.env.join(", "));
+            println!("  Requires env:     {}", reqs.env.join(", "));
         }
         if !reqs.config.is_empty() {
-            println!("  Requires config: {}", reqs.config.join(", "));
+            println!("  Requires config:  {}", reqs.config.join(", "));
+        }
+        if !reqs.skills.is_empty() {
+            println!("  Requires skills:  {}", reqs.skills.join(", "));
         }
     }
 

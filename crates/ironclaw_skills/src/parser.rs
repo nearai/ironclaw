@@ -129,11 +129,9 @@ description: Professional writing help
 activation:
   keywords: ["write", "edit", "proofread"]
   max_context_tokens: 2000
-metadata:
-  openclaw:
-    requires:
-      bins: ["vale"]
-      env: ["VALE_CONFIG"]
+requires:
+  bins: ["vale"]
+  env: ["VALE_CONFIG"]
 ---
 
 You are a writing assistant. When the user asks to write or edit...
@@ -143,10 +141,7 @@ You are a writing assistant. When the user asks to write or edit...
         assert_eq!(result.manifest.version, "1.0.0");
         assert_eq!(result.manifest.activation.keywords.len(), 3);
         assert!(result.prompt_content.starts_with("You are a writing"));
-
-        let meta = result.manifest.metadata.unwrap();
-        let openclaw = meta.openclaw.unwrap();
-        assert_eq!(openclaw.requires.bins, vec!["vale"]);
+        assert_eq!(result.manifest.requires.bins, vec!["vale"]);
     }
 
     #[test]

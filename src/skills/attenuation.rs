@@ -141,7 +141,7 @@ mod tests {
                 description: String::new(),
                 activation: ActivationCriteria::default(),
                 credentials: vec![],
-                metadata: None,
+                requires: ironclaw_skills::GatingRequirements::default(),
             },
             prompt_content: "test".to_string(),
             trust,
