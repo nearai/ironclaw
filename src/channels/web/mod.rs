@@ -326,6 +326,11 @@ impl GatewayChannel {
         self.auth.env_auth.first_token().unwrap_or("")
     }
 
+    /// Get a reference to the combined auth state.
+    pub fn auth(&self) -> &CombinedAuthState {
+        &self.auth
+    }
+
     /// Get a reference to the shared gateway state (for the agent to push SSE events).
     pub fn state(&self) -> &Arc<GatewayState> {
         &self.state
