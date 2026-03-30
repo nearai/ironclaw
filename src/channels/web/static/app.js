@@ -389,10 +389,18 @@ function connectSSE() {
   if (eventSource) eventSource.close();
 
   // In OIDC mode the reverse proxy provides auth; no query token needed.
-  const chatSseUrl = (token && !oidcProxyAuth)
+  let chatSseUrl = (token && !oidcProxyAuth)
     ? '/api/chat/events?token=' + encodeURIComponent(token)
     : '/api/chat/events';
+  if (window.isDebugMode) {
+    chatSseUrl += (chatSseUrl.indexOf('?') !== -1 ? '&' : '?') + 'debug=true';
+  }
   eventSource = new EventSource(chatSseUrl);
+
+  // Notify debug panel (if loaded) so it can attach listeners
+  if (typeof window.onDebugSSEConnect === 'function') {
+    window.onDebugSSEConnect(eventSource);
+  }
 
   eventSource.onopen = () => {
     document.getElementById('sse-dot').classList.remove('disconnected');

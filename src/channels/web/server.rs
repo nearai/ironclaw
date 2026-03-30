@@ -596,6 +596,7 @@ pub async fn start_server(
         )
         // Gateway control plane
         .route("/api/gateway/status", get(gateway_status_handler))
+        .route("/api/debug/prompt", get(debug_prompt_handler))
         // OpenAI-compatible API
         .route(
             "/v1/chat/completions",
@@ -621,12 +622,14 @@ pub async fn start_server(
         .route("/", get(index_handler))
         .route("/style.css", get(css_handler))
         .route("/app.js", get(js_handler))
-        .route("/theme-init.js", get(theme_init_handler))
         .route("/favicon.ico", get(favicon_handler))
         .route("/i18n/index.js", get(i18n_index_handler))
         .route("/i18n/en.js", get(i18n_en_handler))
         .route("/i18n/zh-CN.js", get(i18n_zh_handler))
-        .route("/i18n-app.js", get(i18n_app_handler));
+        .route("/i18n-app.js", get(i18n_app_handler))
+        .route("/init.js", get(init_js_handler))
+        .route("/debug-panel.js", get(debug_panel_js_handler))
+        .route("/debug-panel.css", get(debug_panel_css_handler));
 
     // Project file serving (behind auth to prevent unauthorized file access).
     let projects = Router::new()
@@ -771,15 +774,7 @@ async fn js_handler() -> impl IntoResponse {
     )
 }
 
-async fn theme_init_handler() -> impl IntoResponse {
-    (
-        [
-            (header::CONTENT_TYPE, "application/javascript"),
-            (header::CACHE_CONTROL, "no-cache"),
-        ],
-        include_str!("static/theme-init.js"),
-    )
-}
+
 
 async fn favicon_handler() -> impl IntoResponse {
     (
@@ -828,6 +823,36 @@ async fn i18n_app_handler() -> impl IntoResponse {
             (header::CACHE_CONTROL, "no-cache"),
         ],
         include_str!("static/i18n-app.js"),
+    )
+}
+
+async fn init_js_handler() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "application/javascript"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        include_str!("static/init.js"),
+    )
+}
+
+async fn debug_panel_js_handler() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "application/javascript"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        include_str!("static/debug-panel.js"),
+    )
+}
+
+async fn debug_panel_css_handler() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "text/css"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        include_str!("static/debug-panel.css"),
     )
 }
 
@@ -2816,6 +2841,63 @@ struct GatewayStatusResponse {
     llm_backend: String,
     llm_model: String,
     enabled_channels: Vec<String>,
+}
+
+// --- Debug prompt handler ---
+
+#[derive(serde::Serialize)]
+struct DebugPromptResponse {
+    components: Vec<DebugPromptComponent>,
+    total_estimated_tokens: usize,
+}
+
+#[derive(serde::Serialize)]
+struct DebugPromptComponent {
+    source: String,
+    label: String,
+    content: String,
+    estimated_tokens: usize,
+}
+
+fn estimate_tokens(text: &str) -> usize {
+    let words = text.split_whitespace().count();
+    ((words as f64) * 1.3) as usize + 4
+}
+
+async fn debug_prompt_handler(
+    State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
+) -> Result<Json<DebugPromptResponse>, (StatusCode, String)> {
+    let workspace =
+        super::handlers::memory::resolve_workspace(&state, &user).await?;
+
+    let files: &[(&str, &str)] = &[
+        ("AGENTS.md", "Agent Instructions"),
+        ("SOUL.md", "Core Values"),
+        ("USER.md", "User Context"),
+        ("IDENTITY.md", "Identity"),
+        ("TOOLS.md", "Tool Notes"),
+        ("MEMORY.md", "Long-Term Memory"),
+    ];
+
+    let mut components = Vec::new();
+    for &(path, label) in files {
+        if let Ok(doc) = workspace.read(path).await && !doc.content.is_empty() {
+            let est = estimate_tokens(&doc.content);
+            components.push(DebugPromptComponent {
+                source: path.to_string(),
+                label: label.to_string(),
+                content: doc.content,
+                estimated_tokens: est,
+            });
+        }
+    }
+
+    let total: usize = components.iter().map(|c| c.estimated_tokens).sum();
+    Ok(Json(DebugPromptResponse {
+        components,
+        total_estimated_tokens: total,
+    }))
 }
 
 #[cfg(test)]
