@@ -201,6 +201,22 @@ pub struct Settings {
     #[serde(default)]
     pub builder: BuilderSettings,
 
+    /// Routine scheduling and execution configuration.
+    #[serde(default)]
+    pub routines: RoutineSettings,
+
+    /// Skills system configuration.
+    #[serde(default)]
+    pub skills: SkillsSettings,
+
+    /// Memory hygiene configuration.
+    #[serde(default)]
+    pub hygiene: HygieneSettings,
+
+    /// Workspace search fusion configuration.
+    #[serde(default)]
+    pub search: SearchSettings,
+
     /// Transcription configuration.
     #[serde(default)]
     pub transcription: Option<TranscriptionSettings>,
@@ -791,6 +807,188 @@ impl Default for BuilderSettings {
     }
 }
 
+/// Routine scheduling and execution configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoutineSettings {
+    /// Whether the routines system is enabled.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// How often (seconds) to poll for cron routines that need firing.
+    #[serde(default = "default_routine_cron_interval")]
+    pub cron_check_interval_secs: u64,
+
+    /// Max routines executing concurrently.
+    #[serde(default = "default_routine_max_concurrent")]
+    pub max_concurrent_routines: usize,
+
+    /// Default cooldown between fires (seconds).
+    #[serde(default = "default_routine_cooldown")]
+    pub default_cooldown_secs: u64,
+
+    /// Max output tokens for lightweight routine LLM calls.
+    #[serde(default = "default_routine_max_tokens")]
+    pub max_lightweight_tokens: u32,
+
+    /// Enable tool execution in lightweight routines.
+    #[serde(default = "default_true")]
+    pub lightweight_tools_enabled: bool,
+
+    /// Max tool iterations for lightweight routines.
+    #[serde(default = "default_routine_max_iterations")]
+    pub lightweight_max_iterations: u32,
+}
+
+fn default_routine_cron_interval() -> u64 {
+    15
+}
+
+fn default_routine_max_concurrent() -> usize {
+    10
+}
+
+fn default_routine_cooldown() -> u64 {
+    300
+}
+
+fn default_routine_max_tokens() -> u32 {
+    4096
+}
+
+fn default_routine_max_iterations() -> u32 {
+    3
+}
+
+impl Default for RoutineSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            cron_check_interval_secs: default_routine_cron_interval(),
+            max_concurrent_routines: default_routine_max_concurrent(),
+            default_cooldown_secs: default_routine_cooldown(),
+            max_lightweight_tokens: default_routine_max_tokens(),
+            lightweight_tools_enabled: true,
+            lightweight_max_iterations: default_routine_max_iterations(),
+        }
+    }
+}
+
+/// Skills system configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillsSettings {
+    /// Whether the skills system is enabled.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// Maximum number of skills that can be active simultaneously.
+    #[serde(default = "default_skills_max_active")]
+    pub max_active_skills: usize,
+
+    /// Maximum total context tokens allocated to skill prompts.
+    #[serde(default = "default_skills_max_context_tokens")]
+    pub max_context_tokens: usize,
+}
+
+fn default_skills_max_active() -> usize {
+    3
+}
+
+fn default_skills_max_context_tokens() -> usize {
+    4000
+}
+
+impl Default for SkillsSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_active_skills: default_skills_max_active(),
+            max_context_tokens: default_skills_max_context_tokens(),
+        }
+    }
+}
+
+/// Memory hygiene configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HygieneSettings {
+    /// Whether hygiene is enabled.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// Days before `daily/` documents are deleted.
+    #[serde(default = "default_hygiene_daily_retention")]
+    pub daily_retention_days: u32,
+
+    /// Days before `conversations/` documents are deleted.
+    #[serde(default = "default_hygiene_conversation_retention")]
+    pub conversation_retention_days: u32,
+
+    /// Minimum hours between hygiene passes.
+    #[serde(default = "default_hygiene_cadence_hours")]
+    pub cadence_hours: u32,
+}
+
+fn default_hygiene_daily_retention() -> u32 {
+    30
+}
+
+fn default_hygiene_conversation_retention() -> u32 {
+    7
+}
+
+fn default_hygiene_cadence_hours() -> u32 {
+    12
+}
+
+impl Default for HygieneSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            daily_retention_days: default_hygiene_daily_retention(),
+            conversation_retention_days: default_hygiene_conversation_retention(),
+            cadence_hours: default_hygiene_cadence_hours(),
+        }
+    }
+}
+
+/// Workspace search fusion configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SearchSettings {
+    /// Fusion strategy: "rrf" or "weighted".
+    #[serde(default = "default_search_fusion_strategy")]
+    pub fusion_strategy: String,
+
+    /// RRF constant k.
+    #[serde(default = "default_search_rrf_k")]
+    pub rrf_k: u32,
+
+    /// FTS weight for fusion. `None` = use per-strategy default.
+    #[serde(default)]
+    pub fts_weight: Option<f32>,
+
+    /// Vector weight for fusion. `None` = use per-strategy default.
+    #[serde(default)]
+    pub vector_weight: Option<f32>,
+}
+
+fn default_search_fusion_strategy() -> String {
+    "rrf".to_string()
+}
+
+fn default_search_rrf_k() -> u32 {
+    60
+}
+
+impl Default for SearchSettings {
+    fn default() -> Self {
+        Self {
+            fusion_strategy: default_search_fusion_strategy(),
+            rrf_k: default_search_rrf_k(),
+            fts_weight: None,
+            vector_weight: None,
+        }
+    }
+}
+
 /// Transcription pipeline settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TranscriptionSettings {
@@ -907,8 +1105,9 @@ impl Settings {
         let content = format!(
             "# IronClaw configuration file.\n\
              #\n\
-             # Priority varies by subsystem. LLM: DB > env > this file > defaults.\n\
-             # Most others: env > DB > this file > defaults.\n\
+             # Priority: DB settings > env vars > this file > defaults.\n\
+             # Exceptions: bootstrap fields (DATABASE_URL, etc.) and\n\
+             # security-sensitive fields are env-only.\n\
              # Uncomment and edit values to override defaults.\n\
              # Run `ironclaw config init` to regenerate this file.\n\
              #\n\

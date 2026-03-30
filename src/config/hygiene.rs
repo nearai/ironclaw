@@ -1,6 +1,7 @@
 use crate::bootstrap::ironclaw_base_dir;
-use crate::config::helpers::{parse_bool_env, parse_optional_env};
+use crate::config::helpers::{db_first_bool, db_first_or_default};
 use crate::error::ConfigError;
+use crate::settings::Settings;
 
 /// Memory hygiene configuration.
 ///
@@ -30,15 +31,27 @@ impl Default for HygieneConfig {
 }
 
 impl HygieneConfig {
-    pub(crate) fn resolve() -> Result<Self, ConfigError> {
+    pub(crate) fn resolve(settings: &Settings) -> Result<Self, ConfigError> {
+        let defaults = crate::settings::HygieneSettings::default();
+        let hs = &settings.hygiene;
+
         Ok(Self {
-            enabled: parse_bool_env("MEMORY_HYGIENE_ENABLED", true)?,
-            daily_retention_days: parse_optional_env("MEMORY_HYGIENE_DAILY_RETENTION_DAYS", 30)?,
-            conversation_retention_days: parse_optional_env(
-                "MEMORY_HYGIENE_CONVERSATION_RETENTION_DAYS",
-                7,
+            enabled: db_first_bool(hs.enabled, defaults.enabled, "MEMORY_HYGIENE_ENABLED")?,
+            daily_retention_days: db_first_or_default(
+                &hs.daily_retention_days,
+                &defaults.daily_retention_days,
+                "MEMORY_HYGIENE_DAILY_RETENTION_DAYS",
             )?,
-            cadence_hours: parse_optional_env("MEMORY_HYGIENE_CADENCE_HOURS", 12)?,
+            conversation_retention_days: db_first_or_default(
+                &hs.conversation_retention_days,
+                &defaults.conversation_retention_days,
+                "MEMORY_HYGIENE_CONVERSATION_RETENTION_DAYS",
+            )?,
+            cadence_hours: db_first_or_default(
+                &hs.cadence_hours,
+                &defaults.cadence_hours,
+                "MEMORY_HYGIENE_CADENCE_HOURS",
+            )?,
         })
     }
 
