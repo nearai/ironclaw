@@ -63,19 +63,13 @@ impl WorkspaceSearchConfig {
             FusionStrategy::WeightedScore => (0.3f32, 0.7f32),
         };
 
-        // For weights, we need to check whether the settings value differs from
-        // the *static* default (0.5) to detect DB overrides. If it does, use it;
-        // otherwise fall back to env, then per-strategy default.
-        let fts_weight = if (ss.fts_weight - defaults.fts_weight).abs() > f32::EPSILON {
-            ss.fts_weight
-        } else {
-            parse_optional_env("SEARCH_FTS_WEIGHT", default_fts)?
-        };
-        let vector_weight = if (ss.vector_weight - defaults.vector_weight).abs() > f32::EPSILON {
-            ss.vector_weight
-        } else {
-            parse_optional_env("SEARCH_VECTOR_WEIGHT", default_vec)?
-        };
+        // Weights: DB (Some) > env > per-strategy default.
+        let fts_weight = ss
+            .fts_weight
+            .unwrap_or(parse_optional_env("SEARCH_FTS_WEIGHT", default_fts)?);
+        let vector_weight = ss
+            .vector_weight
+            .unwrap_or(parse_optional_env("SEARCH_VECTOR_WEIGHT", default_vec)?);
 
         if !fts_weight.is_finite() || fts_weight < 0.0 {
             return Err(ConfigError::InvalidValue {
@@ -152,8 +146,8 @@ mod tests {
         let mut settings = Settings::default();
         settings.search.fusion_strategy = "weighted".to_string();
         settings.search.rrf_k = 42;
-        settings.search.fts_weight = 0.4;
-        settings.search.vector_weight = 0.6;
+        settings.search.fts_weight = Some(0.4);
+        settings.search.vector_weight = Some(0.6);
 
         let config = WorkspaceSearchConfig::resolve(&settings).expect("should resolve");
         assert_eq!(config.fusion_strategy, FusionStrategy::WeightedScore);
