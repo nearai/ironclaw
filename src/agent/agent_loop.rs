@@ -1204,7 +1204,7 @@ impl Agent {
 
                 return match result {
                     Ok(SubmissionResult::Response { content }) => Ok(Some(content)),
-                    Ok(SubmissionResult::Ok { message: msg }) => Ok(msg),
+                    Ok(SubmissionResult::Ok { message: msg }) => Ok(Some(msg.unwrap_or_default())),
                     Ok(SubmissionResult::Error { message: err }) => Ok(Some(err)),
                     Ok(_) => {
                         tracing::debug!("Routine review returned non-standard result");
