@@ -2028,7 +2028,7 @@ async fn chat_new_thread_handler(
     let session = session_manager.get_or_create_session(&user.user_id).await;
     let (thread_id, info) = {
         let mut sess = session.lock().await;
-        let thread = sess.create_thread();
+        let thread = sess.create_thread(Some("gateway"));
         let id = thread.id;
         let info = ThreadInfo {
             id: thread.id,
@@ -2047,7 +2047,7 @@ async fn chat_new_thread_handler(
     // so that the subsequent loadThreads() call from the frontend sees it.
     if let Some(ref store) = state.store {
         match store
-            .ensure_conversation(thread_id, "gateway", &user.user_id, None)
+            .ensure_conversation(thread_id, "gateway", &user.user_id, None, Some("gateway"))
             .await
         {
             Ok(true) => {}

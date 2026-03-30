@@ -67,19 +67,20 @@ impl ConversationStore for LibSqlBackend {
         channel: &str,
         user_id: &str,
         thread_id: Option<&str>,
+        source_channel: Option<&str>,
     ) -> Result<bool, DatabaseError> {
         let conn = self.connect().await?;
         let now = fmt_ts(&Utc::now());
         let affected = conn
             .execute(
             r#"
-                INSERT INTO conversations (id, channel, user_id, thread_id, started_at, last_activity)
-                VALUES (?1, ?2, ?3, ?4, ?5, ?5)
+                INSERT INTO conversations (id, channel, user_id, thread_id, source_channel, started_at, last_activity)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)
                 ON CONFLICT (id) DO UPDATE SET last_activity = excluded.last_activity
                 WHERE conversations.user_id = excluded.user_id
                   AND conversations.channel = excluded.channel
                 "#,
-            params![id.to_string(), channel, user_id, opt_text(thread_id), now],
+            params![id.to_string(), channel, user_id, opt_text(thread_id), opt_text(source_channel), now],
         )
             .await
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
@@ -600,6 +601,28 @@ impl ConversationStore for LibSqlBackend {
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
         Ok(found.is_some())
     }
+
+    async fn get_conversation_source_channel(
+        &self,
+        conversation_id: Uuid,
+    ) -> Result<Option<String>, DatabaseError> {
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                "SELECT source_channel FROM conversations WHERE id = ?1",
+                params![conversation_id.to_string()],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        match rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        {
+            Some(row) => Ok(get_opt_text(&row, 0)),
+            None => Ok(None),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -723,6 +746,113 @@ mod tests {
         assert_eq!(
             id1, id2,
             "Expected same heartbeat conversation on repeated calls"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_source_channel_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test_source_channel.db");
+        let backend = LibSqlBackend::new_local(&db_path).await.unwrap();
+        backend.run_migrations().await.unwrap();
+
+        let conv_id = Uuid::new_v4();
+        let user_id = "user-src-chan";
+
+        // Create conversation with a source_channel
+        let created = backend
+            .ensure_conversation(conv_id, "telegram", user_id, None, Some("telegram"))
+            .await
+            .unwrap();
+        assert!(created, "first ensure should create");
+
+        // Read it back
+        let source = backend
+            .get_conversation_source_channel(conv_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            source.as_deref(),
+            Some("telegram"),
+            "source_channel should round-trip through DB"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_source_channel_none_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test_source_channel_none.db");
+        let backend = LibSqlBackend::new_local(&db_path).await.unwrap();
+        backend.run_migrations().await.unwrap();
+
+        let conv_id = Uuid::new_v4();
+        let user_id = "user-no-src";
+
+        // Create conversation without source_channel
+        backend
+            .ensure_conversation(conv_id, "http", user_id, None, None)
+            .await
+            .unwrap();
+
+        let source = backend
+            .get_conversation_source_channel(conv_id)
+            .await
+            .unwrap();
+        assert!(
+            source.is_none(),
+            "None source_channel should persist as NULL"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_source_channel_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test_source_channel_404.db");
+        let backend = LibSqlBackend::new_local(&db_path).await.unwrap();
+        backend.run_migrations().await.unwrap();
+
+        let source = backend
+            .get_conversation_source_channel(Uuid::new_v4())
+            .await
+            .unwrap();
+        assert!(
+            source.is_none(),
+            "non-existent conversation should return None"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_source_channel_not_overwritten_on_upsert() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test_source_channel_upsert.db");
+        let backend = LibSqlBackend::new_local(&db_path).await.unwrap();
+        backend.run_migrations().await.unwrap();
+
+        let conv_id = Uuid::new_v4();
+        let user_id = "user-upsert";
+
+        // First insert with source_channel = "telegram"
+        backend
+            .ensure_conversation(conv_id, "telegram", user_id, None, Some("telegram"))
+            .await
+            .unwrap();
+
+        // Upsert same conversation (same user/channel) — source_channel should
+        // NOT be overwritten because the ON CONFLICT clause only updates
+        // last_activity.
+        backend
+            .ensure_conversation(conv_id, "telegram", user_id, None, Some("different"))
+            .await
+            .unwrap();
+
+        let source = backend
+            .get_conversation_source_channel(conv_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            source.as_deref(),
+            Some("telegram"),
+            "upsert should not overwrite original source_channel"
         );
     }
 }

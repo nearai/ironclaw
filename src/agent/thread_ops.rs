@@ -135,13 +135,29 @@ impl Agent {
             msg_count = 0;
         }
 
-        // Create thread with the historical ID and restore messages
+        // Create thread with the historical ID and restore messages.
+        // Read source_channel from DB so the authorization check uses the
+        // original creator's channel, not the requesting message's channel.
+        let db_source_channel = if let Some(store) = self.store() {
+            store
+                .get_conversation_source_channel(thread_uuid)
+                .await
+                .unwrap_or(None)
+        } else {
+            None
+        };
+        let effective_source_channel = db_source_channel.as_deref();
+
         let session_id = {
             let sess = session.lock().await;
             sess.id
         };
 
-        let mut thread = crate::agent::session::Thread::with_id(thread_uuid, session_id);
+        let mut thread = crate::agent::session::Thread::with_id(
+            thread_uuid,
+            session_id,
+            effective_source_channel,
+        );
         if !chat_messages.is_empty() {
             thread.restore_from_messages(chat_messages);
         }
@@ -636,7 +652,7 @@ impl Agent {
         user_id: &str,
     ) -> bool {
         match store
-            .ensure_conversation(thread_id, channel, user_id, None)
+            .ensure_conversation(thread_id, channel, user_id, None, Some(channel))
             .await
         {
             Ok(true) => true,
@@ -1781,7 +1797,7 @@ impl Agent {
             .get_or_create_session(&message.user_id)
             .await;
         let mut sess = session.lock().await;
-        let thread = sess.create_thread();
+        let thread = sess.create_thread(Some(&message.channel));
         let thread_id = thread.id;
         Ok(SubmissionResult::ok_with_message(format!(
             "New thread: {}",
@@ -2117,7 +2133,7 @@ mod tests {
 
         let session_id = Uuid::new_v4();
         let thread_id = Uuid::new_v4();
-        let mut thread = Thread::with_id(thread_id, session_id);
+        let mut thread = Thread::with_id(thread_id, session_id, None);
 
         // Set thread to AwaitingApproval with a pending tool approval
         let pending = PendingApproval {
@@ -2185,7 +2201,7 @@ mod tests {
         use crate::agent::session::{MAX_PENDING_MESSAGES, Thread, ThreadState};
         use uuid::Uuid;
 
-        let mut thread = Thread::new(Uuid::new_v4());
+        let mut thread = Thread::new(Uuid::new_v4(), None);
         thread.start_turn("processing something");
         assert_eq!(thread.state, ThreadState::Processing);
 
@@ -2211,7 +2227,7 @@ mod tests {
         use crate::agent::session::{Thread, ThreadState};
         use uuid::Uuid;
 
-        let mut thread = Thread::new(Uuid::new_v4());
+        let mut thread = Thread::new(Uuid::new_v4(), None);
         thread.start_turn("processing");
 
         thread.queue_message("pending-1".to_string());
@@ -2241,7 +2257,7 @@ mod tests {
 
         let thread_id = Uuid::new_v4();
         let session_id = Uuid::new_v4();
-        let mut thread = Thread::with_id(thread_id, session_id);
+        let mut thread = Thread::with_id(thread_id, session_id, None);
         thread.start_turn("working");
         assert_eq!(thread.state, ThreadState::Processing);
 
@@ -2268,7 +2284,7 @@ mod tests {
 
         let thread_id = Uuid::new_v4();
         let session_id = Uuid::new_v4();
-        let mut thread = Thread::with_id(thread_id, session_id);
+        let mut thread = Thread::with_id(thread_id, session_id, None);
         thread.start_turn("working");
         assert_eq!(thread.state, ThreadState::Processing);
 

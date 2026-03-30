@@ -787,6 +787,14 @@ CREATE INDEX IF NOT EXISTS idx_api_tokens_user ON api_tokens(user_id);
 CREATE INDEX IF NOT EXISTS idx_api_tokens_hash ON api_tokens(token_hash);
 "#,
     ),
+    (
+        16,
+        "conversation_source_channel",
+        // Add source_channel to conversations for cross-channel approval authorization.
+        r#"
+ALTER TABLE conversations ADD COLUMN source_channel TEXT;
+"#,
+    ),
 ];
 
 /// Run incremental migrations that haven't been applied yet.
