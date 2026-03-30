@@ -2221,6 +2221,7 @@ async fn inject_agent_review(
             "status": status.to_string(),
             "run_id": run.id.to_string(),
             "notify_channel": routine.notify.channel,
+            "notify_user": routine.notify.user,
         }))
         .with_conversation_scope(routine.id.to_string())
         .into_routine_review();
