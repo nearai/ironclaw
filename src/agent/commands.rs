@@ -151,7 +151,7 @@ impl Agent {
             match store.list_conversations_all_channels(50).await {
                 Ok(mut summaries) if !summaries.is_empty() => {
                     summaries.sort_by_key(|s| std::cmp::Reverse(s.last_activity));
-                    output.push_str("Persistent threads:\n");
+                    output.push_str("Persistent threads (use /thread <id> to hydrate):\n");
                     for summary in summaries {
                         seen_threads.insert(summary.id);
                         listed_any = true;
@@ -160,6 +160,7 @@ impl Agent {
                             Some(thread_type) => format!("{}/{}", thread_type, summary.channel),
                             None => summary.channel.clone(),
                         };
+                        // Add [DB] indicator to show this thread is persisted but not yet hydrated
                         let line = format_history_line(
                             prefix,
                             summary.id,
@@ -170,7 +171,7 @@ impl Agent {
                             summary.title.as_deref(),
                         );
                         output.push_str(&line);
-                        output.push('\n');
+                        output.push_str(" [DB]\n");
                     }
                 }
                 Ok(_) => {}
