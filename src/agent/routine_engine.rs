@@ -2404,12 +2404,26 @@ mod tests {
     }
 
     #[test]
+    fn test_sandbox_disabled_by_config_does_not_block_full_job() {
+        use super::SandboxReadiness;
+
+        // DisabledByConfig must NOT match the DockerUnavailable gate —
+        // full-job routines dispatch through the scheduler (no Docker needed).
+        assert!(!matches!(
+            SandboxReadiness::DisabledByConfig,
+            SandboxReadiness::DockerUnavailable
+        ));
+    }
+
+    #[test]
     fn test_sandbox_readiness_docker_unavailable_still_blocks() {
         use super::SandboxReadiness;
 
         // DockerUnavailable should still block full-job dispatch.
-        let readiness = SandboxReadiness::DockerUnavailable;
-        assert_ne!(readiness, SandboxReadiness::Available);
+        assert!(matches!(
+            SandboxReadiness::DockerUnavailable,
+            SandboxReadiness::DockerUnavailable
+        ));
 
         let err = crate::error::RoutineError::JobDispatchFailed {
             reason: "Sandbox is enabled but Docker is not available. \

@@ -115,7 +115,7 @@ impl TestRig {
         let mut interval = Duration::from_millis(50);
         let max_interval = Duration::from_millis(500);
         loop {
-            let filtered = self.filter_responses(self.channel.captured_responses());
+            let filtered = self.filter_responses(self.channel.captured_responses_async().await);
             if filtered.len() >= n {
                 return filtered;
             }
