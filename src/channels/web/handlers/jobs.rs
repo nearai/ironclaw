@@ -817,12 +817,13 @@ pub async fn job_files_read_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::channels::web::util::sanitized_db_error;
 
     #[test]
     fn test_db_error_does_not_leak_details() {
-        let (status, body) = db_error("test_context", "relation \"jobs\" does not exist");
+        let (status, body) = sanitized_db_error("relation \"jobs\" does not exist", "test_context");
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-        assert_eq!(body, "Internal database error");
+        assert_eq!(body, "Database error");
         assert!(!body.contains("relation"));
         assert!(!body.contains("does not exist"));
     }

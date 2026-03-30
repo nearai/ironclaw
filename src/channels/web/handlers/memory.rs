@@ -12,6 +12,7 @@ use serde::Deserialize;
 use crate::channels::web::auth::{AuthenticatedUser, UserIdentity};
 use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::*;
+use crate::channels::web::util::sanitized_workspace_error;
 use crate::workspace::Workspace;
 
 /// Resolve the workspace for the authenticated user.
@@ -48,7 +49,7 @@ pub async fn memory_tree_handler(
     let all_paths = workspace
         .list_all()
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|e| sanitized_workspace_error(e, "list workspace tree"))?;
 
     // Collect unique directories and files
     let mut entries: Vec<TreeEntry> = Vec::new();
@@ -94,7 +95,7 @@ pub async fn memory_list_handler(
     let entries = workspace
         .list(path)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|e| sanitized_workspace_error(e, "list workspace directory"))?;
 
     let list_entries: Vec<ListEntry> = entries
         .iter()
@@ -127,7 +128,7 @@ pub async fn memory_read_handler(
     let doc = workspace
         .read(&query.path)
         .await
-        .map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))?;
+        .map_err(|e| sanitized_workspace_error(e, "read workspace document"))?;
 
     Ok(Json(MemoryReadResponse {
         path: query.path,
@@ -160,16 +161,7 @@ pub async fn memory_write_handler(
                 .write_to_layer(layer_name, &req.path, &req.content, req.force)
                 .await
         }
-        .map_err(|e| {
-            use crate::error::WorkspaceError;
-            let status = match &e {
-                WorkspaceError::LayerNotFound { .. } => StatusCode::BAD_REQUEST,
-                WorkspaceError::LayerReadOnly { .. } => StatusCode::FORBIDDEN,
-                WorkspaceError::PrivacyRedirectFailed => StatusCode::UNPROCESSABLE_ENTITY,
-                _ => StatusCode::INTERNAL_SERVER_ERROR,
-            };
-            (status, e.to_string())
-        })?;
+        .map_err(|e| sanitized_workspace_error(e, "write workspace layer"))?;
         return Ok(Json(MemoryWriteResponse {
             path: req.path,
             status: "written",
@@ -183,12 +175,12 @@ pub async fn memory_write_handler(
         workspace
             .append(&req.path, &req.content)
             .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            .map_err(|e| sanitized_workspace_error(e, "append workspace document"))?;
     } else {
         workspace
             .write(&req.path, &req.content)
             .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            .map_err(|e| sanitized_workspace_error(e, "write workspace document"))?;
     }
 
     Ok(Json(MemoryWriteResponse {
@@ -210,7 +202,7 @@ pub async fn memory_search_handler(
     let results = workspace
         .search(&req.query, limit)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|e| sanitized_workspace_error(e, "search workspace"))?;
 
     let hits: Vec<SearchHit> = results
         .iter()

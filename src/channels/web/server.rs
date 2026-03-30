@@ -59,7 +59,9 @@ use crate::channels::web::handlers::skills::{
 use crate::channels::web::log_layer::LogBroadcaster;
 use crate::channels::web::sse::SseManager;
 use crate::channels::web::types::*;
-use crate::channels::web::util::{build_turns_from_db_messages, truncate_preview};
+use crate::channels::web::util::{
+    build_turns_from_db_messages, sanitized_action_failure, truncate_preview,
+};
 use crate::db::Database;
 use crate::extensions::ExtensionManager;
 use crate::orchestrator::job_manager::ContainerJobManager;
@@ -2314,7 +2316,11 @@ async fn extensions_install_handler(
 
             Ok(Json(resp))
         }
-        Err(e) => Ok(Json(ActionResponse::fail(e.to_string()))),
+        Err(e) => Ok(Json(sanitized_action_failure(
+            e,
+            "install extension from gateway",
+            "Extension installation failed",
+        ))),
     }
 }
 
@@ -2365,7 +2371,11 @@ async fn extensions_activate_handler(
             );
 
             if !needs_auth {
-                return Ok(Json(ActionResponse::fail(activate_err.to_string())));
+                return Ok(Json(sanitized_action_failure(
+                    activate_err,
+                    "activate extension from gateway",
+                    "Extension activation failed",
+                )));
             }
 
             // Activation failed due to auth; try authenticating first.
@@ -2384,7 +2394,11 @@ async fn extensions_activate_handler(
                                 error = %e,
                                 "extensions_activate_handler: retry after auth still failed"
                             );
-                            Ok(Json(ActionResponse::fail(e.to_string())))
+                            Ok(Json(sanitized_action_failure(
+                                e,
+                                "retry extension activation after auth",
+                                "Extension activation failed",
+                            )))
                         }
                     }
                 }
@@ -2401,10 +2415,11 @@ async fn extensions_activate_handler(
                     resp.instructions = auth_result.instructions().map(String::from);
                     Ok(Json(resp))
                 }
-                Err(auth_err) => Ok(Json(ActionResponse::fail(format!(
-                    "Authentication failed: {}",
-                    auth_err
-                )))),
+                Err(auth_err) => Ok(Json(sanitized_action_failure(
+                    auth_err,
+                    "authenticate extension during activation",
+                    "Authentication failed",
+                ))),
             }
         }
     }
@@ -2517,7 +2532,11 @@ async fn extensions_remove_handler(
 
     match ext_mgr.remove(&name, &user.user_id).await {
         Ok(message) => Ok(Json(ActionResponse::ok(message))),
-        Err(e) => Ok(Json(ActionResponse::fail(e.to_string()))),
+        Err(e) => Ok(Json(sanitized_action_failure(
+            e,
+            "remove extension from gateway",
+            "Extension removal failed",
+        ))),
     }
 }
 
@@ -2668,7 +2687,11 @@ async fn extensions_setup_submit_handler(
             }
             Ok(Json(resp))
         }
-        Err(e) => Ok(Json(ActionResponse::fail(e.to_string()))),
+        Err(e) => Ok(Json(sanitized_action_failure(
+            e,
+            "submit extension setup",
+            "Extension setup failed",
+        ))),
     }
 }
 
@@ -2719,7 +2742,11 @@ async fn pairing_approve_handler(
             StatusCode::TOO_MANY_REQUESTS,
             "Too many failed approve attempts; try again later".to_string(),
         )),
-        Err(e) => Ok(Json(ActionResponse::fail(e.to_string()))),
+        Err(e) => Ok(Json(sanitized_action_failure(
+            e,
+            "approve pairing request",
+            "Pairing approval failed",
+        ))),
     }
 }
 
@@ -3354,6 +3381,7 @@ mod tests {
             .expect("request");
         req.extensions_mut().insert(UserIdentity {
             user_id: "test".to_string(),
+            role: "admin".to_string(),
             workspace_read_scopes: Vec::new(),
         });
 

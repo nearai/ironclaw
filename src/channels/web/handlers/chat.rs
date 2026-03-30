@@ -16,7 +16,7 @@ use crate::channels::web::auth::AuthenticatedUser;
 use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::*;
 use crate::channels::web::util::{
-    build_turns_from_db_messages, tool_error_for_display, truncate_preview,
+    build_turns_from_db_messages, sanitized_db_error, tool_error_for_display, truncate_preview,
 };
 
 pub async fn chat_send_handler(
@@ -355,7 +355,7 @@ pub async fn chat_history_handler(
         let (messages, has_more) = store
             .list_conversation_messages_paginated(thread_id, before_cursor, limit as i64)
             .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            .map_err(|e| sanitized_db_error(e, "list paginated conversation messages"))?;
 
         let oldest_timestamp = messages.first().map(|m| m.created_at.to_rfc3339());
         let turns = build_turns_from_db_messages(&messages);
@@ -432,7 +432,7 @@ pub async fn chat_history_handler(
         let (messages, has_more) = store
             .list_conversation_messages_paginated(thread_id, None, limit as i64)
             .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            .map_err(|e| sanitized_db_error(e, "list conversation messages"))?;
 
         if !messages.is_empty() {
             let oldest_timestamp = messages.first().map(|m| m.created_at.to_rfc3339());
@@ -476,7 +476,7 @@ pub async fn chat_threads_handler(
         let assistant_id = store
             .get_or_create_assistant_conversation(&identity.user_id, "gateway")
             .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            .map_err(|e| sanitized_db_error(e, "get assistant conversation"))?;
 
         if let Ok(summaries) = store
             .list_conversations_all_channels(&identity.user_id, 50)

@@ -4,7 +4,7 @@ use std::fmt::Display;
 
 use axum::http::StatusCode;
 
-use crate::channels::web::types::{ToolCallInfo, TurnInfo};
+use crate::channels::web::types::{ActionResponse, ToolCallInfo, TurnInfo};
 
 pub use ironclaw_common::truncate_preview;
 
@@ -13,15 +13,26 @@ pub fn tool_error_for_display(error: &str) -> String {
     ironclaw_safety::SafetyLayer::unwrap_tool_output(error).unwrap_or_else(|| error.to_string())
 }
 
-fn sanitized_internal_error<E: Display>(
+fn sanitized_status_error<E: Display>(
+    status: StatusCode,
     error: E,
     context: &str,
     client_message: &str,
 ) -> (StatusCode, String) {
     tracing::error!(error = %error, context, "Web gateway request failed");
-    (
+    (status, client_message.to_string())
+}
+
+fn sanitized_internal_error<E: Display>(
+    error: E,
+    context: &str,
+    client_message: &str,
+) -> (StatusCode, String) {
+    sanitized_status_error(
         StatusCode::INTERNAL_SERVER_ERROR,
-        client_message.to_string(),
+        error,
+        context,
+        client_message,
     )
 }
 
@@ -38,6 +49,83 @@ pub fn sanitized_internal_error_response<E: Display>(
     sanitized_internal_error(error, context, "Internal error")
 }
 
+/// Log a detailed validation error while returning a safe 400 response.
+pub fn sanitized_bad_request<E: Display>(
+    error: E,
+    context: &str,
+    client_message: &str,
+) -> (StatusCode, String) {
+    sanitized_status_error(StatusCode::BAD_REQUEST, error, context, client_message)
+}
+
+/// Log a detailed upstream failure while returning a safe 502 response.
+pub fn sanitized_bad_gateway<E: Display>(
+    error: E,
+    context: &str,
+    client_message: &str,
+) -> (StatusCode, String) {
+    sanitized_status_error(StatusCode::BAD_GATEWAY, error, context, client_message)
+}
+
+/// Log a detailed backend error while returning a generic failed action payload.
+pub fn sanitized_action_failure<E: Display>(
+    error: E,
+    context: &str,
+    client_message: &str,
+) -> ActionResponse {
+    tracing::error!(error = %error, context, "Web gateway action failed");
+    ActionResponse::fail(client_message)
+}
+
+/// Return safe client responses for `WorkspaceError` values.
+pub fn sanitized_workspace_error(
+    error: crate::error::WorkspaceError,
+    context: &str,
+) -> (StatusCode, String) {
+    use crate::error::WorkspaceError;
+
+    match error {
+        err @ WorkspaceError::DocumentNotFound { .. } => {
+            sanitized_status_error(StatusCode::NOT_FOUND, err, context, "Path not found")
+        }
+        err @ WorkspaceError::InvalidDocType { .. } => {
+            sanitized_bad_request(err, context, "Invalid workspace document type")
+        }
+        err @ WorkspaceError::LayerNotFound { .. } => {
+            sanitized_bad_request(err, context, "Workspace layer not found")
+        }
+        err @ WorkspaceError::LayerReadOnly { .. } => sanitized_status_error(
+            StatusCode::FORBIDDEN,
+            err,
+            context,
+            "Workspace layer is read-only",
+        ),
+        err @ WorkspaceError::PrivacyRedirectFailed => sanitized_status_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            err,
+            context,
+            "Sensitive content requires a private workspace layer",
+        ),
+        err @ WorkspaceError::InjectionRejected { .. } => sanitized_status_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            err,
+            context,
+            "Write rejected: prompt injection detected",
+        ),
+        err @ WorkspaceError::NotInitialized { .. } => sanitized_status_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            err,
+            context,
+            "Workspace not available",
+        ),
+        err @ WorkspaceError::SearchFailed { .. }
+        | err @ WorkspaceError::EmbeddingFailed { .. }
+        | err @ WorkspaceError::ChunkingFailed { .. }
+        | err @ WorkspaceError::HeartbeatError { .. }
+        | err @ WorkspaceError::IoError { .. } => sanitized_internal_error_response(err, context),
+    }
+}
+
 /// Return safe client responses for `RoutineError` while preserving user-actionable variants.
 pub fn sanitized_routine_error(
     error: crate::error::RoutineError,
@@ -46,11 +134,18 @@ pub fn sanitized_routine_error(
     use crate::error::RoutineError;
 
     match error {
-        err @ RoutineError::NotFound { .. } => (StatusCode::NOT_FOUND, err.to_string()),
-        err @ RoutineError::NotAuthorized { .. } => (StatusCode::FORBIDDEN, err.to_string()),
-        err @ RoutineError::Disabled { .. }
-        | err @ RoutineError::Cooldown { .. }
-        | err @ RoutineError::MaxConcurrent { .. } => (StatusCode::CONFLICT, err.to_string()),
+        RoutineError::NotFound { .. } | RoutineError::NotAuthorized { .. } => {
+            (StatusCode::NOT_FOUND, "Routine not found".to_string())
+        }
+        RoutineError::Disabled { .. } => (StatusCode::CONFLICT, "Routine is disabled".to_string()),
+        RoutineError::Cooldown { .. } => (
+            StatusCode::CONFLICT,
+            "Routine is in cooldown period".to_string(),
+        ),
+        RoutineError::MaxConcurrent { .. } => (
+            StatusCode::CONFLICT,
+            "Routine has reached the maximum concurrent runs".to_string(),
+        ),
         err @ RoutineError::Database { .. } => sanitized_db_error(err, context),
         err @ RoutineError::LlmFailed { .. }
         | err @ RoutineError::JobDispatchFailed { .. }
@@ -193,8 +288,9 @@ mod tests {
 
     #[test]
     fn test_sanitized_internal_error_hides_internal_details() {
-        let (_, body) =
+        let (status, body) =
             sanitized_internal_error_response("container launch failed: timeout", "restart job");
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(body, "Internal error");
     }
 
@@ -207,6 +303,68 @@ mod tests {
             "trigger routine",
         );
         assert_eq!(body, "Database error");
+    }
+
+    #[test]
+    fn test_sanitized_routine_not_found_hides_routine_id() {
+        let (status, body) = sanitized_routine_error(
+            crate::error::RoutineError::NotFound { id: Uuid::new_v4() },
+            "trigger routine",
+        );
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body, "Routine not found");
+    }
+
+    #[test]
+    fn test_sanitized_routine_not_authorized_matches_not_found() {
+        let (status, body) = sanitized_routine_error(
+            crate::error::RoutineError::NotAuthorized { id: Uuid::new_v4() },
+            "trigger routine",
+        );
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body, "Routine not found");
+    }
+
+    #[test]
+    fn test_sanitized_routine_conflict_variants_hide_routine_name() {
+        let disabled = sanitized_routine_error(
+            crate::error::RoutineError::Disabled {
+                name: "prod-db-secret-rotation".to_string(),
+            },
+            "trigger routine",
+        );
+        assert_eq!(
+            disabled,
+            (StatusCode::CONFLICT, "Routine is disabled".to_string())
+        );
+
+        let cooldown = sanitized_routine_error(
+            crate::error::RoutineError::Cooldown {
+                name: "prod-db-secret-rotation".to_string(),
+            },
+            "trigger routine",
+        );
+        assert_eq!(
+            cooldown,
+            (
+                StatusCode::CONFLICT,
+                "Routine is in cooldown period".to_string(),
+            )
+        );
+
+        let max_concurrent = sanitized_routine_error(
+            crate::error::RoutineError::MaxConcurrent {
+                name: "prod-db-secret-rotation".to_string(),
+            },
+            "trigger routine",
+        );
+        assert_eq!(
+            max_concurrent,
+            (
+                StatusCode::CONFLICT,
+                "Routine has reached the maximum concurrent runs".to_string(),
+            )
+        );
     }
 
     // ---- build_turns_from_db_messages tests ----

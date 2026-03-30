@@ -11,6 +11,10 @@ use axum::{
 use crate::channels::web::auth::AuthenticatedUser;
 use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::*;
+use crate::channels::web::util::{
+    sanitized_action_failure, sanitized_bad_gateway, sanitized_bad_request,
+    sanitized_internal_error_response,
+};
 
 pub async fn skills_list_handler(
     State(state): State<Arc<GatewayState>>,
@@ -21,12 +25,9 @@ pub async fn skills_list_handler(
         "Skills system not enabled".to_string(),
     ))?;
 
-    let guard = registry.read().map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Skill registry lock poisoned: {}", e),
-        )
-    })?;
+    let guard = registry
+        .read()
+        .map_err(|e| sanitized_internal_error_response(e, "read skill registry"))?;
 
     let skills: Vec<SkillInfo> = guard
         .skills()
@@ -88,12 +89,9 @@ pub async fn skills_search_handler(
     // Search local skills
     let query_lower = req.query.to_lowercase();
     let installed: Vec<SkillInfo> = {
-        let guard = registry.read().map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Skill registry lock poisoned: {}", e),
-            )
-        })?;
+        let guard = registry
+            .read()
+            .map_err(|e| sanitized_internal_error_response(e, "read skill registry"))?;
         guard
             .skills()
             .iter()
@@ -152,7 +150,9 @@ pub async fn skills_install_handler(
         // Fetch from explicit URL (with SSRF protection)
         crate::tools::builtin::skill_tools::fetch_skill_content(url)
             .await
-            .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?
+            .map_err(|e| {
+                sanitized_bad_request(e, "fetch skill from explicit URL", "Invalid skill source")
+            })?
     } else if let Some(ref catalog) = state.skill_catalog {
         // Prefer slug (e.g. "owner/skill-name") over display name for the
         // download URL, since the registry endpoint expects a slug.
@@ -164,7 +164,9 @@ pub async fn skills_install_handler(
         let url = crate::skills::catalog::skill_download_url(catalog.registry_url(), download_key);
         crate::tools::builtin::skill_tools::fetch_skill_content(&url)
             .await
-            .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?
+            .map_err(|e| {
+                sanitized_bad_gateway(e, "download skill from catalog", "Failed to download skill")
+            })?
     } else {
         return Ok(Json(ActionResponse::fail(
             "Provide 'content' or 'url' to install a skill".to_string(),
@@ -173,16 +175,14 @@ pub async fn skills_install_handler(
 
     // Parse, check duplicates, and get install_dir under a brief read lock.
     let (user_dir, skill_name_from_parse) = {
-        let guard = registry.read().map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Skill registry lock poisoned: {}", e),
-            )
-        })?;
+        let guard = registry
+            .read()
+            .map_err(|e| sanitized_internal_error_response(e, "read skill registry"))?;
 
         let normalized = crate::skills::normalize_line_endings(&content);
-        let parsed = crate::skills::parser::parse_skill_md(&normalized)
-            .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+        let parsed = crate::skills::parser::parse_skill_md(&normalized).map_err(|e| {
+            sanitized_bad_request(e, "parse skill definition", "Invalid skill definition")
+        })?;
         let skill_name = parsed.manifest.name.clone();
 
         if guard.has(&skill_name) {
@@ -204,22 +204,23 @@ pub async fn skills_install_handler(
             &normalized,
         )
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|e| sanitized_internal_error_response(e, "prepare skill install"))?;
 
     // Commit: brief write lock for in-memory addition
-    let mut guard = registry.write().map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Skill registry lock poisoned: {}", e),
-        )
-    })?;
+    let mut guard = registry
+        .write()
+        .map_err(|e| sanitized_internal_error_response(e, "write skill registry"))?;
 
     match guard.commit_install(&skill_name, loaded_skill) {
         Ok(()) => Ok(Json(ActionResponse::ok(format!(
             "Skill '{}' installed",
             skill_name
         )))),
-        Err(e) => Ok(Json(ActionResponse::fail(e.to_string()))),
+        Err(e) => Ok(Json(sanitized_action_failure(
+            e,
+            "commit skill install",
+            "Skill installation failed",
+        ))),
     }
 }
 
@@ -250,35 +251,33 @@ pub async fn skills_remove_handler(
 
     // Validate removal under a brief read lock
     let skill_path = {
-        let guard = registry.read().map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Skill registry lock poisoned: {}", e),
-            )
-        })?;
-        guard
-            .validate_remove(&name)
-            .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?
+        let guard = registry
+            .read()
+            .map_err(|e| sanitized_internal_error_response(e, "read skill registry"))?;
+        guard.validate_remove(&name).map_err(|e| {
+            sanitized_bad_request(e, "validate skill removal", "Invalid skill removal request")
+        })?
     };
 
     // Delete files from disk (async I/O, no lock held)
     crate::skills::registry::SkillRegistry::delete_skill_files(&skill_path)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|e| sanitized_internal_error_response(e, "delete skill files"))?;
 
     // Remove from in-memory registry under a brief write lock
-    let mut guard = registry.write().map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Skill registry lock poisoned: {}", e),
-        )
-    })?;
+    let mut guard = registry
+        .write()
+        .map_err(|e| sanitized_internal_error_response(e, "write skill registry"))?;
 
     match guard.commit_remove(&name) {
         Ok(()) => Ok(Json(ActionResponse::ok(format!(
             "Skill '{}' removed",
             name
         )))),
-        Err(e) => Ok(Json(ActionResponse::fail(e.to_string()))),
+        Err(e) => Ok(Json(sanitized_action_failure(
+            e,
+            "commit skill removal",
+            "Skill removal failed",
+        ))),
     }
 }

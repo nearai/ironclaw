@@ -11,6 +11,7 @@ use axum::{
 use crate::channels::web::auth::AuthenticatedUser;
 use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::*;
+use crate::channels::web::util::{sanitized_action_failure, sanitized_internal_error_response};
 
 pub(crate) fn derive_activation_status(
     ext: &crate::extensions::InstalledExtension,
@@ -55,7 +56,7 @@ pub async fn extensions_list_handler(
     let installed = ext_mgr
         .list(None, false, &user.user_id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|e| sanitized_internal_error_response(e, "list installed extensions"))?;
 
     let pairing_store = crate::pairing::PairingStore::new();
     let mut owner_bound_channels = std::collections::HashSet::new();
@@ -139,7 +140,11 @@ pub async fn extensions_install_handler(
         .await
     {
         Ok(result) => Ok(Json(ActionResponse::ok(result.message))),
-        Err(e) => Ok(Json(ActionResponse::fail(e.to_string()))),
+        Err(e) => Ok(Json(sanitized_action_failure(
+            e,
+            "install extension",
+            "Extension installation failed",
+        ))),
     }
 }
 
@@ -155,7 +160,11 @@ pub async fn extensions_remove_handler(
 
     match ext_mgr.remove(&name, &user.user_id).await {
         Ok(message) => Ok(Json(ActionResponse::ok(message))),
-        Err(e) => Ok(Json(ActionResponse::fail(e.to_string()))),
+        Err(e) => Ok(Json(sanitized_action_failure(
+            e,
+            "remove extension",
+            "Extension removal failed",
+        ))),
     }
 }
 
