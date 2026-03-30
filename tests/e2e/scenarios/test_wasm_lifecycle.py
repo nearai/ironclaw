@@ -99,7 +99,7 @@ async def web_search_removed(ironclaw_server, web_search_configured):
 
 @pytest.fixture(scope="module")
 async def web_search_reinstalled(ironclaw_server, web_search_removed):
-    """Reinstall web-search after removal to verify saved-secret recovery."""
+    """Reinstall web-search after removal to verify it returns unconfigured."""
     await _ensure_removed(ironclaw_server, "web-search")
     data = await _install_extension(ironclaw_server, "web-search")
     return {"name": "web-search", "install": data}
