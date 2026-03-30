@@ -796,10 +796,11 @@ CREATE INDEX IF NOT EXISTS idx_api_tokens_hash ON api_tokens(token_hash);
     (
         15,
         "routine_agent_review",
-        // Columns already present in the idempotent CREATE TABLE (migration 13 rebuild).
-        // This migration exists only as a version marker for the PostgreSQL V15 counterpart.
-        // No DDL needed — fresh databases have the columns; upgraded databases got them
-        // via the rebuild in migration 13 which includes them in the schema.
+        // Marker only — the real column additions are handled in Rust code below
+        // (run_migration_v15_fixup) because SQLite's ALTER TABLE ADD COLUMN
+        // fails if the column already exists, and execute_batch aborts on the
+        // first error. The fixup inspects pragma_table_info and only adds
+        // columns that are genuinely missing.
         r#"SELECT 1;"#,
     ),
 ];
@@ -865,6 +866,66 @@ pub async fn run_incremental(conn: &libsql::Connection) -> Result<(), crate::err
 
     if applied_count > 0 {
         tracing::info!("libSQL: applied {} incremental migrations", applied_count);
+    }
+
+    // Post-migration fixups that require conditional DDL (cannot be expressed
+    // in a single execute_batch call because SQLite errors on duplicate ALTER
+    // TABLE ADD COLUMN).
+    run_migration_v15_fixup(conn).await?;
+
+    Ok(())
+}
+
+/// Ensure the `agent_review_on_*` columns exist on the `routines` table.
+///
+/// Migration V15 is recorded as applied after V13 (which rebuilds the table
+/// with these columns). But databases that ran V13 from an older codebase
+/// (before the columns were added to the rebuild schema) will be missing them.
+/// This fixup inspects `pragma_table_info` and adds only the missing columns.
+pub(crate) async fn run_migration_v15_fixup(
+    conn: &libsql::Connection,
+) -> Result<(), crate::error::DatabaseError> {
+    use crate::error::DatabaseError;
+
+    let columns_to_ensure: &[(&str, &str)] = &[
+        (
+            "agent_review_on_success",
+            "ALTER TABLE routines ADD COLUMN agent_review_on_success INTEGER NOT NULL DEFAULT 0",
+        ),
+        (
+            "agent_review_on_failure",
+            "ALTER TABLE routines ADD COLUMN agent_review_on_failure INTEGER NOT NULL DEFAULT 0",
+        ),
+        (
+            "agent_review_on_attention",
+            "ALTER TABLE routines ADD COLUMN agent_review_on_attention INTEGER NOT NULL DEFAULT 0",
+        ),
+    ];
+
+    // Collect existing column names from pragma_table_info.
+    let mut existing_columns = std::collections::HashSet::new();
+    let mut rows = conn
+        .query("SELECT name FROM pragma_table_info('routines')", ())
+        .await
+        .map_err(|e| {
+            DatabaseError::Migration(format!("V15 fixup: failed to read pragma_table_info: {e}"))
+        })?;
+
+    while let Some(row) = rows.next().await.map_err(|e| {
+        DatabaseError::Migration(format!("V15 fixup: failed to iterate columns: {e}"))
+    })? {
+        if let Ok(name) = row.get::<String>(0) {
+            existing_columns.insert(name);
+        }
+    }
+
+    for &(col_name, ddl) in columns_to_ensure {
+        if !existing_columns.contains(col_name) {
+            conn.execute(ddl, ()).await.map_err(|e| {
+                DatabaseError::Migration(format!("V15 fixup: failed to add column {col_name}: {e}"))
+            })?;
+            tracing::info!(column = col_name, "libSQL V15 fixup: added missing column");
+        }
     }
 
     Ok(())

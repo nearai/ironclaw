@@ -925,9 +925,21 @@ impl Agent {
                                 .and_then(|v| v.as_str())
                                 .filter(|s| !s.is_empty());
 
+                            let notify_thread_id = message
+                                .metadata
+                                .get("notify_thread_id")
+                                .and_then(|v| v.as_str())
+                                .map(String::from);
+
+                            let target_user = message
+                                .metadata
+                                .get("notify_user")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or(&message.user_id);
+
                             let outgoing = OutgoingResponse {
                                 content,
-                                thread_id: None,
+                                thread_id: notify_thread_id,
                                 attachments: Vec::new(),
                                 metadata: message.metadata.clone(),
                             };
@@ -935,7 +947,7 @@ impl Agent {
                             if let Some(channel) = notify_channel {
                                 if let Err(e) = self
                                     .channels
-                                    .broadcast(channel, &message.user_id, outgoing.clone())
+                                    .broadcast(channel, target_user, outgoing.clone())
                                     .await
                                 {
                                     tracing::warn!(
@@ -943,10 +955,8 @@ impl Agent {
                                         error = %e,
                                         "Failed to send routine review response, falling back"
                                     );
-                                    let _ = self
-                                        .channels
-                                        .broadcast_all(&message.user_id, outgoing)
-                                        .await;
+                                    let _ =
+                                        self.channels.broadcast_all(target_user, outgoing).await;
                                 }
                             } else {
                                 // notify_channel was absent or empty — log so
@@ -965,10 +975,7 @@ impl Agent {
                                         "notify_channel is empty, falling back to broadcast_all"
                                     );
                                 }
-                                let _ = self
-                                    .channels
-                                    .broadcast_all(&message.user_id, outgoing)
-                                    .await;
+                                let _ = self.channels.broadcast_all(target_user, outgoing).await;
                             }
                         }
                     } else {
@@ -1160,6 +1167,25 @@ impl Agent {
                         .and_then(|v| v.as_str()).unwrap_or("unknown"),
                     "Processing routine review"
                 );
+
+                // Set message tool context so the `message` tool targets the
+                // actual notify channel/user, not the fake "routine-review"
+                // channel.
+                let review_notify_channel = message
+                    .metadata
+                    .get("notify_channel")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(String::from);
+                let review_target_user = message
+                    .metadata
+                    .get("notify_user")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(&message.user_id)
+                    .to_string();
+                self.tools()
+                    .set_message_tool_context(review_notify_channel, Some(review_target_user))
+                    .await;
 
                 let (session, thread_id) = self
                     .session_manager

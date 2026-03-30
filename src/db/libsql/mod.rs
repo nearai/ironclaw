@@ -619,4 +619,154 @@ mod tests {
             );
         }
     }
+
+    /// Regression test: V15 fixup adds agent_review_on_* columns to routines
+    /// even when the table was created without them (simulating an older V13).
+    #[tokio::test]
+    async fn test_v15_fixup_adds_missing_agent_review_columns() {
+        let backend = LibSqlBackend::new_memory().await.unwrap();
+        let conn = backend.connect().await.unwrap();
+
+        // Set up a minimal schema WITHOUT the agent_review columns
+        // to simulate a database that ran old V13 before the columns existed.
+        conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS _migrations (
+                version INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+            );
+            CREATE TABLE IF NOT EXISTS routines (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                user_id TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                trigger_type TEXT NOT NULL,
+                trigger_config TEXT NOT NULL,
+                action_type TEXT NOT NULL,
+                action_config TEXT NOT NULL,
+                cooldown_secs INTEGER NOT NULL DEFAULT 300,
+                max_concurrent INTEGER NOT NULL DEFAULT 1,
+                dedup_window_secs INTEGER,
+                notify_channel TEXT,
+                notify_user TEXT,
+                notify_on_success INTEGER NOT NULL DEFAULT 0,
+                notify_on_failure INTEGER NOT NULL DEFAULT 1,
+                notify_on_attention INTEGER NOT NULL DEFAULT 1,
+                state TEXT NOT NULL DEFAULT '{}',
+                last_run_at TEXT,
+                next_fire_at TEXT,
+                run_count INTEGER NOT NULL DEFAULT 0,
+                consecutive_failures INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                UNIQUE (user_id, name)
+            );
+            -- Mark V13, V14, V15 as already applied so run_incremental skips them.
+            INSERT INTO _migrations (version, name) VALUES (13, 'routine_notify_user_nullable');
+            INSERT INTO _migrations (version, name) VALUES (14, 'users');
+            INSERT INTO _migrations (version, name) VALUES (15, 'routine_agent_review');
+            "#,
+        )
+        .await
+        .unwrap();
+
+        // Verify columns are NOT present yet.
+        let has_col = |rows: &[String], name: &str| rows.iter().any(|c| c == name);
+        let col_names = get_column_names(&conn, "routines").await;
+        assert!(
+            !has_col(&col_names, "agent_review_on_success"),
+            "column should not exist before fixup"
+        );
+
+        // Run the fixup.
+        super::super::libsql_migrations::run_migration_v15_fixup(&conn)
+            .await
+            .unwrap();
+
+        // Verify columns now exist.
+        let col_names = get_column_names(&conn, "routines").await;
+        assert!(
+            has_col(&col_names, "agent_review_on_success"),
+            "agent_review_on_success should exist after fixup"
+        );
+        assert!(
+            has_col(&col_names, "agent_review_on_failure"),
+            "agent_review_on_failure should exist after fixup"
+        );
+        assert!(
+            has_col(&col_names, "agent_review_on_attention"),
+            "agent_review_on_attention should exist after fixup"
+        );
+
+        // Verify defaults work.
+        conn.execute(
+            "INSERT INTO routines (id, name, user_id, trigger_type, trigger_config, action_type, action_config) \
+             VALUES ('r1', 'test', 'u1', 'manual', '{}', 'lightweight', '{}')",
+            (),
+        )
+        .await
+        .unwrap();
+        let mut rows = conn
+            .query(
+                "SELECT agent_review_on_success, agent_review_on_failure, agent_review_on_attention FROM routines WHERE id = 'r1'",
+                (),
+            )
+            .await
+            .unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        assert_eq!(row.get::<i64>(0).unwrap(), 0);
+        assert_eq!(row.get::<i64>(1).unwrap(), 0);
+        assert_eq!(row.get::<i64>(2).unwrap(), 0);
+    }
+
+    /// Regression test: V15 fixup is idempotent — running on a table that
+    /// already has the columns does not error.
+    #[tokio::test]
+    async fn test_v15_fixup_idempotent_when_columns_exist() {
+        let backend = LibSqlBackend::new_memory().await.unwrap();
+        let conn = backend.connect().await.unwrap();
+
+        // Create a routines table WITH the agent_review columns already present.
+        conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS _migrations (
+                version INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+            );
+            CREATE TABLE IF NOT EXISTS routines (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                trigger_type TEXT NOT NULL,
+                trigger_config TEXT NOT NULL,
+                action_type TEXT NOT NULL,
+                action_config TEXT NOT NULL,
+                agent_review_on_success INTEGER NOT NULL DEFAULT 0,
+                agent_review_on_failure INTEGER NOT NULL DEFAULT 0,
+                agent_review_on_attention INTEGER NOT NULL DEFAULT 0,
+                UNIQUE (user_id, name)
+            );
+            "#,
+        )
+        .await
+        .unwrap();
+
+        // Run fixup — should be a no-op, not an error.
+        super::super::libsql_migrations::run_migration_v15_fixup(&conn)
+            .await
+            .unwrap();
+    }
+
+    async fn get_column_names(conn: &libsql::Connection, table: &str) -> Vec<String> {
+        let mut names = Vec::new();
+        let query = format!("SELECT name FROM pragma_table_info('{table}')");
+        let mut rows = conn.query(&query, ()).await.unwrap();
+        while let Some(row) = rows.next().await.unwrap() {
+            names.push(row.get::<String>(0).unwrap());
+        }
+        names
+    }
 }
