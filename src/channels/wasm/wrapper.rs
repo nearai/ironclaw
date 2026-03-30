@@ -65,6 +65,7 @@ use crate::tools::wasm::credential_injector::{
 const WEBSOCKET_EVENT_QUEUE_RELATIVE_PATH: &str = "state/gateway_event_queue";
 const WEBSOCKET_EVENT_PROCESSING_QUEUE_RELATIVE_PATH: &str = "state/gateway_event_queue_processing";
 const WEBSOCKET_EVENT_QUEUE_MAX_ITEMS: usize = 100;
+const SEND_TIMEOUT_SECS: u64 = 10;
 
 // Generate component model bindings from the WIT file
 wasmtime::component::bindgen!({
@@ -2501,7 +2502,6 @@ impl WasmChannel {
             // the agent queue is full. A blocked send would hold up the WASM
             // callback, delay commit_writes, and cause dedup keys to never be
             // persisted — making webhook retries look like new events.
-            const SEND_TIMEOUT_SECS: u64 = 10;
             tracing::info!(
                 channel = %self.name,
                 user_id = %emitted.user_id,
@@ -2526,12 +2526,10 @@ impl WasmChannel {
                     tracing::error!(
                         channel = %self.name,
                         emitted_count,
-                        "Agent message channel closed"
+                        "Agent message channel closed (permanent)"
                     );
-                    return Err(WasmChannelError::SendTimeout {
+                    return Err(WasmChannelError::ChannelClosed {
                         name: self.name.clone(),
-                        timeout_secs: SEND_TIMEOUT_SECS,
-                        emitted_count,
                     });
                 }
                 Err(_) => {
@@ -2852,7 +2850,6 @@ impl WasmChannel {
                 .await;
             }
 
-            const SEND_TIMEOUT_SECS: u64 = 10;
             tracing::info!(
                 channel = %dispatch.channel_name,
                 user_id = %emitted.user_id,
@@ -2877,12 +2874,10 @@ impl WasmChannel {
                     tracing::error!(
                         channel = %dispatch.channel_name,
                         emitted_count,
-                        "Agent message channel closed"
+                        "Agent message channel closed (permanent)"
                     );
-                    return Err(WasmChannelError::SendTimeout {
+                    return Err(WasmChannelError::ChannelClosed {
                         name: dispatch.channel_name.to_string(),
-                        timeout_secs: SEND_TIMEOUT_SECS,
-                        emitted_count,
                     });
                 }
                 Err(_) => {
@@ -3454,9 +3449,12 @@ fn spawn_websocket_poll(poll_guard: tokio::sync::OwnedMutexGuard<()>, ctx: Webso
             )
             .await
             {
-                Ok(emitted_messages) => {
-                    if !emitted_messages.is_empty()
-                        && let Err(error) = WasmChannel::dispatch_emitted_messages(
+                Ok((emitted_messages, pending_writes)) => {
+                    // Dispatch messages BEFORE committing workspace writes.
+                    // On failure, dedup keys stay uncommitted so the next poll
+                    // tick can retry.
+                    let dispatch_ok = if !emitted_messages.is_empty() {
+                        match WasmChannel::dispatch_emitted_messages(
                             EmitDispatchContext {
                                 channel_name: &ctx.channel_name,
                                 owner_scope_id: &ctx.owner_scope_id,
@@ -3469,8 +3467,20 @@ fn spawn_websocket_poll(poll_guard: tokio::sync::OwnedMutexGuard<()>, ctx: Webso
                             emitted_messages,
                         )
                         .await
-                    {
-                        tracing::warn!(channel = %ctx.channel_name, error = %error, "Failed to dispatch emitted websocket poll messages");
+                        {
+                            Ok(()) => true,
+                            Err(error) => {
+                                tracing::warn!(channel = %ctx.channel_name, error = %error, "Failed to dispatch emitted websocket poll messages");
+                                false
+                            }
+                        }
+                    } else {
+                        true
+                    };
+
+                    if dispatch_ok {
+                        ctx.workspace_store.commit_writes(&pending_writes);
+                        ctx.workspace_store.promote_pending_to_delivered(&pending_writes);
                     }
                 }
                 Err(error) => {
@@ -4579,7 +4589,7 @@ mod tests {
         .await;
 
         assert!(result.is_ok()); // safety: test-only assertion
-        assert!(result.unwrap().is_empty());
+        assert!(result.unwrap().0.is_empty());
     }
 
     #[tokio::test]

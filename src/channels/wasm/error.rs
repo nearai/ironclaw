@@ -90,6 +90,9 @@ pub enum WasmChannelError {
         timeout_secs: u64,
         emitted_count: usize,
     },
+
+    #[error("Channel {name} agent message channel is closed (permanent)")]
+    ChannelClosed { name: String },
 }
 
 impl From<crate::tools::wasm::WasmError> for WasmChannelError {
