@@ -298,7 +298,7 @@ impl GatewayWorkflowHarness {
 
         let auth_token = "gateway-test-token".to_string();
         let auth = MultiAuthState::single(auth_token.clone(), user_id.clone());
-        let addr = start_server(
+        let (addr, _server_handle) = start_server(
             "127.0.0.1:0".parse().expect("valid localhost addr"),
             Arc::clone(&gateway_state),
             auth.into(),

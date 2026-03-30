@@ -63,6 +63,15 @@ pub async fn run_gateway_command(
     cmd: GatewayCommand,
     config_path: Option<&Path>,
 ) -> anyhow::Result<()> {
+    // Start, stop, and status rely on Unix process signals (kill, setsid).
+    #[cfg(not(unix))]
+    match cmd {
+        GatewayCommand::Serve => {}
+        GatewayCommand::Start => anyhow::bail!("`gateway start` is currently Unix-only"),
+        GatewayCommand::Stop => anyhow::bail!("`gateway stop` is currently Unix-only"),
+        GatewayCommand::Status => anyhow::bail!("`gateway status` is currently Unix-only"),
+    }
+
     match cmd {
         GatewayCommand::Serve => cmd_serve(config_path).await,
         GatewayCommand::Start => cmd_start(config_path).await,
@@ -116,8 +125,8 @@ async fn cmd_serve(config_path: Option<&Path>) -> anyhow::Result<()> {
     // ext_mgr gateway_mode. Those APIs return 503 in standalone.
     let session_manager =
         Arc::new(crate::agent::SessionManager::new().with_hooks(components.hooks.clone()));
-    let mut gw =
-        GatewayChannel::new(gw_config.clone(), owner_id).with_llm_provider(Arc::clone(&components.llm));
+    let mut gw = GatewayChannel::new(gw_config.clone(), owner_id)
+        .with_llm_provider(Arc::clone(&components.llm));
     if let Some(ref ws) = components.workspace {
         gw = gw.with_workspace(Arc::clone(ws));
     }
@@ -213,13 +222,26 @@ async fn cmd_start(config_path: Option<&Path>) -> anyhow::Result<()> {
         .clone()
         .ok_or_else(|| anyhow::anyhow!("Gateway is not enabled. Set GATEWAY_ENABLED=true"))?;
 
-    // Check if already running.
+    // Best-effort pre-flight check: try to acquire the PID lock to detect
+    // an already-running instance. This is NOT authoritative — there is a
+    // TOCTOU window between this check and the child's PidLock::acquire_at
+    // in `cmd_serve`. The child's lock is the real mutual exclusion point.
+    // If two `gateway start` commands race, the loser's child will fail to
+    // acquire the lock and exit, which the parent detects via health-check
+    // timeout or process exit.
     let pid_path = gateway_pid_lock_path();
-    if let Ok(pid_str) = std::fs::read_to_string(&pid_path)
-        && let Ok(pid) = pid_str.trim().parse::<u32>()
-        && is_process_alive(pid)
-    {
-        anyhow::bail!("Gateway is already running (PID {pid})");
+    match PidLock::acquire_at(pid_path.clone()) {
+        Ok(lock) => {
+            // Lock acquired — no other instance holds it. Release immediately
+            // so the child can acquire it.
+            drop(lock);
+        }
+        Err(crate::bootstrap::PidLockError::AlreadyRunning { pid }) => {
+            anyhow::bail!("Gateway is already running (PID {pid})");
+        }
+        Err(crate::bootstrap::PidLockError::Io(e)) => {
+            anyhow::bail!("Cannot check gateway PID lock: {e}");
+        }
     }
 
     // Spawn `ironclaw gateway serve` as a detached child process.
@@ -269,7 +291,9 @@ async fn cmd_start(config_path: Option<&Path>) -> anyhow::Result<()> {
     println!("Log file: {}", log_path.display());
 
     // Poll health endpoint until it responds or timeout.
-    let health_url = format!("http://{}:{}/api/health", gw_config.host, gw_config.port);
+    // Normalize unspecified bind addresses to localhost for probing.
+    let health_host = normalize_probe_host(&gw_config.host);
+    let health_url = format!("http://{health_host}:{}/api/health", gw_config.port);
     let deadline = std::time::Instant::now() + START_HEALTH_TIMEOUT;
     let mut healthy = false;
 
@@ -351,20 +375,52 @@ fn cmd_stop() -> anyhow::Result<()> {
 
     #[cfg(unix)]
     {
-        // SAFETY: We are sending a signal to a process we own.
+        // Note: is_process_alive uses kill(pid, 0) which can return false
+        // positives if the PID has been reused by an unrelated process.
+        // This is inherent to PID-file-based lifecycle management; the
+        // flock held by PidLock is the authoritative ownership signal.
+        if !is_process_alive(pid) {
+            // Process already gone — clean up stale PID file.
+            let _ = std::fs::remove_file(&pid_path);
+            anyhow::bail!("Gateway process (PID {pid}) is not running (stale PID file removed)");
+        }
+
+        // SAFETY: We are sending a signal to a process identified by our PID file.
         let ret = unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
         if ret != 0 {
             let err = std::io::Error::last_os_error();
             if err.raw_os_error() == Some(libc::ESRCH) {
-                // Process doesn't exist — stale PID file
                 let _ = std::fs::remove_file(&pid_path);
                 anyhow::bail!(
-                    "Gateway process (PID {pid}) is not running (stale PID file removed)"
+                    "Gateway process (PID {pid}) exited before SIGTERM could be delivered (stale PID file removed)"
                 );
             }
             anyhow::bail!("Failed to send SIGTERM to PID {pid}: {err}");
         }
         println!("Sent SIGTERM to gateway (PID {pid}).");
+
+        // Poll for process exit, then clean up the PID file if the serve
+        // process didn't remove it (e.g. killed by SIGKILL or OOM).
+        let stop_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < stop_deadline {
+            if !is_process_alive(pid) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+
+        // If the PID file still exists and the process has exited, remove it.
+        if pid_path.exists() && !is_process_alive(pid) {
+            let _ = std::fs::remove_file(&pid_path);
+        }
+
+        if is_process_alive(pid) {
+            println!(
+                "Warning: process (PID {pid}) still running after 5s. You may need to `kill -9 {pid}`."
+            );
+        } else {
+            println!("Gateway stopped.");
+        }
     }
 
     #[cfg(not(unix))]
@@ -409,12 +465,15 @@ async fn cmd_status(config_path: Option<&Path>) -> anyhow::Result<()> {
 
     // Try to determine configured address and probe health
     let config = Config::from_env_with_toml(config_path).await.ok();
-    let addr = config
+    let probe_addr = config
         .as_ref()
         .and_then(|c| c.channels.gateway.as_ref())
-        .map(|gw| format!("{}:{}", gw.host, gw.port));
+        .map(|gw| {
+            let host = normalize_probe_host(&gw.host);
+            format!("{host}:{}", gw.port)
+        });
 
-    if let Some(ref addr) = addr {
+    if let Some(ref addr) = probe_addr {
         println!("Address: {addr}");
 
         // Probe /api/health (unauthenticated endpoint)
@@ -429,10 +488,16 @@ async fn cmd_status(config_path: Option<&Path>) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Check if a process is alive by sending signal 0.
+///
+/// **PID reuse caveat:** `kill(pid, 0)` only checks that *some* process with
+/// that PID exists. After the original gateway exits, the OS may reassign
+/// the PID to an unrelated process. Callers (especially `cmd_stop`) should
+/// be aware that a `true` return does not guarantee the process is *our*
+/// gateway. The `PidLock` flock is the authoritative ownership signal.
 fn is_process_alive(pid: u32) -> bool {
     #[cfg(unix)]
     {
-        // kill(pid, 0) checks if process exists without sending a signal.
         // SAFETY: Signal 0 is a null signal used only for existence checking.
         unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
     }
@@ -440,6 +505,15 @@ fn is_process_alive(pid: u32) -> bool {
     {
         let _ = pid;
         false
+    }
+}
+
+/// Normalize a bind host for health probing. Unspecified addresses like
+/// `0.0.0.0` or `::` cannot be connected to; use `127.0.0.1` instead.
+fn normalize_probe_host(host: &str) -> &str {
+    match host {
+        "0.0.0.0" | "::" | "[::]" => "127.0.0.1",
+        other => other,
     }
 }
 
@@ -478,21 +552,12 @@ mod tests {
     }
 
     #[test]
-    fn stop_reports_missing_pid_file() {
-        // With no gateway.pid, stop should fail with a clear message
-        let result = cmd_stop();
-        // It may or may not fail depending on whether a gateway is running,
-        // but it should not panic.
-        match result {
-            Ok(()) => {} // gateway was running and got SIGTERM
-            Err(e) => {
-                let msg = e.to_string();
-                assert!(
-                    msg.contains("not running") || msg.contains("PID"),
-                    "expected descriptive error, got: {msg}"
-                );
-            }
-        }
+    fn normalize_probe_host_rewrites_unspecified() {
+        assert_eq!(normalize_probe_host("0.0.0.0"), "127.0.0.1");
+        assert_eq!(normalize_probe_host("::"), "127.0.0.1");
+        assert_eq!(normalize_probe_host("[::]"), "127.0.0.1");
+        assert_eq!(normalize_probe_host("10.0.0.1"), "10.0.0.1");
+        assert_eq!(normalize_probe_host("127.0.0.1"), "127.0.0.1");
     }
 
     #[test]

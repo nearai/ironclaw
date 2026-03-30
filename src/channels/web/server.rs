@@ -726,7 +726,7 @@ pub async fn start_server(
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     *state.shutdown_tx.write().await = Some(shutdown_tx);
 
-    tokio::spawn(async move {
+    let server_handle = tokio::spawn(async move {
         if let Err(e) = axum::serve(listener, app)
             .with_graceful_shutdown(async {
                 let _ = shutdown_rx.await;
@@ -738,7 +738,7 @@ pub async fn start_server(
         }
     });
 
-    Ok(bound_addr)
+    Ok((bound_addr, server_handle))
 }
 
 // --- Static file handlers ---
@@ -3378,7 +3378,7 @@ mod tests {
             "test-token".to_string(),
             "test".to_string(),
         ));
-        let bound = start_server(addr, state.clone(), auth)
+        let (bound, _server_handle) = start_server(addr, state.clone(), auth)
             .await
             .expect("server should start");
 
