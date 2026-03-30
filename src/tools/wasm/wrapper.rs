@@ -1766,10 +1766,10 @@ fn build_tool_usage_hint(tool_name: &str, schema: &serde_json::Value) -> String 
 /// sent — some APIs (e.g. Gmail) return 411 without it. Returns `true` when
 /// the host should inject a `Content-Length: 0` header.
 fn needs_content_length_zero(method: &str, headers: &HashMap<String, String>) -> bool {
-    let mutating = matches!(
-        method.to_uppercase().as_str(),
-        "POST" | "PUT" | "PATCH" | "DELETE"
-    );
+    let mutating = method.eq_ignore_ascii_case("POST")
+        || method.eq_ignore_ascii_case("PUT")
+        || method.eq_ignore_ascii_case("PATCH")
+        || method.eq_ignore_ascii_case("DELETE");
     mutating
         && !headers
             .iter()
