@@ -236,6 +236,18 @@ pub async fn jobs_detail_handler(
                 (end - start).num_seconds().max(0) as u64
             });
 
+            // Build transitions from the job's state transition history.
+            let transitions: Vec<TransitionInfo> = ctx
+                .transitions
+                .iter()
+                .map(|t| TransitionInfo {
+                    from: t.from.to_string(),
+                    to: t.to.to_string(),
+                    timestamp: t.timestamp.to_rfc3339(),
+                    reason: t.reason.clone(),
+                })
+                .collect();
+
             // Only show prompt bar for jobs that have a running worker (Pending/InProgress).
             // Stuck jobs have no active worker loop, so messages would be silently dropped.
             let is_promptable = matches!(
@@ -255,7 +267,7 @@ pub async fn jobs_detail_handler(
                 project_dir: None,
                 browse_url: None,
                 job_mode: None,
-                transitions: Vec::new(),
+                transitions,
                 can_restart: state.scheduler.is_some(),
                 can_prompt: is_promptable && state.scheduler.is_some(),
                 job_kind: Some("agent".to_string()),
@@ -643,25 +655,28 @@ pub async fn jobs_events_handler(
         .parse()
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid job ID".to_string()))?;
 
-    // Verify ownership before returning events.
-    match store.get_sandbox_job(job_id).await {
-        Ok(Some(job)) => {
-            if job.user_id != user.user_id {
-                return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
+    // Verify ownership before returning events (check both sandbox and agent jobs).
+    let is_owner = match store.get_sandbox_job(job_id).await {
+        Ok(Some(job)) => job.user_id == user.user_id,
+        Ok(None) => {
+            // Fall back to agent job ownership check.
+            match store.get_job(job_id).await {
+                Ok(Some(ctx)) => ctx.user_id == user.user_id,
+                _ => false,
             }
         }
-        Ok(None) => {
-            return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
-        }
         Err(e) => {
-            return Err(db_error("jobs_handler", e));
+            return Err(db_error("jobs_events_handler", e));
         }
+    };
+    if !is_owner {
+        return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
     }
 
     let events = store
         .list_job_events(job_id, None)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|e| db_error("jobs_events_handler", e))?;
 
     let events_json: Vec<serde_json::Value> = events
         .into_iter()
