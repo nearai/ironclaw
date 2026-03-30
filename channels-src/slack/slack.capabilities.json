@@ -13,8 +13,13 @@
       },
       {
         "name": "slack_signing_secret",
-        "prompt": "Enter your Slack App Signing Secret (found under Basic Information > App Credentials in your Slack App settings).",
-        "optional": false
+        "prompt": "Enter your Slack Signing Secret (from App Credentials, optional for Socket Mode)",
+        "optional": true
+      },
+      {
+        "name": "slack_app_token",
+        "prompt": "Enter your Slack App-Level Token (xapp-...) for Socket Mode (optional)",
+        "optional": true
       }
     ],
     "setup_url": "https://api.slack.com/apps"
@@ -46,6 +51,12 @@
       "emit_rate_limit": {
         "messages_per_minute": 100,
         "messages_per_hour": 5000
+      },
+      "socket_mode": {
+        "open_url": "https://slack.com/api/apps.connections.open",
+        "app_token_secret": "slack_app_token",
+        "reconnect_delay_ms": 5000,
+        "max_reconnect_attempts": 10
       },
       "webhook": {
         "hmac_secret_name": "slack_signing_secret"
