@@ -541,7 +541,6 @@ pub fn spawn_multi_user_heartbeat(
         // for persistently-failing users (same semantics as single-user mode).
         let mut user_failures: std::collections::HashMap<String, u32> =
             std::collections::HashMap::new();
-
         tracing::info!("Starting multi-user heartbeat loop");
 
         loop {
@@ -621,7 +620,6 @@ pub fn spawn_multi_user_heartbeat(
                             "multi-user heartbeat: memory hygiene deleted stale documents"
                         );
                     }
-
                     let mut runner = HeartbeatRunner::new(cfg, hyg, workspace, llm_clone);
                     if let Some(tx) = tx {
                         runner = runner.with_response_channel(tx);
@@ -686,7 +684,6 @@ fn collect_heartbeat_result(
         }
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;

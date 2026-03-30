@@ -351,7 +351,6 @@ pub async fn run_routines_cli(
     let db: Arc<dyn crate::db::Database> = crate::db::connect_from_config(&config.database)
         .await
         .map_err(|e| anyhow::anyhow!("{e:#}"))?;
-
     let user_id = std::env::var("IRONCLAW_OWNER_ID").unwrap_or_else(|_| "default".to_string());
     run_routines_command(routines_cmd.clone(), db, &user_id).await
 }

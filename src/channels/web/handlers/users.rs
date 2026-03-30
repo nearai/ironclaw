@@ -78,7 +78,10 @@ pub async fn users_create_handler(
         created_at: now,
         updated_at: now,
         last_login_at: None,
-        created_by: Some(user.user_id.clone()),
+        created_by: match store.get_user(&user.user_id).await {
+            Ok(Some(_)) => Some(user.user_id.clone()),
+            _ => None,
+        },
         metadata: serde_json::json!({}),
     };
 
@@ -271,6 +274,22 @@ pub async fn users_update_handler(
             if let Some(ref db_auth) = state.db_auth {
                 db_auth.invalidate_user(&id).await;
             }
+        }
+    }
+
+    // Update role if provided and valid.
+    if let Some(role) = body.get("role").and_then(|v| v.as_str()) {
+        if role != "admin" && role != "member" {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "role must be 'admin' or 'member'".to_string(),
+            ));
+        }
+        if role != existing.role {
+            store
+                .update_user_role(&id, role)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
         }
     }
 
