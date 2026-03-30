@@ -64,7 +64,7 @@ impl TranscriptionConfig {
 
         // Validate base URL to prevent SSRF (#1103).
         if let Some(ref url) = base_url {
-            validate_base_url(url, "TRANSCRIPTION_BASE_URL", allow_local_network()?)?;
+            validate_base_url(url, "TRANSCRIPTION_BASE_URL", allow_local_network()?, true)?;
         }
 
         Ok(Self {

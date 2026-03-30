@@ -94,9 +94,9 @@ impl EmbeddingsConfig {
 
         // Validate base URLs to prevent SSRF attacks (#1103).
         let local_net = allow_local_network()?;
-        validate_base_url(&ollama_base_url, "OLLAMA_BASE_URL", local_net)?;
+        validate_base_url(&ollama_base_url, "OLLAMA_BASE_URL", local_net, true)?;
         if let Some(ref url) = openai_base_url {
-            validate_base_url(url, "EMBEDDING_BASE_URL", local_net)?;
+            validate_base_url(url, "EMBEDDING_BASE_URL", local_net, true)?;
         }
 
         let cache_size = parse_optional_env("EMBEDDING_CACHE_SIZE", DEFAULT_EMBEDDING_CACHE_SIZE)?;
