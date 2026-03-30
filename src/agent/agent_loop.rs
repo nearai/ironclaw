@@ -345,13 +345,25 @@ impl Agent {
             .map(|db| crate::tenant::TenantScope::new(user_id, Arc::clone(db)));
 
         // Reuse the owner workspace if user matches, otherwise create per-user.
+        // Per-user workspaces are seeded on first creation so they get identity
+        // files and BOOTSTRAP.md (which triggers the onboarding greeting).
         let workspace = match &self.deps.workspace {
             Some(ws) if ws.user_id() == user_id => Some(Arc::clone(ws)),
-            _ => self
-                .deps
-                .store
-                .as_ref()
-                .map(|db| Arc::new(Workspace::new_with_db(user_id, Arc::clone(db)))),
+            _ => {
+                if let Some(db) = self.deps.store.as_ref() {
+                    let ws = Arc::new(Workspace::new_with_db(user_id, Arc::clone(db)));
+                    if let Err(e) = ws.seed_if_empty().await {
+                        tracing::warn!(
+                            user_id = user_id,
+                            "Failed to seed per-user workspace: {}",
+                            e
+                        );
+                    }
+                    Some(ws)
+                } else {
+                    None
+                }
+            }
         };
 
         crate::tenant::TenantCtx::new(
@@ -1262,6 +1274,34 @@ impl Agent {
 
         // Build per-tenant execution context once; threaded through all handlers.
         let tenant = self.tenant_ctx(&message.user_id).await;
+
+        // Per-user bootstrap: if this user's workspace was just seeded (fresh),
+        // persist the static greeting to their assistant conversation and
+        // broadcast it so the web client shows it immediately.
+        if tenant
+            .workspace()
+            .is_some_and(|ws| ws.take_bootstrap_pending())
+        {
+            tracing::info!(
+                user_id = message.user_id,
+                "Fresh user workspace — persisting bootstrap greeting"
+            );
+            if let Some(store) = tenant.store()
+                && let Ok(conv_id) = store
+                    .get_or_create_assistant_conversation(&message.channel)
+                    .await
+            {
+                let _ = store
+                    .add_conversation_message(conv_id, "assistant", BOOTSTRAP_GREETING)
+                    .await;
+                let mut out = OutgoingResponse::text(BOOTSTRAP_GREETING.to_string());
+                out.thread_id = Some(conv_id.to_string());
+                let _ = self
+                    .channels
+                    .broadcast(&message.channel, &message.user_id, out)
+                    .await;
+            }
+        }
 
         let session_for_empty_exit = Arc::clone(&session);
 

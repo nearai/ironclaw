@@ -295,6 +295,9 @@ impl McpClient {
     }
 
     /// Get the access token for this server (if authenticated).
+    ///
+    /// If the stored token has expired, automatically attempts a refresh using
+    /// the stored refresh token before failing.
     async fn get_access_token(&self) -> Result<Option<String>, ToolError> {
         let Some(ref secrets) = self.secrets else {
             return Ok(None);
@@ -311,6 +314,33 @@ impl McpClient {
         {
             Ok(token) => Ok(Some(token.expose().to_string())),
             Err(crate::secrets::SecretError::NotFound(_)) => Ok(None),
+            Err(crate::secrets::SecretError::Expired) => {
+                // Token expired — attempt refresh before failing.
+                tracing::info!(
+                    server = %self.server_name,
+                    "Access token expired, attempting refresh"
+                );
+                match refresh_access_token(config, secrets, &self.user_id).await {
+                    Ok(new_token) => {
+                        tracing::info!(
+                            server = %self.server_name,
+                            "Access token refreshed successfully"
+                        );
+                        Ok(Some(new_token.access_token))
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            server = %self.server_name,
+                            "Token refresh failed: {}", e
+                        );
+                        Err(ToolError::ExternalService(format!(
+                            "Failed to get access token: Secret has expired \
+                             and refresh failed: {}",
+                            e
+                        )))
+                    }
+                }
+            }
             Err(e) => Err(ToolError::ExternalService(format!(
                 "Failed to get access token: {}",
                 e

@@ -14,9 +14,12 @@ scenarios/test_extensions.py
 scenarios/test_html_injection.py
 scenarios/test_mcp_auth_flow.py
 scenarios/test_oauth_credential_fallback.py
+scenarios/test_oauth_refresh.py
+scenarios/test_oauth_url_parameters.py
 scenarios/test_owner_scope.py
 scenarios/test_pairing.py
 scenarios/test_routine_event_batch.py
+scenarios/test_routine_full_job.py
 scenarios/test_routine_oauth_credential_injection.py
 scenarios/test_skills.py
 scenarios/test_sse_reconnect.py

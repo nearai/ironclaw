@@ -291,7 +291,19 @@ impl McpServerConfig {
     }
 
     /// Get the secret name used to store the refresh token.
+    ///
+    /// Matches the convention used by the hosted OAuth flow in
+    /// `store_oauth_tokens`: `{token_secret_name}_refresh_token`.
     pub fn refresh_token_secret_name(&self) -> String {
+        format!("{}_refresh_token", self.token_secret_name())
+    }
+
+    /// Legacy secret name for refresh tokens (pre-v0.22).
+    ///
+    /// Earlier versions stored refresh tokens as `mcp_{name}_refresh_token`
+    /// instead of `{token_secret_name}_refresh_token`. Used as a fallback
+    /// during lookup to avoid forcing re-auth on existing users.
+    pub fn legacy_refresh_token_secret_name(&self) -> String {
         format!("mcp_{}_refresh_token", self.name)
     }
 
@@ -944,8 +956,15 @@ mod tests {
     fn test_token_secret_names() {
         let config = McpServerConfig::new("notion", "https://mcp.notion.com");
         assert_eq!(config.token_secret_name(), "mcp_notion_access_token");
+        // Refresh token name follows the hosted OAuth convention:
+        // {token_secret_name}_refresh_token
         assert_eq!(
             config.refresh_token_secret_name(),
+            "mcp_notion_access_token_refresh_token"
+        );
+        // Legacy name used before v0.22 — fallback lookup prevents forced re-auth
+        assert_eq!(
+            config.legacy_refresh_token_secret_name(),
             "mcp_notion_refresh_token"
         );
     }

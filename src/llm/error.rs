@@ -17,6 +17,9 @@ pub enum LlmError {
     #[error("Invalid response from {provider}: {reason}")]
     InvalidResponse { provider: String, reason: String },
 
+    #[error("Empty response from {provider}: no content returned")]
+    EmptyResponse { provider: String },
+
     #[error("Context length exceeded: {used} tokens used, {limit} allowed")]
     ContextLengthExceeded { used: usize, limit: usize },
 

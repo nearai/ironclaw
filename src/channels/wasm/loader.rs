@@ -317,6 +317,14 @@ impl LoadedChannel {
             .map(|f| f.webhook_secret_name())
             .unwrap_or_else(|| format!("{}_webhook_secret", self.channel.channel_name()))
     }
+
+    /// Whether the host should enforce generic webhook-secret validation.
+    pub fn webhook_secret_managed_by_host(&self) -> bool {
+        self.capabilities_file
+            .as_ref()
+            .map(|f| f.webhook_secret_managed_by_host())
+            .unwrap_or(true)
+    }
 }
 
 /// Results from loading multiple channels.
