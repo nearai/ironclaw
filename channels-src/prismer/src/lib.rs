@@ -207,7 +207,13 @@ fn respond_json(status: u16, body: serde_json::Value) -> OutgoingHttpResponse {
     OutgoingHttpResponse {
         status,
         headers_json: r#"{"Content-Type":"application/json"}"#.to_string(),
-        body: serde_json::to_vec(&body).unwrap_or_default(),
+        body: serde_json::to_vec(&body).unwrap_or_else(|e| {
+            channel_host::log(
+                channel_host::LogLevel::Error,
+                &format!("Failed to serialize response body: {}", e),
+            );
+            Vec::new()
+        }),
     }
 }
 
@@ -228,7 +234,15 @@ fn api_request(
         })
     };
 
-    let body_bytes = body.map(|b| serde_json::to_vec(b).unwrap_or_default());
+    let body_bytes = body.map(|b| {
+        serde_json::to_vec(b).unwrap_or_else(|e| {
+            channel_host::log(
+                channel_host::LogLevel::Error,
+                &format!("Failed to serialize request body: {}", e),
+            );
+            Vec::new()
+        })
+    });
 
     let resp = channel_host::http_request(
         method,
@@ -468,7 +482,13 @@ impl Guest for PrismerChannel {
         }
 
         // Skip self-messages
-        let my_id = channel_host::workspace_read(IM_USER_ID_PATH).unwrap_or_default();
+        let my_id = channel_host::workspace_read(IM_USER_ID_PATH).unwrap_or_else(|| {
+            channel_host::log(
+                channel_host::LogLevel::Warn,
+                "Failed to read IM user ID from workspace",
+            );
+            String::new()
+        });
         if payload.sender.id == my_id {
             return respond_json(
                 200,
@@ -507,7 +527,13 @@ impl Guest for PrismerChannel {
             user_name: Some(payload.sender.display_name),
             content: content.to_string(),
             thread_id: Some(payload.conversation.id),
-            metadata_json: serde_json::to_string(&metadata).unwrap_or_default(),
+            metadata_json: serde_json::to_string(&metadata).unwrap_or_else(|e| {
+                channel_host::log(
+                    channel_host::LogLevel::Error,
+                    &format!("Failed to serialize webhook metadata: {}", e),
+                );
+                String::new()
+            }),
         });
 
         channel_host::log(
@@ -534,7 +560,13 @@ impl Guest for PrismerChannel {
         };
 
         let config = read_config();
-        let my_id = channel_host::workspace_read(IM_USER_ID_PATH).unwrap_or_default();
+        let my_id = channel_host::workspace_read(IM_USER_ID_PATH).unwrap_or_else(|| {
+            channel_host::log(
+                channel_host::LogLevel::Warn,
+                "Failed to read IM user ID from workspace during poll",
+            );
+            String::new()
+        });
 
         // Fetch conversations with unread messages
         let conv_url = format!(
@@ -598,7 +630,13 @@ impl Guest for PrismerChannel {
             }
 
             let cursor_key = format!("cursor_{}", conv.id);
-            let cursor = channel_host::workspace_read(&cursor_key).unwrap_or_default();
+            let cursor = channel_host::workspace_read(&cursor_key).unwrap_or_else(|| {
+                channel_host::log(
+                    channel_host::LogLevel::Debug,
+                    &format!("No cursor for conversation {}, starting from beginning", conv.id),
+                );
+                String::new()
+            });
 
             let mut msg_url = format!(
                 "{}/api/im/messages/{}",
@@ -709,7 +747,13 @@ impl Guest for PrismerChannel {
                     user_name: None,
                     content: content.to_string(),
                     thread_id: Some(conv.id.clone()),
-                    metadata_json: serde_json::to_string(&metadata).unwrap_or_default(),
+                    metadata_json: serde_json::to_string(&metadata).unwrap_or_else(|e| {
+                        channel_host::log(
+                            channel_host::LogLevel::Error,
+                            &format!("Failed to serialize poll metadata: {}", e),
+                        );
+                        String::new()
+                    }),
                 });
             }
 
@@ -726,8 +770,13 @@ impl Guest for PrismerChannel {
                 config.base_url, conv.id
             );
             // Re-read JWT for mark-as-read (may have been refreshed above)
-            let read_jwt =
-                channel_host::workspace_read(JWT_PATH).unwrap_or_default();
+            let read_jwt = channel_host::workspace_read(JWT_PATH).unwrap_or_else(|| {
+                channel_host::log(
+                    channel_host::LogLevel::Warn,
+                    "No JWT available for mark-as-read request",
+                );
+                String::new()
+            });
             let _ = api_request("POST", &read_url, &read_jwt, None);
         }
     }

@@ -1,0 +1,33 @@
+{
+  "name": "prismer",
+  "display_name": "Prismer Cloud IM",
+  "kind": "channel",
+  "version": "0.1.0",
+  "wit_version": "0.2.0",
+  "description": "Prismer Cloud IM channel for agent-to-agent and human-to-agent messaging",
+  "keywords": [
+    "messaging",
+    "chat",
+    "agent-to-agent",
+    "prismer"
+  ],
+  "source": {
+    "dir": "channels-src/prismer",
+    "capabilities": "prismer.capabilities.json",
+    "crate_name": "prismer-channel"
+  },
+  "artifacts": {},
+  "auth_summary": {
+    "method": "manual",
+    "provider": "Prismer Cloud",
+    "secrets": [
+      "prismer_api_key",
+      "prismer_webhook_secret"
+    ],
+    "shared_auth": null,
+    "setup_url": "https://prismer.cloud"
+  },
+  "tags": [
+    "messaging"
+  ]
+}
