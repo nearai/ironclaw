@@ -892,6 +892,24 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                 };
 
                 if needs_approval {
+                    // Routine review turns have no interactive user to
+                    // approve tools — auto-deny to prevent the thread
+                    // from wedging in AwaitingApproval state.
+                    if self.message_source == MessageSource::RoutineReview {
+                        tracing::info!(
+                            tool = %tc.name,
+                            "Auto-denying approval-requiring tool in routine review turn"
+                        );
+                        let reject_msg = format!(
+                            "Tool '{}' requires approval and cannot run during \
+                             routine review (no interactive user to approve). \
+                             Consider using tools that don't require approval.",
+                            tc.name
+                        );
+                        preflight.push((tc, PreflightOutcome::Rejected(reject_msg)));
+                        continue;
+                    }
+
                     // In non-DM relay channels, auto-deny approval-
                     // requiring tools to prevent stuck AwaitingApproval
                     // state and prompt injection from other users.
