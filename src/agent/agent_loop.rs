@@ -1396,7 +1396,7 @@ impl Agent {
                     };
                 }
                 // Authorization checks (including restart channel check) are enforced in handle_system_command
-                self.handle_system_command(&command, &args, &message.channel, &tenant)
+                self.handle_system_command(session, &command, &args, &message.channel, &tenant)
                     .await
             }
             Submission::Undo => self.process_undo(session, thread_id).await,

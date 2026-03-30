@@ -149,6 +149,19 @@ impl SubmissionParser {
             }
         }
 
+        // /history [args] - list real session threads / conversations
+        if lower == "/history" || lower.starts_with("/history ") {
+            let args: Vec<String> = trimmed
+                .split_whitespace()
+                .skip(1)
+                .map(|s| s.to_string())
+                .collect();
+            return Submission::SystemCommand {
+                command: "history".to_string(),
+                args,
+            };
+        }
+
         // /thread <uuid> - switch thread
         if let Some(rest) = lower.strip_prefix("/thread ") {
             let rest = rest.trim();
@@ -538,6 +551,15 @@ mod tests {
     fn test_parser_heartbeat() {
         let submission = SubmissionParser::parse("/heartbeat");
         assert!(matches!(submission, Submission::Heartbeat));
+    }
+
+    #[test]
+    fn test_parser_history() {
+        let submission = SubmissionParser::parse("/history");
+        assert!(matches!(submission, Submission::SystemCommand { command, args } if command == "history" && args.is_empty()));
+
+        let submission = SubmissionParser::parse("/history all");
+        assert!(matches!(submission, Submission::SystemCommand { command, args } if command == "history" && args == vec!["all"]));
     }
 
     #[test]

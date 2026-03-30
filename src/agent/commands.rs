@@ -27,10 +27,28 @@ fn format_count(n: u64, suffix: &str) -> String {
     }
 }
 
+fn format_history_line(
+    prefix: char,
+    id: Uuid,
+    label: &str,
+    count_label: &str,
+    count: i64,
+    updated_at: &str,
+    title: Option<&str>,
+) -> String {
+    let mut line = format!("{} {} [{}] {}={} updated={}", prefix, id, label, count_label, count, updated_at);
+    if let Some(title) = title
+        && !title.is_empty() {
+        line.push_str(&format!(" — {}", title));
+    }
+    line
+}
+
 impl Agent {
     /// Handle job-related intents without turn tracking.
     pub(super) async fn handle_job_or_command(
         &self,
+        session: Arc<Mutex<Session>>,
         intent: MessageIntent,
         message: &IncomingMessage,
         tenant: &crate::tenant::TenantCtx,
@@ -64,7 +82,7 @@ impl Agent {
             MessageIntent::HelpJob { job_id } => self.handle_help_job(tenant, &job_id).await?,
             MessageIntent::Command { command, args } => {
                 match self
-                    .handle_command(&command, &args, &message.channel, tenant)
+                    .handle_command(session, &command, &args, &message.channel, tenant)
                     .await?
                 {
                     Some(s) => s,
@@ -104,6 +122,101 @@ impl Agent {
             "Created job: {}\nID: {}\n\nThe job has been scheduled and is now running.",
             title, job_id
         ))
+    }
+
+    async fn handle_history_command(
+        &self,
+        session: Arc<Mutex<Session>>,
+        tenant: &crate::tenant::TenantCtx,
+    ) -> Result<String, Error> {
+        let (session_id, active_thread, threads) = {
+            let sess = session.lock().await;
+            (
+                sess.id,
+                sess.active_thread,
+                sess.threads.values().cloned().collect::<Vec<_>>(),
+            )
+        };
+
+        let mut output = String::new();
+        output.push_str(&format!("Session: {}\n", session_id));
+        if let Some(active) = active_thread {
+            output.push_str(&format!("Active thread: {}\n", active));
+        }
+
+        let mut listed_any = false;
+        let mut seen_threads = std::collections::HashSet::new();
+
+        if let Some(store) = tenant.store() {
+            match store.list_conversations_all_channels(50).await {
+                Ok(mut summaries) if !summaries.is_empty() => {
+                    summaries.sort_by_key(|s| std::cmp::Reverse(s.last_activity));
+                    output.push_str("Persistent threads:\n");
+                    for summary in summaries {
+                        seen_threads.insert(summary.id);
+                        listed_any = true;
+                        let prefix = if Some(summary.id) == active_thread { '*' } else { ' ' };
+                        let label = match summary.thread_type.as_deref() {
+                            Some(thread_type) => format!("{}/{}", thread_type, summary.channel),
+                            None => summary.channel.clone(),
+                        };
+                        let line = format_history_line(
+                            prefix,
+                            summary.id,
+                            &label,
+                            "messages",
+                            summary.message_count.max(0),
+                            &summary.last_activity.to_rfc3339(),
+                            summary.title.as_deref(),
+                        );
+                        output.push_str(&line);
+                        output.push('\n');
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::debug!("[commands::history] Failed to list persistent conversations: {}", e);
+                }
+            }
+        }
+
+        let mut in_memory_threads: Vec<_> = threads
+            .into_iter()
+            .filter(|thread| !seen_threads.contains(&thread.id))
+            .collect();
+        in_memory_threads.sort_by_key(|thread| std::cmp::Reverse(thread.updated_at));
+
+        if !in_memory_threads.is_empty() || !listed_any {
+            if listed_any {
+                output.push('\n');
+            }
+            output.push_str("Current session threads:\n");
+            if in_memory_threads.is_empty() {
+                output.push_str("  (no threads yet)\n");
+            } else {
+                for thread in in_memory_threads {
+                    let prefix = if Some(thread.id) == active_thread { '*' } else { ' ' };
+                    let title = thread
+                        .metadata
+                        .get("title")
+                        .and_then(|v| v.as_str());
+                    let line = format_history_line(
+                        prefix,
+                        thread.id,
+                        &format!("{:?}", thread.state),
+                        "turns",
+                        thread.turns.len() as i64,
+                        &thread.updated_at.to_rfc3339(),
+                        title,
+                    );
+                    output.push_str(&line);
+                    output.push('\n');
+                }
+            }
+        }
+
+        output.push_str("\nUse /thread <id> to switch threads.");
+        Ok(output.trim_end().to_string())
     }
 
     async fn handle_check_status(
@@ -563,6 +676,7 @@ impl Agent {
     /// Handle system commands that bypass thread-state checks entirely.
     pub(super) async fn handle_system_command(
         &self,
+        session: Arc<Mutex<Session>>,
         command: &str,
         args: &[String],
         channel: &str,
@@ -593,6 +707,7 @@ impl Agent {
                 "  /interrupt        Stop current operation\n",
                 "  /new              New conversation thread\n",
                 "  /thread <id>      Switch to thread\n",
+                "  /history          List threads/sessions\n",
                 "  /resume <id>      Resume from checkpoint\n",
                 "\n",
                 "Skills:\n",
@@ -684,6 +799,11 @@ impl Agent {
                     "Available tools: {}",
                     tools.join(", ")
                 )))
+            }
+
+            "history" => {
+                let history = self.handle_history_command(session, tenant).await?;
+                Ok(SubmissionResult::response(history))
             }
 
             "debug" => {
@@ -924,6 +1044,7 @@ impl Agent {
     /// process_user_input -> router -> handle_job_or_command -> here).
     pub(super) async fn handle_command(
         &self,
+        session: Arc<Mutex<Session>>,
         command: &str,
         args: &[String],
         channel: &str,
@@ -932,7 +1053,7 @@ impl Agent {
         // System commands are now handled directly via Submission::SystemCommand,
         // but the router may still send us unknown /commands.
         match self
-            .handle_system_command(command, args, channel, tenant)
+            .handle_system_command(session, command, args, channel, tenant)
             .await?
         {
             SubmissionResult::Response { content } => Ok(Some(content)),

@@ -352,7 +352,9 @@ impl Agent {
 
         if let Some(intent) = self.router.route_command(&temp_message) {
             // Explicit command like /status, /job, /list - handle directly
-            return self.handle_job_or_command(intent, message, &tenant).await;
+            return self
+                .handle_job_or_command(session.clone(), intent, message, &tenant)
+                .await;
         }
 
         // Natural language goes through the agentic loop

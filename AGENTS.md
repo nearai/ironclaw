@@ -1,94 +1,68 @@
 # Agent Rules
 
 ## Purpose and Precedence
-
-- `AGENTS.md` is the quick-start contract for coding agents. It is not the full architecture spec.
-- Read the relevant subsystem spec before changing a complex area. When a repo spec exists, treat it as authoritative.
-Start with these deeper docs as needed:
-- `CLAUDE.md`
-- `src/agent/CLAUDE.md`
-- `src/channels/web/CLAUDE.md`
-- `src/db/CLAUDE.md`
-- `src/llm/CLAUDE.md`
-- `src/setup/README.md`
-- `src/tools/README.md`
-- `src/workspace/README.md`
-- `src/NETWORK_SECURITY.md`
-- `tests/e2e/CLAUDE.md`
+- `AGENTS.md` is quick-start; read subsystem specs for complex changes.
+- Deeper docs: `CLAUDE.md`, `src/agent/CLAUDE.md`, `src/channels/web/CLAUDE.md`, `src/db/CLAUDE.md`, `src/llm/CLAUDE.md`, `src/setup/README.md`, `src/tools/README.md`, `src/workspace/README.md`, `src/NETWORK_SECURITY.md`, `tests/e2e/CLAUDE.md`
 
 ## Architecture Mental Model
-
-- Channels normalize external input into `IncomingMessage`; `ChannelManager` merges all active channel streams.
-- `Agent` owns session/thread/turn handling, submission parsing, the LLM/tool loop, approvals, routines, and background runtime behavior.
-- `AppBuilder` is the composition root that wires database, secrets, LLMs, tools, workspace, extensions, skills, hooks, and cost controls before the agent starts.
-- The web gateway is a browser-facing API/UI layered on top of the same agent/session/tool systems, not a separate product path.
+- Channels normalize input → `IncomingMessage`; `ChannelManager` merges streams.
+- `Agent` owns session/thread/turn, LLM/tool loop, approvals, routines.
+- `AppBuilder` wires DB, secrets, LLMs, tools, workspace, extensions, hooks.
+- Web gateway layers on agent/session/tool systems.
 
 ## Where to Work
-
-- Agent/runtime behavior: `src/agent/`
+- Agent/runtime: `src/agent/`
 - Web gateway/API/SSE/WebSocket: `src/channels/web/`
-- Persistence and DB abstractions: `src/db/`
-- Setup/onboarding/configuration flow: `src/setup/`
-- LLM providers and routing: `src/llm/`
-- Workspace, memory, embeddings, search: `src/workspace/`
-- Extensions, tools, channels, MCP, WASM: `src/extensions/`, `src/tools/`, `src/channels/`
+- Persistence: `src/db/`
+- Setup/onboarding: `src/setup/`
+- LLM providers: `src/llm/`
+- Workspace/memory/embeddings: `src/workspace/`
+- Extensions/tools/channels/MCP/WASM: `src/extensions/`, `src/tools/`, `src/channels/`
 
-## Ownership and Composition Rules
+## Ownership and Composition
+- Keep `main.rs`/`app.rs` orchestration-focused.
+- Module-specific init lives in owning module.
+- Feature-flag branching inside owning module.
 
-- Keep `src/main.rs` and `src/app.rs` orchestration-focused. Do not move module-owned logic into entrypoints.
-- Module-specific initialization should live in the owning module behind a public factory/helper, not be reimplemented ad hoc.
-- Keep feature-flag branching inside the module that owns the abstraction whenever possible.
-- Prefer extending existing traits and registries over hardcoding one-off integration paths.
+## Coding Rules
+- No `.unwrap()`/`.expect()` in production (tests OK, infallible literals OK with comment).
+- Clippy clean, zero warnings.
+- Prefer `crate::` imports.
+- Strong types/enums over stringly-typed control flow.
 
-## Repo-Wide Coding Rules
+## Database and Config
+- New persistence must support PostgreSQL and libSQL.
+- Add to shared DB trait first, implement both backends.
+- Bootstrap config, DB-backed settings, encrypted secrets are distinct layers.
+- Update `src/setup/README.md` if onboarding changes.
 
-- Avoid `.unwrap()` and `.expect()` in production; prefer proper error handling. They are fine in tests, and in production only for truly infallible invariants (e.g., literals/regexes) with a safety comment.
-- Keep clippy clean with zero warnings.
-- Prefer `crate::` imports for cross-module references.
-- Use strong types and enums over stringly-typed control flow when the shape is known.
+## Security and Runtime
+- Review listeners, routes, auth, secrets, sandboxing, approvals, outbound HTTP.
+- Do not weaken bearer-token auth, webhook auth, CORS, body limits, rate limits, allowlists.
+- Docker/external services are untrusted.
+- Submission parsing precedes chat handling.
+- Skills selected deterministically; tool approval/auth are special paths.
+- Persistent memory = workspace system (file-like semantics, chunking/search).
 
-## Database, Setup, and Config Rules
+## Tools, Channels, Extensions
+- Built-in Rust tool: core internal capabilities.
+- WASM tools/channels: sandboxed extensions, plugins.
+- MCP: external server integrations.
+- Preserve extension lifecycle: install → auth/config → activate → remove.
 
-- New persistence behavior must support both PostgreSQL and libSQL.
-- Add new DB operations to the shared DB trait first, then implement both backends.
-- Treat bootstrap config, DB-backed settings, and encrypted secrets as distinct layers; do not collapse them casually.
-- If onboarding or setup behavior changes, update `src/setup/README.md` in the same branch.
-- Do not break config precedence, bootstrap env loading, DB-backed config reload, or post-secrets LLM re-resolution.
-
-## Security and Runtime Invariants
-
-- Review any change touching listeners, routes, auth, secrets, sandboxing, approvals, or outbound HTTP with a security mindset.
-- Do not weaken bearer-token auth, webhook auth, CORS/origin checks, body limits, rate limits, allowlists, or secret-handling guarantees.
-- Treat Docker containers and external services as untrusted.
-- Session/thread/turn state matters. Submission parsing happens before normal chat handling.
-- Skills are selected deterministically. Tool approval and auth flows are special paths and must not be mixed into normal chat history carelessly.
-- Persistent memory is the workspace system, not just transcript storage; preserve file-like semantics, chunking/search behavior, and identity/system-prompt loading.
-
-## Tools, Channels, and Extensions
-
-- Use a built-in Rust tool for core internal capabilities tightly coupled to the runtime.
-- Use WASM tools or WASM channels for sandboxed extensions and plugin-style integrations.
-- Use MCP for external server integrations when the capability belongs outside the main binary.
-- Preserve extension lifecycle expectations: install, authenticate/configure, activate, remove.
-
-## Docs, Parity, and Testing
-
-- If behavior changes, update the relevant docs/specs in the same branch.
-- If you change implementation status for any feature tracked in `FEATURE_PARITY.md`, update that file in the same branch.
-- Do not open a PR that changes feature behavior without checking `FEATURE_PARITY.md` for needed status updates (`❌`, `🚧`, `✅`, notes, and priorities).
-- Add the narrowest tests that validate the change: unit tests for local logic, integration tests for runtime/DB/routing behavior, and E2E or trace coverage for gateway, approvals, extensions, or other user-visible flows.
+## Docs, Parity, Testing
+- Update docs/specs with behavior changes.
+- Update `FEATURE_PARITY.md` status (`❌`, `🚧`, `✅`) when implementation changes.
+- Narrowest tests: unit (local), integration (runtime/DB/routing), E2E (gateway/approvals/extensions).
 
 ## Risk and Change Discipline
-
-- Keep changes scoped; avoid broad refactors unless the task truly requires them.
-- Security, database schema, runtime, worker, CI, and secrets changes are high-risk. Call out rollback risks, compatibility concerns, and hidden side effects.
-- Preserve existing defaults unless the task explicitly changes them.
-- Avoid unrelated file churn and generated-file edits unless required.
-- Respect a dirty worktree and never revert user changes you did not make.
+- Keep changes scoped; avoid broad refactors.
+- High-risk: security, DB schema, runtime, worker, CI, secrets.
+- Preserve existing defaults unless task explicitly changes them.
+- No unrelated file churn.
 
 ## Before Finishing
-
-- Confirm whether behavior changes require updates to `FEATURE_PARITY.md`, specs, API docs, or `CHANGELOG.md`.
-- Run the most targeted tests/checks that cover the change.
-- Re-check security-sensitive paths when touching auth, secrets, network listeners, sandboxing, or approvals.
-- Keep the final diff scoped to the task.
+- Check `FEATURE_PARITY.md`, specs, API docs, `CHANGELOG.md` for needed updates.
+- Run targeted tests covering the change.
+- Re-check security paths (auth, secrets, listeners, sandboxing, approvals).
+- Keep diff scoped to task.
