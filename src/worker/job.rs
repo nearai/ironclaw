@@ -1529,15 +1529,16 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
             return TextAction::Continue;
         }
 
-        // Record communication for drift monitor (non-empty trimmed text only)
-        {
-            let mut monitor = self.drift_monitor.lock().await;
-            monitor.record_communication();
-        }
-
         // Jobs run autonomously — strip <suggestions> tags that are only
         // meaningful for interactive chat sessions.
         let text = crate::agent::strip_suggestions(text);
+
+        // Record communication for drift monitor only if the stripped text
+        // is non-empty. Whitespace-only text should not reset silence drift.
+        if !text.trim().is_empty() {
+            let mut monitor = self.drift_monitor.lock().await;
+            monitor.record_communication();
+        }
 
         // A non-empty text response with no tool intent (already filtered
         // by the agentic loop's nudge mechanism) is the LLM's final answer.
@@ -2658,6 +2659,64 @@ mod tests {
         assert!(
             !reason_ctx.messages.is_empty(),
             "Error message should be added to reason_ctx for the LLM"
+        );
+    }
+
+    /// Regression: whitespace-only text in handle_text_response must NOT
+    /// reset silence drift detection. The empty check (`text.is_empty()`)
+    /// only catches truly empty strings; whitespace must be caught by the
+    /// trimmed communication gate after strip_suggestions.
+    #[tokio::test]
+    async fn test_whitespace_text_does_not_reset_silence_drift() {
+        let worker = make_worker(vec![]).await;
+        worker
+            .context_manager()
+            .update_context(worker.job_id, |ctx| {
+                ctx.transition_to(JobState::InProgress, None)
+            })
+            .await
+            .unwrap() // safety: test
+            .unwrap(); // safety: test
+
+        let (_, mut rx) = tokio::sync::mpsc::channel(1);
+        let drift_config = crate::agent::drift_monitor::DriftConfig {
+            silence_threshold: 1,
+            ..crate::agent::drift_monitor::DriftConfig::default()
+        };
+        let delegate = JobDelegate {
+            worker: &worker,
+            rx: tokio::sync::Mutex::new(&mut rx),
+            consecutive_rate_limits: std::sync::atomic::AtomicUsize::new(0),
+            has_text_response: std::sync::atomic::AtomicBool::new(false),
+            drift_monitor: tokio::sync::Mutex::new(crate::agent::drift_monitor::DriftMonitor::new(
+                drift_config,
+            )),
+            recovery_state: tokio::sync::Mutex::new(AutonomousRecoveryState::default()),
+        };
+
+        // Prime the monitor: 1 iteration of tool calls so silence counter = 1
+        {
+            let mut monitor = delegate.drift_monitor.lock().await;
+            monitor.set_iteration(1);
+            monitor.record_tool_calls(&[("tool".to_string(), 1, true)]);
+        }
+
+        // Whitespace-only text should NOT reset the silence counter
+        let mut reason_ctx = ReasoningContext::new();
+        let _ = delegate
+            .handle_text_response("   ", ResponseMetadata::default(), &mut reason_ctx)
+            .await;
+
+        // Silence threshold is 1. If whitespace didn't reset the counter,
+        // SilenceDrift should fire.
+        let mut monitor = delegate.drift_monitor.lock().await;
+        let correction = monitor.check_and_mark();
+        assert!(
+            matches!(
+                correction,
+                Some(crate::agent::drift_monitor::DriftCorrection::SilenceDrift { .. })
+            ),
+            "whitespace-only text must not reset silence drift: got {correction:?}"
         );
     }
 }
