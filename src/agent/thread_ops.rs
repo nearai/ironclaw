@@ -1800,16 +1800,48 @@ impl Agent {
             .session_manager
             .get_or_create_session(&message.user_id)
             .await;
-        let mut sess = session.lock().await;
-
-        if sess.switch_thread(target_thread_id) {
-            Ok(SubmissionResult::ok_with_message(format!(
-                "Switched to thread {}",
-                target_thread_id
-            )))
-        } else {
-            Ok(SubmissionResult::error("Thread not found."))
+        
+        // First, try to switch to an in-memory thread
+        {
+            let mut sess = session.lock().await;
+            if sess.switch_thread(target_thread_id) {
+                return Ok(SubmissionResult::ok_with_message(format!(
+                    "Switched to thread {}",
+                    target_thread_id
+                )));
+            }
         }
+        
+        // Thread not in memory — try to hydrate from persistent store
+        if let Some(store) = self.store() {
+            // Verify the thread exists and belongs to this user
+            let owned = store
+                .conversation_belongs_to_user(target_thread_id, &message.user_id)
+                .await
+                .unwrap_or(false);
+            
+            if owned {
+                // Hydrate the thread from DB
+                if let Some(error_msg) = self.maybe_hydrate_thread(message, &target_thread_id.to_string()).await {
+                    // Hydration failed with a specific error
+                    return Ok(SubmissionResult::error(error_msg));
+                }
+                
+                // Retry the switch after hydration
+                let mut sess = session.lock().await;
+                if sess.switch_thread(target_thread_id) {
+                    return Ok(SubmissionResult::ok_with_message(format!(
+                        "Switched to thread {} (hydrated from history)",
+                        target_thread_id
+                    )));
+                }
+            }
+        }
+        
+        Ok(SubmissionResult::error(format!(
+            "Thread {} not found. Use /history to list available threads.",
+            target_thread_id
+        )))
     }
 
     pub(super) async fn process_resume(
