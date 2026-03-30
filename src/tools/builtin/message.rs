@@ -12,8 +12,33 @@ use crate::channels::{ChannelManager, OutgoingResponse};
 use crate::context::JobContext;
 use crate::extensions::ExtensionManager;
 use crate::tools::tool::{
-    ApprovalRequirement, Tool, ToolError, ToolOutput, ToolRateLimitConfig, require_str,
+    ApprovalRequirement, Tool, ToolDiscoverySummary, ToolError, ToolOutput, ToolRateLimitConfig,
+    require_str,
 };
+
+fn message_tool_summary() -> ToolDiscoverySummary {
+    ToolDiscoverySummary {
+        always_required: vec!["content".into()],
+        conditional_requirements: vec![
+            "Omitting 'channel' defaults to the current conversation's channel.".into(),
+            "Omitting 'target' defaults to the current sender/group.".into(),
+            "Attachments must be files under ~/.ironclaw or /tmp/ (download with http tool first).".into(),
+        ],
+        notes: vec![
+            "Signal targets: E.164 phone number (+1234567890) or group ID.".into(),
+            "Telegram targets: username (@alice), bare username, or chat ID (numeric).".into(),
+            "Slack targets: channel name (#general) or user ID (U1234567890).".into(),
+            "For interactive chat, omit channel and target to reply in the current conversation.".into(),
+            "Images are sent as photos on Telegram; other file types pass through as attachments.".into(),
+            "Rate limit: 10/min, 100/hour.".into(),
+        ],
+        examples: vec![
+            serde_json::json!({"content": "Hello!"}),
+            serde_json::json!({"content": "Check this out", "channel": "telegram", "target": "@alice"}),
+            serde_json::json!({"content": "Here's the report", "attachments": ["/tmp/report.pdf"]}),
+        ],
+    }
+}
 
 /// Tool for sending messages to channels.
 pub struct MessageTool {
@@ -432,6 +457,10 @@ impl Tool for MessageTool {
 
     fn requires_sanitization(&self) -> bool {
         false
+    }
+
+    fn discovery_summary(&self) -> Option<ToolDiscoverySummary> {
+        Some(message_tool_summary())
     }
 }
 
@@ -1063,5 +1092,16 @@ mod tests {
         assert_eq!(gateway.len(), 1);
         assert_eq!(gateway[0].0, "owner-scope");
         assert_eq!(gateway[0].1.thread_id.as_deref(), Some("thread-123"));
+    }
+
+    #[test]
+    fn message_discovery_summary_explains_routing_and_formats() {
+        let summary = message_tool_summary();
+        assert_eq!(summary.always_required, vec!["content".to_string()]);
+        assert!(summary.notes.iter().any(|n| n.contains("Signal")));
+        assert!(summary.notes.iter().any(|n| n.contains("Telegram")));
+        assert!(summary.notes.iter().any(|n| n.contains("Slack")));
+        assert!(summary.conditional_requirements.iter().any(|r| r.contains("channel")));
+        assert_eq!(summary.examples.len(), 3);
     }
 }

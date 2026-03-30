@@ -5,7 +5,32 @@ use chrono::{DateTime, LocalResult, NaiveDate, NaiveDateTime, TimeZone, Utc};
 use chrono_tz::Tz;
 
 use crate::context::JobContext;
-use crate::tools::tool::{Tool, ToolError, ToolOutput};
+use crate::tools::tool::{Tool, ToolDiscoverySummary, ToolError, ToolOutput};
+
+fn time_tool_summary() -> ToolDiscoverySummary {
+    ToolDiscoverySummary {
+        always_required: vec!["operation".into()],
+        conditional_requirements: vec![
+            "parse/convert/format/diff require 'input' (or legacy alias 'timestamp').".into(),
+            "convert requires 'to_timezone'.".into(),
+            "diff requires 'timestamp2'.".into(),
+        ],
+        notes: vec![
+            "'input' and 'timestamp' are aliases; prefer 'input'.".into(),
+            "Timezones use IANA names (e.g. 'America/New_York', 'Europe/London').".into(),
+            "Naive timestamps (no UTC offset) require 'timezone' or 'from_timezone' to interpret.".into(),
+            "'format' and 'format_string' are aliases for the strftime pattern; prefer 'format_string'.".into(),
+            "The user's timezone is auto-detected from context when available.".into(),
+        ],
+        examples: vec![
+            serde_json::json!({"operation": "now", "timezone": "America/New_York"}),
+            serde_json::json!({"operation": "parse", "input": "2026-03-08 03:30:00", "from_timezone": "America/New_York"}),
+            serde_json::json!({"operation": "convert", "input": "2026-03-08T07:30:00Z", "to_timezone": "Europe/London"}),
+            serde_json::json!({"operation": "format", "input": "2026-03-08T07:30:00Z", "timezone": "America/New_York", "format_string": "%Y-%m-%d %H:%M:%S %Z"}),
+            serde_json::json!({"operation": "diff", "input": "2026-03-01T00:00:00Z", "timestamp2": "2026-03-08T00:00:00Z"}),
+        ],
+    }
+}
 
 /// Tool for getting current time and date operations.
 pub struct TimeTool;
@@ -97,6 +122,10 @@ impl Tool for TimeTool {
 
     fn requires_sanitization(&self) -> bool {
         false // Internal tool, no external data
+    }
+
+    fn discovery_summary(&self) -> Option<ToolDiscoverySummary> {
+        Some(time_tool_summary())
     }
 }
 
@@ -588,5 +617,15 @@ mod tests {
             .expect("empty from_timezone string should not error");
 
         assert!(output.result.get("output").is_some(), "should have output");
+    }
+
+    #[test]
+    fn time_discovery_summary_explains_operations_and_requirements() {
+        let summary = time_tool_summary();
+        assert_eq!(summary.always_required, vec!["operation".to_string()]);
+        assert!(summary.conditional_requirements.iter().any(|r| r.contains("to_timezone")));
+        assert!(summary.conditional_requirements.iter().any(|r| r.contains("timestamp2")));
+        assert!(summary.notes.iter().any(|n| n.contains("IANA")));
+        assert_eq!(summary.examples.len(), 5);
     }
 }

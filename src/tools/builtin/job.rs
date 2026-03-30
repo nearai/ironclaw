@@ -23,7 +23,9 @@ use crate::history::SandboxJobRecord;
 use crate::orchestrator::auth::CredentialGrant;
 use crate::orchestrator::job_manager::{ContainerJobManager, JobMode};
 use crate::secrets::SecretsStore;
-use crate::tools::tool::{ApprovalRequirement, Tool, ToolError, ToolOutput, require_str};
+use crate::tools::tool::{
+    ApprovalRequirement, Tool, ToolDiscoverySummary, ToolError, ToolOutput, require_str,
+};
 use ironclaw_common::AppEvent;
 
 /// Lazy scheduler reference, filled after Agent::new creates the Scheduler.
@@ -70,6 +72,30 @@ async fn resolve_job_id(input: &str, context_manager: &ContextManager) -> Result
             "ambiguous prefix '{}' matches {} jobs, provide more characters",
             input, n
         ))),
+    }
+}
+
+fn create_job_tool_summary() -> ToolDiscoverySummary {
+    ToolDiscoverySummary {
+        always_required: vec!["title".into(), "description".into()],
+        conditional_requirements: vec![
+            "mode='claude_code' uses Claude Code CLI for complex software engineering tasks.".into(),
+            "credentials requires each secret to already exist in the secrets store (via 'ironclaw tool auth' or web UI).".into(),
+            "project_dir must be an existing directory under ~/.ironclaw/projects/. Auto-created if omitted.".into(),
+        ],
+        notes: vec![
+            "wait defaults to true (blocks up to 10 minutes for completion).".into(),
+            "Set wait=false to start the job and return immediately; poll with job_status or job_events.".into(),
+            "mode defaults to 'worker' (IronClaw sub-agent with shell, file, and patch tools).".into(),
+            "Credential env var names must be uppercase: [A-Z_][A-Z0-9_]* (e.g. GITHUB_TOKEN). Max 20 grants per job.".into(),
+            "Certain env var names are denied (PATH, HOME, LD_PRELOAD, etc.) to prevent process hijacking.".into(),
+            "Rate limit: 5 job creations per 30-second window.".into(),
+        ],
+        examples: vec![
+            serde_json::json!({"title": "Build landing page", "description": "Create a responsive landing page using React and Tailwind CSS"}),
+            serde_json::json!({"title": "Refactor auth module", "description": "Extract auth logic into a separate service", "mode": "claude_code"}),
+            serde_json::json!({"title": "Deploy to staging", "description": "Run the deploy script and verify health checks", "wait": false, "credentials": {"github_token": "GITHUB_TOKEN"}}),
+        ],
     }
 }
 
@@ -920,6 +946,10 @@ impl Tool for CreateJobTool {
 
     fn requires_sanitization(&self) -> bool {
         false
+    }
+
+    fn discovery_summary(&self) -> Option<ToolDiscoverySummary> {
+        Some(create_job_tool_summary())
     }
 }
 
@@ -2263,5 +2293,16 @@ mod tests {
         let cm = ContextManager::new(5);
         let result = resolve_job_id("not-hex-at-all!", &cm).await;
         assert!(result.is_err()); // safety: test
+    }
+
+    #[test]
+    fn create_job_discovery_summary_explains_modes_and_credentials() {
+        let summary = create_job_tool_summary();
+        assert_eq!(summary.always_required, vec!["title".to_string(), "description".to_string()]);
+        assert!(summary.conditional_requirements.iter().any(|r| r.contains("claude_code")));
+        assert!(summary.conditional_requirements.iter().any(|r| r.contains("credentials")));
+        assert!(summary.notes.iter().any(|n| n.contains("wait")));
+        assert!(summary.notes.iter().any(|n| n.contains("uppercase")));
+        assert_eq!(summary.examples.len(), 3);
     }
 }

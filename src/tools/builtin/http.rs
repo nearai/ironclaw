@@ -12,7 +12,9 @@ use reqwest::Client;
 use crate::context::JobContext;
 use crate::safety::LeakDetector;
 use crate::secrets::SecretsStore;
-use crate::tools::tool::{ApprovalRequirement, Tool, ToolError, ToolOutput, require_str};
+use crate::tools::tool::{
+    ApprovalRequirement, Tool, ToolDiscoverySummary, ToolError, ToolOutput, require_str,
+};
 use crate::tools::wasm::{InjectedCredentials, SharedCredentialRegistry, inject_credential};
 
 #[cfg(feature = "html-to-markdown")]
@@ -46,6 +48,31 @@ const USER_AGENT: &str = concat!(
     env!("CARGO_PKG_VERSION"),
     " (https://github.com/nearai/ironclaw)"
 );
+
+fn http_tool_summary() -> ToolDiscoverySummary {
+    ToolDiscoverySummary {
+        always_required: vec!["url".into()],
+        conditional_requirements: vec![
+            "'body' is typical for POST, PUT, and PATCH requests.".into(),
+            "'save_to' must be a path under /tmp/ (for binary downloads).".into(),
+        ],
+        notes: vec![
+            "HTTPS only — http:// URLs are rejected.".into(),
+            "localhost, private IPs, and cloud metadata endpoints are blocked (SSRF protection).".into(),
+            "Headers accept either object {\"Name\": \"Value\"} or array [{\"name\": \"N\", \"value\": \"V\"}] format.".into(),
+            "timeout_secs defaults to 30, maximum 300.".into(),
+            "Response body capped at 5 MB (text) or 50 MB (save_to file downloads).".into(),
+            "Credentials in headers (Authorization, X-API-Key, etc.) or URL query params trigger approval.".into(),
+            "GET with no credentials or custom headers does not require approval.".into(),
+            "Redirects are followed only for simple GETs (max 3 hops); non-GET redirects are blocked.".into(),
+        ],
+        examples: vec![
+            serde_json::json!({"method": "GET", "url": "https://api.example.com/data"}),
+            serde_json::json!({"method": "POST", "url": "https://api.example.com/items", "body": {"name": "test"}, "headers": {"Authorization": "Bearer token"}}),
+            serde_json::json!({"method": "GET", "url": "https://example.com/photo.jpg", "save_to": "/tmp/photo.jpg"}),
+        ],
+    }
+}
 
 /// Tool for making HTTP requests.
 ///
@@ -829,6 +856,10 @@ impl Tool for HttpTool {
         true // External data always needs sanitization
     }
 
+    fn discovery_summary(&self) -> Option<ToolDiscoverySummary> {
+        Some(http_tool_summary())
+    }
+
     fn requires_approval(&self, params: &serde_json::Value) -> ApprovalRequirement {
         let has_credentials = crate::safety::params_contain_manual_credentials(params)
             || (self.credential_registry.as_ref().is_some_and(|registry| {
@@ -1482,5 +1513,16 @@ mod tests {
     fn test_save_to_rejects_bare_tmp() {
         let err = validate_save_to_path("/tmp").unwrap_err();
         assert!(err.to_string().contains("must be under /tmp/"));
+    }
+
+    #[test]
+    fn http_discovery_summary_explains_policies_and_constraints() {
+        let summary = http_tool_summary();
+        assert_eq!(summary.always_required, vec!["url".to_string()]);
+        assert!(summary.notes.iter().any(|n| n.contains("HTTPS only")));
+        assert!(summary.notes.iter().any(|n| n.contains("SSRF")));
+        assert!(summary.notes.iter().any(|n| n.contains("save_to")));
+        assert!(summary.notes.iter().any(|n| n.contains("approval")));
+        assert_eq!(summary.examples.len(), 3);
     }
 }
