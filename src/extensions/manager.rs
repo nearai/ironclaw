@@ -8201,6 +8201,8 @@ mod tests {
             dir.path().join("tools"),
             dir.path().join("channels"),
             Some(store),
+            None,
+            None,
         );
 
         // Set up relay channel manager with a stub channel
@@ -8416,7 +8418,14 @@ mod tests {
                 }
             }"#,
         );
-        let mgr = make_test_manager_with_dirs(None, tools_dir, dir.path().join("channels"), None);
+        let mgr = make_test_manager_with_dirs(
+            None,
+            tools_dir,
+            dir.path().join("channels"),
+            None,
+            None,
+            None,
+        );
 
         store_test_secret(&mgr, "github_token", "access-token").await;
         store_test_secret(&mgr, "github_token_refresh_token", "refresh-token").await;
@@ -8460,7 +8469,14 @@ mod tests {
         );
         std::fs::write(tools_dir.join("broken.wasm"), b"fake-tool").expect("write tool");
 
-        let mgr = make_test_manager_with_dirs(None, tools_dir, dir.path().join("channels"), None);
+        let mgr = make_test_manager_with_dirs(
+            None,
+            tools_dir,
+            dir.path().join("channels"),
+            None,
+            None,
+            None,
+        );
         store_test_secret(&mgr, "shared_token", "access-token").await;
         store_test_secret(&mgr, "shared_token_refresh_token", "refresh-token").await;
         store_test_secret(&mgr, "shared_token_scopes", "repo").await;
@@ -8515,7 +8531,14 @@ mod tests {
                 }
             }"#,
         );
-        let mgr = make_test_manager_with_dirs(None, tools_dir, dir.path().join("channels"), None);
+        let mgr = make_test_manager_with_dirs(
+            None,
+            tools_dir,
+            dir.path().join("channels"),
+            None,
+            None,
+            None,
+        );
 
         for (secret_name, value) in [
             ("google_oauth_token", "access-token"),
@@ -8638,7 +8661,14 @@ mod tests {
                 }
             }"#,
         );
-        let mgr = make_test_manager_with_dirs(None, dir.path().join("tools"), channels_dir, None);
+        let mgr = make_test_manager_with_dirs(
+            None,
+            dir.path().join("tools"),
+            channels_dir,
+            None,
+            None,
+            None,
+        );
 
         store_test_secret(&mgr, "telegram_bot_token", "123:telegram-token").await;
         store_test_secret(&mgr, "telegram_service_token", "tenant-service-token").await;
@@ -8672,6 +8702,8 @@ mod tests {
             dir.path().join("tools"),
             dir.path().join("channels"),
             Some(Arc::clone(&store)),
+            None,
+            None,
         );
         let server = McpServerConfig::new("notion", "https://example.com/mcp");
         mgr.add_mcp_server(server.clone(), "test")
