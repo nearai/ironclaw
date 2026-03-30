@@ -748,4 +748,111 @@ mod tests {
             "Expected same heartbeat conversation on repeated calls"
         );
     }
+
+    #[tokio::test]
+    async fn test_source_channel_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test_source_channel.db");
+        let backend = LibSqlBackend::new_local(&db_path).await.unwrap();
+        backend.run_migrations().await.unwrap();
+
+        let conv_id = Uuid::new_v4();
+        let user_id = "user-src-chan";
+
+        // Create conversation with a source_channel
+        let created = backend
+            .ensure_conversation(conv_id, "telegram", user_id, None, Some("telegram"))
+            .await
+            .unwrap();
+        assert!(created, "first ensure should create");
+
+        // Read it back
+        let source = backend
+            .get_conversation_source_channel(conv_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            source.as_deref(),
+            Some("telegram"),
+            "source_channel should round-trip through DB"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_source_channel_none_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test_source_channel_none.db");
+        let backend = LibSqlBackend::new_local(&db_path).await.unwrap();
+        backend.run_migrations().await.unwrap();
+
+        let conv_id = Uuid::new_v4();
+        let user_id = "user-no-src";
+
+        // Create conversation without source_channel
+        backend
+            .ensure_conversation(conv_id, "http", user_id, None, None)
+            .await
+            .unwrap();
+
+        let source = backend
+            .get_conversation_source_channel(conv_id)
+            .await
+            .unwrap();
+        assert!(
+            source.is_none(),
+            "None source_channel should persist as NULL"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_source_channel_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test_source_channel_404.db");
+        let backend = LibSqlBackend::new_local(&db_path).await.unwrap();
+        backend.run_migrations().await.unwrap();
+
+        let source = backend
+            .get_conversation_source_channel(Uuid::new_v4())
+            .await
+            .unwrap();
+        assert!(
+            source.is_none(),
+            "non-existent conversation should return None"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_source_channel_not_overwritten_on_upsert() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test_source_channel_upsert.db");
+        let backend = LibSqlBackend::new_local(&db_path).await.unwrap();
+        backend.run_migrations().await.unwrap();
+
+        let conv_id = Uuid::new_v4();
+        let user_id = "user-upsert";
+
+        // First insert with source_channel = "telegram"
+        backend
+            .ensure_conversation(conv_id, "telegram", user_id, None, Some("telegram"))
+            .await
+            .unwrap();
+
+        // Upsert same conversation (same user/channel) — source_channel should
+        // NOT be overwritten because the ON CONFLICT clause only updates
+        // last_activity.
+        backend
+            .ensure_conversation(conv_id, "telegram", user_id, None, Some("different"))
+            .await
+            .unwrap();
+
+        let source = backend
+            .get_conversation_source_channel(conv_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            source.as_deref(),
+            Some("telegram"),
+            "upsert should not overwrite original source_channel"
+        );
+    }
 }

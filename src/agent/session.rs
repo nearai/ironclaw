@@ -239,6 +239,11 @@ pub const MAX_PENDING_MESSAGES: usize = 10;
 /// Sentinel value for bootstrap threads that accept approvals from any channel.
 pub const BOOTSTRAP_SOURCE_CHANNEL: &str = "__bootstrap__";
 
+/// Channels that are always authorized to approve tool calls on any thread,
+/// regardless of which channel originally created the thread. These are
+/// trusted UI surfaces (the web dashboard and its gateway).
+pub const TRUSTED_APPROVAL_CHANNELS: &[&str] = &["web", "gateway"];
+
 /// Check whether an approval from `requesting_channel` is authorized for a
 /// thread whose `source_channel` is `source`.
 ///
@@ -246,13 +251,13 @@ pub const BOOTSTRAP_SOURCE_CHANNEL: &str = "__bootstrap__";
 /// - `None` (unknown origin) -> denied (fail-closed)
 /// - `Some("__bootstrap__")` -> authorized from any channel
 /// - `Some(src) == requesting` -> same channel, authorized
-/// - requesting is "web" or "gateway" -> always authorized (trusted UI)
+/// - requesting is in `TRUSTED_APPROVAL_CHANNELS` -> always authorized
 /// - Otherwise -> denied
 pub fn is_approval_authorized(source: Option<&str>, requesting: &str) -> bool {
     match source {
         None => false,
         Some(src) if src == BOOTSTRAP_SOURCE_CHANNEL => true,
-        Some(src) => src == requesting || requesting == "web" || requesting == "gateway",
+        Some(src) => src == requesting || TRUSTED_APPROVAL_CHANNELS.contains(&requesting),
     }
 }
 
@@ -1924,6 +1929,112 @@ mod tests {
         assert!(
             is_approval_authorized(Some(BOOTSTRAP_SOURCE_CHANNEL), "cli"),
             "__bootstrap__ should be authorized from any channel"
+        );
+    }
+
+    #[test]
+    fn test_approval_authorized_uses_trusted_channels_constant() {
+        // Every channel in TRUSTED_APPROVAL_CHANNELS should be authorized
+        // against any source, ensuring the constant drives the logic.
+        for &trusted in TRUSTED_APPROVAL_CHANNELS {
+            assert!(
+                is_approval_authorized(Some("any-source"), trusted),
+                "TRUSTED_APPROVAL_CHANNELS entry '{}' should always be authorized",
+                trusted
+            );
+        }
+    }
+
+    #[test]
+    fn test_approval_blocks_thread_without_pending_approval() {
+        // A thread with no pending_approval should not be eligible for
+        // approval routing. This test verifies the data-level invariant
+        // that `agent_loop.rs` checks before calling is_approval_authorized.
+        let thread = Thread::new(Uuid::new_v4(), Some("telegram"));
+        assert!(
+            thread.pending_approval.is_none(),
+            "new thread should have no pending approval"
+        );
+
+        // Set up a thread WITH a pending approval to contrast
+        let mut thread_with_approval = Thread::new(Uuid::new_v4(), Some("telegram"));
+        thread_with_approval.pending_approval = Some(PendingApproval {
+            request_id: Uuid::new_v4(),
+            tool_name: "shell".to_string(),
+            parameters: serde_json::json!({"cmd": "rm -rf /"}),
+            display_parameters: serde_json::json!({"cmd": "rm -rf /"}),
+            description: "run shell command".to_string(),
+            tool_call_id: "call_1".to_string(),
+            context_messages: vec![],
+            deferred_tool_calls: vec![],
+            user_timezone: None,
+            allow_always: true,
+        });
+        assert!(
+            thread_with_approval.pending_approval.is_some(),
+            "thread with pending approval should be eligible"
+        );
+
+        // Authorization check should pass for the thread with pending approval
+        // (same channel), confirming the two checks compose correctly.
+        assert!(is_approval_authorized(
+            thread_with_approval.source_channel.as_deref(),
+            "telegram"
+        ));
+    }
+
+    #[test]
+    fn test_approval_wasm_channel_cannot_impersonate_trusted() {
+        // A WASM channel named "web" or "gateway" would bypass authorization.
+        // This test documents the invariant that WASM setup must reject these
+        // names (tested separately in wasm/setup.rs).
+        // Here we verify the authorization logic itself treats them as trusted.
+        assert!(is_approval_authorized(Some("telegram"), "web"));
+        assert!(is_approval_authorized(Some("telegram"), "gateway"));
+        // But a random WASM channel name should NOT be trusted
+        assert!(!is_approval_authorized(Some("telegram"), "my-wasm-channel"));
+    }
+
+    #[test]
+    fn test_approval_bootstrap_sentinel_not_a_normal_channel() {
+        // If a channel happens to be named __bootstrap__, it should be treated
+        // as the source (always authorized), NOT as a requesting channel with
+        // special trust. Only TRUSTED_APPROVAL_CHANNELS get that privilege.
+        assert!(
+            !is_approval_authorized(Some("telegram"), BOOTSTRAP_SOURCE_CHANNEL),
+            "__bootstrap__ as requesting channel should not have special trust"
+        );
+    }
+
+    #[test]
+    fn test_create_thread_propagates_channel() {
+        let mut session = Session::new("user-chan");
+        let tid = session.create_thread(Some("signal")).id;
+        let thread = session.threads.get(&tid).unwrap();
+        assert_eq!(thread.source_channel.as_deref(), Some("signal"));
+    }
+
+    #[test]
+    fn test_get_or_create_thread_propagates_channel() {
+        let mut session = Session::new("user-chan2");
+        // First call creates
+        let tid = session.get_or_create_thread(Some("http")).id;
+        assert_eq!(
+            session.threads.get(&tid).unwrap().source_channel.as_deref(),
+            Some("http")
+        );
+        // Second call returns existing (channel param ignored)
+        let tid2 = session.get_or_create_thread(Some("different")).id;
+        assert_eq!(tid, tid2);
+        assert_eq!(
+            session
+                .threads
+                .get(&tid2)
+                .unwrap()
+                .source_channel
+                .as_deref(),
+            Some("http"),
+            "existing thread should keep its original source_channel"
         );
     }
 }

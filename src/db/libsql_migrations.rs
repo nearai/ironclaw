@@ -788,7 +788,7 @@ CREATE INDEX IF NOT EXISTS idx_api_tokens_hash ON api_tokens(token_hash);
 "#,
     ),
     (
-        15,
+        16,
         "conversation_source_channel",
         // Add source_channel to conversations for cross-channel approval authorization.
         r#"

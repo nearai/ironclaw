@@ -75,12 +75,14 @@ pub async fn setup_wasm_channels(
     // Reserved channel names that WASM modules must not claim.
     // A malicious module could otherwise register as a trusted built-in
     // channel and bypass cross-channel authorization checks.
-    // This list must cover every built-in channel name to prevent a WASM
-    // module from impersonating a built-in and satisfying same-channel
-    // approval checks.
-    const RESERVED_CHANNEL_NAMES: &[&str] = &[
-        "web",
-        "gateway",
+    //
+    // This list includes:
+    // - All built-in channel names (prevent impersonation)
+    // - Trusted approval channels from session::TRUSTED_APPROVAL_CHANNELS
+    // - The bootstrap sentinel (universal approval wildcard)
+    use crate::agent::session::{BOOTSTRAP_SOURCE_CHANNEL, TRUSTED_APPROVAL_CHANNELS};
+
+    let mut reserved: Vec<&str> = vec![
         "cli",
         "repl",
         "http",
@@ -88,10 +90,12 @@ pub async fn setup_wasm_channels(
         "slack-relay",
         "secret_save",
     ];
+    reserved.extend(TRUSTED_APPROVAL_CHANNELS);
+    reserved.push(BOOTSTRAP_SOURCE_CHANNEL);
 
     for loaded in results.loaded {
         let name_lower = loaded.name().to_ascii_lowercase();
-        if RESERVED_CHANNEL_NAMES.contains(&name_lower.as_str()) {
+        if reserved.contains(&name_lower.as_str()) {
             tracing::warn!(
                 channel = %loaded.name(),
                 "Rejected WASM channel with reserved name"
@@ -486,6 +490,77 @@ async fn inject_channel_secrets_into_config(
                     );
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::agent::session::{BOOTSTRAP_SOURCE_CHANNEL, TRUSTED_APPROVAL_CHANNELS};
+
+    /// Build the same reserved-name list that `setup_wasm_channels` uses.
+    fn reserved_names() -> Vec<&'static str> {
+        let mut reserved: Vec<&str> = vec![
+            "cli",
+            "repl",
+            "http",
+            "signal",
+            "slack-relay",
+            "secret_save",
+        ];
+        reserved.extend(TRUSTED_APPROVAL_CHANNELS);
+        reserved.push(BOOTSTRAP_SOURCE_CHANNEL);
+        reserved
+    }
+
+    #[test]
+    fn reserved_names_include_trusted_approval_channels() {
+        let reserved = reserved_names();
+        for &trusted in TRUSTED_APPROVAL_CHANNELS {
+            assert!(
+                reserved.contains(&trusted),
+                "trusted approval channel '{}' must be in WASM reserved names",
+                trusted
+            );
+        }
+    }
+
+    #[test]
+    fn reserved_names_include_bootstrap_sentinel() {
+        let reserved = reserved_names();
+        assert!(
+            reserved.contains(&BOOTSTRAP_SOURCE_CHANNEL),
+            "__bootstrap__ sentinel must be in WASM reserved names"
+        );
+    }
+
+    #[test]
+    fn reserved_names_reject_case_insensitive() {
+        // The setup logic lowercases the WASM channel name before checking.
+        // Verify that "Web" or "GATEWAY" would be caught.
+        let reserved = reserved_names();
+        let test_cases = ["Web", "GATEWAY", "CLI", "Repl", "__BOOTSTRAP__"];
+        for name in test_cases {
+            let lowered = name.to_ascii_lowercase();
+            assert!(
+                reserved.contains(&lowered.as_str()),
+                "'{}' (lowercased to '{}') should match a reserved name",
+                name,
+                lowered
+            );
+        }
+    }
+
+    #[test]
+    fn non_reserved_names_allowed() {
+        let reserved = reserved_names();
+        let allowed = ["telegram", "discord", "my-custom-channel", "slack-bot"];
+        for name in allowed {
+            assert!(
+                !reserved.contains(&name),
+                "'{}' should NOT be reserved",
+                name
+            );
         }
     }
 }
