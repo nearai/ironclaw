@@ -43,6 +43,12 @@ impl LlmConfig {
             request_timeout_secs: 120,
             cheap_model: None,
             smart_routing_cascade: false,
+            max_retries: 0,
+            circuit_breaker_threshold: None,
+            circuit_breaker_recovery_secs: 30,
+            response_cache_enabled: false,
+            response_cache_ttl_secs: 3600,
+            response_cache_max_entries: 100,
         }
     }
 
@@ -301,6 +307,62 @@ impl LlmConfig {
         // Defaults to true. Overrides NearAI-specific smart_routing_cascade.
         let smart_routing_cascade = parse_optional_env("SMART_ROUTING_CASCADE", true)?;
 
+        // Decorator chain settings — top-level `LLM_*` vars with fallback to
+        // existing backend-specific vars for backward compatibility.
+        let max_retries = optional_env("LLM_MAX_RETRIES")?
+            .map(|s| s.parse::<u32>())
+            .transpose()
+            .map_err(|e| ConfigError::InvalidValue {
+                key: "LLM_MAX_RETRIES".to_string(),
+                message: format!("must be a non-negative integer: {e}"),
+            })?
+            .unwrap_or(nearai.max_retries);
+
+        let circuit_breaker_threshold = optional_env("LLM_CIRCUIT_BREAKER_THRESHOLD")?
+            .map(|s| s.parse::<u32>())
+            .transpose()
+            .map_err(|e| ConfigError::InvalidValue {
+                key: "LLM_CIRCUIT_BREAKER_THRESHOLD".to_string(),
+                message: format!("must be a positive integer: {e}"),
+            })?
+            .or(nearai.circuit_breaker_threshold);
+
+        let circuit_breaker_recovery_secs = optional_env("LLM_CIRCUIT_BREAKER_RECOVERY_SECS")?
+            .map(|s| s.parse::<u64>())
+            .transpose()
+            .map_err(|e| ConfigError::InvalidValue {
+                key: "LLM_CIRCUIT_BREAKER_RECOVERY_SECS".to_string(),
+                message: format!("must be a non-negative integer: {e}"),
+            })?
+            .unwrap_or(nearai.circuit_breaker_recovery_secs);
+
+        let response_cache_enabled = optional_env("LLM_RESPONSE_CACHE_ENABLED")?
+            .map(|s| s.parse::<bool>())
+            .transpose()
+            .map_err(|e| ConfigError::InvalidValue {
+                key: "LLM_RESPONSE_CACHE_ENABLED".to_string(),
+                message: format!("must be true or false: {e}"),
+            })?
+            .unwrap_or(nearai.response_cache_enabled);
+
+        let response_cache_ttl_secs = optional_env("LLM_RESPONSE_CACHE_TTL_SECS")?
+            .map(|s| s.parse::<u64>())
+            .transpose()
+            .map_err(|e| ConfigError::InvalidValue {
+                key: "LLM_RESPONSE_CACHE_TTL_SECS".to_string(),
+                message: format!("must be a non-negative integer: {e}"),
+            })?
+            .unwrap_or(nearai.response_cache_ttl_secs);
+
+        let response_cache_max_entries = optional_env("LLM_RESPONSE_CACHE_MAX_ENTRIES")?
+            .map(|s| s.parse::<usize>())
+            .transpose()
+            .map_err(|e| ConfigError::InvalidValue {
+                key: "LLM_RESPONSE_CACHE_MAX_ENTRIES".to_string(),
+                message: format!("must be a non-negative integer: {e}"),
+            })?
+            .unwrap_or(nearai.response_cache_max_entries);
+
         Ok(Self {
             backend: if is_nearai {
                 "nearai".to_string()
@@ -324,6 +386,12 @@ impl LlmConfig {
             request_timeout_secs,
             cheap_model,
             smart_routing_cascade,
+            max_retries,
+            circuit_breaker_threshold,
+            circuit_breaker_recovery_secs,
+            response_cache_enabled,
+            response_cache_ttl_secs,
+            response_cache_max_entries,
         })
     }
 
