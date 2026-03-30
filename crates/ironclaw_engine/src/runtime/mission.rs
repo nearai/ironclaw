@@ -374,7 +374,7 @@ impl MissionManager {
                             }
                         }
 
-                        // ── Trigger 2: Skill extraction ──────────────────
+                        // ── Trigger 2: Skill extraction + positive learning ──
                         let action_count = thread
                             .events
                             .iter()
@@ -386,11 +386,56 @@ impl MissionManager {
                             })
                             .count();
 
-                        if thread.state == crate::types::thread::ThreadState::Done
-                            && trace
-                                .issues
+                        let succeeded_cleanly = thread.state
+                            == crate::types::thread::ThreadState::Done
+                            && trace.issues.iter().all(|i| {
+                                i.severity != crate::executor::trace::IssueSeverity::Error
+                            });
+
+                        // Positive learning: capture what worked well from clean
+                        // successes with meaningful work (3+ steps, 2+ actions).
+                        // Lower threshold than skill extraction — we want to
+                        // capture patterns even from simpler successful threads.
+                        if succeeded_cleanly && thread.step_count >= 3 && action_count >= 2 {
+                            let actions_used: Vec<String> = thread
+                                .events
                                 .iter()
-                                .all(|i| i.severity != crate::executor::trace::IssueSeverity::Error)
+                                .filter_map(|e| {
+                                    if let crate::types::event::EventKind::ActionExecuted {
+                                        action_name,
+                                        ..
+                                    } = &e.kind
+                                    {
+                                        Some(action_name.clone())
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .collect();
+
+                            let payload = serde_json::json!({
+                                "source_thread_id": event.thread_id.0.to_string(),
+                                "goal": thread.goal,
+                                "step_count": thread.step_count,
+                                "action_count": action_count,
+                                "actions_used": actions_used,
+                                "outcome": "success",
+                            });
+
+                            if let Err(e) = mgr
+                                .fire_on_system_event(
+                                    "engine",
+                                    "thread_completed_successfully",
+                                    &user_id,
+                                    Some(payload),
+                                )
+                                .await
+                            {
+                                debug!("event listener: failed to fire positive learning: {e}");
+                            }
+                        }
+
+                        if succeeded_cleanly
                             && thread.step_count >= SKILL_EXTRACTION_MIN_STEPS
                             && action_count >= SKILL_EXTRACTION_MIN_ACTIONS
                         {
@@ -608,6 +653,21 @@ impl MissionManager {
             },
             "Investigate user-reported expectation gaps and apply fixes",
             5, // max 5/day
+        )
+        .await?;
+
+        // 5. Positive learning (capture what worked from successful threads)
+        self.ensure_mission_by_metadata(
+            project_id,
+            "positive_learning",
+            "positive-learning",
+            POSITIVE_LEARNING_GOAL,
+            MissionCadence::OnSystemEvent {
+                source: "engine".into(),
+                event_type: "thread_completed_successfully".into(),
+            },
+            "Extract successful patterns and approaches from clean thread completions",
+            3, // max 3/day
         )
         .await?;
 
@@ -1086,6 +1146,9 @@ const CONVERSATION_INSIGHTS_GOAL: &str =
 
 /// The goal for the expected-behavior mission (user feedback loop).
 const EXPECTED_BEHAVIOR_GOAL: &str = include_str!("../../prompts/mission_expected_behavior.md");
+
+/// The goal for the positive learning mission (capture what worked).
+const POSITIVE_LEARNING_GOAL: &str = include_str!("../../prompts/mission_positive_learning.md");
 
 /// Seed content for the fix pattern database.
 const SEED_FIX_PATTERNS: &str = "\
