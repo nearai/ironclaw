@@ -3211,8 +3211,10 @@ mod tests {
         ));
         let tools = Arc::new(crate::tools::ToolRegistry::new());
 
-        let mut config = RoutineConfig::default();
-        config.agent_review_enabled = true;
+        let config = RoutineConfig {
+            agent_review_enabled: true,
+            ..RoutineConfig::default()
+        };
 
         let ctx = super::EngineContext {
             config,
@@ -3326,9 +3328,11 @@ mod tests {
             .expect("migrations"); // safety: test code
         let db: Arc<dyn crate::db::Database> = Arc::new(backend);
 
-        let mut config = RoutineConfig::default();
-        config.agent_review_enabled = true;
-        config.max_agent_reviews_per_hour = 3; // low limit for testing
+        let config = RoutineConfig {
+            agent_review_enabled: true,
+            max_agent_reviews_per_hour: 3, // low limit for testing
+            ..RoutineConfig::default()
+        };
 
         let ctx = super::EngineContext {
             config,
