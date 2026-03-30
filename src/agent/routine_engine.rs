@@ -2042,12 +2042,20 @@ fn strip_html_tags(s: &str) -> String {
 
     if let Some(re) = COMMENT_RE.as_ref() {
         result = re.replace_all(&result, "").into_owned();
+    } else {
+        tracing::error!("HTML comment regex failed to compile; skipping comment sanitization");
     }
     if let Some(re) = HTML_TAG_RE.as_ref() {
         result = re.replace_all(&result, "").into_owned();
+    } else {
+        tracing::error!("HTML tag regex failed to compile; skipping tag sanitization");
     }
     if let Some(re) = CUSTOM_ELEMENT_RE.as_ref() {
         result = re.replace_all(&result, "").into_owned();
+    } else {
+        tracing::error!(
+            "Custom element regex failed to compile; skipping custom element sanitization"
+        );
     }
 
     result
