@@ -1907,7 +1907,10 @@ fn rebuild_chat_messages_from_db(
                             let name = c["name"].as_str().unwrap_or("unknown").to_string();
                             let content = if let Some(err) = c.get("error").and_then(|v| v.as_str())
                             {
-                                format!("Error: {}", err)
+                                // Both wrapped (new) and legacy (plain) errors pass
+                                // through as-is. Legacy errors are already descriptive
+                                // (e.g. "Tool 'http' failed: timeout"), so no prefix needed.
+                                err.to_string()
                             } else if let Some(res) = c.get("result").and_then(|v| v.as_str()) {
                                 res.to_string()
                             } else if let Some(preview) =
@@ -1993,11 +1996,36 @@ mod tests {
 
         assert_eq!(result[3].role, crate::llm::Role::Tool);
         assert_eq!(result[3].tool_call_id, Some("call_1".to_string()));
-        assert!(result[3].content.contains("Error: timeout"));
+        assert!(result[3].content.contains("timeout"));
 
         // final assistant
         assert_eq!(result[4].role, crate::llm::Role::Assistant);
         assert_eq!(result[4].content, "I found some results.");
+    }
+
+    #[test]
+    fn test_rebuild_chat_messages_preserves_wrapped_tool_error() {
+        let wrapped_error =
+            "<tool_output name=\"http\">\nTool 'http' failed: timeout\n</tool_output>";
+        let tool_json = serde_json::json!([
+            {
+                "name": "http",
+                "call_id": "call_1",
+                "parameters": {"url": "https://example.com"},
+                "error": wrapped_error
+            }
+        ]);
+        let messages = vec![
+            make_db_msg("user", "Fetch example"),
+            make_db_msg("tool_calls", &tool_json.to_string()),
+        ];
+
+        let result = rebuild_chat_messages_from_db(&messages);
+
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[2].role, crate::llm::Role::Tool);
+        assert_eq!(result[2].tool_call_id, Some("call_1".to_string()));
+        assert_eq!(result[2].content, wrapped_error);
     }
 
     #[test]
