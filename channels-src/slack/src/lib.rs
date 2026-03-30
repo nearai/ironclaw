@@ -239,6 +239,13 @@ const DM_POLICY_PATH: &str = "state/dm_policy";
 const ALLOW_FROM_PATH: &str = "state/allow_from";
 /// Workspace path for persisting bot_id (from auth.test) across WASM callbacks.
 const BOT_ID_PATH: &str = "state/bot_id";
+/// Workspace path for tracking thread roots where the bot was mentioned.
+/// Stored as a JSON array of thread_ts strings. Threaded channel replies
+/// are only forwarded if the thread root is in this set, preventing
+/// unrelated channel threads from being ingested.
+const BOT_THREADS_PATH: &str = "state/bot_threads";
+/// Maximum number of bot thread roots to track (oldest evicted first).
+const MAX_BOT_THREADS: usize = 500;
 /// Channel name for pairing store (used by pairing host APIs).
 const CHANNEL_NAME: &str = "slack";
 /// Maximum retry attempts for transient Slack API errors.
@@ -703,6 +710,12 @@ fn handle_slack_event(event: SlackEvent, team_id: Option<String>, _event_id: Opt
                 if !check_sender_permission(&user, &channel, false) {
                     return;
                 }
+                // Track this thread root so threaded replies are accepted.
+                // The root is thread_ts if replying in an existing thread,
+                // otherwise the mention's own ts becomes the root.
+                let thread_root = event.thread_ts.as_deref().unwrap_or(&ts);
+                register_bot_thread(thread_root);
+
                 emit_message(
                     user,
                     text,
@@ -752,6 +765,13 @@ fn handle_slack_event(event: SlackEvent, team_id: Option<String>, _event_id: Opt
                         attachments,
                     );
                 } else if is_threaded_reply {
+                    // Only forward threaded replies in channels where the
+                    // bot was @mentioned (registered as a bot thread).
+                    // Prevents unrelated channel threads from being ingested.
+                    let thread_root = event.thread_ts.as_deref().unwrap_or("");
+                    if !is_bot_thread(thread_root) {
+                        return;
+                    }
                     if !check_sender_permission(&user, &channel, false) {
                         return;
                     }
@@ -806,6 +826,34 @@ fn emit_message(
         metadata_json,
         attachments,
     });
+}
+
+// ============================================================================
+// Bot Thread Tracking
+// ============================================================================
+
+/// Record a thread root as bot-owned (the bot was @mentioned or started it).
+fn register_bot_thread(thread_ts: &str) {
+    let mut threads: Vec<String> = channel_host::workspace_read(BOT_THREADS_PATH)
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+
+    if !threads.contains(&thread_ts.to_string()) {
+        threads.push(thread_ts.to_string());
+        // Evict oldest if over capacity
+        if threads.len() > MAX_BOT_THREADS {
+            threads.drain(..threads.len() - MAX_BOT_THREADS);
+        }
+        let json = serde_json::to_string(&threads).unwrap_or_else(|_| "[]".to_string());
+        let _ = channel_host::workspace_write(BOT_THREADS_PATH, &json);
+    }
+}
+
+/// Check if a thread root was started by / involves the bot.
+fn is_bot_thread(thread_ts: &str) -> bool {
+    channel_host::workspace_read(BOT_THREADS_PATH)
+        .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
+        .is_some_and(|threads| threads.contains(&thread_ts.to_string()))
 }
 
 // ============================================================================

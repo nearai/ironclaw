@@ -140,13 +140,31 @@ async fn register_channel(
 
     let secret_header = loaded.webhook_secret_header().map(|s| s.to_string());
 
+    let has_socket_mode = loaded
+        .capabilities_file
+        .as_ref()
+        .and_then(|f| f.capabilities.channel.as_ref())
+        .and_then(|c| c.socket_mode.as_ref())
+        .is_some();
+
+    // If Socket Mode is the sole transport and no signing secret is configured,
+    // do NOT register the webhook endpoint — it would be an unauthenticated
+    // ingress path. The channel will operate purely via the Socket Mode bridge.
     let webhook_path = format!("/webhook/{}", channel_name);
-    let endpoints = vec![RegisteredEndpoint {
-        channel_name: channel_name.clone(),
-        path: webhook_path,
-        methods: vec!["POST".to_string()],
-        require_secret: webhook_secret.is_some(),
-    }];
+    let endpoints = if webhook_secret.is_none() && has_socket_mode {
+        tracing::info!(
+            channel = %channel_name,
+            "Skipping webhook registration: no signing secret and Socket Mode configured"
+        );
+        vec![]
+    } else {
+        vec![RegisteredEndpoint {
+            channel_name: channel_name.clone(),
+            path: webhook_path,
+            methods: vec!["POST".to_string()],
+            require_secret: webhook_secret.is_some(),
+        }]
+    };
 
     let channel_arc = Arc::new(loaded.channel.with_owner_actor_id(owner_actor_id.clone()));
 

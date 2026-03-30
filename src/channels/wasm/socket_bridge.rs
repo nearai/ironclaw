@@ -41,12 +41,15 @@ pub fn spawn_socket_bridge(
     channel: Arc<WasmChannel>,
     config: SocketModeConfig,
     secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
+    owner_scope_id: String,
     shutdown_rx: oneshot::Receiver<()>,
 ) {
     let channel_name = channel.channel_name().to_string();
 
     tokio::spawn(async move {
-        if let Err(e) = run_bridge(channel, config, secrets_store, shutdown_rx).await {
+        if let Err(e) =
+            run_bridge(channel, config, secrets_store, &owner_scope_id, shutdown_rx).await
+        {
             tracing::error!(
                 channel = %channel_name,
                 error = %e,
@@ -61,13 +64,16 @@ async fn run_bridge(
     channel: Arc<WasmChannel>,
     config: SocketModeConfig,
     secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
+    owner_scope_id: &str,
     shutdown_rx: oneshot::Receiver<()>,
 ) -> Result<(), WasmChannelError> {
     let channel_name = channel.channel_name().to_string();
 
     // Read the app token: try secrets store first, then fall back to env var.
     // The env var name is the UPPER_CASE version of the secret name (e.g., SLACK_APP_TOKEN).
-    let app_token = resolve_app_token(&channel_name, &config, secrets_store.as_deref()).await?;
+    let app_token =
+        resolve_app_token(&channel_name, &config, secrets_store.as_deref(), owner_scope_id)
+            .await?;
 
     let mut shutdown = std::pin::pin!(shutdown_rx);
     let mut reconnect_attempt: u32 = 0;
@@ -420,11 +426,12 @@ async fn resolve_app_token(
     channel_name: &str,
     config: &SocketModeConfig,
     secrets_store: Option<&(dyn SecretsStore + Send + Sync)>,
+    owner_scope_id: &str,
 ) -> Result<String, WasmChannelError> {
-    // Try secrets store first
+    // Try secrets store first, using the deployment's actual owner scope.
     if let Some(store) = secrets_store
         && let Ok(decrypted) = store
-            .get_decrypted("default", &config.app_token_secret)
+            .get_decrypted(owner_scope_id, &config.app_token_secret)
             .await
     {
         tracing::debug!(channel = %channel_name, "Read app token from secrets store");
@@ -781,7 +788,7 @@ mod tests {
             max_reconnect_attempts: 10,
         };
 
-        let result = resolve_app_token("test", &config, None).await;
+        let result = resolve_app_token("test", &config, None, "default").await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), expected_value);
 
@@ -806,7 +813,7 @@ mod tests {
             std::env::remove_var("TEST_NONEXISTENT_APP_TOKEN_BRIDGE_10");
         }
 
-        let result = resolve_app_token("test", &config, None).await;
+        let result = resolve_app_token("test", &config, None, "default").await;
         assert!(result.is_err());
 
         // Verify the error is a SocketMode variant with a meaningful message

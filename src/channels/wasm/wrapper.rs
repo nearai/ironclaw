@@ -2474,10 +2474,12 @@ impl WasmChannel {
             None => return,
         };
 
-        // Check if the app token is available (secrets store or env var)
+        // Check if the app token is available (secrets store or env var).
+        // Use the channel's owner scope — not hard-coded "default" — so
+        // non-default-owner deployments find the correct token.
         let in_secrets = if let Some(ref secrets) = self.secrets_store {
             secrets
-                .exists("default", &socket_config.app_token_secret)
+                .exists(&self.owner_scope_id, &socket_config.app_token_secret)
                 .await
                 .unwrap_or(false)
         } else {
@@ -2510,6 +2512,7 @@ impl WasmChannel {
             channel_arc,
             socket_config,
             self.secrets_store.clone(),
+            self.owner_scope_id.clone(),
             shutdown_rx,
         );
     }
