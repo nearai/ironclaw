@@ -2,6 +2,7 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 /// Well-known document paths.
@@ -35,6 +36,139 @@ pub mod paths {
     pub const PROFILE: &str = "context/profile.json";
     /// Assistant behavioral directives (derived from profile).
     pub const ASSISTANT_DIRECTIVES: &str = "context/assistant-directives.md";
+}
+
+/// Name of the folder-level configuration document.
+///
+/// A document at `{directory}/.config` carries metadata flags that apply
+/// as defaults to all documents in that directory (e.g., `skip_indexing`,
+/// `hygiene` settings). Individual document metadata overrides folder defaults.
+pub const CONFIG_FILE_NAME: &str = ".config";
+
+/// Typed overlay for the `metadata` JSON field on [`MemoryDocument`].
+///
+/// Fields use `Option` so that only explicitly set flags participate in
+/// the merge chain (document metadata → folder `.config` → system defaults).
+/// Unknown fields are preserved via `serde(flatten)`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct DocumentMetadata {
+    /// When `true`, skip chunking and embedding for this document/folder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skip_indexing: Option<bool>,
+
+    /// When `true`, skip automatic versioning for this document/folder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skip_versioning: Option<bool>,
+
+    /// Hygiene (auto-cleanup) configuration for this folder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hygiene: Option<HygieneMetadata>,
+
+    /// Preserve unknown fields for forward compatibility.
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
+impl DocumentMetadata {
+    /// Parse from a raw JSON [`serde_json::Value`].
+    ///
+    /// Returns [`Default`] if the value is not an object or cannot be parsed.
+    pub fn from_value(value: &serde_json::Value) -> Self {
+        serde_json::from_value(value.clone()).unwrap_or_default()
+    }
+
+    /// Convert to a JSON [`serde_json::Value`].
+    pub fn to_value(&self) -> serde_json::Value {
+        serde_json::to_value(self).unwrap_or(serde_json::json!({}))
+    }
+
+    /// Merge two metadata values: `overlay` keys win over `base` keys.
+    ///
+    /// This is a shallow merge at the top-level keys — nested objects are
+    /// replaced wholesale, not recursively merged. This keeps the semantics
+    /// simple and predictable across both PostgreSQL and libSQL.
+    pub fn merge(base: &serde_json::Value, overlay: &serde_json::Value) -> serde_json::Value {
+        let mut merged = match base {
+            serde_json::Value::Object(map) => map.clone(),
+            _ => serde_json::Map::new(),
+        };
+        if let serde_json::Value::Object(over) = overlay {
+            for (k, v) in over {
+                merged.insert(k.clone(), v.clone());
+            }
+        }
+        serde_json::Value::Object(merged)
+    }
+}
+
+/// Hygiene (auto-cleanup) settings for a folder.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct HygieneMetadata {
+    /// Whether this folder is a hygiene target.
+    pub enabled: bool,
+
+    /// Delete documents older than this many days.
+    #[serde(default = "default_retention_days")]
+    pub retention_days: u32,
+}
+
+fn default_retention_days() -> u32 {
+    30
+}
+
+/// A historical version of a workspace document.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocumentVersion {
+    /// Version record ID.
+    pub id: Uuid,
+    /// Parent document ID.
+    pub document_id: Uuid,
+    /// Version number (1-based, monotonically increasing per document).
+    pub version: i32,
+    /// Full document content at this version.
+    pub content: String,
+    /// SHA-256 hash of `content` (hex-encoded, prefixed with `sha256:`).
+    pub content_hash: String,
+    /// When this version was created.
+    pub created_at: DateTime<Utc>,
+    /// Who/what created this version (e.g. `"agent"`, `"user:alice"`).
+    pub changed_by: Option<String>,
+}
+
+/// Summary of a document version (without full content).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VersionSummary {
+    /// Version number.
+    pub version: i32,
+    /// SHA-256 hash of the version's content.
+    pub content_hash: String,
+    /// When this version was created.
+    pub created_at: DateTime<Utc>,
+    /// Who/what created this version.
+    pub changed_by: Option<String>,
+}
+
+/// Result of a workspace patch operation.
+#[derive(Debug, Clone)]
+pub struct PatchResult {
+    /// The updated document.
+    pub document: MemoryDocument,
+    /// Number of replacements made.
+    pub replacements: usize,
+}
+
+/// Compute a SHA-256 hash of content, returned as `"sha256:{hex}"`.
+pub fn content_sha256(content: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(content.as_bytes());
+    let result = hasher.finalize();
+    format!("sha256:{:x}", result)
+}
+
+/// Check if a path refers to a `.config` document.
+pub fn is_config_path(path: &str) -> bool {
+    let file_name = path.rsplit('/').next().unwrap_or(path);
+    file_name == CONFIG_FILE_NAME
 }
 
 /// Paths treated as identity documents for multi-scope isolation.
@@ -358,6 +492,190 @@ mod tests {
         let result = merge_workspace_entries(entries);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].updated_at, Some(ts));
+    }
+
+    #[test]
+    fn test_document_metadata_default_is_empty() {
+        let meta = DocumentMetadata::default();
+        assert_eq!(meta.skip_indexing, None);
+        assert_eq!(meta.skip_versioning, None);
+        assert_eq!(meta.hygiene, None);
+        assert!(meta.extra.is_empty());
+    }
+
+    #[test]
+    fn test_document_metadata_from_value_full() {
+        let value = serde_json::json!({
+            "skip_indexing": true,
+            "skip_versioning": false,
+            "hygiene": { "enabled": true, "retention_days": 7 }
+        });
+        let meta = DocumentMetadata::from_value(&value);
+        assert_eq!(meta.skip_indexing, Some(true));
+        assert_eq!(meta.skip_versioning, Some(false));
+        let hygiene = meta.hygiene.unwrap();
+        assert!(hygiene.enabled);
+        assert_eq!(hygiene.retention_days, 7);
+    }
+
+    #[test]
+    fn test_document_metadata_from_value_partial() {
+        let value = serde_json::json!({"skip_indexing": true});
+        let meta = DocumentMetadata::from_value(&value);
+        assert_eq!(meta.skip_indexing, Some(true));
+        assert_eq!(meta.hygiene, None);
+    }
+
+    #[test]
+    fn test_document_metadata_from_value_invalid() {
+        let meta = DocumentMetadata::from_value(&serde_json::json!("not an object"));
+        assert_eq!(meta, DocumentMetadata::default());
+    }
+
+    #[test]
+    fn test_document_metadata_preserves_unknown_fields() {
+        let value = serde_json::json!({
+            "skip_indexing": true,
+            "custom_field": "hello"
+        });
+        let meta = DocumentMetadata::from_value(&value);
+        assert_eq!(meta.skip_indexing, Some(true));
+        assert_eq!(
+            meta.extra.get("custom_field").and_then(|v| v.as_str()),
+            Some("hello")
+        );
+
+        // Round-trip preserves the field
+        let back = meta.to_value();
+        assert_eq!(
+            back.get("custom_field").and_then(|v| v.as_str()),
+            Some("hello")
+        );
+    }
+
+    #[test]
+    fn test_document_metadata_merge() {
+        let base = serde_json::json!({"skip_indexing": false, "hygiene": {"enabled": true, "retention_days": 30}});
+        let overlay = serde_json::json!({"skip_indexing": true, "skip_versioning": true});
+        let merged = DocumentMetadata::merge(&base, &overlay);
+        let meta = DocumentMetadata::from_value(&merged);
+        // Overlay wins
+        assert_eq!(meta.skip_indexing, Some(true));
+        assert_eq!(meta.skip_versioning, Some(true));
+        // Base preserved when not overridden
+        assert!(meta.hygiene.is_some());
+    }
+
+    #[test]
+    fn test_document_metadata_merge_empty_base() {
+        let base = serde_json::json!({});
+        let overlay = serde_json::json!({"skip_indexing": true});
+        let merged = DocumentMetadata::merge(&base, &overlay);
+        let meta = DocumentMetadata::from_value(&merged);
+        assert_eq!(meta.skip_indexing, Some(true));
+    }
+
+    #[test]
+    fn test_hygiene_metadata_default_retention() {
+        let value = serde_json::json!({"enabled": true});
+        let hygiene: HygieneMetadata = serde_json::from_value(value).unwrap();
+        assert!(hygiene.enabled);
+        assert_eq!(hygiene.retention_days, 30);
+    }
+
+    #[test]
+    fn test_content_sha256_deterministic() {
+        let hash1 = content_sha256("hello world");
+        let hash2 = content_sha256("hello world");
+        assert_eq!(hash1, hash2);
+        assert!(hash1.starts_with("sha256:"));
+    }
+
+    #[test]
+    fn test_content_sha256_different_content() {
+        let hash1 = content_sha256("hello");
+        let hash2 = content_sha256("world");
+        assert_ne!(hash1, hash2);
+    }
+
+    #[test]
+    fn test_is_config_path() {
+        assert!(is_config_path(".config"));
+        assert!(is_config_path("daily/.config"));
+        assert!(is_config_path("frontend/widgets/.config"));
+        assert!(!is_config_path("daily/2024-01-15.md"));
+        assert!(!is_config_path("MEMORY.md"));
+        assert!(!is_config_path(".config.bak"));
+    }
+
+    #[test]
+    fn test_is_config_path_edge_cases() {
+        assert!(!is_config_path("foo.config"));
+        assert!(!is_config_path(""));
+        // ".config/bar" — the filename component is "bar", not ".config"
+        assert!(!is_config_path(".config/bar"));
+    }
+
+    #[test]
+    fn test_content_sha256_empty_string() {
+        let hash = content_sha256("");
+        assert!(hash.starts_with("sha256:"));
+        // SHA-256 of "" is a known constant
+        assert_eq!(
+            hash,
+            "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+    }
+
+    #[test]
+    fn test_content_sha256_unicode() {
+        let hash1 = content_sha256("Hello 🌍");
+        let hash2 = content_sha256("Hello 🌍");
+        assert_eq!(hash1, hash2);
+        // Different unicode content produces different hashes
+        let hash3 = content_sha256("Hello 🌎");
+        assert_ne!(hash1, hash3);
+    }
+
+    #[test]
+    fn test_document_metadata_merge_null_overlay_value() {
+        // Overlay with null values should overwrite base values
+        let base = serde_json::json!({"skip_indexing": true});
+        let overlay = serde_json::json!({"skip_indexing": null});
+        let merged = DocumentMetadata::merge(&base, &overlay);
+        // null wins over true (shallow merge replaces entire key)
+        assert_eq!(merged.get("skip_indexing"), Some(&serde_json::Value::Null));
+    }
+
+    #[test]
+    fn test_document_metadata_merge_nested_hygiene_replaced_wholesale() {
+        // Nested objects are replaced entirely, not recursively merged
+        let base = serde_json::json!({
+            "hygiene": {"enabled": true, "retention_days": 30}
+        });
+        let overlay = serde_json::json!({
+            "hygiene": {"enabled": false}
+        });
+        let merged = DocumentMetadata::merge(&base, &overlay);
+        let meta = DocumentMetadata::from_value(&merged);
+        let hygiene = meta.hygiene.unwrap();
+        // Overlay replaced the entire hygiene object — retention_days falls back to default
+        assert!(!hygiene.enabled);
+        assert_eq!(hygiene.retention_days, 30); // serde default kicks in
+    }
+
+    #[test]
+    fn test_document_metadata_merge_both_empty() {
+        let merged = DocumentMetadata::merge(&serde_json::json!({}), &serde_json::json!({}));
+        assert_eq!(merged, serde_json::json!({}));
+    }
+
+    #[test]
+    fn test_document_metadata_merge_non_object_base() {
+        // Non-object base is treated as empty
+        let merged =
+            DocumentMetadata::merge(&serde_json::json!("string"), &serde_json::json!({"a": 1}));
+        assert_eq!(merged, serde_json::json!({"a": 1}));
     }
 
     #[test]

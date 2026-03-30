@@ -953,8 +953,7 @@ mod tests {
 
         let hygiene_config = HygieneConfig {
             enabled: false,
-            daily_retention_days: 30,
-            conversation_retention_days: 7,
+            version_keep_count: 50,
             cadence_hours: 24,
             state_dir: _tmp.path().to_path_buf(),
         };
@@ -1000,8 +999,7 @@ mod tests {
 
         let hygiene_config = HygieneConfig {
             enabled: false,
-            daily_retention_days: 30,
-            conversation_retention_days: 7,
+            version_keep_count: 50,
             cadence_hours: 24,
             state_dir: _tmp.path().to_path_buf(),
         };

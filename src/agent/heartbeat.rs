@@ -276,8 +276,8 @@ impl HeartbeatRunner {
                         .await;
                 if report.had_work() {
                     tracing::info!(
-                        daily_logs_deleted = report.daily_logs_deleted,
-                        conversation_docs_deleted = report.conversation_docs_deleted,
+                        directories_cleaned = ?report.directories_cleaned,
+                        versions_pruned = report.versions_pruned,
                         "heartbeat: memory hygiene deleted stale documents"
                     );
                 }
@@ -616,8 +616,8 @@ pub fn spawn_multi_user_heartbeat(
                     if report.had_work() {
                         tracing::info!(
                             user_id = uid,
-                            daily_logs_deleted = report.daily_logs_deleted,
-                            conversation_docs_deleted = report.conversation_docs_deleted,
+                            directories_cleaned = ?report.directories_cleaned,
+                            versions_pruned = report.versions_pruned,
                             "multi-user heartbeat: memory hygiene deleted stale documents"
                         );
                     }

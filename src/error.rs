@@ -315,6 +315,12 @@ pub enum WorkspaceError {
 
     #[error("Write rejected for '{path}': prompt injection detected ({reason})")]
     InjectionRejected { path: String, reason: String },
+
+    #[error("Version not found: document {document_id} version {version}")]
+    VersionNotFound { document_id: Uuid, version: i32 },
+
+    #[error("Patch failed for '{path}': {reason}")]
+    PatchFailed { path: String, reason: String },
 }
 
 /// Orchestrator errors (internal API, container management).
