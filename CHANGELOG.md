@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.23.1](https://github.com/nearai/ironclaw/compare/ironclaw-v0.23.0...ironclaw-v0.23.1) - 2026-03-30
+
+### Fixed
+
+- *(mcp)* deserialize tool annotations with camelCase (MCP spec) ([#1571](https://github.com/nearai/ironclaw/pull/1571))
+
 ## [0.23.0](https://github.com/nearai/ironclaw/compare/ironclaw-v0.22.0...ironclaw-v0.23.0) - 2026-03-27
 
 ### Added
