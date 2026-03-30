@@ -715,6 +715,7 @@ impl RoutineEngine {
             status,
             Some(summary),
             thread_id.as_deref(),
+            run.job_id,
         )
         .await;
 
@@ -1085,7 +1086,7 @@ struct EngineContext {
 }
 
 /// Execute a routine run. Handles both lightweight and full_job modes.
-async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) {
+async fn execute_routine(ctx: EngineContext, routine: Routine, mut run: RoutineRun) {
     // Increment running count (atomic: survives panics in the execution below)
     ctx.running_count.fetch_add(1, Ordering::Relaxed);
 
@@ -1118,7 +1119,7 @@ async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) 
                 description,
                 max_iterations: *max_iterations,
             };
-            execute_full_job(&ctx, &routine, &run, &execution).await
+            execute_full_job(&ctx, &routine, &mut run, &execution).await
         }
     };
 
@@ -1218,6 +1219,7 @@ async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) 
         status,
         summary.as_deref(),
         thread_id.as_deref(),
+        run.job_id,
     )
     .await;
 }
@@ -1253,7 +1255,7 @@ struct FullJobExecutionConfig<'a> {
 async fn execute_full_job(
     ctx: &EngineContext,
     routine: &Routine,
-    run: &RoutineRun,
+    run: &mut RoutineRun,
     execution: &FullJobExecutionConfig<'_>,
 ) -> Result<(RunStatus, Option<String>, Option<i32>), RoutineError> {
     // Full-job routines dispatch through the scheduler (same as /job
@@ -1320,6 +1322,9 @@ async fn execute_full_job(
         .map_err(|e| RoutineError::Database {
             reason: format!("failed to link run to job: {e}"),
         })?;
+
+    // Keep the in-memory struct in sync so send_notification can read run.job_id.
+    run.job_id = Some(job_id);
 
     tracing::info!(
         routine = %routine.name,
@@ -1833,7 +1838,18 @@ async fn execute_routine_tool(
     Ok(result_str)
 }
 
+/// Human-readable label for a run status, suitable for user-facing notifications.
+fn status_display_label(status: RunStatus) -> &'static str {
+    match status {
+        RunStatus::Ok => "Completed",
+        RunStatus::Attention => "Needs attention",
+        RunStatus::Failed => "Failed",
+        RunStatus::Running => "Running",
+    }
+}
+
 /// Send a notification based on the routine's notify config and run status.
+#[allow(clippy::too_many_arguments)]
 async fn send_notification(
     tx: &mpsc::Sender<OutgoingResponse>,
     notify: &NotifyConfig,
@@ -1842,6 +1858,7 @@ async fn send_notification(
     status: RunStatus,
     summary: Option<&str>,
     thread_id: Option<&str>,
+    job_id: Option<Uuid>,
 ) {
     let should_notify = match status {
         RunStatus::Ok => notify.on_success,
@@ -1861,23 +1878,37 @@ async fn send_notification(
         RunStatus::Running => "⏳",
     };
 
+    let label = status_display_label(status);
+
     let message = match summary {
-        Some(s) => format!("{} *Routine '{}'*: {}\n\n{}", icon, routine_name, status, s),
-        None => format!("{} *Routine '{}'*: {}", icon, routine_name, status),
+        Some(s) => {
+            let sanitized = sanitize_summary(s);
+            format!(
+                "{} *Routine '{}'*: {}\n\n{}",
+                icon, routine_name, label, sanitized
+            )
+        }
+        None => format!("{} *Routine '{}'*: {}", icon, routine_name, label),
     };
+
+    let mut metadata = serde_json::json!({
+        "source": "routine",
+        "routine_name": routine_name,
+        "status": status.to_string(),
+        "owner_id": owner_id,
+        "notify_user": notify.user,
+        "notify_channel": notify.channel,
+    });
+
+    if let Some(jid) = job_id {
+        metadata["job_id"] = serde_json::json!(jid.to_string());
+    }
 
     let response = OutgoingResponse {
         content: message,
         thread_id: thread_id.map(String::from),
         attachments: Vec::new(),
-        metadata: serde_json::json!({
-            "source": "routine",
-            "routine_name": routine_name,
-            "status": status.to_string(),
-            "owner_id": owner_id,
-            "notify_user": notify.user,
-            "notify_channel": notify.channel,
-        }),
+        metadata,
     };
 
     if let Err(e) = tx.send(response).await {
@@ -1940,7 +1971,6 @@ fn truncate(s: &str, max: usize) -> String {
 /// 2. Strip HTML tags to prevent injection in web-rendered notifications
 /// 3. Collapse multiple whitespace/newlines to single spaces for cleaner output
 /// 4. Truncate to 500 chars to prevent oversized notifications
-#[cfg(test)]
 fn sanitize_summary(s: &str) -> String {
     // Strip control characters (keep newline for now, collapse later)
     let no_control: String = s
@@ -1967,19 +1997,67 @@ fn sanitize_summary(s: &str) -> String {
     }
 }
 
-/// Remove HTML/XML tags from a string.
-#[cfg(test)]
+/// Remove actual HTML tags from a string while preserving non-HTML angle brackets.
+///
+/// Only strips patterns that look like real HTML/XML tags (e.g. `<div>`, `</p>`,
+/// `<img src=...>`), not generic angle-bracket content like `Vec<String>`,
+/// `cat < input.txt`, or comparison operators.
+///
+/// Also strips HTML comments (`<!--...-->`), SVG/MathML tags, and custom elements
+/// (tags containing hyphens like `<custom-element>`).
 fn strip_html_tags(s: &str) -> String {
-    let mut result = String::with_capacity(s.len());
-    let mut in_tag = false;
-    for c in s.chars() {
-        match c {
-            '<' => in_tag = true,
-            '>' if in_tag => in_tag = false,
-            _ if !in_tag => result.push(c),
-            _ => {}
-        }
+    use std::sync::LazyLock;
+
+    // HTML comment pattern: <!--...-->
+    static COMMENT_RE: LazyLock<Option<Regex>> =
+        LazyLock::new(|| Regex::new(r"<!--[\s\S]*?-->").ok());
+
+    // Known HTML/SVG/MathML tag names. Includes SVG tags (svg, path, circle, etc.)
+    // and MathML tags (math, mrow, etc.) that can carry event handlers.
+    static HTML_TAG_RE: LazyLock<Option<Regex>> = LazyLock::new(|| {
+        let tags = "a|abbr|address|area|article|aside|audio|b|base|bdi|bdo|blockquote|\
+            body|br|button|canvas|caption|cite|code|col|colgroup|data|datalist|dd|del|\
+            details|dfn|dialog|div|dl|dt|em|embed|fieldset|figcaption|figure|footer|\
+            form|h[1-6]|head|header|hgroup|hr|html|i|iframe|img|input|ins|kbd|label|\
+            legend|li|link|main|map|mark|meta|meter|nav|noscript|object|ol|optgroup|\
+            option|output|p|param|picture|pre|progress|q|rp|rt|ruby|s|samp|script|\
+            section|select|slot|small|source|span|strong|style|sub|summary|sup|table|\
+            tbody|td|template|textarea|tfoot|th|thead|time|title|tr|track|u|ul|var|\
+            video|wbr|\
+            svg|g|path|circle|ellipse|line|polyline|polygon|rect|text|tspan|defs|\
+            clippath|mask|pattern|image|use|symbol|marker|lineargradient|\
+            radialgradient|stop|filter|foreignobject|animate|animatetransform|\
+            math|mrow|mi|mo|mn|ms|mtext|mfrac|msqrt|mroot|msub|msup|msubsup|\
+            munder|mover|munderover|mtable|mtr|mtd|mspace|mpadded|mfenced|menclose";
+        // Handles: <tag>, </tag>, <tag/>, <tag />, <tag attr="val">, <tag attr="val"/>
+        Regex::new(&format!(r"(?i)</?(?:{})(?:\s[^>]*)?\s*/?>", tags)).ok()
+    });
+
+    // Custom elements: tags containing a hyphen (web components spec requires it).
+    // E.g. <custom-element>, <my-widget foo="bar">, </x-foo>
+    static CUSTOM_ELEMENT_RE: LazyLock<Option<Regex>> =
+        LazyLock::new(|| Regex::new(r"(?i)</?\w+-[\w-]*(?:\s[^>]*)?\s*/?>").ok());
+
+    let mut result = s.to_string();
+
+    if let Some(re) = COMMENT_RE.as_ref() {
+        result = re.replace_all(&result, "").into_owned();
+    } else {
+        tracing::error!("HTML comment regex failed to compile; skipping comment sanitization");
     }
+    if let Some(re) = HTML_TAG_RE.as_ref() {
+        result = re.replace_all(&result, "").into_owned();
+    } else {
+        tracing::error!("HTML tag regex failed to compile; skipping tag sanitization");
+    }
+    if let Some(re) = CUSTOM_ELEMENT_RE.as_ref() {
+        result = re.replace_all(&result, "").into_owned();
+    } else {
+        tracing::error!(
+            "Custom element regex failed to compile; skipping custom element sanitization"
+        );
+    }
+
     result
 }
 
@@ -2552,6 +2630,33 @@ mod tests {
     }
 
     #[test]
+    fn test_sanitize_summary_preserves_non_html_angle_brackets() {
+        use super::sanitize_summary;
+
+        // Rust/Java generics must pass through unchanged
+        assert_eq!(
+            sanitize_summary("expected Vec<String>"),
+            "expected Vec<String>"
+        );
+        assert_eq!(
+            sanitize_summary("HashMap<String, Vec<u8>>"),
+            "HashMap<String, Vec<u8>>"
+        );
+
+        // Shell redirects must pass through unchanged
+        assert_eq!(sanitize_summary("cat < input.txt"), "cat < input.txt");
+
+        // Comparison operators must pass through unchanged
+        assert_eq!(sanitize_summary("x < 10 && y > 20"), "x < 10 && y > 20");
+
+        // Mixed: real HTML stripped but generics preserved
+        assert_eq!(
+            sanitize_summary("Error in Vec<String>: <b>failed</b>"),
+            "Error in Vec<String>: failed"
+        );
+    }
+
+    #[test]
     fn test_sanitize_summary_multibyte_truncation() {
         use super::sanitize_summary;
 
@@ -2560,5 +2665,209 @@ mod tests {
         let result = sanitize_summary(&s);
         assert!(result.len() <= 503);
         assert!(result.ends_with("..."));
+    }
+
+    #[test]
+    fn test_sanitize_summary_truncates_long_text() {
+        use super::sanitize_summary;
+
+        let short = "This is a short summary.";
+        assert_eq!(sanitize_summary(short), short);
+
+        let long = "x".repeat(600);
+        let result = sanitize_summary(&long);
+        assert!(
+            result.len() <= 503,
+            "Truncated summary should be at most 503 bytes (500 + '...')"
+        );
+        assert!(
+            result.ends_with("..."),
+            "Truncated summary should end with ellipsis"
+        );
+    }
+
+    #[test]
+    fn test_sanitize_summary_strips_all_html_forms() {
+        use super::sanitize_summary;
+
+        // Self-closing tags without whitespace: <br/>, <img/>
+        assert_eq!(sanitize_summary("line1<br/>line2"), "line1line2");
+        assert_eq!(sanitize_summary("text<img/>more"), "textmore");
+        assert_eq!(sanitize_summary("text<br />more"), "textmore");
+
+        // HTML comments
+        assert_eq!(sanitize_summary("before<!--x-->after"), "beforeafter");
+        assert_eq!(sanitize_summary("a<!-- multi\nline -->b"), "ab");
+
+        // SVG tags (can carry event handlers)
+        assert_eq!(
+            sanitize_summary("<svg onload=alert(1)>payload</svg>"),
+            "payload"
+        );
+        assert_eq!(sanitize_summary("<svg><circle r=10/></svg>"), "");
+
+        // MathML tags
+        assert_eq!(sanitize_summary("<math><mrow>x</mrow></math>"), "x");
+
+        // Custom elements (web components with hyphens)
+        assert_eq!(
+            sanitize_summary("before<custom-element>inner</custom-element>after"),
+            "beforeinnerafter"
+        );
+        assert_eq!(
+            sanitize_summary("<my-widget foo=\"bar\">content</my-widget>"),
+            "content"
+        );
+
+        // Generics must still be preserved
+        assert_eq!(
+            sanitize_summary("expected Vec<String>"),
+            "expected Vec<String>"
+        );
+    }
+
+    #[test]
+    fn test_status_display_label_readable() {
+        use super::status_display_label;
+
+        assert_eq!(status_display_label(RunStatus::Ok), "Completed");
+        assert_eq!(status_display_label(RunStatus::Failed), "Failed");
+        assert_eq!(
+            status_display_label(RunStatus::Attention),
+            "Needs attention"
+        );
+        assert_eq!(status_display_label(RunStatus::Running), "Running");
+    }
+
+    #[tokio::test]
+    async fn test_notification_message_uses_readable_status() {
+        use tokio::sync::mpsc;
+
+        let (tx, mut rx) = mpsc::channel(1);
+        let notify = NotifyConfig {
+            on_success: true,
+            on_failure: true,
+            on_attention: true,
+            ..Default::default()
+        };
+
+        super::send_notification(
+            &tx,
+            &notify,
+            "user-1",
+            "my-routine",
+            RunStatus::Ok,
+            Some("All good"),
+            None,
+            None,
+        )
+        .await;
+
+        let msg = rx.recv().await.expect("should receive notification");
+        assert!(
+            msg.content.contains("Completed"),
+            "Notification should use readable label 'Completed', got: {}",
+            msg.content
+        );
+        assert!(
+            !msg.content.contains(": ok"),
+            "Notification should not contain raw lowercase status"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_notification_includes_job_id_in_metadata() {
+        use tokio::sync::mpsc;
+
+        let (tx, mut rx) = mpsc::channel(1);
+        let notify = NotifyConfig {
+            on_failure: true,
+            ..Default::default()
+        };
+        let job_id = uuid::Uuid::new_v4();
+
+        super::send_notification(
+            &tx,
+            &notify,
+            "user-1",
+            "my-routine",
+            RunStatus::Failed,
+            Some("something broke"),
+            None,
+            Some(job_id),
+        )
+        .await;
+
+        let msg = rx.recv().await.expect("should receive notification");
+        let meta_job_id = msg.metadata["job_id"]
+            .as_str()
+            .expect("metadata should contain job_id");
+        assert_eq!(meta_job_id, job_id.to_string());
+    }
+
+    #[tokio::test]
+    async fn test_notification_omits_job_id_when_none() {
+        use tokio::sync::mpsc;
+
+        let (tx, mut rx) = mpsc::channel(1);
+        let notify = NotifyConfig {
+            on_success: true,
+            ..Default::default()
+        };
+
+        super::send_notification(
+            &tx,
+            &notify,
+            "user-1",
+            "my-routine",
+            RunStatus::Ok,
+            Some("done"),
+            None,
+            None,
+        )
+        .await;
+
+        let msg = rx.recv().await.expect("should receive notification");
+        assert!(
+            msg.metadata.get("job_id").is_none(),
+            "metadata should not contain job_id when None"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_notification_truncates_long_summary() {
+        use tokio::sync::mpsc;
+
+        let (tx, mut rx) = mpsc::channel(1);
+        let notify = NotifyConfig {
+            on_failure: true,
+            ..Default::default()
+        };
+
+        let long_summary = "z".repeat(1000);
+        super::send_notification(
+            &tx,
+            &notify,
+            "user-1",
+            "my-routine",
+            RunStatus::Failed,
+            Some(&long_summary),
+            None,
+            None,
+        )
+        .await;
+
+        let msg = rx.recv().await.expect("should receive notification");
+        // The sanitized summary should be truncated to ~500 chars + "..."
+        // The full message includes icon + routine name + label, so just check
+        // it doesn't contain the full 1000-char string.
+        assert!(
+            !msg.content.contains(&long_summary),
+            "Notification should truncate long summaries"
+        );
+        assert!(
+            msg.content.contains("..."),
+            "Truncated notification should contain ellipsis"
+        );
     }
 }
