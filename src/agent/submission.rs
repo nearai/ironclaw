@@ -1087,6 +1087,35 @@ mod tests {
     }
 
     #[test]
+    fn test_parser_system_commands_full_set() {
+        // Test all system commands from commands.rs
+        assert!(
+            matches!(SubmissionParser::parse("/help"), Submission::SystemCommand { command, args } if command == "help" && args.is_empty())
+        );
+        assert!(
+            matches!(SubmissionParser::parse("/?"), Submission::SystemCommand { command, args } if command == "help" && args.is_empty())
+        );
+        assert!(
+            matches!(SubmissionParser::parse("/version"), Submission::SystemCommand { command, args } if command == "version" && args.is_empty())
+        );
+        assert!(
+            matches!(SubmissionParser::parse("/tools"), Submission::SystemCommand { command, args } if command == "tools" && args.is_empty())
+        );
+        assert!(
+            matches!(SubmissionParser::parse("/skills"), Submission::SystemCommand { command, args } if command == "skills" && args.is_empty())
+        );
+        assert!(
+            matches!(SubmissionParser::parse("/skills search test"), Submission::SystemCommand { command, args } if command == "skills" && args == vec!["search", "test"])
+        );
+        assert!(
+            matches!(SubmissionParser::parse("/ping"), Submission::SystemCommand { command, args } if command == "ping" && args.is_empty())
+        );
+        assert!(
+            matches!(SubmissionParser::parse("/debug"), Submission::SystemCommand { command, args } if command == "debug" && args.is_empty())
+        );
+    }
+
+    #[test]
     fn test_parser_control_vs_system_commands() {
         // Control commands should return true for is_control()
         assert!(SubmissionParser::parse("/undo").is_control());
@@ -1164,6 +1193,16 @@ mod tests {
         // Slash in middle of text → UserInput
         assert!(matches!(
             SubmissionParser::parse("hello /world test"),
+            Submission::UserInput { .. }
+        ));
+
+        // Partial matches should not trigger
+        assert!(matches!(
+            SubmissionParser::parse("/und"),
+            Submission::UserInput { .. }
+        ));
+        assert!(matches!(
+            SubmissionParser::parse("/compactly"),
             Submission::UserInput { .. }
         ));
 

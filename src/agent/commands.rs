@@ -1247,3 +1247,96 @@ impl Agent {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent::session::{Session, Thread, ThreadState};
+    use crate::channels::ChannelMetadata;
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+    use uuid::Uuid;
+
+    fn create_test_session() -> Arc<Mutex<Session>> {
+        let session = Session {
+            id: Uuid::new_v4(),
+            user_id: "test-user".to_string(),
+            channel: "test-channel".to_string(),
+            metadata: ChannelMetadata::default(),
+            threads: std::collections::HashMap::new(),
+            active_thread: None,
+            pending_auth: None,
+        };
+        Arc::new(Mutex::new(session))
+    }
+
+    fn add_test_thread(session: &Session) -> Uuid {
+        let thread_id = Uuid::new_v4();
+        let thread = Thread {
+            id: thread_id,
+            session_id: session.id,
+            state: ThreadState::Idle,
+            turns: vec![],
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            metadata: std::collections::HashMap::new(),
+        };
+        session.threads.insert(thread_id, thread);
+        thread_id
+    }
+
+    #[test]
+    fn test_format_count() {
+        assert_eq!(format_count(5, "items"), "5 items");
+        assert_eq!(format_count(1500, "messages"), "1.5K messages");
+        assert_eq!(format_count(2500000, "tokens"), "2.5M tokens");
+    }
+
+    #[test]
+    fn test_format_history_line_without_title() {
+        let id = Uuid::new_v4();
+        let line = format_history_line(
+            '*',
+            id,
+            "Idle/test-channel",
+            "turns",
+            5,
+            "2026-03-31T20:00:00Z",
+            None,
+        );
+        assert!(line.starts_with(&format!("* {} [Idle/test-channel] turns=5", id)));
+        assert!(line.contains("updated=2026-03-31T20:00:00Z"));
+    }
+
+    #[test]
+    fn test_format_history_line_with_title() {
+        let id = Uuid::new_v4();
+        let line = format_history_line(
+            ' ',
+            id,
+            "Processing/telegram",
+            "messages",
+            42,
+            "2026-03-31T19:00:00Z",
+            Some("Debug build issue"),
+        );
+        assert!(line.contains("messages=42"));
+        assert!(line.contains("— Debug build issue"));
+    }
+
+    #[test]
+    fn test_format_history_line_empty_title() {
+        let id = Uuid::new_v4();
+        let line = format_history_line(
+            ' ',
+            id,
+            "Idle/discord",
+            "turns",
+            0,
+            "2026-03-31T18:00:00Z",
+            Some(""),
+        );
+        // Empty title should be omitted
+        assert!(!line.contains("—"));
+    }
+}
