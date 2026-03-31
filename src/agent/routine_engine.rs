@@ -2600,13 +2600,8 @@ mod tests {
             on_success: false,
         };
 
-        let prompt = super::build_lightweight_prompt(
-            "Send Ping in this channel.",
-            &[],
-            None,
-            &notify,
-            true,
-        );
+        let prompt =
+            super::build_lightweight_prompt("Send Ping in this channel.", &[], None, &notify, true);
 
         assert!(
             prompt.contains("slack-relay"),

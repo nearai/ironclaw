@@ -1181,27 +1181,19 @@ impl Tool for RoutineCreateTool {
                 // Fall back to the current conversation's channel/target when
                 // the LLM omits delivery params, so routines created from
                 // e.g. a Slack channel know where to send results.
-                channel: normalized
-                    .delivery
-                    .channel
-                    .clone()
-                    .or_else(|| {
-                        ctx.metadata
-                            .get("notify_channel")
-                            .and_then(|v| v.as_str())
-                            .map(ToOwned::to_owned)
-                    }),
-                user: normalized
-                    .delivery
-                    .user
-                    .clone()
-                    .or_else(|| {
-                        ctx.metadata
-                            .get("notify_user")
-                            .and_then(|v| v.as_str())
-                            .filter(|v| *v != "default")
-                            .map(ToOwned::to_owned)
-                    }),
+                channel: normalized.delivery.channel.clone().or_else(|| {
+                    ctx.metadata
+                        .get("notify_channel")
+                        .and_then(|v| v.as_str())
+                        .map(ToOwned::to_owned)
+                }),
+                user: normalized.delivery.user.clone().or_else(|| {
+                    ctx.metadata
+                        .get("notify_user")
+                        .and_then(|v| v.as_str())
+                        .filter(|v| *v != "default")
+                        .map(ToOwned::to_owned)
+                }),
                 ..NotifyConfig::default()
             },
             last_run_at: None,
