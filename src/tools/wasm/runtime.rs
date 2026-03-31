@@ -150,6 +150,8 @@ impl std::fmt::Debug for PreparedModule {
     }
 }
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 /// WASM tool runtime.
 ///
 /// Manages the Wasmtime engine and a cache of prepared modules.
@@ -160,6 +162,8 @@ pub struct WasmToolRuntime {
     config: WasmRuntimeConfig,
     /// Cache of prepared modules by name.
     modules: RwLock<HashMap<String, Arc<PreparedModule>>>,
+    /// Whether the epoch ticker thread has been started.
+    ticker_started: AtomicBool,
 }
 
 impl WasmToolRuntime {
@@ -187,14 +191,6 @@ impl WasmToolRuntime {
         // Disable debug info in production for smaller modules
         wasmtime_config.debug_info(false);
 
-        // Enable persistent compilation cache. Wasmtime serializes compiled native
-        // code to disk (~/.cache/wasmtime by default), so subsequent startups
-        // deserialize instead of recompiling — typically 10-50x faster.
-        //
-        // On Windows, each Engine gets its own cache subdirectory to avoid
-        // OS error 33 (ERROR_LOCK_VIOLATION) when multiple engines share the
-        // default cache and Windows holds exclusive locks on memory-mapped
-        // files. See #448.
         if let Err(e) =
             enable_compilation_cache(&mut wasmtime_config, "tools", config.cache_dir.as_deref())
         {
@@ -205,30 +201,38 @@ impl WasmToolRuntime {
             WasmError::EngineCreationFailed(format!("Failed to create Wasmtime engine: {}", e))
         })?;
 
-        // Spawn a background thread that periodically increments the engine's
-        // epoch counter. Without this, epoch_deadline_trap() never fires and
-        // WASM modules can spin indefinitely even with a deadline set.
-        let ticker_engine = engine.clone();
-        std::thread::Builder::new()
-            .name("wasm-epoch-ticker".into())
-            .spawn(move || {
-                loop {
-                    std::thread::sleep(EPOCH_TICK_INTERVAL);
-                    ticker_engine.increment_epoch();
-                }
-            })
-            .map_err(|e| {
-                WasmError::EngineCreationFailed(format!(
-                    "Failed to spawn epoch ticker thread: {}",
-                    e
-                ))
-            })?;
+        // Note: Ticker thread spawning moved to ensure_ticker_started()
+        // to support lazy initialization in high-density deployments.
 
         Ok(Self {
             engine,
             config,
             modules: RwLock::new(HashMap::new()),
+            ticker_started: AtomicBool::new(false),
         })
+    }
+
+    /// Ensure the epoch ticker thread is running.
+    ///
+    /// Called lazily before any WASM preparation or execution.
+    fn ensure_ticker_started(&self) {
+        if self
+            .ticker_started
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
+            let ticker_engine = self.engine.clone();
+            let _ = std::thread::Builder::new()
+                .name("wasm-epoch-ticker".into())
+                .spawn(move || loop {
+                    std::thread::sleep(EPOCH_TICK_INTERVAL);
+                    ticker_engine.increment_epoch();
+                })
+                .map_err(|e| {
+                    tracing::error!("Failed to spawn WASM epoch ticker thread: {}", e);
+                });
+            tracing::debug!("Lazy WASM epoch ticker started");
+        }
     }
 
     /// Get the Wasmtime engine.
@@ -245,9 +249,11 @@ impl WasmToolRuntime {
     ///
     /// This validates and compiles the component, extracting metadata.
     /// The compiled component is cached for fast instantiation.
-    pub async fn prepare(
-        &self,
-        name: &str,
+    pub async fn prepare(&self, name: &str, component_bytes: &[u8]) -> Result<Arc<PreparedModule>, WasmError> {
+        // Ensure ticker is running before we prepare any code that might use it
+        self.ensure_ticker_started();
+
+        let mut modules = self.modules.write().await;
         wasm_bytes: &[u8],
         limits: Option<ResourceLimits>,
     ) -> Result<Arc<PreparedModule>, WasmError> {
