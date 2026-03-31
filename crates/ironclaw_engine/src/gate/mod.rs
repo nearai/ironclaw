@@ -94,6 +94,15 @@ pub enum GateResolution {
 pub enum ExecutionMode {
     /// Interactive session — a user can approve / authenticate.
     Interactive,
+    /// Interactive session with auto-approve enabled.
+    ///
+    /// `UnlessAutoApproved` tools pass without prompting (shell, file_write,
+    /// http, etc.). `Always`-gated tools (destructive operations) still pause
+    /// for explicit approval. All other safeguards remain active: leases,
+    /// rate limits, hooks, relay channel checks, authentication gates.
+    ///
+    /// Activated via `AGENT_AUTO_APPROVE_TOOLS=true` or settings.
+    InteractiveAutoApprove,
     /// Autonomous background job — no interactive user.
     /// The lease set determines what tools are available.
     Autonomous,

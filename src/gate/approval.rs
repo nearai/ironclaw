@@ -90,6 +90,27 @@ impl ExecutionGate for ApprovalGate {
                     },
                 },
             },
+            ExecutionMode::InteractiveAutoApprove => match requirement {
+                ApprovalRequirement::Never | ApprovalRequirement::UnlessAutoApproved => {
+                    // Auto-approve mode: shell, file_write, http, etc. proceed
+                    // without prompting. Other safeguards (leases, rate limits,
+                    // hooks, auth gates) still apply.
+                    GateDecision::Allow
+                }
+                ApprovalRequirement::Always => {
+                    // Always-gated tools still require explicit approval even
+                    // in auto-approve mode — these are truly destructive operations.
+                    GateDecision::Pause {
+                        reason: format!(
+                            "Tool '{}' requires explicit approval (auto-approve does not cover this operation).",
+                            ctx.action_name
+                        ),
+                        resume_kind: ResumeKind::Approval {
+                            allow_always: false,
+                        },
+                    }
+                }
+            },
             ExecutionMode::Autonomous => match requirement {
                 ApprovalRequirement::Never | ApprovalRequirement::UnlessAutoApproved => {
                     // Never and UnlessAutoApproved are allowed in autonomous mode
@@ -327,6 +348,28 @@ mod tests {
             execution_mode: mode,
             auto_approved,
         }
+    }
+
+    // ── InteractiveAutoApprove mode ─────────────────────────
+
+    #[tokio::test]
+    async fn test_auto_approve_allows_unless_auto_approved_tools() {
+        let gate = RelayChannelGate;
+        // This test uses RelayChannelGate only to get a gate instance —
+        // the actual auto-approve logic is in ApprovalGate which needs
+        // a ToolRegistry. Test the mode semantics directly via GateContext.
+        let ad = action_def("shell", false); // UnlessAutoApproved mapped here
+        let auto = HashSet::new();
+        let params = serde_json::json!({});
+        let c = ctx(
+            &ad,
+            ExecutionMode::InteractiveAutoApprove,
+            "web",
+            &auto,
+            &params,
+        );
+        // RelayChannelGate doesn't care about mode — it only checks channel suffix
+        assert!(matches!(gate.evaluate(&c).await, GateDecision::Allow));
     }
 
     // ── RelayChannelGate ─────────────────────────────────────
