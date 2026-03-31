@@ -130,7 +130,7 @@ impl Scheduler {
     ///
     /// Returns the new job ID.
     pub async fn dispatch_job(
-        &mut self,
+        &self,
         user_id: &str,
         title: &str,
         description: &str,
@@ -152,7 +152,7 @@ impl Scheduler {
     /// Same as `dispatch_job`, but the worker will use the given `ApprovalContext`
     /// to determine the explicit autonomous allowlist for that job.
     pub async fn dispatch_job_with_context(
-        &mut self,
+        &self,
         user_id: &str,
         title: &str,
         description: &str,
@@ -171,7 +171,7 @@ impl Scheduler {
 
     /// Shared implementation for `dispatch_job` and `dispatch_job_with_context`.
     async fn dispatch_job_inner(
-        &mut self,
+        &self,
         user_id: &str,
         title: &str,
         description: &str,
@@ -247,13 +247,13 @@ impl Scheduler {
     }
 
     /// Schedule a job for execution.
-    pub async fn schedule(&mut self, job_id: Uuid) -> Result<(), JobError> {
+    pub async fn schedule(&self, job_id: Uuid) -> Result<(), JobError> {
         self.schedule_with_context(job_id, None).await
     }
 
     /// Schedule a job with an optional approval context.
     async fn schedule_with_context(
-        &mut self,
+        &self,
         job_id: Uuid,
         approval_context: Option<ApprovalContext>,
     ) -> Result<(), JobError> {
@@ -273,7 +273,7 @@ impl Scheduler {
             }
 
             // Set the default approval context for subtasks spawned from this job.
-            self.default_approval_context = approval_context.clone();
+            *self.default_approval_context.write().await = approval_context.clone();
 
             // Transition job to in_progress
             self.context_manager
@@ -382,7 +382,8 @@ impl Scheduler {
                 let safety = self.safety.clone();
                 // Propagate the parent job's ApprovalContext to subtasks so autonomous
                 // tool execution respects the same allowlist as the parent job.
-                let approval_context = self.default_approval_context.clone();
+                // Read the approval context from the RwLock before moving into the spawned task.
+                let approval_context = self.default_approval_context.read().await.clone();
 
                 tokio::spawn(async move {
                     let result = Self::execute_tool_task(
@@ -823,7 +824,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_dispatch_job_caps_user_max_tokens() {
-        let sched = make_test_scheduler(1000);
+        let mut sched = make_test_scheduler(1000);
         let meta = serde_json::json!({ "max_tokens": 5000 });
         let job_id = sched
             .dispatch_job("user1", "test", "desc", Some(meta))
@@ -836,7 +837,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_dispatch_job_unlimited_config_preserves_user_tokens() {
-        let sched = make_test_scheduler(0); // 0 = unlimited
+        let mut sched = make_test_scheduler(0); // 0 = unlimited
         let meta = serde_json::json!({ "max_tokens": 5000 });
         let job_id = sched
             .dispatch_job("user1", "test", "desc", Some(meta))
