@@ -1037,8 +1037,10 @@ mod tests {
                 });
                 Json(json!({
                     "access_token": "proxy-access-token",
+                    "token_type": "Bearer",
                     "refresh_token": "proxy-refresh-token",
-                    "expires_in": 7200
+                    "expires_in": 7200,
+                    "scope": "scope-a scope-b"
                 }))
             }
 
