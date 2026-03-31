@@ -475,7 +475,7 @@ pub async fn chat_completions_handler(
         ));
     }
 
-    let llm = state.llm_provider.as_ref().ok_or_else(|| {
+    let llm = state.current_llm_provider().ok_or_else(|| {
         openai_error(
             StatusCode::SERVICE_UNAVAILABLE,
             "LLM provider not configured",
@@ -804,7 +804,7 @@ async fn send_finish_chunk(
 pub async fn models_handler(
     State(state): State<Arc<GatewayState>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<OpenAiErrorResponse>)> {
-    let llm = state.llm_provider.as_ref().ok_or_else(|| {
+    let llm = state.current_llm_provider().ok_or_else(|| {
         openai_error(
             StatusCode::SERVICE_UNAVAILABLE,
             "LLM provider not configured",

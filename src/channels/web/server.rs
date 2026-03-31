@@ -4,8 +4,9 @@
 
 use std::convert::Infallible;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use axum::{
     Json, Router,
@@ -375,6 +376,8 @@ pub struct GatewayState {
     pub ws_tracker: Option<Arc<crate::channels::web::ws::WsConnectionTracker>>,
     /// LLM provider for OpenAI-compatible API proxy.
     pub llm_provider: Option<Arc<dyn crate::llm::LlmProvider>>,
+    /// Hot-reloadable LLM runtime used for new requests after settings changes.
+    pub llm_runtime: Option<Arc<crate::llm::LlmRuntime>>,
     /// Skill registry for skill management API.
     pub skill_registry: Option<Arc<std::sync::RwLock<crate::skills::SkillRegistry>>>,
     /// Skill catalog for searching the ClawHub registry.
@@ -397,11 +400,52 @@ pub struct GatewayState {
     /// Server startup time for uptime calculation.
     pub startup_time: std::time::Instant,
     /// Snapshot of active (resolved) configuration for the frontend.
-    pub active_config: ActiveConfigSnapshot,
+    pub active_config: Arc<RwLock<ActiveConfigSnapshot>>,
+    /// Optional config.toml path used to preserve startup precedence on reload.
+    pub config_toml_path: Option<PathBuf>,
     /// Secrets store for admin secret provisioning.
     pub secrets_store: Option<Arc<dyn crate::secrets::SecretsStore + Send + Sync>>,
     /// DB auth cache for invalidation on security-critical actions.
     pub db_auth: Option<Arc<crate::channels::web::auth::DbAuthenticator>>,
+}
+
+impl GatewayState {
+    pub fn current_llm_provider(&self) -> Option<Arc<dyn crate::llm::LlmProvider>> {
+        self.llm_runtime
+            .as_ref()
+            .map(|runtime| runtime.current_provider())
+            .or_else(|| self.llm_provider.as_ref().map(Arc::clone))
+    }
+
+    pub fn active_config_snapshot(&self) -> ActiveConfigSnapshot {
+        read_guard(&self.active_config).clone()
+    }
+
+    pub fn set_active_llm_config(&self, backend: String, model: String) {
+        let mut active = write_guard(&self.active_config);
+        active.llm_backend = backend;
+        active.llm_model = model;
+    }
+}
+
+fn read_guard<T>(lock: &RwLock<T>) -> RwLockReadGuard<'_, T> {
+    match lock.read() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            tracing::warn!("Recovering from poisoned gateway state read lock");
+            poisoned.into_inner()
+        }
+    }
+}
+
+fn write_guard<T>(lock: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
+    match lock.write() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            tracing::warn!("Recovering from poisoned gateway state write lock");
+            poisoned.into_inner()
+        }
+    }
 }
 
 /// Start the gateway HTTP server.
@@ -2810,6 +2854,8 @@ async fn gateway_status_handler(
         .map(|v| v.to_lowercase() == "true")
         .unwrap_or(false);
 
+    let active_config = state.active_config_snapshot();
+
     Json(GatewayStatusResponse {
         version: env!("CARGO_PKG_VERSION").to_string(),
         sse_connections,
@@ -2820,9 +2866,9 @@ async fn gateway_status_handler(
         daily_cost,
         actions_this_hour,
         model_usage,
-        llm_backend: state.active_config.llm_backend.clone(),
-        llm_model: state.active_config.llm_model.clone(),
-        enabled_channels: state.active_config.enabled_channels.clone(),
+        llm_backend: active_config.llm_backend,
+        llm_model: active_config.llm_model,
+        enabled_channels: active_config.enabled_channels,
     })
 }
 
@@ -3039,6 +3085,7 @@ mod tests {
             shutdown_tx: tokio::sync::RwLock::new(None),
             ws_tracker: None,
             llm_provider: None,
+            llm_runtime: None,
             skill_registry: None,
             skill_catalog: None,
             scheduler: None,
@@ -3049,7 +3096,8 @@ mod tests {
             cost_guard: None,
             routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
             startup_time: std::time::Instant::now(),
-            active_config: ActiveConfigSnapshot::default(),
+            active_config: Arc::new(RwLock::new(ActiveConfigSnapshot::default())),
+            config_toml_path: None,
             secrets_store: None,
             db_auth: None,
         })

@@ -124,9 +124,10 @@ impl Agent {
             None
         };
 
-        let mut reasoning = Reasoning::new(self.llm().clone())
+        let llm = self.llm();
+        let mut reasoning = Reasoning::new(llm.clone())
             .with_channel(message.channel.clone())
-            .with_model_name(self.llm().active_model_name())
+            .with_model_name(llm.active_model_name())
             .with_group_chat(is_group_chat);
 
         // Pass channel-specific conversation context to the LLM.
@@ -1357,6 +1358,7 @@ mod tests {
             owner_id: "default".to_string(),
             store: None,
             llm: Arc::new(StaticLlmProvider),
+            llm_runtime: None,
             cheap_llm: None,
             safety: Arc::new(SafetyLayer::new(&SafetyConfig {
                 max_output_length: 100_000,
@@ -2239,6 +2241,7 @@ mod tests {
             owner_id: "default".to_string(),
             store: None,
             llm,
+            llm_runtime: None,
             cheap_llm: None,
             safety: Arc::new(SafetyLayer::new(&SafetyConfig {
                 max_output_length: 100_000,
@@ -2363,6 +2366,7 @@ mod tests {
                 owner_id: "default".to_string(),
                 store: None,
                 llm,
+                llm_runtime: None,
                 cheap_llm: None,
                 safety: Arc::new(SafetyLayer::new(&SafetyConfig {
                     max_output_length: 100_000,

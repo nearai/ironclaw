@@ -798,6 +798,18 @@ CREATE INDEX IF NOT EXISTS idx_api_tokens_hash ON api_tokens(token_hash);
 ALTER TABLE conversations ADD COLUMN source_channel TEXT;
 "#,
     ),
+    (
+        17,
+        "conversation_source_channel_backfill",
+        // Existing conversations predate the new source_channel column.
+        // Backfill them from the owning channel so approval authorization
+        // continues to work after restart/hydration.
+        r#"
+UPDATE conversations
+SET source_channel = channel
+WHERE source_channel IS NULL;
+"#,
+    ),
 ];
 
 /// Migrations whose ADD COLUMN should be skipped when the column already

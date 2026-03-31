@@ -61,15 +61,16 @@ impl ApprovalContext {
     /// Check whether a tool invocation is blocked in this context.
     ///
     /// - `Never` tools are always allowed (no approval needed).
-    /// - `UnlessAutoApproved` tools are allowed in autonomous contexts
-    ///   (autonomous execution implies auto-approve).
-    /// - `Always` tools are only allowed if explicitly listed in `allowed_tools`.
+    /// - All other tools must be explicitly listed in `allowed_tools`.
+    ///   Autonomous runs have no interactive approval path, so the allowlist
+    ///   is the source of truth for which non-`Never` tools may execute.
     pub fn is_blocked(&self, tool_name: &str, requirement: ApprovalRequirement) -> bool {
         match self {
             Self::Autonomous { allowed_tools } => match requirement {
                 ApprovalRequirement::Never => false,
-                ApprovalRequirement::UnlessAutoApproved => false,
-                ApprovalRequirement::Always => !allowed_tools.contains(tool_name),
+                ApprovalRequirement::UnlessAutoApproved | ApprovalRequirement::Always => {
+                    !allowed_tools.contains(tool_name)
+                }
             },
         }
     }
@@ -1062,12 +1063,11 @@ mod tests {
     }
 
     #[test]
-    fn test_approval_context_autonomous_blocks_always_but_allows_soft() {
+    fn test_approval_context_autonomous_blocks_all_non_never_tools() {
         let ctx = ApprovalContext::autonomous();
-        // Never and UnlessAutoApproved are always allowed in autonomous context
+        // Only Never tools are allowed without an explicit allowlist entry.
         assert!(!ctx.is_blocked("shell", ApprovalRequirement::Never));
-        assert!(!ctx.is_blocked("shell", ApprovalRequirement::UnlessAutoApproved));
-        // Always tools are blocked unless explicitly listed
+        assert!(ctx.is_blocked("shell", ApprovalRequirement::UnlessAutoApproved));
         assert!(ctx.is_blocked("shell", ApprovalRequirement::Always));
     }
 
@@ -1076,8 +1076,10 @@ mod tests {
         let ctx =
             ApprovalContext::autonomous_with_tools(["shell".to_string(), "message".to_string()]);
         assert!(!ctx.is_blocked("shell", ApprovalRequirement::Never));
+        assert!(!ctx.is_blocked("shell", ApprovalRequirement::UnlessAutoApproved));
         assert!(!ctx.is_blocked("shell", ApprovalRequirement::Always));
         assert!(!ctx.is_blocked("message", ApprovalRequirement::Always));
+        assert!(ctx.is_blocked("http", ApprovalRequirement::UnlessAutoApproved));
         assert!(ctx.is_blocked("http", ApprovalRequirement::Always));
     }
 

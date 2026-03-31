@@ -124,6 +124,7 @@ impl GatewayChannel {
             shutdown_tx: tokio::sync::RwLock::new(None),
             ws_tracker: Some(Arc::new(ws::WsConnectionTracker::new())),
             llm_provider: None,
+            llm_runtime: None,
             skill_registry: None,
             skill_catalog: None,
             chat_rate_limiter: server::PerUserRateLimiter::new(30, 60),
@@ -133,7 +134,10 @@ impl GatewayChannel {
             cost_guard: None,
             routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
             startup_time: std::time::Instant::now(),
-            active_config: server::ActiveConfigSnapshot::default(),
+            active_config: Arc::new(std::sync::RwLock::new(
+                server::ActiveConfigSnapshot::default(),
+            )),
+            config_toml_path: None,
             secrets_store: None,
             db_auth: None,
         });
@@ -166,6 +170,7 @@ impl GatewayChannel {
             shutdown_tx: tokio::sync::RwLock::new(None),
             ws_tracker: self.state.ws_tracker.clone(),
             llm_provider: self.state.llm_provider.clone(),
+            llm_runtime: self.state.llm_runtime.clone(),
             skill_registry: self.state.skill_registry.clone(),
             skill_catalog: self.state.skill_catalog.clone(),
             chat_rate_limiter: server::PerUserRateLimiter::new(30, 60),
@@ -175,7 +180,8 @@ impl GatewayChannel {
             cost_guard: self.state.cost_guard.clone(),
             routine_engine: Arc::clone(&self.state.routine_engine),
             startup_time: self.state.startup_time,
-            active_config: self.state.active_config.clone(),
+            active_config: Arc::clone(&self.state.active_config),
+            config_toml_path: self.state.config_toml_path.clone(),
             secrets_store: self.state.secrets_store.clone(),
             db_auth: self.state.db_auth.clone(),
         };
@@ -282,6 +288,11 @@ impl GatewayChannel {
         self
     }
 
+    pub fn with_llm_runtime(mut self, runtime: Arc<crate::llm::LlmRuntime>) -> Self {
+        self.rebuild_state(|s| s.llm_runtime = Some(runtime));
+        self
+    }
+
     /// Inject registry catalog entries for the available extensions API.
     pub fn with_registry_entries(mut self, entries: Vec<crate::extensions::RegistryEntry>) -> Self {
         self.rebuild_state(|s| s.registry_entries = entries);
@@ -302,7 +313,18 @@ impl GatewayChannel {
 
     /// Inject the active (resolved) configuration snapshot for the status endpoint.
     pub fn with_active_config(mut self, config: server::ActiveConfigSnapshot) -> Self {
-        self.rebuild_state(|s| s.active_config = config);
+        self.rebuild_state(|s| match s.active_config.write() {
+            Ok(mut guard) => *guard = config,
+            Err(poisoned) => {
+                tracing::warn!("Recovering from poisoned gateway active-config write lock");
+                *poisoned.into_inner() = config;
+            }
+        });
+        self
+    }
+
+    pub fn with_config_toml_path(mut self, path: Option<std::path::PathBuf>) -> Self {
+        self.rebuild_state(|s| s.config_toml_path = path);
         self
     }
 

@@ -32,7 +32,8 @@ use crate::context::{JobContext, JobState};
 use crate::error::RoutineError;
 use crate::extensions::ExtensionManager;
 use crate::llm::{
-    ChatMessage, CompletionRequest, FinishReason, LlmProvider, ToolCall, ToolCompletionRequest,
+    ChatMessage, CompletionRequest, FinishReason, LlmProvider, LlmRuntime, ToolCall,
+    ToolCompletionRequest,
 };
 use crate::tenant::AdminScope;
 use crate::tools::{
@@ -102,6 +103,7 @@ pub struct RoutineEngine {
     config: RoutineConfig,
     store: AdminScope,
     llm: Arc<dyn LlmProvider>,
+    llm_runtime: Option<Arc<LlmRuntime>>,
     workspace: Arc<Workspace>,
     /// Sender for notifications (routed to channel manager).
     notify_tx: mpsc::Sender<OutgoingResponse>,
@@ -131,6 +133,7 @@ impl RoutineEngine {
         config: RoutineConfig,
         store: AdminScope,
         llm: Arc<dyn LlmProvider>,
+        llm_runtime: Option<Arc<LlmRuntime>>,
         workspace: Arc<Workspace>,
         notify_tx: mpsc::Sender<OutgoingResponse>,
         scheduler: Option<Arc<Scheduler>>,
@@ -143,6 +146,7 @@ impl RoutineEngine {
             config,
             store,
             llm,
+            llm_runtime,
             workspace,
             notify_tx,
             running_count: Arc::new(AtomicUsize::new(0)),
@@ -154,6 +158,13 @@ impl RoutineEngine {
             sandbox_readiness,
             boot_time: Utc::now(),
         }
+    }
+
+    fn current_llm(&self) -> Arc<dyn LlmProvider> {
+        self.llm_runtime
+            .as_ref()
+            .map(|runtime| runtime.current_provider())
+            .unwrap_or_else(|| Arc::clone(&self.llm))
     }
 
     /// Expose the running count for integration tests.
@@ -803,7 +814,7 @@ impl RoutineEngine {
         let engine = EngineContext {
             config: self.config.clone(),
             store: self.store.clone(),
-            llm: self.llm.clone(),
+            llm: self.current_llm(),
             workspace: routine_workspace,
             notify_tx: self.notify_tx.clone(),
             running_count: self.running_count.clone(),
@@ -888,7 +899,7 @@ impl RoutineEngine {
         let engine = EngineContext {
             config: self.config.clone(),
             store: self.store.clone(),
-            llm: self.llm.clone(),
+            llm: self.current_llm(),
             workspace: self.workspace.clone(),
             notify_tx: self.notify_tx.clone(),
             running_count: self.running_count.clone(),
@@ -942,7 +953,7 @@ impl RoutineEngine {
         let engine = EngineContext {
             config: self.config.clone(),
             store: self.store.clone(),
-            llm: self.llm.clone(),
+            llm: self.current_llm(),
             workspace: routine_workspace,
             notify_tx: self.notify_tx.clone(),
             running_count: self.running_count.clone(),

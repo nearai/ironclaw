@@ -31,7 +31,7 @@ use chrono_tz::Tz;
 use tokio::sync::mpsc;
 
 use crate::channels::OutgoingResponse;
-use crate::llm::{ChatMessage, CompletionRequest, LlmProvider, Reasoning};
+use crate::llm::{ChatMessage, CompletionRequest, LlmProvider, LlmRuntime, Reasoning};
 use crate::tenant::AdminScope;
 use crate::workspace::Workspace;
 use crate::workspace::hygiene::HygieneConfig;
@@ -181,6 +181,7 @@ pub struct HeartbeatRunner {
     hygiene_config: HygieneConfig,
     workspace: Arc<Workspace>,
     llm: Arc<dyn LlmProvider>,
+    llm_runtime: Option<Arc<LlmRuntime>>,
     response_tx: Option<mpsc::Sender<OutgoingResponse>>,
     store: Option<AdminScope>,
     consecutive_failures: u32,
@@ -199,10 +200,16 @@ impl HeartbeatRunner {
             hygiene_config,
             workspace,
             llm,
+            llm_runtime: None,
             response_tx: None,
             store: None,
             consecutive_failures: 0,
         }
+    }
+
+    pub fn with_llm_runtime(mut self, runtime: Arc<LlmRuntime>) -> Self {
+        self.llm_runtime = Some(runtime);
+        self
     }
 
     /// Set the response channel for notifications.
@@ -215,6 +222,13 @@ impl HeartbeatRunner {
     pub fn with_store(mut self, store: AdminScope) -> Self {
         self.store = Some(store);
         self
+    }
+
+    fn current_llm(&self) -> Arc<dyn LlmProvider> {
+        self.llm_runtime
+            .as_ref()
+            .map(|runtime| runtime.current_or_cheap_provider())
+            .unwrap_or_else(|| Arc::clone(&self.llm))
     }
 
     /// Run the heartbeat loop.
@@ -358,7 +372,8 @@ impl HeartbeatRunner {
         // Use the model's context_length to set max_tokens. The API returns
         // the total context window; we cap output at half of that (the rest is
         // the prompt) with a floor of 4096.
-        let max_tokens = match self.llm.model_metadata().await {
+        let llm = self.current_llm();
+        let max_tokens = match llm.model_metadata().await {
             Ok(meta) => {
                 let from_api = meta.context_length.map(|ctx| ctx / 2).unwrap_or(4096);
                 from_api.max(4096)
@@ -376,8 +391,7 @@ impl HeartbeatRunner {
             .with_max_tokens(max_tokens)
             .with_temperature(0.3);
 
-        let reasoning =
-            Reasoning::new(self.llm.clone()).with_model_name(self.llm.active_model_name());
+        let reasoning = Reasoning::new(llm.clone()).with_model_name(llm.active_model_name());
         let (content, _usage) = match reasoning.complete(request).await {
             Ok(r) => r,
             Err(e) => return HeartbeatResult::Failed(format!("LLM call failed: {}", e)),
@@ -496,10 +510,14 @@ pub fn spawn_heartbeat(
     hygiene_config: HygieneConfig,
     workspace: Arc<Workspace>,
     llm: Arc<dyn LlmProvider>,
+    llm_runtime: Option<Arc<LlmRuntime>>,
     response_tx: Option<mpsc::Sender<OutgoingResponse>>,
     store: Option<AdminScope>,
 ) -> tokio::task::JoinHandle<()> {
     let mut runner = HeartbeatRunner::new(config, hygiene_config, workspace, llm);
+    if let Some(runtime) = llm_runtime {
+        runner = runner.with_llm_runtime(runtime);
+    }
     if let Some(tx) = response_tx {
         runner = runner.with_response_channel(tx);
     }
@@ -520,6 +538,7 @@ pub fn spawn_multi_user_heartbeat(
     config: HeartbeatConfig,
     hygiene_config: HygieneConfig,
     llm: Arc<dyn LlmProvider>,
+    llm_runtime: Option<Arc<LlmRuntime>>,
     response_tx: Option<mpsc::Sender<OutgoingResponse>>,
     store: AdminScope,
 ) -> tokio::task::JoinHandle<()> {
@@ -606,6 +625,7 @@ pub fn spawn_multi_user_heartbeat(
                 cfg.notify_user_id = None;
                 let hyg = hygiene_config.clone();
                 let llm_clone = llm.clone();
+                let llm_runtime = llm_runtime.clone();
                 let tx = response_tx.clone();
                 let admin = store.clone();
 
@@ -623,6 +643,9 @@ pub fn spawn_multi_user_heartbeat(
                     }
 
                     let mut runner = HeartbeatRunner::new(cfg, hyg, workspace, llm_clone);
+                    if let Some(runtime) = llm_runtime {
+                        runner = runner.with_llm_runtime(runtime);
+                    }
                     if let Some(tx) = tx {
                         runner = runner.with_response_channel(tx);
                     }
@@ -897,13 +920,15 @@ mod tests {
     fn test_spawn_heartbeat_accepts_store_param() {
         // Regression: spawn_heartbeat must accept an optional Database store
         // for persisting heartbeat notifications to a dedicated conversation.
-        // Compile-time check: the 7th parameter is `Option<Arc<dyn Database>>`.
+        // Compile-time check: the helper still accepts an optional runtime and
+        // an optional admin-scoped store.
         #[allow(clippy::type_complexity)]
         let _fn_ptr: fn(
             HeartbeatConfig,
             HygieneConfig,
             Arc<crate::workspace::Workspace>,
             Arc<dyn crate::llm::LlmProvider>,
+            Option<Arc<crate::llm::LlmRuntime>>,
             Option<tokio::sync::mpsc::Sender<crate::channels::OutgoingResponse>>,
             Option<AdminScope>,
         ) -> tokio::task::JoinHandle<()> = spawn_heartbeat;

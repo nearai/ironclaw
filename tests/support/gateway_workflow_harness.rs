@@ -230,6 +230,7 @@ impl GatewayWorkflowHarness {
             shutdown_tx: tokio::sync::RwLock::new(None),
             ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
             llm_provider: Some(Arc::clone(&components.llm)),
+            llm_runtime: Some(Arc::clone(&components.llm_runtime)),
             skill_registry: components.skill_registry.clone(),
             skill_catalog: components.skill_catalog.clone(),
             chat_rate_limiter: PerUserRateLimiter::new(120, 60),
@@ -239,7 +240,10 @@ impl GatewayWorkflowHarness {
             cost_guard: Some(Arc::clone(&components.cost_guard)),
             routine_engine: Arc::clone(&routine_slot),
             startup_time: Instant::now(),
-            active_config: ironclaw::channels::web::server::ActiveConfigSnapshot::default(),
+            active_config: Arc::new(std::sync::RwLock::new(
+                ironclaw::channels::web::server::ActiveConfigSnapshot::default(),
+            )),
+            config_toml_path: None,
             secrets_store: None,
             db_auth: None,
         });
@@ -250,6 +254,7 @@ impl GatewayWorkflowHarness {
                 owner_id: components.config.owner_id.clone(),
                 store: components.db,
                 llm: components.llm,
+                llm_runtime: Some(Arc::clone(&components.llm_runtime)),
                 cheap_llm: components.cheap_llm,
                 safety: components.safety,
                 tools: components.tools,

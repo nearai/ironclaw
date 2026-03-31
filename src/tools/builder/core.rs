@@ -292,7 +292,6 @@ impl LlmSoftwareBuilder {
                 "write_file",
                 "list_dir",
                 "apply_patch",
-                "http", // For fetching docs/deps
             ])
             .await
     }
@@ -797,7 +796,7 @@ Create alongside the .wasm file to grant capabilities:
 
         // Create context with build-specific approval permissions.
         // Note: shell commands (cargo, npm, pip, etc.) handle network access
-        // for dependency fetching, so we don't need to grant direct http tool access.
+        // for dependency fetching, so the builder does not expose the http tool.
         let ctx =
             JobContext::default().with_approval_context(ApprovalContext::autonomous_with_tools([
                 "shell".into(),

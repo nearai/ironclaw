@@ -14,7 +14,7 @@ use crate::context::{ContextManager, JobContext, JobState};
 use crate::error::{Error, JobError};
 use crate::extensions::ExtensionManager;
 use crate::hooks::HookRegistry;
-use crate::llm::LlmProvider;
+use crate::llm::{LlmProvider, LlmRuntime};
 use crate::safety::SafetyLayer;
 use crate::tenant::AdminScope;
 use crate::tools::{
@@ -61,6 +61,7 @@ pub struct Scheduler {
     config: AgentConfig,
     context_manager: Arc<ContextManager>,
     llm: Arc<dyn LlmProvider>,
+    llm_runtime: Option<Arc<LlmRuntime>>,
     safety: Arc<SafetyLayer>,
     tools: Arc<ToolRegistry>,
     extension_manager: Option<Arc<ExtensionManager>>,
@@ -82,6 +83,7 @@ impl Scheduler {
         config: AgentConfig,
         context_manager: Arc<ContextManager>,
         llm: Arc<dyn LlmProvider>,
+        llm_runtime: Option<Arc<LlmRuntime>>,
         safety: Arc<SafetyLayer>,
         deps: SchedulerDeps,
     ) -> Self {
@@ -89,6 +91,7 @@ impl Scheduler {
             config,
             context_manager,
             llm,
+            llm_runtime,
             safety,
             tools: deps.tools,
             extension_manager: deps.extension_manager,
@@ -99,6 +102,13 @@ impl Scheduler {
             jobs: Arc::new(RwLock::new(HashMap::new())),
             subtasks: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+
+    fn current_llm(&self) -> Arc<dyn LlmProvider> {
+        self.llm_runtime
+            .as_ref()
+            .map(|runtime| runtime.current_provider())
+            .unwrap_or_else(|| Arc::clone(&self.llm))
     }
 
     /// Set the SSE manager for live job event streaming.
@@ -303,7 +313,7 @@ impl Scheduler {
             // Create worker with shared dependencies
             let deps = WorkerDeps {
                 context_manager: self.context_manager.clone(),
-                llm: self.llm.clone(),
+                llm: self.current_llm(),
                 safety: self.safety.clone(),
                 tools: self.tools.clone(),
                 store: self.store.clone(),
@@ -819,6 +829,7 @@ mod tests {
             config,
             cm,
             llm,
+            None,
             safety,
             SchedulerDeps {
                 tools,

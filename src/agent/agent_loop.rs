@@ -27,7 +27,7 @@ use crate::db::Database;
 use crate::error::{ChannelError, Error};
 use crate::extensions::ExtensionManager;
 use crate::hooks::HookRegistry;
-use crate::llm::LlmProvider;
+use crate::llm::{LlmProvider, LlmRuntime};
 use crate::safety::SafetyLayer;
 use crate::skills::SkillRegistry;
 use crate::tools::ToolRegistry;
@@ -154,6 +154,7 @@ pub struct AgentDeps {
     pub owner_id: String,
     pub store: Option<Arc<dyn Database>>,
     pub llm: Arc<dyn LlmProvider>,
+    pub llm_runtime: Option<Arc<LlmRuntime>>,
     /// Cheap/fast LLM for lightweight tasks (heartbeat, routing, evaluation).
     /// Falls back to the main `llm` if None.
     pub cheap_llm: Option<Arc<dyn LlmProvider>>,
@@ -242,6 +243,7 @@ impl Agent {
             config.clone(),
             context_manager.clone(),
             deps.llm.clone(),
+            deps.llm_runtime.clone(),
             deps.safety.clone(),
             SchedulerDeps {
                 tools: deps.tools.clone(),
@@ -301,13 +303,25 @@ impl Agent {
         self.deps.store.as_ref()
     }
 
-    pub(super) fn llm(&self) -> &Arc<dyn LlmProvider> {
-        &self.deps.llm
+    pub(super) fn llm(&self) -> Arc<dyn LlmProvider> {
+        self.deps
+            .llm_runtime
+            .as_ref()
+            .map(|runtime| runtime.current_provider())
+            .unwrap_or_else(|| Arc::clone(&self.deps.llm))
     }
 
     /// Get the cheap/fast LLM provider, falling back to the main one.
-    pub(super) fn cheap_llm(&self) -> &Arc<dyn LlmProvider> {
-        self.deps.cheap_llm.as_ref().unwrap_or(&self.deps.llm)
+    pub(super) fn cheap_llm(&self) -> Arc<dyn LlmProvider> {
+        if let Some(runtime) = self.deps.llm_runtime.as_ref() {
+            return runtime.current_or_cheap_provider();
+        }
+
+        self.deps
+            .cheap_llm
+            .as_ref()
+            .map(Arc::clone)
+            .unwrap_or_else(|| Arc::clone(&self.deps.llm))
     }
 
     pub(super) fn safety(&self) -> &Arc<SafetyLayer> {
@@ -672,7 +686,8 @@ impl Agent {
                             Some(spawn_multi_user_heartbeat(
                                 config,
                                 hygiene,
-                                self.cheap_llm().clone(),
+                                self.cheap_llm(),
+                                self.deps.llm_runtime.clone(),
                                 Some(notify_tx),
                                 admin,
                             ))
@@ -685,7 +700,8 @@ impl Agent {
                             config,
                             hygiene,
                             workspace.clone(),
-                            self.cheap_llm().clone(),
+                            self.cheap_llm(),
+                            self.deps.llm_runtime.clone(),
                             Some(notify_tx),
                             self.admin_store(),
                         ))
@@ -712,7 +728,8 @@ impl Agent {
                     let engine = Arc::new(RoutineEngine::new(
                         rt_config.clone(),
                         crate::tenant::AdminScope::new(Arc::clone(store)),
-                        self.llm().clone(),
+                        self.llm(),
+                        self.deps.llm_runtime.clone(),
                         Arc::clone(workspace),
                         notify_tx,
                         Some(self.scheduler.clone()),

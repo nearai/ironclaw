@@ -139,6 +139,10 @@ pub async fn settings_set_handler(
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
+    if setting_affects_llm(key.as_str()) {
+        reload_owner_llm_runtime(&state, &user.user_id).await?;
+    }
+
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -260,6 +264,10 @@ pub async fn settings_delete_handler(
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
+    if setting_affects_llm(key.as_str()) {
+        reload_owner_llm_runtime(&state, &user.user_id).await?;
+    }
+
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -314,7 +322,78 @@ pub async fn settings_import_handler(
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
+    if sanitized.keys().any(|key| setting_affects_llm(key)) {
+        reload_owner_llm_runtime(&state, &user.user_id).await?;
+    }
+
     Ok(StatusCode::NO_CONTENT)
+}
+
+fn setting_affects_llm(key: &str) -> bool {
+    key == "selected_model" || key.starts_with("llm_")
+}
+
+async fn reload_owner_llm_runtime(state: &GatewayState, user_id: &str) -> Result<(), StatusCode> {
+    if user_id != state.owner_id {
+        return Ok(());
+    }
+
+    let Some(runtime) = state.llm_runtime.as_ref() else {
+        return Ok(());
+    };
+    let Some(store) = state.store.as_ref() else {
+        tracing::error!("Cannot reload LLM runtime: settings store unavailable");
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    };
+
+    let mut config = crate::config::Config::from_db_with_toml(
+        store.as_ref(),
+        &state.owner_id,
+        state.config_toml_path.as_deref(),
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!("Failed to reload owner config from DB: {}", e);
+        StatusCode::UNPROCESSABLE_ENTITY
+    })?;
+
+    let settings_store: Option<&(dyn crate::db::SettingsStore + Sync)> = Some(store.as_ref());
+    let resolve_result = if let Some(secrets) = state.secrets_store.as_ref() {
+        config
+            .re_resolve_llm_with_secrets(
+                settings_store,
+                &state.owner_id,
+                state.config_toml_path.as_deref(),
+                Some(secrets.as_ref()),
+            )
+            .await
+    } else {
+        config
+            .re_resolve_llm(
+                settings_store,
+                &state.owner_id,
+                state.config_toml_path.as_deref(),
+            )
+            .await
+    };
+    resolve_result.map_err(|e| {
+        tracing::error!(
+            "Failed to re-resolve LLM config after settings update: {}",
+            e
+        );
+        StatusCode::UNPROCESSABLE_ENTITY
+    })?;
+
+    let snapshot = runtime.reload(&config.llm).await.map_err(|e| {
+        tracing::error!(
+            "Failed to rebuild LLM provider chain after settings update: {}",
+            e
+        );
+        StatusCode::UNPROCESSABLE_ENTITY
+    })?;
+
+    state.set_active_llm_config(snapshot.backend, snapshot.model);
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -599,7 +678,9 @@ async fn annotate_secret_key_presence(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::Database;
     use std::collections::HashMap;
+    use std::sync::Arc;
 
     #[test]
     fn test_mask_settings_api_keys_builtin_overrides() {
@@ -690,6 +771,7 @@ mod tests {
             shutdown_tx: tokio::sync::RwLock::new(None),
             ws_tracker: None,
             llm_provider: None,
+            llm_runtime: None,
             skill_registry: None,
             skill_catalog: None,
             chat_rate_limiter: crate::channels::web::server::PerUserRateLimiter::new(30, 60),
@@ -699,10 +781,27 @@ mod tests {
             cost_guard: None,
             routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
             startup_time: std::time::Instant::now(),
-            active_config: crate::channels::web::server::ActiveConfigSnapshot::default(),
+            active_config: Arc::new(std::sync::RwLock::new(
+                crate::channels::web::server::ActiveConfigSnapshot::default(),
+            )),
+            config_toml_path: None,
             secrets_store: Some(secrets),
             db_auth: None,
         }
+    }
+
+    #[cfg(feature = "libsql")]
+    async fn test_db() -> (Arc<dyn crate::db::Database>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        let path = dir.path().join("settings-hot-reload.db");
+        let backend = crate::db::libsql::LibSqlBackend::new_local(&path)
+            .await
+            .expect("failed to create libsql backend");
+        backend
+            .run_migrations()
+            .await
+            .expect("failed to run migrations");
+        (Arc::new(backend) as Arc<dyn crate::db::Database>, dir)
     }
 
     #[tokio::test]
@@ -854,6 +953,104 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_settings_set_handler_reloads_owner_llm_runtime() {
+        let _guard = crate::config::helpers::lock_env();
+        crate::config::set_runtime_env("NEARAI_AUTH_URL", "http://127.0.0.1:8080");
+        crate::config::set_runtime_env("NEARAI_BASE_URL", "http://127.0.0.1:8080");
+
+        let (db, _tmp) = test_db().await;
+        let secrets = test_secrets_store();
+
+        db.set_setting(
+            "test",
+            "llm_backend",
+            &serde_json::Value::String("openai".to_string()),
+        )
+        .await
+        .expect("set llm_backend");
+        db.set_setting(
+            "test",
+            "llm_builtin_overrides",
+            &serde_json::json!({
+                "openai": {}
+            }),
+        )
+        .await
+        .expect("set llm_builtin_overrides");
+        db.set_setting(
+            "test",
+            "selected_model",
+            &serde_json::Value::String("gpt-4o-mini".to_string()),
+        )
+        .await
+        .expect("set selected_model");
+        secrets
+            .create(
+                "test",
+                CreateSecretParams {
+                    name: "llm_builtin_openai_api_key".to_string(),
+                    value: SecretString::from("sk-test-openai".to_string()),
+                    provider: Some("openai".to_string()),
+                    expires_at: None,
+                },
+            )
+            .await
+            .expect("store openai key");
+
+        let mut config = crate::config::Config::from_db_with_toml(db.as_ref(), "test", None)
+            .await
+            .expect("load config");
+        config
+            .re_resolve_llm_with_secrets(Some(db.as_ref()), "test", None, Some(secrets.as_ref()))
+            .await
+            .expect("resolve llm with secrets");
+
+        let runtime = Arc::new(
+            crate::llm::LlmRuntime::from_config(
+                &config.llm,
+                Arc::new(crate::llm::SessionManager::new(
+                    crate::llm::SessionConfig::default(),
+                )),
+            )
+            .await
+            .expect("create llm runtime"),
+        );
+        let initial_model = runtime.current_provider().active_model_name();
+
+        let state = Arc::new(GatewayState {
+            store: Some(Arc::clone(&db)),
+            llm_runtime: Some(Arc::clone(&runtime)),
+            active_config: Arc::new(std::sync::RwLock::new(
+                crate::channels::web::server::ActiveConfigSnapshot {
+                    llm_backend: "openai".to_string(),
+                    llm_model: initial_model,
+                    enabled_channels: Vec::new(),
+                },
+            )),
+            ..test_gateway_state(Arc::clone(&secrets))
+        });
+
+        let result = settings_set_handler(
+            State(Arc::clone(&state)),
+            AuthenticatedUser(crate::channels::web::auth::UserIdentity {
+                user_id: "test".to_string(),
+                role: "admin".to_string(),
+                workspace_read_scopes: Vec::new(),
+            }),
+            Path("selected_model".to_string()),
+            Json(SettingWriteRequest {
+                value: serde_json::Value::String("gpt-4.1".to_string()),
+            }),
+        )
+        .await;
+
+        assert_eq!(result, Ok(StatusCode::NO_CONTENT));
+        assert_eq!(runtime.current_provider().active_model_name(), "gpt-4.1");
+        assert_eq!(state.active_config_snapshot().llm_model, "gpt-4.1");
     }
 
     // --- Provider ID validation tests ---

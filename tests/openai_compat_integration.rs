@@ -208,6 +208,7 @@ async fn start_test_server_with_provider(
         shutdown_tx: tokio::sync::RwLock::new(None),
         ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
         llm_provider: Some(llm_provider),
+        llm_runtime: None,
         skill_registry: None,
         skill_catalog: None,
         chat_rate_limiter: ironclaw::channels::web::server::PerUserRateLimiter::new(30, 60),
@@ -217,7 +218,10 @@ async fn start_test_server_with_provider(
         cost_guard: None,
         routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
         startup_time: std::time::Instant::now(),
-        active_config: ironclaw::channels::web::server::ActiveConfigSnapshot::default(),
+        active_config: Arc::new(std::sync::RwLock::new(
+            ironclaw::channels::web::server::ActiveConfigSnapshot::default(),
+        )),
+        config_toml_path: None,
         secrets_store: None,
         db_auth: None,
     });
@@ -708,6 +712,7 @@ async fn test_no_llm_provider_returns_503() {
         shutdown_tx: tokio::sync::RwLock::new(None),
         ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
         llm_provider: None, // No LLM!
+        llm_runtime: None,
         skill_registry: None,
         skill_catalog: None,
         chat_rate_limiter: ironclaw::channels::web::server::PerUserRateLimiter::new(30, 60),
@@ -717,7 +722,10 @@ async fn test_no_llm_provider_returns_503() {
         cost_guard: None,
         routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
         startup_time: std::time::Instant::now(),
-        active_config: ironclaw::channels::web::server::ActiveConfigSnapshot::default(),
+        active_config: Arc::new(std::sync::RwLock::new(
+            ironclaw::channels::web::server::ActiveConfigSnapshot::default(),
+        )),
+        config_toml_path: None,
         secrets_store: None,
         db_auth: None,
     });

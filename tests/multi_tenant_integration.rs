@@ -550,6 +550,7 @@ fn gateway_state_has_multi_tenant_fields() {
         shutdown_tx: tokio::sync::RwLock::new(None),
         ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
         llm_provider: None,
+        llm_runtime: None,
         skill_registry: None,
         skill_catalog: None,
         chat_rate_limiter: PerUserRateLimiter::new(30, 60), // Multi-tenant: per-user
@@ -559,7 +560,8 @@ fn gateway_state_has_multi_tenant_fields() {
         routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
         startup_time: std::time::Instant::now(),
         webhook_rate_limiter: RateLimiter::new(10, 60),
-        active_config: Default::default(),
+        active_config: Arc::new(std::sync::RwLock::new(Default::default())),
+        config_toml_path: None,
         secrets_store: None,
         db_auth: None,
     };
@@ -626,6 +628,7 @@ async fn start_owner_scoped_sender_server() -> (
         shutdown_tx: tokio::sync::RwLock::new(None),
         ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
         llm_provider: None,
+        llm_runtime: None,
         skill_registry: None,
         skill_catalog: None,
         chat_rate_limiter: PerUserRateLimiter::new(30, 60),
@@ -635,7 +638,8 @@ async fn start_owner_scoped_sender_server() -> (
         cost_guard: None,
         routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
         startup_time: std::time::Instant::now(),
-        active_config: Default::default(),
+        active_config: Arc::new(std::sync::RwLock::new(Default::default())),
+        config_toml_path: None,
         secrets_store: None,
         db_auth: None,
     });
@@ -1012,6 +1016,7 @@ async fn start_multi_user_server_with_db() -> (
         shutdown_tx: tokio::sync::RwLock::new(None),
         ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
         llm_provider: None,
+        llm_runtime: None,
         skill_registry: None,
         skill_catalog: None,
         chat_rate_limiter: PerUserRateLimiter::new(30, 60),
@@ -1021,7 +1026,8 @@ async fn start_multi_user_server_with_db() -> (
         routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
         startup_time: std::time::Instant::now(),
         webhook_rate_limiter: RateLimiter::new(10, 60),
-        active_config: Default::default(),
+        active_config: Arc::new(std::sync::RwLock::new(Default::default())),
+        config_toml_path: None,
         secrets_store: None,
         db_auth: None,
     });

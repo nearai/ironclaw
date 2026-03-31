@@ -16,7 +16,7 @@ use crate::context::ContextManager;
 use crate::db::Database;
 use crate::extensions::ExtensionManager;
 use crate::hooks::HookRegistry;
-use crate::llm::{LlmProvider, RecordingLlm, SessionManager};
+use crate::llm::{LlmProvider, LlmRuntime, LlmRuntimeSnapshot, RecordingLlm, SessionManager};
 use crate::safety::SafetyLayer;
 use crate::secrets::SecretsStore;
 use crate::skills::SkillRegistry;
@@ -34,6 +34,7 @@ pub struct AppComponents {
     pub config: Config,
     pub db: Option<Arc<dyn Database>>,
     pub secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
+    pub llm_runtime: Arc<LlmRuntime>,
     pub llm: Arc<dyn LlmProvider>,
     pub cheap_llm: Option<Arc<dyn LlmProvider>>,
     pub safety: Arc<SafetyLayer>,
@@ -789,11 +790,17 @@ impl AppBuilder {
             );
         }
 
-        let (llm, cheap_llm, recording_handle) = if let Some(llm) = self.llm_override.take() {
-            (llm, None, None)
+        let llm_runtime = if let Some(llm) = self.llm_override.take() {
+            Arc::new(LlmRuntime::new(
+                self.session.clone(),
+                LlmRuntimeSnapshot::from_parts(self.config.llm.backend.clone(), llm, None, None),
+            ))
         } else {
-            self.init_llm().await?
+            Arc::new(LlmRuntime::from_config(&self.config.llm, self.session.clone()).await?)
         };
+        let llm = llm_runtime.current_provider();
+        let cheap_llm = llm_runtime.current_cheap_provider();
+        let recording_handle = llm_runtime.current_recording_handle();
         let (safety, tools, embeddings, workspace, builder) = self.init_tools(&llm).await?;
 
         // Create hook registry early so runtime extension activation can register hooks.
@@ -906,6 +913,7 @@ impl AppBuilder {
             config: self.config,
             db: self.db,
             secrets_store: self.secrets_store,
+            llm_runtime,
             llm,
             cheap_llm,
             safety,

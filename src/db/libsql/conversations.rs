@@ -22,8 +22,8 @@ impl ConversationStore for LibSqlBackend {
         let id = Uuid::new_v4();
         let now = fmt_ts(&Utc::now());
         conn.execute(
-            "INSERT INTO conversations (id, channel, user_id, thread_id, started_at, last_activity) VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
-            params![id.to_string(), channel, user_id, opt_text(thread_id), now],
+            "INSERT INTO conversations (id, channel, user_id, thread_id, source_channel, started_at, last_activity) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+            params![id.to_string(), channel, user_id, opt_text(thread_id), channel, now],
         )
         .await
         .map_err(|e| DatabaseError::Query(e.to_string()))?;
@@ -269,8 +269,8 @@ impl ConversationStore for LibSqlBackend {
                 "routine_name": routine_name,
             });
             conn.execute(
-                "INSERT INTO conversations (id, channel, user_id, metadata, started_at, last_activity) VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
-                params![id.to_string(), "routine", user_id, metadata.to_string(), now],
+                "INSERT INTO conversations (id, channel, user_id, metadata, source_channel, started_at, last_activity) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+                params![id.to_string(), "routine", user_id, metadata.to_string(), "routine", now],
             )
             .await
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
@@ -366,8 +366,8 @@ impl ConversationStore for LibSqlBackend {
             let now = fmt_ts(&Utc::now());
             let metadata = serde_json::json!({ "thread_type": "heartbeat" });
             conn.execute(
-                "INSERT INTO conversations (id, channel, user_id, metadata, started_at, last_activity) VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
-                params![id.to_string(), "heartbeat", user_id, metadata.to_string(), now],
+                "INSERT INTO conversations (id, channel, user_id, metadata, source_channel, started_at, last_activity) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+                params![id.to_string(), "heartbeat", user_id, metadata.to_string(), "heartbeat", now],
             )
             .await
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
@@ -424,8 +424,8 @@ impl ConversationStore for LibSqlBackend {
         let now = fmt_ts(&Utc::now());
         let metadata = serde_json::json!({"thread_type": "assistant", "title": "Assistant"});
         conn.execute(
-            "INSERT INTO conversations (id, channel, user_id, metadata, started_at, last_activity) VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
-            params![id.to_string(), channel, user_id, metadata.to_string(), now],
+            "INSERT INTO conversations (id, channel, user_id, metadata, source_channel, started_at, last_activity) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+            params![id.to_string(), channel, user_id, metadata.to_string(), channel, now],
         )
         .await
         .map_err(|e| DatabaseError::Query(e.to_string()))?;
@@ -442,8 +442,8 @@ impl ConversationStore for LibSqlBackend {
         let id = Uuid::new_v4();
         let now = fmt_ts(&Utc::now());
         conn.execute(
-            "INSERT INTO conversations (id, channel, user_id, metadata, started_at, last_activity) VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
-            params![id.to_string(), channel, user_id, metadata.to_string(), now],
+            "INSERT INTO conversations (id, channel, user_id, metadata, source_channel, started_at, last_activity) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+            params![id.to_string(), channel, user_id, metadata.to_string(), channel, now],
         )
         .await
         .map_err(|e| DatabaseError::Query(e.to_string()))?;
@@ -747,6 +747,89 @@ mod tests {
             id1, id2,
             "Expected same heartbeat conversation on repeated calls"
         );
+    }
+
+    #[tokio::test]
+    async fn test_assistant_conversation_sets_source_channel() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test_assistant_source_channel.db");
+        let backend = LibSqlBackend::new_local(&db_path).await.unwrap();
+        backend.run_migrations().await.unwrap();
+
+        let conv_id = backend
+            .get_or_create_assistant_conversation("assistant-user", "gateway")
+            .await
+            .unwrap();
+
+        let source = backend
+            .get_conversation_source_channel(conv_id)
+            .await
+            .unwrap();
+        assert_eq!(source.as_deref(), Some("gateway"));
+    }
+
+    #[tokio::test]
+    async fn test_routine_and_heartbeat_conversations_set_source_channel() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test_system_source_channels.db");
+        let backend = LibSqlBackend::new_local(&db_path).await.unwrap();
+        backend.run_migrations().await.unwrap();
+
+        let routine_id = backend
+            .get_or_create_routine_conversation(Uuid::new_v4(), "nightly", "system-user")
+            .await
+            .unwrap();
+        let heartbeat_id = backend
+            .get_or_create_heartbeat_conversation("system-user")
+            .await
+            .unwrap();
+
+        let routine_source = backend
+            .get_conversation_source_channel(routine_id)
+            .await
+            .unwrap();
+        let heartbeat_source = backend
+            .get_conversation_source_channel(heartbeat_id)
+            .await
+            .unwrap();
+
+        assert_eq!(routine_source.as_deref(), Some("routine"));
+        assert_eq!(heartbeat_source.as_deref(), Some("heartbeat"));
+    }
+
+    #[tokio::test]
+    async fn test_backfill_migration_populates_missing_source_channel() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test_source_channel_backfill.db");
+        let backend = LibSqlBackend::new_local(&db_path).await.unwrap();
+        backend.run_migrations().await.unwrap();
+
+        let conv_id = backend
+            .get_or_create_assistant_conversation("backfill-user", "gateway")
+            .await
+            .unwrap();
+
+        let conn = backend.connect().await.unwrap();
+        conn.execute(
+            "UPDATE conversations SET source_channel = NULL WHERE id = ?1",
+            libsql::params![conv_id.to_string()],
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "DELETE FROM _migrations WHERE version = 17",
+            libsql::params![],
+        )
+        .await
+        .unwrap();
+
+        backend.run_migrations().await.unwrap();
+
+        let source = backend
+            .get_conversation_source_channel(conv_id)
+            .await
+            .unwrap();
+        assert_eq!(source.as_deref(), Some("gateway"));
     }
 
     #[tokio::test]

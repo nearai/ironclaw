@@ -184,6 +184,7 @@ mod tests {
             owner_id: components.config.owner_id.clone(),
             store: components.db.clone(),
             llm: components.llm.clone(),
+            llm_runtime: Some(Arc::clone(&components.llm_runtime)),
             cheap_llm: components.cheap_llm.clone(),
             safety: components.safety.clone(),
             tools: components.tools.clone(),

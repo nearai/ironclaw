@@ -336,10 +336,11 @@ async fn async_main() -> anyhow::Result<()> {
     // ── Phase 1-5: Build all core components via AppBuilder ────────────
 
     let flags = AppBuilderFlags { no_db: cli.no_db };
+    let toml_path_buf = toml_path.map(std::path::PathBuf::from);
     let components = AppBuilder::new(
         config,
         flags,
-        toml_path.map(std::path::PathBuf::from),
+        toml_path_buf.clone(),
         session.clone(),
         Arc::clone(&log_broadcaster),
     )
@@ -594,6 +595,8 @@ async fn async_main() -> anyhow::Result<()> {
     if let Some(ref gw_config) = config.channels.gateway {
         let mut gw = GatewayChannel::new(gw_config.clone(), config.owner_id.clone());
         gw = gw.with_llm_provider(Arc::clone(&components.llm));
+        gw = gw.with_llm_runtime(Arc::clone(&components.llm_runtime));
+        gw = gw.with_config_toml_path(toml_path_buf.clone());
         if let Some(ref ws) = components.workspace {
             gw = gw.with_workspace(Arc::clone(ws));
         }
@@ -696,7 +699,10 @@ async fn async_main() -> anyhow::Result<()> {
         }
         gw = gw.with_cost_guard(Arc::clone(&components.cost_guard));
         {
-            let active_model = components.llm.model_name().to_string();
+            let active_model = components
+                .llm_runtime
+                .current_provider()
+                .active_model_name();
             let mut enabled = channel_names.clone();
             enabled.push("gateway".into());
             gw = gw.with_active_config(ironclaw::channels::web::server::ActiveConfigSnapshot {
@@ -888,15 +894,15 @@ async fn async_main() -> anyhow::Result<()> {
     }
 
     // Snapshot memory for trace recording before the agent starts
-    if let Some(ref recorder) = components.recording_handle
+    if let Some(ref recorder) = components.llm_runtime.current_recording_handle()
         && let Some(ref ws) = components.workspace
     {
         recorder.snapshot_memory(ws).await;
     }
 
     let http_interceptor = components
-        .recording_handle
-        .as_ref()
+        .llm_runtime
+        .current_recording_handle()
         .map(|r| r.http_interceptor());
     // Clone context_manager for the reaper before it's moved into Agent::new()
     let reaper_context_manager = Arc::clone(&components.context_manager);
@@ -912,6 +918,7 @@ async fn async_main() -> anyhow::Result<()> {
         owner_id: config.owner_id.clone(),
         store: components.db,
         llm: components.llm,
+        llm_runtime: Some(Arc::clone(&components.llm_runtime)),
         cheap_llm: components.cheap_llm,
         safety: components.safety,
         tools: components.tools,
@@ -1186,7 +1193,7 @@ async fn async_main() -> anyhow::Result<()> {
     components.mcp_process_manager.shutdown_all().await;
 
     // Flush LLM trace recording if enabled
-    if let Some(ref recorder) = components.recording_handle
+    if let Some(ref recorder) = components.llm_runtime.current_recording_handle()
         && let Err(e) = recorder.flush().await
     {
         tracing::warn!("Failed to write LLM trace: {}", e);

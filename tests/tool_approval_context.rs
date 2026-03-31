@@ -63,20 +63,22 @@ fn test_job_context_with_approval_context() {
 }
 
 #[test]
-fn test_approval_context_autonomous_allows_unless_auto_approved() {
+fn test_approval_context_autonomous_blocks_unless_auto_approved_without_allowlist() {
     let ctx =
         JobContext::new("Test", "Test job").with_approval_context(ApprovalContext::autonomous());
     let tool = TestTool {
         approval_req: ApprovalRequirement::UnlessAutoApproved,
     };
 
-    // Check should pass for UnlessAutoApproved in autonomous context
-    check_approval_in_context(
+    let result = check_approval_in_context(
         &ctx,
         "test_tool",
         tool.requires_approval(&serde_json::json!({})),
-    )
-    .expect("UnlessAutoApproved should be allowed in autonomous context");
+    );
+    assert!(
+        result.is_err(),
+        "UnlessAutoApproved should be blocked unless the tool is in the autonomous allowlist"
+    );
 }
 
 #[test]
@@ -105,15 +107,18 @@ fn test_approval_context_autonomous_with_tools_allows_specific() {
     let ctx = JobContext::new("Test", "Test job").with_approval_context(
         ApprovalContext::autonomous_with_tools(["shell".to_string(), "read_file".to_string()]),
     );
-    let tool = TestTool {
+    let always_tool = TestTool {
         approval_req: ApprovalRequirement::Always,
+    };
+    let soft_tool = TestTool {
+        approval_req: ApprovalRequirement::UnlessAutoApproved,
     };
 
     // shell should be allowed (explicitly listed)
     check_approval_in_context(
         &ctx,
         "shell",
-        tool.requires_approval(&serde_json::json!({})),
+        always_tool.requires_approval(&serde_json::json!({})),
     )
     .expect("Listed tool should be allowed");
 
@@ -121,7 +126,7 @@ fn test_approval_context_autonomous_with_tools_allows_specific() {
     check_approval_in_context(
         &ctx,
         "read_file",
-        tool.requires_approval(&serde_json::json!({})),
+        always_tool.requires_approval(&serde_json::json!({})),
     )
     .expect("Listed tool should be allowed");
 
@@ -129,9 +134,28 @@ fn test_approval_context_autonomous_with_tools_allows_specific() {
     let result = check_approval_in_context(
         &ctx,
         "write_file",
-        tool.requires_approval(&serde_json::json!({})),
+        always_tool.requires_approval(&serde_json::json!({})),
     );
     assert!(result.is_err(), "Non-listed Always tool should be blocked");
+
+    // Unlisted UnlessAutoApproved tools should also be blocked.
+    let result = check_approval_in_context(
+        &ctx,
+        "http",
+        soft_tool.requires_approval(&serde_json::json!({})),
+    );
+    assert!(
+        result.is_err(),
+        "Non-listed UnlessAutoApproved tool should be blocked"
+    );
+
+    // But listed UnlessAutoApproved tools remain allowed.
+    check_approval_in_context(
+        &ctx,
+        "shell",
+        soft_tool.requires_approval(&serde_json::json!({})),
+    )
+    .expect("Listed UnlessAutoApproved tool should be allowed");
 }
 
 #[test]
@@ -284,4 +308,14 @@ fn test_builder_execute_build_tool_blocks_unlisted_tool() {
             tool_name
         );
     }
+
+    let result = check_approval_in_context(
+        &builder_ctx,
+        "http",
+        ApprovalRequirement::UnlessAutoApproved,
+    );
+    assert!(
+        result.is_err(),
+        "UnlessAutoApproved tools outside the builder allowlist should also be blocked"
+    );
 }

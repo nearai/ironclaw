@@ -70,6 +70,7 @@ fn build_state(
         shutdown_tx: tokio::sync::RwLock::new(None),
         ws_tracker: None,
         llm_provider: None,
+        llm_runtime: None,
         skill_registry: None,
         skill_catalog: None,
         scheduler: None,
@@ -80,7 +81,8 @@ fn build_state(
         cost_guard: None,
         routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
         startup_time: std::time::Instant::now(),
-        active_config: ActiveConfigSnapshot::default(),
+        active_config: Arc::new(std::sync::RwLock::new(ActiveConfigSnapshot::default())),
+        config_toml_path: None,
         secrets_store: None,
         db_auth: None,
     })

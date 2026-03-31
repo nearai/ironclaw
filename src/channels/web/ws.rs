@@ -524,6 +524,7 @@ mod tests {
             shutdown_tx: tokio::sync::RwLock::new(None),
             ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
             llm_provider: None,
+            llm_runtime: None,
             skill_registry: None,
             skill_catalog: None,
             chat_rate_limiter: crate::channels::web::server::PerUserRateLimiter::new(30, 60),
@@ -533,7 +534,10 @@ mod tests {
             cost_guard: None,
             routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
             startup_time: std::time::Instant::now(),
-            active_config: crate::channels::web::server::ActiveConfigSnapshot::default(),
+            active_config: Arc::new(std::sync::RwLock::new(
+                crate::channels::web::server::ActiveConfigSnapshot::default(),
+            )),
+            config_toml_path: None,
             secrets_store: None,
             db_auth: None,
         }

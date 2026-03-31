@@ -548,6 +548,7 @@ impl TestHarnessBuilder {
             owner_id: "default".to_string(),
             store: Some(Arc::clone(&db)),
             llm,
+            llm_runtime: None,
             cheap_llm: None,
             safety,
             tools,

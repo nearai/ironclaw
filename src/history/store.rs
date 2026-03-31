@@ -98,8 +98,8 @@ impl Store {
         let id = Uuid::new_v4();
 
         conn.execute(
-            "INSERT INTO conversations (id, channel, user_id, thread_id) VALUES ($1, $2, $3, $4)",
-            &[&id, &channel, &user_id, &thread_id],
+            "INSERT INTO conversations (id, channel, user_id, thread_id, source_channel) VALUES ($1, $2, $3, $4, $5)",
+            &[&id, &channel, &user_id, &thread_id, &channel],
         )
         .await?;
 
@@ -1751,8 +1751,8 @@ impl Store {
         });
         conn.execute(
             r#"
-            INSERT INTO conversations (id, channel, user_id, metadata)
-            VALUES ($1, 'routine', $2, $3)
+            INSERT INTO conversations (id, channel, user_id, metadata, source_channel)
+            VALUES ($1, 'routine', $2, $3, 'routine')
             ON CONFLICT (user_id, (metadata->>'routine_id'))
                 WHERE metadata->>'routine_id' IS NOT NULL
                 DO NOTHING
@@ -1816,8 +1816,8 @@ impl Store {
         });
         conn.execute(
             r#"
-            INSERT INTO conversations (id, channel, user_id, metadata)
-            VALUES ($1, 'heartbeat', $2, $3)
+            INSERT INTO conversations (id, channel, user_id, metadata, source_channel)
+            VALUES ($1, 'heartbeat', $2, $3, 'heartbeat')
             ON CONFLICT (user_id)
                 WHERE metadata->>'thread_type' = 'heartbeat'
                 DO NOTHING
@@ -1873,10 +1873,10 @@ impl Store {
         let metadata = serde_json::json!({"thread_type": "assistant", "title": "Assistant"});
         conn.execute(
             r#"
-            INSERT INTO conversations (id, channel, user_id, metadata)
-            VALUES ($1, $2, $3, $4)
+            INSERT INTO conversations (id, channel, user_id, metadata, source_channel)
+            VALUES ($1, $2, $3, $4, $5)
             "#,
-            &[&id, &channel, &user_id, &metadata],
+            &[&id, &channel, &user_id, &metadata, &channel],
         )
         .await?;
 
@@ -1894,8 +1894,8 @@ impl Store {
         let id = Uuid::new_v4();
 
         conn.execute(
-            "INSERT INTO conversations (id, channel, user_id, metadata) VALUES ($1, $2, $3, $4)",
-            &[&id, &channel, &user_id, metadata],
+            "INSERT INTO conversations (id, channel, user_id, metadata, source_channel) VALUES ($1, $2, $3, $4, $5)",
+            &[&id, &channel, &user_id, metadata, &channel],
         )
         .await?;
 
