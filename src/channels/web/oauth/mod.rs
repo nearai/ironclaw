@@ -5,6 +5,7 @@
 //! the system creates or links a user via the existing `UserStore`, issues an
 //! API token, and sets it as an HttpOnly cookie.
 
+pub mod near;
 pub mod providers;
 pub mod state_store;
 

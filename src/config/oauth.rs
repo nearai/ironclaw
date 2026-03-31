@@ -29,6 +29,8 @@ pub struct OAuthConfig {
     pub github: Option<GitHubOAuthConfig>,
     /// Apple Sign In configuration.
     pub apple: Option<AppleOAuthConfig>,
+    /// NEAR wallet authentication (signature-based, not OAuth).
+    pub near: Option<NearAuthConfig>,
 }
 
 /// Google OAuth 2.0 / OIDC configuration.
@@ -64,6 +66,20 @@ pub struct AppleOAuthConfig {
     pub key_id: String,
     /// ES256 private key in PEM format (contents of the `.p8` file).
     pub private_key_pem: SecretString,
+}
+
+/// NEAR wallet authentication configuration.
+///
+/// Uses NEP-413 signature verification instead of OAuth. The server generates
+/// a challenge nonce, the client signs it with a NEAR wallet, and the server
+/// verifies the Ed25519 signature and confirms the public key belongs to the
+/// claimed account via NEAR RPC.
+#[derive(Debug, Clone)]
+pub struct NearAuthConfig {
+    /// NEAR network: `mainnet` or `testnet`.
+    pub network: String,
+    /// NEAR RPC endpoint URL.
+    pub rpc_url: String,
 }
 
 impl OAuthConfig {
@@ -139,6 +155,19 @@ impl OAuthConfig {
             _ => None,
         };
 
+        let near = if parse_bool_env("NEAR_AUTH_ENABLED", false)? {
+            let network =
+                optional_env("NEAR_AUTH_NETWORK")?.unwrap_or_else(|| "mainnet".to_string());
+            let rpc_url =
+                optional_env("NEAR_AUTH_RPC_URL")?.unwrap_or_else(|| match network.as_str() {
+                    "testnet" => "https://rpc.testnet.near.org".to_string(),
+                    _ => "https://rpc.mainnet.near.org".to_string(),
+                });
+            Some(NearAuthConfig { network, rpc_url })
+        } else {
+            None
+        };
+
         Ok(Self {
             enabled,
             base_url,
@@ -146,6 +175,7 @@ impl OAuthConfig {
             google,
             github,
             apple,
+            near,
         })
     }
 }

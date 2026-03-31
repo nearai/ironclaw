@@ -228,6 +228,96 @@ document.getElementById('token-input').addEventListener('keydown', (e) => {
   if (e.key === 'Enter') authenticate();
 });
 
+// --- Social login (OAuth + NEAR wallet) ---
+
+// Discover enabled providers and show corresponding buttons.
+fetch('/auth/providers', { credentials: 'include' })
+  .then(function(r) { return r.ok ? r.json() : { providers: [] }; })
+  .then(function(data) {
+    var providers = data.providers || [];
+    if (providers.length === 0) return;
+    var social = document.getElementById('auth-social');
+    if (social) social.style.display = '';
+    providers.forEach(function(p) {
+      var btn = document.getElementById('auth-' + p + '-btn');
+      if (btn) btn.style.display = '';
+    });
+    // Wire up NEAR wallet button.
+    if (providers.indexOf('near') !== -1) {
+      var nearBtn = document.getElementById('auth-near-btn');
+      if (nearBtn) nearBtn.addEventListener('click', authenticateWithNear);
+    }
+  })
+  .catch(function() { /* auth providers not available */ });
+
+// NEAR wallet authentication via near-connect.
+async function authenticateWithNear() {
+  var nearBtn = document.getElementById('auth-near-btn');
+  var errEl = document.getElementById('auth-error');
+  if (nearBtn) { nearBtn.disabled = true; nearBtn.textContent = 'Connecting wallet...'; }
+  if (errEl) errEl.textContent = '';
+
+  try {
+    // 1. Get challenge nonce from the server.
+    var challengeResp = await fetch('/auth/near/challenge', { credentials: 'include' });
+    if (!challengeResp.ok) throw new Error('Failed to get challenge');
+    var challenge = await challengeResp.json();
+
+    // 2. Load near-connect dynamically if not already loaded.
+    if (!window._nearConnector) {
+      var mod = await import('https://esm.sh/@hot-labs/near-connect@1');
+      window._nearConnector = new mod.NearConnector({ network: 'mainnet' });
+    }
+    var connector = window._nearConnector;
+
+    // 3. Connect wallet and request signature.
+    if (nearBtn) nearBtn.textContent = 'Sign with wallet...';
+    var wallet = await connector.connect();
+    var accounts = await wallet.getAccounts();
+    if (!accounts || accounts.length === 0) throw new Error('No NEAR account found');
+
+    var accountId = accounts[0].accountId;
+
+    // Convert hex nonce to Uint8Array for signMessage.
+    var nonceBytes = new Uint8Array(challenge.nonce.match(/.{2}/g).map(function(b) { return parseInt(b, 16); }));
+
+    var signed = await wallet.signMessage({
+      message: challenge.nonce,
+      recipient: challenge.recipient || 'ironclaw',
+      nonce: nonceBytes,
+    });
+
+    // 4. Send signature to server for verification.
+    if (nearBtn) nearBtn.textContent = 'Verifying...';
+    var verifyResp = await fetch('/auth/near/verify', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({
+        account_id: accountId,
+        public_key: signed.publicKey,
+        signature: signed.signature,
+        nonce: challenge.nonce,
+      }),
+    });
+
+    if (!verifyResp.ok) {
+      var errText = await verifyResp.text();
+      throw new Error(errText || 'Verification failed');
+    }
+
+    var result = await verifyResp.json();
+
+    // 5. Use the returned token to authenticate.
+    token = result.token;
+    sessionStorage.setItem('ironclaw_token', token);
+    initApp();
+  } catch (err) {
+    if (errEl) errEl.textContent = err.message || 'NEAR wallet login failed';
+    if (nearBtn) { nearBtn.disabled = false; nearBtn.textContent = 'Sign in with NEAR'; }
+  }
+}
+
 // Note: main event listener registration is at the bottom of this file (search
 // "Event Listener Registration"). Do NOT add duplicate listeners here.
 

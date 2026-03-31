@@ -87,6 +87,8 @@ fn build_state(
         oauth_state_store: None,
         oauth_base_url: None,
         oauth_allowed_domains: Vec::new(),
+        near_nonce_store: None,
+        near_rpc_url: None,
     })
 }
 

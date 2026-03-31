@@ -44,10 +44,14 @@ pub struct CallbackParams {
 
 /// GET /auth/providers — list enabled OAuth providers.
 pub async fn providers_handler(State(state): State<Arc<GatewayState>>) -> Json<serde_json::Value> {
-    let providers: Vec<&str> = match state.oauth_providers.as_ref() {
+    let mut providers: Vec<&str> = match state.oauth_providers.as_ref() {
         Some(map) => map.keys().map(|s| s.as_str()).collect(),
         None => Vec::new(),
     };
+    if state.near_nonce_store.is_some() {
+        providers.push("near");
+    }
+    providers.sort_unstable();
     Json(serde_json::json!({ "providers": providers }))
 }
 
@@ -304,6 +308,266 @@ pub async fn logout_handler(
         response.headers_mut().insert(header::SET_COOKIE, hv);
     }
     response
+}
+
+// ── NEAR wallet auth ─────────────────────────────────────────────────────
+
+/// GET /auth/near/challenge — generate a nonce for NEAR wallet signing.
+pub async fn near_challenge_handler(
+    State(state): State<Arc<GatewayState>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    if !state.oauth_rate_limiter.check() {
+        return Err((StatusCode::TOO_MANY_REQUESTS, "Rate limited".to_string()));
+    }
+
+    let nonce_store = state.near_nonce_store.as_ref().ok_or((
+        StatusCode::NOT_FOUND,
+        "NEAR authentication is not enabled".to_string(),
+    ))?;
+
+    let nonce = nonce_store.generate().await;
+
+    Ok(Json(serde_json::json!({
+        "nonce": nonce,
+        "message": "Sign in to IronClaw",
+        "recipient": "ironclaw",
+    })))
+}
+
+/// Request body for NEAR wallet verification.
+#[derive(serde::Deserialize)]
+pub struct NearVerifyRequest {
+    pub account_id: String,
+    pub public_key: String,
+    pub signature: String,
+    pub nonce: String,
+}
+
+/// POST /auth/near/verify — verify NEAR wallet signature and issue session.
+pub async fn near_verify_handler(
+    State(state): State<Arc<GatewayState>>,
+    Json(body): Json<NearVerifyRequest>,
+) -> Response {
+    if !state.oauth_rate_limiter.check() {
+        return (StatusCode::TOO_MANY_REQUESTS, "Rate limited").into_response();
+    }
+
+    let nonce_store = match state.near_nonce_store.as_ref() {
+        Some(s) => s,
+        None => return (StatusCode::NOT_FOUND, "NEAR auth not enabled").into_response(),
+    };
+
+    let near_rpc_url = match state.near_rpc_url.as_deref() {
+        Some(u) => u,
+        None => {
+            return (StatusCode::SERVICE_UNAVAILABLE, "NEAR RPC not configured").into_response();
+        }
+    };
+
+    let store = match state.store.as_ref() {
+        Some(s) => s,
+        None => return (StatusCode::SERVICE_UNAVAILABLE, "Database not available").into_response(),
+    };
+
+    // Validate nonce (single-use, TTL-checked).
+    if !nonce_store.consume(&body.nonce).await {
+        return (StatusCode::BAD_REQUEST, "Invalid or expired nonce").into_response();
+    }
+
+    // Validate input lengths to prevent abuse.
+    if body.account_id.len() > 64 || body.public_key.len() > 128 || body.signature.len() > 256 {
+        return (StatusCode::BAD_REQUEST, "Invalid input").into_response();
+    }
+
+    // Decode the public key and signature from base58/hex.
+    // NEAR public keys are formatted as "ed25519:base58encoded".
+    let pub_key_bytes: [u8; 32] = match decode_near_public_key(&body.public_key) {
+        Ok(b) => b,
+        Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
+    };
+
+    let sig_bytes: [u8; 64] = match decode_near_signature(&body.signature) {
+        Ok(b) => b,
+        Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
+    };
+
+    // The signed message is the nonce bytes (the client signs the hex nonce string).
+    let message = body.nonce.as_bytes();
+
+    // Verify the Ed25519 signature.
+    if let Err(e) =
+        crate::channels::web::oauth::near::verify_signature(&pub_key_bytes, &sig_bytes, message)
+    {
+        tracing::warn!(account_id = %body.account_id, error = %e, "NEAR signature verification failed");
+        return (StatusCode::UNAUTHORIZED, "Invalid signature").into_response();
+    }
+
+    // Verify the public key is an active access key on the NEAR account.
+    let http = reqwest::Client::new();
+    if let Err(e) = crate::channels::web::oauth::near::verify_access_key(
+        near_rpc_url,
+        &body.account_id,
+        &body.public_key,
+        &http,
+    )
+    .await
+    {
+        tracing::warn!(
+            account_id = %body.account_id,
+            public_key = %body.public_key,
+            error = %e,
+            "NEAR access key verification failed"
+        );
+        return (
+            StatusCode::UNAUTHORIZED,
+            "Access key not valid for this account",
+        )
+            .into_response();
+    }
+
+    // Domain restriction check (account_id is like "user.near" — check domain part).
+    if !state.oauth_allowed_domains.is_empty() {
+        // NEAR account_id acts as the "email" for domain checks.
+        // e.g., "alice.company.near" — check if "company.near" is allowed.
+        let domain = body
+            .account_id
+            .rsplit_once('.')
+            .map(|(_, tld)| {
+                // Get the last two parts: e.g., "company.near" from "alice.company.near"
+                let parts: Vec<&str> = body.account_id.rsplitn(3, '.').collect();
+                if parts.len() >= 2 {
+                    format!("{}.{}", parts[1], parts[0])
+                } else {
+                    tld.to_string()
+                }
+            })
+            .unwrap_or_default();
+        if !state
+            .oauth_allowed_domains
+            .iter()
+            .any(|d| d.eq_ignore_ascii_case(&domain))
+        {
+            // If no domain match, also try the full account_id suffix
+            let account_lower = body.account_id.to_ascii_lowercase();
+            if !state
+                .oauth_allowed_domains
+                .iter()
+                .any(|d| account_lower.ends_with(d))
+            {
+                return error_page(
+                    "Your NEAR account is not authorized. Contact your administrator.",
+                );
+            }
+        }
+    }
+
+    // Use the OAuth user resolution pipeline.
+    let profile = crate::channels::web::oauth::OAuthUserProfile {
+        provider_user_id: body.account_id.clone(),
+        email: None,
+        email_verified: false,
+        display_name: Some(body.account_id.clone()),
+        avatar_url: None,
+        raw: serde_json::json!({
+            "account_id": body.account_id,
+            "public_key": body.public_key,
+        }),
+    };
+
+    let (user_id, is_new) = match resolve_user(store.as_ref(), "near", &profile).await {
+        Ok(result) => result,
+        Err(e) => {
+            tracing::error!(error = %e, "NEAR user resolution failed");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to create user account",
+            )
+                .into_response();
+        }
+    };
+
+    if let Err(e) = store.record_login(&user_id).await {
+        tracing::warn!(error = %e, user_id = %user_id, "Failed to record login");
+    }
+
+    // Issue API token.
+    let mut token_bytes = [0u8; 32];
+    OsRng.fill_bytes(&mut token_bytes);
+    let plaintext_token = hex::encode(token_bytes);
+    let token_hash = crate::channels::web::auth::hash_token(&plaintext_token);
+    let token_prefix = &plaintext_token[..8];
+
+    let token_name = if is_new {
+        "near-wallet-initial".to_string()
+    } else {
+        "near-wallet-login".to_string()
+    };
+
+    let expires_at = Some(chrono::Utc::now() + chrono::Duration::seconds(SESSION_LIFETIME_SECS));
+    if let Err(e) = store
+        .create_api_token(&user_id, &token_name, &token_hash, token_prefix, expires_at)
+        .await
+    {
+        tracing::error!(error = %e, "Failed to create API token for NEAR login");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to create session",
+        )
+            .into_response();
+    }
+
+    if let Some(ref db_auth) = state.db_auth {
+        db_auth.invalidate_user(&user_id).await;
+    }
+
+    // Return the token as JSON (the frontend sets the cookie/session).
+    Json(serde_json::json!({
+        "token": plaintext_token,
+        "user_id": user_id,
+        "account_id": body.account_id,
+        "is_new": is_new,
+    }))
+    .into_response()
+}
+
+/// Decode a NEAR public key (format: "ed25519:base58encoded" or raw hex).
+fn decode_near_public_key(key: &str) -> Result<[u8; 32], String> {
+    let raw = key.strip_prefix("ed25519:").unwrap_or(key);
+    // Try base58 first (NEAR standard), then hex.
+    if let Ok(bytes) = bs58::decode(raw).into_vec()
+        && bytes.len() == 32
+    {
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&bytes);
+        return Ok(arr);
+    }
+    if let Ok(bytes) = hex::decode(raw)
+        && bytes.len() == 32
+    {
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&bytes);
+        return Ok(arr);
+    }
+    Err("Invalid public key format".to_string())
+}
+
+/// Decode a NEAR signature (base58 or hex, 64 bytes).
+fn decode_near_signature(sig: &str) -> Result<[u8; 64], String> {
+    if let Ok(bytes) = bs58::decode(sig).into_vec()
+        && bytes.len() == 64
+    {
+        let mut arr = [0u8; 64];
+        arr.copy_from_slice(&bytes);
+        return Ok(arr);
+    }
+    if let Ok(bytes) = hex::decode(sig)
+        && bytes.len() == 64
+    {
+        let mut arr = [0u8; 64];
+        arr.copy_from_slice(&bytes);
+        return Ok(arr);
+    }
+    Err("Invalid signature format".to_string())
 }
 
 /// Extract the session cookie value from request headers.

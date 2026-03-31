@@ -142,6 +142,8 @@ impl GatewayChannel {
             oauth_state_store: None,
             oauth_base_url: None,
             oauth_allowed_domains: Vec::new(),
+            near_nonce_store: None,
+            near_rpc_url: None,
         });
 
         Self {
@@ -188,6 +190,8 @@ impl GatewayChannel {
             oauth_state_store: self.state.oauth_state_store.clone(),
             oauth_base_url: self.state.oauth_base_url.clone(),
             oauth_allowed_domains: self.state.oauth_allowed_domains.clone(),
+            near_nonce_store: self.state.near_nonce_store.clone(),
+            near_rpc_url: self.state.near_rpc_url.clone(),
         };
         mutate(&mut new_state);
         self.state = Arc::new(new_state);
@@ -400,6 +404,21 @@ impl GatewayChannel {
             }
         });
 
+        // Set up NEAR wallet auth if configured.
+        let near_nonce_store = config.near.as_ref().map(|_| {
+            let store = Arc::new(crate::channels::web::oauth::near::NearNonceStore::new());
+            let sweep = Arc::clone(&store);
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+                loop {
+                    interval.tick().await;
+                    sweep.sweep_expired().await;
+                }
+            });
+            store
+        });
+        let near_rpc_url = config.near.as_ref().map(|n| n.rpc_url.clone());
+
         let allowed_domains = config.allowed_domains;
         // Share domain restrictions with both the OAuth handlers (GatewayState)
         // and the OIDC middleware (CombinedAuthState).
@@ -409,6 +428,8 @@ impl GatewayChannel {
             s.oauth_state_store = Some(state_store);
             s.oauth_base_url = Some(base_url);
             s.oauth_allowed_domains = allowed_domains;
+            s.near_nonce_store = near_nonce_store;
+            s.near_rpc_url = near_rpc_url;
         });
         self
     }

@@ -417,6 +417,10 @@ pub struct GatewayState {
     pub oauth_base_url: Option<String>,
     /// Email domains allowed for OAuth/OIDC login. Empty means allow all.
     pub oauth_allowed_domains: Vec<String>,
+    /// NEAR wallet auth nonce store (None when NEAR auth is disabled).
+    pub near_nonce_store: Option<Arc<crate::channels::web::oauth::near::NearNonceStore>>,
+    /// NEAR RPC endpoint URL for access key verification.
+    pub near_rpc_url: Option<String>,
 }
 
 /// Start the gateway HTTP server.
@@ -476,6 +480,15 @@ pub async fn start_server(
         .route(
             "/auth/logout",
             post(crate::channels::web::handlers::auth::logout_handler),
+        )
+        // NEAR wallet auth (challenge-response, not OAuth redirect)
+        .route(
+            "/auth/near/challenge",
+            get(crate::channels::web::handlers::auth::near_challenge_handler),
+        )
+        .route(
+            "/auth/near/verify",
+            post(crate::channels::web::handlers::auth::near_verify_handler),
         );
 
     // Protected routes (require auth)
@@ -3089,6 +3102,8 @@ mod tests {
             oauth_state_store: None,
             oauth_base_url: None,
             oauth_allowed_domains: Vec::new(),
+            near_nonce_store: None,
+            near_rpc_url: None,
         })
     }
 

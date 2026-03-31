@@ -40,6 +40,15 @@
         <input type="password" id="token-input" data-i18n="auth.tokenPlaceholder" data-i18n-attr="placeholder" placeholder="Paste your auth token" autofocus>
         <button id="auth-connect-btn" data-i18n="auth.connect">Connect</button>
       </div>
+      <div id="auth-social" style="display:none">
+        <div class="auth-divider"><span>or</span></div>
+        <div class="auth-social-buttons">
+          <button id="auth-google-btn" class="auth-social-btn" style="display:none" onclick="window.location='/auth/login/google'">Sign in with Google</button>
+          <button id="auth-github-btn" class="auth-social-btn" style="display:none" onclick="window.location='/auth/login/github'">Sign in with GitHub</button>
+          <button id="auth-apple-btn" class="auth-social-btn" style="display:none" onclick="window.location='/auth/login/apple'">Sign in with Apple</button>
+          <button id="auth-near-btn" class="auth-social-btn" style="display:none">Sign in with NEAR</button>
+        </div>
+      </div>
       <div id="auth-error"></div>
     </div>
   </div>
