@@ -565,6 +565,7 @@ fn gateway_state_has_multi_tenant_fields() {
         oauth_providers: None,
         oauth_state_store: None,
         oauth_base_url: None,
+        oauth_allowed_domains: Vec::new(),
     };
 
     assert_eq!(state.owner_id, "fallback");
@@ -644,6 +645,7 @@ async fn start_owner_scoped_sender_server() -> (
         oauth_providers: None,
         oauth_state_store: None,
         oauth_base_url: None,
+        oauth_allowed_domains: Vec::new(),
     });
 
     let auth = MultiAuthState::multi(tokens).into();
@@ -1033,6 +1035,7 @@ async fn start_multi_user_server_with_db() -> (
         oauth_providers: None,
         oauth_state_store: None,
         oauth_base_url: None,
+        oauth_allowed_domains: Vec::new(),
     });
 
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();

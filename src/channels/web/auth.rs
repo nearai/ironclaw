@@ -283,6 +283,8 @@ pub struct CombinedAuthState {
     pub db_auth: Option<DbAuthenticator>,
     /// OIDC JWT auth state (None when OIDC is disabled).
     pub oidc: Option<OidcState>,
+    /// Email domains allowed for OIDC login. Empty means allow all.
+    pub oidc_allowed_domains: Vec<String>,
 }
 
 impl From<MultiAuthState> for CombinedAuthState {
@@ -291,6 +293,7 @@ impl From<MultiAuthState> for CombinedAuthState {
             env_auth,
             db_auth: None,
             oidc: None,
+            oidc_allowed_domains: Vec::new(),
         }
     }
 }
@@ -863,6 +866,30 @@ async fn validate_oidc_jwt(oidc: &OidcState, jwt: &str) -> Result<String, OidcEr
     Ok(sub)
 }
 
+/// Extract the `email` claim from an OIDC JWT without signature validation.
+///
+/// Used only after signature has been validated by `validate_oidc_jwt()` to
+/// enforce domain restrictions.
+fn extract_oidc_email_claim(jwt: &str) -> Option<String> {
+    let normalized = normalize_jwt_for_claims(jwt);
+    let mut validation = Validation::default();
+    validation.insecure_disable_signature_validation();
+    validation.validate_aud = false;
+    validation.validate_exp = false;
+
+    let data = jsonwebtoken::decode::<serde_json::Value>(
+        &normalized,
+        &DecodingKey::from_secret(&[]),
+        &validation,
+    )
+    .ok()?;
+
+    data.claims
+        .get("email")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+}
+
 // ── Token extraction helpers ─────────────────────────────────────────────
 
 /// Whether query-string token auth is allowed for this request.
@@ -983,6 +1010,17 @@ pub async fn auth_middleware(
     {
         match validate_oidc_jwt(oidc, jwt).await {
             Ok(sub) => {
+                // Enforce email domain restriction if configured.
+                if !auth.oidc_allowed_domains.is_empty() {
+                    let email = extract_oidc_email_claim(jwt);
+                    if let Err(msg) = crate::channels::web::handlers::auth::check_email_domain(
+                        email.as_deref(),
+                        &auth.oidc_allowed_domains,
+                    ) {
+                        tracing::warn!(sub = %sub, error = %msg, "OIDC login rejected by domain restriction");
+                        return (StatusCode::FORBIDDEN, msg).into_response();
+                    }
+                }
                 tracing::debug!(sub = %sub, "OIDC auth succeeded");
                 let identity = UserIdentity {
                     user_id: sub,
@@ -1839,6 +1877,7 @@ mod tests {
             ),
             db_auth: None,
             oidc: Some(test_oidc_state().await),
+            oidc_allowed_domains: Vec::new(),
         }
     }
 

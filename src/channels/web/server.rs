@@ -415,6 +415,8 @@ pub struct GatewayState {
     pub oauth_state_store: Option<Arc<crate::channels::web::oauth::state_store::OAuthStateStore>>,
     /// Base URL for constructing OAuth callback URLs.
     pub oauth_base_url: Option<String>,
+    /// Email domains allowed for OAuth/OIDC login. Empty means allow all.
+    pub oauth_allowed_domains: Vec<String>,
 }
 
 /// Start the gateway HTTP server.
@@ -3085,6 +3087,7 @@ mod tests {
             oauth_providers: None,
             oauth_state_store: None,
             oauth_base_url: None,
+            oauth_allowed_domains: Vec::new(),
         })
     }
 

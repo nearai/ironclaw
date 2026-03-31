@@ -223,6 +223,7 @@ async fn start_test_server_with_provider(
         oauth_providers: None,
         oauth_state_store: None,
         oauth_base_url: None,
+        oauth_allowed_domains: Vec::new(),
     });
 
     let auth = ironclaw::channels::web::auth::MultiAuthState::single(
@@ -726,6 +727,7 @@ async fn test_no_llm_provider_returns_503() {
         oauth_providers: None,
         oauth_state_store: None,
         oauth_base_url: None,
+        oauth_allowed_domains: Vec::new(),
     });
 
     let auth = ironclaw::channels::web::auth::MultiAuthState::single(

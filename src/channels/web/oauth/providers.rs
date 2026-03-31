@@ -35,14 +35,17 @@ const GOOGLE_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 pub struct GoogleProvider {
     client_id: String,
     client_secret: SecretString,
+    /// Optional hosted domain restriction (Google Workspace).
+    allowed_hd: Option<String>,
     http: reqwest::Client,
 }
 
 impl GoogleProvider {
-    pub fn new(client_id: String, client_secret: SecretString) -> Self {
+    pub fn new(client_id: String, client_secret: SecretString, allowed_hd: Option<String>) -> Self {
         Self {
             client_id,
             client_secret,
+            allowed_hd,
             http: reqwest::Client::new(),
         }
     }
@@ -62,6 +65,8 @@ struct GoogleIdTokenClaims {
     email_verified: Option<bool>,
     name: Option<String>,
     picture: Option<String>,
+    /// Google Workspace hosted domain (e.g. `company.com`).
+    hd: Option<String>,
 }
 
 #[async_trait]
@@ -71,7 +76,7 @@ impl OAuthProvider for GoogleProvider {
     }
 
     fn authorization_url(&self, callback_url: &str, state: &str, code_challenge: &str) -> String {
-        format!(
+        let mut url = format!(
             "{GOOGLE_AUTH_URL}?\
              response_type=code\
              &client_id={client_id}\
@@ -86,7 +91,12 @@ impl OAuthProvider for GoogleProvider {
             scope = urlencoding::encode("openid email profile"),
             state = urlencoding::encode(state),
             code_challenge = urlencoding::encode(code_challenge),
-        )
+        );
+        // Hint Google to show only accounts from this hosted domain.
+        if let Some(ref hd) = self.allowed_hd {
+            url.push_str(&format!("&hd={}", urlencoding::encode(hd)));
+        }
+        url
     }
 
     async fn exchange_code(
@@ -142,6 +152,19 @@ impl OAuthProvider for GoogleProvider {
         .map_err(|e| OAuthError::ProfileFetch(format!("Failed to decode id_token: {e}")))?;
 
         let claims = token_data.claims;
+
+        // Server-side hosted domain validation — the `hd` URL parameter is
+        // only a UI hint; a user could bypass it by editing the URL.
+        if let Some(ref required_hd) = self.allowed_hd {
+            match claims.hd.as_deref() {
+                Some(hd) if hd.eq_ignore_ascii_case(required_hd) => {}
+                _ => {
+                    return Err(OAuthError::ProfileFetch(format!(
+                        "Account is not from the required domain '{required_hd}'"
+                    )));
+                }
+            }
+        }
 
         Ok(OAuthUserProfile {
             provider_user_id: claims.sub,
@@ -323,6 +346,7 @@ mod tests {
         let provider = GoogleProvider::new(
             "test-client-id".to_string(),
             SecretString::from("test-secret".to_string()),
+            None,
         );
 
         let url = provider.authorization_url(
@@ -337,6 +361,24 @@ mod tests {
         assert!(url.contains("code_challenge=challenge-abc"));
         assert!(url.contains("code_challenge_method=S256"));
         assert!(url.contains("scope=openid"));
+        assert!(!url.contains("&hd="));
+    }
+
+    #[test]
+    fn test_google_authorization_url_includes_hd() {
+        let provider = GoogleProvider::new(
+            "test-client-id".to_string(),
+            SecretString::from("test-secret".to_string()),
+            Some("company.com".to_string()),
+        );
+
+        let url = provider.authorization_url(
+            "https://example.com/auth/callback/google",
+            "csrf-state-123",
+            "challenge-abc",
+        );
+
+        assert!(url.contains("&hd=company.com"));
     }
 
     #[test]

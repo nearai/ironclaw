@@ -105,6 +105,7 @@ impl GatewayChannel {
             env_auth: MultiAuthState::single(auth_token, owner_id.clone()),
             db_auth: None,
             oidc: oidc_state,
+            oidc_allowed_domains: Vec::new(),
         };
 
         let state = Arc::new(GatewayState {
@@ -140,6 +141,7 @@ impl GatewayChannel {
             oauth_providers: None,
             oauth_state_store: None,
             oauth_base_url: None,
+            oauth_allowed_domains: Vec::new(),
         });
 
         Self {
@@ -185,6 +187,7 @@ impl GatewayChannel {
             oauth_providers: self.state.oauth_providers.clone(),
             oauth_state_store: self.state.oauth_state_store.clone(),
             oauth_base_url: self.state.oauth_base_url.clone(),
+            oauth_allowed_domains: self.state.oauth_allowed_domains.clone(),
         };
         mutate(&mut new_state);
         self.state = Arc::new(new_state);
@@ -345,6 +348,7 @@ impl GatewayChannel {
                 Arc::new(GoogleProvider::new(
                     google.client_id.clone(),
                     google.client_secret.clone(),
+                    google.allowed_hd.clone(),
                 )),
             );
         }
@@ -384,10 +388,15 @@ impl GatewayChannel {
             }
         });
 
+        let allowed_domains = config.allowed_domains;
+        // Share domain restrictions with both the OAuth handlers (GatewayState)
+        // and the OIDC middleware (CombinedAuthState).
+        self.auth.oidc_allowed_domains = allowed_domains.clone();
         self.rebuild_state(|s| {
             s.oauth_providers = Some(providers);
             s.oauth_state_store = Some(state_store);
             s.oauth_base_url = Some(base_url);
+            s.oauth_allowed_domains = allowed_domains;
         });
         self
     }

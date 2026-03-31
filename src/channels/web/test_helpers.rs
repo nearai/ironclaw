@@ -96,6 +96,7 @@ impl TestGatewayBuilder {
             oauth_providers: None,
             oauth_state_store: None,
             oauth_base_url: None,
+            oauth_allowed_domains: Vec::new(),
         })
     }
 

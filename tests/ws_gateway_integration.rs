@@ -70,6 +70,7 @@ async fn start_test_server() -> (
         oauth_providers: None,
         oauth_state_store: None,
         oauth_base_url: None,
+        oauth_allowed_domains: Vec::new(),
     });
 
     let auth = ironclaw::channels::web::auth::MultiAuthState::single(
