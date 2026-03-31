@@ -342,16 +342,13 @@ mod tests {
             .expect("Failed to send request");
         assert_eq!(response.status(), 200, "Server should be listening");
 
-        // Try to restart on an invalid address (port 1 typically requires elevated privileges)
-        let invalid_addr: SocketAddr = "127.0.0.1:1".parse().unwrap();
-
-        // Attempt bind (should fail); server state is untouched because we
-        // never call install_listener on failure.
+        // Try to restart on the same address (bind should fail - address already in use)
+        // This works regardless of root vs non-root user
         let app = server
             .merged_router_clone()
             .expect("Router should exist after start()");
-        let result = tokio::net::TcpListener::bind(invalid_addr).await;
-        assert!(result.is_err(), "Bind to privileged port should fail");
+        let result = tokio::net::TcpListener::bind(addr1).await;
+        assert!(result.is_err(), "Bind to already-in-use port should fail");
         // `app` is dropped — server state unchanged (rollback by construction)
         drop(app);
 

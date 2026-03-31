@@ -175,7 +175,7 @@ impl SubmissionParser {
             }
 
             // /thread list - alias for /history
-            if rest == "list" {
+            if rest.eq_ignore_ascii_case("list") {
                 return Submission::SystemCommand {
                     command: "history".to_string(),
                     args: vec![],
@@ -183,7 +183,7 @@ impl SubmissionParser {
             }
 
             // /thread new - create new thread
-            if rest == "new" {
+            if rest.eq_ignore_ascii_case("new") {
                 return Submission::NewThread;
             }
 
