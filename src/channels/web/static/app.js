@@ -188,16 +188,14 @@ function initApp() {
       avatarInitials.textContent = displayName.charAt(0).toUpperCase();
     }
     if (profile.avatar_url && avatarImg) {
-      avatarImg.onload = function() {
-        // Image loaded successfully — hide initials.
-        if (avatarInitials) avatarInitials.style.display = 'none';
+      var img = new Image();
+      img.onload = function() {
+        avatarImg.src = profile.avatar_url;
+        avatarImg.hidden = false;
+        if (avatarInitials) avatarInitials.hidden = true;
       };
-      avatarImg.onerror = function() {
-        // Image failed — remove src so CSS hides it, show initials.
-        avatarImg.removeAttribute('src');
-        if (avatarInitials) avatarInitials.style.display = 'flex';
-      };
-      avatarImg.src = profile.avatar_url;
+      img.onerror = function() { /* keep initials */ };
+      img.src = profile.avatar_url;
     }
     // Populate dropdown.
     var nameEl = document.getElementById('user-dropdown-name');

@@ -402,10 +402,6 @@ body {
 .user-avatar-img {
   object-fit: cover;
   z-index: 1;
-  display: none;
-}
-.user-avatar-img[src] {
-  display: block;
 }
 
 .user-avatar-initials {
