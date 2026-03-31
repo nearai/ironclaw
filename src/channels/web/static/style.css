@@ -379,6 +379,9 @@ body {
   position: relative;
   width: 32px;
   height: 32px;
+  min-width: 32px;
+  min-height: 32px;
+  flex-shrink: 0;
   border-radius: 50%;
   border: none;
   padding: 0;
@@ -392,8 +395,11 @@ body {
 .user-avatar-img {
   width: 32px;
   height: 32px;
+  min-width: 32px;
+  min-height: 32px;
   border-radius: 50%;
   object-fit: cover;
+  flex-shrink: 0;
 }
 
 .user-avatar-initials {
