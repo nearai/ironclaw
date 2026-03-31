@@ -115,7 +115,7 @@ fn generate_state_token() -> String {
 /// Only allows relative paths starting with `/` (and not `//` which browsers
 /// treat as protocol-relative URLs).
 fn sanitize_redirect(url: Option<String>) -> Option<String> {
-    url.filter(|u| u.starts_with('/') && !u.starts_with("//"))
+    url.filter(|u| u.starts_with('/') && !u.starts_with("//") && !u.starts_with("/\\"))
 }
 
 /// Create a `PendingOAuthFlow` with a fresh code verifier.

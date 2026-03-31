@@ -26,6 +26,8 @@ use tower_http::cors::{AllowHeaders, CorsLayer};
 use tower_http::set_header::SetResponseHeaderLayer;
 use uuid::Uuid;
 
+use axum::http::HeaderMap;
+
 use crate::agent::SessionManager;
 use crate::bootstrap::ironclaw_base_dir;
 use crate::channels::IncomingMessage;
@@ -384,7 +386,8 @@ pub struct GatewayState {
     /// Per-user rate limiter for chat endpoints (30 messages per 60 seconds per user).
     pub chat_rate_limiter: PerUserRateLimiter,
     /// Rate limiter for OAuth callback endpoints (10 requests per 60 seconds).
-    pub oauth_rate_limiter: RateLimiter,
+    /// Per-IP rate limiter for OAuth/auth endpoints (20 requests per 60 seconds per IP).
+    pub oauth_rate_limiter: PerUserRateLimiter,
     /// Rate limiter for webhook trigger endpoints (10 requests per 60 seconds).
     pub webhook_rate_limiter: RateLimiter,
     /// Registry catalog entries for the available extensions API.
@@ -1271,10 +1274,17 @@ async fn relay_events_handler(
 /// Query params: `provider`, `team_id`.
 async fn slack_relay_oauth_callback_handler(
     State(state): State<Arc<GatewayState>>,
+    headers: HeaderMap,
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
     // Rate limit
-    if !state.oauth_rate_limiter.check() {
+    let ip = headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.split(',').next())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    if !state.oauth_rate_limiter.check(&ip) {
         return axum::response::Html(
             "<html><body style='font-family: system-ui; text-align: center; padding: 60px;'>\
              <h2>Too Many Requests</h2>\
@@ -3107,7 +3117,7 @@ mod tests {
             skill_catalog: None,
             scheduler: None,
             chat_rate_limiter: PerUserRateLimiter::new(30, 60),
-            oauth_rate_limiter: RateLimiter::new(10, 60),
+            oauth_rate_limiter: PerUserRateLimiter::new(20, 60),
             webhook_rate_limiter: RateLimiter::new(10, 60),
             registry_entries: vec![],
             cost_guard: None,

@@ -147,6 +147,7 @@ impl OAuthProvider for GoogleProvider {
         let mut validation = jsonwebtoken::Validation::default();
         validation.insecure_disable_signature_validation();
         validation.set_audience(&[&self.client_id]);
+        validation.set_issuer(&["https://accounts.google.com"]);
 
         let token_data = jsonwebtoken::decode::<GoogleIdTokenClaims>(
             &id_token,

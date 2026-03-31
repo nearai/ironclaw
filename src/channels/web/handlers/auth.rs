@@ -68,9 +68,10 @@ pub async fn providers_handler(State(state): State<Arc<GatewayState>>) -> Json<s
 pub async fn login_handler(
     State(state): State<Arc<GatewayState>>,
     Path(provider_name): Path<String>,
+    headers: axum::http::HeaderMap,
     Query(params): Query<LoginParams>,
 ) -> Result<Response, (StatusCode, String)> {
-    if !state.oauth_rate_limiter.check() {
+    if !state.oauth_rate_limiter.check(&rate_limit_key(&headers)) {
         return Err((StatusCode::TOO_MANY_REQUESTS, "Rate limited".to_string()));
     }
 
@@ -108,18 +109,20 @@ pub async fn login_handler(
 pub async fn callback_handler(
     State(state): State<Arc<GatewayState>>,
     Path(provider_name): Path<String>,
+    headers: axum::http::HeaderMap,
     Query(params): Query<CallbackParams>,
 ) -> Response {
-    handle_callback(state, provider_name, params).await
+    handle_callback(state, provider_name, params, &headers).await
 }
 
 /// POST /auth/callback/{provider} — OAuth callback (form post, used by Apple Sign In).
 pub async fn callback_post_handler(
     State(state): State<Arc<GatewayState>>,
     Path(provider_name): Path<String>,
+    headers: axum::http::HeaderMap,
     axum::Form(params): axum::Form<CallbackParams>,
 ) -> Response {
-    handle_callback(state, provider_name, params).await
+    handle_callback(state, provider_name, params, &headers).await
 }
 
 /// Shared callback logic for both GET (query) and POST (form) callbacks.
@@ -127,8 +130,9 @@ async fn handle_callback(
     state: Arc<GatewayState>,
     provider_name: String,
     params: CallbackParams,
+    headers: &axum::http::HeaderMap,
 ) -> Response {
-    if !state.oauth_rate_limiter.check() {
+    if !state.oauth_rate_limiter.check(&rate_limit_key(headers)) {
         return error_page("Too many requests. Please try again later.");
     }
 
@@ -336,8 +340,9 @@ pub async fn logout_handler(
 /// GET /auth/near/challenge — generate a nonce for NEAR wallet signing.
 pub async fn near_challenge_handler(
     State(state): State<Arc<GatewayState>>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    if !state.oauth_rate_limiter.check() {
+    if !state.oauth_rate_limiter.check(&rate_limit_key(&headers)) {
         return Err((StatusCode::TOO_MANY_REQUESTS, "Rate limited".to_string()));
     }
 
@@ -368,9 +373,10 @@ pub struct NearVerifyRequest {
 /// POST /auth/near/verify — verify NEAR wallet signature and issue session.
 pub async fn near_verify_handler(
     State(state): State<Arc<GatewayState>>,
+    headers: axum::http::HeaderMap,
     Json(body): Json<NearVerifyRequest>,
 ) -> Response {
-    if !state.oauth_rate_limiter.check() {
+    if !state.oauth_rate_limiter.check(&rate_limit_key(&headers)) {
         return (StatusCode::TOO_MANY_REQUESTS, "Rate limited").into_response();
     }
 
@@ -758,6 +764,16 @@ fn build_session_cookie_clear(secure: bool) -> String {
 
 fn is_secure(base_url: &str) -> bool {
     base_url.starts_with("https://")
+}
+
+/// Extract a rate-limit key from request headers (X-Forwarded-For or fallback).
+fn rate_limit_key(headers: &axum::http::HeaderMap) -> String {
+    headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.split(',').next())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|| "unknown".to_string())
 }
 
 /// Check that the email belongs to one of the allowed domains.

@@ -74,7 +74,7 @@ fn build_state(
         skill_catalog: None,
         scheduler: None,
         chat_rate_limiter: PerUserRateLimiter::new(30, 60),
-        oauth_rate_limiter: RateLimiter::new(10, 60),
+        oauth_rate_limiter: PerUserRateLimiter::new(20, 60),
         webhook_rate_limiter: RateLimiter::new(10, 60),
         registry_entries: Vec::new(),
         cost_guard: None,
