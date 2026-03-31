@@ -962,50 +962,58 @@ async fn streaming_worker(
                     content.clone()
                 };
                 if !text.is_empty() {
-                    match message_output_index {
-                        Some(idx) => {
-                            acc.output[idx] = ResponseOutputItem::Message {
-                                id: make_item_id(),
-                                role: "assistant".to_string(),
-                                content: vec![MessageContent::OutputText { text }],
-                            };
-                            if let Some(item) = acc.output.get(idx) {
-                                emit(
-                                    &tx,
-                                    "response.output_item.done",
-                                    &ResponseStreamEvent::OutputItemDone {
-                                        output_index: idx,
-                                        item: item.clone(),
-                                    },
-                                );
-                            }
-                        }
+                    let idx = match message_output_index {
+                        Some(i) => i,
                         None => {
-                            let idx = acc.output.len();
-                            let item = ResponseOutputItem::Message {
+                            // Create the output item first.
+                            let i = acc.output.len();
+                            let placeholder = ResponseOutputItem::Message {
                                 id: make_item_id(),
                                 role: "assistant".to_string(),
-                                content: vec![MessageContent::OutputText { text }],
+                                content: vec![MessageContent::OutputText {
+                                    text: String::new(),
+                                }],
                             };
                             emit(
                                 &tx,
                                 "response.output_item.added",
                                 &ResponseStreamEvent::OutputItemAdded {
-                                    output_index: idx,
-                                    item: item.clone(),
+                                    output_index: i,
+                                    item: placeholder.clone(),
                                 },
                             );
-                            emit(
-                                &tx,
-                                "response.output_item.done",
-                                &ResponseStreamEvent::OutputItemDone {
-                                    output_index: idx,
-                                    item: item.clone(),
-                                },
-                            );
-                            acc.output.push(item);
+                            acc.output.push(placeholder);
+                            i
                         }
-                    }
+                    };
+
+                    // Emit the full text as a delta so streaming clients
+                    // receive it via response.output_text.delta.
+                    emit(
+                        &tx,
+                        "response.output_text.delta",
+                        &ResponseStreamEvent::OutputTextDelta {
+                            output_index: idx,
+                            content_index: 0,
+                            delta: text.clone(),
+                        },
+                    );
+
+                    // Finalize the output item with the complete text.
+                    let item = ResponseOutputItem::Message {
+                        id: make_item_id(),
+                        role: "assistant".to_string(),
+                        content: vec![MessageContent::OutputText { text }],
+                    };
+                    acc.output[idx] = item.clone();
+                    emit(
+                        &tx,
+                        "response.output_item.done",
+                        &ResponseStreamEvent::OutputItemDone {
+                            output_index: idx,
+                            item,
+                        },
+                    );
                 }
             }
 

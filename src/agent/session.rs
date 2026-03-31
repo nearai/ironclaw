@@ -76,6 +76,17 @@ impl Session {
         self.threads.entry(thread_id).or_insert(thread)
     }
 
+    /// Create a new thread with a specific UUID.
+    ///
+    /// Used when the caller provides a pre-determined thread ID (e.g. the
+    /// Responses API generates UUIDs that must be preserved for later lookup).
+    pub fn create_thread_with_id(&mut self, id: Uuid) -> &mut Thread {
+        let thread = Thread::with_id(id, self.id);
+        self.active_thread = Some(id);
+        self.last_active_at = Utc::now();
+        self.threads.entry(id).or_insert(thread)
+    }
+
     /// Get the active thread.
     pub fn active_thread(&self) -> Option<&Thread> {
         self.active_thread.and_then(|id| self.threads.get(&id))
