@@ -958,10 +958,16 @@ pub async fn resolve_gate(
                 Ok(()) => {}
                 Err(e) => {
                     // Rollback auto-approve on resume failure (fix: e75fa8c4)
+                    // Revoke both underscore and hyphenated variants
                     if always {
+                        let registry_name = pending.action_name.replace('_', "-");
                         state
                             .effect_adapter
                             .revoke_auto_approve(&pending.action_name)
+                            .await;
+                        state
+                            .effect_adapter
+                            .revoke_auto_approve(&registry_name)
                             .await;
                     }
                     return Err(engine_err("resume error", e));
@@ -1736,6 +1742,14 @@ async fn await_thread_outcome(
         } => {
             use crate::gate::pending::PendingGate;
 
+            // Redact sensitive params before storing/broadcasting
+            let redacted_params =
+                if let Some(tool) = state.effect_adapter.tools().get(&action_name).await {
+                    crate::tools::redact_params(&parameters, tool.sensitive_params())
+                } else {
+                    parameters.clone()
+                };
+
             // Store in unified PendingGateStore (keyed by user_id + thread_id)
             let pending = PendingGate {
                 request_id: uuid::Uuid::new_v4(),
@@ -1746,7 +1760,7 @@ async fn await_thread_outcome(
                 source_channel: message.channel.clone(),
                 action_name: action_name.clone(),
                 call_id,
-                parameters,
+                parameters: redacted_params,
                 description: format!(
                     "Tool '{}' requires {} (gate: {gate_name})",
                     action_name,
@@ -1758,10 +1772,10 @@ async fn await_thread_outcome(
             };
 
             if let Err(e) = state.pending_gates.insert(pending.clone()).await {
-                tracing::warn!(
+                tracing::debug!(
                     gate = %gate_name,
                     error = %e,
-                    "Failed to store pending gate"
+                    "failed to store pending gate (may be duplicate)"
                 );
             }
 

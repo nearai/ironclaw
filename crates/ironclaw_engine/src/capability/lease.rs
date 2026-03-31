@@ -153,21 +153,30 @@ impl LeaseManager {
             }
 
             let child_actions: Vec<String> = match requested_actions {
-                Some(req) => parent
-                    .granted_actions
-                    .iter()
-                    .filter(|a| req.contains(*a))
-                    .cloned()
-                    .collect(),
+                Some(req) => {
+                    if parent.granted_actions.is_empty() {
+                        // Parent is wildcard (empty = all actions). Child gets
+                        // only the requested subset, NOT a wildcard.
+                        req.iter().cloned().collect()
+                    } else {
+                        // Intersection: only actions in both parent and request.
+                        parent
+                            .granted_actions
+                            .iter()
+                            .filter(|a| req.contains(*a))
+                            .cloned()
+                            .collect()
+                    }
+                }
                 None => parent.granted_actions.clone(),
             };
 
-            // Skip if intersection is empty and parent has specific grants
-            if !parent.granted_actions.is_empty() && child_actions.is_empty() {
+            // Skip if intersection is empty (no matching actions)
+            if child_actions.is_empty() && requested_actions.is_some() {
                 continue;
             }
 
-            let child = CapabilityLease {
+            child_leases.push(CapabilityLease {
                 id: LeaseId::new(),
                 thread_id: child_thread_id,
                 capability_name: parent.capability_name.clone(),
@@ -177,9 +186,15 @@ impl LeaseManager {
                 max_uses: parent.uses_remaining, // budget from parent's remaining
                 uses_remaining: parent.uses_remaining,
                 revoked: false,
-            };
-            self.active.write().await.insert(child.id, child.clone());
-            child_leases.push(child);
+            });
+        }
+
+        // Batch insert under a single write lock (M2: avoid per-iteration locking)
+        {
+            let mut active = self.active.write().await;
+            for child in &child_leases {
+                active.insert(child.id, child.clone());
+            }
         }
 
         child_leases

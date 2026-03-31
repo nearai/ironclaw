@@ -922,6 +922,37 @@ async fn expired_parent_yields_no_child_leases() {
     );
 }
 
+/// Wildcard parent (granted_actions=[]) + requested subset should give
+/// only the requested subset, NOT a wildcard child (regression: C3 review).
+#[tokio::test]
+async fn wildcard_parent_lease_gives_requested_subset_not_wildcard() {
+    let mgr = LeaseManager::new();
+    let parent = ThreadId::new();
+    let child = ThreadId::new();
+
+    // Wildcard parent: granted_actions=[] means "all actions"
+    mgr.grant(parent, "tools", vec![], None, None).await;
+
+    let mut requested = std::collections::HashSet::new();
+    requested.insert("read".into());
+    requested.insert("write".into());
+
+    let child_leases = mgr
+        .derive_child_leases(parent, child, Some(&requested))
+        .await;
+    assert_eq!(child_leases.len(), 1);
+
+    let actions = &child_leases[0].granted_actions;
+    // Child should get ["read", "write"], NOT [] (wildcard)
+    assert_eq!(
+        actions.len(),
+        2,
+        "Child of wildcard parent should get exactly the requested actions, not wildcard. Got: {actions:?}"
+    );
+    assert!(actions.contains(&"read".to_string()));
+    assert!(actions.contains(&"write".to_string()));
+}
+
 // ── Tests: LeaseGate integration ─────────────────────────────
 
 /// LeaseGate denies actions without a valid lease.

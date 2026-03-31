@@ -105,7 +105,8 @@ pub enum ExecutionMode {
 
 /// Immutable snapshot of everything a gate needs to make a decision.
 ///
-/// All fields are borrowed to avoid cloning in the hot path.
+/// String and Value fields are borrowed to avoid cloning in the hot path.
+/// `ThreadId` and `ExecutionMode` are `Copy` and stored inline.
 #[derive(Debug)]
 pub struct GateContext<'a> {
     pub user_id: &'a str,

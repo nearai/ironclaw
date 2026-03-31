@@ -4,7 +4,9 @@
 //! return [`GateDecision::Pause`] or [`GateDecision::Deny`] wins.
 //! If all gates return [`GateDecision::Allow`], execution proceeds.
 //!
-//! A panicking gate is treated as a denial (fail-closed).
+//! Gate implementations must not panic. A panicking gate will propagate
+//! the panic to the caller (async `catch_unwind` is not used because
+//! the gate evaluation borrows non-`UnwindSafe` context).
 
 use std::sync::Arc;
 
@@ -29,8 +31,7 @@ impl GatePipeline {
 
     /// Evaluate all gates in priority order. First `Pause` or `Deny` wins.
     ///
-    /// If a gate panics, it is treated as [`GateDecision::Deny`] with an
-    /// internal-error reason (fail-closed).
+    /// Gate implementations must not panic — a panic propagates to the caller.
     pub async fn evaluate(&self, ctx: &GateContext<'_>) -> GateDecision {
         for gate in &self.gates {
             let decision = gate.evaluate(ctx).await;

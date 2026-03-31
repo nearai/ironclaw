@@ -166,17 +166,16 @@ impl PendingGateStore {
             }
 
             // Atomically remove — no TOCTOU gap
-            let gate = inner
-                .by_key
-                .remove(key)
-                .expect("gate existence verified above");
+            let gate = inner.by_key.remove(key).ok_or(GateStoreError::NotFound)?;
             inner.by_request_id.remove(&gate.request_id);
             gate
         };
 
         // Persist removal after lock is released
-        if let Some(ref persistence) = self.persistence {
-            let _ = persistence.remove(key).await;
+        if let Some(ref persistence) = self.persistence
+            && let Err(e) = persistence.remove(key).await
+        {
+            tracing::debug!(error = %e, "gate persistence removal failed (gate already taken from memory)");
         }
         Ok(gate)
     }
@@ -217,17 +216,28 @@ impl PendingGateStore {
 
     /// Remove all expired gates. Returns the number removed.
     pub async fn expire_stale(&self) -> usize {
-        let mut inner = self.inner.lock().await;
-        let expired_keys: Vec<PendingGateKey> = inner
-            .by_key
-            .iter()
-            .filter(|(_, g)| g.is_expired())
-            .map(|(k, _)| k.clone())
-            .collect();
+        let expired_keys = {
+            let mut inner = self.inner.lock().await;
+            let expired_keys: Vec<PendingGateKey> = inner
+                .by_key
+                .iter()
+                .filter(|(_, g)| g.is_expired())
+                .map(|(k, _)| k.clone())
+                .collect();
+            for key in &expired_keys {
+                if let Some(gate) = inner.by_key.remove(key) {
+                    inner.by_request_id.remove(&gate.request_id);
+                }
+            }
+            expired_keys
+        };
+        // Persist removals outside the lock
         let count = expired_keys.len();
-        for key in &expired_keys {
-            if let Some(gate) = inner.by_key.remove(key) {
-                inner.by_request_id.remove(&gate.request_id);
+        if let Some(ref persistence) = self.persistence {
+            for key in &expired_keys {
+                if let Err(e) = persistence.remove(key).await {
+                    tracing::debug!(error = %e, "failed to remove expired gate from persistence");
+                }
             }
         }
         count
