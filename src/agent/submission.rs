@@ -162,29 +162,51 @@ impl SubmissionParser {
             };
         }
 
-        // /thread <uuid> - switch thread
-        if let Some(rest) = lower.strip_prefix("/thread ") {
+        // /thread [subcommand] - thread management
+        if let Some(rest) = trimmed.strip_prefix("/thread") {
             let rest = rest.trim();
-            if rest != "new"
-                && let Ok(id) = Uuid::parse_str(rest)
-            {
+
+            // /thread (no args) - show current thread info
+            if rest.is_empty() {
+                return Submission::SystemCommand {
+                    command: "thread".to_string(),
+                    args: vec![],
+                };
+            }
+
+            // /thread list - alias for /history
+            if rest == "list" {
+                return Submission::SystemCommand {
+                    command: "history".to_string(),
+                    args: vec![],
+                };
+            }
+
+            // /thread new - create new thread
+            if rest == "new" {
+                return Submission::NewThread;
+            }
+
+            // /thread <uuid> - switch thread
+            if let Ok(id) = Uuid::parse_str(rest) {
                 return Submission::SwitchThread { thread_id: id };
             }
         }
 
         // /resume <uuid> - resume from checkpoint
-        if let Some(rest) = lower.strip_prefix("/resume ")
-            && let Ok(id) = Uuid::parse_str(rest.trim())
-        {
-            return Submission::Resume { checkpoint_id: id };
+        if let Some(rest) = lower.strip_prefix("/resume ") {
+            if let Ok(id) = Uuid::parse_str(rest.trim()) {
+                return Submission::Resume { checkpoint_id: id };
+            }
         }
 
         // Try structured JSON approval (from web gateway's /api/chat/approval endpoint)
-        if trimmed.starts_with('{')
-            && let Ok(submission) = serde_json::from_str::<Submission>(trimmed)
-            && matches!(submission, Submission::ExecApproval { .. })
-        {
-            return submission;
+        if trimmed.starts_with('{') {
+            if let Ok(submission) = serde_json::from_str::<Submission>(trimmed) {
+                if matches!(submission, Submission::ExecApproval { .. }) {
+                    return submission;
+                }
+            }
         }
 
         // Approval responses (simple yes/no/always for pending approvals)
@@ -556,10 +578,38 @@ mod tests {
     #[test]
     fn test_parser_history() {
         let submission = SubmissionParser::parse("/history");
-        assert!(matches!(submission, Submission::SystemCommand { command, args } if command == "history" && args.is_empty()));
+        assert!(
+            matches!(submission, Submission::SystemCommand { command, args } if command == "history" && args.is_empty())
+        );
 
         let submission = SubmissionParser::parse("/history all");
-        assert!(matches!(submission, Submission::SystemCommand { command, args } if command == "history" && args == vec!["all"]));
+        assert!(
+            matches!(submission, Submission::SystemCommand { command, args } if command == "history" && args == vec!["all"])
+        );
+    }
+
+    #[test]
+    fn test_parser_thread_subcommands() {
+        // /thread (no args) - show current thread info
+        let submission = SubmissionParser::parse("/thread");
+        assert!(
+            matches!(submission, Submission::SystemCommand { command, args } if command == "thread" && args.is_empty())
+        );
+
+        // /thread list - alias for /history
+        let submission = SubmissionParser::parse("/thread list");
+        assert!(
+            matches!(submission, Submission::SystemCommand { command, args } if command == "history" && args.is_empty())
+        );
+
+        // /thread new - create new thread
+        let submission = SubmissionParser::parse("/thread new");
+        assert!(matches!(submission, Submission::NewThread));
+
+        // /thread <uuid> - switch thread
+        let uuid = Uuid::new_v4();
+        let submission = SubmissionParser::parse(&format!("/thread {}", uuid));
+        assert!(matches!(submission, Submission::SwitchThread { thread_id } if thread_id == uuid));
     }
 
     #[test]

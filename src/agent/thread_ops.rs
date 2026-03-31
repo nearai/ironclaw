@@ -1800,7 +1800,7 @@ impl Agent {
             .session_manager
             .get_or_create_session(&message.user_id)
             .await;
-        
+
         // First, try to switch to an in-memory thread
         {
             let mut sess = session.lock().await;
@@ -1811,7 +1811,7 @@ impl Agent {
                 )));
             }
         }
-        
+
         // Thread not in memory — try to hydrate from persistent store
         if let Some(store) = self.store() {
             // Verify the thread exists and belongs to this user
@@ -1819,14 +1819,17 @@ impl Agent {
                 .conversation_belongs_to_user(target_thread_id, &message.user_id)
                 .await
                 .unwrap_or(false);
-            
+
             if owned {
                 // Hydrate the thread from DB
-                if let Some(error_msg) = self.maybe_hydrate_thread(message, &target_thread_id.to_string()).await {
+                if let Some(error_msg) = self
+                    .maybe_hydrate_thread(message, &target_thread_id.to_string())
+                    .await
+                {
                     // Hydration failed with a specific error
                     return Ok(SubmissionResult::error(error_msg));
                 }
-                
+
                 // Retry the switch after hydration
                 let mut sess = session.lock().await;
                 if sess.switch_thread(target_thread_id) {
@@ -1837,7 +1840,7 @@ impl Agent {
                 }
             }
         }
-        
+
         Ok(SubmissionResult::error(format!(
             "Thread {} not found. Use /history to list available threads.",
             target_thread_id

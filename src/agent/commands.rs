@@ -36,9 +36,13 @@ fn format_history_line(
     updated_at: &str,
     title: Option<&str>,
 ) -> String {
-    let mut line = format!("{} {} [{}] {}={} updated={}", prefix, id, label, count_label, count, updated_at);
+    let mut line = format!(
+        "{} {} [{}] {}={} updated={}",
+        prefix, id, label, count_label, count, updated_at
+    );
     if let Some(title) = title
-        && !title.is_empty() {
+        && !title.is_empty()
+    {
         line.push_str(&format!(" — {}", title));
     }
     line
@@ -155,7 +159,11 @@ impl Agent {
                     for summary in summaries {
                         seen_threads.insert(summary.id);
                         listed_any = true;
-                        let prefix = if Some(summary.id) == active_thread { '*' } else { ' ' };
+                        let prefix = if Some(summary.id) == active_thread {
+                            '*'
+                        } else {
+                            ' '
+                        };
                         let label = match summary.thread_type.as_deref() {
                             Some(thread_type) => format!("{}/{}", thread_type, summary.channel),
                             None => summary.channel.clone(),
@@ -176,7 +184,10 @@ impl Agent {
                 }
                 Ok(_) => {}
                 Err(e) => {
-                    tracing::debug!("[commands::history] Failed to list persistent conversations: {}", e);
+                    tracing::debug!(
+                        "[commands::history] Failed to list persistent conversations: {}",
+                        e
+                    );
                 }
             }
         }
@@ -196,11 +207,12 @@ impl Agent {
                 output.push_str("  (no threads yet)\n");
             } else {
                 for thread in in_memory_threads {
-                    let prefix = if Some(thread.id) == active_thread { '*' } else { ' ' };
-                    let title = thread
-                        .metadata
-                        .get("title")
-                        .and_then(|v| v.as_str());
+                    let prefix = if Some(thread.id) == active_thread {
+                        '*'
+                    } else {
+                        ' '
+                    };
+                    let title = thread.metadata.get("title").and_then(|v| v.as_str());
                     let line = format_history_line(
                         prefix,
                         thread.id,
@@ -805,6 +817,55 @@ impl Agent {
             "history" => {
                 let history = self.handle_history_command(session, tenant).await?;
                 Ok(SubmissionResult::response(history))
+            }
+
+            "thread" => {
+                // /thread (no args) - show current thread info
+                if args.is_empty() {
+                    let (session_id, active_thread) = {
+                        let sess = session.lock().await;
+                        (sess.id, sess.active_thread)
+                    };
+
+                    let mut output = String::new();
+                    output.push_str(&format!("Session: {}\n", session_id));
+
+                    if let Some(thread_id) = active_thread {
+                        let sess = session.lock().await;
+                        if let Some(thread) = sess.threads.get(&thread_id) {
+                            output.push_str(&format!("Current thread: {}\n", thread_id));
+                            output.push_str(&format!("State: {:?}\n", thread.state));
+                            output.push_str(&format!("Turns: {}\n", thread.turns.len()));
+
+                            if let Some(title) =
+                                thread.metadata.get("title").and_then(|v| v.as_str())
+                            {
+                                output.push_str(&format!("Title: {}\n", title));
+                            }
+
+                            output.push_str(&format!(
+                                "Updated: {}\n",
+                                thread.updated_at.to_rfc3339()
+                            ));
+                        } else {
+                            output.push_str(&format!(
+                                "Active thread: {} (not found in memory)\n",
+                                thread_id
+                            ));
+                        }
+                    } else {
+                        output.push_str("No active thread.\n");
+                    }
+
+                    output.push_str("\nUse /history or /thread list to see all threads.");
+                    Ok(SubmissionResult::response(output))
+                } else {
+                    // Unknown /thread subcommand
+                    Ok(SubmissionResult::error(format!(
+                        "Unknown /thread subcommand: {}. Use /thread (no args), /thread list, /thread new, or /thread <uuid>.",
+                        args.join(" ")
+                    )))
+                }
             }
 
             "debug" => {
