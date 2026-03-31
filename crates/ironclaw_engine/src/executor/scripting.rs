@@ -510,6 +510,32 @@ pub async fn execute_code_with_skills(
                                     had_error,
                                 });
                             }
+                            DispatchResult::GatePaused {
+                                gate_name,
+                                action_name,
+                                call_id,
+                                parameters,
+                                resume_kind,
+                            } => {
+                                return Ok(CodeExecutionResult {
+                                    return_value: serde_json::Value::Null,
+                                    stdout,
+                                    action_results,
+                                    events,
+                                    need_approval: Some(
+                                        crate::runtime::messaging::ThreadOutcome::GatePaused {
+                                            gate_name,
+                                            action_name,
+                                            call_id,
+                                            parameters,
+                                            resume_kind,
+                                        },
+                                    ),
+                                    recursive_tokens,
+                                    final_answer: None,
+                                    had_error,
+                                });
+                            }
                         }
                     }
                 };
@@ -997,6 +1023,13 @@ enum DispatchResult {
         call_id: String,
         parameters: serde_json::Value,
     },
+    GatePaused {
+        gate_name: String,
+        action_name: String,
+        call_id: String,
+        parameters: serde_json::Value,
+        resume_kind: crate::gate::ResumeKind,
+    },
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1107,6 +1140,25 @@ async fn dispatch_action(
                 action_name: action_name.into(),
                 call_id: call_id.into(),
                 parameters: params_for_auth,
+            }
+        }
+        Err(EngineError::GatePaused {
+            gate_name,
+            action_name: gp_action,
+            call_id: gp_call_id,
+            parameters: gp_params,
+            resume_kind,
+        }) => {
+            events.push(EventKind::ApprovalRequested {
+                action_name: action_name.into(),
+                call_id: call_id.into(),
+            });
+            DispatchResult::GatePaused {
+                gate_name,
+                action_name: gp_action,
+                call_id: gp_call_id,
+                parameters: *gp_params,
+                resume_kind: *resume_kind,
             }
         }
         Err(e) => {

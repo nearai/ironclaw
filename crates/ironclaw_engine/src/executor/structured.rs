@@ -169,6 +169,30 @@ pub async fn execute_action_calls(
                     }),
                 });
             }
+            Err(crate::types::error::EngineError::GatePaused {
+                gate_name,
+                action_name,
+                call_id,
+                parameters,
+                resume_kind,
+            }) => {
+                // Unified gate pause — interrupt the batch.
+                events.push(EventKind::ApprovalRequested {
+                    action_name: action_name.clone(),
+                    call_id: call_id.clone(),
+                });
+                return Ok(ActionBatchResult {
+                    results,
+                    events,
+                    need_approval: Some(ThreadOutcome::GatePaused {
+                        gate_name,
+                        action_name,
+                        call_id,
+                        parameters: *parameters,
+                        resume_kind: *resume_kind,
+                    }),
+                });
+            }
             Err(e) => {
                 let error_result = ActionResult {
                     call_id: call.id.clone(),
