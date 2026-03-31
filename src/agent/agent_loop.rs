@@ -907,7 +907,10 @@ impl Agent {
             {
                 use crate::agent::session::Thread;
                 let mut sess = session.lock().await;
-                let thread = Thread::with_id(id, sess.id);
+                // Bootstrap thread has no incoming message -- use the
+                // "__bootstrap__" sentinel so approvals from any channel are
+                // permitted. None means "deny by default" (fail-closed).
+                let thread = Thread::with_id(id, sess.id, Some("__bootstrap__"));
                 sess.active_thread = Some(id);
                 sess.threads.entry(id).or_insert(thread);
             }
@@ -1259,7 +1262,37 @@ impl Agent {
                 .get_or_create_session(&message.user_id)
                 .await;
             let mut sess = session.lock().await;
-            if sess.threads.contains_key(&target_thread_id) {
+            if let Some(thread) = sess.threads.get(&target_thread_id) {
+                // Verify the thread actually has a pending approval before
+                // allowing approval-shaped messages to target it. Without this
+                // check, an attacker could use approval messages to hijack any
+                // thread by UUID.
+                if thread.pending_approval.is_none() {
+                    tracing::warn!(
+                        %target_thread_id,
+                        approval_channel = %message.channel,
+                        "Blocked approval for thread with no pending approval"
+                    );
+                    drop(sess);
+                    return Ok(Some("Error: no pending approval on this thread".into()));
+                }
+
+                let authorized = crate::agent::session::is_approval_authorized(
+                    thread.source_channel.as_deref(),
+                    &message.channel,
+                );
+                if !authorized {
+                    tracing::warn!(
+                        %target_thread_id,
+                        source_channel = ?thread.source_channel,
+                        approval_channel = %message.channel,
+                        "Blocked cross-channel approval attempt"
+                    );
+                    drop(sess);
+                    return Ok(Some(
+                        "Error: approval not authorized for this channel".into(),
+                    ));
+                }
                 sess.active_thread = Some(target_thread_id);
                 sess.last_active_at = chrono::Utc::now();
                 drop(sess);

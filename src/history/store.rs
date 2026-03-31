@@ -258,6 +258,10 @@ impl Store {
                     // TODO(#661): persist user_timezone in agent_jobs table so
                     // background/routine jobs retain the session's timezone context.
                     user_timezone: "UTC".to_string(),
+                    // TODO(#1125): approval_context is #[serde(skip)] so it's lost on
+                    // DB restore. Tools that were allowed before restart will be blocked
+                    // until the scheduler re-sets the context on the next dispatch.
+                    approval_context: None,
                 }))
             }
             None => Ok(None),
@@ -1581,19 +1585,20 @@ impl Store {
         channel: &str,
         user_id: &str,
         thread_id: Option<&str>,
+        source_channel: Option<&str>,
     ) -> Result<bool, DatabaseError> {
         let conn = self.conn().await?;
         let affected = conn
             .execute(
                 r#"
-            INSERT INTO conversations (id, channel, user_id, thread_id)
-            VALUES ($1, $2, $3, $4)
+            INSERT INTO conversations (id, channel, user_id, thread_id, source_channel)
+            VALUES ($1, $2, $3, $4, $5)
             ON CONFLICT (id) DO UPDATE
             SET last_activity = NOW()
             WHERE conversations.user_id = EXCLUDED.user_id
               AND conversations.channel = EXCLUDED.channel
             "#,
-                &[&id, &channel, &user_id, &thread_id],
+                &[&id, &channel, &user_id, &thread_id, &source_channel],
             )
             .await?;
         Ok(affected > 0)
@@ -1911,6 +1916,21 @@ impl Store {
             )
             .await?;
         Ok(row.is_some())
+    }
+
+    /// Get the source_channel for a conversation.
+    pub async fn get_conversation_source_channel(
+        &self,
+        conversation_id: Uuid,
+    ) -> Result<Option<String>, DatabaseError> {
+        let conn = self.conn().await?;
+        let row = conn
+            .query_opt(
+                "SELECT source_channel FROM conversations WHERE id = $1",
+                &[&conversation_id],
+            )
+            .await?;
+        Ok(row.and_then(|r| r.get::<_, Option<String>>(0)))
     }
 
     /// Load messages for a conversation with cursor-based pagination.

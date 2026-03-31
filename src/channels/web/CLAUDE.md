@@ -84,7 +84,7 @@ Browser-facing HTTP API and SSE/WebSocket real-time streaming. Axum-based, singl
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/api/routines` | List routines |
-| GET | `/api/routines/summary` | Aggregated stats (total/enabled/disabled/failing/runs_today) |
+| GET | `/api/routines/summary` | Aggregated stats (total/enabled/disabled/unverified/failing/runs_today) |
 | GET | `/api/routines/{id}` | Routine detail with recent run history |
 | POST | `/api/routines/{id}/trigger` | Manually trigger a routine |
 | POST | `/api/routines/{id}/toggle` | Enable/disable a routine |
