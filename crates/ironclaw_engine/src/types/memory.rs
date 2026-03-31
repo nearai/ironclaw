@@ -11,9 +11,7 @@ use uuid::Uuid;
 use crate::types::project::ProjectId;
 use crate::types::thread::ThreadId;
 
-fn default_user_id() -> String {
-    "legacy".to_string()
-}
+use super::default_user_id;
 
 /// Strongly-typed document identifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

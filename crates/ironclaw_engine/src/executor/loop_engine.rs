@@ -12,7 +12,7 @@ use tracing::{debug, warn};
 
 use crate::capability::lease::LeaseManager;
 use crate::capability::policy::PolicyEngine;
-use crate::runtime::messaging::{SignalReceiver, ThreadOutcome, ThreadSignal};
+use crate::runtime::messaging::{SignalReceiver, ThreadOutcome};
 use crate::traits::effect::EffectExecutor;
 use crate::traits::llm::LlmBackend;
 use crate::types::error::EngineError;
@@ -23,13 +23,12 @@ use crate::types::thread::{Thread, ThreadState};
 
 const RUNTIME_CHECKPOINT_METADATA_KEY: &str = "runtime_checkpoint";
 
+/// Persisted state from a prior execution, used to resume threads.
+/// The Python orchestrator manages loop counters internally; Rust only
+/// needs the opaque `persisted_state` blob to hand back on resume.
 #[derive(Default)]
-#[allow(dead_code)]
 struct RuntimeCheckpoint {
     persisted_state: serde_json::Value,
-    nudge_count: u32,
-    consecutive_errors: u32,
-    compaction_count: u32,
 }
 
 /// The core execution loop for a thread.
@@ -40,8 +39,8 @@ pub struct ExecutionLoop {
     leases: Arc<LeaseManager>,
     policy: Arc<PolicyEngine>,
     signal_rx: SignalReceiver,
-    #[allow(dead_code)]
-    user_id: String,
+    /// Stored for potential future use (e.g. user-scoped prompt overlays).
+    _user_id: String,
     /// Optional capability registry for resolving capability-level policies.
     capabilities: Option<Arc<crate::capability::registry::CapabilityRegistry>>,
     /// Optional broadcast sender for live event streaming.
@@ -71,7 +70,7 @@ impl ExecutionLoop {
             leases,
             policy,
             signal_rx,
-            user_id,
+            _user_id: user_id,
             capabilities: None,
             event_tx: None,
             retrieval: None,
@@ -117,7 +116,6 @@ impl ExecutionLoop {
     }
 
     /// Add an event to the thread and broadcast it for live status updates.
-    #[allow(dead_code)]
     fn emit_event(&mut self, kind: EventKind) {
         let event = crate::types::event::ThreadEvent::new(self.thread.id, kind);
         if let Some(ref tx) = self.event_tx {
@@ -128,58 +126,15 @@ impl ExecutionLoop {
     }
 
     fn load_runtime_checkpoint(&self) -> RuntimeCheckpoint {
-        let Some(checkpoint) = self
+        let persisted_state = self
             .thread
             .metadata
             .get(RUNTIME_CHECKPOINT_METADATA_KEY)
-            .and_then(|value| value.as_object())
-        else {
-            return RuntimeCheckpoint {
-                persisted_state: serde_json::json!({}),
-                ..RuntimeCheckpoint::default()
-            };
-        };
+            .and_then(|value| value.get("persisted_state"))
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({}));
 
-        RuntimeCheckpoint {
-            persisted_state: checkpoint
-                .get("persisted_state")
-                .cloned()
-                .unwrap_or_else(|| serde_json::json!({})),
-            nudge_count: checkpoint
-                .get("nudge_count")
-                .and_then(|value| value.as_u64())
-                .unwrap_or(0) as u32,
-            consecutive_errors: checkpoint
-                .get("consecutive_errors")
-                .and_then(|value| value.as_u64())
-                .unwrap_or(0) as u32,
-            compaction_count: checkpoint
-                .get("compaction_count")
-                .and_then(|value| value.as_u64())
-                .unwrap_or(0) as u32,
-        }
-    }
-
-    #[allow(dead_code)]
-    fn save_runtime_checkpoint(
-        &mut self,
-        persisted_state: &serde_json::Value,
-        nudge_count: u32,
-        consecutive_errors: u32,
-        compaction_count: u32,
-    ) {
-        if let Some(metadata) = self.thread.metadata.as_object_mut() {
-            metadata.insert(
-                RUNTIME_CHECKPOINT_METADATA_KEY.into(),
-                serde_json::json!({
-                    "persisted_state": persisted_state,
-                    "nudge_count": nudge_count,
-                    "consecutive_errors": consecutive_errors,
-                    "compaction_count": compaction_count,
-                }),
-            );
-        }
-        self.thread.updated_at = chrono::Utc::now();
+        RuntimeCheckpoint { persisted_state }
     }
 
     fn clear_runtime_checkpoint(&mut self) {
@@ -378,104 +333,67 @@ impl ExecutionLoop {
             }
         }
     }
-
-    /// Check for pending signals without blocking.
-    #[allow(dead_code)]
-    fn check_signals(&mut self) -> SignalAction {
-        match self.signal_rx.try_recv() {
-            Ok(ThreadSignal::Stop) => SignalAction::Stop,
-            Ok(ThreadSignal::InjectMessage(msg)) => SignalAction::Inject(msg),
-            Ok(ThreadSignal::Suspend) => {
-                // For now, treat suspend as stop. Phase 3 adds proper suspend/resume.
-                SignalAction::Stop
-            }
-            Ok(ThreadSignal::Resume) | Ok(ThreadSignal::ChildCompleted { .. }) => {
-                SignalAction::Continue
-            }
-            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => SignalAction::Continue,
-            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
-                // Channel closed — the manager dropped our sender. Treat as stop.
-                SignalAction::Stop
-            }
-        }
-    }
-}
-
-#[allow(dead_code)]
-enum SignalAction {
-    Continue,
-    Stop,
-    Inject(ThreadMessage),
-}
-
-/// Extract a FINAL() answer from the LLM's text response.
-///
-/// Matches `FINAL(...)` anywhere in the text, handling:
-/// - Single-line: `FINAL("the answer")`
-/// - Multi-line: `FINAL("""\n...\n""")`
-/// - With or without quotes
-///
-/// This is the regex fallback from the official RLM implementation
-/// (`find_final_answer` in parsing.py) for when the model writes
-/// FINAL() outside a code block.
-#[allow(dead_code)]
-fn extract_final_from_text(text: &str) -> Option<String> {
-    // Find FINAL( — could be at start of line or after whitespace
-    let marker = "FINAL(";
-    let start = text.find(marker)?;
-    let content_start = start + marker.len();
-
-    // Extract everything after FINAL( up to the matching closing paren
-    // Handle nested parens and triple-quoted strings
-    let remaining = &text[content_start..];
-
-    // Try triple-quoted string first: FINAL("""...""")
-    if remaining.starts_with("\"\"\"") {
-        let inner_start = 3;
-        if let Some(end) = remaining[inner_start..].find("\"\"\"") {
-            let answer = remaining[inner_start..inner_start + end].trim();
-            if !answer.is_empty() {
-                return Some(answer.to_string());
-            }
-        }
-    }
-
-    // Try single/double quoted: FINAL("...") or FINAL('...')
-    if remaining.starts_with('"') || remaining.starts_with('\'') {
-        let quote = remaining.as_bytes()[0] as char;
-        if let Some(end) = remaining[1..].find(quote) {
-            let answer = &remaining[1..1 + end];
-            if !answer.is_empty() {
-                return Some(answer.to_string());
-            }
-        }
-    }
-
-    // Unquoted: FINAL(some content here) — find matching close paren
-    let mut depth = 1;
-    for (i, ch) in remaining.char_indices() {
-        match ch {
-            '(' => depth += 1,
-            ')' => {
-                depth -= 1;
-                if depth == 0 {
-                    let answer = remaining[..i].trim();
-                    if !answer.is_empty() {
-                        return Some(answer.to_string());
-                    }
-                    return None;
-                }
-            }
-            _ => {}
-        }
-    }
-
-    None
 }
 
 #[cfg(test)]
 mod tests {
+    /// Extract a FINAL() answer from the LLM's text response.
+    ///
+    /// Matches `FINAL(...)` anywhere in the text, handling:
+    /// - Single-line: `FINAL("the answer")`
+    /// - Multi-line: `FINAL("""\n...\n""")`
+    /// - With or without quotes
+    fn extract_final_from_text(text: &str) -> Option<String> {
+        let marker = "FINAL(";
+        let start = text.find(marker)?;
+        let content_start = start + marker.len();
+        let remaining = &text[content_start..];
+
+        // Try triple-quoted string first: FINAL("""...""")
+        if remaining.starts_with("\"\"\"") {
+            let inner_start = 3;
+            if let Some(end) = remaining[inner_start..].find("\"\"\"") {
+                let answer = remaining[inner_start..inner_start + end].trim();
+                if !answer.is_empty() {
+                    return Some(answer.to_string());
+                }
+            }
+        }
+
+        // Try single/double quoted: FINAL("...") or FINAL('...')
+        if remaining.starts_with('"') || remaining.starts_with('\'') {
+            let quote = remaining.as_bytes()[0] as char;
+            if let Some(end) = remaining[1..].find(quote) {
+                let answer = &remaining[1..1 + end];
+                if !answer.is_empty() {
+                    return Some(answer.to_string());
+                }
+            }
+        }
+
+        // Unquoted: FINAL(some content here) — find matching close paren
+        let mut depth = 1;
+        for (i, ch) in remaining.char_indices() {
+            match ch {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        let answer = remaining[..i].trim();
+                        if !answer.is_empty() {
+                            return Some(answer.to_string());
+                        }
+                        return None;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        None
+    }
     use super::*;
+    use crate::runtime::messaging::ThreadSignal;
     use crate::traits::effect::ThreadExecutionContext;
     use crate::traits::llm::{LlmCallConfig, LlmOutput};
     use crate::types::capability::{ActionDef, CapabilityLease, EffectType};
@@ -619,7 +537,13 @@ mod tests {
         config: ThreadConfig,
     ) -> (ExecutionLoop, crate::runtime::messaging::SignalSender) {
         let project_id = ProjectId::new();
-        let thread = Thread::new("test goal", ThreadType::Foreground, project_id, "test-user", config);
+        let thread = Thread::new(
+            "test goal",
+            ThreadType::Foreground,
+            project_id,
+            "test-user",
+            config,
+        );
         let tid = thread.id;
 
         let llm = Arc::new(MockLlm::new(llm_responses));

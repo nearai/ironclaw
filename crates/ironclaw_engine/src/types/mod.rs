@@ -14,3 +14,9 @@ pub mod project;
 pub mod provenance;
 pub mod step;
 pub mod thread;
+
+/// Default user_id for backwards-compatible deserialization of records
+/// created before multi-tenant isolation was added.
+pub(crate) fn default_user_id() -> String {
+    "legacy".to_string()
+}

@@ -172,7 +172,11 @@ mod tests {
         async fn load_memory_doc(&self, _: DocId) -> Result<Option<MemoryDoc>, EngineError> {
             Ok(None)
         }
-        async fn list_memory_docs(&self, pid: ProjectId, _: &str) -> Result<Vec<MemoryDoc>, EngineError> {
+        async fn list_memory_docs(
+            &self,
+            pid: ProjectId,
+            _: &str,
+        ) -> Result<Vec<MemoryDoc>, EngineError> {
             Ok(self
                 .0
                 .iter()
@@ -268,10 +272,17 @@ mod tests {
             ThreadMessage::user("hello"),
         ];
 
-        let (ctx_msgs, _) =
-            build_step_context(&messages, &[], &effects, None, ProjectId::new(), "test-user", "hello")
-                .await
-                .unwrap();
+        let (ctx_msgs, _) = build_step_context(
+            &messages,
+            &[],
+            &effects,
+            None,
+            ProjectId::new(),
+            "test-user",
+            "hello",
+        )
+        .await
+        .unwrap();
 
         // No injection — same number of messages
         assert_eq!(ctx_msgs.len(), 2);
@@ -286,10 +297,17 @@ mod tests {
 
         let messages = vec![ThreadMessage::user("hello")];
 
-        let (ctx_msgs, _) =
-            build_step_context(&messages, &[], &effects, Some(&retrieval), project, "test-user", "hello")
-                .await
-                .unwrap();
+        let (ctx_msgs, _) = build_step_context(
+            &messages,
+            &[],
+            &effects,
+            Some(&retrieval),
+            project,
+            "test-user",
+            "hello",
+        )
+        .await
+        .unwrap();
 
         assert_eq!(ctx_msgs.len(), 1);
     }

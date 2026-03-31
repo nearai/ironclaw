@@ -7,9 +7,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-fn default_user_id() -> String {
-    "legacy".to_string()
-}
+use super::default_user_id;
 
 /// Strongly-typed project identifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

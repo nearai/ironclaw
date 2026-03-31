@@ -13,11 +13,9 @@ use crate::types::capability::LeaseId;
 use crate::types::error::EngineError;
 use crate::types::event::{EventKind, ThreadEvent};
 use crate::types::message::ThreadMessage;
-
-fn default_user_id() -> String {
-    "legacy".to_string()
-}
 use crate::types::project::ProjectId;
+
+use super::default_user_id;
 
 /// Strongly-typed thread identifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

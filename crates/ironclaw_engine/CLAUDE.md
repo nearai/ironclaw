@@ -49,7 +49,6 @@ src/
 │   ├── registry.rs       # CapabilityRegistry — register/get/list capabilities
 │   ├── lease.rs          # LeaseManager — grant/check/consume/revoke/expire leases
 │   ├── policy.rs         # PolicyEngine — deterministic effect-level allow/deny/approve + provenance taint
-│   ├── skill_selector.rs # SkillSelector — MemoryDoc→LoadedSkill bridge, deterministic selection
 │   └── skill_tracker.rs  # SkillTracker — confidence tracking, versioned updates, rollback
 ├── runtime/              # Thread lifecycle management
 │   ├── manager.rs        # ThreadManager — spawn, stop, inject messages, join threads

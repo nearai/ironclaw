@@ -274,12 +274,11 @@ fn analyze_trace(thread: &Thread) -> Vec<TraceIssue> {
         .messages
         .iter()
         .any(|m| m.role == crate::types::message::MessageRole::ActionResult);
-    let has_tool_output_in_messages = thread.messages.iter().any(|m| {
-        m.role == crate::types::message::MessageRole::ActionResult
-            || m.content.contains(" result]")
-            || m.content.contains(" error]")
+    let has_tool_output_in_context = thread.messages.iter().any(|m| {
+        m.role == crate::types::message::MessageRole::User
+            && (m.content.contains(" result]") || m.content.contains(" error]"))
     });
-    if has_tool_results && !has_tool_output_in_messages {
+    if has_tool_results && !has_tool_output_in_context {
         issues.push(TraceIssue {
             severity: IssueSeverity::Warning,
             category: "missing_tool_output".into(),
