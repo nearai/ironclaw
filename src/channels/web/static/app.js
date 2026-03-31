@@ -190,10 +190,10 @@ function initApp() {
     if (profile.avatar_url && avatarImg) {
       avatarImg.referrerPolicy = 'no-referrer';
       avatarImg.onload = function() {
-        if (avatarInitials) avatarInitials.hidden = true;
+        if (avatarInitials) avatarInitials.style.display = 'none';
       };
       avatarImg.src = profile.avatar_url;
-      avatarImg.hidden = false;
+      avatarImg.removeAttribute('hidden');
     }
     // Populate dropdown.
     var nameEl = document.getElementById('user-dropdown-name');

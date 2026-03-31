@@ -400,8 +400,9 @@ body {
 }
 
 .user-avatar-img {
+  display: block;
   object-fit: cover;
-  z-index: 1;
+  z-index: 2;
 }
 
 .user-avatar-initials {
