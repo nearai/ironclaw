@@ -87,6 +87,7 @@ pub async fn setup_wasm_channels(
         "repl",
         "http",
         "signal",
+        "telegram",
         "slack-relay",
         "secret_save",
     ];
@@ -505,6 +506,7 @@ mod tests {
             "repl",
             "http",
             "signal",
+            "telegram",
             "slack-relay",
             "secret_save",
         ];
@@ -554,7 +556,7 @@ mod tests {
     #[test]
     fn non_reserved_names_allowed() {
         let reserved = reserved_names();
-        let allowed = ["telegram", "discord", "my-custom-channel", "slack-bot"];
+        let allowed = ["discord", "my-custom-channel", "slack-bot"];
         for name in allowed {
             assert!(
                 !reserved.contains(&name),

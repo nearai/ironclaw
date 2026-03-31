@@ -138,11 +138,34 @@ impl Agent {
         // Create thread with the historical ID and restore messages.
         // Read source_channel from DB so the authorization check uses the
         // original creator's channel, not the requesting message's channel.
+        //
+        // Fail-closed policy: if the DB lookup fails or the conversation has
+        // no stored source_channel (legacy row), the thread is hydrated with
+        // source_channel = None.  `is_approval_authorized(None, _)` returns
+        // false, so approvals are denied until the conversation is backfilled
+        // with a source_channel via an explicit migration or re-creation.
         let db_source_channel = if let Some(store) = self.store() {
-            store
-                .get_conversation_source_channel(thread_uuid)
-                .await
-                .unwrap_or(None)
+            match store.get_conversation_source_channel(thread_uuid).await {
+                Ok(sc) => {
+                    if sc.is_none() {
+                        tracing::warn!(
+                            thread_id = %thread_uuid,
+                            "Legacy thread has no stored source_channel; \
+                             cross-channel approvals will be denied (fail-closed)"
+                        );
+                    }
+                    sc
+                }
+                Err(e) => {
+                    tracing::error!(
+                        thread_id = %thread_uuid,
+                        error = %e,
+                        "Failed to read source_channel from DB; \
+                         cross-channel approvals will be denied (fail-closed)"
+                    );
+                    None
+                }
+            }
         } else {
             None
         };
