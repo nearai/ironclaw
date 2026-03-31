@@ -981,7 +981,7 @@ mod tests {
         assert!(alice_stats.last_active_at.is_some());
 
         // Bob has no LLM calls so doesn't appear in summary stats
-        assert!(stats.iter().find(|s| s.user_id == "bob").is_none());
+        assert!(!stats.iter().any(|s| s.user_id == "bob"));
 
         // Filter to single user
         let alice_only = db.user_summary_stats(Some("alice")).await.unwrap();
