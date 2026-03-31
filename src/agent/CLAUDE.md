@@ -166,6 +166,112 @@ All commands parsed by `SubmissionParser::parse()`:
 
 **`SystemCommand` vs control**: `SystemCommand` variants bypass thread-state checks entirely (no session lock, no turn creation). `Quit` returns `Ok(None)` from `handle_message` which breaks the main loop.
 
+## Routines System
+
+Routines are named, persistent, user-owned automated tasks that fire independently when their trigger conditions are met. Each routine runs with only its own prompt and context — not the full session history.
+
+### Architecture
+
+```
+┌──────────────┐     ┌─────────────┐     ┌────────────────────┐
+│   Trigger     │────▶│   Engine    │────▶│  Execution Mode    │
+│ cron/event/   │     │  guardrails │     │ lightweight│full_job│
+│ system/manual │     │  check      │     └────────────────────┘
+└──────────────┘     └─────────────┘              │
+                                                  ▼
+                                         ┌────────────────┐
+                                         │ Notify user    │
+                                         │ if configured  │
+                                         └────────────────┘
+```
+
+**Key files:**
+- `routine.rs` — Core types: `Routine`, `Trigger`, `RoutineAction`, `RoutineGuardrails`, `NotifyConfig`
+- `routine_engine.rs` — Execution engine with cron ticker and event matcher (2561 lines)
+
+### Trigger Types
+
+| Type | Description | Example |
+|------|-------------|---------|
+| `Cron` | Fire on cron schedule | `"0 9 * * MON-FRI"`, `"every 2h"` |
+| `Event` | Fire when channel message matches regex | pattern: `"daily report"`, channel: `"telegram"` |
+| `SystemEvent` | Fire on structured system events | source: `"github"`, event_type: `"issue.opened"` |
+| `Webhook` | Fire on POST to `/api/webhooks/{path}` | path: `"deploy-complete"`, secret: HMAC |
+| `Manual` | Only via tool call or CLI | — |
+
+### Execution Modes
+
+**Lightweight** (default for simple routines):
+- Single LLM call executed inline
+- No scheduler slot consumed
+- Tool calls allowed but limited
+- Best for: notifications, summaries, quick checks
+
+**Full-job**:
+- Delegated to `Scheduler` (runs as background job)
+- Full agentic loop with multiple turns
+- Can use sandbox, long-running operations
+- Best for: complex workflows, multi-step tasks
+
+### Guardrails
+
+`RoutineGuardrails` enforces:
+- `max_duration`: Maximum execution time (default: 5min for lightweight)
+- `max_tool_calls`: Limit tool invocations per run
+- `allowed_tools`: Whitelist of tools (subset of `autonomous_allowed_tool_names`)
+- `forbidden_tools`: Explicit deny list
+- `require_sandbox`: Force sandbox execution (full-job only)
+
+### Notification Config
+
+`NotifyConfig` controls post-execution notifications:
+- `on_success`: Notify when routine completes successfully
+- `on_failure`: Notify on error/timeout
+- `always`: Notify on every run regardless of outcome
+- `channel`: Target channel for notifications (defaults to routine's channel)
+
+### Runtime State (DB-managed)
+
+Each routine tracks:
+- `last_run_at`: Last successful execution timestamp
+- `next_fire_at`: Next scheduled fire time (cron only)
+- `run_count`: Total successful executions
+- `consecutive_failures`: Failure counter for circuit-breaking
+- `state`: JSON blob for routine-specific persistence
+
+### Engine Execution Flow
+
+**Cron ticker loop** (`routine_engine.rs`):
+1. Poll DB every N seconds for due cron routines
+2. For each due routine: check guardrails → execute → notify
+3. Update `last_run_at`, `next_fire_at`, `run_count` in DB
+
+**Event matcher** (called from agent main loop):
+1. On each `IncomingMessage`, check `routine_matches_message()`
+2. If pattern matches and filters pass → execute routine inline
+3. Event routines run synchronously before the agentic turn starts
+
+### Adding a New Routine
+
+1. Define the routine struct in `routine.rs` (if new fields needed)
+2. Add trigger parsing in `Trigger::from_db()` (routine.rs)
+3. Implement execution logic in `routine_engine.rs`:
+   - `execute_lightweight()` for single-call routines
+   - `execute_full_job()` for scheduler-delegated routines
+4. Add guardrail checks in `check_guardrails()`
+5. Wire up notification in `notify_user()`
+6. Add DB migration if schema changes (see `src/db/migrations/`)
+
+### Key Invariants
+
+- Routines fire **independently** of user sessions — they don't hold session locks
+- Lightweight routines execute **synchronously** in the agent loop — keep them fast (<5s)
+- Full-job routines are **asynchronous** — safe for long-running operations
+- Guardrails are checked **before** execution — failures return `RoutineError::GuardrailViolated`
+- Consecutive failures trigger **circuit-breaking** — routine disabled after threshold (default: 3)
+- Event routines match **case-insensitively** on message content
+- Cron schedules use **user-configured timezone** (defaults to UTC)
+
 ## Adding a New Submission Command
 
 Submissions are special messages parsed in `submission.rs` before the agentic loop runs. To add a new one:
