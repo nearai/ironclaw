@@ -1090,7 +1090,14 @@ async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) 
     ctx.running_count.fetch_add(1, Ordering::Relaxed);
 
     // Retry constants for transient lightweight execution failures.
-    const MAX_RETRIES: u32 = 3;
+    //
+    // NOTE: Multiplicative retry budgets — `ctx.llm` is wrapped in `RetryProvider`
+    // which has its own retry budget (default 3). Although `LlmFailed` errors are
+    // excluded from outer retry (only `EmptyResponse`/`TruncatedResponse` retry
+    // here), be aware that each outer attempt triggers a full inner retry budget
+    // for the LLM call itself. With MAX_RETRIES=2, worst case is 2 outer x 3 inner
+    // = 6 LLM calls per routine run.
+    const MAX_RETRIES: u32 = 2;
     const BASE_DELAY_MS: u64 = 1000;
 
     let is_lightweight = matches!(routine.action, RoutineAction::Lightweight { .. });
@@ -1601,6 +1608,9 @@ async fn execute_lightweight_no_tools(
         let retryable = crate::llm::retry::is_retryable(&e);
         RoutineError::LlmFailed {
             reason: e.to_string(),
+            // No partial tokens: the LLM call itself failed, so the response
+            // (and its token counts) is unavailable. If providers start returning
+            // partial usage on error responses, this should be updated.
             partial_tokens: None,
             retryable,
         }
@@ -1612,6 +1622,17 @@ async fn execute_lightweight_no_tools(
         response.input_tokens,
         response.output_tokens,
     )
+}
+
+/// Convert raw `u32` token counts into `Option<i32>`, preserving `None` semantics.
+///
+/// Providers that don't report token usage return `(0, 0)`. Wrapping that in
+/// `Some(0)` would change the stored meaning from "unknown/not tracked" to "zero",
+/// leaking incorrect data to downstream reporting. Only materialize `Some` when
+/// at least one count is non-zero.
+fn tokens_to_option(input: u32, output: u32) -> Option<i32> {
+    let total = input.saturating_add(output);
+    if total > 0 { Some(total as i32) } else { None }
 }
 
 /// Handle a text-only LLM response in lightweight routine execution.
@@ -1628,7 +1649,7 @@ fn handle_text_response(
     // Empty content guard — carry consumed tokens so the retry loop can
     // accumulate them even when the response shape is invalid.
     if content.is_empty() {
-        let consumed = Some((total_input_tokens + total_output_tokens) as i32);
+        let consumed = tokens_to_option(total_input_tokens, total_output_tokens);
         return if finish_reason == FinishReason::Length {
             Err(RoutineError::TruncatedResponse {
                 partial_tokens: consumed,
@@ -1642,11 +1663,11 @@ fn handle_text_response(
 
     // Check for the "nothing to do" sentinel (exact match on trimmed content).
     if content == "ROUTINE_OK" {
-        let total_tokens = Some((total_input_tokens + total_output_tokens) as i32);
+        let total_tokens = tokens_to_option(total_input_tokens, total_output_tokens);
         return Ok((RunStatus::Ok, None, total_tokens));
     }
 
-    let total_tokens = Some((total_input_tokens + total_output_tokens) as i32);
+    let total_tokens = tokens_to_option(total_input_tokens, total_output_tokens);
     Ok((
         RunStatus::Attention,
         Some(content.to_string()),
@@ -1715,11 +1736,10 @@ async fn execute_lightweight_with_tools(
                 .with_temperature(0.3);
 
             let response = ctx.llm.complete(request).await.map_err(|e| {
-                let partial = (total_input_tokens + total_output_tokens) as i32;
                 let retryable = crate::llm::retry::is_retryable(&e);
                 RoutineError::LlmFailed {
                     reason: e.to_string(),
-                    partial_tokens: if partial > 0 { Some(partial) } else { None },
+                    partial_tokens: tokens_to_option(total_input_tokens, total_output_tokens),
                     retryable,
                 }
             })?;
@@ -1749,11 +1769,10 @@ async fn execute_lightweight_with_tools(
                 .with_temperature(0.3);
 
             let response = ctx.llm.complete_with_tools(request).await.map_err(|e| {
-                let partial = (total_input_tokens + total_output_tokens) as i32;
                 let retryable = crate::llm::retry::is_retryable(&e);
                 RoutineError::LlmFailed {
                     reason: e.to_string(),
-                    partial_tokens: if partial > 0 { Some(partial) } else { None },
+                    partial_tokens: tokens_to_option(total_input_tokens, total_output_tokens),
                     retryable,
                 }
             })?;
