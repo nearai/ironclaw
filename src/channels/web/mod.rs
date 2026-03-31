@@ -17,6 +17,7 @@
 pub mod auth;
 pub(crate) mod handlers;
 pub mod log_layer;
+pub mod oauth;
 pub mod openai_compat;
 pub mod responses_api;
 pub mod server;
@@ -136,6 +137,9 @@ impl GatewayChannel {
             active_config: server::ActiveConfigSnapshot::default(),
             secrets_store: None,
             db_auth: None,
+            oauth_providers: None,
+            oauth_state_store: None,
+            oauth_base_url: None,
         });
 
         Self {
@@ -178,6 +182,9 @@ impl GatewayChannel {
             active_config: self.state.active_config.clone(),
             secrets_store: self.state.secrets_store.clone(),
             db_auth: self.state.db_auth.clone(),
+            oauth_providers: self.state.oauth_providers.clone(),
+            oauth_state_store: self.state.oauth_state_store.clone(),
+            oauth_base_url: self.state.oauth_base_url.clone(),
         };
         mutate(&mut new_state);
         self.state = Arc::new(new_state);
@@ -312,6 +319,76 @@ impl GatewayChannel {
         store: Arc<dyn crate::secrets::SecretsStore + Send + Sync>,
     ) -> Self {
         self.rebuild_state(|s| s.secrets_store = Some(store));
+        self
+    }
+
+    /// Enable OAuth social login with the given configuration.
+    ///
+    /// Creates provider instances for each configured provider, initializes
+    /// the in-memory state store, and resolves the callback base URL.
+    pub fn with_oauth(mut self, config: crate::config::OAuthConfig, gateway_port: u16) -> Self {
+        if !config.enabled {
+            return self;
+        }
+
+        use crate::channels::web::oauth::providers::{
+            GitHubProvider, GoogleProvider, OAuthProvider,
+        };
+        use crate::channels::web::oauth::state_store::OAuthStateStore;
+        use std::collections::HashMap;
+
+        let mut providers: HashMap<String, Arc<dyn OAuthProvider>> = HashMap::new();
+
+        if let Some(ref google) = config.google {
+            providers.insert(
+                "google".to_string(),
+                Arc::new(GoogleProvider::new(
+                    google.client_id.clone(),
+                    google.client_secret.clone(),
+                )),
+            );
+        }
+
+        if let Some(ref github) = config.github {
+            providers.insert(
+                "github".to_string(),
+                Arc::new(GitHubProvider::new(
+                    github.client_id.clone(),
+                    github.client_secret.clone(),
+                )),
+            );
+        }
+
+        if providers.is_empty() {
+            tracing::warn!("OAuth enabled but no providers configured");
+            return self;
+        }
+
+        let base_url = config
+            .base_url
+            .unwrap_or_else(|| format!("http://localhost:{gateway_port}"));
+
+        let provider_names: Vec<&str> = providers.keys().map(|s| s.as_str()).collect();
+        tracing::info!(?provider_names, "OAuth social login enabled");
+
+        let providers = Arc::new(providers);
+        let state_store = Arc::new(OAuthStateStore::new());
+
+        // Spawn a background task to sweep expired OAuth states.
+        let sweep_store = Arc::clone(&state_store);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                interval.tick().await;
+                sweep_store.sweep_expired().await;
+            }
+        });
+
+        self.rebuild_state(|s| {
+            s.oauth_providers = Some(providers);
+            s.oauth_state_store = Some(state_store);
+            s.oauth_base_url = Some(base_url);
+        });
         self
     }
 

@@ -402,6 +402,19 @@ pub struct GatewayState {
     pub secrets_store: Option<Arc<dyn crate::secrets::SecretsStore + Send + Sync>>,
     /// DB auth cache for invalidation on security-critical actions.
     pub db_auth: Option<Arc<crate::channels::web::auth::DbAuthenticator>>,
+    /// OAuth providers for social login (None when OAuth is disabled).
+    pub oauth_providers: Option<
+        Arc<
+            std::collections::HashMap<
+                String,
+                Arc<dyn crate::channels::web::oauth::providers::OAuthProvider>,
+            >,
+        >,
+    >,
+    /// In-memory store for pending OAuth flows (CSRF + PKCE state).
+    pub oauth_state_store: Option<Arc<crate::channels::web::oauth::state_store::OAuthStateStore>>,
+    /// Base URL for constructing OAuth callback URLs.
+    pub oauth_base_url: Option<String>,
 }
 
 /// Start the gateway HTTP server.
@@ -443,6 +456,23 @@ pub async fn start_server(
         .route(
             "/api/webhooks/u/{user_id}/{path}",
             post(crate::channels::web::handlers::webhooks::webhook_trigger_user_scoped_handler),
+        )
+        // OAuth social login routes (public, no auth required)
+        .route(
+            "/auth/providers",
+            get(crate::channels::web::handlers::auth::providers_handler),
+        )
+        .route(
+            "/auth/login/{provider}",
+            get(crate::channels::web::handlers::auth::login_handler),
+        )
+        .route(
+            "/auth/callback/{provider}",
+            get(crate::channels::web::handlers::auth::callback_handler),
+        )
+        .route(
+            "/auth/logout",
+            post(crate::channels::web::handlers::auth::logout_handler),
         );
 
     // Protected routes (require auth)
@@ -3052,6 +3082,9 @@ mod tests {
             active_config: ActiveConfigSnapshot::default(),
             secrets_store: None,
             db_auth: None,
+            oauth_providers: None,
+            oauth_state_store: None,
+            oauth_base_url: None,
         })
     }
 

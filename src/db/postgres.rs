@@ -16,8 +16,9 @@ use crate::agent::routine::{Routine, RoutineRun, RunStatus};
 use crate::config::DatabaseConfig;
 use crate::context::{ActionRecord, JobContext, JobState};
 use crate::db::{
-    ApiTokenRecord, ConversationStore, Database, JobStore, RoutineStore, SandboxStore,
-    SettingsStore, ToolFailureStore, UserRecord, UserStore, WorkspaceStore,
+    ApiTokenRecord, ConversationStore, Database, IdentityStore, JobStore, RoutineStore,
+    SandboxStore, SettingsStore, ToolFailureStore, UserIdentityRecord, UserRecord, UserStore,
+    WorkspaceStore,
 };
 use crate::error::{DatabaseError, WorkspaceError};
 use crate::history::{
@@ -906,5 +907,184 @@ impl UserStore for PgBackend {
         self.store
             .create_user_with_token(user, token_name, token_hash, token_prefix, expires_at)
             .await
+    }
+}
+
+// ==================== IdentityStore ====================
+
+fn row_to_identity(row: &tokio_postgres::Row) -> UserIdentityRecord {
+    UserIdentityRecord {
+        id: row.get("id"),
+        user_id: row.get("user_id"),
+        provider: row.get("provider"),
+        provider_user_id: row.get("provider_user_id"),
+        email: row.get("email"),
+        email_verified: row.get("email_verified"),
+        display_name: row.get("display_name"),
+        avatar_url: row.get("avatar_url"),
+        raw_profile: row.get("raw_profile"),
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+    }
+}
+
+#[async_trait]
+impl IdentityStore for PgBackend {
+    async fn get_identity_by_provider(
+        &self,
+        provider: &str,
+        provider_user_id: &str,
+    ) -> Result<Option<UserIdentityRecord>, DatabaseError> {
+        let conn = self.store.pool().get().await?;
+        let row = conn
+            .query_opt(
+                "SELECT id, user_id, provider, provider_user_id, email, email_verified, \
+                 display_name, avatar_url, raw_profile, created_at, updated_at \
+                 FROM user_identities WHERE provider = $1 AND provider_user_id = $2",
+                &[&provider, &provider_user_id],
+            )
+            .await?;
+        Ok(row.as_ref().map(row_to_identity))
+    }
+
+    async fn list_identities_for_user(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<UserIdentityRecord>, DatabaseError> {
+        let conn = self.store.pool().get().await?;
+        let rows = conn
+            .query(
+                "SELECT id, user_id, provider, provider_user_id, email, email_verified, \
+                 display_name, avatar_url, raw_profile, created_at, updated_at \
+                 FROM user_identities WHERE user_id = $1 ORDER BY created_at",
+                &[&user_id],
+            )
+            .await?;
+        Ok(rows.iter().map(row_to_identity).collect())
+    }
+
+    async fn create_identity(&self, identity: &UserIdentityRecord) -> Result<(), DatabaseError> {
+        let conn = self.store.pool().get().await?;
+        conn.execute(
+            "INSERT INTO user_identities \
+             (id, user_id, provider, provider_user_id, email, email_verified, \
+              display_name, avatar_url, raw_profile, created_at, updated_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+            &[
+                &identity.id,
+                &identity.user_id,
+                &identity.provider,
+                &identity.provider_user_id,
+                &identity.email,
+                &identity.email_verified,
+                &identity.display_name,
+                &identity.avatar_url,
+                &identity.raw_profile,
+                &identity.created_at,
+                &identity.updated_at,
+            ],
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn find_identity_by_verified_email(
+        &self,
+        email: &str,
+    ) -> Result<Option<UserIdentityRecord>, DatabaseError> {
+        let conn = self.store.pool().get().await?;
+        let row = conn
+            .query_opt(
+                "SELECT id, user_id, provider, provider_user_id, email, email_verified, \
+                 display_name, avatar_url, raw_profile, created_at, updated_at \
+                 FROM user_identities WHERE email = $1 AND email_verified = true LIMIT 1",
+                &[&email],
+            )
+            .await?;
+        Ok(row.as_ref().map(row_to_identity))
+    }
+
+    async fn create_user_with_identity_and_token(
+        &self,
+        user: &UserRecord,
+        identity: &UserIdentityRecord,
+        token_name: &str,
+        token_hash: &[u8; 32],
+        token_prefix: &str,
+    ) -> Result<ApiTokenRecord, DatabaseError> {
+        let mut conn = self.store.pool().get().await?;
+        let tx = conn.transaction().await?;
+
+        // Insert user
+        tx.execute(
+            "INSERT INTO users (id, email, display_name, status, role, created_at, \
+             updated_at, last_login_at, created_by, metadata) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+            &[
+                &user.id,
+                &user.email,
+                &user.display_name,
+                &user.status,
+                &user.role,
+                &user.created_at,
+                &user.updated_at,
+                &user.last_login_at,
+                &user.created_by,
+                &user.metadata,
+            ],
+        )
+        .await?;
+
+        // Insert identity
+        tx.execute(
+            "INSERT INTO user_identities \
+             (id, user_id, provider, provider_user_id, email, email_verified, \
+              display_name, avatar_url, raw_profile, created_at, updated_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+            &[
+                &identity.id,
+                &identity.user_id,
+                &identity.provider,
+                &identity.provider_user_id,
+                &identity.email,
+                &identity.email_verified,
+                &identity.display_name,
+                &identity.avatar_url,
+                &identity.raw_profile,
+                &identity.created_at,
+                &identity.updated_at,
+            ],
+        )
+        .await?;
+
+        // Insert API token
+        let token_id = Uuid::new_v4();
+        let now = chrono::Utc::now();
+        tx.execute(
+            "INSERT INTO api_tokens (id, user_id, token_hash, token_prefix, name, created_at) \
+             VALUES ($1, $2, $3, $4, $5, $6)",
+            &[
+                &token_id,
+                &user.id,
+                &token_hash.as_slice(),
+                &token_prefix,
+                &token_name,
+                &now,
+            ],
+        )
+        .await?;
+
+        tx.commit().await?;
+
+        Ok(ApiTokenRecord {
+            id: token_id,
+            user_id: user.id.clone(),
+            name: token_name.to_string(),
+            token_prefix: token_prefix.to_string(),
+            expires_at: None,
+            last_used_at: None,
+            created_at: now,
+            revoked_at: None,
+        })
     }
 }

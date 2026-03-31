@@ -18,6 +18,7 @@ mod heartbeat;
 pub(crate) mod helpers;
 mod hygiene;
 pub(crate) mod llm;
+pub mod oauth;
 pub mod relay;
 mod routines;
 mod safety;
@@ -48,6 +49,7 @@ pub use self::embeddings::{DEFAULT_EMBEDDING_CACHE_SIZE, EmbeddingsConfig};
 pub use self::heartbeat::HeartbeatConfig;
 pub use self::hygiene::HygieneConfig;
 pub use self::llm::default_session_path;
+pub use self::oauth::OAuthConfig;
 pub use self::relay::RelayConfig;
 pub use self::routines::RoutineConfig;
 pub use self::safety::SafetyConfig;
@@ -107,6 +109,8 @@ pub struct Config {
     pub search: WorkspaceSearchConfig,
     pub workspace: WorkspaceConfig,
     pub observability: crate::observability::ObservabilityConfig,
+    /// OAuth/social login configuration (Google, GitHub, etc.).
+    pub oauth: OAuthConfig,
     /// Channel-relay integration (Slack via external relay service).
     /// Present only when both `CHANNEL_RELAY_URL` and `CHANNEL_RELAY_API_KEY` are set.
     pub relay: Option<RelayConfig>,
@@ -185,6 +189,7 @@ impl Config {
             search: WorkspaceSearchConfig::default(),
             workspace: WorkspaceConfig::default(),
             observability: crate::observability::ObservabilityConfig::default(),
+            oauth: OAuthConfig::default(),
             relay: None,
         }
     }
@@ -377,6 +382,7 @@ impl Config {
             observability: crate::observability::ObservabilityConfig {
                 backend: std::env::var("OBSERVABILITY_BACKEND").unwrap_or_else(|_| "none".into()),
             },
+            oauth: OAuthConfig::resolve()?,
             relay: RelayConfig::from_env(),
         })
     }

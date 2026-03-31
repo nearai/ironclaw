@@ -220,6 +220,9 @@ async fn start_test_server_with_provider(
         active_config: ironclaw::channels::web::server::ActiveConfigSnapshot::default(),
         secrets_store: None,
         db_auth: None,
+        oauth_providers: None,
+        oauth_state_store: None,
+        oauth_base_url: None,
     });
 
     let auth = ironclaw::channels::web::auth::MultiAuthState::single(
@@ -720,6 +723,9 @@ async fn test_no_llm_provider_returns_503() {
         active_config: ironclaw::channels::web::server::ActiveConfigSnapshot::default(),
         secrets_store: None,
         db_auth: None,
+        oauth_providers: None,
+        oauth_state_store: None,
+        oauth_base_url: None,
     });
 
     let auth = ironclaw::channels::web::auth::MultiAuthState::single(

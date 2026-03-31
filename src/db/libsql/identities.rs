@@ -1,0 +1,423 @@
+//! IdentityStore implementation for LibSqlBackend.
+
+use async_trait::async_trait;
+use libsql::params;
+use uuid::Uuid;
+
+use super::{fmt_opt_ts, fmt_ts, get_opt_text, get_text, get_ts, opt_text};
+use crate::db::libsql::LibSqlBackend;
+use crate::db::{ApiTokenRecord, DatabaseError, IdentityStore, UserIdentityRecord, UserRecord};
+
+fn row_to_identity(row: &libsql::Row) -> Result<UserIdentityRecord, DatabaseError> {
+    let id_str = get_text(row, 0);
+    let id: Uuid = id_str
+        .parse()
+        .map_err(|e| DatabaseError::Serialization(format!("invalid UUID: {e}")))?;
+    let raw_str = get_text(row, 8);
+    let raw_profile: serde_json::Value =
+        serde_json::from_str(&raw_str).map_err(|e| DatabaseError::Serialization(e.to_string()))?;
+    let email_verified_i: i64 = row
+        .get::<i64>(5)
+        .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
+    Ok(UserIdentityRecord {
+        id,
+        user_id: get_text(row, 1),
+        provider: get_text(row, 2),
+        provider_user_id: get_text(row, 3),
+        email: get_opt_text(row, 4),
+        email_verified: email_verified_i != 0,
+        display_name: get_opt_text(row, 6),
+        avatar_url: get_opt_text(row, 7),
+        raw_profile,
+        created_at: get_ts(row, 9),
+        updated_at: get_ts(row, 10),
+    })
+}
+
+#[async_trait]
+impl IdentityStore for LibSqlBackend {
+    async fn get_identity_by_provider(
+        &self,
+        provider: &str,
+        provider_user_id: &str,
+    ) -> Result<Option<UserIdentityRecord>, DatabaseError> {
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                "SELECT id, user_id, provider, provider_user_id, email, email_verified, \
+                 display_name, avatar_url, raw_profile, created_at, updated_at \
+                 FROM user_identities WHERE provider = ?1 AND provider_user_id = ?2",
+                params![provider, provider_user_id],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        match rows.next().await {
+            Ok(Some(row)) => Ok(Some(row_to_identity(&row)?)),
+            Ok(None) => Ok(None),
+            Err(e) => Err(DatabaseError::Query(e.to_string())),
+        }
+    }
+
+    async fn list_identities_for_user(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<UserIdentityRecord>, DatabaseError> {
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                "SELECT id, user_id, provider, provider_user_id, email, email_verified, \
+                 display_name, avatar_url, raw_profile, created_at, updated_at \
+                 FROM user_identities WHERE user_id = ?1 ORDER BY created_at",
+                params![user_id],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        let mut result = Vec::new();
+        while let Ok(Some(row)) = rows.next().await {
+            result.push(row_to_identity(&row)?);
+        }
+        Ok(result)
+    }
+
+    async fn create_identity(&self, identity: &UserIdentityRecord) -> Result<(), DatabaseError> {
+        let conn = self.connect().await?;
+        let raw = serde_json::to_string(&identity.raw_profile)
+            .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
+        conn.execute(
+            "INSERT INTO user_identities \
+             (id, user_id, provider, provider_user_id, email, email_verified, \
+              display_name, avatar_url, raw_profile, created_at, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                identity.id.to_string(),
+                identity.user_id.as_str(),
+                identity.provider.as_str(),
+                identity.provider_user_id.as_str(),
+                opt_text(identity.email.as_deref()),
+                if identity.email_verified { 1i64 } else { 0i64 },
+                opt_text(identity.display_name.as_deref()),
+                opt_text(identity.avatar_url.as_deref()),
+                raw,
+                fmt_ts(&identity.created_at),
+                fmt_ts(&identity.updated_at),
+            ],
+        )
+        .await
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn find_identity_by_verified_email(
+        &self,
+        email: &str,
+    ) -> Result<Option<UserIdentityRecord>, DatabaseError> {
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                "SELECT id, user_id, provider, provider_user_id, email, email_verified, \
+                 display_name, avatar_url, raw_profile, created_at, updated_at \
+                 FROM user_identities WHERE email = ?1 AND email_verified = 1 LIMIT 1",
+                params![email],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        match rows.next().await {
+            Ok(Some(row)) => Ok(Some(row_to_identity(&row)?)),
+            Ok(None) => Ok(None),
+            Err(e) => Err(DatabaseError::Query(e.to_string())),
+        }
+    }
+
+    async fn create_user_with_identity_and_token(
+        &self,
+        user: &UserRecord,
+        identity: &UserIdentityRecord,
+        token_name: &str,
+        token_hash: &[u8; 32],
+        token_prefix: &str,
+    ) -> Result<ApiTokenRecord, DatabaseError> {
+        let conn = self.connect().await?;
+
+        let token_id = Uuid::new_v4();
+        let now = chrono::Utc::now();
+        let now_str = fmt_ts(&now);
+        let metadata_str = serde_json::to_string(&user.metadata)
+            .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
+        let raw_profile_str = serde_json::to_string(&identity.raw_profile)
+            .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
+
+        conn.execute("BEGIN", ())
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        // Insert user
+        let user_result = conn
+            .execute(
+                "INSERT INTO users (id, email, display_name, status, role, created_at, \
+                 updated_at, last_login_at, created_by, metadata) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                params![
+                    user.id.as_str(),
+                    opt_text(user.email.as_deref()),
+                    user.display_name.as_str(),
+                    user.status.as_str(),
+                    user.role.as_str(),
+                    fmt_ts(&user.created_at),
+                    fmt_ts(&user.updated_at),
+                    fmt_opt_ts(&user.last_login_at),
+                    opt_text(user.created_by.as_deref()),
+                    metadata_str,
+                ],
+            )
+            .await;
+
+        if let Err(e) = user_result {
+            let _ = conn.execute("ROLLBACK", ()).await;
+            return Err(DatabaseError::Query(e.to_string()));
+        }
+
+        // Insert identity
+        let identity_result = conn
+            .execute(
+                "INSERT INTO user_identities \
+                 (id, user_id, provider, provider_user_id, email, email_verified, \
+                  display_name, avatar_url, raw_profile, created_at, updated_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                params![
+                    identity.id.to_string(),
+                    identity.user_id.as_str(),
+                    identity.provider.as_str(),
+                    identity.provider_user_id.as_str(),
+                    opt_text(identity.email.as_deref()),
+                    if identity.email_verified { 1i64 } else { 0i64 },
+                    opt_text(identity.display_name.as_deref()),
+                    opt_text(identity.avatar_url.as_deref()),
+                    raw_profile_str,
+                    fmt_ts(&identity.created_at),
+                    fmt_ts(&identity.updated_at),
+                ],
+            )
+            .await;
+
+        if let Err(e) = identity_result {
+            let _ = conn.execute("ROLLBACK", ()).await;
+            return Err(DatabaseError::Query(e.to_string()));
+        }
+
+        // Insert API token
+        let token_result = conn
+            .execute(
+                "INSERT INTO api_tokens (id, user_id, token_hash, token_prefix, name, \
+                 expires_at, created_at) VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6)",
+                params![
+                    token_id.to_string(),
+                    user.id.as_str(),
+                    token_hash.to_vec(),
+                    token_prefix,
+                    token_name,
+                    now_str.as_str(),
+                ],
+            )
+            .await;
+
+        if let Err(e) = token_result {
+            let _ = conn.execute("ROLLBACK", ()).await;
+            return Err(DatabaseError::Query(e.to_string()));
+        }
+
+        conn.execute("COMMIT", ())
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        Ok(ApiTokenRecord {
+            id: token_id,
+            user_id: user.id.clone(),
+            name: token_name.to_string(),
+            token_prefix: token_prefix.to_string(),
+            expires_at: None,
+            last_used_at: None,
+            created_at: now,
+            revoked_at: None,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::{Database, IdentityStore, UserStore};
+
+    async fn test_backend() -> (LibSqlBackend, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test_identities.db");
+        let backend = LibSqlBackend::new_local(&db_path).await.unwrap();
+        backend.run_migrations().await.unwrap();
+        (backend, dir)
+    }
+
+    #[tokio::test]
+    async fn test_identity_crud() {
+        let (db, _dir) = test_backend().await;
+        let now = chrono::Utc::now();
+
+        // Create a user first
+        let user = UserRecord {
+            id: "user-1".to_string(),
+            email: Some("alice@example.com".to_string()),
+            display_name: "Alice".to_string(),
+            status: "active".to_string(),
+            role: "member".to_string(),
+            created_at: now,
+            updated_at: now,
+            last_login_at: None,
+            created_by: None,
+            metadata: serde_json::json!({}),
+        };
+        db.create_user(&user).await.unwrap();
+
+        let identity = UserIdentityRecord {
+            id: Uuid::new_v4(),
+            user_id: "user-1".to_string(),
+            provider: "google".to_string(),
+            provider_user_id: "google-sub-123".to_string(),
+            email: Some("alice@example.com".to_string()),
+            email_verified: true,
+            display_name: Some("Alice G".to_string()),
+            avatar_url: Some("https://example.com/photo.jpg".to_string()),
+            raw_profile: serde_json::json!({"sub": "google-sub-123"}),
+            created_at: now,
+            updated_at: now,
+        };
+        db.create_identity(&identity).await.unwrap();
+
+        // Get by provider
+        let found = db
+            .get_identity_by_provider("google", "google-sub-123")
+            .await
+            .unwrap();
+        assert!(found.is_some());
+        let found = found.unwrap();
+        assert_eq!(found.user_id, "user-1");
+        assert_eq!(found.provider, "google");
+        assert!(found.email_verified);
+
+        // Not found for wrong provider
+        let not_found = db
+            .get_identity_by_provider("github", "google-sub-123")
+            .await
+            .unwrap();
+        assert!(not_found.is_none());
+
+        // List for user
+        let list = db.list_identities_for_user("user-1").await.unwrap();
+        assert_eq!(list.len(), 1);
+
+        // Find by verified email
+        let by_email = db
+            .find_identity_by_verified_email("alice@example.com")
+            .await
+            .unwrap();
+        assert!(by_email.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_find_by_verified_email_ignores_unverified() {
+        let (db, _dir) = test_backend().await;
+        let now = chrono::Utc::now();
+
+        let user = UserRecord {
+            id: "user-2".to_string(),
+            email: None,
+            display_name: "Bob".to_string(),
+            status: "active".to_string(),
+            role: "member".to_string(),
+            created_at: now,
+            updated_at: now,
+            last_login_at: None,
+            created_by: None,
+            metadata: serde_json::json!({}),
+        };
+        db.create_user(&user).await.unwrap();
+
+        let identity = UserIdentityRecord {
+            id: Uuid::new_v4(),
+            user_id: "user-2".to_string(),
+            provider: "github".to_string(),
+            provider_user_id: "gh-456".to_string(),
+            email: Some("bob@example.com".to_string()),
+            email_verified: false,
+            display_name: None,
+            avatar_url: None,
+            raw_profile: serde_json::json!({}),
+            created_at: now,
+            updated_at: now,
+        };
+        db.create_identity(&identity).await.unwrap();
+
+        let result = db
+            .find_identity_by_verified_email("bob@example.com")
+            .await
+            .unwrap();
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_create_user_with_identity_and_token() {
+        let (db, _dir) = test_backend().await;
+        let now = chrono::Utc::now();
+
+        let user = UserRecord {
+            id: "user-3".to_string(),
+            email: Some("carol@example.com".to_string()),
+            display_name: "Carol".to_string(),
+            status: "active".to_string(),
+            role: "member".to_string(),
+            created_at: now,
+            updated_at: now,
+            last_login_at: None,
+            created_by: None,
+            metadata: serde_json::json!({}),
+        };
+        let identity = UserIdentityRecord {
+            id: Uuid::new_v4(),
+            user_id: "user-3".to_string(),
+            provider: "google".to_string(),
+            provider_user_id: "google-sub-789".to_string(),
+            email: Some("carol@example.com".to_string()),
+            email_verified: true,
+            display_name: Some("Carol".to_string()),
+            avatar_url: None,
+            raw_profile: serde_json::json!({}),
+            created_at: now,
+            updated_at: now,
+        };
+        let token_hash = [0u8; 32];
+
+        let token = db
+            .create_user_with_identity_and_token(
+                &user,
+                &identity,
+                "oauth-login",
+                &token_hash,
+                "00000000",
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(token.user_id, "user-3");
+        assert_eq!(token.name, "oauth-login");
+
+        // Verify all three records exist
+        let found_user = db.get_user("user-3").await.unwrap();
+        assert!(found_user.is_some());
+
+        let found_identity = db
+            .get_identity_by_provider("google", "google-sub-789")
+            .await
+            .unwrap();
+        assert!(found_identity.is_some());
+
+        let tokens = db.list_api_tokens("user-3").await.unwrap();
+        assert_eq!(tokens.len(), 1);
+    }
+}

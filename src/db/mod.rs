@@ -346,6 +346,27 @@ pub struct ApiTokenRecord {
     pub revoked_at: Option<DateTime<Utc>>,
 }
 
+// ==================== User identity record types ====================
+
+/// A linked external identity from an OAuth/social login provider.
+#[derive(Debug, Clone)]
+pub struct UserIdentityRecord {
+    pub id: Uuid,
+    pub user_id: String,
+    /// Provider name (e.g. `google`, `github`, `apple`, `near`, `email`).
+    pub provider: String,
+    /// Provider-specific unique user identifier (Google `sub`, GitHub user ID, etc.).
+    pub provider_user_id: String,
+    pub email: Option<String>,
+    pub email_verified: bool,
+    pub display_name: Option<String>,
+    pub avatar_url: Option<String>,
+    /// Raw JSON profile payload from the provider for debugging/auditing.
+    pub raw_profile: serde_json::Value,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
 // ==================== Sub-traits ====================
 //
 // Each sub-trait groups related persistence methods. The `Database` supertrait
@@ -912,6 +933,42 @@ pub struct UserSummaryStats {
     pub last_active_at: Option<DateTime<Utc>>,
 }
 
+/// Persistence for linked external identities (OAuth/social login providers).
+#[async_trait]
+pub trait IdentityStore: Send + Sync {
+    /// Find a user identity by provider and provider-specific user ID.
+    async fn get_identity_by_provider(
+        &self,
+        provider: &str,
+        provider_user_id: &str,
+    ) -> Result<Option<UserIdentityRecord>, DatabaseError>;
+
+    /// Find all identities linked to a user.
+    async fn list_identities_for_user(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<UserIdentityRecord>, DatabaseError>;
+
+    /// Create a new identity link.
+    async fn create_identity(&self, identity: &UserIdentityRecord) -> Result<(), DatabaseError>;
+
+    /// Find identities with a given verified email (for automatic account linking).
+    async fn find_identity_by_verified_email(
+        &self,
+        email: &str,
+    ) -> Result<Option<UserIdentityRecord>, DatabaseError>;
+
+    /// Create a new user, link an identity, and issue an API token atomically.
+    async fn create_user_with_identity_and_token(
+        &self,
+        user: &UserRecord,
+        identity: &UserIdentityRecord,
+        token_name: &str,
+        token_hash: &[u8; 32],
+        token_prefix: &str,
+    ) -> Result<ApiTokenRecord, DatabaseError>;
+}
+
 /// Backend-agnostic database supertrait.
 ///
 /// Combines all sub-traits into one. Existing `Arc<dyn Database>` consumers
@@ -926,6 +983,7 @@ pub trait Database:
     + SettingsStore
     + WorkspaceStore
     + UserStore
+    + IdentityStore
     + Send
     + Sync
 {

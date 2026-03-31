@@ -694,6 +694,7 @@ async fn async_main() -> anyhow::Result<()> {
             gw = gw.with_skill_catalog(Arc::clone(sc));
         }
         gw = gw.with_cost_guard(Arc::clone(&components.cost_guard));
+        gw = gw.with_oauth(config.oauth.clone(), gw_config.port);
         {
             let active_model = components.llm.model_name().to_string();
             let mut enabled = channel_names.clone();

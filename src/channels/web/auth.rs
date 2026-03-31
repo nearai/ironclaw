@@ -910,6 +910,21 @@ fn extract_token(headers: &HeaderMap, request: &Request) -> Option<String> {
         return Some(value[7..].to_string());
     }
 
+    // Try session cookie (for OAuth-authenticated browser sessions).
+    if let Some(cookie_header) = headers.get("cookie")
+        && let Ok(cookie_str) = cookie_header.to_str()
+    {
+        for pair in cookie_str.split(';') {
+            let pair = pair.trim();
+            if let Some(value) = pair.strip_prefix("ironclaw_session=") {
+                let value = value.trim();
+                if !value.is_empty() {
+                    return Some(value.to_string());
+                }
+            }
+        }
+    }
+
     // Fall back to query parameter for SSE/WS endpoints.
     if allows_query_token_auth(request) {
         return query_token(request);
@@ -1264,7 +1279,77 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
-    // ── OIDC unit tests ───────────────────────────────────────────���──────
+    // ── Cookie session tests ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_cookie_session_authenticates() {
+        let app = test_app(TEST_AUTH_SECRET_TOKEN);
+        let req = Request::builder()
+            .uri("/api/chat/history")
+            .header(
+                "Cookie",
+                format!("ironclaw_session={TEST_AUTH_SECRET_TOKEN}"),
+            )
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_bearer_header_takes_priority_over_cookie() {
+        let app = test_app(TEST_AUTH_SECRET_TOKEN);
+        // Valid bearer header + invalid cookie → should succeed (header wins)
+        let req = Request::builder()
+            .uri("/api/chat/history")
+            .header("Authorization", format!("Bearer {TEST_AUTH_SECRET_TOKEN}"))
+            .header("Cookie", "ironclaw_session=wrong-token")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_empty_cookie_ignored() {
+        let app = test_app(TEST_AUTH_SECRET_TOKEN);
+        let req = Request::builder()
+            .uri("/api/chat/history")
+            .header("Cookie", "ironclaw_session=")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_cookie_among_multiple() {
+        let app = test_app(TEST_AUTH_SECRET_TOKEN);
+        let req = Request::builder()
+            .uri("/api/chat/history")
+            .header(
+                "Cookie",
+                format!("other=foo; ironclaw_session={TEST_AUTH_SECRET_TOKEN}; bar=baz"),
+            )
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_wrong_cookie_name_ignored() {
+        let app = test_app(TEST_AUTH_SECRET_TOKEN);
+        let req = Request::builder()
+            .uri("/api/chat/history")
+            .header("Cookie", format!("other_cookie={TEST_AUTH_SECRET_TOKEN}"))
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    // ── OIDC unit tests ─────────────────────────────────────────���──────
 
     #[test]
     fn test_normalize_jwt_noop_for_rfc_compliant() {
