@@ -1,10 +1,10 @@
-//! Tests proving that multi-tenant system prompts are broken.
+//! Regression tests for multi-tenant system prompts.
 //!
-//! Bug: In multi-tenant mode, the agent loop uses `self.workspace()` which
-//! returns a single shared workspace (user_id="default"). Identity files
-//! (IDENTITY.md, SOUL.md, USER.md) seeded under per-user IDs ("alice",
-//! "bob") are invisible to this workspace, so the system prompt is
-//! empty/wrong.
+//! The agent must build the conversational system prompt from a workspace
+//! scoped to the incoming message's user, not from the shared owner-scope
+//! workspace created at startup. Otherwise per-user identity files
+//! (IDENTITY.md, SOUL.md, USER.md) become invisible and different users can
+//! see the same owner-scoped prompt.
 //!
 //! These tests:
 //! 1. Seed identity files for two users (alice, bob) in the database
@@ -13,7 +13,7 @@
 //!    correct user's identity
 //! 4. Verify user A's identity doesn't leak into user B's prompt
 //!
-//! All tests are expected to FAIL until the bug is fixed.
+//! These tests ensure each user's identity is isolated correctly.
 
 #[cfg(feature = "libsql")]
 mod support;
@@ -233,6 +233,49 @@ mod tests {
             prompt.contains("Alice is a software engineer"),
             "Alice's own identity should be in her system prompt.\n\
              Actual system prompt:\n{prompt}"
+        );
+
+        rig.shutdown();
+    }
+
+    #[tokio::test]
+    async fn telegram_system_prompt_clarifies_reply_vs_proactive_message_tool() {
+        let trace = simple_trace(1);
+        let rig = TestRigBuilder::new().with_trace(trace).build().await;
+
+        let msg = IncomingMessage::new("telegram", "telegram-user", "Hello there");
+        rig.send_incoming(msg).await;
+        let _responses = rig.wait_for_responses(1, TIMEOUT).await;
+
+        let requests = rig.captured_llm_requests();
+        let system_prompt =
+            extract_system_prompt(&requests).expect("Expected a system prompt in the LLM request");
+
+        assert!(
+            system_prompt.contains("Channels are not separate send-message tools"),
+            "System prompt should describe channels as setup/integration surfaces.\n\
+             Actual system prompt:\n{system_prompt}"
+        );
+        assert!(
+            system_prompt
+                .contains("use normal assistant output to reply in the current conversation"),
+            "System prompt should route ordinary replies through normal assistant output.\n\
+             Actual system prompt:\n{system_prompt}"
+        );
+        assert!(
+            system_prompt.contains("respond normally without calling `message`"),
+            "System prompt should say normal replies do not use the message tool.\n\
+             Actual system prompt:\n{system_prompt}"
+        );
+        assert!(
+            system_prompt.contains("proactive follow-up in the current conversation"),
+            "System prompt should reserve omitted channel/target for proactive follow-ups.\n\
+             Actual system prompt:\n{system_prompt}"
+        );
+        assert!(
+            !system_prompt.contains("omit 'target' to send here"),
+            "System prompt should not imply the message tool is the default way to reply \
+             in-thread.\nActual system prompt:\n{system_prompt}"
         );
 
         rig.shutdown();

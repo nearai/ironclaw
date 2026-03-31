@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use libsql::params;
+use libsql::{params, params_from_iter};
 use uuid::Uuid;
 
 use super::{
@@ -471,25 +471,33 @@ impl RoutineStore for LibSqlBackend {
         }
 
         let conn = self.connect().await?;
-
-        // SQLite doesn't support ANY($1), so we query all latest runs and filter in memory.
-        // Uses a subquery to pick only the most recent run per routine.
+        let requested_rows = (1..=routine_ids.len())
+            .map(|i| format!("(?{i})"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let requested_ids = routine_ids
+            .iter()
+            .map(|id| id.to_string())
+            .collect::<Vec<_>>();
+        let sql = format!(
+            "WITH requested(routine_id) AS (VALUES {requested_rows})
+             SELECT r1.routine_id, r1.status
+             FROM routine_runs r1
+             JOIN (
+                 SELECT rr.routine_id, MAX(rr.started_at) AS max_started_at
+                 FROM routine_runs rr
+                 JOIN requested req ON req.routine_id = rr.routine_id
+                 GROUP BY rr.routine_id
+             ) latest
+               ON latest.routine_id = r1.routine_id
+              AND latest.max_started_at = r1.started_at"
+        );
         let mut rows = conn
-            .query(
-                "SELECT routine_id, status FROM routine_runs r1
-                 WHERE started_at = (
-                     SELECT MAX(started_at) FROM routine_runs r2
-                     WHERE r2.routine_id = r1.routine_id
-                 )
-                 GROUP BY routine_id",
-                params![],
-            )
+            .query(&sql, params_from_iter(requested_ids))
             .await
             .map_err(|e| {
                 DatabaseError::Query(format!("Failed to batch get last run status: {}", e))
             })?;
-
-        let routine_id_set: HashSet<Uuid> = routine_ids.iter().copied().collect();
         let mut statuses = HashMap::new();
 
         while let Some(row) = rows
@@ -501,11 +509,9 @@ impl RoutineStore for LibSqlBackend {
             let id = Uuid::parse_str(&id_str)
                 .map_err(|e| DatabaseError::Query(format!("Invalid routine UUID: {}", e)))?;
 
-            if routine_id_set.contains(&id) {
-                let status_str: String = get_text(&row, 1);
-                if let std::result::Result::Ok(status) = status_str.parse::<RunStatus>() {
-                    statuses.insert(id, status);
-                }
+            let status_str: String = get_text(&row, 1);
+            if let std::result::Result::Ok(status) = status_str.parse::<RunStatus>() {
+                statuses.insert(id, status);
             }
         }
 
@@ -530,10 +536,24 @@ impl RoutineStore for LibSqlBackend {
     async fn get_webhook_routine_by_path(
         &self,
         path: &str,
+        user_id: Option<&str>,
     ) -> Result<Option<Routine>, DatabaseError> {
         let conn = self.connect().await?;
-        let mut rows = conn
-            .query(
+        let mut rows = if let Some(uid) = user_id {
+            conn.query(
+                &format!(
+                    "SELECT {} FROM routines WHERE enabled = 1 AND trigger_type = 'webhook' \
+                     AND user_id = ?2 \
+                     AND (json_extract(trigger_config, '$.path') = ?1 \
+                     OR (json_extract(trigger_config, '$.path') IS NULL AND CAST(id AS TEXT) = ?1))",
+                    ROUTINE_COLUMNS
+                ),
+                params![path, uid],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        } else {
+            conn.query(
                 &format!(
                     "SELECT {} FROM routines WHERE enabled = 1 AND trigger_type = 'webhook' \
                      AND (json_extract(trigger_config, '$.path') = ?1 \
@@ -543,7 +563,8 @@ impl RoutineStore for LibSqlBackend {
                 params![path],
             )
             .await
-            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        };
 
         match rows
             .next()
@@ -577,5 +598,93 @@ impl RoutineStore for LibSqlBackend {
             runs.push(row_to_routine_run_libsql(&row)?);
         }
         Ok(runs)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent::routine::{
+        NotifyConfig, Routine, RoutineAction, RoutineGuardrails, RoutineRun, Trigger,
+    };
+    use crate::db::{Database, RoutineStore};
+
+    fn test_routine(user_id: &str, name: &str) -> Routine {
+        Routine {
+            id: Uuid::new_v4(),
+            name: name.to_string(),
+            description: "test routine".to_string(),
+            user_id: user_id.to_string(),
+            enabled: true,
+            trigger: Trigger::Manual,
+            action: RoutineAction::Lightweight {
+                prompt: "test".to_string(),
+                context_paths: Vec::new(),
+                max_tokens: 128,
+                use_tools: false,
+                max_tool_rounds: 1,
+            },
+            guardrails: RoutineGuardrails::default(),
+            notify: NotifyConfig::default(),
+            last_run_at: None,
+            next_fire_at: None,
+            run_count: 0,
+            consecutive_failures: 0,
+            state: serde_json::json!({}),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    fn test_run(routine_id: Uuid, status: RunStatus, started_at: DateTime<Utc>) -> RoutineRun {
+        RoutineRun {
+            id: Uuid::new_v4(),
+            routine_id,
+            trigger_type: "manual".to_string(),
+            trigger_detail: None,
+            started_at,
+            completed_at: None,
+            status,
+            result_summary: None,
+            tokens_used: None,
+            job_id: None,
+            created_at: started_at,
+        }
+    }
+
+    #[tokio::test]
+    async fn batch_get_last_run_status_is_scoped_to_requested_routines() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("routine-status.db");
+        let backend = LibSqlBackend::new_local(&db_path).await.unwrap();
+        backend.run_migrations().await.unwrap();
+
+        let requested = test_routine("user-1", "requested");
+        let other = test_routine("user-1", "other");
+        backend.create_routine(&requested).await.unwrap();
+        backend.create_routine(&other).await.unwrap();
+
+        let now = Utc::now();
+        backend
+            .create_routine_run(&test_run(requested.id, RunStatus::Ok, now))
+            .await
+            .unwrap();
+        backend
+            .create_routine_run(&test_run(
+                other.id,
+                RunStatus::Failed,
+                now + chrono::Duration::seconds(1),
+            ))
+            .await
+            .unwrap();
+
+        let statuses = backend
+            .batch_get_last_run_status(&[requested.id])
+            .await
+            .unwrap();
+
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses.get(&requested.id), Some(&RunStatus::Ok));
+        assert!(!statuses.contains_key(&other.id));
     }
 }

@@ -122,6 +122,12 @@ impl TestChannel {
             .clone()
     }
 
+    /// Async version of `captured_responses` — safe to call while the agent is
+    /// actively pushing responses (avoids `try_lock` panic on contention).
+    pub async fn captured_responses_async(&self) -> Vec<OutgoingResponse> {
+        self.responses.lock().await.clone()
+    }
+
     /// Wait until at least `n` responses have been captured, or `timeout` elapses.
     ///
     /// Returns whatever responses have been collected when the condition is met

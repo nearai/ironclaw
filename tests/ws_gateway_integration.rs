@@ -5,7 +5,7 @@
 //! - WebSocket upgrade with auth
 //! - Ping/pong
 //! - Client message → agent msg_tx
-//! - Broadcast SSE event → WebSocket client
+//! - Broadcast AppEvent → WebSocket client
 //! - Connection tracking (counter increment/decrement)
 //! - Gateway status endpoint
 
@@ -22,8 +22,8 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use ironclaw::channels::IncomingMessage;
 use ironclaw::channels::web::server::{GatewayState, start_server};
 use ironclaw::channels::web::sse::SseManager;
-use ironclaw::channels::web::types::SseEvent;
 use ironclaw::channels::web::ws::WsConnectionTracker;
+use ironclaw_common::AppEvent;
 
 const AUTH_TOKEN: &str = "test-token-12345";
 const TIMEOUT: Duration = Duration::from_secs(5);
@@ -51,7 +51,7 @@ async fn start_test_server() -> (
         job_manager: None,
         prompt_queue: None,
         scheduler: None,
-        default_user_id: "test-user".to_string(),
+        owner_id: "test-user".to_string(),
         shutdown_tx: tokio::sync::RwLock::new(None),
         ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
         llm_provider: None,
@@ -65,6 +65,8 @@ async fn start_test_server() -> (
         routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
         startup_time: std::time::Instant::now(),
         active_config: ironclaw::channels::web::server::ActiveConfigSnapshot::default(),
+        secrets_store: None,
+        db_auth: None,
     });
 
     let auth = ironclaw::channels::web::auth::MultiAuthState::single(
@@ -72,7 +74,7 @@ async fn start_test_server() -> (
         "test-user".to_string(),
     );
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-    let bound_addr = start_server(addr, state.clone(), auth)
+    let bound_addr = start_server(addr, state.clone(), auth.into())
         .await
         .expect("Failed to start test server");
 
@@ -163,8 +165,8 @@ async fn test_ws_broadcast_event_received() {
     // Give the connection a moment to fully establish
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    // Broadcast an SSE event (simulates agent sending a response)
-    state.sse.broadcast(SseEvent::Response {
+    // Broadcast an event (simulates agent sending a response)
+    state.sse.broadcast(AppEvent::Response {
         content: "agent says hi".to_string(),
         thread_id: "t1".to_string(),
     });
@@ -185,7 +187,7 @@ async fn test_ws_thinking_event() {
     let mut ws = connect_ws(addr).await;
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    state.sse.broadcast(SseEvent::Thinking {
+    state.sse.broadcast(AppEvent::Thinking {
         message: "analyzing...".to_string(),
         thread_id: None,
     });
@@ -310,22 +312,22 @@ async fn test_ws_multiple_events_in_sequence() {
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // Broadcast multiple events rapidly
-    state.sse.broadcast(SseEvent::Thinking {
+    state.sse.broadcast(AppEvent::Thinking {
         message: "step 1".to_string(),
         thread_id: None,
     });
-    state.sse.broadcast(SseEvent::ToolStarted {
+    state.sse.broadcast(AppEvent::ToolStarted {
         name: "shell".to_string(),
         thread_id: None,
     });
-    state.sse.broadcast(SseEvent::ToolCompleted {
+    state.sse.broadcast(AppEvent::ToolCompleted {
         name: "shell".to_string(),
         success: true,
         error: None,
         parameters: None,
         thread_id: None,
     });
-    state.sse.broadcast(SseEvent::Response {
+    state.sse.broadcast(AppEvent::Response {
         content: "done".to_string(),
         thread_id: "t1".to_string(),
     });

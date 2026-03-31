@@ -23,14 +23,25 @@ pub struct AgentConfig {
     pub max_cost_per_day_cents: Option<u64>,
     /// Maximum LLM/tool actions per hour. None = unlimited.
     pub max_actions_per_hour: Option<u64>,
+    /// Maximum daily LLM spend per user in cents. None = unlimited.
+    pub max_cost_per_user_per_day_cents: Option<u64>,
     /// Maximum tool-call iterations per agentic loop invocation. Default 50.
     pub max_tool_iterations: usize,
     /// When true, skip tool approval checks entirely. For benchmarks/CI.
     pub auto_approve_tools: bool,
     /// Default timezone for new sessions (IANA name, e.g. "America/New_York").
     pub default_timezone: String,
+    /// Maximum concurrent jobs per user. None = use global max_parallel_jobs.
+    pub max_jobs_per_user: Option<usize>,
     /// Maximum tokens per job (0 = unlimited).
     pub max_tokens_per_job: u64,
+    /// Whether the deployment is multi-tenant (multiple users sharing one
+    /// instance). Defaults to false; can be set via AGENT_MULTI_TENANT env var.
+    pub multi_tenant: bool,
+    /// Maximum concurrent LLM calls per user. None = use default (4).
+    pub max_llm_concurrent_per_user: Option<usize>,
+    /// Maximum concurrent jobs per user. None = use default (3).
+    pub max_jobs_concurrent_per_user: Option<usize>,
 }
 
 impl AgentConfig {
@@ -49,10 +60,15 @@ impl AgentConfig {
             allow_local_tools: true,
             max_cost_per_day_cents: None,
             max_actions_per_hour: None,
+            max_cost_per_user_per_day_cents: None,
             max_tool_iterations: 10,
             auto_approve_tools: true,
             default_timezone: "UTC".to_string(),
+            max_jobs_per_user: None,
             max_tokens_per_job: 0,
+            multi_tenant: false,
+            max_llm_concurrent_per_user: None,
+            max_jobs_concurrent_per_user: None,
         }
     }
 
@@ -87,6 +103,7 @@ impl AgentConfig {
             allow_local_tools: parse_bool_env("ALLOW_LOCAL_TOOLS", false)?,
             max_cost_per_day_cents: parse_option_env("MAX_COST_PER_DAY_CENTS")?,
             max_actions_per_hour: parse_option_env("MAX_ACTIONS_PER_HOUR")?,
+            max_cost_per_user_per_day_cents: parse_option_env("MAX_COST_PER_USER_PER_DAY_CENTS")?,
             max_tool_iterations: parse_optional_env(
                 "AGENT_MAX_TOOL_ITERATIONS",
                 settings.agent.max_tool_iterations,
@@ -108,10 +125,14 @@ impl AgentConfig {
                 }
                 tz
             },
+            max_jobs_per_user: parse_option_env("MAX_JOBS_PER_USER")?,
             max_tokens_per_job: parse_optional_env(
                 "AGENT_MAX_TOKENS_PER_JOB",
                 settings.agent.max_tokens_per_job,
             )?,
+            multi_tenant: parse_bool_env("AGENT_MULTI_TENANT", false)?,
+            max_llm_concurrent_per_user: parse_option_env("TENANT_MAX_LLM_CONCURRENT")?,
+            max_jobs_concurrent_per_user: parse_option_env("TENANT_MAX_JOBS_CONCURRENT")?,
         })
     }
 }

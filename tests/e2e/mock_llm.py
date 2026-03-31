@@ -34,6 +34,20 @@ TOOL_CALL_PATTERNS = [
             "body": {"label": m.group("label")},
         },
     ),
+    (
+        re.compile(r"check gmail unread|gmail unread", re.IGNORECASE),
+        "gmail",
+        lambda _: {
+            "action": "list_messages",
+            "query": "is:unread",
+            "max_results": 1,
+        },
+    ),
+    (
+        re.compile(r"check mock mcp|mock mcp search", re.IGNORECASE),
+        "mock-mcp_mock_search",
+        lambda _: {"query": "refresh-check"},
+    ),
     (re.compile(r"what time|current time", re.IGNORECASE), "time", lambda _: {"operation": "now"}),
     (
         re.compile(
@@ -91,6 +105,15 @@ TOOL_CALL_PATTERNS = [
 ]
 
 
+def _new_oauth_state() -> dict:
+    return {
+        "exchange_count": 0,
+        "refresh_count": 0,
+        "last_exchange": None,
+        "last_refresh": None,
+    }
+
+
 def _last_user_content(messages: list[dict]) -> str:
     for msg in reversed(messages):
         if msg.get("role") == "user":
@@ -101,6 +124,75 @@ def _last_user_content(messages: list[dict]) -> str:
                 )
             return content
     return ""
+
+
+def _is_job_mode(messages: list[dict]) -> bool:
+    """Detect if this conversation is a background job (not chat)."""
+    for msg in messages:
+        if msg.get("role") == "system":
+            content = msg.get("content", "")
+            if "autonomous agent working on a job" in content:
+                return True
+    return False
+
+
+def _count_tool_results(messages: list[dict]) -> int:
+    """Count how many tool result messages are in the conversation."""
+    return sum(1 for m in messages if m.get("role") == "tool")
+
+
+def match_job_response(messages: list[dict], has_tools: bool) -> dict | None:
+    """Handle background job conversations.
+
+    Returns a dict with either {"text": ...} or {"tool_call": ...},
+    or None if this isn't a job conversation.
+    """
+    if not _is_job_mode(messages):
+        return None
+
+    last_user = _last_user_content(messages)
+    tool_result_count = _count_tool_results(messages)
+
+    # Planning call (no tools available = complete() not complete_with_tools())
+    if "create a plan" in last_user.lower():
+        return {"text": json.dumps({
+            "goal": "Complete the requested routine job",
+            "actions": [
+                {
+                    "tool_name": "echo",
+                    "parameters": {"message": "job-step-1"},
+                    "reasoning": "First step: echo a test message",
+                    "expected_outcome": "Echo returns the message",
+                },
+                {
+                    "tool_name": "time",
+                    "parameters": {"operation": "now"},
+                    "reasoning": "Second step: get the current time",
+                    "expected_outcome": "Returns current timestamp",
+                },
+            ],
+            "estimated_cost": 0.001,
+            "estimated_time_secs": 5,
+            "confidence": 0.95,
+        })}
+
+    # Post-plan completion check: after tool results, say complete
+    if "planned actions" in last_user.lower() and tool_result_count >= 2:
+        return {"text": "The job is complete. All tasks are done."}
+
+    # Continuation prompt (from our fix): the plan didn't fully complete,
+    # now the agentic loop should call tools
+    if "continue executing now" in last_user.lower() and has_tools:
+        return {"tool_call": {
+            "tool_name": "echo",
+            "arguments": {"message": "continuation-step"},
+        }}
+
+    # After a tool result in the agentic loop, signal completion
+    if tool_result_count > 0 and has_tools:
+        return {"text": "The job is complete. All requested work has been finished."}
+
+    return None
 
 
 def match_response(messages: list[dict]) -> str:
@@ -174,6 +266,19 @@ async def chat_completions(request: web.Request) -> web.StreamResponse:
     stream = body.get("stream", False)
     has_tools = bool(body.get("tools"))
     cid = f"mock-{uuid.uuid4().hex[:8]}"
+
+    # Job-mode conversations (background routine/job execution)
+    job_resp = match_job_response(messages, has_tools)
+    if job_resp:
+        if "tool_call" in job_resp:
+            tc = job_resp["tool_call"]
+            if not stream:
+                return _tool_call_response(cid, tc)
+            return await _stream_tool_call(request, cid, tc)
+        text = job_resp["text"]
+        if not stream:
+            return _text_response(cid, text)
+        return await _stream_text(request, cid, text)
 
     # Tool result in messages -> text summary
     tr = _find_tool_result(messages)
@@ -272,6 +377,12 @@ async def oauth_exchange(request: web.Request) -> web.Response:
     specific token params such as RFC 8707 `resource` are forwarded here.
     """
     data = await request.post()
+    oauth_state = request.app["oauth_state"]
+    oauth_state["exchange_count"] += 1
+    oauth_state["last_exchange"] = {
+        "authorization": request.headers.get("Authorization"),
+        "form": dict(data),
+    }
     code = data.get("code", "")
     access_token_field = data.get("access_token_field", "access_token")
 
@@ -288,6 +399,53 @@ async def oauth_exchange(request: web.Request) -> web.Response:
         "refresh_token": "mock-refresh-token",
         "expires_in": 3600,
     })
+
+
+async def oauth_refresh(request: web.Request) -> web.Response:
+    """Mock OAuth token refresh proxy for hosted refresh E2E tests."""
+    data = await request.post()
+    oauth_state = request.app["oauth_state"]
+    oauth_state["refresh_count"] += 1
+    oauth_state["last_refresh"] = {
+        "authorization": request.headers.get("Authorization"),
+        "form": dict(data),
+    }
+
+    if request.headers.get("Authorization") != "Bearer e2e-test-token":
+        return web.json_response({"error": "invalid_gateway_auth"}, status=401)
+
+    provider = data.get("provider", "")
+    if provider.startswith("mcp:"):
+        if data.get("client_id") != "mock-mcp-client-id":
+            return web.json_response({"error": "invalid_mcp_client_id"}, status=400)
+        if data.get("client_secret") != "mock-mcp-client-secret":
+            return web.json_response({"error": "missing_mcp_client_secret"}, status=400)
+        if not data.get("token_url", "").endswith("/oauth/token"):
+            return web.json_response({"error": "invalid_mcp_token_url"}, status=400)
+        if data.get("resource") != f"http://127.0.0.1:{request.app['port']}/mcp":
+            return web.json_response({"error": "missing_mcp_resource"}, status=400)
+    else:
+        if data.get("client_id") != "hosted-google-client-id":
+            return web.json_response({"error": "invalid_client_id"}, status=400)
+        if "client_secret" in data:
+            return web.json_response({"error": "unexpected_client_secret"}, status=400)
+
+    return web.json_response({
+        "access_token": "mock-refreshed-access-token",
+        "token_type": "Bearer",
+        "refresh_token": "mock-rotated-refresh-token",
+        "expires_in": 3600,
+        "scope": "mock-scope",
+    })
+
+
+async def oauth_state_handler(request: web.Request) -> web.Response:
+    return web.json_response(request.app["oauth_state"])
+
+
+async def oauth_reset(request: web.Request) -> web.Response:
+    request.app["oauth_state"] = _new_oauth_state()
+    return web.json_response({"ok": True})
 
 
 async def models(_request: web.Request) -> web.Response:
@@ -403,6 +561,7 @@ async def mcp_oauth_register(request: web.Request) -> web.Response:
     body = await request.json()
     return web.json_response({
         "client_id": "mock-mcp-client-id",
+        "client_secret": "mock-mcp-client-secret",
         "client_name": body.get("client_name", "IronClaw"),
         "redirect_uris": body.get("redirect_uris", []),
     })
@@ -424,12 +583,16 @@ def main():
     parser.add_argument("--port", type=int, default=0)
     args = parser.parse_args()
     app = web.Application()
+    app["oauth_state"] = _new_oauth_state()
     # Register both /v1/ and non-/v1/ paths (rig-core omits the /v1/ prefix)
     app.router.add_post("/v1/chat/completions", chat_completions)
     app.router.add_post("/chat/completions", chat_completions)
     app.router.add_get("/v1/models", models)
     app.router.add_get("/models", models)
     app.router.add_post("/oauth/exchange", oauth_exchange)
+    app.router.add_post("/oauth/refresh", oauth_refresh)
+    app.router.add_get("/__mock/oauth/state", oauth_state_handler)
+    app.router.add_post("/__mock/oauth/reset", oauth_reset)
     # Mock MCP server endpoints
     app.router.add_post("/mcp", mcp_endpoint)
     app.router.add_post("/mcp-400", mcp_endpoint_400)

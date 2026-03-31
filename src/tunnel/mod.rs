@@ -428,7 +428,9 @@ mod tests {
             host: "127.0.0.1".to_string(),
             port: 3000,
             auth_token: None,
-            user_id: "test".to_string(),
+            workspace_read_scopes: Vec::new(),
+            oidc: None,
+            memory_layers: Vec::new(),
         });
         c
     }
@@ -439,7 +441,9 @@ mod tests {
             host: host.to_string(),
             port,
             auth_token: None,
-            user_id: "test".to_string(),
+            workspace_read_scopes: Vec::new(),
+            memory_layers: Vec::new(),
+            oidc: None,
         });
         c
     }
