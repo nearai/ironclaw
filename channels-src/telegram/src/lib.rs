@@ -363,6 +363,14 @@ const TELEGRAM_STATUS_MAX_CHARS: usize = 600;
 /// Telegram's hard limit for message text length.
 const TELEGRAM_MAX_MESSAGE_LEN: usize = 4096;
 
+fn telegram_bot_api_url(method: &str) -> String {
+    format!("https://api.telegram.org/bot{{TELEGRAM_BOT_TOKEN}}/{method}")
+}
+
+fn telegram_file_api_url(file_path: &str) -> String {
+    format!("https://api.telegram.org/file/bot{{TELEGRAM_BOT_TOKEN}}/{file_path}")
+}
+
 fn truncate_status_message(input: &str, max_chars: usize) -> String {
     let mut iter = input.chars();
     let truncated: String = iter.by_ref().take(max_chars).collect();
@@ -407,7 +415,8 @@ fn split_message(text: &str) -> Vec<String> {
         let window = &remaining[..window_bytes];
 
         // 1. Double newline — best paragraph boundary
-        let split_at = window.rfind("\n\n")
+        let split_at = window
+            .rfind("\n\n")
             // 2. Single newline
             .or_else(|| window.rfind('\n'))
             // 3. Sentence-ending punctuation followed by space.
@@ -417,9 +426,9 @@ fn split_message(text: &str) -> Vec<String> {
             .or_else(|| {
                 let bytes = window.as_bytes();
                 // Search backwards for '. ', '! ', '? '
-                (1..bytes.len()).rev().find(|&i| {
-                    matches!(bytes[i - 1], b'.' | b'!' | b'?') && bytes[i] == b' '
-                })
+                (1..bytes.len())
+                    .rev()
+                    .find(|&i| matches!(bytes[i - 1], b'.' | b'!' | b'?') && bytes[i] == b' ')
             })
             // 4. Word boundary (last space)
             .or_else(|| window.rfind(' '))
@@ -427,7 +436,11 @@ fn split_message(text: &str) -> Vec<String> {
             .unwrap_or(window_bytes);
 
         // Avoid empty chunks (e.g. text starting with \n\n).
-        let split_at = if split_at == 0 { window_bytes } else { split_at };
+        let split_at = if split_at == 0 {
+            window_bytes
+        } else {
+            split_at
+        };
 
         // Trim whitespace at chunk boundaries for clean Telegram display.
         // Note: this drops leading/trailing spaces at split points, which is
@@ -451,8 +464,8 @@ fn status_message_for_user(update: &StatusUpdate) -> Option<String> {
 
 fn get_updates_url(offset: i64, timeout_secs: u32) -> String {
     format!(
-        "https://api.telegram.org/bot{{TELEGRAM_BOT_TOKEN}}/getUpdates?offset={}&timeout={}&allowed_updates=[\"message\",\"edited_message\"]",
-        offset, timeout_secs
+        "{}?offset={offset}&timeout={timeout_secs}&allowed_updates=[\"message\",\"edited_message\"]",
+        telegram_bot_api_url("getUpdates")
     )
 }
 
@@ -825,7 +838,7 @@ impl Guest for TelegramChannel {
 
                 let result = channel_host::http_request(
                     "POST",
-                    "https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendChatAction",
+                    &telegram_bot_api_url("sendChatAction"),
                     &headers.to_string(),
                     Some(&payload_bytes),
                     None,
@@ -950,7 +963,7 @@ fn send_message(
 
     let result = channel_host::http_request(
         "POST",
-        "https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+        &telegram_bot_api_url("sendMessage"),
         &headers.to_string(),
         Some(&payload_bytes),
         None,
@@ -1028,7 +1041,8 @@ fn download_telegram_file(file_id: &str) -> Result<Vec<u8>, String> {
 
     // Step 1: Call getFile to get file_path
     let get_file_url = format!(
-        "https://api.telegram.org/bot{{TELEGRAM_BOT_TOKEN}}/getFile?file_id={}",
+        "{}?file_id={}",
+        telegram_bot_api_url("getFile"),
         percent_encode(file_id)
     );
 
@@ -1071,10 +1085,7 @@ fn download_telegram_file(file_id: &str) -> Result<Vec<u8>, String> {
     }
 
     // Step 2: Download the actual file bytes
-    let download_url = format!(
-        "https://api.telegram.org/file/bot{{TELEGRAM_BOT_TOKEN}}/{}",
-        file_path
-    );
+    let download_url = telegram_file_api_url(&file_path);
 
     let result = channel_host::http_request("GET", &download_url, &headers.to_string(), None, None);
 
@@ -1207,7 +1218,7 @@ fn send_photo(
 
     let result = channel_host::http_request(
         "POST",
-        "https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto",
+        &telegram_bot_api_url("sendPhoto"),
         &headers.to_string(),
         Some(&body),
         Some(60_000), // 60s timeout for file uploads
@@ -1272,7 +1283,7 @@ fn send_document(
 
     let result = channel_host::http_request(
         "POST",
-        "https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument",
+        &telegram_bot_api_url("sendDocument"),
         &headers.to_string(),
         Some(&body),
         Some(60_000), // 60s timeout for file uploads
@@ -1329,7 +1340,13 @@ fn send_response(
 
     for (i, chunk) in chunks.into_iter().enumerate() {
         // Try Markdown, fall back to plain text on parse errors
-        let result = send_message(chat_id, &chunk, reply_to, Some("Markdown"), message_thread_id);
+        let result = send_message(
+            chat_id,
+            &chunk,
+            reply_to,
+            Some("Markdown"),
+            message_thread_id,
+        );
 
         let msg_id = match result {
             Ok(id) => {
@@ -1422,7 +1439,7 @@ fn delete_webhook() -> Result<(), String> {
 
     let result = channel_host::http_request(
         "POST",
-        "https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/deleteWebhook",
+        &telegram_bot_api_url("deleteWebhook"),
         &headers.to_string(),
         None,
         None,
@@ -1485,7 +1502,7 @@ fn register_webhook(tunnel_url: &str, webhook_secret: Option<&str>) -> Result<()
     // Note: {TELEGRAM_BOT_TOKEN} is replaced by host with the actual token
     let result = channel_host::http_request(
         "POST",
-        "https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/setWebhook",
+        &telegram_bot_api_url("setWebhook"),
         &headers.to_string(),
         Some(&body_bytes),
         None,
@@ -1507,7 +1524,7 @@ fn register_webhook(tunnel_url: &str, webhook_secret: Option<&str>) -> Result<()
 
         response = match channel_host::http_request(
             "POST",
-            "https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/setWebhook",
+            &telegram_bot_api_url("setWebhook"),
             &headers.to_string(),
             Some(&body_bytes),
             None,
@@ -1574,18 +1591,22 @@ const BOT_COMMANDS: &[(&str, &str)] = &[
     ("model", "Show or change AI model"),
 ];
 
+#[derive(Serialize)]
+struct BotCommand<'a> {
+    command: &'a str,
+    description: &'a str,
+}
+
 /// Register bot commands with Telegram so they appear in the "/" command menu.
 ///
 /// Calls the `setMyCommands` Bot API method with default scope (all chats).
 /// This is non-fatal: failure only logs a warning and does not block startup.
 fn register_bot_commands() -> Result<(), String> {
-    let commands: Vec<serde_json::Value> = BOT_COMMANDS
+    let commands: Vec<BotCommand<'_>> = BOT_COMMANDS
         .iter()
-        .map(|(cmd, desc)| {
-            serde_json::json!({
-                "command": cmd,
-                "description": desc
-            })
+        .map(|&(command, description)| BotCommand {
+            command,
+            description,
         })
         .collect();
 
@@ -1597,7 +1618,7 @@ fn register_bot_commands() -> Result<(), String> {
 
     let result = channel_host::http_request(
         "POST",
-        "https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/setMyCommands",
+        &telegram_bot_api_url("setMyCommands"),
         &headers.to_string(),
         Some(&body_bytes),
         None,
@@ -1610,9 +1631,8 @@ fn register_bot_commands() -> Result<(), String> {
                 return Err(format!("HTTP {}: {}", response.status, body_str));
             }
 
-            let api_response: TelegramApiResponse<bool> =
-                serde_json::from_slice(&response.body)
-                    .map_err(|e| format!("Failed to parse response: {}", e))?;
+            let api_response: TelegramApiResponse<bool> = serde_json::from_slice(&response.body)
+                .map_err(|e| format!("Failed to parse response: {}", e))?;
 
             if !api_response.ok {
                 return Err(format!(
@@ -1635,6 +1655,89 @@ fn register_bot_commands() -> Result<(), String> {
         }
         Err(e) => Err(format!("HTTP request failed: {}", e)),
     }
+}
+
+fn normalize_leading_telegram_command(text: &str, bot_username: Option<&str>) -> Option<String> {
+    let trimmed = text.trim();
+    if !trimmed.starts_with('/') {
+        return Some(trimmed.to_string());
+    }
+
+    let (first_token, remainder) = trimmed
+        .split_once(char::is_whitespace)
+        .map_or((trimmed, None), |(token, rest)| {
+            (token, Some(rest.trim_start()))
+        });
+
+    let Some(at_idx) = first_token.find('@') else {
+        return Some(trimmed.to_string());
+    };
+
+    let command = &first_token[..at_idx];
+    let target = &first_token[at_idx + 1..];
+    if command.is_empty() || target.is_empty() {
+        return Some(trimmed.to_string());
+    }
+
+    let Some(bot_username) = bot_username else {
+        return Some(trimmed.to_string());
+    };
+
+    if !target.eq_ignore_ascii_case(bot_username) {
+        return None;
+    }
+
+    Some(match remainder {
+        Some(rest) if !rest.is_empty() => format!("{command} {rest}"),
+        _ => command.to_string(),
+    })
+}
+
+fn should_pass_through_as_command(text: &str) -> bool {
+    let lower = text.trim().to_lowercase();
+    matches!(
+        lower.as_str(),
+        "/undo"
+            | "/redo"
+            | "/interrupt"
+            | "/stop"
+            | "/compact"
+            | "/clear"
+            | "/heartbeat"
+            | "/summarize"
+            | "/summary"
+            | "/suggest"
+            | "/new"
+            | "/thread new"
+            | "/help"
+            | "/?"
+            | "/version"
+            | "/tools"
+            | "/skills"
+            | "/ping"
+            | "/debug"
+            | "/restart"
+            | "/quit"
+            | "/exit"
+            | "/shutdown"
+            | "/status"
+            | "/progress"
+            | "/list"
+            | "/approve"
+            | "/yes"
+            | "/y"
+            | "/always"
+            | "/a"
+            | "/deny"
+            | "/no"
+            | "/n"
+    ) || lower.starts_with("/skills ")
+        || lower.starts_with("/model")
+        || lower.starts_with("/status ")
+        || lower.starts_with("/progress ")
+        || lower.starts_with("/cancel ")
+        || lower.starts_with("/thread ")
+        || lower.starts_with("/resume ")
 }
 
 // ============================================================================
@@ -1709,7 +1812,8 @@ fn extract_attachments(message: &TelegramMessage) -> Vec<InboundAttachment> {
     let mut attachments = Vec::new();
     let get_file_url = |file_id: &str| {
         format!(
-            "https://api.telegram.org/bot{{TELEGRAM_BOT_TOKEN}}/getFile?file_id={}",
+            "{}?file_id={}",
+            telegram_bot_api_url("getFile"),
             percent_encode(file_id)
         )
     };
@@ -2199,16 +2303,22 @@ fn clean_message_text(text: &str, bot_username: Option<&str>) -> String {
 /// - empty/mention-only messages are ignored
 /// - otherwise cleaned text is emitted
 fn content_to_emit_for_agent(content: &str, bot_username: Option<&str>) -> Option<String> {
-    let cleaned_text = clean_message_text(content, bot_username);
-    let trimmed_content = content.trim();
+    let normalized = normalize_leading_telegram_command(content, bot_username)?;
+    let trimmed_content = normalized.trim();
 
     if trimmed_content.eq_ignore_ascii_case("/start") {
         return Some("[User started the bot]".to_string());
     }
 
-    if cleaned_text.is_empty() && trimmed_content.starts_with('/') {
+    if trimmed_content.to_lowercase().starts_with("/start ") {
+        return Some(clean_message_text(trimmed_content, bot_username));
+    }
+
+    if should_pass_through_as_command(trimmed_content) {
         return Some(trimmed_content.to_string());
     }
+
+    let cleaned_text = clean_message_text(trimmed_content, bot_username);
 
     if cleaned_text.is_empty() {
         return None;
@@ -2379,6 +2489,26 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_normalize_leading_telegram_command() {
+        assert_eq!(
+            normalize_leading_telegram_command("/help@MyBot", Some("MyBot")),
+            Some("/help".to_string())
+        );
+        assert_eq!(
+            normalize_leading_telegram_command("/model@mybot gpt-4", Some("MyBot")),
+            Some("/model gpt-4".to_string())
+        );
+        assert_eq!(
+            normalize_leading_telegram_command("/help@OtherBot", Some("MyBot")),
+            None
+        );
+        assert_eq!(
+            normalize_leading_telegram_command("hello", Some("MyBot")),
+            Some("hello".to_string())
+        );
+    }
+
     /// Tests for the content_to_emit logic in handle_message.
     /// Since handle_message uses WASM host calls, test the extracted decision function.
     #[test]
@@ -2400,6 +2530,10 @@ mod tests {
         // /start with args → pass args through
         assert_eq!(
             content_to_emit_for_agent("/start hello", None),
+            Some("hello".to_string())
+        );
+        assert_eq!(
+            content_to_emit_for_agent("/start@MyBot hello", Some("MyBot")),
             Some("hello".to_string())
         );
 
@@ -2464,8 +2598,32 @@ mod tests {
             content_to_emit_for_agent("/no", None),
             Some("/no".to_string())
         );
+        assert_eq!(
+            content_to_emit_for_agent("/help@MyBot", Some("MyBot")),
+            Some("/help".to_string())
+        );
+        assert_eq!(
+            content_to_emit_for_agent("/model@MyBot gpt-4", Some("MyBot")),
+            Some("/model gpt-4".to_string())
+        );
+        assert_eq!(
+            content_to_emit_for_agent("/status@mybot job-123", Some("MyBot")),
+            Some("/status job-123".to_string())
+        );
+        assert_eq!(
+            content_to_emit_for_agent("/skills@MyBot search markdown", Some("MyBot")),
+            Some("/skills search markdown".to_string())
+        );
+        assert_eq!(
+            content_to_emit_for_agent("/help@OtherBot", Some("MyBot")),
+            None
+        );
 
-        // Commands with args → cleaned text (command stripped)
+        // Commands with args that SubmissionParser understands stay intact.
+        assert_eq!(
+            content_to_emit_for_agent("/model claude-opus-4-6", None),
+            Some("/model claude-opus-4-6".to_string())
+        );
         assert_eq!(
             content_to_emit_for_agent("/help me please", None),
             Some("me please".to_string())
@@ -3067,7 +3225,7 @@ mod tests {
     #[test]
     fn test_bot_commands_are_valid() {
         // Telegram enforces: 1-32 lowercase chars, only a-z, 0-9, underscore
-        for (cmd, desc) in BOT_COMMANDS {
+        for &(cmd, desc) in BOT_COMMANDS {
             assert!(
                 !cmd.is_empty() && cmd.len() <= 32,
                 "command '{}' length out of range",
@@ -3090,17 +3248,18 @@ mod tests {
     #[test]
     fn test_bot_commands_no_duplicates() {
         let mut seen = std::collections::HashSet::new();
-        for (cmd, _) in BOT_COMMANDS {
+        for &(cmd, _) in BOT_COMMANDS {
             assert!(seen.insert(cmd), "duplicate command: {}", cmd);
         }
     }
 
     #[test]
     fn test_bot_commands_known_set() {
-        let commands: Vec<&str> = BOT_COMMANDS.iter().map(|(c, _)| *c).collect();
-        assert!(commands.contains(&"new"));
-        assert!(commands.contains(&"status"));
-        assert!(commands.contains(&"help"));
-        assert!(commands.contains(&"stop"));
+        let commands: std::collections::HashSet<&str> =
+            BOT_COMMANDS.iter().map(|&(c, _)| c).collect();
+        assert!(commands.contains("new"));
+        assert!(commands.contains("status"));
+        assert!(commands.contains("help"));
+        assert!(commands.contains("stop"));
     }
 }
