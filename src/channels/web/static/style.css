@@ -387,25 +387,23 @@ body {
   padding: 0;
   cursor: pointer;
   background: transparent;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+}
+
+.user-avatar-img,
+.user-avatar-initials {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
 }
 
 .user-avatar-img {
-  width: 32px;
-  height: 32px;
-  min-width: 32px;
-  min-height: 32px;
-  border-radius: 50%;
   object-fit: cover;
-  flex-shrink: 0;
 }
 
 .user-avatar-initials {
-  width: 32px;
-  height: 32px;
-  border-radius: 50%;
   background: var(--accent);
   color: var(--bg);
   font-size: 14px;
