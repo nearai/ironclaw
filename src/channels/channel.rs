@@ -265,6 +265,15 @@ impl OutgoingResponse {
     }
 }
 
+/// A single tool decision within a reasoning update.
+#[derive(Debug, Clone)]
+pub struct ToolDecision {
+    /// Tool name.
+    pub tool_name: String,
+    /// Agent's reasoning for choosing this tool.
+    pub rationale: String,
+}
+
 /// Status update types for showing agent activity.
 #[derive(Debug, Clone)]
 pub enum StatusUpdate {
@@ -305,6 +314,11 @@ pub enum StatusUpdate {
         tool_name: String,
         description: String,
         parameters: serde_json::Value,
+        /// When `true`, the UI should offer an "always" option that auto-approves
+        /// future calls to this tool for the rest of the session.  When `false`
+        /// (i.e. `ApprovalRequirement::Always`), the tool must be approved every
+        /// time and the "always" button should be hidden.
+        allow_always: bool,
     },
     /// Extension needs user authentication (token or OAuth).
     AuthRequired {
@@ -328,6 +342,19 @@ pub enum StatusUpdate {
     },
     /// Suggested follow-up messages for the user.
     Suggestions { suggestions: Vec<String> },
+    /// Agent reasoning update (why it chose specific tools).
+    ReasoningUpdate {
+        /// Human-readable summary of the agent's decision.
+        narrative: String,
+        /// Per-tool decisions.
+        decisions: Vec<ToolDecision>,
+    },
+    /// Per-turn token usage and cost summary (shown as subtle metadata).
+    TurnCost {
+        input_tokens: u64,
+        output_tokens: u64,
+        cost_usd: String,
+    },
 }
 
 impl StatusUpdate {

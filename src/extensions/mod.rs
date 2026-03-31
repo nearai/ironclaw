@@ -2,7 +2,8 @@
 //! and activation of channels, tools, and MCP servers.
 //!
 //! Extensions are the user-facing abstraction that unifies three runtime kinds:
-//! - **Channels** (Telegram, Slack, Discord) — messaging integrations (WASM)
+//! - **Channels** (Telegram, Slack, Discord) — messaging platform connections
+//!   and conversation transports (WASM)
 //! - **Tools** — sandboxed capabilities (WASM)
 //! - **MCP servers** — external API integrations via Model Context Protocol
 //!
@@ -470,6 +471,8 @@ pub struct ConfigureResult {
     pub message: String,
     /// Whether the extension was successfully activated after configuration.
     pub activated: bool,
+    /// Whether a restart is required for the new configuration to take effect.
+    pub restart_required: bool,
     /// OAuth authorization URL (if OAuth flow was started).
     pub auth_url: Option<String>,
     /// Pending manual verification challenge (for Telegram owner binding, etc.).
@@ -498,7 +501,7 @@ pub struct InstalledExtension {
     /// Tool names if active.
     #[serde(default)]
     pub tools: Vec<String>,
-    /// Whether this extension has a setup schema (required_secrets) that can be configured.
+    /// Whether this extension has a setup schema (required_secrets/required_fields) that can be configured.
     #[serde(default)]
     pub needs_setup: bool,
     /// Whether this extension has an auth configuration (OAuth or manual token).

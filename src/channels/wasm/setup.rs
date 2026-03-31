@@ -34,6 +34,7 @@ pub async fn setup_wasm_channels(
     secrets_store: &Option<Arc<dyn SecretsStore + Send + Sync>>,
     extension_manager: Option<&Arc<ExtensionManager>>,
     database: Option<&Arc<dyn Database>>,
+    registered_channel_names: &[String],
 ) -> Option<WasmChannelSetup> {
     let runtime = match WasmChannelRuntime::new(WasmChannelRuntimeConfig::default()) {
         Ok(r) => Arc::new(r),
@@ -71,7 +72,51 @@ pub async fn setup_wasm_channels(
     let mut channels: Vec<(String, Box<dyn crate::channels::Channel>)> = Vec::new();
     let mut channel_names: Vec<String> = Vec::new();
 
+    // Reserved channel names that WASM modules must not claim.
+    // A malicious module could otherwise register as a trusted built-in
+    // channel and bypass cross-channel authorization checks.
+    //
+    // This list includes:
+    // - All built-in channel names (prevent impersonation)
+    // - Trusted approval channels from session::TRUSTED_APPROVAL_CHANNELS
+    // - The bootstrap sentinel (universal approval wildcard)
+    use crate::agent::session::{BOOTSTRAP_SOURCE_CHANNEL, TRUSTED_APPROVAL_CHANNELS};
+
+    let mut reserved: Vec<&str> = vec![
+        "cli",
+        "repl",
+        "http",
+        "signal",
+        "telegram",
+        "slack-relay",
+        "secret_save",
+    ];
+    reserved.extend(TRUSTED_APPROVAL_CHANNELS);
+    reserved.push(BOOTSTRAP_SOURCE_CHANNEL);
+
     for loaded in results.loaded {
+        let name_lower = loaded.name().to_ascii_lowercase();
+        if reserved.contains(&name_lower.as_str()) {
+            tracing::warn!(
+                channel = %loaded.name(),
+                "Rejected WASM channel with reserved name"
+            );
+            continue;
+        }
+        // Also reject any name that collides with an already-registered
+        // channel to prevent a WASM module from shadowing a channel that
+        // was registered earlier in the startup sequence.
+        if registered_channel_names
+            .iter()
+            .any(|n| n.to_ascii_lowercase() == name_lower)
+        {
+            tracing::warn!(
+                channel = %loaded.name(),
+                "Rejected WASM channel that collides with already-registered channel"
+            );
+            continue;
+        }
+
         let (name, channel) = register_channel(
             loaded,
             config,
@@ -117,7 +162,7 @@ async fn register_channel(
     wasm_router: &Arc<WasmChannelRouter>,
 ) -> (String, Box<dyn crate::channels::Channel>) {
     let channel_name = loaded.name().to_string();
-    tracing::info!("Loaded WASM channel: {}", channel_name);
+    tracing::debug!("Loaded WASM channel: {}", channel_name);
     let owner_actor_id = config
         .channels
         .wasm_channel_owner_ids
@@ -139,13 +184,18 @@ async fn register_channel(
     };
 
     let secret_header = loaded.webhook_secret_header().map(|s| s.to_string());
+    let host_webhook_secret = if loaded.webhook_secret_managed_by_host() {
+        webhook_secret.clone()
+    } else {
+        None
+    };
 
     let webhook_path = format!("/webhook/{}", channel_name);
     let endpoints = vec![RegisteredEndpoint {
         channel_name: channel_name.clone(),
         path: webhook_path,
         methods: vec!["POST".to_string()],
-        require_secret: webhook_secret.is_some(),
+        require_secret: host_webhook_secret.is_some(),
     }];
 
     let channel_arc = Arc::new(loaded.channel.with_owner_actor_id(owner_actor_id.clone()));
@@ -205,7 +255,7 @@ async fn register_channel(
 
     tracing::info!(
         channel = %channel_name,
-        has_webhook_secret = webhook_secret.is_some(),
+        has_webhook_secret = host_webhook_secret.is_some(),
         secret_header = ?secret_header,
         "Registering channel with router"
     );
@@ -214,7 +264,7 @@ async fn register_channel(
         .register(
             Arc::clone(&channel_arc),
             endpoints,
-            webhook_secret.clone(),
+            host_webhook_secret.clone(),
             secret_header,
         )
         .await;
@@ -392,8 +442,9 @@ pub async fn inject_channel_credentials(
 /// placeholders in URLs and headers, so this function fills config fields
 /// that map to secret names.
 ///
-/// Mapping: for a channel named "feishu", secrets `feishu_app_id` and
-/// `feishu_app_secret` are injected as config keys `app_id` and `app_secret`.
+/// Mapping: for a channel named "feishu", secrets `feishu_app_id`,
+/// `feishu_app_secret`, and `feishu_verification_token` are injected as config
+/// keys `app_id`, `app_secret`, and `verification_token`.
 async fn inject_channel_secrets_into_config(
     channel_name: &str,
     secrets_store: &Option<Arc<dyn SecretsStore + Send + Sync>>,
@@ -404,6 +455,7 @@ async fn inject_channel_secrets_into_config(
         "feishu" => &[
             ("app_id", "feishu_app_id"),
             ("app_secret", "feishu_app_secret"),
+            ("verification_token", "feishu_verification_token"),
         ],
         _ => return,
     };
@@ -439,6 +491,78 @@ async fn inject_channel_secrets_into_config(
                     );
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::agent::session::{BOOTSTRAP_SOURCE_CHANNEL, TRUSTED_APPROVAL_CHANNELS};
+
+    /// Build the same reserved-name list that `setup_wasm_channels` uses.
+    fn reserved_names() -> Vec<&'static str> {
+        let mut reserved: Vec<&str> = vec![
+            "cli",
+            "repl",
+            "http",
+            "signal",
+            "telegram",
+            "slack-relay",
+            "secret_save",
+        ];
+        reserved.extend(TRUSTED_APPROVAL_CHANNELS);
+        reserved.push(BOOTSTRAP_SOURCE_CHANNEL);
+        reserved
+    }
+
+    #[test]
+    fn reserved_names_include_trusted_approval_channels() {
+        let reserved = reserved_names();
+        for &trusted in TRUSTED_APPROVAL_CHANNELS {
+            assert!(
+                reserved.contains(&trusted),
+                "trusted approval channel '{}' must be in WASM reserved names",
+                trusted
+            );
+        }
+    }
+
+    #[test]
+    fn reserved_names_include_bootstrap_sentinel() {
+        let reserved = reserved_names();
+        assert!(
+            reserved.contains(&BOOTSTRAP_SOURCE_CHANNEL),
+            "__bootstrap__ sentinel must be in WASM reserved names"
+        );
+    }
+
+    #[test]
+    fn reserved_names_reject_case_insensitive() {
+        // The setup logic lowercases the WASM channel name before checking.
+        // Verify that "Web" or "GATEWAY" would be caught.
+        let reserved = reserved_names();
+        let test_cases = ["Web", "GATEWAY", "CLI", "Repl", "__BOOTSTRAP__"];
+        for name in test_cases {
+            let lowered = name.to_ascii_lowercase();
+            assert!(
+                reserved.contains(&lowered.as_str()),
+                "'{}' (lowercased to '{}') should match a reserved name",
+                name,
+                lowered
+            );
+        }
+    }
+
+    #[test]
+    fn non_reserved_names_allowed() {
+        let reserved = reserved_names();
+        let allowed = ["discord", "my-custom-channel", "slack-bot"];
+        for name in allowed {
+            assert!(
+                !reserved.contains(&name),
+                "'{}' should NOT be reserved",
+                name
+            );
         }
     }
 }

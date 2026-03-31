@@ -20,6 +20,7 @@ use rust_decimal_macros::dec;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value as JsonValue;
+use sha2::{Digest, Sha256};
 
 use std::collections::HashSet;
 
@@ -112,6 +113,16 @@ impl<M: CompletionModel> RigAdapter<M> {
 
 // -- Type conversion helpers --
 
+/// Round an f32 to f64 without precision artifacts.
+///
+/// Direct `f32 as f64` preserves the binary representation, producing values
+/// like `0.699999988079071` instead of `0.7`. Some providers (e.g. Zhipu/GLM)
+/// reject these values with a 400 error. Rounding to 6 decimal places removes
+/// the artifact while preserving all meaningful precision for temperature.
+fn round_f32_to_f64(val: f32) -> f64 {
+    ((val as f64) * 1_000_000.0).round() / 1_000_000.0
+}
+
 /// Normalize a JSON Schema for OpenAI strict mode compliance.
 ///
 /// OpenAI strict function calling requires:
@@ -122,7 +133,7 @@ impl<M: CompletionModel> RigAdapter<M> {
 ///
 /// This is applied as a clone-and-transform at the provider boundary so the
 /// original tool definitions remain unchanged for other providers.
-fn normalize_schema_strict(schema: &JsonValue) -> JsonValue {
+pub(crate) fn normalize_schema_strict(schema: &JsonValue) -> JsonValue {
     let mut schema = schema.clone();
     normalize_schema_recursive(&mut schema);
     schema
@@ -290,6 +301,10 @@ fn convert_messages(messages: &[ChatMessage]) -> (Option<String>, Vec<RigMessage
             }
             crate::llm::Role::User => {
                 if msg.content_parts.is_empty() {
+                    // Skip empty user messages — some providers (e.g. Kimi) reject "content": ""
+                    if msg.content.is_empty() {
+                        continue;
+                    }
                     history.push(RigMessage::user(&msg.content));
                 } else {
                     // Build multimodal user message with text + image parts
@@ -353,6 +368,12 @@ fn convert_messages(messages: &[ChatMessage]) -> (Option<String>, Vec<RigMessage
                         history.push(RigMessage::assistant(&msg.content));
                     }
                 } else {
+                    // Skip empty assistant messages — these occur when thinking-tag stripping
+                    // leaves a blank response; sending "content": "" causes 400 on strict
+                    // OpenAI-compatible providers (e.g. Kimi).
+                    if msg.content.is_empty() {
+                        continue;
+                    }
                     history.push(RigMessage::assistant(&msg.content));
                 }
             }
@@ -390,11 +411,48 @@ fn convert_messages(messages: &[ChatMessage]) -> (Option<String>, Vec<RigMessage
 }
 
 /// Responses-style providers require a non-empty tool call ID.
+///
+/// IDs must be compatible with providers like Mistral, which constrain IDs
+/// to `[a-zA-Z0-9]{9}`. We therefore:
+/// - pass through any non-empty raw ID that already matches this constraint;
+/// - otherwise deterministically map the raw string into a provider-compliant ID;
+/// - and when `raw` is empty/None, delegate to `generate_tool_call_id`.
 fn normalized_tool_call_id(raw: Option<&str>, seed: usize) -> String {
-    match raw.map(str::trim).filter(|id| !id.is_empty()) {
-        Some(id) => id.to_string(),
-        None => format!("generated_tool_call_{seed}"),
+    // Trim and treat empty as None.
+    let trimmed = raw.and_then(|s| {
+        let t = s.trim();
+        if t.is_empty() { None } else { Some(t) }
+    });
+
+    if let Some(id) = trimmed {
+        // If the ID already satisfies `[a-zA-Z0-9]{9}`, pass it through unchanged.
+        if id.len() == 9 && id.chars().all(|c| c.is_ascii_alphanumeric()) {
+            return id.to_string();
+        }
+
+        // Otherwise, deterministically hash the raw ID and feed the hash-derived
+        // seed into the provider-level generator so that the encoding and any
+        // provider-specific constraints remain centralized in one place.
+        let digest = Sha256::digest(id.as_bytes());
+        // Derive a 64-bit value from the first 8 bytes of the digest, then
+        // split it into two usize seeds so we preserve all 64 bits of entropy
+        // even on 32-bit targets.
+        let hash64 = {
+            // SHA-256 always produces 32 bytes, so indexing the first 8 is safe.
+            let bytes: [u8; 8] = [
+                digest[0], digest[1], digest[2], digest[3], digest[4], digest[5], digest[6],
+                digest[7],
+            ];
+            u64::from_be_bytes(bytes)
+        };
+        let hi_seed: usize = (hash64 >> 32) as usize;
+        let lo_seed: usize = (hash64 & 0xFFFF_FFFF) as usize;
+        return super::provider::generate_tool_call_id(hi_seed, lo_seed);
     }
+
+    // Fallback for missing/empty raw IDs: use the provider-level generator,
+    // which already produces compliant IDs.
+    super::provider::generate_tool_call_id(seed, 0)
 }
 
 /// Convert IronClaw tool definitions to rig-core format.
@@ -442,6 +500,7 @@ fn extract_response(
                     id: tc.id.clone(),
                     name: tc.function.name.clone(),
                     arguments: tc.function.arguments.clone(),
+                    reasoning: None,
                 });
             }
             // Reasoning and Image variants are not mapped to IronClaw types
@@ -542,11 +601,38 @@ fn build_rig_request(
         chat_history,
         documents: Vec::new(),
         tools,
-        temperature: temperature.map(|t| t as f64),
+        temperature: temperature.map(round_f32_to_f64),
         max_tokens: max_tokens.map(|t| t as u64),
         tool_choice,
         additional_params,
     })
+}
+
+/// Inject a per-request model override into the rig request's `additional_params`.
+///
+/// Rig-core bakes the model name at construction time inside each provider's
+/// `CompletionModel` implementation. This helper inserts a top-level `"model"`
+/// key into `additional_params`, which rig-core flattens into the provider's
+/// request payload via `#[serde(flatten)]`.
+///
+/// Whether the override takes effect depends on the downstream API server's
+/// handling of duplicate JSON keys (most Python/Go servers use last-key-wins,
+/// but this is not guaranteed by the JSON spec). The `effective_model_name()`
+/// trait method should be consulted to determine the model actually used.
+fn inject_model_override(rig_req: &mut RigRequest, model_override: Option<&str>) {
+    let Some(model) = model_override else {
+        return;
+    };
+    match rig_req.additional_params {
+        Some(ref mut params) => {
+            if let Some(obj) = params.as_object_mut() {
+                obj.insert("model".to_string(), serde_json::json!(model));
+            }
+        }
+        None => {
+            rig_req.additional_params = Some(serde_json::json!({ "model": model }));
+        }
+    }
 }
 
 #[async_trait]
@@ -583,15 +669,7 @@ where
         &self,
         mut request: CompletionRequest,
     ) -> Result<CompletionResponse, LlmError> {
-        if let Some(requested_model) = request.model.as_deref()
-            && requested_model != self.model_name.as_str()
-        {
-            tracing::warn!(
-                requested_model = requested_model,
-                active_model = %self.model_name,
-                "Per-request model override is not supported for this provider; using configured model"
-            );
-        }
+        let model_override = request.model.take();
 
         self.strip_unsupported_completion_params(&mut request);
 
@@ -599,7 +677,7 @@ where
         crate::llm::provider::sanitize_tool_messages(&mut messages);
         let (preamble, history) = convert_messages(&messages);
 
-        let rig_req = build_rig_request(
+        let mut rig_req = build_rig_request(
             preamble,
             history,
             Vec::new(),
@@ -608,6 +686,8 @@ where
             request.max_tokens,
             self.cache_retention,
         )?;
+
+        inject_model_override(&mut rig_req, model_override.as_deref());
 
         let response =
             self.model
@@ -646,15 +726,7 @@ where
         &self,
         mut request: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, LlmError> {
-        if let Some(requested_model) = request.model.as_deref()
-            && requested_model != self.model_name.as_str()
-        {
-            tracing::warn!(
-                requested_model = requested_model,
-                active_model = %self.model_name,
-                "Per-request model override is not supported for this provider; using configured model"
-            );
-        }
+        let model_override = request.model.take();
 
         self.strip_unsupported_tool_params(&mut request);
 
@@ -667,7 +739,7 @@ where
         let tools = convert_tools(&request.tools);
         let tool_choice = convert_tool_choice(request.tool_choice.as_deref());
 
-        let rig_req = build_rig_request(
+        let mut rig_req = build_rig_request(
             preamble,
             history,
             tools,
@@ -676,6 +748,8 @@ where
             request.max_tokens,
             self.cache_retention,
         )?;
+
+        inject_model_override(&mut rig_req, model_override.as_deref());
 
         let response =
             self.model
@@ -768,6 +842,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_round_f32_to_f64_no_precision_artifacts() {
+        // Direct f32->f64 cast produces 0.699999988079071 instead of 0.7
+        assert_eq!(round_f32_to_f64(0.7_f32), 0.7_f64);
+        assert_eq!(round_f32_to_f64(0.5_f32), 0.5_f64);
+        assert_eq!(round_f32_to_f64(1.0_f32), 1.0_f64);
+        assert_eq!(round_f32_to_f64(0.0_f32), 0.0_f64);
+        // Original cast produces artifacts — our fix should not
+        assert_ne!(0.7_f32 as f64, 0.7_f64);
+    }
+
+    #[test]
     fn test_convert_messages_system_to_preamble() {
         let messages = vec![
             ChatMessage::system("You are a helpful assistant."),
@@ -792,8 +877,9 @@ mod tests {
 
     #[test]
     fn test_convert_messages_tool_result() {
+        // Use a conforming 9-char alphanumeric ID so it passes through unchanged.
         let messages = vec![ChatMessage::tool_result(
-            "call_123",
+            "abcDE1234",
             "search",
             "result text",
         )];
@@ -804,8 +890,8 @@ mod tests {
         match &history[0] {
             RigMessage::User { content } => match content.first() {
                 UserContent::ToolResult(r) => {
-                    assert_eq!(r.id, "call_123");
-                    assert_eq!(r.call_id.as_deref(), Some("call_123"));
+                    assert_eq!(r.id, "abcDE1234");
+                    assert_eq!(r.call_id.as_deref(), Some("abcDE1234"));
                 }
                 other => panic!("Expected tool result content, got: {:?}", other),
             },
@@ -815,10 +901,12 @@ mod tests {
 
     #[test]
     fn test_convert_messages_assistant_with_tool_calls() {
+        // Use a conforming 9-char alphanumeric ID so it passes through unchanged.
         let tc = IronToolCall {
-            id: "call_1".to_string(),
+            id: "Xt7mK9pQ2".to_string(),
             name: "search".to_string(),
             arguments: serde_json::json!({"query": "test"}),
+            reasoning: None,
         };
         let msg = ChatMessage::assistant_with_tool_calls(Some("thinking".to_string()), vec![tc]);
         let messages = vec![msg];
@@ -830,7 +918,7 @@ mod tests {
                 assert!(content.iter().count() >= 2);
                 for item in content.iter() {
                     if let AssistantContent::ToolCall(tc) = item {
-                        assert_eq!(tc.call_id.as_deref(), Some("call_1"));
+                        assert_eq!(tc.call_id.as_deref(), Some("Xt7mK9pQ2"));
                     }
                 }
             }
@@ -852,7 +940,14 @@ mod tests {
         match &history[0] {
             RigMessage::User { content } => match content.first() {
                 UserContent::ToolResult(r) => {
-                    assert!(r.id.starts_with("generated_tool_call_"));
+                    // Missing ID → normalized_tool_call_id generates a 9-char alphanumeric ID.
+                    assert_eq!(
+                        r.id.len(),
+                        9,
+                        "fallback ID should be 9 chars, got: {}",
+                        r.id
+                    );
+                    assert!(r.id.chars().all(|c| c.is_ascii_alphanumeric()));
                     assert_eq!(r.call_id.as_deref(), Some(r.id.as_str()));
                 }
                 other => panic!("Expected tool result content, got: {:?}", other),
@@ -929,6 +1024,7 @@ mod tests {
             id: "".to_string(),
             name: "search".to_string(),
             arguments: serde_json::json!({"query": "test"}),
+            reasoning: None,
         };
         let messages = vec![ChatMessage::assistant_with_tool_calls(None, vec![tc])];
         let (_preamble, history) = convert_messages(&messages);
@@ -940,12 +1036,14 @@ mod tests {
                     _ => None,
                 });
                 let tc = tool_call.expect("should have a tool call");
-                assert!(!tc.id.is_empty(), "tool call id must not be empty");
-                assert!(
-                    tc.id.starts_with("generated_tool_call_"),
-                    "empty id should be replaced with generated id, got: {}",
+                // Empty ID → normalized_tool_call_id generates a 9-char alphanumeric ID.
+                assert_eq!(
+                    tc.id.len(),
+                    9,
+                    "generated id should be 9 chars, got: {}",
                     tc.id
                 );
+                assert!(tc.id.chars().all(|c| c.is_ascii_alphanumeric()));
                 assert_eq!(tc.call_id.as_deref(), Some(tc.id.as_str()));
             }
             other => panic!("Expected Assistant message, got: {:?}", other),
@@ -958,6 +1056,7 @@ mod tests {
             id: "   ".to_string(),
             name: "search".to_string(),
             arguments: serde_json::json!({"query": "test"}),
+            reasoning: None,
         };
         let messages = vec![ChatMessage::assistant_with_tool_calls(None, vec![tc])];
         let (_preamble, history) = convert_messages(&messages);
@@ -969,11 +1068,14 @@ mod tests {
                     _ => None,
                 });
                 let tc = tool_call.expect("should have a tool call");
-                assert!(
-                    tc.id.starts_with("generated_tool_call_"),
-                    "whitespace-only id should be replaced, got: {:?}",
+                // Whitespace-only ID → normalized_tool_call_id generates a 9-char alphanumeric ID.
+                assert_eq!(
+                    tc.id.len(),
+                    9,
+                    "generated id should be 9 chars, got: {}",
                     tc.id
                 );
+                assert!(tc.id.chars().all(|c| c.is_ascii_alphanumeric()));
             }
             other => panic!("Expected Assistant message, got: {:?}", other),
         }
@@ -988,6 +1090,7 @@ mod tests {
             id: "".to_string(),
             name: "search".to_string(),
             arguments: serde_json::json!({"query": "test"}),
+            reasoning: None,
         };
         let assistant_msg = ChatMessage::assistant_with_tool_calls(None, vec![tc]);
         let tool_result_msg = ChatMessage {
@@ -1307,11 +1410,13 @@ mod tests {
             id: "call_a".to_string(),
             name: "search".to_string(),
             arguments: serde_json::json!({"q": "rust"}),
+            reasoning: None,
         };
         let tc2 = IronToolCall {
             id: "call_b".to_string(),
             name: "fetch".to_string(),
             arguments: serde_json::json!({"url": "https://example.com"}),
+            reasoning: None,
         };
         let assistant = ChatMessage::assistant_with_tool_calls(None, vec![tc1, tc2]);
         let result_a = ChatMessage::tool_result("call_a", "search", "search results");
@@ -1359,5 +1464,179 @@ mod tests {
 
         // Should be 2 separate User messages (text user + tool result user)
         assert_eq!(history.len(), 2);
+    }
+
+    /// Empty user messages (e.g. after thinking-tag stripping) must be skipped.
+    /// Strict providers like Kimi return 400 when "content": "" is sent.
+    #[test]
+    fn test_empty_user_message_is_skipped() {
+        let empty = ChatMessage::user("");
+        let non_empty = ChatMessage::user("hello");
+        let messages = vec![empty, non_empty];
+        let (_preamble, history) = convert_messages(&messages);
+
+        assert_eq!(history.len(), 1, "empty user message must be dropped");
+        match &history[0] {
+            RigMessage::User { content } => {
+                assert_eq!(content.len(), 1);
+                let first = content.iter().next().expect("one content item");
+                match first {
+                    UserContent::Text(t) => assert_eq!(t.text, "hello"),
+                    other => panic!("expected Text, got {:?}", other),
+                }
+            }
+            other => panic!("expected User message, got {:?}", other),
+        }
+    }
+
+    /// Empty assistant messages (e.g. after thinking-tag stripping) must be skipped.
+    #[test]
+    fn test_empty_assistant_message_is_skipped() {
+        let empty_asst = ChatMessage {
+            role: crate::llm::Role::Assistant,
+            content: String::new(),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+            content_parts: vec![],
+        };
+        let non_empty = ChatMessage::user("hi");
+        let messages = vec![empty_asst, non_empty];
+        let (_preamble, history) = convert_messages(&messages);
+
+        assert_eq!(history.len(), 1, "empty assistant message must be dropped");
+        assert!(matches!(history[0], RigMessage::User { .. }));
+    }
+
+    /// A conversation mixing normal and empty messages: only non-empty ones survive.
+    #[test]
+    fn test_mixed_empty_and_non_empty_messages_filtered_correctly() {
+        let user1 = ChatMessage::user("first");
+        let empty_asst = ChatMessage {
+            role: crate::llm::Role::Assistant,
+            content: String::new(),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+            content_parts: vec![],
+        };
+        let user2 = ChatMessage::user("");
+        let asst = ChatMessage::assistant("response");
+        let messages = vec![user1, empty_asst, user2, asst];
+        let (_preamble, history) = convert_messages(&messages);
+
+        assert_eq!(history.len(), 2, "only non-empty messages should survive");
+        assert!(matches!(history[0], RigMessage::User { .. }));
+        assert!(matches!(history[1], RigMessage::Assistant { .. }));
+    }
+
+    // -- normalized_tool_call_id tests --
+
+    #[test]
+    fn test_normalized_tool_call_id_conforming_passthrough() {
+        // A 9-char alphanumeric ID should pass through unchanged.
+        let id = normalized_tool_call_id(Some("abcDE1234"), 42);
+        assert_eq!(id, "abcDE1234");
+    }
+
+    #[test]
+    fn test_normalized_tool_call_id_non_conforming_hashed() {
+        // An ID that doesn't match [a-zA-Z0-9]{9} should be hashed into one.
+        let id = normalized_tool_call_id(Some("call_abc_long_id"), 0);
+        assert_eq!(id.len(), 9);
+        assert!(id.chars().all(|c| c.is_ascii_alphanumeric()));
+        // Should NOT be the raw input.
+        assert_ne!(id, "call_abc_l");
+    }
+
+    #[test]
+    fn test_normalized_tool_call_id_empty_input() {
+        let id = normalized_tool_call_id(Some(""), 5);
+        assert_eq!(id.len(), 9);
+        assert!(id.chars().all(|c| c.is_ascii_alphanumeric()));
+    }
+
+    #[test]
+    fn test_normalized_tool_call_id_whitespace_input() {
+        let id = normalized_tool_call_id(Some("   "), 5);
+        assert_eq!(id.len(), 9);
+        assert!(id.chars().all(|c| c.is_ascii_alphanumeric()));
+        // Empty and whitespace-only with the same seed should produce identical results.
+        let id_empty = normalized_tool_call_id(Some(""), 5);
+        assert_eq!(id, id_empty);
+    }
+
+    #[test]
+    fn test_normalized_tool_call_id_none_input() {
+        let id = normalized_tool_call_id(None, 7);
+        assert_eq!(id.len(), 9);
+        assert!(id.chars().all(|c| c.is_ascii_alphanumeric()));
+        // None and empty string with same seed should produce identical results.
+        let id_empty = normalized_tool_call_id(Some(""), 7);
+        assert_eq!(id, id_empty);
+    }
+
+    #[test]
+    fn test_normalized_tool_call_id_deterministic() {
+        let id1 = normalized_tool_call_id(Some("call_xyz_123"), 0);
+        let id2 = normalized_tool_call_id(Some("call_xyz_123"), 0);
+        assert_eq!(id1, id2, "same input must produce same output");
+    }
+
+    #[test]
+    fn test_normalized_tool_call_id_different_inputs_differ() {
+        let id_a = normalized_tool_call_id(Some("call_aaa"), 0);
+        let id_b = normalized_tool_call_id(Some("call_bbb"), 0);
+        assert_ne!(
+            id_a, id_b,
+            "different raw IDs should produce different hashed IDs"
+        );
+    }
+
+    fn make_rig_request(additional_params: Option<serde_json::Value>) -> RigRequest {
+        RigRequest {
+            preamble: None,
+            chat_history: OneOrMany::one(RigMessage::user("test")),
+            documents: Vec::new(),
+            tools: Vec::new(),
+            temperature: None,
+            max_tokens: None,
+            tool_choice: None,
+            additional_params,
+        }
+    }
+
+    #[test]
+    fn test_inject_model_override_creates_params_when_none() {
+        let mut req = make_rig_request(None);
+        inject_model_override(&mut req, Some("test-model"));
+
+        let params = req
+            .additional_params
+            .expect("additional_params should be Some");
+        assert_eq!(params, serde_json::json!({ "model": "test-model" }));
+    }
+
+    #[test]
+    fn test_inject_model_override_preserves_existing_params() {
+        let mut req = make_rig_request(Some(serde_json::json!({
+            "cache_control": { "type": "ephemeral" },
+        })));
+        inject_model_override(&mut req, Some("override-model"));
+
+        let params = req.additional_params.expect("should remain Some");
+        let obj = params.as_object().expect("should be object");
+        assert_eq!(
+            obj.get("cache_control"),
+            Some(&serde_json::json!({ "type": "ephemeral" }))
+        );
+        assert_eq!(obj.get("model"), Some(&serde_json::json!("override-model")));
+    }
+
+    #[test]
+    fn test_inject_model_override_noop_when_none() {
+        let mut req = make_rig_request(None);
+        inject_model_override(&mut req, None);
+        assert!(req.additional_params.is_none());
     }
 }

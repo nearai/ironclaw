@@ -21,11 +21,15 @@ use crate::agent::agentic_loop::{
 use crate::config::SafetyConfig;
 use crate::context::JobContext;
 use crate::error::WorkerError;
-use crate::llm::{ChatMessage, LlmProvider, Reasoning, ReasoningContext};
+use crate::llm::{ChatMessage, LlmProvider, Reasoning, ReasoningContext, ResponseMetadata};
 use crate::safety::SafetyLayer;
 use crate::tools::ToolRegistry;
 use crate::tools::execute::{execute_tool_simple, process_tool_result};
 use crate::worker::api::{CompletionReport, JobEventPayload, StatusUpdate, WorkerHttpClient};
+use crate::worker::autonomous_recovery::{
+    AutonomousRecoveryAction, AutonomousRecoveryState, EMPTY_TOOL_COMPLETION_FAILURE,
+    EMPTY_TOOL_COMPLETION_NUDGE, FORCE_TEXT_RECOVERY_PROMPT,
+};
 use crate::worker::proxy_llm::ProxyLlmProvider;
 
 /// Configuration for the worker runtime.
@@ -151,7 +155,7 @@ Job: {}
 Description: {}
 
 You have tools for shell commands, file operations, and code editing.
-Work independently to complete this job. Report when done."#,
+Work independently to complete this job. When finished, your final message MUST include the phrase "The job is complete" to signal termination."#,
             job.title, job.description
         )));
 
@@ -170,6 +174,7 @@ Work independently to complete this job. Report when done."#,
                 extra_env: self.extra_env.clone(),
                 last_output: Mutex::new(String::new()),
                 iteration_tracker: iteration_tracker.clone(),
+                recovery_state: Mutex::new(AutonomousRecoveryState::default()),
             };
 
             let config = AgenticLoopConfig {
@@ -224,6 +229,24 @@ Work independently to complete this job. Report when done."#,
                     .report_complete(&CompletionReport {
                         success: false,
                         message: Some(format!("Execution failed: {}", msg)),
+                        iterations,
+                    })
+                    .await?;
+            }
+            Ok(Ok(LoopOutcome::Failure(reason))) => {
+                tracing::warn!("Worker failed for job {}: {}", self.config.job_id, reason);
+                self.post_event(
+                    "result",
+                    serde_json::json!({
+                        "success": false,
+                        "message": reason,
+                    }),
+                )
+                .await;
+                self.client
+                    .report_complete(&CompletionReport {
+                        success: false,
+                        message: Some(reason),
                         iterations,
                     })
                     .await?;
@@ -304,6 +327,7 @@ struct ContainerDelegate {
     /// Tracks the current iteration — shared with the outer `run` method so
     /// `CompletionReport` can include accurate iteration counts.
     iteration_tracker: Arc<Mutex<u32>>,
+    recovery_state: Mutex<AutonomousRecoveryState>,
 }
 
 impl ContainerDelegate {
@@ -373,8 +397,21 @@ impl LoopDelegate for ContainerDelegate {
         // Poll for follow-up prompts from the user
         self.poll_and_inject_prompt(reason_ctx).await;
 
-        // Refresh tools (in case WASM tools were built)
-        reason_ctx.available_tools = self.tools.tool_definitions().await;
+        // Claude 4.6 rejects assistant prefill; NEAR AI rejects any non-user-ending
+        // conversation. Ensure the last message is user-role before calling the LLM.
+        crate::util::ensure_ends_with_user_message(&mut reason_ctx.messages);
+
+        let force_text_recovery = {
+            let mut recovery = self.recovery_state.lock().await;
+            recovery.begin_iteration()
+        };
+        if force_text_recovery {
+            tracing::warn!("Switching to text-only recovery after malformed tool completions");
+            reason_ctx.available_tools.clear();
+        } else {
+            // Refresh tools (in case WASM tools were built)
+            reason_ctx.available_tools = self.tools.tool_definitions().await;
+        }
 
         None
     }
@@ -395,8 +432,53 @@ impl LoopDelegate for ContainerDelegate {
     async fn handle_text_response(
         &self,
         text: &str,
+        metadata: ResponseMetadata,
         reason_ctx: &mut ReasoningContext,
     ) -> TextAction {
+        let action = {
+            let mut recovery = self.recovery_state.lock().await;
+            recovery.on_text_response(metadata, text)
+        };
+        match action {
+            AutonomousRecoveryAction::ToolModeNudge => {
+                tracing::warn!("Malformed empty tool completion detected; retrying in tool mode");
+                self.post_event(
+                    "status",
+                    serde_json::json!({
+                        "message": "Model returned an empty tool-completion response; retrying with a stronger tool-use nudge.",
+                    }),
+                )
+                .await;
+                reason_ctx
+                    .messages
+                    .push(ChatMessage::user(EMPTY_TOOL_COMPLETION_NUDGE));
+                return TextAction::Continue;
+            }
+            AutonomousRecoveryAction::ForceTextRecovery => {
+                tracing::warn!(
+                    "Repeated malformed tool completions detected; switching to text-only recovery"
+                );
+                self.post_event(
+                    "status",
+                    serde_json::json!({
+                        "message": "Model returned repeated empty tool-completion responses; requesting a final status update without tools.",
+                    }),
+                )
+                .await;
+                reason_ctx
+                    .messages
+                    .push(ChatMessage::user(FORCE_TEXT_RECOVERY_PROMPT));
+                return TextAction::Continue;
+            }
+            AutonomousRecoveryAction::Fail => {
+                tracing::warn!("Failing fast after repeated malformed autonomous responses");
+                return TextAction::Return(LoopOutcome::Failure(
+                    EMPTY_TOOL_COMPLETION_FAILURE.to_string(),
+                ));
+            }
+            AutonomousRecoveryAction::Continue => {}
+        }
+
         self.post_event(
             "message",
             serde_json::json!({
@@ -427,6 +509,11 @@ impl LoopDelegate for ContainerDelegate {
         content: Option<String>,
         reason_ctx: &mut ReasoningContext,
     ) -> Result<Option<LoopOutcome>, crate::error::Error> {
+        {
+            let mut recovery = self.recovery_state.lock().await;
+            recovery.on_valid_tool_call();
+        }
+
         if let Some(ref text) = content {
             self.post_event(
                 "message",
@@ -462,9 +549,14 @@ impl LoopDelegate for ContainerDelegate {
                 ..Default::default()
             };
 
-            let result =
-                execute_tool_simple(&self.tools, &self.safety, &tc.name, &tc.arguments, &job_ctx)
-                    .await;
+            let result = execute_tool_simple(
+                &self.tools,
+                &self.safety,
+                &tc.name,
+                tc.arguments.clone(),
+                &job_ctx,
+            )
+            .await;
 
             self.post_event(
                 "tool_result",
@@ -472,7 +564,7 @@ impl LoopDelegate for ContainerDelegate {
                     "tool_name": tc.name,
                     "output": match &result {
                         Ok(output) => truncate_for_preview(output, 2000),
-                        Err(e) => format!("Error: {}", truncate_for_preview(e, 500)),
+                        Err(e) => format!("Error: {}", truncate_for_preview(e, 500)).into(),
                     },
                     "success": result.is_ok(),
                 }),

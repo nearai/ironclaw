@@ -1,0 +1,39 @@
+{
+  "model_name": "test-routine-manual-create-no-tools",
+  "expects": {
+    "tools_used": ["routine_create"],
+    "all_tools_succeeded": true,
+    "min_responses": 1
+  },
+  "steps": [
+    {
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_rc_manual_2",
+            "name": "routine_create",
+            "arguments": {
+              "name": "manual-triage-no-tools",
+              "trigger_type": "manual",
+              "prompt": "Summarize the latest bug reports when this routine is fired.",
+              "execution": {
+                "use_tools": false
+              }
+            }
+          }
+        ],
+        "input_tokens": 90,
+        "output_tokens": 24
+      }
+    },
+    {
+      "response": {
+        "type": "text",
+        "content": "Created the manual-triage-no-tools routine, but it is not verified yet. It will only run when explicitly fired and stay text-only until you decide to test it.",
+        "input_tokens": 140,
+        "output_tokens": 18
+      }
+    }
+  ]
+}

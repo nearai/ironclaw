@@ -1,15 +1,10 @@
 //! HTTP client for the channel-relay service.
 //!
 //! Wraps reqwest for all channel-relay API calls: OAuth initiation,
-//! SSE streaming, token renewal, and Slack API proxy.
+//! approvals, signing-secret fetch, and Slack API proxy.
 
-use std::pin::Pin;
-use std::task::{Context, Poll};
-
-use futures::Stream;
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc;
 
 /// Known relay event types.
 pub mod event_types {
@@ -18,7 +13,7 @@ pub mod event_types {
     pub const MENTION: &str = "mention";
 }
 
-/// A parsed SSE event from the channel-relay stream.
+/// A parsed event from the channel-relay webhook callback.
 ///
 /// Field names match the channel-relay `ChannelEvent` struct exactly.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -123,24 +118,36 @@ impl RelayClient {
     ///
     /// Calls `GET /oauth/slack/auth` with `redirect(Policy::none())` and
     /// returns the `Location` header (Slack OAuth URL) without following it.
-    pub async fn initiate_oauth(
-        &self,
-        instance_id: &str,
-        user_id: &str,
-        callback_url: &str,
-    ) -> Result<String, RelayError> {
+    /// Initiate Slack OAuth. Channel-relay derives all URLs from the trusted
+    /// instance_url in chat-api. IronClaw only passes an optional CSRF nonce
+    /// for validating the callback — no URLs.
+    pub async fn initiate_oauth(&self, state_nonce: Option<&str>) -> Result<String, RelayError> {
+        let url = format!("{}/oauth/slack/auth", self.base_url);
+        tracing::trace!(relay_url = %url, "RelayClient::initiate_oauth: sending request");
+        let mut query: Vec<(&str, &str)> = vec![];
+        if let Some(nonce) = state_nonce {
+            query.push(("state_nonce", nonce));
+        }
         let resp = self
             .http
-            .get(format!("{}/oauth/slack/auth", self.base_url))
-            .header("X-API-Key", self.api_key.expose_secret())
-            .query(&[
-                ("instance_id", instance_id),
-                ("user_id", user_id),
-                ("callback", callback_url),
-            ])
+            .get(&url)
+            .bearer_auth(self.api_key.expose_secret())
+            .query(&query)
             .send()
             .await
-            .map_err(|e| RelayError::Network(e.to_string()))?;
+            .map_err(|e| {
+                tracing::warn!(
+                    relay_url = %url,
+                    error = %e,
+                    "RelayClient::initiate_oauth: network request failed"
+                );
+                RelayError::Network(e.to_string())
+            })?;
+        tracing::trace!(
+            relay_url = %url,
+            status = %resp.status(),
+            "RelayClient::initiate_oauth: received response"
+        );
 
         let status = resp.status();
         if status.is_redirection() {
@@ -173,105 +180,31 @@ impl RelayClient {
         }
     }
 
-    /// Connect to the SSE event stream.
+    /// Register a pending approval and return the opaque approval token.
     ///
-    /// Returns a stream of parsed `ChannelEvent`s and the `JoinHandle` of the
-    /// background SSE parser task. The caller is responsible for reconnection
-    /// logic on stream end/error and for aborting the handle on shutdown.
-    pub async fn connect_stream(
+    /// Calls `POST /approvals` with the target team/channel/request identifiers.
+    /// The returned token is embedded in Slack button values instead of routing fields.
+    /// The relay derives the authorized approver from the connection's authed_user_id.
+    pub async fn create_approval(
         &self,
-        stream_token: &str,
-        stream_timeout_secs: u64,
-    ) -> Result<(ChannelEventStream, tokio::task::JoinHandle<()>), RelayError> {
-        let resp = self
-            .http
-            .get(format!("{}/stream", self.base_url))
-            .query(&[("token", stream_token)])
-            .timeout(std::time::Duration::from_secs(stream_timeout_secs))
-            .send()
-            .await
-            .map_err(|e| RelayError::Network(e.to_string()))?;
-
-        let status = resp.status();
-        if status == reqwest::StatusCode::UNAUTHORIZED {
-            return Err(RelayError::TokenExpired);
-        }
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(RelayError::Api {
-                status: status.as_u16(),
-                message: body,
-            });
-        }
-
-        // Spawn a background task that reads the SSE stream and sends parsed events
-        let (tx, rx) = mpsc::channel(64);
-        let byte_stream = resp.bytes_stream();
-        let handle = tokio::spawn(parse_sse_stream(byte_stream, tx));
-
-        Ok((ChannelEventStream { rx }, handle))
-    }
-
-    /// Renew an expired stream token.
-    ///
-    /// Calls `POST /stream/renew` with API key auth, returns a new stream token.
-    pub async fn renew_token(
-        &self,
-        instance_id: &str,
-        user_id: &str,
-    ) -> Result<String, RelayError> {
-        let resp = self
-            .http
-            .post(format!("{}/stream/renew", self.base_url))
-            .header("X-API-Key", self.api_key.expose_secret())
-            .json(&serde_json::json!({
-                "instance_id": instance_id,
-                "user_id": user_id,
-            }))
-            .send()
-            .await
-            .map_err(|e| RelayError::Network(e.to_string()))?;
-
-        let status = resp.status();
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(RelayError::Api {
-                status: status.as_u16(),
-                message: body,
-            });
-        }
-
-        let body: serde_json::Value = resp
-            .json()
-            .await
-            .map_err(|e| RelayError::Protocol(e.to_string()))?;
-        body.get("stream_token")
-            .or_else(|| body.get("token"))
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-            .ok_or_else(|| RelayError::Protocol("Response missing stream_token field".to_string()))
-    }
-
-    /// Proxy an API call through channel-relay for any provider.
-    ///
-    /// Calls `POST /proxy/{provider}/{method}?team_id=X&instance_id=Y` with the given JSON body.
-    pub async fn proxy_provider(
-        &self,
-        provider: &str,
         team_id: &str,
-        method: &str,
-        body: serde_json::Value,
-        instance_id: Option<&str>,
-    ) -> Result<serde_json::Value, RelayError> {
-        let mut query: Vec<(&str, &str)> = vec![("team_id", team_id)];
-        if let Some(iid) = instance_id {
-            query.push(("instance_id", iid));
+        channel_id: &str,
+        thread_ts: Option<&str>,
+        request_id: &str,
+    ) -> Result<String, RelayError> {
+        let mut body = serde_json::json!({
+            "team_id": team_id,
+            "channel_id": channel_id,
+            "request_id": request_id,
+        });
+        if let Some(ts) = thread_ts {
+            body["thread_ts"] = serde_json::Value::String(ts.to_string());
         }
+
         let resp = self
             .http
-            .post(format!("{}/proxy/{}/{}", self.base_url, provider, method))
-            .header("X-API-Key", self.api_key.expose_secret())
-            .query(&query)
+            .post(format!("{}/approvals", self.base_url))
+            .bearer_auth(self.api_key.expose_secret())
             .json(&body)
             .send()
             .await
@@ -286,9 +219,135 @@ impl RelayClient {
             });
         }
 
+        let result: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| RelayError::Protocol(e.to_string()))?;
+
+        result
+            .get("approval_token")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .ok_or_else(|| RelayError::Protocol("missing approval_token in response".to_string()))
+    }
+
+    pub async fn proxy_provider(
+        &self,
+        provider: &str,
+        team_id: &str,
+        method: &str,
+        body: serde_json::Value,
+    ) -> Result<serde_json::Value, RelayError> {
+        let url = format!("{}/proxy/{}/{}", self.base_url, provider, method);
+        tracing::trace!(
+            relay_url = %url,
+            provider = %provider,
+            method = %method,
+            "RelayClient::proxy_provider: sending request"
+        );
+        let query: Vec<(&str, &str)> = vec![("team_id", team_id)];
+        let resp = self
+            .http
+            .post(&url)
+            .bearer_auth(self.api_key.expose_secret())
+            .query(&query)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| {
+                tracing::warn!(
+                    relay_url = %url,
+                    error = %e,
+                    "RelayClient::proxy_provider: network request failed"
+                );
+                RelayError::Network(e.to_string())
+            })?;
+
+        if !resp.status().is_success() {
+            let status = resp.status().as_u16();
+            let body = resp.text().await.unwrap_or_default();
+            tracing::warn!(
+                relay_url = %url,
+                status = status,
+                "RelayClient::proxy_provider: channel-relay returned error"
+            );
+            return Err(RelayError::Api {
+                status,
+                message: body,
+            });
+        }
+
         resp.json()
             .await
             .map_err(|e| RelayError::Protocol(e.to_string()))
+    }
+
+    /// Fetch the per-instance callback signing secret from channel-relay.
+    ///
+    /// Calls `GET /relay/signing-secret` (authenticated) and returns the decoded
+    /// 32-byte secret. Called once at activation time; the result is cached in the
+    /// extension manager so subsequent calls to `relay_signing_secret()` use it.
+    pub async fn get_signing_secret(&self, team_id: &str) -> Result<Vec<u8>, RelayError> {
+        let url = format!("{}/relay/signing-secret", self.base_url);
+        tracing::trace!(
+            relay_url = %url,
+            "RelayClient::get_signing_secret: fetching signing secret"
+        );
+        let resp = self
+            .http
+            .get(&url)
+            .bearer_auth(self.api_key.expose_secret())
+            .query(&[("team_id", team_id)])
+            .send()
+            .await
+            .map_err(|e| {
+                tracing::warn!(
+                    relay_url = %url,
+                    error = %e,
+                    "RelayClient::get_signing_secret: network request failed"
+                );
+                RelayError::Network(e.to_string())
+            })?;
+
+        if !resp.status().is_success() {
+            let status = resp.status().as_u16();
+            let body = resp.text().await.unwrap_or_default();
+            tracing::warn!(
+                relay_url = %url,
+                status = status,
+                body = %body,
+                "RelayClient::get_signing_secret: channel-relay returned error"
+            );
+            return Err(RelayError::Api {
+                status,
+                message: body,
+            });
+        }
+        tracing::trace!(
+            relay_url = %url,
+            "RelayClient::get_signing_secret: received successful response"
+        );
+
+        let body: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| RelayError::Protocol(e.to_string()))?;
+
+        body.get("signing_secret")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| RelayError::Protocol("missing signing_secret in response".to_string()))
+            .and_then(|raw| {
+                let decoded = hex::decode(raw).map_err(|e| {
+                    RelayError::Protocol(format!("invalid signing_secret hex: {e}"))
+                })?;
+                if decoded.len() != 32 {
+                    return Err(RelayError::Protocol(format!(
+                        "invalid signing_secret length: expected 32 bytes, got {}",
+                        decoded.len()
+                    )));
+                }
+                Ok(decoded)
+            })
     }
 
     /// List active connections for an instance.
@@ -296,7 +355,7 @@ impl RelayClient {
         let resp = self
             .http
             .get(format!("{}/connections", self.base_url))
-            .header("X-API-Key", self.api_key.expose_secret())
+            .bearer_auth(self.api_key.expose_secret())
             .query(&[("instance_id", instance_id)])
             .send()
             .await
@@ -317,91 +376,6 @@ impl RelayClient {
     }
 }
 
-/// Async stream of parsed channel events from SSE.
-pub struct ChannelEventStream {
-    rx: mpsc::Receiver<ChannelEvent>,
-}
-
-impl Stream for ChannelEventStream {
-    type Item = ChannelEvent;
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        self.rx.poll_recv(cx)
-    }
-}
-
-/// Parse SSE format from a reqwest bytes stream.
-///
-/// SSE format:
-/// ```text
-/// event: message
-/// data: {"key": "value"}
-///
-/// ```
-/// Blank line terminates an event.
-async fn parse_sse_stream(
-    byte_stream: impl futures::Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Send + 'static,
-    tx: mpsc::Sender<ChannelEvent>,
-) {
-    use futures::StreamExt;
-
-    let mut buffer = Vec::<u8>::new();
-    let mut event_type = String::new();
-    let mut data_lines = Vec::new();
-
-    let mut byte_stream = std::pin::pin!(byte_stream);
-    while let Some(chunk_result) = byte_stream.next().await {
-        let chunk = match chunk_result {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::debug!(error = %e, "SSE stream chunk error");
-                break;
-            }
-        };
-
-        buffer.extend_from_slice(&chunk);
-
-        // Process complete lines (decode UTF-8 only on full lines to avoid
-        // corruption when multi-byte characters span chunk boundaries)
-        while let Some(newline_pos) = buffer.iter().position(|&b| b == b'\n') {
-            let line = String::from_utf8_lossy(&buffer[..newline_pos])
-                .trim_end_matches('\r')
-                .to_string();
-            buffer.drain(..=newline_pos);
-
-            if line.is_empty() {
-                // Blank line = end of event
-                if !data_lines.is_empty() {
-                    let data = data_lines.join("\n");
-                    if let Ok(mut event) = serde_json::from_str::<ChannelEvent>(&data) {
-                        if event.event_type.is_empty() && !event_type.is_empty() {
-                            event.event_type = event_type.clone();
-                        }
-                        if tx.send(event).await.is_err() {
-                            return; // receiver dropped
-                        }
-                    } else {
-                        tracing::debug!(
-                            event_type = %event_type,
-                            data_len = data.len(),
-                            "Failed to parse SSE event data as ChannelEvent"
-                        );
-                    }
-                }
-                event_type.clear();
-                data_lines.clear();
-            } else if let Some(value) = line.strip_prefix("event:") {
-                event_type = value.trim().to_string();
-            } else if let Some(value) = line.strip_prefix("data:") {
-                data_lines.push(value.trim().to_string());
-            }
-            // Ignore other fields (id:, retry:, comments)
-        }
-    }
-
-    tracing::debug!("SSE stream ended");
-}
-
 /// Errors from relay client operations.
 #[derive(Debug, thiserror::Error)]
 pub enum RelayError {
@@ -413,9 +387,6 @@ pub enum RelayError {
 
     #[error("Protocol error: {0}")]
     Protocol(String),
-
-    #[error("Stream token expired")]
-    TokenExpired,
 }
 
 #[cfg(test)]
@@ -494,9 +465,6 @@ mod tests {
             message: "unauthorized".into(),
         };
         assert_eq!(err.to_string(), "API error (HTTP 401): unauthorized");
-
-        let err = RelayError::TokenExpired;
-        assert_eq!(err.to_string(), "Stream token expired");
     }
 
     #[test]
@@ -517,33 +485,5 @@ mod tests {
         assert!(make(event_types::MESSAGE).is_message());
         assert!(make(event_types::DIRECT_MESSAGE).is_message());
         assert!(make(event_types::MENTION).is_message());
-    }
-
-    #[tokio::test]
-    async fn parse_sse_handles_multibyte_utf8_across_chunks() {
-        // The crab emoji (🦀) is 4 bytes: [0xF0, 0x9F, 0xA6, 0x80].
-        // Split it across two chunks to verify no U+FFFD corruption.
-        let event_json = r#"{"event_type":"message","content":"hello 🦀 world","provider_scope":"T1","channel_id":"C1","sender_id":"U1"}"#;
-        let full = format!("event: message\ndata: {}\n\n", event_json);
-        let bytes = full.as_bytes();
-
-        // Find the crab emoji and split mid-character
-        let crab_pos = bytes
-            .windows(4)
-            .position(|w| w == [0xF0, 0x9F, 0xA6, 0x80])
-            .expect("crab emoji not found");
-        let split_at = crab_pos + 2; // split in the middle of the 4-byte emoji
-
-        let chunk1 = bytes::Bytes::copy_from_slice(&bytes[..split_at]);
-        let chunk2 = bytes::Bytes::copy_from_slice(&bytes[split_at..]);
-
-        let chunks: Vec<Result<bytes::Bytes, reqwest::Error>> = vec![Ok(chunk1), Ok(chunk2)];
-        let stream = futures::stream::iter(chunks);
-
-        let (tx, mut rx) = mpsc::channel(8);
-        parse_sse_stream(stream, tx).await;
-
-        let event = rx.recv().await.expect("should receive event");
-        assert_eq!(event.text(), "hello 🦀 world");
     }
 }

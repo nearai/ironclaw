@@ -16,8 +16,8 @@ use crate::agent::routine::{Routine, RoutineRun, RunStatus};
 use crate::config::DatabaseConfig;
 use crate::context::{ActionRecord, JobContext, JobState};
 use crate::db::{
-    ConversationStore, Database, JobStore, RoutineStore, SandboxStore, SettingsStore,
-    ToolFailureStore, WorkspaceStore,
+    ApiTokenRecord, ConversationStore, Database, JobStore, RoutineStore, SandboxStore,
+    SettingsStore, ToolFailureStore, UserRecord, UserStore, WorkspaceStore,
 };
 use crate::error::{DatabaseError, WorkspaceError};
 use crate::history::{
@@ -99,9 +99,10 @@ impl ConversationStore for PgBackend {
         channel: &str,
         user_id: &str,
         thread_id: Option<&str>,
+        source_channel: Option<&str>,
     ) -> Result<bool, DatabaseError> {
         self.store
-            .ensure_conversation(id, channel, user_id, thread_id)
+            .ensure_conversation(id, channel, user_id, thread_id, source_channel)
             .await
     }
 
@@ -134,6 +135,16 @@ impl ConversationStore for PgBackend {
     ) -> Result<Uuid, DatabaseError> {
         self.store
             .get_or_create_routine_conversation(routine_id, routine_name, user_id)
+            .await
+    }
+
+    async fn find_routine_conversation(
+        &self,
+        routine_id: Uuid,
+        user_id: &str,
+    ) -> Result<Option<Uuid>, DatabaseError> {
+        self.store
+            .find_routine_conversation(routine_id, user_id)
             .await
     }
 
@@ -212,6 +223,15 @@ impl ConversationStore for PgBackend {
             .conversation_belongs_to_user(conversation_id, user_id)
             .await
     }
+
+    async fn get_conversation_source_channel(
+        &self,
+        conversation_id: Uuid,
+    ) -> Result<Option<String>, DatabaseError> {
+        self.store
+            .get_conversation_source_channel(conversation_id)
+            .await
+    }
 }
 
 // ==================== JobStore ====================
@@ -249,8 +269,22 @@ impl JobStore for PgBackend {
         self.store.list_agent_jobs().await
     }
 
+    async fn list_agent_jobs_for_user(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<AgentJobRecord>, DatabaseError> {
+        self.store.list_agent_jobs_for_user(user_id).await
+    }
+
     async fn agent_job_summary(&self) -> Result<AgentJobSummary, DatabaseError> {
         self.store.agent_job_summary().await
+    }
+
+    async fn agent_job_summary_for_user(
+        &self,
+        user_id: &str,
+    ) -> Result<AgentJobSummary, DatabaseError> {
+        self.store.agent_job_summary_for_user(user_id).await
     }
 
     async fn get_agent_job_failure_reason(
@@ -496,12 +530,32 @@ impl RoutineStore for PgBackend {
             .await
     }
 
+    async fn batch_get_last_run_status(
+        &self,
+        routine_ids: &[Uuid],
+    ) -> Result<std::collections::HashMap<Uuid, crate::agent::routine::RunStatus>, DatabaseError>
+    {
+        self.store.batch_get_last_run_status(routine_ids).await
+    }
+
     async fn link_routine_run_to_job(
         &self,
         run_id: Uuid,
         job_id: Uuid,
     ) -> Result<(), DatabaseError> {
         self.store.link_routine_run_to_job(run_id, job_id).await
+    }
+
+    async fn get_webhook_routine_by_path(
+        &self,
+        path: &str,
+        user_id: Option<&str>,
+    ) -> Result<Option<Routine>, DatabaseError> {
+        self.store.get_webhook_routine_by_path(path, user_id).await
+    }
+
+    async fn list_dispatched_routine_runs(&self) -> Result<Vec<RoutineRun>, DatabaseError> {
+        self.store.list_dispatched_routine_runs().await
     }
 }
 
@@ -704,6 +758,163 @@ impl WorkspaceStore for PgBackend {
     ) -> Result<Vec<SearchResult>, WorkspaceError> {
         self.repo
             .hybrid_search(user_id, agent_id, query, embedding, config)
+            .await
+    }
+
+    // Optimized multi-scope overrides using `ANY($1::text[])` SQL.
+
+    async fn hybrid_search_multi(
+        &self,
+        user_ids: &[String],
+        agent_id: Option<Uuid>,
+        query: &str,
+        embedding: Option<&[f32]>,
+        config: &SearchConfig,
+    ) -> Result<Vec<SearchResult>, WorkspaceError> {
+        self.repo
+            .hybrid_search_multi(user_ids, agent_id, query, embedding, config)
+            .await
+    }
+
+    async fn list_all_paths_multi(
+        &self,
+        user_ids: &[String],
+        agent_id: Option<Uuid>,
+    ) -> Result<Vec<String>, WorkspaceError> {
+        self.repo.list_all_paths_multi(user_ids, agent_id).await
+    }
+
+    async fn get_document_by_path_multi(
+        &self,
+        user_ids: &[String],
+        agent_id: Option<Uuid>,
+        path: &str,
+    ) -> Result<MemoryDocument, WorkspaceError> {
+        self.repo
+            .get_document_by_path_multi(user_ids, agent_id, path)
+            .await
+    }
+
+    async fn list_directory_multi(
+        &self,
+        user_ids: &[String],
+        agent_id: Option<Uuid>,
+        directory: &str,
+    ) -> Result<Vec<WorkspaceEntry>, WorkspaceError> {
+        self.repo
+            .list_directory_multi(user_ids, agent_id, directory)
+            .await
+    }
+}
+
+// ==================== UserStore ====================
+
+#[async_trait]
+impl UserStore for PgBackend {
+    async fn create_user(&self, user: &UserRecord) -> Result<(), DatabaseError> {
+        self.store.create_user(user).await
+    }
+
+    async fn get_user(&self, id: &str) -> Result<Option<UserRecord>, DatabaseError> {
+        self.store.get_user(id).await
+    }
+
+    async fn get_user_by_email(&self, email: &str) -> Result<Option<UserRecord>, DatabaseError> {
+        self.store.get_user_by_email(email).await
+    }
+
+    async fn list_users(&self, status: Option<&str>) -> Result<Vec<UserRecord>, DatabaseError> {
+        self.store.list_users(status).await
+    }
+
+    async fn update_user_status(&self, id: &str, status: &str) -> Result<(), DatabaseError> {
+        self.store.update_user_status(id, status).await
+    }
+
+    async fn update_user_role(&self, id: &str, role: &str) -> Result<(), DatabaseError> {
+        self.store.update_user_role(id, role).await
+    }
+
+    async fn update_user_profile(
+        &self,
+        id: &str,
+        display_name: &str,
+        metadata: &serde_json::Value,
+    ) -> Result<(), DatabaseError> {
+        self.store
+            .update_user_profile(id, display_name, metadata)
+            .await
+    }
+
+    async fn record_login(&self, id: &str) -> Result<(), DatabaseError> {
+        self.store.record_login(id).await
+    }
+
+    async fn create_api_token(
+        &self,
+        user_id: &str,
+        name: &str,
+        token_hash: &[u8; 32],
+        token_prefix: &str,
+        expires_at: Option<DateTime<Utc>>,
+    ) -> Result<ApiTokenRecord, DatabaseError> {
+        self.store
+            .create_api_token(user_id, name, token_hash, token_prefix, expires_at)
+            .await
+    }
+
+    async fn list_api_tokens(&self, user_id: &str) -> Result<Vec<ApiTokenRecord>, DatabaseError> {
+        self.store.list_api_tokens(user_id).await
+    }
+
+    async fn revoke_api_token(&self, token_id: Uuid, user_id: &str) -> Result<bool, DatabaseError> {
+        self.store.revoke_api_token(token_id, user_id).await
+    }
+
+    async fn authenticate_token(
+        &self,
+        token_hash: &[u8; 32],
+    ) -> Result<Option<(ApiTokenRecord, UserRecord)>, DatabaseError> {
+        self.store.authenticate_token(token_hash).await
+    }
+
+    async fn record_token_usage(&self, token_id: Uuid) -> Result<(), DatabaseError> {
+        self.store.record_token_usage(token_id).await
+    }
+
+    async fn has_any_users(&self) -> Result<bool, DatabaseError> {
+        self.store.has_any_users().await
+    }
+
+    async fn delete_user(&self, id: &str) -> Result<bool, DatabaseError> {
+        self.store.delete_user(id).await
+    }
+
+    async fn user_usage_stats(
+        &self,
+        user_id: Option<&str>,
+        since: DateTime<Utc>,
+    ) -> Result<Vec<crate::db::UserUsageStats>, DatabaseError> {
+        self.store.user_usage_stats(user_id, since).await
+    }
+
+    async fn user_summary_stats(
+        &self,
+        user_id: Option<&str>,
+    ) -> Result<Vec<crate::db::UserSummaryStats>, DatabaseError> {
+        self.store.user_summary_stats(user_id).await
+    }
+
+    async fn create_user_with_token(
+        &self,
+        user: &UserRecord,
+        token_name: &str,
+        token_hash: &[u8; 32],
+        token_prefix: &str,
+        expires_at: Option<DateTime<Utc>>,
+    ) -> Result<ApiTokenRecord, DatabaseError> {
+        self.store
+            .create_user_with_token(user, token_name, token_hash, token_prefix, expires_at)
             .await
     }
 }

@@ -18,19 +18,24 @@ use crate::agent::agentic_loop::{
 };
 use crate::agent::scheduler::WorkerMessage;
 use crate::agent::task::TaskOutput;
-use crate::channels::web::types::SseEvent;
+use crate::channels::web::types::ToolDecisionDto;
 use crate::context::{ContextManager, JobState};
-use crate::db::Database;
 use crate::error::Error;
 use crate::hooks::HookRegistry;
 use crate::llm::{
-    ActionPlan, ChatMessage, LlmProvider, Reasoning, ReasoningContext, RespondResult, ToolCall,
-    ToolSelection,
+    ActionPlan, ChatMessage, LlmProvider, Reasoning, ReasoningContext, RespondResult,
+    ResponseMetadata, ToolCall, ToolSelection,
 };
 use crate::safety::SafetyLayer;
+use crate::tenant::AdminScope;
 use crate::tools::execute::process_tool_result;
 use crate::tools::rate_limiter::RateLimitResult;
 use crate::tools::{ApprovalContext, ToolRegistry, prepare_tool_params, redact_params};
+use crate::worker::autonomous_recovery::{
+    AutonomousRecoveryAction, AutonomousRecoveryState, EMPTY_TOOL_COMPLETION_FAILURE,
+    EMPTY_TOOL_COMPLETION_NUDGE, FORCE_TEXT_RECOVERY_PROMPT,
+};
+use ironclaw_common::AppEvent;
 
 /// Shared dependencies for worker execution.
 ///
@@ -42,12 +47,12 @@ pub struct WorkerDeps {
     pub llm: Arc<dyn LlmProvider>,
     pub safety: Arc<SafetyLayer>,
     pub tools: Arc<ToolRegistry>,
-    pub store: Option<Arc<dyn Database>>,
+    pub store: Option<AdminScope>,
     pub hooks: Arc<HookRegistry>,
     pub timeout: Duration,
     pub use_planning: bool,
-    /// SSE broadcast sender for live job event streaming to the web gateway.
-    pub sse_tx: Option<tokio::sync::broadcast::Sender<SseEvent>>,
+    /// Broadcast sender for live job event streaming to the web gateway.
+    pub sse_tx: Option<Arc<crate::channels::web::sse::SseManager>>,
     /// Approval context for tool execution. When `None`, all non-`Never` tools are
     /// blocked (legacy behavior). When `Some`, the context determines which tools
     /// are pre-approved for autonomous execution.
@@ -91,7 +96,7 @@ impl Worker {
         &self.deps.tools
     }
 
-    fn store(&self) -> Option<&Arc<dyn Database>> {
+    fn store(&self) -> Option<&AdminScope> {
         self.deps.store.as_ref()
     }
 
@@ -136,10 +141,10 @@ impl Worker {
         }
 
         // Broadcast SSE for live web UI updates
-        if let Some(ref tx) = self.deps.sse_tx {
+        if let Some(ref sse) = self.deps.sse_tx {
             let job_id_str = job_id.to_string();
             let event = match event_type {
-                "message" => Some(SseEvent::JobMessage {
+                "message" => Some(AppEvent::JobMessage {
                     job_id: job_id_str,
                     role: data
                         .get("role")
@@ -152,7 +157,7 @@ impl Worker {
                         .unwrap_or("")
                         .to_string(),
                 }),
-                "tool_use" => Some(SseEvent::JobToolUse {
+                "tool_use" => Some(AppEvent::JobToolUse {
                     job_id: job_id_str,
                     tool_name: data
                         .get("tool_name")
@@ -164,7 +169,7 @@ impl Worker {
                         .cloned()
                         .unwrap_or(serde_json::Value::Null),
                 }),
-                "tool_result" => Some(SseEvent::JobToolResult {
+                "tool_result" => Some(AppEvent::JobToolResult {
                     job_id: job_id_str,
                     tool_name: data
                         .get("tool_name")
@@ -177,7 +182,7 @@ impl Worker {
                         .unwrap_or("")
                         .to_string(),
                 }),
-                "status" => Some(SseEvent::JobStatus {
+                "status" => Some(AppEvent::JobStatus {
                     job_id: job_id_str,
                     message: data
                         .get("message")
@@ -185,7 +190,7 @@ impl Worker {
                         .unwrap_or("")
                         .to_string(),
                 }),
-                "result" => Some(SseEvent::JobResult {
+                "result" => Some(AppEvent::JobResult {
                     job_id: job_id_str,
                     status: data
                         .get("status")
@@ -196,11 +201,25 @@ impl Worker {
                         .get("session_id")
                         .and_then(|v| v.as_str())
                         .map(|s| s.to_string()),
+                    fallback_deliverable: data.get("fallback_deliverable").cloned(),
                 }),
+                "reasoning" => {
+                    let narrative = data
+                        .get("narrative")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let decisions = ToolDecisionDto::from_json_array(&data["decisions"]);
+                    Some(AppEvent::JobReasoning {
+                        job_id: job_id_str,
+                        narrative,
+                        decisions,
+                    })
+                }
                 _ => None,
             };
             if let Some(event) = event {
-                let _ = tx.send(event);
+                sse.broadcast(event);
             }
         }
     }
@@ -374,6 +393,8 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
             worker: self,
             rx: tokio::sync::Mutex::new(rx),
             consecutive_rate_limits: std::sync::atomic::AtomicUsize::new(0),
+            recovery_state: tokio::sync::Mutex::new(AutonomousRecoveryState::default()),
+            has_text_response: std::sync::atomic::AtomicBool::new(false),
         };
 
         let config = AgenticLoopConfig {
@@ -391,6 +412,9 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
             LoopOutcome::MaxIterations => {
                 self.mark_failed("Maximum iterations exceeded: job hit the iteration cap")
                     .await?;
+            }
+            LoopOutcome::Failure(reason) => {
+                self.mark_failed(&reason).await?;
             }
             LoopOutcome::Stopped => {
                 // Stop signal handled — nothing more to do
@@ -485,19 +509,49 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
 
         let normalized_params = prepare_tool_params(tool.as_ref(), params);
 
-        // Check approval: use context-aware check if available, else block all non-Never tools
+        // Fetch job context early for approval checking and other needs
+        let mut job_ctx = deps.context_manager.get_context(job_id).await?;
+
+        // Check approval: additive semantics - BOTH job-level AND worker-level must approve
         let requirement = tool.requires_approval(&normalized_params);
-        let blocked =
+
+        // Check job-level approval context (if set by tools like the builder)
+        let job_level_blocked = job_ctx
+            .approval_context
+            .as_ref()
+            .map(|ctx| ctx.is_blocked(tool_name, requirement))
+            .unwrap_or(false);
+
+        // Check worker-level approval context (set by scheduler for autonomous jobs)
+        let worker_level_blocked =
             ApprovalContext::is_blocked_or_default(&deps.approval_context, tool_name, requirement);
-        if blocked {
-            return Err(crate::error::ToolError::AuthRequired {
+
+        // Tool is blocked if EITHER level blocks it (additive/intersection semantics)
+        // This maintains defense in depth: job-level cannot bypass worker-level restrictions
+        if job_level_blocked || worker_level_blocked {
+            let reason = if job_level_blocked && worker_level_blocked {
+                format!(
+                    "Tool '{}' is blocked by both job-level and worker-level approval context",
+                    tool_name
+                )
+            } else if job_level_blocked {
+                format!(
+                    "Tool '{}' is not in the job-level allowed tools list",
+                    tool_name
+                )
+            } else {
+                format!(
+                    "Tool '{}' is not available for autonomous execution",
+                    tool_name
+                )
+            };
+            return Err(crate::error::ToolError::AutonomousUnavailable {
                 name: tool_name.to_string(),
+                reason,
             }
             .into());
         }
 
-        // Fetch job context early so we have the real user_id for hooks and rate limiting
-        let mut job_ctx = deps.context_manager.get_context(job_id).await?;
         // Propagate http_interceptor for trace recording/replay
         if job_ctx.http_interceptor.is_none() {
             job_ctx.http_interceptor = deps.http_interceptor.clone();
@@ -591,10 +645,12 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
 
         // Redact sensitive parameter values before they touch any observability or audit path.
         let safe_params = redact_params(&effective_params, tool.sensitive_params());
+        let risk = tool.risk_level_for(&effective_params);
         tracing::debug!(
             tool = %tool_name,
             params = %safe_params,
             job = %job_id,
+            risk = %risk,
             "Tool call started"
         );
 
@@ -760,12 +816,12 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
         );
         reason_ctx.messages.push(message);
 
-        match &result {
+        match result {
             Ok(raw_output) => {
                 let sanitized = self
                     .deps
                     .safety
-                    .sanitize_tool_output(&selection.tool_name, raw_output);
+                    .sanitize_tool_output(&selection.tool_name, &raw_output);
                 self.log_event(
                     "tool_result",
                     serde_json::json!({
@@ -797,15 +853,23 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                     });
                 }
 
+                let error_preview = {
+                    let msg = format!("Error: {}", e);
+                    truncate_for_preview(&msg, 500).into_owned()
+                };
                 self.log_event(
                     "tool_result",
                     serde_json::json!({
                         "tool_name": selection.tool_name,
                         "success": false,
-                        "output": truncate_for_preview(&format!("Error: {}", e), 500),
+                        "output": error_preview,
                     }),
                 );
 
+                // All tool errors (including AutonomousUnavailable) are
+                // recoverable — the error message is already recorded in
+                // reason_ctx so the LLM can see it and try a different
+                // approach. Returning Err here would kill the entire job.
                 Ok(())
             }
         }
@@ -883,6 +947,11 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                         id: selection.tool_call_id.clone(),
                         name: selection.tool_name.clone(),
                         arguments: selection.parameters.clone(),
+                        reasoning: if action.reasoning.is_empty() {
+                            None
+                        } else {
+                            Some(action.reasoning.clone())
+                        },
                     }],
                 ));
 
@@ -896,17 +965,31 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
 
-        // Plan completed, check with LLM if job is done
+        // Plan completed — ask the LLM whether the job is done.
+        let msg_count_before = reason_ctx.messages.len();
         reason_ctx.messages.push(ChatMessage::user(
-            "All planned actions have been executed. Is the job complete? If not, what else needs to be done?",
+            "All planned actions have been executed. Assess the results: \
+             if the job is fully complete, state that the job is complete. \
+             Otherwise, briefly list what remains.",
         ));
 
         let response = reasoning.respond(reason_ctx).await?;
-        reason_ctx.messages.push(ChatMessage::assistant(&response));
+        let response = crate::agent::strip_suggestions(&response);
 
         if crate::util::llm_signals_completion(&response) {
+            reason_ctx.messages.push(ChatMessage::assistant(&response));
             self.mark_completed().await?;
         } else {
+            // Replace the completion-check exchange with an action-oriented
+            // continuation prompt. Leaving the "Is the job complete?" / "No"
+            // dialogue in context causes the agentic loop to repeat the same
+            // analysis instead of calling tools (self-dialogue loop).
+            reason_ctx.messages.truncate(msg_count_before);
+            reason_ctx.messages.push(ChatMessage::user(format!(
+                "The planned actions are done but the job is not yet complete. \
+                 Remaining work:\n\n{response}\n\n\
+                 Continue executing now — use tools to finish the job."
+            )));
             tracing::info!(
                 "Job {} plan completed but work remains, falling back to direct selection",
                 self.job_id
@@ -960,9 +1043,14 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
     }
 
     async fn mark_failed(&self, reason: &str) -> Result<(), Error> {
+        // Build fallback deliverable from memory before transitioning.
+        let fallback = self.build_fallback(reason).await;
+
         self.context_manager()
             .update_context(self.job_id, |ctx| {
-                ctx.transition_to(JobState::Failed, Some(reason.to_string()))
+                ctx.transition_to(JobState::Failed, Some(reason.to_string()))?;
+                store_fallback_in_metadata(ctx, fallback.as_ref());
+                Ok(())
             })
             .await?
             .map_err(|s| crate::error::JobError::ContextError {
@@ -983,8 +1071,15 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
     }
 
     async fn mark_stuck(&self, reason: &str) -> Result<(), Error> {
+        // Build fallback deliverable from memory before transitioning.
+        let fallback = self.build_fallback(reason).await;
+
         self.context_manager()
-            .update_context(self.job_id, |ctx| ctx.mark_stuck(reason))
+            .update_context(self.job_id, |ctx| {
+                ctx.mark_stuck(reason)?;
+                store_fallback_in_metadata(ctx, fallback.as_ref());
+                Ok(())
+            })
             .await?
             .map_err(|s| crate::error::JobError::ContextError {
                 id: self.job_id,
@@ -1002,9 +1097,69 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
         self.persist_status(JobState::Stuck, Some(reason.to_string()));
         Ok(())
     }
+
+    /// Build a [`FallbackDeliverable`] from the current job context and memory.
+    async fn build_fallback(&self, reason: &str) -> Option<crate::context::FallbackDeliverable> {
+        let memory = match self.context_manager().get_memory(self.job_id).await {
+            Ok(memory) => memory,
+            Err(e) => {
+                tracing::warn!(
+                    job_id = %self.job_id,
+                    "Failed to load memory while building fallback deliverable: {e}"
+                );
+                return None;
+            }
+        };
+        let ctx = match self.context_manager().get_context(self.job_id).await {
+            Ok(ctx) => ctx,
+            Err(e) => {
+                tracing::warn!(
+                    job_id = %self.job_id,
+                    "Failed to load context while building fallback deliverable: {e}"
+                );
+                return None;
+            }
+        };
+        Some(crate::context::FallbackDeliverable::build(
+            &ctx, &memory, reason,
+        ))
+    }
+}
+
+/// Store a fallback deliverable in the job context's metadata.
+fn store_fallback_in_metadata(
+    ctx: &mut crate::context::JobContext,
+    fallback: Option<&crate::context::FallbackDeliverable>,
+) {
+    let Some(fb) = fallback else {
+        return;
+    };
+    match serde_json::to_value(fb) {
+        Ok(val) => {
+            if !ctx.metadata.is_object() {
+                ctx.metadata = serde_json::json!({});
+            }
+            ctx.metadata["fallback_deliverable"] = val;
+        }
+        Err(e) => {
+            tracing::warn!(
+                "Failed to serialize fallback deliverable for job {}: {e}",
+                ctx.job_id
+            );
+        }
+    }
 }
 
 /// Job delegate: implements `LoopDelegate` for the background job context.
+/// Whether an LLM error represents a completion-eligible empty response.
+///
+/// Only `EmptyResponse` (provider returned no choices/content) qualifies.
+/// Infrastructure errors (`AuthFailed`, `Http`, `Io`, etc.) never qualify —
+/// they must propagate even if prior text output was produced.
+fn is_completion_eligible_error(error: &crate::error::LlmError) -> bool {
+    matches!(error, crate::error::LlmError::EmptyResponse { .. })
+}
+
 ///
 /// Handles: signal channel (stop/ping/user messages), cancellation checks,
 /// rate-limit retry, parallel tool execution, DB persistence, SSE broadcasting.
@@ -1013,6 +1168,11 @@ struct JobDelegate<'a> {
     rx: tokio::sync::Mutex<&'a mut mpsc::Receiver<WorkerMessage>>,
     /// Tracks consecutive rate-limit errors to fail fast instead of burning iterations.
     consecutive_rate_limits: std::sync::atomic::AtomicUsize,
+    recovery_state: tokio::sync::Mutex<AutonomousRecoveryState>,
+    /// Whether a substantive (non-empty) text response has been produced.
+    /// When true, an empty follow-up response is treated as job completion
+    /// rather than a retry signal (prevents spurious failures in routines).
+    has_text_response: std::sync::atomic::AtomicBool,
 }
 
 impl<'a> JobDelegate<'a> {
@@ -1062,6 +1222,56 @@ impl<'a> JobDelegate<'a> {
         Ok(crate::llm::RespondOutput {
             result: RespondResult::Text(String::new()),
             usage: crate::llm::TokenUsage::default(),
+            finish_reason: crate::llm::FinishReason::Stop,
+            metadata: ResponseMetadata::default(),
+        })
+    }
+
+    /// Mark the job as completed, logging a warning on failure.
+    async fn mark_completed_or_warn(&self, context: &str) {
+        if let Err(e) = self.worker.mark_completed().await {
+            tracing::warn!(
+                job_id = %self.worker.job_id,
+                error = %e,
+                "Failed to mark job completed ({context})"
+            );
+        }
+    }
+
+    /// If a substantive text response was already produced and the error
+    /// indicates the LLM simply returned nothing, treat it as successful
+    /// completion rather than a fatal failure.
+    ///
+    /// Only swallows `EmptyResponse` — infrastructure errors (`AuthFailed`,
+    /// `ContextLengthExceeded`, `Http`, `Io`, etc.) always propagate.
+    ///
+    /// Returns `Some(empty RespondOutput)` when the error should be swallowed,
+    /// `None` when it should propagate normally.
+    async fn try_complete_on_error(
+        &self,
+        context: &str,
+        error: &crate::error::LlmError,
+    ) -> Option<crate::llm::RespondOutput> {
+        if !is_completion_eligible_error(error) {
+            return None;
+        }
+        if !self
+            .has_text_response
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return None;
+        }
+        tracing::info!(
+            job_id = %self.worker.job_id,
+            error = %error,
+            "{context} empty response after text output — treating as completion"
+        );
+        self.mark_completed_or_warn(context).await;
+        Some(crate::llm::RespondOutput {
+            result: RespondResult::Text(String::new()),
+            usage: crate::llm::TokenUsage::default(),
+            finish_reason: crate::llm::FinishReason::Stop,
+            metadata: ResponseMetadata::default(),
         })
     }
 }
@@ -1153,8 +1363,26 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
         reason_ctx: &mut ReasoningContext,
         _iteration: usize,
     ) -> Option<LoopOutcome> {
-        // Refresh tool definitions so newly built tools become visible
-        reason_ctx.available_tools = self.worker.tools().tool_definitions().await;
+        let force_text_recovery = {
+            let mut recovery = self.recovery_state.lock().await;
+            recovery.begin_iteration()
+        };
+
+        if force_text_recovery {
+            tracing::warn!(
+                job_id = %self.worker.job_id,
+                "Switching to text-only recovery after malformed tool completions"
+            );
+            reason_ctx.available_tools.clear();
+        } else {
+            // Refresh tool definitions so newly built tools become visible
+            reason_ctx.available_tools = self.worker.tools().tool_definitions().await;
+        }
+
+        // Claude 4.6 rejects assistant prefill; NEAR AI rejects any non-user-ending
+        // conversation. Ensure the last message is user-role before calling the LLM.
+        crate::util::ensure_ends_with_user_message(&mut reason_ctx.messages);
+
         None
     }
 
@@ -1182,13 +1410,20 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
                         content: reasoning_text,
                     },
                     usage: crate::llm::TokenUsage::default(),
+                    finish_reason: crate::llm::FinishReason::ToolUse,
+                    metadata: ResponseMetadata::default(),
                 });
             }
             Ok(_) => {} // empty selections, fall through
             Err(crate::error::LlmError::RateLimited { retry_after, .. }) => {
                 return self.handle_rate_limit(retry_after, "tool selection").await;
             }
-            Err(e) => return Err(e.into()),
+            Err(e) => {
+                if let Some(output) = self.try_complete_on_error("select_tools", &e).await {
+                    return Ok(output);
+                }
+                return Err(e.into());
+            }
         };
 
         // Fall back to respond_with_tools
@@ -1218,35 +1453,112 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
                 self.handle_rate_limit(retry_after, "respond_with_tools")
                     .await
             }
-            Err(e) => Err(e.into()),
+            Err(e) => {
+                if let Some(output) = self.try_complete_on_error("respond_with_tools", &e).await {
+                    return Ok(output);
+                }
+                Err(e.into())
+            }
         }
     }
 
     async fn handle_text_response(
         &self,
         text: &str,
+        metadata: ResponseMetadata,
         reason_ctx: &mut ReasoningContext,
     ) -> TextAction {
-        // Empty text from rate-limit backoff retry — skip processing and let the
-        // loop proceed to the next iteration which will re-call the LLM.
+        let action = {
+            let mut recovery = self.recovery_state.lock().await;
+            recovery.on_text_response(metadata, text)
+        };
+
+        match action {
+            AutonomousRecoveryAction::ToolModeNudge => {
+                tracing::warn!(
+                    job_id = %self.worker.job_id,
+                    "Malformed empty tool completion detected; retrying in tool mode"
+                );
+                self.worker.log_event(
+                    "status",
+                    serde_json::json!({
+                        "message": "Model returned an empty tool-completion response; retrying with a stronger tool-use nudge.",
+                    }),
+                );
+                reason_ctx
+                    .messages
+                    .push(ChatMessage::user(EMPTY_TOOL_COMPLETION_NUDGE));
+                return TextAction::Continue;
+            }
+            AutonomousRecoveryAction::ForceTextRecovery => {
+                tracing::warn!(
+                    job_id = %self.worker.job_id,
+                    "Repeated malformed tool completions detected; switching to text-only recovery"
+                );
+                self.worker.log_event(
+                    "status",
+                    serde_json::json!({
+                        "message": "Model returned repeated empty tool-completion responses; requesting a final status update without tools.",
+                    }),
+                );
+                reason_ctx
+                    .messages
+                    .push(ChatMessage::user(FORCE_TEXT_RECOVERY_PROMPT));
+                return TextAction::Continue;
+            }
+            AutonomousRecoveryAction::Fail => {
+                tracing::warn!(
+                    job_id = %self.worker.job_id,
+                    "Failing fast after repeated malformed autonomous responses"
+                );
+                return TextAction::Return(LoopOutcome::Failure(
+                    EMPTY_TOOL_COMPLETION_FAILURE.to_string(),
+                ));
+            }
+            AutonomousRecoveryAction::Continue => {}
+        }
+
+        // Empty text after a substantive response means the LLM has finished.
+        // Treat as successful completion rather than continuing the loop (which
+        // would produce "Response contained no message or tool call (empty)").
         if text.is_empty() {
+            if self
+                .has_text_response
+                .load(std::sync::atomic::Ordering::Relaxed)
+            {
+                tracing::debug!(
+                    job_id = %self.worker.job_id,
+                    "Empty response after text output — treating as completion"
+                );
+                self.mark_completed_or_warn("empty text response").await;
+                return TextAction::Return(LoopOutcome::Response(String::new()));
+            }
+            // No prior text response — this is likely a rate-limit backoff retry.
             return TextAction::Continue;
         }
 
-        // Check for explicit completion
-        if crate::util::llm_signals_completion(text) {
-            if let Err(e) = self.worker.mark_completed().await {
-                tracing::warn!(
-                    "Failed to mark job {} as completed: {}",
-                    self.worker.job_id,
-                    e
-                );
-            }
-            return TextAction::Return(LoopOutcome::Response(text.to_string()));
+        // Jobs run autonomously — strip <suggestions> tags that are only
+        // meaningful for interactive chat sessions.
+        let text = crate::agent::strip_suggestions(text);
+
+        // A non-empty text response with no tool intent (already filtered
+        // by the agentic loop's nudge mechanism) is the LLM's final answer.
+        // Mark the job complete and stop the loop. Without this, the LLM
+        // restates its summary every iteration until the cap is hit.
+        if let Err(e) = self.worker.mark_completed().await {
+            tracing::warn!(
+                "Failed to mark job {} as completed: {}",
+                self.worker.job_id,
+                e
+            );
         }
 
+        // Track that a substantive response has been produced.
+        self.has_text_response
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+
         // Add assistant response to context
-        reason_ctx.messages.push(ChatMessage::assistant(text));
+        reason_ctx.messages.push(ChatMessage::assistant(&text));
 
         self.worker.log_event(
             "message",
@@ -1256,7 +1568,7 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
             }),
         );
 
-        TextAction::Continue
+        TextAction::Return(LoopOutcome::Response(text))
     }
 
     async fn execute_tool_calls(
@@ -1265,12 +1577,62 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
         content: Option<String>,
         reason_ctx: &mut ReasoningContext,
     ) -> Result<Option<LoopOutcome>, crate::error::Error> {
+        {
+            let mut recovery = self.recovery_state.lock().await;
+            recovery.on_valid_tool_call();
+        }
+
+        // Strip suggestions from accompanying text (not useful in job context).
+        let content = content.map(|c| crate::agent::strip_suggestions(&c));
+
         if let Some(ref text) = content {
             self.worker.log_event(
                 "message",
                 serde_json::json!({
                     "role": "assistant",
                     "content": text,
+                }),
+            );
+        }
+
+        // Emit reasoning event if any tool calls carry reasoning.
+        // Sanitize narrative and per-tool rationale through SafetyLayer
+        // (parity with ChatDelegate in dispatcher.rs).
+        let sanitized_narrative = content
+            .as_deref()
+            .filter(|c| !c.trim().is_empty())
+            .map(|c| {
+                self.worker
+                    .deps
+                    .safety
+                    .sanitize_tool_output("job_narrative", c)
+                    .content
+            })
+            .filter(|c| !c.trim().is_empty())
+            .unwrap_or_default();
+        let decisions: Vec<serde_json::Value> = tool_calls
+            .iter()
+            .filter_map(|tc| {
+                tc.reasoning.as_ref().map(|r| {
+                    let sanitized = self
+                        .worker
+                        .deps
+                        .safety
+                        .sanitize_tool_output("tool_rationale", r)
+                        .content;
+                    serde_json::json!({
+                        "tool_name": tc.name,
+                        "rationale": sanitized,
+                    })
+                })
+            })
+            .collect();
+        if !decisions.is_empty() {
+            self.worker.log_event(
+                "reasoning",
+                serde_json::json!({
+                    "narrative": sanitized_narrative,
+                    "decisions": decisions,
                 }),
             );
         }
@@ -1289,7 +1651,7 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
             .map(|tc| ToolSelection {
                 tool_name: tc.name.clone(),
                 parameters: tc.arguments.clone(),
-                reasoning: String::new(),
+                reasoning: tc.reasoning.clone().unwrap_or_default(),
                 alternatives: vec![],
                 tool_call_id: tc.id.clone(),
             })
@@ -1342,6 +1704,11 @@ fn selections_to_tool_calls(selections: &[ToolSelection]) -> Vec<ToolCall> {
             id: s.tool_call_id.clone(),
             name: s.tool_name.clone(),
             arguments: s.parameters.clone(),
+            reasoning: if s.reasoning.is_empty() {
+                None
+            } else {
+                Some(s.reasoning.clone())
+            },
         })
         .collect()
 }
@@ -1361,6 +1728,9 @@ impl From<TaskOutput> for Result<String, Error> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use crate::channels::ChannelManager;
     use crate::llm::ToolSelection;
 
     use super::*;
@@ -1371,6 +1741,8 @@ mod tests {
         ToolCompletionResponse,
     };
     use crate::safety::SafetyLayer;
+    use crate::testing::{BroadcastCapture, RecordingBroadcastChannel};
+    use crate::tools::builtin::MessageTool;
     use crate::tools::{Tool, ToolError as ToolExecError, ToolOutput};
 
     /// A test tool that sleeps for a configurable duration before returning.
@@ -1440,7 +1812,7 @@ mod tests {
         }
 
         let cm = Arc::new(crate::context::ContextManager::new(5));
-        let job_id = cm.create_job("test", "test job").await.unwrap();
+        let job_id = cm.create_job("test", "test job").await.unwrap(); // safety: test
 
         let deps = WorkerDeps {
             context_manager: cm,
@@ -1462,6 +1834,20 @@ mod tests {
         Worker::new(job_id, deps)
     }
 
+    async fn make_worker_with_message_tool()
+    -> (Worker, Arc<MessageTool>, BroadcastCapture, BroadcastCapture) {
+        let channel_manager = ChannelManager::new();
+        let (gateway, gateway_captures) = RecordingBroadcastChannel::new("gateway");
+        let (telegram, telegram_captures) = RecordingBroadcastChannel::new("telegram");
+        channel_manager.add(Box::new(gateway)).await;
+        channel_manager.add(Box::new(telegram)).await;
+
+        let message_tool = Arc::new(MessageTool::new(Arc::new(channel_manager)));
+        let worker = make_worker(vec![message_tool.clone()]).await;
+
+        (worker, message_tool, gateway_captures, telegram_captures)
+    }
+
     #[test]
     fn test_tool_selection_preserves_call_id() {
         let selection = ToolSelection {
@@ -1472,8 +1858,9 @@ mod tests {
             tool_call_id: "call_abc123".to_string(),
         };
 
-        assert_eq!(selection.tool_call_id, "call_abc123");
+        assert_eq!(selection.tool_call_id, "call_abc123"); // safety: test
         assert_ne!(
+            /* safety: test */
             selection.tool_call_id, "tool_call_id",
             "tool_call_id must not be the hardcoded placeholder string"
         );
@@ -1509,11 +1896,12 @@ mod tests {
         let results = worker.execute_tools_parallel(&selections).await;
         let elapsed = start.elapsed();
 
-        assert_eq!(results.len(), 3);
+        assert_eq!(results.len(), 3); // safety: test
         for r in &results {
-            assert!(r.result.is_ok(), "Tool should succeed");
+            assert!(r.result.is_ok(), "Tool should succeed"); // safety: test
         }
         assert!(
+            /* safety: test */
             elapsed < Duration::from_millis(800),
             "Parallel execution took {:?}, expected < 800ms (sequential would be ~600ms)",
             elapsed
@@ -1565,9 +1953,9 @@ mod tests {
 
         let results = worker.execute_tools_parallel(&selections).await;
 
-        assert!(results[0].result.as_ref().unwrap().contains("done_tool_a"));
-        assert!(results[1].result.as_ref().unwrap().contains("done_tool_b"));
-        assert!(results[2].result.as_ref().unwrap().contains("done_tool_c"));
+        assert!(results[0].result.as_ref().unwrap().contains("done_tool_a")); // safety: test
+        assert!(results[1].result.as_ref().unwrap().contains("done_tool_b")); // safety: test
+        assert!(results[2].result.as_ref().unwrap().contains("done_tool_c")); // safety: test
     }
 
     #[tokio::test]
@@ -1583,8 +1971,9 @@ mod tests {
         }];
 
         let results = worker.execute_tools_parallel(&selections).await;
-        assert_eq!(results.len(), 1);
+        assert_eq!(results.len(), 1); // safety: test
         assert!(
+            /* safety: test */
             results[0].result.is_err(),
             "Missing tool should produce an error, not a panic"
         );
@@ -1600,23 +1989,24 @@ mod tests {
                 ctx.transition_to(JobState::InProgress, None)
             })
             .await
-            .unwrap()
-            .unwrap();
+            .unwrap() // safety: test
+            .unwrap(); // safety: test
 
-        worker.mark_completed().await.unwrap();
+        worker.mark_completed().await.unwrap(); // safety: test
 
         let ctx = worker
             .context_manager()
             .get_context(worker.job_id)
             .await
-            .unwrap();
-        assert_eq!(ctx.state, JobState::Completed);
+            .unwrap(); // safety: test
+        assert_eq!(ctx.state, JobState::Completed); // safety: test
 
         // Second mark_completed should succeed (idempotent) rather than
         // erroring, matching the fix for the execution_loop / worker wrapper
         // race condition.
         let result = worker.mark_completed().await;
         assert!(
+            /* safety: test */
             result.is_ok(),
             "Completed -> Completed transition should be idempotent"
         );
@@ -1641,7 +2031,7 @@ mod tests {
         }
 
         let cm = Arc::new(crate::context::ContextManager::new(5));
-        let job_id = cm.create_job("test", "test job").await.unwrap();
+        let job_id = cm.create_job("test", "test job").await.unwrap(); // safety: test
 
         let deps = WorkerDeps {
             context_manager: cm,
@@ -1734,25 +2124,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_approval_context_unblocks_unless_auto_approved() {
+    async fn test_approval_context_requires_explicit_allowed_tool_names() {
         let worker_blocked = make_worker_with_approval(vec![Arc::new(ApprovalTool)], None).await;
         let result = worker_blocked
             .execute_tool("needs_approval", &serde_json::json!({}))
             .await;
         assert!(
+            /* safety: test */
             result.is_err(),
             "Should be blocked without approval context"
         );
 
         let worker_allowed = make_worker_with_approval(
             vec![Arc::new(ApprovalTool)],
-            Some(crate::tools::ApprovalContext::autonomous()),
+            Some(crate::tools::ApprovalContext::autonomous_with_tools([
+                "needs_approval".to_string(),
+            ])),
         )
         .await;
         let result = worker_allowed
             .execute_tool("needs_approval", &serde_json::json!({}))
             .await;
-        assert!(result.is_ok(), "Should be allowed with autonomous context");
+        assert!(
+            result.is_ok(),
+            "Should be allowed when the tool is in the autonomous scope"
+        ); // safety: test
     }
 
     #[tokio::test]
@@ -1766,6 +2162,7 @@ mod tests {
             .execute_tool("always_approval", &serde_json::json!({}))
             .await;
         assert!(
+            /* safety: test */
             result.is_err(),
             "Always tool should be blocked without permission"
         );
@@ -1781,8 +2178,127 @@ mod tests {
             .execute_tool("always_approval", &serde_json::json!({}))
             .await;
         assert!(
+            /* safety: test */
             result.is_ok(),
             "Always tool should be allowed with permission"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_approval_context_returns_structured_autonomous_unavailable_error() {
+        let worker = make_worker_with_approval(
+            vec![Arc::new(AlwaysApprovalTool)],
+            Some(crate::tools::ApprovalContext::autonomous()),
+        )
+        .await;
+
+        let result = worker
+            .execute_tool("always_approval", &serde_json::json!({}))
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(Error::Tool(crate::error::ToolError::AutonomousUnavailable { name, .. }))
+                if name == "always_approval"
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_additive_approval_semantics_both_levels_must_approve() {
+        // Test additive semantics: BOTH job-level AND worker-level must approve
+        // If either blocks, the tool is blocked (defense in depth)
+
+        // Scenario 1: Worker-level allows, job-level blocks → BLOCKED
+        let worker = make_worker_with_approval(
+            vec![Arc::new(AlwaysApprovalTool)],
+            // Worker-level allows the tool
+            Some(crate::tools::ApprovalContext::autonomous_with_tools([
+                "always_approval".to_string(),
+            ])),
+        )
+        .await;
+
+        // Set job-level context to block the tool (by not listing it)
+        worker
+            .context_manager()
+            .update_context(worker.job_id, |ctx| {
+                ctx.approval_context = Some(crate::tools::ApprovalContext::autonomous());
+            })
+            .await
+            .unwrap();
+
+        let result = worker
+            .execute_tool("always_approval", &serde_json::json!({}))
+            .await;
+        assert!(
+            result.is_err(),
+            "Tool should be blocked when job-level doesn't allow it, \
+             even if worker-level does (additive semantics)"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_additive_approval_worker_block_overrides_job_allow() {
+        // Scenario 2: Job-level allows, worker-level blocks → BLOCKED
+        let worker = make_worker_with_approval(
+            vec![Arc::new(AlwaysApprovalTool)],
+            // Worker-level does NOT allow the tool
+            Some(crate::tools::ApprovalContext::autonomous()),
+        )
+        .await;
+
+        // Set job-level context to allow the tool
+        worker
+            .context_manager()
+            .update_context(worker.job_id, |ctx| {
+                ctx.approval_context =
+                    Some(crate::tools::ApprovalContext::autonomous_with_tools([
+                        "always_approval".to_string(),
+                    ]));
+            })
+            .await
+            .unwrap();
+
+        let result = worker
+            .execute_tool("always_approval", &serde_json::json!({}))
+            .await;
+        assert!(
+            result.is_err(),
+            "Tool should be blocked when worker-level doesn't allow it, \
+             even if job-level does (additive semantics)"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_additive_approval_both_levels_allow() {
+        // Scenario 3: Both levels allow → ALLOWED
+        let worker = make_worker_with_approval(
+            vec![Arc::new(AlwaysApprovalTool)],
+            // Worker-level allows
+            Some(crate::tools::ApprovalContext::autonomous_with_tools([
+                "always_approval".to_string(),
+            ])),
+        )
+        .await;
+
+        // Job-level also allows
+        worker
+            .context_manager()
+            .update_context(worker.job_id, |ctx| {
+                ctx.approval_context =
+                    Some(crate::tools::ApprovalContext::autonomous_with_tools([
+                        "always_approval".to_string(),
+                    ]));
+            })
+            .await
+            .unwrap();
+
+        let result = worker
+            .execute_tool("always_approval", &serde_json::json!({}))
+            .await;
+        assert!(
+            result.is_ok(),
+            "Tool should be allowed when both job-level and worker-level allow it"
         );
     }
 
@@ -1797,8 +2313,8 @@ mod tests {
                 ctx.transition_to(JobState::InProgress, None)
             })
             .await
-            .unwrap()
-            .unwrap();
+            .unwrap() // safety: test
+            .unwrap(); // safety: test
 
         // Set a token budget
         worker
@@ -1807,16 +2323,17 @@ mod tests {
                 ctx.max_tokens = 100;
             })
             .await
-            .unwrap();
+            .unwrap(); // safety: test
 
         // Simulate adding tokens that exceed the budget
         let budget_result = worker
             .context_manager()
             .update_context(worker.job_id, |ctx| ctx.add_tokens(200))
             .await
-            .unwrap();
+            .unwrap(); // safety: test
 
         assert!(
+            /* safety: test */
             budget_result.is_err(),
             "Should return error when token budget exceeded"
         );
@@ -1825,13 +2342,13 @@ mod tests {
         worker
             .mark_failed(&budget_result.unwrap_err().to_string())
             .await
-            .unwrap();
+            .unwrap(); // safety: test
         let ctx = worker
             .context_manager()
             .get_context(worker.job_id)
             .await
-            .unwrap();
-        assert_eq!(ctx.state, JobState::Failed);
+            .unwrap(); // safety: test
+        assert_eq!(ctx.state, JobState::Failed); // safety: test
     }
 
     #[tokio::test]
@@ -1845,25 +2362,75 @@ mod tests {
                 ctx.transition_to(JobState::InProgress, None)
             })
             .await
-            .unwrap()
-            .unwrap();
+            .unwrap() // safety: test
+            .unwrap(); // safety: test
 
         // Simulate what the execution loop does when max_iterations is exceeded
         worker
             .mark_failed("Maximum iterations exceeded: job hit the iteration cap")
             .await
-            .unwrap();
+            .unwrap(); // safety: test
 
         let ctx = worker
             .context_manager()
             .get_context(worker.job_id)
             .await
-            .unwrap();
+            .unwrap(); // safety: test
         assert_eq!(
+            /* safety: test */
             ctx.state,
             JobState::Failed,
             "Iteration cap should transition to Failed, not Stuck"
         );
+    }
+
+    /// Regression: a text response without rigid completion phrases (e.g.
+    /// "Weekly review completed and saved to Notion") must still terminate the
+    /// agentic loop and mark the job complete, rather than continuing until
+    /// max_iterations.
+    #[tokio::test]
+    async fn test_text_response_terminates_loop_without_explicit_completion_phrase() {
+        let worker = make_worker(vec![]).await;
+        worker
+            .context_manager()
+            .update_context(worker.job_id, |ctx| {
+                ctx.transition_to(JobState::InProgress, None)
+            })
+            .await
+            .unwrap() // safety: test
+            .unwrap(); // safety: test
+
+        let (_, mut rx) = tokio::sync::mpsc::channel(1);
+        let delegate = JobDelegate {
+            worker: &worker,
+            rx: tokio::sync::Mutex::new(&mut rx),
+            consecutive_rate_limits: std::sync::atomic::AtomicUsize::new(0),
+            recovery_state: tokio::sync::Mutex::new(AutonomousRecoveryState::default()),
+            has_text_response: std::sync::atomic::AtomicBool::new(false),
+        };
+
+        let mut reason_ctx = ReasoningContext::new();
+
+        // Text that a real LLM would produce but doesn't match llm_signals_completion
+        let action = delegate
+            .handle_text_response(
+                "Weekly review created in Notion and notification sent.",
+                ResponseMetadata::default(),
+                &mut reason_ctx,
+            )
+            .await;
+
+        assert!(
+            matches!(action, TextAction::Return(_)),
+            "Text response should terminate the loop, got Continue"
+        ); // safety: test
+
+        let ctx = worker
+            .context_manager()
+            .get_context(worker.job_id)
+            .await
+            .unwrap(); // safety: test
+        assert_eq!(ctx.state, JobState::Completed); // safety: test
     }
 
     /// Regression test: selections_to_tool_calls must preserve tool_call_id
@@ -1987,6 +2554,191 @@ mod tests {
             reasoning_text.as_deref(),
             Some("Found the answer in the second selection"),
             "Should skip empty first reasoning and return the first non-empty one"
+        );
+    }
+
+    #[test]
+    fn test_store_fallback_in_metadata_roundtrip() {
+        use crate::context::FallbackDeliverable;
+
+        let mut ctx = JobContext::new("Test", "fallback roundtrip");
+        let memory = crate::context::Memory::new(ctx.job_id);
+        let fb = FallbackDeliverable::build(&ctx, &memory, "test failure");
+
+        // Store into metadata
+        store_fallback_in_metadata(&mut ctx, Some(&fb));
+
+        // Verify it's stored and can be deserialized back
+        let stored = ctx.metadata.get("fallback_deliverable");
+        assert!(stored.is_some(), "fallback missing from metadata"); // safety: test
+
+        let recovered: FallbackDeliverable =
+            serde_json::from_value(stored.unwrap().clone()).expect("deserialize fallback"); // safety: test
+        assert_eq!(recovered.failure_reason, "test failure"); // safety: test
+        assert!(!recovered.partial); // safety: test
+    }
+
+    #[test]
+    fn test_store_fallback_handles_non_object_metadata() {
+        use crate::context::FallbackDeliverable;
+
+        let mut ctx = JobContext::new("Test", "non-object metadata");
+        ctx.metadata = serde_json::json!("not an object");
+
+        let memory = crate::context::Memory::new(ctx.job_id);
+        let fb = FallbackDeliverable::build(&ctx, &memory, "failed");
+
+        store_fallback_in_metadata(&mut ctx, Some(&fb));
+
+        // Must normalize to object and store
+        assert!(ctx.metadata.is_object()); // safety: test
+        assert!(ctx.metadata.get("fallback_deliverable").is_some()); // safety: test
+    }
+
+    #[test]
+    fn test_store_fallback_none_is_noop() {
+        let mut ctx = JobContext::new("Test", "noop");
+        let original = ctx.metadata.clone();
+
+        store_fallback_in_metadata(&mut ctx, None);
+
+        assert_eq!(ctx.metadata, original); // safety: test
+    }
+
+    #[tokio::test]
+    async fn autonomous_message_tool_ignores_stale_gateway_context_when_routine_metadata_targets_telegram()
+     {
+        let (worker, message_tool, gateway_captures, telegram_captures) =
+            make_worker_with_message_tool().await;
+
+        message_tool
+            .set_context(
+                Some("gateway".to_string()),
+                Some("stale-gateway-target".to_string()),
+            )
+            .await;
+
+        worker
+            .context_manager()
+            .update_context(worker.job_id, |ctx| {
+                ctx.user_id = "telegram".to_string();
+                ctx.metadata = serde_json::json!({
+                    "notify_channel": "telegram",
+                    "owner_id": "owner-scope",
+                });
+                Ok::<(), String>(())
+            })
+            .await
+            .unwrap() // safety: test
+            .unwrap(); // safety: test
+
+        let result = worker
+            .execute_tool(
+                "message",
+                &serde_json::json!({"content": "hello from routine"}),
+            )
+            .await
+            .unwrap(); // safety: test
+        assert!(
+            result.contains("telegram:owner-scope"),
+            "expected telegram owner-scope routing, got: {result}"
+        );
+
+        assert!(gateway_captures.lock().await.is_empty());
+        let telegram = telegram_captures.lock().await.clone();
+        assert_eq!(telegram.len(), 1);
+        assert_eq!(telegram[0].0, "owner-scope");
+        assert_eq!(telegram[0].1.content, "hello from routine");
+    }
+
+    /// Regression test: only `EmptyResponse` errors are eligible for
+    /// completion-swallowing. Infrastructure errors must always propagate.
+    #[test]
+    fn is_completion_eligible_only_matches_empty_response() {
+        use crate::error::LlmError;
+
+        // EmptyResponse is eligible
+        assert!(super::is_completion_eligible_error(
+            &LlmError::EmptyResponse {
+                provider: "test".to_string(),
+            }
+        ));
+
+        // All other variants are NOT eligible
+        assert!(!super::is_completion_eligible_error(
+            &LlmError::InvalidResponse {
+                provider: "test".to_string(),
+                reason: "parse error".to_string(),
+            }
+        ));
+        assert!(!super::is_completion_eligible_error(
+            &LlmError::AuthFailed {
+                provider: "test".to_string(),
+            }
+        ));
+        assert!(!super::is_completion_eligible_error(
+            &LlmError::ContextLengthExceeded {
+                used: 100_000,
+                limit: 50_000,
+            }
+        ));
+        assert!(!super::is_completion_eligible_error(
+            &LlmError::ModelNotAvailable {
+                provider: "test".to_string(),
+                model: "gpt-4".to_string(),
+            }
+        ));
+        assert!(!super::is_completion_eligible_error(
+            &LlmError::RequestFailed {
+                provider: "test".to_string(),
+                reason: "timeout".to_string(),
+            }
+        ));
+        assert!(!super::is_completion_eligible_error(
+            &LlmError::SessionExpired {
+                provider: "test".to_string(),
+            }
+        ));
+        assert!(!super::is_completion_eligible_error(
+            &LlmError::SessionRenewalFailed {
+                provider: "test".to_string(),
+                reason: "timeout".to_string(),
+            }
+        ));
+    }
+
+    /// Regression test: AutonomousUnavailable errors must be recoverable.
+    /// Previously the job worker treated them as fatal, killing the entire
+    /// job instead of feeding the error back to the LLM.
+    #[tokio::test]
+    async fn test_autonomous_unavailable_is_recoverable() {
+        let worker = make_worker(vec![]).await;
+        let mut reason_ctx = ReasoningContext::new();
+        let selection = ToolSelection {
+            tool_name: "secret_list".to_string(),
+            parameters: serde_json::json!({}),
+            reasoning: "list secrets".to_string(),
+            alternatives: vec![],
+            tool_call_id: "call_123".to_string(),
+        };
+        let err = Error::Tool(crate::error::ToolError::AutonomousUnavailable {
+            name: "secret_list".to_string(),
+            reason: "not available in autonomous jobs".to_string(),
+        });
+
+        let result = worker
+            .process_tool_result_job(&mut reason_ctx, &selection, Err(err))
+            .await;
+
+        assert!(
+            result.is_ok(),
+            "AutonomousUnavailable must be recoverable, not fatal: {:?}",
+            result
+        );
+        // The error should be fed back to the LLM as a message.
+        assert!(
+            !reason_ctx.messages.is_empty(),
+            "Error message should be added to reason_ctx for the LLM"
         );
     }
 }

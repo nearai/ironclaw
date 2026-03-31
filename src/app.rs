@@ -25,7 +25,7 @@ use crate::tools::ToolRegistry;
 use crate::tools::mcp::{McpProcessManager, McpSessionManager};
 use crate::tools::wasm::SharedCredentialRegistry;
 use crate::tools::wasm::WasmToolRuntime;
-use crate::workspace::{EmbeddingProvider, Workspace};
+use crate::workspace::{EmbeddingCacheConfig, EmbeddingProvider, Workspace};
 
 /// Fully initialized application components, ready for channel wiring
 /// and agent construction.
@@ -56,6 +56,7 @@ pub struct AppComponents {
     pub session: Arc<SessionManager>,
     pub catalog_entries: Vec<crate::extensions::RegistryEntry>,
     pub dev_loaded_tool_names: Vec<String>,
+    pub builder: Option<Arc<dyn crate::tools::SoftwareBuilder>>,
 }
 
 /// Options that control optional init phases.
@@ -228,18 +229,35 @@ impl AppBuilder {
         let store = crate::secrets::create_secrets_store(crypto, handles);
 
         if let Some(ref secrets) = store {
+            // Migrate any plaintext API keys from the settings table to the
+            // encrypted secrets store. Idempotent — safe to run on every startup.
+            if let Some(ref db) = self.db {
+                crate::config::migrate_plaintext_llm_keys(
+                    db.as_ref(),
+                    secrets.as_ref(),
+                    &self.config.owner_id,
+                )
+                .await;
+            }
+
             // Inject LLM API keys from encrypted storage
             crate::config::inject_llm_keys_from_secrets(secrets.as_ref(), &self.config.owner_id)
                 .await;
 
-            // Re-resolve only the LLM config with newly available keys.
-            let store: Option<&(dyn crate::db::SettingsStore + Sync)> =
+            // Re-resolve only the LLM config with newly available keys,
+            // including keys hydrated from the secrets store.
+            let settings_store: Option<&(dyn crate::db::SettingsStore + Sync)> =
                 self.db.as_ref().map(|db| db.as_ref() as _);
             let toml_path = self.toml_path.as_deref();
             let owner_id = self.config.owner_id.clone();
             if let Err(e) = self
                 .config
-                .re_resolve_llm(store, &owner_id, toml_path)
+                .re_resolve_llm_with_secrets(
+                    settings_store,
+                    &owner_id,
+                    toml_path,
+                    Some(secrets.as_ref()),
+                )
                 .await
             {
                 tracing::warn!("Failed to re-resolve LLM config after secret injection: {e}");
@@ -280,6 +298,7 @@ impl AppBuilder {
             Arc<ToolRegistry>,
             Option<Arc<dyn EmbeddingProvider>>,
             Option<Arc<Workspace>>,
+            Option<Arc<dyn crate::tools::SoftwareBuilder>>,
         ),
         anyhow::Error,
     > {
@@ -310,14 +329,53 @@ impl AppBuilder {
             .create_provider(&self.config.llm.nearai.base_url, self.session.clone());
 
         // Register memory tools if database is available
+        let workspace_user_id = self.config.owner_id.as_str();
         let workspace = if let Some(ref db) = self.db {
-            let mut ws = Workspace::new_with_db(&self.config.owner_id, db.clone())
+            let emb_cache_config = EmbeddingCacheConfig {
+                max_entries: self.config.embeddings.cache_size,
+            };
+            let mut ws = Workspace::new_with_db(workspace_user_id, db.clone())
                 .with_search_config(&self.config.search);
+
             if let Some(ref emb) = embeddings {
-                ws = ws.with_embeddings(emb.clone());
+                ws = ws.with_embeddings_cached(emb.clone(), emb_cache_config.clone());
             }
+
+            // Wire workspace-level settings (read scopes, memory layers)
+            if !self.config.workspace.read_scopes.is_empty() {
+                ws = ws.with_additional_read_scopes(self.config.workspace.read_scopes.clone());
+                tracing::info!(
+                    user_id = workspace_user_id,
+                    read_scopes = ?ws.read_user_ids(),
+                    "Workspace configured with multi-scope reads"
+                );
+            }
+            ws = ws.with_memory_layers(self.config.workspace.memory_layers.clone());
             let ws = Arc::new(ws);
-            tools.register_memory_tools(Arc::clone(&ws));
+
+            // Detect multi-tenant mode: when the database has registered users,
+            // each authenticated user needs their own workspace scope. Use
+            // WorkspacePool (which implements WorkspaceResolver) to create
+            // per-user workspaces on demand instead of sharing the startup
+            // workspace across all users.
+            let is_multi_tenant = db.has_any_users().await.unwrap_or(false);
+
+            if is_multi_tenant {
+                let pool = Arc::new(crate::channels::web::server::WorkspacePool::new(
+                    Arc::clone(db),
+                    embeddings.clone(),
+                    emb_cache_config,
+                    self.config.search.clone(),
+                    self.config.workspace.clone(),
+                ));
+                tools.register_memory_tools_with_resolver(pool);
+                tracing::info!(
+                    "Memory tools configured with per-user workspace resolver (multi-tenant mode)"
+                );
+            } else {
+                tools.register_memory_tools(Arc::clone(&ws));
+            }
+
             Some(ws)
         } else {
             None
@@ -367,16 +425,19 @@ impl AppBuilder {
         }
 
         // Register builder tool if enabled
-        if self.config.builder.enabled
+        let builder = if self.config.builder.enabled
             && (self.config.agent.allow_local_tools || !self.config.sandbox.enabled)
         {
-            tools
+            let b = tools
                 .register_builder_tool(llm.clone(), Some(self.config.builder.to_builder_config()))
                 .await;
             tracing::debug!("Builder mode enabled");
-        }
+            Some(b)
+        } else {
+            None
+        };
 
-        Ok((safety, tools, embeddings, workspace))
+        Ok((safety, tools, embeddings, workspace, builder))
     }
 
     /// Phase 5: Load WASM tools, MCP servers, and create extension manager.
@@ -520,7 +581,7 @@ impl AppBuilder {
                                             server_name,
                                             e
                                         );
-                                        return;
+                                        return None;
                                     }
                                 };
 
@@ -537,6 +598,10 @@ impl AppBuilder {
                                                     tool_count,
                                                     server_name
                                                 );
+                                                return Some((
+                                                    server_name,
+                                                    Arc::new(client),
+                                                ));
                                             }
                                             Err(e) => {
                                                 tracing::warn!(
@@ -567,14 +632,27 @@ impl AppBuilder {
                                         }
                                     }
                                 }
+                                None
                             });
                         }
 
+                        let mut startup_clients = Vec::new();
                         while let Some(result) = join_set.join_next().await {
-                            if let Err(e) = result {
-                                tracing::warn!("MCP server loading task panicked: {}", e);
+                            match result {
+                                Ok(Some(client_pair)) => {
+                                    startup_clients.push(client_pair);
+                                }
+                                Ok(None) => {}
+                                Err(e) => {
+                                    if e.is_panic() {
+                                        tracing::error!("MCP server loading task panicked: {}", e);
+                                    } else {
+                                        tracing::warn!("MCP server loading task failed: {}", e);
+                                    }
+                                }
                             }
                         }
+                        return startup_clients;
                     }
                     Err(e) => {
                         if matches!(
@@ -592,10 +670,12 @@ impl AppBuilder {
                         }
                     }
                 }
+                Vec::new()
             }
         };
 
-        let (dev_loaded_tool_names, _) = tokio::join!(wasm_tools_future, mcp_servers_future);
+        let (dev_loaded_tool_names, startup_mcp_clients) =
+            tokio::join!(wasm_tools_future, mcp_servers_future);
 
         // Load registry catalog entries for extension discovery
         let mut catalog_entries = match crate::registry::RegistryCatalog::load_or_embedded() {
@@ -657,6 +737,17 @@ impl AppBuilder {
             ));
             tools.register_extension_tools(Arc::clone(&manager));
             tracing::debug!("Extension manager initialized with in-chat discovery tools");
+
+            if !startup_mcp_clients.is_empty() {
+                tracing::info!(
+                    count = startup_mcp_clients.len(),
+                    "Injecting startup MCP clients into extension manager"
+                );
+                for (name, client) in startup_mcp_clients {
+                    manager.inject_mcp_client(name, client).await;
+                }
+            }
+
             Some(manager)
         };
 
@@ -683,10 +774,14 @@ impl AppBuilder {
         self.init_database().await?;
         self.init_secrets().await?;
 
-        // Post-init validation: if a non-nearai backend was selected but
-        // credentials were never resolved (deferred resolution found no keys),
-        // fail early with a clear error instead of a confusing runtime failure.
-        if self.config.llm.backend != "nearai" && self.config.llm.provider.is_none() {
+        // Post-init validation: backends with dedicated config (nearai, gemini_oauth,
+        // bedrock, openai_codex) handle their own credential resolution. For registry-based
+        // backends, fail early if no provider config was resolved.
+        if !matches!(
+            self.config.llm.backend.as_str(),
+            "nearai" | "gemini_oauth" | "bedrock" | "openai_codex"
+        ) && self.config.llm.provider.is_none()
+        {
             let backend = &self.config.llm.backend;
             anyhow::bail!(
                 "LLM_BACKEND={backend} is configured but no credentials were found. \
@@ -699,7 +794,7 @@ impl AppBuilder {
         } else {
             self.init_llm().await?
         };
-        let (safety, tools, embeddings, workspace) = self.init_tools(&llm).await?;
+        let (safety, tools, embeddings, workspace, builder) = self.init_tools(&llm).await?;
 
         // Create hook registry early so runtime extension activation can register hooks.
         let hooks = Arc::new(HookRegistry::new());
@@ -714,6 +809,17 @@ impl AppBuilder {
             catalog_entries,
             dev_loaded_tool_names,
         ) = self.init_extensions(&tools, &hooks).await?;
+
+        // Load bootstrap-completed flag from settings so that existing users
+        // who already completed onboarding don't re-get bootstrap injection.
+        if let Some(ref ws) = workspace {
+            let toml_path = crate::settings::Settings::default_toml_path();
+            if let Ok(Some(settings)) = crate::settings::Settings::load_toml(&toml_path)
+                && settings.profile_onboarding_completed
+            {
+                ws.mark_bootstrap_completed();
+            }
+        }
 
         // Seed workspace and backfill embeddings
         if let Some(ref ws) = workspace {
@@ -768,7 +874,8 @@ impl AppBuilder {
         // Skills system
         let (skill_registry, skill_catalog) = if self.config.skills.enabled {
             let mut registry = SkillRegistry::new(self.config.skills.local_dir.clone())
-                .with_installed_dir(self.config.skills.installed_dir.clone());
+                .with_installed_dir(self.config.skills.installed_dir.clone())
+                .with_max_scan_depth(self.config.skills.max_scan_depth);
             let loaded = registry.discover_all().await;
             if !loaded.is_empty() {
                 tracing::debug!("Loaded {} skill(s): {}", loaded.len(), loaded.join(", "));
@@ -786,6 +893,7 @@ impl AppBuilder {
             crate::agent::cost_guard::CostGuardConfig {
                 max_cost_per_day_cents: self.config.agent.max_cost_per_day_cents,
                 max_actions_per_hour: self.config.agent.max_actions_per_hour,
+                max_cost_per_user_per_day_cents: self.config.agent.max_cost_per_user_per_day_cents,
             },
         ));
 
@@ -819,6 +927,7 @@ impl AppBuilder {
             session: self.session,
             catalog_entries,
             dev_loaded_tool_names,
+            builder,
         })
     }
 }

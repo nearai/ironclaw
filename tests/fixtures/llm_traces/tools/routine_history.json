@@ -41,7 +41,7 @@
     {
       "response": {
         "type": "text",
-        "content": "The history-test routine was created. Its run history is empty since it hasn't been triggered yet.",
+        "content": "The history-test routine was created, but it is not verified yet. Its run history is empty since it hasn't been triggered yet.",
         "input_tokens": 300,
         "output_tokens": 25
       }

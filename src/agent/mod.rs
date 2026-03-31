@@ -36,11 +36,14 @@ pub(crate) use agent_loop::truncate_for_preview;
 pub use agent_loop::{Agent, AgentDeps};
 pub use compaction::{CompactionResult, ContextCompactor};
 pub use context_monitor::{CompactionStrategy, ContextBreakdown, ContextMonitor};
-pub use heartbeat::{HeartbeatConfig, HeartbeatResult, HeartbeatRunner, spawn_heartbeat};
+pub(crate) use dispatcher::strip_suggestions;
+pub use heartbeat::{
+    HeartbeatConfig, HeartbeatResult, HeartbeatRunner, spawn_heartbeat, spawn_multi_user_heartbeat,
+};
 pub use router::{MessageIntent, Router};
 pub use routine::{Routine, RoutineAction, RoutineRun, Trigger};
-pub use routine_engine::RoutineEngine;
-pub use scheduler::Scheduler;
+pub use routine_engine::{RoutineEngine, SandboxReadiness};
+pub use scheduler::{Scheduler, SchedulerDeps};
 pub use self_repair::{BrokenTool, RepairResult, RepairTask, SelfRepair, StuckJob};
 pub use session::{PendingApproval, PendingAuth, Session, Thread, ThreadState, Turn, TurnState};
 pub use session_manager::SessionManager;

@@ -97,7 +97,7 @@ pub async fn connect_with_handles(
                     .map_err(|e| DatabaseError::Pool(e.to_string()))?
             };
             backend.run_migrations().await?;
-            tracing::info!("libSQL database connected and migrations applied");
+            tracing::debug!("libSQL database connected and migrations applied");
 
             handles.libsql_db = Some(backend.shared_db());
 
@@ -309,6 +309,43 @@ async fn validate_postgres(pool: &deadpool_postgres::Pool) -> Result<(), Databas
     Ok(())
 }
 
+// ==================== User management record types ====================
+
+/// A registered user.
+#[derive(Debug, Clone)]
+pub struct UserRecord {
+    /// User identifier (string, matches existing `user_id` throughout the codebase).
+    pub id: String,
+    pub email: Option<String>,
+    pub display_name: String,
+    /// `active`, `suspended`, or `deactivated`.
+    pub status: String,
+    /// `admin` or `member`.
+    pub role: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub last_login_at: Option<DateTime<Utc>>,
+    /// Who created/invited this user (nullable for bootstrap users).
+    pub created_by: Option<String>,
+    pub metadata: serde_json::Value,
+}
+
+/// An API token for authenticating requests (hash stored, never plaintext).
+#[derive(Debug, Clone)]
+pub struct ApiTokenRecord {
+    pub id: Uuid,
+    pub user_id: String,
+    /// Human label (e.g. "my-laptop", "ci-bot").
+    pub name: String,
+    /// First 8 hex chars of the plaintext token for display/identification.
+    pub token_prefix: String,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub last_used_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    /// Soft-revoke timestamp. Non-null means revoked.
+    pub revoked_at: Option<DateTime<Utc>>,
+}
+
 // ==================== Sub-traits ====================
 //
 // Each sub-trait groups related persistence methods. The `Database` supertrait
@@ -336,6 +373,7 @@ pub trait ConversationStore: Send + Sync {
         channel: &str,
         user_id: &str,
         thread_id: Option<&str>,
+        source_channel: Option<&str>,
     ) -> Result<bool, DatabaseError>;
     async fn list_conversations_with_preview(
         &self,
@@ -354,6 +392,13 @@ pub trait ConversationStore: Send + Sync {
         routine_name: &str,
         user_id: &str,
     ) -> Result<Uuid, DatabaseError>;
+    /// Read-only lookup for an existing routine conversation. Returns `None`
+    /// if the routine has never executed (no conversation created yet).
+    async fn find_routine_conversation(
+        &self,
+        routine_id: Uuid,
+        user_id: &str,
+    ) -> Result<Option<Uuid>, DatabaseError>;
     async fn get_or_create_heartbeat_conversation(
         &self,
         user_id: &str,
@@ -394,6 +439,11 @@ pub trait ConversationStore: Send + Sync {
         conversation_id: Uuid,
         user_id: &str,
     ) -> Result<bool, DatabaseError>;
+    /// Get the source_channel for a conversation (the channel that created it).
+    async fn get_conversation_source_channel(
+        &self,
+        conversation_id: Uuid,
+    ) -> Result<Option<String>, DatabaseError>;
 }
 
 #[async_trait]
@@ -409,7 +459,15 @@ pub trait JobStore: Send + Sync {
     async fn mark_job_stuck(&self, id: Uuid) -> Result<(), DatabaseError>;
     async fn get_stuck_jobs(&self) -> Result<Vec<Uuid>, DatabaseError>;
     async fn list_agent_jobs(&self) -> Result<Vec<AgentJobRecord>, DatabaseError>;
+    async fn list_agent_jobs_for_user(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<AgentJobRecord>, DatabaseError>;
     async fn agent_job_summary(&self) -> Result<AgentJobSummary, DatabaseError>;
+    async fn agent_job_summary_for_user(
+        &self,
+        user_id: &str,
+    ) -> Result<AgentJobSummary, DatabaseError>;
     /// Get the failure reason for a single agent job (O(1) lookup).
     async fn get_agent_job_failure_reason(&self, id: Uuid)
     -> Result<Option<String>, DatabaseError>;
@@ -520,11 +578,29 @@ pub trait RoutineStore: Send + Sync {
         &self,
         routine_ids: &[Uuid],
     ) -> Result<HashMap<Uuid, i64>, DatabaseError>;
+
+    /// Fetch the last run status for multiple routines in a single query.
+    /// Returns a map from routine_id to its most recent RunStatus.
+    /// Routines with no runs are omitted from the result.
+    async fn batch_get_last_run_status(
+        &self,
+        routine_ids: &[Uuid],
+    ) -> Result<HashMap<Uuid, RunStatus>, DatabaseError>;
+
     async fn link_routine_run_to_job(
         &self,
         run_id: Uuid,
         job_id: Uuid,
     ) -> Result<(), DatabaseError>;
+    async fn get_webhook_routine_by_path(
+        &self,
+        path: &str,
+        user_id: Option<&str>,
+    ) -> Result<Option<Routine>, DatabaseError>;
+
+    /// List routine runs that were dispatched as full_job but have not yet
+    /// been finalized (status='running' with a linked job_id).
+    async fn list_dispatched_routine_runs(&self) -> Result<Vec<RoutineRun>, DatabaseError>;
 }
 
 #[async_trait]
@@ -636,6 +712,210 @@ pub trait WorkspaceStore: Send + Sync {
         embedding: Option<&[f32]>,
         config: &SearchConfig,
     ) -> Result<Vec<SearchResult>, WorkspaceError>;
+
+    // ==================== Multi-scope read methods ====================
+    //
+    // Default implementations loop over user_ids calling single-scope methods,
+    // then merge results. Backends can override with efficient SQL (e.g.,
+    // `WHERE user_id = ANY($1::text[])`).
+
+    /// Hybrid search across multiple user scopes, merging results by score.
+    ///
+    /// **Note:** The default implementation calls `hybrid_search` per scope and
+    /// merges by raw score. Because RRF scores are normalized independently
+    /// within each scope, scores are not directly comparable across scopes.
+    /// The Postgres backend overrides this with a single combined query that
+    /// applies RRF once to the unified result set.
+    async fn hybrid_search_multi(
+        &self,
+        user_ids: &[String],
+        agent_id: Option<Uuid>,
+        query: &str,
+        embedding: Option<&[f32]>,
+        config: &SearchConfig,
+    ) -> Result<Vec<SearchResult>, WorkspaceError> {
+        if user_ids.len() > 1 {
+            tracing::debug!(
+                scope_count = user_ids.len(),
+                "hybrid_search_multi: using default per-scope RRF merge; \
+                 cross-scope score comparison may be unreliable"
+            );
+        }
+        let mut all_results = Vec::new();
+        for uid in user_ids {
+            let results = self
+                .hybrid_search(uid, agent_id, query, embedding, config)
+                .await?;
+            all_results.extend(results);
+        }
+        // Re-sort by score descending and truncate to limit
+        all_results.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        all_results.truncate(config.limit);
+        Ok(all_results)
+    }
+
+    /// List all file paths across multiple user scopes.
+    async fn list_all_paths_multi(
+        &self,
+        user_ids: &[String],
+        agent_id: Option<Uuid>,
+    ) -> Result<Vec<String>, WorkspaceError> {
+        let mut all_paths = Vec::new();
+        for uid in user_ids {
+            let paths = self.list_all_paths(uid, agent_id).await?;
+            all_paths.extend(paths);
+        }
+        all_paths.sort();
+        all_paths.dedup();
+        Ok(all_paths)
+    }
+
+    /// Get a document by path, searching across multiple user scopes.
+    ///
+    /// Returns the first match found (tries each user_id in order).
+    async fn get_document_by_path_multi(
+        &self,
+        user_ids: &[String],
+        agent_id: Option<Uuid>,
+        path: &str,
+    ) -> Result<MemoryDocument, WorkspaceError> {
+        for uid in user_ids {
+            match self.get_document_by_path(uid, agent_id, path).await {
+                Ok(doc) => return Ok(doc),
+                Err(WorkspaceError::DocumentNotFound { .. }) => continue,
+                Err(e) => return Err(e),
+            }
+        }
+        Err(WorkspaceError::DocumentNotFound {
+            doc_type: path.to_string(),
+            user_id: format!("[{}]", user_ids.join(", ")),
+        })
+    }
+
+    /// List directory contents across multiple user scopes.
+    async fn list_directory_multi(
+        &self,
+        user_ids: &[String],
+        agent_id: Option<Uuid>,
+        directory: &str,
+    ) -> Result<Vec<WorkspaceEntry>, WorkspaceError> {
+        let mut all_entries = Vec::new();
+        for uid in user_ids {
+            all_entries.extend(self.list_directory(uid, agent_id, directory).await?);
+        }
+        Ok(crate::workspace::merge_workspace_entries(all_entries))
+    }
+}
+
+#[async_trait]
+pub trait UserStore: Send + Sync {
+    // ---- Users ----
+
+    /// Create a new user record.
+    async fn create_user(&self, user: &UserRecord) -> Result<(), DatabaseError>;
+    /// Get a user by their string id.
+    async fn get_user(&self, id: &str) -> Result<Option<UserRecord>, DatabaseError>;
+    /// Get a user by email address.
+    async fn get_user_by_email(&self, email: &str) -> Result<Option<UserRecord>, DatabaseError>;
+    /// List users, optionally filtered by status.
+    async fn list_users(&self, status: Option<&str>) -> Result<Vec<UserRecord>, DatabaseError>;
+    /// Update a user's status (active/suspended/deactivated).
+    async fn update_user_status(&self, id: &str, status: &str) -> Result<(), DatabaseError>;
+    /// Update a user's role (admin/member).
+    async fn update_user_role(&self, id: &str, role: &str) -> Result<(), DatabaseError>;
+    /// Update a user's display name and metadata.
+    async fn update_user_profile(
+        &self,
+        id: &str,
+        display_name: &str,
+        metadata: &serde_json::Value,
+    ) -> Result<(), DatabaseError>;
+    /// Record a login timestamp.
+    async fn record_login(&self, id: &str) -> Result<(), DatabaseError>;
+
+    // ---- API Tokens ----
+
+    /// Create a new API token. The `token_hash` is SHA-256 of the plaintext.
+    async fn create_api_token(
+        &self,
+        user_id: &str,
+        name: &str,
+        token_hash: &[u8; 32],
+        token_prefix: &str,
+        expires_at: Option<DateTime<Utc>>,
+    ) -> Result<ApiTokenRecord, DatabaseError>;
+    /// List tokens for a user (never includes the hash).
+    async fn list_api_tokens(&self, user_id: &str) -> Result<Vec<ApiTokenRecord>, DatabaseError>;
+    /// Soft-revoke a token. Returns false if the token doesn't exist or doesn't belong to the user.
+    async fn revoke_api_token(&self, token_id: Uuid, user_id: &str) -> Result<bool, DatabaseError>;
+    /// Look up a token by hash, returning the token record and its owning user.
+    /// Only returns active (non-revoked, non-expired) tokens for active users.
+    async fn authenticate_token(
+        &self,
+        token_hash: &[u8; 32],
+    ) -> Result<Option<(ApiTokenRecord, UserRecord)>, DatabaseError>;
+    /// Update `last_used_at` for a token.
+    async fn record_token_usage(&self, token_id: Uuid) -> Result<(), DatabaseError>;
+
+    /// Check whether any user records exist (for first-run bootstrap detection).
+    async fn has_any_users(&self) -> Result<bool, DatabaseError>;
+
+    /// Delete a user and all their data across all user-scoped tables.
+    /// Returns false if the user doesn't exist.
+    async fn delete_user(&self, id: &str) -> Result<bool, DatabaseError>;
+
+    /// Get per-user LLM usage stats for a time period.
+    /// Aggregates from llm_calls via agent_jobs.user_id.
+    async fn user_usage_stats(
+        &self,
+        user_id: Option<&str>,
+        since: DateTime<Utc>,
+    ) -> Result<Vec<UserUsageStats>, DatabaseError>;
+
+    /// Lightweight per-user summary stats (job count, total cost, last active).
+    /// Used by the admin users list to show inline stats.
+    async fn user_summary_stats(
+        &self,
+        user_id: Option<&str>,
+    ) -> Result<Vec<UserSummaryStats>, DatabaseError>;
+
+    /// Create a user and their initial API token atomically.
+    /// If either operation fails, both are rolled back.
+    async fn create_user_with_token(
+        &self,
+        user: &UserRecord,
+        token_name: &str,
+        token_hash: &[u8; 32],
+        token_prefix: &str,
+        expires_at: Option<DateTime<Utc>>,
+    ) -> Result<ApiTokenRecord, DatabaseError>;
+}
+
+/// Per-user LLM usage statistics.
+#[derive(Debug, Clone)]
+pub struct UserUsageStats {
+    pub user_id: String,
+    pub model: String,
+    pub call_count: i64,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub total_cost: Decimal,
+}
+
+/// Lightweight per-user summary for the admin users list.
+#[derive(Debug, Clone)]
+pub struct UserSummaryStats {
+    pub user_id: String,
+    /// Total agent jobs created by this user.
+    pub job_count: i64,
+    /// Total LLM spend across all jobs (all-time).
+    pub total_cost: Decimal,
+    /// Most recent activity (latest job or LLM call timestamp).
+    pub last_active_at: Option<DateTime<Utc>>,
 }
 
 /// Backend-agnostic database supertrait.
@@ -651,6 +931,7 @@ pub trait Database:
     + ToolFailureStore
     + SettingsStore
     + WorkspaceStore
+    + UserStore
     + Send
     + Sync
 {
