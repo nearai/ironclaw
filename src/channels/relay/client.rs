@@ -277,9 +277,30 @@ impl RelayClient {
             });
         }
 
-        resp.json()
+        let json: serde_json::Value = resp
+            .json()
             .await
-            .map_err(|e| RelayError::Protocol(e.to_string()))
+            .map_err(|e| RelayError::Protocol(e.to_string()))?;
+
+        // Slack API always returns HTTP 200 but signals errors via {"ok": false}.
+        // Surface these as relay errors so callers get actionable feedback.
+        if json.get("ok") == Some(&serde_json::Value::Bool(false)) {
+            let slack_error = json
+                .get("error")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            tracing::warn!(
+                relay_url = %url,
+                slack_error = %slack_error,
+                "RelayClient::proxy_provider: Slack API returned ok=false"
+            );
+            return Err(RelayError::Api {
+                status: 200,
+                message: format!("Slack API error: {slack_error}"),
+            });
+        }
+
+        Ok(json)
     }
 
     /// Fetch the per-instance callback signing secret from channel-relay.
