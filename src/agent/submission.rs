@@ -641,6 +641,57 @@ mod tests {
     }
 
     #[test]
+    fn test_thread_command_edge_cases() {
+        // /thread with empty arg after space should be treated as invalid
+        let submission = SubmissionParser::parse("/thread ");
+        assert!(
+            matches!(submission, Submission::SystemCommand { command, args }
+            if command == "thread" && args.is_empty())
+        );
+
+        // /thread with multiple args (invalid) should become user input
+        let submission = SubmissionParser::parse("/thread foo bar");
+        assert!(matches!(submission, Submission::UserInput { .. }));
+
+        // /thread with malformed UUID (partial) should become user input
+        let submission = SubmissionParser::parse("/thread 12345678-1234");
+        assert!(matches!(submission, Submission::UserInput { .. }));
+
+        // /thread with case-insensitive list
+        let submission = SubmissionParser::parse("/thread LIST");
+        assert!(
+            matches!(submission, Submission::SystemCommand { command, args }
+            if command == "history" && args.is_empty())
+        );
+
+        // /thread with case-insensitive new
+        let submission = SubmissionParser::parse("/thread NEW");
+        assert!(matches!(submission, Submission::NewThread));
+    }
+
+    #[test]
+    fn test_resume_command_edge_cases() {
+        // /resume with invalid UUID should become user input
+        let submission = SubmissionParser::parse("/resume not-a-uuid");
+        assert!(matches!(submission, Submission::UserInput { .. }));
+
+        // /resume with no arg should become user input
+        let submission = SubmissionParser::parse("/resume ");
+        assert!(matches!(submission, Submission::UserInput { .. }));
+
+        // /resume with case-insensitive check
+        let submission = SubmissionParser::parse("/RESUME ");
+        assert!(matches!(submission, Submission::UserInput { .. }));
+
+        // /resume with valid UUID (case variations in UUID should still parse)
+        let uuid = Uuid::new_v4();
+        let submission = SubmissionParser::parse(&format!("/resume {}", uuid));
+        assert!(
+            matches!(submission, Submission::Resume { checkpoint_id } if checkpoint_id == uuid)
+        );
+    }
+
+    #[test]
     fn test_parser_approval_response_aliases() {
         // approve once
         assert!(matches!(
