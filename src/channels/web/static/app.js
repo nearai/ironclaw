@@ -236,6 +236,8 @@ fetch('/auth/providers', { credentials: 'include' })
   .then(function(data) {
     var providers = data.providers || [];
     if (providers.length === 0) return;
+    // Store NEAR network for the wallet connector.
+    if (data.near_network) window._nearNetwork = data.near_network;
     var social = document.getElementById('auth-social');
     if (social) social.style.display = '';
     providers.forEach(function(p) {
@@ -267,7 +269,8 @@ async function authenticateWithNear() {
     // 2. Load near-connect dynamically if not already loaded.
     if (!window._nearConnector) {
       var mod = await import('https://esm.sh/@hot-labs/near-connect@1');
-      window._nearConnector = new mod.NearConnector({ network: 'mainnet' });
+      var network = window._nearNetwork || 'mainnet';
+      window._nearConnector = new mod.NearConnector({ network: network });
     }
     var connector = window._nearConnector;
 

@@ -69,14 +69,32 @@ impl NearNonceStore {
     }
 }
 
-/// Verify an Ed25519 signature over a NEP-413 message.
+/// NEP-413 tag: `2^31 + 413 = 2147484061`.
+const NEP413_TAG: u32 = (1 << 31) + 413;
+
+/// Build the NEP-413 borsh-serialized payload that wallets sign.
 ///
-/// The signed payload is: the message bytes prepended with a NEP-413 tag.
-/// NEP-413 specifies the payload as:
-///   `u32_le(2**31 + 413)` || `u32_le(len(message))` || message || nonce || recipient || callback_url?
-///
-/// For simplicity we verify over the raw message bytes directly, which is
-/// compatible with wallets that sign the plain message via `signMessage`.
+/// Format (borsh):
+///   u32_le(2^31 + 413)        — discriminant tag
+///   u32_le(len(message))      — message length prefix
+///   message bytes
+///   nonce (32 bytes)           — raw nonce bytes
+///   u32_le(len(recipient))    — recipient length prefix
+///   recipient bytes
+///   u8(0)                      — None for optional callback_url
+pub fn build_nep413_payload(message: &str, nonce: &[u8; 32], recipient: &str) -> Vec<u8> {
+    let mut buf = Vec::new();
+    buf.extend_from_slice(&NEP413_TAG.to_le_bytes());
+    buf.extend_from_slice(&(message.len() as u32).to_le_bytes());
+    buf.extend_from_slice(message.as_bytes());
+    buf.extend_from_slice(nonce);
+    buf.extend_from_slice(&(recipient.len() as u32).to_le_bytes());
+    buf.extend_from_slice(recipient.as_bytes());
+    buf.push(0); // None for callback_url
+    buf
+}
+
+/// Verify an Ed25519 signature over a NEP-413 payload.
 pub fn verify_signature(
     public_key_bytes: &[u8; 32],
     signature_bytes: &[u8; 64],

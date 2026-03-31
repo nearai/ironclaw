@@ -941,11 +941,18 @@ fn extract_token(headers: &HeaderMap, request: &Request) -> Option<String> {
         return Some(value[7..].to_string());
     }
 
-    // Try session cookie (for OAuth-authenticated browser sessions).
+    // Try query parameter for SSE/WS endpoints (explicit token always wins
+    // over cookie so `?token=B` is not silently overridden by cookie A).
+    if allows_query_token_auth(request)
+        && let Some(t) = query_token(request)
+    {
+        return Some(t);
+    }
+
+    // Fall back to session cookie (for OAuth-authenticated browser sessions).
     if let Some(cookie_header) = headers.get("cookie")
         && let Ok(cookie_str) = cookie_header.to_str()
     {
-        // Use a runtime format since const can't be used in concat!().
         let prefix_match = format!("{SESSION_COOKIE_NAME}=");
         for pair in cookie_str.split(';') {
             let pair = pair.trim();
@@ -956,11 +963,6 @@ fn extract_token(headers: &HeaderMap, request: &Request) -> Option<String> {
                 }
             }
         }
-    }
-
-    // Fall back to query parameter for SSE/WS endpoints.
-    if allows_query_token_auth(request) {
-        return query_token(request);
     }
 
     None

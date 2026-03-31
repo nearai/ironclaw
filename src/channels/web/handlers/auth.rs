@@ -51,7 +51,17 @@ pub async fn providers_handler(State(state): State<Arc<GatewayState>>) -> Json<s
         providers.push("near");
     }
     providers.sort_unstable();
-    Json(serde_json::json!({ "providers": providers }))
+    let mut resp = serde_json::json!({ "providers": providers });
+    // Surface NEAR network config so the frontend wallet connector uses the right network.
+    if let Some(ref rpc_url) = state.near_rpc_url {
+        let network = if rpc_url.contains("testnet") {
+            "testnet"
+        } else {
+            "mainnet"
+        };
+        resp["near_network"] = serde_json::json!(network);
+    }
+    Json(resp)
 }
 
 /// GET /auth/login/{provider} — initiate OAuth flow (redirect to provider).
@@ -213,16 +223,28 @@ async fn handle_callback(
         };
     }
 
-    // Validate email domain restriction.
-    if !state.oauth_allowed_domains.is_empty()
-        && let Err(msg) = check_email_domain(profile.email.as_deref(), &state.oauth_allowed_domains)
-    {
-        tracing::warn!(
-            provider = %provider_name,
-            email = ?profile.email,
-            "OAuth login rejected by domain restriction"
-        );
-        return error_page(&msg);
+    // Validate email domain restriction. Only trust verified emails — an
+    // unverified email could be set to any value by the user.
+    if !state.oauth_allowed_domains.is_empty() {
+        if !profile.email_verified {
+            tracing::warn!(
+                provider = %provider_name,
+                email = ?profile.email,
+                "OAuth login rejected: domain restriction requires a verified email"
+            );
+            return error_page(
+                "Login requires a verified email address from an authorized domain.",
+            );
+        }
+        if let Err(msg) = check_email_domain(profile.email.as_deref(), &state.oauth_allowed_domains)
+        {
+            tracing::warn!(
+                provider = %provider_name,
+                email = ?profile.email,
+                "OAuth login rejected by domain restriction"
+            );
+            return error_page(&msg);
+        }
     }
 
     // Resolve user: find existing, link by email, or create new.
@@ -391,9 +413,23 @@ pub async fn near_verify_handler(
         Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
     };
 
-    // The signed message matches what the challenge endpoint returns.
+    // Build the exact NEP-413 payload the wallet signed. The nonce in the
+    // challenge is hex-encoded; convert back to 32 raw bytes for NEP-413.
+    let nonce_bytes: [u8; 32] = match hex::decode(&body.nonce) {
+        Ok(b) if b.len() == 32 => {
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&b);
+            arr
+        }
+        _ => return (StatusCode::BAD_REQUEST, "Invalid nonce format").into_response(),
+    };
     let message_str = format!("Sign in to IronClaw\nNonce: {}", body.nonce);
-    let message = message_str.as_bytes();
+    let payload = crate::channels::web::oauth::near::build_nep413_payload(
+        &message_str,
+        &nonce_bytes,
+        "ironclaw",
+    );
+    let message = payload.as_slice();
 
     // Verify the Ed25519 signature.
     if let Err(e) =
@@ -426,39 +462,18 @@ pub async fn near_verify_handler(
             .into_response();
     }
 
-    // Domain restriction check (account_id is like "user.near" — check domain part).
+    // Domain restriction check for NEAR account IDs.
+    // Allowed domains match as a suffix with a dot boundary:
+    //   "company.near" allows "alice.company.near" but NOT "evilcompany.near".
+    //   "near" allows "alice.near" (exact TLD match).
     if !state.oauth_allowed_domains.is_empty() {
-        // NEAR account_id acts as the "email" for domain checks.
-        // e.g., "alice.company.near" — check if "company.near" is allowed.
-        let domain = body
-            .account_id
-            .rsplit_once('.')
-            .map(|(_, tld)| {
-                // Get the last two parts: e.g., "company.near" from "alice.company.near"
-                let parts: Vec<&str> = body.account_id.rsplitn(3, '.').collect();
-                if parts.len() >= 2 {
-                    format!("{}.{}", parts[1], parts[0])
-                } else {
-                    tld.to_string()
-                }
-            })
-            .unwrap_or_default();
-        if !state
-            .oauth_allowed_domains
-            .iter()
-            .any(|d| d.eq_ignore_ascii_case(&domain))
-        {
-            // If no domain match, also try the full account_id suffix
-            let account_lower = body.account_id.to_ascii_lowercase();
-            if !state
-                .oauth_allowed_domains
-                .iter()
-                .any(|d| account_lower.ends_with(d))
-            {
-                return error_page(
-                    "Your NEAR account is not authorized. Contact your administrator.",
-                );
-            }
+        let account = body.account_id.to_ascii_lowercase();
+        let allowed = state.oauth_allowed_domains.iter().any(|d| {
+            let d_lower = d.to_ascii_lowercase();
+            account == d_lower || account.ends_with(&format!(".{d_lower}"))
+        });
+        if !allowed {
+            return error_page("Your NEAR account is not authorized. Contact your administrator.");
         }
     }
 
@@ -658,6 +673,11 @@ async fn resolve_user(
     }
 
     // 3. Create a new user.
+    // Note: has_any_users() + create is not atomic, so two concurrent first
+    // logins could both see false. This is acceptable — the second insert will
+    // succeed as a normal member, and the admin can promote via the admin API.
+    // A truly empty deployment (no bootstrap user) is the only window, and the
+    // unique constraint on user_identities prevents duplicate identity links.
     let is_first_user = !store.has_any_users().await.map_err(|e| e.to_string())?;
     let role = if is_first_user { "admin" } else { "member" };
 
