@@ -313,30 +313,6 @@ impl WorkspacePool {
             );
         }
 
-        // Fresh workspace — persist the bootstrap greeting into the assistant
-        // conversation so the web client sees it on first load.
-        if ws.take_bootstrap_pending() {
-            static GREETING: &str = include_str!("../../workspace/seeds/GREETING.md");
-            match self
-                .db
-                .get_or_create_assistant_conversation(&identity.user_id, "gateway")
-                .await
-            {
-                Ok(conv_id) => {
-                    if let Err(e) = self
-                        .db
-                        .add_conversation_message(conv_id, "assistant", GREETING)
-                        .await
-                    {
-                        tracing::warn!(user_id = identity.user_id, error = %e, "Failed to persist bootstrap greeting");
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(user_id = identity.user_id, error = %e, "Failed to create assistant conversation for bootstrap");
-                }
-            }
-        }
-
         ws
     }
 }
