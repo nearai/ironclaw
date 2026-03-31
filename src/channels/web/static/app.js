@@ -230,12 +230,22 @@ document.getElementById('token-input').addEventListener('keydown', (e) => {
 
 // --- Social login (OAuth + NEAR wallet) ---
 
+// Show the token form (used as fallback when no OAuth providers are available).
+function showTokenForm() {
+  var tokenForm = document.getElementById('auth-token-form');
+  if (tokenForm) {
+    tokenForm.style.display = '';
+    var input = document.getElementById('token-input');
+    if (input) input.focus();
+  }
+}
+
 // Discover enabled providers and show corresponding buttons.
 fetch('/auth/providers', { credentials: 'include' })
   .then(function(r) { return r.ok ? r.json() : { providers: [] }; })
   .then(function(data) {
     var providers = data.providers || [];
-    if (providers.length === 0) return;
+    if (providers.length === 0) { showTokenForm(); return; }
     // Store NEAR network for the wallet connector.
     if (data.near_network) window._nearNetwork = data.near_network;
     var social = document.getElementById('auth-social');
@@ -266,7 +276,7 @@ fetch('/auth/providers', { credentials: 'include' })
       });
     }
   })
-  .catch(function() { /* auth providers not available */ });
+  .catch(function() { showTokenForm(); });
 
 // NEAR wallet authentication via near-connect.
 async function authenticateWithNear() {
