@@ -189,6 +189,7 @@ mod test_channel_tests {
             .send_status(
                 StatusUpdate::ToolStarted {
                     name: "echo".to_string(),
+                    detail: None,
                 },
                 &metadata,
             )
@@ -209,7 +210,7 @@ mod test_channel_tests {
 
         let events = channel.captured_status_events();
         assert_eq!(events.len(), 2);
-        assert!(matches!(&events[0], StatusUpdate::ToolStarted { name } if name == "echo"));
+        assert!(matches!(&events[0], StatusUpdate::ToolStarted { name, .. } if name == "echo"));
         assert!(
             matches!(&events[1], StatusUpdate::ToolCompleted { name, success, .. } if name == "echo" && *success)
         );
@@ -224,6 +225,7 @@ mod test_channel_tests {
             .send_status(
                 StatusUpdate::ToolStarted {
                     name: "memory_search".to_string(),
+                    detail: None,
                 },
                 &metadata,
             )
@@ -237,6 +239,7 @@ mod test_channel_tests {
             .send_status(
                 StatusUpdate::ToolStarted {
                     name: "echo".to_string(),
+                    detail: None,
                 },
                 &metadata,
             )
@@ -304,6 +307,7 @@ mod test_channel_tests {
             .send_status(
                 StatusUpdate::ToolStarted {
                     name: "echo".to_string(),
+                    detail: None,
                 },
                 &serde_json::Value::Null,
             )

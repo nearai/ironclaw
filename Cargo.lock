@@ -3593,6 +3593,7 @@ name = "ironclaw_tui"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "pulldown-cmark",
  "ratatui",
  "serde",
  "serde_json",
@@ -5066,6 +5067,17 @@ checksum = "71cec9e2670207c5ebb9e477763c74436af3b9091dd550b9fb3c1bec7f3ea266"
 dependencies = [
  "rustix 1.1.4",
  "tokio",
+]
+
+[[package]]
+name = "pulldown-cmark"
+version = "0.12.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f86ba2052aebccc42cbbb3ed234b8b13ce76f75c3551a303cb2bcffcff12bb14"
+dependencies = [
+ "bitflags 2.11.0",
+ "memchr",
+ "unicase",
 ]
 
 [[package]]

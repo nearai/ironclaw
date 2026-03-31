@@ -81,7 +81,7 @@ The `Router` handles explicit `/commands` (prefix `/`). It parses them into `Mes
 
 Triggered by `ContextMonitor` when token usage approaches the model's context limit.
 
-**Token estimation**: Word-count × 1.3 + 4 overhead per message. Default context limit: 100,000 tokens. Compaction threshold: 80% (configurable).
+**Token estimation**: Word-count × 1.3 + 4 overhead per message. Fallback context limit: 100,000 tokens. `Agent::new()` seeds the monitor from a best-effort model-family limit for known OpenAI, Anthropic, and Gemini models, then falls back to 100,000 when the model is unknown. Compaction threshold: 80% (configurable).
 
 Three strategies, chosen by `ContextMonitor.suggest_compaction()` based on usage ratio:
 - **MoveToWorkspace** — Writes full turn transcript to workspace daily log, keeps 10 recent turns. Used when usage is 80–85% (moderate). Falls back to `Truncate(5)` if no workspace.

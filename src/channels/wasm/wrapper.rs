@@ -3746,9 +3746,12 @@ fn status_to_wit(
             message: msg.clone(),
             metadata_json,
         },
-        StatusUpdate::ToolStarted { name } => wit_channel::StatusUpdate {
+        StatusUpdate::ToolStarted { name, detail } => wit_channel::StatusUpdate {
             status: wit_channel::StatusType::ToolStarted,
-            message: format!("Tool started: {}", name),
+            message: match detail {
+                Some(d) => format!("Tool started: {name}: {d}"),
+                None => format!("Tool started: {name}"),
+            },
             metadata_json,
         },
         StatusUpdate::ToolCompleted { name, success, .. } => wit_channel::StatusUpdate {
@@ -4707,6 +4710,7 @@ mod tests {
             .send_status(
                 crate::channels::StatusUpdate::ToolStarted {
                     name: "http_request".into(),
+                    detail: None,
                 },
                 &metadata,
             )
@@ -5022,6 +5026,7 @@ mod tests {
         let wit = status_to_wit(
             &crate::channels::StatusUpdate::ToolStarted {
                 name: "http_request".to_string(),
+                detail: None,
             },
             &metadata,
         )

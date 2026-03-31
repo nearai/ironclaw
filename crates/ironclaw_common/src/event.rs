@@ -48,6 +48,8 @@ pub enum AppEvent {
     ToolStarted {
         name: String,
         #[serde(skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         thread_id: Option<String>,
     },
     #[serde(rename = "tool_completed")]
@@ -260,6 +262,7 @@ mod tests {
             },
             AppEvent::ToolStarted {
                 name: String::new(),
+                detail: None,
                 thread_id: None,
             },
             AppEvent::ToolCompleted {

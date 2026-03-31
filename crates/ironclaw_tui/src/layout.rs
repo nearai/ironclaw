@@ -133,7 +133,7 @@ pub struct HeaderConfig {
 impl Default for HeaderConfig {
     fn default() -> Self {
         Self {
-            visible: true,
+            visible: false,
             show_model: true,
             show_tokens: true,
             show_session_duration: true,

@@ -155,6 +155,7 @@ pub trait LlmProvider: Send + Sync {
 Key notes:
 - `model_name()` returns the configured model name; `active_model_name()` returns the currently active model (may differ if `set_model()` was called — only `NearAiChatProvider` supports this).
 - `cost_per_token()` returns `(Decimal, Decimal)` using `rust_decimal`. Look up via `costs::model_cost()` in your constructor; fall back to `costs::default_cost()` for unknowns.
+- `model_limits.rs` contains a separate best-effort context-window lookup used by UI and context-monitoring paths when provider metadata is absent. It is intentionally separate from `model_metadata()` because some runtime paths currently treat `context_length` as a proxy for output budget.
 - `RigAdapter` ignores per-request model overrides (logs a warning). Only `NearAiChatProvider` supports per-request model overrides via `CompletionRequest::model`.
 - `complete_with_tools()` is never cached (tool calls can have side effects) — `CachedProvider` always passes them through.
 

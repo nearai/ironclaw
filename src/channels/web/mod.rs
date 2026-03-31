@@ -397,8 +397,9 @@ impl Channel for GatewayChannel {
                 message: msg,
                 thread_id: thread_id.clone(),
             },
-            StatusUpdate::ToolStarted { name } => AppEvent::ToolStarted {
+            StatusUpdate::ToolStarted { name, detail } => AppEvent::ToolStarted {
                 name,
+                detail,
                 thread_id: thread_id.clone(),
             },
             StatusUpdate::ToolCompleted {

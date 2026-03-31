@@ -49,6 +49,8 @@ impl TuiWidget for ToolPanelWidget {
             ),
         ]));
 
+        let show_detail = area.width >= 12;
+
         // Active tools
         for tool in &state.active_tools {
             let elapsed = chrono::Utc::now()
@@ -59,19 +61,29 @@ impl TuiWidget for ToolPanelWidget {
             lines.push(Line::from(vec![
                 Span::styled(" \u{25CF} ", self.theme.accent_style()),
                 Span::styled(name, self.theme.accent_style()),
-                Span::styled(
-                    format!("  {elapsed}ms"),
-                    self.theme.dim_style(),
-                ),
+                Span::styled(format!("  {elapsed}ms"), self.theme.dim_style()),
             ]));
+            if show_detail && let Some(ref d) = tool.detail {
+                let detail_max = (area.width as usize).saturating_sub(4);
+                lines.push(Line::from(Span::styled(
+                    format!("   {}", truncate(d, detail_max)),
+                    self.theme.dim_style(),
+                )));
+            }
         }
 
         // Recent tools
-        for tool in state.recent_tools.iter().rev().take(
-            (area.height as usize)
-                .saturating_sub(lines.len())
-                .saturating_sub(1),
-        ) {
+        for (recent_shown, tool) in state
+            .recent_tools
+            .iter()
+            .rev()
+            .take(
+                (area.height as usize)
+                    .saturating_sub(lines.len())
+                    .saturating_sub(1),
+            )
+            .enumerate()
+        {
             let name = truncate(&tool.name, max_name_len);
             let (icon, style) = match tool.status {
                 ToolStatus::Success => ("\u{25CF}", self.theme.success_style()),
@@ -87,6 +99,17 @@ impl TuiWidget for ToolPanelWidget {
                 Span::styled(name, self.theme.dim_style()),
                 Span::styled(duration_text, self.theme.dim_style()),
             ]));
+            // Show detail for the 3 most recent completed tools
+            if show_detail
+                && recent_shown < 3
+                && let Some(d) = tool.result_preview.as_deref().or(tool.detail.as_deref())
+            {
+                let detail_max = (area.width as usize).saturating_sub(4);
+                lines.push(Line::from(Span::styled(
+                    format!("   {}", truncate(d, detail_max)),
+                    self.theme.dim_style(),
+                )));
+            }
         }
 
         let paragraph = ratatui::widgets::Paragraph::new(lines);

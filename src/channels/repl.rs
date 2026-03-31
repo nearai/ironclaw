@@ -715,9 +715,13 @@ impl Channel for ReplChannel {
                 eprintln!("  {}\u{25CB} {display}{}", fmt::dim(), fmt::reset());
                 self.transient_lines.store(1, Ordering::Relaxed);
             }
-            StatusUpdate::ToolStarted { name } => {
+            StatusUpdate::ToolStarted { name, detail } => {
                 self.clear_transient();
-                eprintln!("  {}\u{25CB} {name}{}", fmt::dim(), fmt::reset());
+                if let Some(d) = detail {
+                    eprintln!("  {}\u{25CB} {name}: {d}{}", fmt::dim(), fmt::reset());
+                } else {
+                    eprintln!("  {}\u{25CB} {name}{}", fmt::dim(), fmt::reset());
+                }
                 self.transient_lines.store(1, Ordering::Relaxed);
             }
             StatusUpdate::ToolCompleted { name, success, .. } => {

@@ -94,10 +94,7 @@ impl TuiWidget for LogsWidget {
             let line = Line::from(vec![
                 Span::styled(format!(" {ts} "), self.theme.dim_style()),
                 Span::styled(format!("{:<5} ", entry.level), level_style),
-                Span::styled(
-                    message,
-                    Style::default().fg(self.theme.fg.to_color()),
-                ),
+                Span::styled(message, Style::default().fg(self.theme.fg.to_color())),
             ]);
             all_lines.push(line);
         }

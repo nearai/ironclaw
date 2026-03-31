@@ -136,18 +136,18 @@ fn parse_custom_headers() -> std::collections::HashMap<String, String> {
 /// for unrecognized models.
 fn gemini_context_length(model: &str) -> u32 {
     match model {
-        // Pro models — 2M context
+        // Current 2.5/3.x Pro models — 1,048,576 context
         "gemini-2.5-pro"
         | "gemini-3-pro-preview"
         | "gemini-3.1-pro-preview"
-        | "gemini-3.1-pro-preview-customtools" => 2_000_000,
+        | "gemini-3.1-pro-preview-customtools" => 1_048_576,
         // Flash / Flash-Lite — 1M context
         "gemini-2.5-flash"
         | "gemini-2.5-flash-lite"
         | "gemini-3-flash-preview"
         | "gemini-3.1-flash-lite-preview" => 1_000_000,
         // Legacy
-        "gemini-1.5-pro" => 2_000_000,
+        "gemini-1.5-pro" => 1_000_000,
         "gemini-1.5-flash" => 1_000_000,
         "gemini-2.0-flash" => 1_000_000,
         // Fallback for unknown models
@@ -2096,6 +2096,13 @@ impl LlmProvider for GeminiOauthProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_gemini_context_length_current_models() {
+        assert_eq!(gemini_context_length("gemini-2.5-pro"), 1_048_576);
+        assert_eq!(gemini_context_length("gemini-3-pro-preview"), 1_048_576);
+        assert_eq!(gemini_context_length("gemini-2.5-flash"), 1_000_000);
+    }
 
     #[test]
     fn test_deobfuscate_reconstructs_credentials() {

@@ -46,9 +46,7 @@ impl TuiWidget for HeaderWidget {
         let mut spans = vec![
             Span::styled(
                 format!("  ironclaw v{}", state.version),
-                self.theme
-                    .accent_style()
-                    .add_modifier(Modifier::BOLD),
+                self.theme.accent_style().add_modifier(Modifier::BOLD),
             ),
             Span::styled("  ·  ", self.theme.dim_style()),
             Span::styled(state.model.clone(), self.theme.bold_style()),
@@ -66,8 +64,7 @@ impl TuiWidget for HeaderWidget {
         }
 
         let line = Line::from(spans);
-        let widget = ratatui::widgets::Paragraph::new(line)
-            .style(self.theme.header_style());
+        let widget = ratatui::widgets::Paragraph::new(line).style(self.theme.header_style());
         widget.render(area, buf);
     }
 }

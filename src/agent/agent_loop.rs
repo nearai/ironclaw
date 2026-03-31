@@ -27,7 +27,7 @@ use crate::db::Database;
 use crate::error::{ChannelError, Error};
 use crate::extensions::ExtensionManager;
 use crate::hooks::HookRegistry;
-use crate::llm::LlmProvider;
+use crate::llm::{LlmProvider, infer_context_length};
 use crate::safety::SafetyLayer;
 use crate::skills::SkillRegistry;
 use crate::tools::ToolRegistry;
@@ -261,6 +261,10 @@ impl Agent {
         }
         let scheduler = Arc::new(scheduler);
 
+        let context_limit = infer_context_length(&deps.llm.active_model_name())
+            .map(|limit| limit as usize)
+            .unwrap_or_else(|| ContextMonitor::new().limit());
+
         Self {
             config,
             deps,
@@ -269,7 +273,7 @@ impl Agent {
             scheduler,
             router: Router::new(),
             session_manager,
-            context_monitor: ContextMonitor::new(),
+            context_monitor: ContextMonitor::new().with_limit(context_limit),
             heartbeat_config,
             hygiene_config,
             routine_config,

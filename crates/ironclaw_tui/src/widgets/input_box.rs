@@ -1,7 +1,7 @@
 //! User input area widget using tui-textarea.
 
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::buffer::Buffer;
+use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Rect;
 use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
@@ -22,16 +22,19 @@ impl InputBoxWidget {
     pub fn new(theme: Theme) -> Self {
         let mut textarea = TextArea::default();
         textarea.set_cursor_line_style(ratatui::style::Style::default());
-        textarea.set_block(
-            ratatui::widgets::Block::default()
-                .borders(ratatui::widgets::Borders::NONE),
-        );
+        textarea
+            .set_block(ratatui::widgets::Block::default().borders(ratatui::widgets::Borders::NONE));
         Self { theme, textarea }
     }
 
     /// Get the current input text and clear the textarea.
     pub fn take_input(&mut self) -> String {
-        let lines: Vec<String> = self.textarea.lines().iter().map(|l| l.to_string()).collect();
+        let lines: Vec<String> = self
+            .textarea
+            .lines()
+            .iter()
+            .map(|l| l.to_string())
+            .collect();
         let text = lines.join("\n");
         // Clear by selecting all and deleting
         self.textarea.select_all();
@@ -80,9 +83,7 @@ impl TuiWidget for InputBoxWidget {
 
         let prompt_span = Span::styled(
             format!("  {prompt} "),
-            self.theme
-                .accent_style()
-                .add_modifier(Modifier::BOLD),
+            self.theme.accent_style().add_modifier(Modifier::BOLD),
         );
         let prompt_line = Line::from(prompt_span);
         let prompt_widget = ratatui::widgets::Paragraph::new(prompt_line);

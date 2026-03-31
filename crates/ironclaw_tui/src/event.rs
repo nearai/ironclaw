@@ -74,7 +74,10 @@ pub enum TuiEvent {
     Thinking(String),
 
     /// Tool execution started.
-    ToolStarted { name: String },
+    ToolStarted {
+        name: String,
+        detail: Option<String>,
+    },
 
     /// Tool execution completed.
     ToolCompleted {
@@ -99,10 +102,7 @@ pub enum TuiEvent {
     },
 
     /// A sandbox job started.
-    JobStarted {
-        job_id: String,
-        title: String,
-    },
+    JobStarted { job_id: String, title: String },
 
     /// Tool requires user approval.
     ApprovalNeeded {
@@ -127,9 +127,7 @@ pub enum TuiEvent {
     },
 
     /// Agent reasoning update.
-    ReasoningUpdate {
-        narrative: String,
-    },
+    ReasoningUpdate { narrative: String },
 
     /// Per-turn token/cost summary.
     TurnCost {

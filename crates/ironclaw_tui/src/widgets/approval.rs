@@ -106,14 +106,9 @@ impl TuiWidget for ApprovalWidget {
         lines.push(Line::from(vec![
             Span::styled(
                 format!(" \u{25C6} {} ", approval.tool_name),
-                self.theme
-                    .accent_style()
-                    .add_modifier(Modifier::BOLD),
+                self.theme.accent_style().add_modifier(Modifier::BOLD),
             ),
-            Span::styled(
-                "requires approval",
-                self.theme.dim_style(),
-            ),
+            Span::styled("requires approval", self.theme.dim_style()),
         ]));
         lines.push(Line::from(""));
 
@@ -138,10 +133,7 @@ impl TuiWidget for ApprovalWidget {
                     }
                 };
                 lines.push(Line::from(vec![
-                    Span::styled(
-                        format!("  {key}: "),
-                        self.theme.accent_style(),
-                    ),
+                    Span::styled(format!("  {key}: "), self.theme.accent_style()),
                     Span::styled(val_str, self.theme.dim_style()),
                 ]));
             }

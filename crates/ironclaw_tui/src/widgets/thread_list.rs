@@ -60,26 +60,13 @@ impl TuiWidget for ThreadListWidget {
                 ("\u{2713}", self.theme.success_style())
             };
 
-            let status = if thread.is_running {
-                "running"
-            } else {
-                "done"
-            };
+            let status = if thread.is_running { "running" } else { "done" };
 
             lines.push(Line::from(vec![
                 Span::styled(format!(" {icon} "), style),
-                Span::styled(
-                    format!("#{short_id}"),
-                    self.theme.dim_style(),
-                ),
-                Span::styled(
-                    format!(" ({kind}) "),
-                    self.theme.dim_style(),
-                ),
-                Span::styled(
-                    format!("{status} {dur}"),
-                    self.theme.dim_style(),
-                ),
+                Span::styled(format!("#{short_id}"), self.theme.dim_style()),
+                Span::styled(format!(" ({kind}) "), self.theme.dim_style()),
+                Span::styled(format!("{status} {dur}"), self.theme.dim_style()),
             ]));
 
             if !label.is_empty() {
@@ -97,10 +84,7 @@ impl TuiWidget for ThreadListWidget {
             )));
         }
 
-        let visible: Vec<Line<'_>> = lines
-            .into_iter()
-            .take(area.height as usize)
-            .collect();
+        let visible: Vec<Line<'_>> = lines.into_iter().take(area.height as usize).collect();
         let paragraph = ratatui::widgets::Paragraph::new(visible);
         paragraph.render(area, buf);
     }

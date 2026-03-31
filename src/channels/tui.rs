@@ -13,11 +13,10 @@ use tokio_stream::wrappers::ReceiverStream;
 
 use ironclaw_tui::{TuiAppConfig, TuiEvent, TuiLayout, start_tui};
 
-use crate::channels::{
-    Channel, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate,
-};
 use crate::channels::web::log_layer::LogBroadcaster;
+use crate::channels::{Channel, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate};
 use crate::error::ChannelError;
+use crate::llm::infer_context_length;
 
 /// TUI channel backed by `ironclaw_tui`.
 pub struct TuiChannel {
@@ -79,7 +78,9 @@ impl Channel for TuiChannel {
             version: self.version.clone(),
             model: self.model.clone(),
             layout: self.layout.clone(),
-            context_window: 128_000,
+            context_window: infer_context_length(&self.model)
+                .map(u64::from)
+                .unwrap_or(128_000),
         };
 
         let ironclaw_tui::TuiAppHandle {
@@ -126,14 +127,11 @@ impl Channel for TuiChannel {
         // Bridge: forward user messages from TUI to the agent's MessageStream
         let (incoming_tx, incoming_rx) = mpsc::channel::<IncomingMessage>(32);
         let user_id = self.user_id.clone();
-        let sys_tz = crate::timezone::detect_system_timezone()
-            .name()
-            .to_string();
+        let sys_tz = crate::timezone::detect_system_timezone().name().to_string();
 
         tokio::spawn(async move {
             while let Some(text) = msg_rx.recv().await {
-                let msg =
-                    IncomingMessage::new("tui", &user_id, &text).with_timezone(&sys_tz);
+                let msg = IncomingMessage::new("tui", &user_id, &text).with_timezone(&sys_tz);
                 if incoming_tx.send(msg).await.is_err() {
                     break;
                 }
@@ -171,7 +169,7 @@ impl Channel for TuiChannel {
 
         let event = match status {
             StatusUpdate::Thinking(msg) => TuiEvent::Thinking(msg),
-            StatusUpdate::ToolStarted { name } => TuiEvent::ToolStarted { name },
+            StatusUpdate::ToolStarted { name, detail } => TuiEvent::ToolStarted { name, detail },
             StatusUpdate::ToolCompleted {
                 name,
                 success,
@@ -182,14 +180,12 @@ impl Channel for TuiChannel {
                 success,
                 error,
             },
-            StatusUpdate::ToolResult { name, preview } => {
-                TuiEvent::ToolResult { name, preview }
-            }
+            StatusUpdate::ToolResult { name, preview } => TuiEvent::ToolResult { name, preview },
             StatusUpdate::StreamChunk(chunk) => TuiEvent::StreamChunk(chunk),
             StatusUpdate::Status(msg) => TuiEvent::Status(msg),
-            StatusUpdate::JobStarted {
-                job_id, title, ..
-            } => TuiEvent::JobStarted { job_id, title },
+            StatusUpdate::JobStarted { job_id, title, .. } => {
+                TuiEvent::JobStarted { job_id, title }
+            }
             StatusUpdate::ApprovalNeeded {
                 request_id,
                 tool_name,
@@ -233,9 +229,7 @@ impl Channel for TuiChannel {
                 output_tokens,
                 cost_usd,
             },
-            StatusUpdate::Suggestions { suggestions } => {
-                TuiEvent::Suggestions { suggestions }
-            }
+            StatusUpdate::Suggestions { suggestions } => TuiEvent::Suggestions { suggestions },
             StatusUpdate::ImageGenerated { .. } => return Ok(()),
         };
 

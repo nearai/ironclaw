@@ -280,7 +280,11 @@ pub enum StatusUpdate {
     /// Agent is thinking/processing.
     Thinking(String),
     /// Tool execution started.
-    ToolStarted { name: String },
+    ToolStarted {
+        name: String,
+        /// Short contextual summary extracted from tool arguments.
+        detail: Option<String>,
+    },
     /// Tool execution completed.
     ///
     /// Use [`StatusUpdate::tool_completed`] to construct this variant — it
@@ -357,7 +361,62 @@ pub enum StatusUpdate {
     },
 }
 
+const DETAIL_MAX_LEN: usize = 80;
+
+/// Extract a short, non-sensitive one-liner from tool arguments.
+///
+/// Returns `None` for unknown tools or when no relevant field is present.
+pub fn tool_call_detail(name: &str, args: &serde_json::Value) -> Option<String> {
+    let raw = match name {
+        "http" | "http_request" | "web_fetch" => {
+            let method = args.get("method").and_then(|v| v.as_str()).unwrap_or("GET");
+            let url = args.get("url").and_then(|v| v.as_str())?;
+            format!("{method} {url}")
+        }
+        "shell" | "execute_command" => args.get("command").and_then(|v| v.as_str())?.to_string(),
+        "read_file" | "write_file" | "list_dir" => {
+            args.get("path").and_then(|v| v.as_str())?.to_string()
+        }
+        "memory_search" => {
+            let q = args.get("query").and_then(|v| v.as_str())?;
+            format!("query: {q}")
+        }
+        "memory_read" => args.get("path").and_then(|v| v.as_str())?.to_string(),
+        "memory_write" => {
+            let t = args.get("target").and_then(|v| v.as_str())?;
+            format!("target: {t}")
+        }
+        "create_job" => args.get("title").and_then(|v| v.as_str())?.to_string(),
+        "message" | "send_message" => {
+            let ch = args.get("channel").and_then(|v| v.as_str())?;
+            format!("to: {ch}")
+        }
+        "skill_search" | "tool_search" => args.get("query").and_then(|v| v.as_str())?.to_string(),
+        _ => return None,
+    };
+    Some(truncate_detail(&raw))
+}
+
+/// Truncate to `DETAIL_MAX_LEN` chars, appending "..." if truncated.
+fn truncate_detail(s: &str) -> String {
+    if s.chars().count() <= DETAIL_MAX_LEN {
+        s.to_string()
+    } else {
+        let truncated: String = s.chars().take(DETAIL_MAX_LEN.saturating_sub(3)).collect();
+        format!("{truncated}...")
+    }
+}
+
 impl StatusUpdate {
+    /// Build a `ToolStarted` status, extracting a contextual detail from the
+    /// tool's arguments (URL, path, query, etc.).
+    pub fn tool_started(name: String, arguments: &serde_json::Value) -> Self {
+        Self::ToolStarted {
+            detail: tool_call_detail(&name, arguments),
+            name,
+        }
+    }
+
     /// Build a `ToolCompleted` status with redacted parameters.
     ///
     /// On failure, serializes the tool's input parameters as pretty JSON after
@@ -611,5 +670,51 @@ mod tests {
     fn test_incoming_message_with_timezone() {
         let msg = IncomingMessage::new("test", "user1", "hello").with_timezone("America/New_York");
         assert_eq!(msg.timezone.as_deref(), Some("America/New_York"));
+    }
+
+    // ── tool_call_detail tests ──────────────────────────────────
+
+    #[test]
+    fn tool_call_detail_http() {
+        let args = serde_json::json!({"method": "POST", "url": "https://api.example.com/data"});
+        let detail = super::tool_call_detail("http", &args);
+        assert_eq!(detail.as_deref(), Some("POST https://api.example.com/data"));
+    }
+
+    #[test]
+    fn tool_call_detail_http_default_method() {
+        let args = serde_json::json!({"url": "https://api.example.com"});
+        let detail = super::tool_call_detail("http", &args);
+        assert_eq!(detail.as_deref(), Some("GET https://api.example.com"));
+    }
+
+    #[test]
+    fn tool_call_detail_shell() {
+        let args = serde_json::json!({"command": "cargo test --all"});
+        let detail = super::tool_call_detail("shell", &args);
+        assert_eq!(detail.as_deref(), Some("cargo test --all"));
+    }
+
+    #[test]
+    fn tool_call_detail_memory_search() {
+        let args = serde_json::json!({"query": "database migration"});
+        let detail = super::tool_call_detail("memory_search", &args);
+        assert_eq!(detail.as_deref(), Some("query: database migration"));
+    }
+
+    #[test]
+    fn tool_call_detail_unknown_tool() {
+        let args = serde_json::json!({"foo": "bar"});
+        let detail = super::tool_call_detail("unknown_tool_xyz", &args);
+        assert!(detail.is_none());
+    }
+
+    #[test]
+    fn tool_call_detail_truncation() {
+        let long_url = format!("https://example.com/{}", "a".repeat(100));
+        let args = serde_json::json!({"url": long_url});
+        let detail = super::tool_call_detail("http", &args).unwrap();
+        assert!(detail.chars().count() <= super::DETAIL_MAX_LEN);
+        assert!(detail.ends_with("..."));
     }
 }

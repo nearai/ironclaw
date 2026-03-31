@@ -33,10 +33,10 @@ mod manager;
 pub mod relay;
 mod repl;
 mod signal;
-pub mod wasm;
-pub mod web;
 #[cfg(feature = "tui")]
 mod tui;
+pub mod wasm;
+pub mod web;
 mod webhook_server;
 
 #[cfg(feature = "tui")]

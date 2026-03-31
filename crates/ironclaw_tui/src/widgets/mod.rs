@@ -149,6 +149,10 @@ pub struct ToolActivity {
     pub started_at: chrono::DateTime<chrono::Utc>,
     pub duration_ms: Option<u64>,
     pub status: ToolStatus,
+    /// Short contextual summary (e.g., URL, path, query).
+    pub detail: Option<String>,
+    /// Brief preview of the tool's output.
+    pub result_preview: Option<String>,
 }
 
 /// Tool execution status.

@@ -290,9 +290,7 @@ impl CommandPaletteWidget {
                 self.theme.accent_style()
             };
             let desc_style = if is_selected {
-                self.theme
-                    .dim_style()
-                    .add_modifier(Modifier::BOLD)
+                self.theme.dim_style().add_modifier(Modifier::BOLD)
             } else {
                 self.theme.dim_style()
             };
@@ -319,8 +317,7 @@ impl CommandPaletteWidget {
                 for bx in line_area.x..line_area.x + line_area.width {
                     if let Some(cell) = buf.cell_mut((bx, y)) {
                         cell.set_style(
-                            ratatui::style::Style::default()
-                                .bg(self.theme.border.to_color()),
+                            ratatui::style::Style::default().bg(self.theme.border.to_color()),
                         );
                     }
                 }
@@ -341,11 +338,7 @@ mod tests {
         state.update_filter("he");
         // Should match /help and /heartbeat
         assert_eq!(state.filtered.len(), 2);
-        let names: Vec<&str> = state
-            .filtered
-            .iter()
-            .map(|&i| COMMANDS[i].name)
-            .collect();
+        let names: Vec<&str> = state.filtered.iter().map(|&i| COMMANDS[i].name).collect();
         assert!(names.contains(&"/help"));
         assert!(names.contains(&"/heartbeat"));
     }

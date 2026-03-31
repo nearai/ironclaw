@@ -12,15 +12,13 @@
 use std::io;
 use std::time::Duration;
 
-use ratatui::crossterm::event::{
-    self, Event as CtEvent, KeyEventKind, MouseEvent, MouseEventKind,
-};
+use ratatui::Terminal;
+use ratatui::backend::CrosstermBackend;
+use ratatui::crossterm::event::{self, Event as CtEvent, KeyEventKind, MouseEvent, MouseEventKind};
 use ratatui::crossterm::execute;
 use ratatui::crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
-use ratatui::Terminal;
-use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use tokio::sync::mpsc;
 
@@ -287,7 +285,10 @@ async fn handle_event(
                 InputAction::ApprovalConfirm => {
                     if let Some(ref ap) = state.pending_approval {
                         let options = ApprovalWidget::options(ap.allow_always);
-                        let action = options.get(ap.selected).copied().unwrap_or(ApprovalAction::Deny);
+                        let action = options
+                            .get(ap.selected)
+                            .copied()
+                            .unwrap_or(ApprovalAction::Deny);
                         let _ = msg_tx.send(action.as_response().to_string()).await;
                         state.pending_approval = None;
                     }
@@ -363,13 +364,18 @@ async fn handle_event(
             state.status_text = msg;
         }
 
-        TuiEvent::ToolStarted { name } => {
-            state.status_text = format!("Running {name}...");
+        TuiEvent::ToolStarted { name, detail } => {
+            state.status_text = match &detail {
+                Some(d) => format!("Running {name}: {d}"),
+                None => format!("Running {name}..."),
+            };
             state.active_tools.push(ToolActivity {
                 name,
                 started_at: chrono::Utc::now(),
                 duration_ms: None,
                 status: ToolStatus::Running,
+                detail,
+                result_preview: None,
             });
         }
 
@@ -403,8 +409,13 @@ async fn handle_event(
             }
         }
 
-        TuiEvent::ToolResult { name: _, preview: _ } => {
-            // Could show in sidebar; for now, skip
+        TuiEvent::ToolResult { name, preview } => {
+            if let Some(tool) = state.active_tools.iter_mut().find(|t| t.name == name) {
+                tool.result_preview = Some(preview);
+            } else if let Some(tool) = state.recent_tools.iter_mut().rev().find(|t| t.name == name)
+            {
+                tool.result_preview = Some(preview);
+            }
         }
 
         TuiEvent::StreamChunk(chunk) => {
@@ -580,22 +591,21 @@ fn render_frame(
 
     // Header
     if layout.header.visible {
-        widgets.header.render(header_area, frame.buffer_mut(), state);
+        widgets
+            .header
+            .render(header_area, frame.buffer_mut(), state);
     }
 
     // Main area: conversation/logs | sidebar
     match state.active_tab {
         ActiveTab::Logs => {
             // Logs tab takes the full main area (no sidebar)
-            widgets
-                .logs
-                .render(main_area, frame.buffer_mut(), state);
+            widgets.logs.render(main_area, frame.buffer_mut(), state);
         }
         ActiveTab::Conversation => {
             if state.sidebar_visible && main_area.width > 40 {
-                let sidebar_width = (main_area.width as u32
-                    * layout.sidebar.effective_width() as u32
-                    / 100) as u16;
+                let sidebar_width =
+                    (main_area.width as u32 * layout.sidebar.effective_width() as u32 / 100) as u16;
                 let conversation_width = main_area.width.saturating_sub(sidebar_width + 1);
 
                 let horizontal = Layout::default()
@@ -666,9 +676,11 @@ fn render_frame(
             state.command_palette.filtered.len(),
         );
         if palette_area.height > 0 {
-            widgets
-                .command_palette
-                .render_palette(palette_area, frame.buffer_mut(), &state.command_palette);
+            widgets.command_palette.render_palette(
+                palette_area,
+                frame.buffer_mut(),
+                &state.command_palette,
+            );
         }
     }
 

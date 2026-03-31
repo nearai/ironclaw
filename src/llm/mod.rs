@@ -41,6 +41,7 @@ pub mod transcription;
 mod codex_test_helpers;
 
 pub mod image_models;
+mod model_limits;
 pub mod models;
 pub mod reasoning_models;
 pub mod vision_models;
@@ -53,6 +54,7 @@ pub use config::{
 pub use error::LlmError;
 pub use failover::{CooldownConfig, FailoverProvider};
 pub use gemini_oauth::GeminiOauthProvider;
+pub use model_limits::infer_context_length;
 pub use nearai_chat::{DEFAULT_MODEL, ModelInfo, NearAiChatProvider, default_models};
 pub use openai_codex_provider::OpenAiCodexProvider;
 pub use openai_codex_session::{OpenAiCodexSession, OpenAiCodexSessionManager};

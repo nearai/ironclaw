@@ -96,12 +96,14 @@ impl TuiWidget for StatusBarWidget {
         };
 
         let mut left_spans = vec![
-            Span::styled(
-                format!(" {tab_label} "),
-                self.theme.bold_accent_style(),
-            ),
+            Span::styled(format!(" {tab_label} "), self.theme.bold_accent_style()),
             sep.clone(),
             Span::styled(state.model.to_string(), self.theme.accent_style()),
+            sep.clone(),
+            Span::styled(
+                format!("v{}", state.version),
+                self.theme.dim_style(),
+            ),
             sep.clone(),
             Span::styled(
                 format!("{tokens_used_str}/{context_max_str}"),
@@ -124,10 +126,7 @@ impl TuiWidget for StatusBarWidget {
         left_spans.push(Span::styled(duration_str, self.theme.dim_style()));
 
         let right_text = "^L logs  ^B sidebar  ^C quit";
-        let right_span = Span::styled(
-            format!("{right_text}  "),
-            self.theme.dim_style(),
-        );
+        let right_span = Span::styled(format!("{right_text}  "), self.theme.dim_style());
 
         // Render left-aligned portion
         let left_line = Line::from(left_spans);
@@ -157,7 +156,10 @@ mod tests {
     #[test]
     fn context_bar_full() {
         let bar = context_bar(1.0, 10);
-        assert_eq!(bar, "[\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}]");
+        assert_eq!(
+            bar,
+            "[\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}]"
+        );
     }
 
     #[test]

@@ -1065,9 +1065,7 @@ impl Agent {
                 .channels
                 .send_status(
                     &message.channel,
-                    StatusUpdate::ToolStarted {
-                        name: pending.tool_name.clone(),
-                    },
+                    StatusUpdate::tool_started(pending.tool_name.clone(), &pending.parameters),
                     &message.metadata,
                 )
                 .await;
@@ -1229,9 +1227,7 @@ impl Agent {
                         .channels
                         .send_status(
                             &message.channel,
-                            StatusUpdate::ToolStarted {
-                                name: tc.name.clone(),
-                            },
+                            StatusUpdate::tool_started(tc.name.clone(), &tc.arguments),
                             &message.metadata,
                         )
                         .await;
@@ -1276,9 +1272,7 @@ impl Agent {
                         let _ = channels
                             .send_status(
                                 &channel,
-                                StatusUpdate::ToolStarted {
-                                    name: tc.name.clone(),
-                                },
+                                StatusUpdate::tool_started(tc.name.clone(), &tc.arguments),
                                 &metadata,
                             )
                             .await;

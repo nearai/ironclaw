@@ -7,7 +7,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 
 use crate::layout::TuiSlot;
-use crate::render::wrap_text;
+use crate::render::{render_markdown, wrap_text};
 use crate::theme::Theme;
 
 use super::{AppState, MessageRole, TuiWidget};
@@ -41,18 +41,9 @@ impl TuiWidget for ConversationWidget {
 
         for msg in &state.messages {
             let (prefix, style) = match msg.role {
-                MessageRole::User => (
-                    "\u{25CF} ",
-                    self.theme.accent_style(),
-                ),
-                MessageRole::Assistant => (
-                    "",
-                    Style::default().fg(self.theme.fg.to_color()),
-                ),
-                MessageRole::System => (
-                    "\u{25CB} ",
-                    self.theme.dim_style(),
-                ),
+                MessageRole::User => ("\u{25CF} ", self.theme.accent_style()),
+                MessageRole::Assistant => ("", Style::default().fg(self.theme.fg.to_color())),
+                MessageRole::System => ("\u{25CB} ", self.theme.dim_style()),
             };
 
             if msg.role == MessageRole::User {
@@ -74,10 +65,15 @@ impl TuiWidget for ConversationWidget {
                     self.theme.dim_style(),
                 )));
 
-                let wrapped = wrap_text(&msg.content, usable_width.saturating_sub(2), style);
+                let wrapped =
+                    render_markdown(&msg.content, usable_width.saturating_sub(2), &self.theme);
                 for line in wrapped {
                     let mut padded = vec![Span::raw("  ".to_string())];
-                    padded.extend(line.spans.into_iter().map(|s| Span::styled(s.content.to_string(), s.style)));
+                    padded.extend(
+                        line.spans
+                            .into_iter()
+                            .map(|s| Span::styled(s.content.to_string(), s.style)),
+                    );
                     all_lines.push(Line::from(padded));
                 }
                 all_lines.push(Line::from(""));
