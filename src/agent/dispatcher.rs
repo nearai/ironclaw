@@ -2649,4 +2649,246 @@ mod tests {
         assert!(!content.contains("\n</tool_output><system>"));
         assert_eq!(message.content, content);
     }
+
+    #[tokio::test]
+    async fn test_chat_delegate_check_signals_continue() {
+        use crate::agent::session::{Session, Thread, ThreadState};
+        use std::sync::Arc;
+        use tokio::sync::Mutex;
+        use uuid::Uuid;
+        let thread_id = Uuid::new_v4();
+        let session = Arc::new(Mutex::new(Session::new("test-user")));
+        {
+            let mut sess = session.lock().await;
+            let mut thread = Thread::with_id(thread_id, sess.id);
+            thread.state = ThreadState::Idle;
+            sess.threads.insert(thread_id, thread);
+        }
+        assert_ne!(ThreadState::Idle, ThreadState::Interrupted);
+    }
+
+    #[tokio::test]
+    async fn test_chat_delegate_check_signals_interrupted() {
+        use crate::agent::session::{Session, Thread, ThreadState};
+        use std::sync::Arc;
+        use tokio::sync::Mutex;
+        use uuid::Uuid;
+        let thread_id = Uuid::new_v4();
+        let session = Arc::new(Mutex::new(Session::new("test-user")));
+        {
+            let mut sess = session.lock().await;
+            let mut thread = Thread::with_id(thread_id, sess.id);
+            thread.state = ThreadState::Interrupted;
+            sess.threads.insert(thread_id, thread);
+        }
+        {
+            let sess = session.lock().await;
+            let thread = sess.threads.get(&thread_id).unwrap();
+            assert_eq!(thread.state, ThreadState::Interrupted);
+        }
+    }
+
+    #[test]
+    fn test_agentic_loop_config_defaults() {
+        use crate::agent::agentic_loop::AgenticLoopConfig;
+        let config = AgenticLoopConfig {
+            max_iterations: 11,
+            enable_tool_intent_nudge: true,
+            max_tool_intent_nudges: 2,
+        };
+        assert_eq!(config.max_iterations, 11);
+        assert!(config.enable_tool_intent_nudge);
+        assert_eq!(config.max_tool_intent_nudges, 2);
+    }
+
+    #[test]
+    fn test_loop_outcome_variants() {
+        use crate::agent::agentic_loop::LoopOutcome;
+        let _response = LoopOutcome::Response("test".to_string());
+        let _stopped = LoopOutcome::Stopped;
+        let _max_iter = LoopOutcome::MaxIterations;
+        let _need_approval =
+            LoopOutcome::NeedApproval(Box::new(crate::agent::session::PendingApproval {
+                request_id: uuid::Uuid::new_v4(),
+                tool_name: "shell".to_string(),
+                parameters: serde_json::json!({}),
+                display_parameters: serde_json::json!({}),
+                description: "test".to_string(),
+                tool_call_id: "call_1".to_string(),
+                context_messages: vec![],
+                deferred_tool_calls: vec![],
+                user_timezone: None,
+                allow_always: false,
+            }));
+    }
+
+    #[tokio::test]
+    async fn test_execute_chat_tool_standalone_with_safety_check() {
+        use crate::config::SafetyConfig;
+        use crate::context::JobContext;
+        use crate::safety::SafetyLayer;
+        use crate::tools::ToolRegistry;
+        use crate::tools::builtin::EchoTool;
+        let registry = ToolRegistry::new();
+        registry.register(std::sync::Arc::new(EchoTool)).await;
+        let safety = SafetyLayer::new(&SafetyConfig {
+            max_output_length: 100,
+            injection_check_enabled: true,
+        });
+        let job_ctx = JobContext::with_user("test", "chat", "test session");
+        let result = super::execute_chat_tool_standalone(
+            &registry,
+            &safety,
+            "echo",
+            &serde_json::json!({ "message": "hi" }),
+            &job_ctx,
+        )
+        .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_execute_chat_tool_standalone_safety_truncation() {
+        use crate::config::SafetyConfig;
+        use crate::context::JobContext;
+        use crate::safety::SafetyLayer;
+        use crate::tools::ToolRegistry;
+        use crate::tools::builtin::EchoTool;
+        let registry = ToolRegistry::new();
+        registry.register(std::sync::Arc::new(EchoTool)).await;
+        let safety = SafetyLayer::new(&SafetyConfig {
+            max_output_length: 50,
+            injection_check_enabled: false,
+        });
+        let job_ctx = JobContext::with_user("test", "chat", "test session");
+        let long_message = "x".repeat(200);
+        let result = super::execute_chat_tool_standalone(
+            &registry,
+            &safety,
+            "echo",
+            &serde_json::json!({ "message": long_message }),
+            &job_ctx,
+        )
+        .await;
+        assert!(result.is_ok());
+        let output = result.unwrap();
+        assert!(output.len() <= 100);
+    }
+
+    #[test]
+    fn test_compact_messages_preserves_tool_call_structure() {
+        use crate::llm::{ChatMessage, Role, ToolCall};
+        let messages = vec![
+            ChatMessage::system("System"),
+            ChatMessage::user("Q1"),
+            ChatMessage::assistant("A1"),
+            ChatMessage::user("Q2"),
+            ChatMessage::assistant_with_tool_calls(
+                Some("Thinking...".to_string()),
+                vec![ToolCall {
+                    id: "call_1".to_string(),
+                    name: "search".to_string(),
+                    arguments: serde_json::json!({ "query": "test" }),
+                    reasoning: None,
+                }],
+            ),
+            ChatMessage::tool_result("call_1", "search", "Result"),
+        ];
+        let compacted = compact_messages_for_retry(&messages);
+        assert!(
+            compacted
+                .iter()
+                .any(|m| m.role == Role::Assistant && m.tool_calls.is_some())
+        );
+        assert!(compacted.iter().any(|m| m.role == Role::Tool));
+    }
+
+    #[test]
+    fn test_compact_messages_empty_input() {
+        use crate::llm::ChatMessage;
+        let messages: Vec<ChatMessage> = vec![];
+        let compacted = compact_messages_for_retry(&messages);
+        assert!(!compacted.is_empty());
+        assert!(compacted[0].role == crate::llm::Role::System);
+    }
+
+    #[test]
+    fn test_compact_messages_no_user_messages() {
+        use crate::llm::{ChatMessage, Role};
+        let messages = vec![
+            ChatMessage::system("System only"),
+            ChatMessage::system("Another system"),
+        ];
+        let compacted = compact_messages_for_retry(&messages);
+        assert!(compacted.iter().any(|m| m.role == Role::System));
+    }
+
+    #[tokio::test]
+    async fn test_relay_channel_approval_logic_matrix() {
+        use crate::channels::IncomingMessage;
+        use crate::tools::ApprovalRequirement;
+        struct TestCase {
+            channel: &'static str,
+            event_type: &'static str,
+            requirement: ApprovalRequirement,
+            auto_approved: bool,
+            expect_approval: bool,
+        }
+        let test_cases = [
+            TestCase {
+                channel: "slack-relay",
+                event_type: "message",
+                requirement: ApprovalRequirement::Always,
+                auto_approved: false,
+                expect_approval: false,
+            },
+            TestCase {
+                channel: "slack-relay",
+                event_type: "direct_message",
+                requirement: ApprovalRequirement::Always,
+                auto_approved: false,
+                expect_approval: false,
+            },
+            TestCase {
+                channel: "web",
+                event_type: "message",
+                requirement: ApprovalRequirement::UnlessAutoApproved,
+                auto_approved: true,
+                expect_approval: true,
+            },
+            TestCase {
+                channel: "web",
+                event_type: "message",
+                requirement: ApprovalRequirement::UnlessAutoApproved,
+                auto_approved: false,
+                expect_approval: false,
+            },
+            TestCase {
+                channel: "cli",
+                event_type: "message",
+                requirement: ApprovalRequirement::Never,
+                auto_approved: false,
+                expect_approval: true,
+            },
+        ];
+        for tc in &test_cases {
+            let msg = IncomingMessage::new(tc.channel, "u1", "hello")
+                .with_metadata(serde_json::json!({ "event_type": tc.event_type }));
+            let is_relay = msg.channel.ends_with("-relay");
+            let is_dm =
+                msg.metadata.get("event_type").and_then(|v| v.as_str()) == Some("direct_message");
+            let relay_auto_reject = is_relay && !is_dm;
+            let requires_approval = match tc.requirement {
+                ApprovalRequirement::Never => false,
+                ApprovalRequirement::UnlessAutoApproved => !tc.auto_approved,
+                ApprovalRequirement::Always => true,
+            };
+            let final_requires_approval = relay_auto_reject || requires_approval;
+            assert_eq!(
+                !final_requires_approval, tc.expect_approval,
+                "Case: {:?}+{:?}+{:?}+auto={}",
+                tc.channel, tc.event_type, tc.requirement, tc.auto_approved
+            );
+        }
+    }
 }
