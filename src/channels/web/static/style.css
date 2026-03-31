@@ -472,6 +472,13 @@ body {
   background: var(--border);
 }
 
+.user-dropdown-gateway {
+  padding: 8px 16px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  line-height: 1.6;
+}
+
 .user-dropdown-item {
   display: block;
   width: 100%;

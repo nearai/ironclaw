@@ -170,6 +170,13 @@ impl OAuthProvider for GoogleProvider {
             }
         }
 
+        tracing::debug!(
+            sub = %claims.sub,
+            picture = ?claims.picture,
+            name = ?claims.name,
+            "Google id_token claims decoded"
+        );
+
         Ok(OAuthUserProfile {
             provider_user_id: claims.sub.clone(),
             email: claims.email.clone(),
