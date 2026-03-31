@@ -183,22 +183,21 @@ function initApp() {
     // Render avatar.
     var avatarImg = document.getElementById('user-avatar-img');
     var avatarInitials = document.getElementById('user-avatar-initials');
+    var displayName = profile.display_name || profile.email || profile.id || '?';
+    if (avatarInitials) {
+      avatarInitials.textContent = displayName.charAt(0).toUpperCase();
+    }
     if (profile.avatar_url && avatarImg) {
-      avatarImg.src = profile.avatar_url;
-      avatarImg.style.display = 'block';
-      if (avatarInitials) avatarInitials.style.display = 'none';
-      avatarImg.onerror = function() {
-        // Fallback to initials if image fails to load.
-        avatarImg.style.display = 'none';
-        if (avatarInitials) {
-          avatarInitials.style.display = 'flex';
-          var n = profile.display_name || profile.email || profile.id || '?';
-          avatarInitials.textContent = n.charAt(0).toUpperCase();
-        }
+      avatarImg.onload = function() {
+        // Image loaded successfully — hide initials.
+        if (avatarInitials) avatarInitials.style.display = 'none';
       };
-    } else if (avatarInitials) {
-      var name = profile.display_name || profile.email || profile.id || '?';
-      avatarInitials.textContent = name.charAt(0).toUpperCase();
+      avatarImg.onerror = function() {
+        // Image failed — remove src so CSS hides it, show initials.
+        avatarImg.removeAttribute('src');
+        if (avatarInitials) avatarInitials.style.display = 'flex';
+      };
+      avatarImg.src = profile.avatar_url;
     }
     // Populate dropdown.
     var nameEl = document.getElementById('user-dropdown-name');
