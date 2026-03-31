@@ -1774,34 +1774,46 @@ impl Agent {
         instructions: String,
     ) {
         let auth_data = parse_auth_result(tool_result);
-        {
+        let thread_exists = {
             let mut sess = session.lock().await;
-            if let Some(thread) = sess.threads.get_mut(&thread_id) {
-                thread.enter_auth_mode(ext_name.clone());
-                thread.complete_turn(&instructions);
-                // User message already persisted at turn start; save auth instructions
-                self.persist_assistant_response(
-                    thread_id,
+            match sess.threads.get_mut(&thread_id) {
+                Some(thread) => {
+                    thread.enter_auth_mode(ext_name.clone());
+                    thread.complete_turn(&instructions);
+                    // User message already persisted at turn start; save auth instructions
+                    self.persist_assistant_response(
+                        thread_id,
+                        &message.channel,
+                        &message.user_id,
+                        &instructions,
+                    )
+                    .await;
+                    true
+                }
+                None => {
+                    tracing::error!(
+                        %thread_id,
+                        "Thread disappeared during auth intercept — skipping AuthRequired event"
+                    );
+                    false
+                }
+            }
+        };
+        if thread_exists {
+            let _ = self
+                .channels
+                .send_status(
                     &message.channel,
-                    &message.user_id,
-                    &instructions,
+                    StatusUpdate::AuthRequired {
+                        extension_name: ext_name,
+                        instructions: Some(instructions.clone()),
+                        auth_url: auth_data.auth_url,
+                        setup_url: auth_data.setup_url,
+                    },
+                    &message.metadata,
                 )
                 .await;
-            }
         }
-        let _ = self
-            .channels
-            .send_status(
-                &message.channel,
-                StatusUpdate::AuthRequired {
-                    extension_name: ext_name,
-                    instructions: Some(instructions.clone()),
-                    auth_url: auth_data.auth_url,
-                    setup_url: auth_data.setup_url,
-                },
-                &message.metadata,
-            )
-            .await;
     }
 
     /// Handle an auth token submitted while the thread is in auth mode.
@@ -1821,8 +1833,16 @@ impl Agent {
         // Clear auth mode regardless of outcome
         {
             let mut sess = session.lock().await;
-            if let Some(thread) = sess.threads.get_mut(&thread_id) {
-                thread.pending_auth = None;
+            match sess.threads.get_mut(&thread_id) {
+                Some(thread) => {
+                    thread.pending_auth = None;
+                }
+                None => {
+                    tracing::error!(
+                        %thread_id,
+                        "Thread disappeared while clearing auth mode"
+                    );
+                }
             }
         }
 
@@ -1859,8 +1879,16 @@ impl Agent {
             Ok(result) => {
                 {
                     let mut sess = session.lock().await;
-                    if let Some(thread) = sess.threads.get_mut(&thread_id) {
-                        thread.enter_auth_mode(pending.extension_name.clone());
+                    match sess.threads.get_mut(&thread_id) {
+                        Some(thread) => {
+                            thread.enter_auth_mode(pending.extension_name.clone());
+                        }
+                        None => {
+                            tracing::error!(
+                                %thread_id,
+                                "Thread disappeared while re-entering auth mode"
+                            );
+                        }
                     }
                 }
                 let _ = self
@@ -1884,8 +1912,16 @@ impl Agent {
                 if matches!(e, crate::extensions::ExtensionError::ValidationFailed(_)) {
                     {
                         let mut sess = session.lock().await;
-                        if let Some(thread) = sess.threads.get_mut(&thread_id) {
-                            thread.enter_auth_mode(pending.extension_name.clone());
+                        match sess.threads.get_mut(&thread_id) {
+                            Some(thread) => {
+                                thread.enter_auth_mode(pending.extension_name.clone());
+                            }
+                            None => {
+                                tracing::error!(
+                                    %thread_id,
+                                    "Thread disappeared while re-entering auth mode after validation failure"
+                                );
+                            }
                         }
                     }
                     let _ = self
