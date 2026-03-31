@@ -1691,7 +1691,7 @@ impl Workspace {
         }
 
         if count > 0 {
-            tracing::info!("Seeded {} workspace files", count);
+            tracing::debug!("Seeded {} workspace files", count);
         }
         Ok(count)
     }
