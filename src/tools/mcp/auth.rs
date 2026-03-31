@@ -2169,14 +2169,13 @@ mod tests {
             "IRONCLAW_OAUTH_PROXY_AUTH_TOKEN",
             Some("gateway-test-token"),
         );
+        let expected_token_url = format!("{base_url}/token");
 
         let secrets = test_secrets_store();
         let user_id = "test-user";
         let server = McpServerConfig::new("notion", "https://mcp.notion.com/mcp").with_oauth(
-            crate::tools::mcp::config::OAuthConfig::new("configured-client").with_endpoints(
-                "http://127.0.0.1/authorize",
-                "https://auth.example.com/token",
-            ),
+            crate::tools::mcp::config::OAuthConfig::new("configured-client")
+                .with_endpoints("http://127.0.0.1/authorize", expected_token_url.clone()),
         );
 
         secrets
@@ -2202,7 +2201,7 @@ mod tests {
         );
         assert_eq!(
             requests[0].form.get("token_url").map(String::as_str),
-            Some("https://auth.example.com/token")
+            Some(expected_token_url.as_str())
         );
         assert_eq!(
             requests[0].form.get("provider").map(String::as_str),
@@ -2218,8 +2217,12 @@ mod tests {
         );
     }
 
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn test_refresh_access_token_serializes_concurrent_refreshes() {
+        let _env_guard = lock_env();
+        let _proxy_url_guard = set_env_var("IRONCLAW_OAUTH_EXCHANGE_URL", None);
+        let _proxy_token_guard = set_env_var("IRONCLAW_OAUTH_PROXY_AUTH_TOKEN", None);
         let secrets = test_secrets_store();
         let user_id = "test-user";
         let Some((base_url, state)) = start_refresh_server().await else {
@@ -2265,13 +2268,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_refresh_lock_recreates_dropped_entry() {
-        let first = refresh_lock("notion", "user-a").await;
-        let first_ptr = Arc::as_ptr(&first);
+        let first = refresh_lock("notion-recreate", "user-recreate").await;
+        let first_weak = Arc::downgrade(&first);
         drop(first);
 
-        let second = refresh_lock("notion", "user-a").await;
+        assert!(first_weak.upgrade().is_none());
 
-        assert_ne!(Arc::as_ptr(&second), first_ptr);
+        let second = refresh_lock("notion-recreate", "user-recreate").await;
+        let third = refresh_lock("notion-recreate", "user-recreate").await;
+
+        assert!(Arc::ptr_eq(&second, &third));
     }
 
     struct EnvVarGuard {
