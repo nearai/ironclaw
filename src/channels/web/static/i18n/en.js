@@ -106,6 +106,10 @@ I18n.register('en', {
   
   // Chat Tab
   'chat.newThread': 'New Thread',
+  'chat.deleteThread': 'Delete Thread',
+  'chat.confirmDeleteThread': 'Delete "{title}"?',
+  'chat.threadDeleted': 'Thread deleted',
+  'chat.deleteThreadFailed': 'Delete failed: {message}',
   'chat.toggleSidebar': 'Toggle Sidebar',
   'chat.assistant': 'Assistant',
   'chat.conversations': 'Conversations',
