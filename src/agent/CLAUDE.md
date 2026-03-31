@@ -155,14 +155,16 @@ All commands parsed by `SubmissionParser::parse()`:
 | `always/a` and aliases | `ApprovalResponse { approved: true, always: true }` | |
 | `no/n/deny/reject/cancel` and aliases | `ApprovalResponse { approved: false }` | |
 | JSON `ExecApproval{...}` | `ExecApproval` | From web gateway approval endpoint |
-| `/help`, `/?` | `SystemCommand { "help" }` | Bypasses thread-state checks |
-| `/version` | `SystemCommand { "version" }` | |
-| `/tools` | `SystemCommand { "tools" }` | |
-| `/skills [search <q>]` | `SystemCommand { "skills" }` | |
-| `/ping` | `SystemCommand { "ping" }` | |
-| `/debug` | `SystemCommand { "debug" }` | |
-| `/model [name]` | `SystemCommand { "model" }` | |
-| Everything else | `UserInput` | Starts a new agentic turn |
+|| `/help`, `/?` | `SystemCommand { "help" }` | Bypasses thread-state checks |
+|| `/version` | `SystemCommand { "version" }` | |
+|| `/tools` | `SystemCommand { "tools" }` | |
+|| `/skills [search <q>]` | `SystemCommand { "skills" }` | |
+|| `/ping` | `SystemCommand { "ping" }` | |
+|| `/debug` | `SystemCommand { "debug" }` | |
+|| `/model [name]` | `SystemCommand { "model" }` | |
+|| `/reasoning [on|off|<model>]` | `SystemCommand { "reasoning" }` | Configure reasoning mode |
+|| `/restart` | `SystemCommand { "restart" }` | Restart agent loop |
+|| Everything else | `UserInput` | Starts a new agentic turn |
 
 **`SystemCommand` vs control**: `SystemCommand` variants bypass thread-state checks entirely (no session lock, no turn creation). `Quit` returns `Ok(None)` from `handle_message` which breaks the main loop.
 
