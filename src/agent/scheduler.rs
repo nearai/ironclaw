@@ -824,7 +824,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_dispatch_job_caps_user_max_tokens() {
-        let mut sched = make_test_scheduler(1000);
+        let sched = make_test_scheduler(1000);
         let meta = serde_json::json!({ "max_tokens": 5000 });
         let job_id = sched
             .dispatch_job("user1", "test", "desc", Some(meta))
@@ -837,7 +837,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_dispatch_job_unlimited_config_preserves_user_tokens() {
-        let mut sched = make_test_scheduler(0); // 0 = unlimited
+        let sched = make_test_scheduler(0); // 0 = unlimited
         let meta = serde_json::json!({ "max_tokens": 5000 });
         let job_id = sched
             .dispatch_job("user1", "test", "desc", Some(meta))
