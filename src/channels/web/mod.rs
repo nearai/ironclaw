@@ -335,7 +335,7 @@ impl GatewayChannel {
         }
 
         use crate::channels::web::oauth::providers::{
-            GitHubProvider, GoogleProvider, OAuthProvider,
+            AppleProvider, GitHubProvider, GoogleProvider, OAuthProvider,
         };
         use crate::channels::web::oauth::state_store::OAuthStateStore;
         use std::collections::HashMap;
@@ -359,6 +359,18 @@ impl GatewayChannel {
                 Arc::new(GitHubProvider::new(
                     github.client_id.clone(),
                     github.client_secret.clone(),
+                )),
+            );
+        }
+
+        if let Some(ref apple) = config.apple {
+            providers.insert(
+                "apple".to_string(),
+                Arc::new(AppleProvider::new(
+                    apple.client_id.clone(),
+                    apple.team_id.clone(),
+                    apple.key_id.clone(),
+                    apple.private_key_pem.clone(),
                 )),
             );
         }

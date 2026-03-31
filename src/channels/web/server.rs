@@ -470,7 +470,8 @@ pub async fn start_server(
         )
         .route(
             "/auth/callback/{provider}",
-            get(crate::channels::web::handlers::auth::callback_handler),
+            get(crate::channels::web::handlers::auth::callback_handler)
+                .post(crate::channels::web::handlers::auth::callback_post_handler),
         )
         .route(
             "/auth/logout",

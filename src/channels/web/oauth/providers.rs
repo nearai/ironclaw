@@ -341,6 +341,175 @@ impl OAuthProvider for GitHubProvider {
     }
 }
 
+// ── Apple Sign In ─────────────────────────────────────────────────────────
+
+const APPLE_AUTH_URL: &str = "https://appleid.apple.com/auth/authorize";
+const APPLE_TOKEN_URL: &str = "https://appleid.apple.com/auth/token";
+
+/// Apple Sign In provider.
+///
+/// Apple uses OIDC but requires a JWT `client_secret` (ES256-signed, 6-month
+/// lifetime) and sends the callback as a POST with `response_mode=form_post`.
+pub struct AppleProvider {
+    client_id: String,
+    team_id: String,
+    key_id: String,
+    private_key_pem: SecretString,
+    http: reqwest::Client,
+}
+
+impl AppleProvider {
+    pub fn new(
+        client_id: String,
+        team_id: String,
+        key_id: String,
+        private_key_pem: SecretString,
+    ) -> Self {
+        Self {
+            client_id,
+            team_id,
+            key_id,
+            private_key_pem,
+            http: reqwest::Client::new(),
+        }
+    }
+
+    /// Generate a JWT client_secret for Apple's token endpoint.
+    ///
+    /// Apple requires the client_secret to be an ES256-signed JWT with:
+    /// - `iss`: Team ID
+    /// - `sub`: Client (Services) ID
+    /// - `aud`: `https://appleid.apple.com`
+    /// - `iat`: current time
+    /// - `exp`: up to 6 months from now
+    fn generate_client_secret(&self) -> Result<String, OAuthError> {
+        use jsonwebtoken::{Algorithm, EncodingKey, Header};
+
+        let now = chrono::Utc::now().timestamp() as u64;
+        let claims = serde_json::json!({
+            "iss": self.team_id,
+            "sub": self.client_id,
+            "aud": "https://appleid.apple.com",
+            "iat": now,
+            "exp": now + 86400 * 180, // 6 months
+        });
+
+        let mut header = Header::new(Algorithm::ES256);
+        header.kid = Some(self.key_id.clone());
+
+        let key = EncodingKey::from_ec_pem(self.private_key_pem.expose_secret().as_bytes())
+            .map_err(|e| OAuthError::CodeExchange(format!("Invalid Apple private key: {e}")))?;
+
+        jsonwebtoken::encode(&header, &claims, &key).map_err(|e| {
+            OAuthError::CodeExchange(format!("Failed to sign Apple client_secret: {e}"))
+        })
+    }
+}
+
+#[derive(Deserialize)]
+struct AppleTokenResponse {
+    id_token: String,
+}
+
+#[derive(Deserialize, serde::Serialize)]
+struct AppleIdTokenClaims {
+    sub: String,
+    email: Option<String>,
+    email_verified: Option<serde_json::Value>,
+}
+
+#[async_trait]
+impl OAuthProvider for AppleProvider {
+    fn name(&self) -> &str {
+        "apple"
+    }
+
+    fn authorization_url(&self, callback_url: &str, state: &str, _code_challenge: &str) -> String {
+        // Apple requires response_mode=form_post (callback is a POST, not GET).
+        format!(
+            "{APPLE_AUTH_URL}?\
+             response_type=code\
+             &response_mode=form_post\
+             &client_id={client_id}\
+             &redirect_uri={redirect_uri}\
+             &scope={scope}\
+             &state={state}",
+            client_id = urlencoding::encode(&self.client_id),
+            redirect_uri = urlencoding::encode(callback_url),
+            scope = urlencoding::encode("name email"),
+            state = urlencoding::encode(state),
+        )
+    }
+
+    async fn exchange_code(
+        &self,
+        code: &str,
+        callback_url: &str,
+        _code_verifier: &str,
+    ) -> Result<OAuthUserProfile, OAuthError> {
+        let client_secret = self.generate_client_secret()?;
+
+        let resp = self
+            .http
+            .post(APPLE_TOKEN_URL)
+            .form(&[
+                ("grant_type", "authorization_code"),
+                ("code", code),
+                ("redirect_uri", callback_url),
+                ("client_id", &self.client_id),
+                ("client_secret", &client_secret),
+            ])
+            .send()
+            .await
+            .map_err(|e| OAuthError::CodeExchange(e.to_string()))?;
+
+        if !resp.status().is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(OAuthError::CodeExchange(format!(
+                "Apple token endpoint error: {body}"
+            )));
+        }
+
+        let token_resp: AppleTokenResponse = resp
+            .json()
+            .await
+            .map_err(|e| OAuthError::CodeExchange(e.to_string()))?;
+
+        // Decode the id_token — we skip signature verification because
+        // the token was received directly from Apple over TLS. We validate
+        // `aud` to prevent token substitution.
+        let mut validation = jsonwebtoken::Validation::default();
+        validation.insecure_disable_signature_validation();
+        validation.set_audience(&[&self.client_id]);
+        validation.set_issuer(&["https://appleid.apple.com"]);
+
+        let token_data = jsonwebtoken::decode::<AppleIdTokenClaims>(
+            &token_resp.id_token,
+            &jsonwebtoken::DecodingKey::from_secret(&[]),
+            &validation,
+        )
+        .map_err(|e| OAuthError::ProfileFetch(format!("Failed to decode Apple id_token: {e}")))?;
+
+        let claims = token_data.claims;
+
+        // Apple's email_verified can be a string "true"/"false" or a boolean.
+        let email_verified = match &claims.email_verified {
+            Some(serde_json::Value::Bool(b)) => *b,
+            Some(serde_json::Value::String(s)) => s == "true",
+            _ => false,
+        };
+
+        Ok(OAuthUserProfile {
+            provider_user_id: claims.sub.clone(),
+            email: claims.email.clone(),
+            email_verified,
+            display_name: None, // Apple sends name only on first auth via POST user field
+            avatar_url: None,
+            raw: serde_json::to_value(&claims).unwrap_or_default(),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -403,6 +572,29 @@ mod tests {
         assert!(url.contains("state=csrf-state-456"));
         assert!(url.contains("scope=read%3Auser"));
         // GitHub ignores code_challenge, verify it's not included
+        assert!(!url.contains("code_challenge="));
+    }
+
+    #[test]
+    fn test_apple_authorization_url_format() {
+        let provider = AppleProvider::new(
+            "com.example.myapp".to_string(),
+            "TEAM123456".to_string(),
+            "KEY1234567".to_string(),
+            SecretString::from("fake-key".to_string()),
+        );
+
+        let url = provider.authorization_url(
+            "https://example.com/auth/callback/apple",
+            "csrf-state-789",
+            "ignored-challenge",
+        );
+
+        assert!(url.starts_with(APPLE_AUTH_URL));
+        assert!(url.contains("client_id=com.example.myapp"));
+        assert!(url.contains("response_mode=form_post"));
+        assert!(url.contains("state=csrf-state-789"));
+        assert!(url.contains("scope=name"));
         assert!(!url.contains("code_challenge="));
     }
 }

@@ -27,6 +27,8 @@ pub struct OAuthConfig {
     pub google: Option<GoogleOAuthConfig>,
     /// GitHub OAuth configuration.
     pub github: Option<GitHubOAuthConfig>,
+    /// Apple Sign In configuration.
+    pub apple: Option<AppleOAuthConfig>,
 }
 
 /// Google OAuth 2.0 / OIDC configuration.
@@ -46,6 +48,22 @@ pub struct GoogleOAuthConfig {
 pub struct GitHubOAuthConfig {
     pub client_id: String,
     pub client_secret: SecretString,
+}
+
+/// Apple Sign In configuration.
+///
+/// Apple uses OIDC but requires a JWT `client_secret` signed with an ES256
+/// private key from the Apple Developer portal.
+#[derive(Debug, Clone)]
+pub struct AppleOAuthConfig {
+    /// Services ID (e.g. `com.example.myapp`).
+    pub client_id: String,
+    /// Apple Developer Team ID (10-character string).
+    pub team_id: String,
+    /// Key ID from the Apple Developer portal.
+    pub key_id: String,
+    /// ES256 private key in PEM format (contents of the `.p8` file).
+    pub private_key_pem: SecretString,
 }
 
 impl OAuthConfig {
@@ -89,12 +107,45 @@ impl OAuthConfig {
             _ => None,
         };
 
+        let apple = match (
+            optional_env("APPLE_CLIENT_ID")?,
+            optional_env("APPLE_TEAM_ID")?,
+            optional_env("APPLE_KEY_ID")?,
+        ) {
+            (Some(client_id), Some(team_id), Some(key_id)) => {
+                // Read the private key from a file path or directly from env.
+                let pem = if let Some(path) = optional_env("APPLE_PRIVATE_KEY_PATH")? {
+                    std::fs::read_to_string(&path).map_err(|e| ConfigError::InvalidValue {
+                        key: "APPLE_PRIVATE_KEY_PATH".to_string(),
+                        message: format!("failed to read Apple private key from '{path}': {e}"),
+                    })?
+                } else if let Some(pem) = optional_env("APPLE_PRIVATE_KEY_PEM")? {
+                    pem
+                } else {
+                    return Err(ConfigError::InvalidValue {
+                        key: "APPLE_PRIVATE_KEY_PATH".to_string(),
+                        message: "either APPLE_PRIVATE_KEY_PATH or APPLE_PRIVATE_KEY_PEM is \
+                                  required when APPLE_CLIENT_ID is set"
+                            .to_string(),
+                    });
+                };
+                Some(AppleOAuthConfig {
+                    client_id,
+                    team_id,
+                    key_id,
+                    private_key_pem: SecretString::from(pem),
+                })
+            }
+            _ => None,
+        };
+
         Ok(Self {
             enabled,
             base_url,
             allowed_domains,
             google,
             github,
+            apple,
         })
     }
 }

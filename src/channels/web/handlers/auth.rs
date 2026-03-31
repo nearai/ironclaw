@@ -31,13 +31,15 @@ pub struct LoginParams {
     redirect_after: Option<String>,
 }
 
-/// Query parameters from the OAuth provider callback.
+/// Parameters from the OAuth provider callback (query string or form body).
 #[derive(serde::Deserialize)]
 pub struct CallbackParams {
     code: Option<String>,
     state: Option<String>,
     error: Option<String>,
     error_description: Option<String>,
+    /// Apple-specific: JSON-encoded user info (name), sent only on first authorization.
+    user: Option<String>,
 }
 
 /// GET /auth/providers — list enabled OAuth providers.
@@ -89,11 +91,29 @@ pub async fn login_handler(
     Ok(Redirect::temporary(&auth_url).into_response())
 }
 
-/// GET /auth/callback/{provider} — OAuth callback (exchange code, issue session).
+/// GET /auth/callback/{provider} — OAuth callback (query params, used by Google/GitHub).
 pub async fn callback_handler(
     State(state): State<Arc<GatewayState>>,
     Path(provider_name): Path<String>,
     Query(params): Query<CallbackParams>,
+) -> Response {
+    handle_callback(state, provider_name, params).await
+}
+
+/// POST /auth/callback/{provider} — OAuth callback (form post, used by Apple Sign In).
+pub async fn callback_post_handler(
+    State(state): State<Arc<GatewayState>>,
+    Path(provider_name): Path<String>,
+    axum::Form(params): axum::Form<CallbackParams>,
+) -> Response {
+    handle_callback(state, provider_name, params).await
+}
+
+/// Shared callback logic for both GET (query) and POST (form) callbacks.
+async fn handle_callback(
+    state: Arc<GatewayState>,
+    provider_name: String,
+    params: CallbackParams,
 ) -> Response {
     if !state.oauth_rate_limiter.check() {
         return error_page("Too many requests. Please try again later.");
@@ -157,7 +177,7 @@ pub async fn callback_handler(
     let callback_url = format!("{base_url}/auth/callback/{provider_name}");
 
     // Exchange the authorization code for a user profile.
-    let profile = match provider
+    let mut profile = match provider
         .exchange_code(code, &callback_url, &flow.code_verifier)
         .await
     {
@@ -167,6 +187,28 @@ pub async fn callback_handler(
             return error_page("Failed to complete login. Please try again.");
         }
     };
+
+    // Apple sends the user's name only on the FIRST authorization via the
+    // `user` form field. Merge it into the profile if present.
+    if profile.display_name.is_none()
+        && let Some(ref user_json) = params.user
+        && let Ok(user) = serde_json::from_str::<serde_json::Value>(user_json)
+    {
+        let first = user
+            .get("name")
+            .and_then(|n| n.get("firstName"))
+            .and_then(|v| v.as_str());
+        let last = user
+            .get("name")
+            .and_then(|n| n.get("lastName"))
+            .and_then(|v| v.as_str());
+        profile.display_name = match (first, last) {
+            (Some(f), Some(l)) => Some(format!("{f} {l}")),
+            (Some(f), None) => Some(f.to_string()),
+            (None, Some(l)) => Some(l.to_string()),
+            _ => None,
+        };
+    }
 
     // Validate email domain restriction.
     if !state.oauth_allowed_domains.is_empty()
