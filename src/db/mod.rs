@@ -958,15 +958,12 @@ pub trait IdentityStore: Send + Sync {
         email: &str,
     ) -> Result<Option<UserIdentityRecord>, DatabaseError>;
 
-    /// Create a new user, link an identity, and issue an API token atomically.
-    async fn create_user_with_identity_and_token(
+    /// Create a new user and link an identity atomically.
+    async fn create_user_with_identity(
         &self,
         user: &UserRecord,
         identity: &UserIdentityRecord,
-        token_name: &str,
-        token_hash: &[u8; 32],
-        token_prefix: &str,
-    ) -> Result<ApiTokenRecord, DatabaseError>;
+    ) -> Result<(), DatabaseError>;
 }
 
 /// Backend-agnostic database supertrait.

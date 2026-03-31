@@ -19,6 +19,11 @@ use crate::channels::web::oauth::state_store::{OAuthStateStore, new_oauth_flow};
 use crate::channels::web::server::GatewayState;
 use crate::db::{UserIdentityRecord, UserRecord};
 
+/// Cookie name for OAuth browser sessions.
+const SESSION_COOKIE_NAME: &str = "ironclaw_session";
+/// Session lifetime: 30 days (cookie Max-Age and token expiry).
+const SESSION_LIFETIME_SECS: i64 = 30 * 24 * 60 * 60;
+
 /// Query parameters for the login redirect.
 #[derive(serde::Deserialize)]
 pub struct LoginParams {
@@ -202,8 +207,9 @@ pub async fn callback_handler(
         format!("oauth-{provider_name}-login")
     };
 
+    let expires_at = Some(chrono::Utc::now() + chrono::Duration::seconds(SESSION_LIFETIME_SECS));
     if let Err(e) = store
-        .create_api_token(&user_id, &token_name, &token_hash, token_prefix, None)
+        .create_api_token(&user_id, &token_name, &token_hash, token_prefix, expires_at)
         .await
     {
         tracing::error!(error = %e, "Failed to create API token for OAuth login");
@@ -227,14 +233,50 @@ pub async fn callback_handler(
     response
 }
 
-/// POST /auth/logout — clear session cookie.
-pub async fn logout_handler() -> Response {
-    let cookie = "ironclaw_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0";
+/// POST /auth/logout — revoke session token and clear cookie.
+pub async fn logout_handler(
+    State(state): State<Arc<GatewayState>>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    // Try to revoke the API token backing this session.
+    if let Some(token) = extract_session_cookie(&headers)
+        && let Some(ref store) = state.store
+    {
+        let token_hash = crate::channels::web::auth::hash_token(&token);
+        if let Ok(Some((record, _user))) = store.authenticate_token(&token_hash).await {
+            let _ = store.revoke_api_token(record.id, &_user.id).await;
+            if let Some(ref db_auth) = state.db_auth {
+                db_auth.invalidate_user(&_user.id).await;
+            }
+        }
+    }
+
+    let secure = state
+        .oauth_base_url
+        .as_deref()
+        .map(is_secure)
+        .unwrap_or(false);
+    let cookie = build_session_cookie_clear(secure);
     let mut response = (StatusCode::OK, "Logged out").into_response();
-    if let Ok(hv) = HeaderValue::from_str(cookie) {
+    if let Ok(hv) = HeaderValue::from_str(&cookie) {
         response.headers_mut().insert(header::SET_COOKIE, hv);
     }
     response
+}
+
+/// Extract the session cookie value from request headers.
+fn extract_session_cookie(headers: &axum::http::HeaderMap) -> Option<String> {
+    let cookie_header = headers.get("cookie")?.to_str().ok()?;
+    for pair in cookie_header.split(';') {
+        let pair = pair.trim();
+        if let Some(value) = pair.strip_prefix(&format!("{SESSION_COOKIE_NAME}=")) {
+            let value = value.trim();
+            if !value.is_empty() {
+                return Some(value.to_string());
+            }
+        }
+    }
+    None
 }
 
 // ── User resolution ──────────────────────────────────────────────────────
@@ -328,19 +370,8 @@ async fn resolve_user(
 
     let identity = build_identity_record(&user_id, provider, profile);
 
-    let mut token_bytes = [0u8; 32];
-    OsRng.fill_bytes(&mut token_bytes);
-    let token_hash = crate::channels::web::auth::hash_token(&hex::encode(token_bytes));
-    let token_prefix = &hex::encode(&token_bytes[..4]);
-
     store
-        .create_user_with_identity_and_token(
-            &user,
-            &identity,
-            &format!("oauth-{provider}-signup"),
-            &token_hash,
-            token_prefix,
-        )
+        .create_user_with_identity(&user, &identity)
         .await
         .map_err(|e| e.to_string())?;
 
@@ -373,8 +404,13 @@ fn build_identity_record(
 fn build_session_cookie(token: &str, secure: bool) -> String {
     let secure_flag = if secure { "; Secure" } else { "" };
     format!(
-        "ironclaw_session={token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=2592000{secure_flag}"
+        "{SESSION_COOKIE_NAME}={token}; HttpOnly; SameSite=Lax; Path=/; Max-Age={SESSION_LIFETIME_SECS}{secure_flag}"
     )
+}
+
+fn build_session_cookie_clear(secure: bool) -> String {
+    let secure_flag = if secure { "; Secure" } else { "" };
+    format!("{SESSION_COOKIE_NAME}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0{secure_flag}")
 }
 
 fn is_secure(base_url: &str) -> bool {
@@ -414,7 +450,8 @@ fn error_page(message: &str) -> Response {
         .replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
-        .replace('"', "&quot;");
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;");
     axum::response::Html(format!(
         "<html><body style='font-family: system-ui; text-align: center; padding: 60px;'>\
          <h2>Login Failed</h2>\

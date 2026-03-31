@@ -941,9 +941,10 @@ fn extract_token(headers: &HeaderMap, request: &Request) -> Option<String> {
     if let Some(cookie_header) = headers.get("cookie")
         && let Ok(cookie_str) = cookie_header.to_str()
     {
+        let prefix = concat!("ironclaw_session", "=");
         for pair in cookie_str.split(';') {
             let pair = pair.trim();
-            if let Some(value) = pair.strip_prefix("ironclaw_session=") {
+            if let Some(value) = pair.strip_prefix(prefix) {
                 let value = value.trim();
                 if !value.is_empty() {
                     return Some(value.to_string());
@@ -1387,7 +1388,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
-    // ── OIDC unit tests ─────────────────────────────────────────���──────
+    // ── OIDC unit tests ──────────────────────────────────────────────────
 
     #[test]
     fn test_normalize_jwt_noop_for_rfc_compliant() {

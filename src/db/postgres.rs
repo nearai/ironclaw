@@ -1004,18 +1004,14 @@ impl IdentityStore for PgBackend {
         Ok(row.as_ref().map(row_to_identity))
     }
 
-    async fn create_user_with_identity_and_token(
+    async fn create_user_with_identity(
         &self,
         user: &UserRecord,
         identity: &UserIdentityRecord,
-        token_name: &str,
-        token_hash: &[u8; 32],
-        token_prefix: &str,
-    ) -> Result<ApiTokenRecord, DatabaseError> {
+    ) -> Result<(), DatabaseError> {
         let mut conn = self.store.pool().get().await?;
         let tx = conn.transaction().await?;
 
-        // Insert user
         tx.execute(
             "INSERT INTO users (id, email, display_name, status, role, created_at, \
              updated_at, last_login_at, created_by, metadata) \
@@ -1035,7 +1031,6 @@ impl IdentityStore for PgBackend {
         )
         .await?;
 
-        // Insert identity
         tx.execute(
             "INSERT INTO user_identities \
              (id, user_id, provider, provider_user_id, email, email_verified, \
@@ -1057,34 +1052,7 @@ impl IdentityStore for PgBackend {
         )
         .await?;
 
-        // Insert API token
-        let token_id = Uuid::new_v4();
-        let now = chrono::Utc::now();
-        tx.execute(
-            "INSERT INTO api_tokens (id, user_id, token_hash, token_prefix, name, created_at) \
-             VALUES ($1, $2, $3, $4, $5, $6)",
-            &[
-                &token_id,
-                &user.id,
-                &token_hash.as_slice(),
-                &token_prefix,
-                &token_name,
-                &now,
-            ],
-        )
-        .await?;
-
         tx.commit().await?;
-
-        Ok(ApiTokenRecord {
-            id: token_id,
-            user_id: user.id.clone(),
-            name: token_name.to_string(),
-            token_prefix: token_prefix.to_string(),
-            expires_at: None,
-            last_used_at: None,
-            created_at: now,
-            revoked_at: None,
-        })
+        Ok(())
     }
 }

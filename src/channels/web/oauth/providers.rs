@@ -58,7 +58,7 @@ struct GoogleTokenResponse {
     access_token: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, serde::Serialize)]
 struct GoogleIdTokenClaims {
     sub: String,
     email: Option<String>,
@@ -140,9 +140,13 @@ impl OAuthProvider for GoogleProvider {
             OAuthError::CodeExchange("Google did not return an id_token".to_string())
         })?;
 
+        // Validate the id_token JWT claims. We skip signature verification
+        // because the token was received directly from Google over TLS.
+        // However, we MUST validate `aud` to prevent token substitution from
+        // a different OAuth client.
         let mut validation = jsonwebtoken::Validation::default();
         validation.insecure_disable_signature_validation();
-        validation.validate_aud = false;
+        validation.set_audience(&[&self.client_id]);
 
         let token_data = jsonwebtoken::decode::<GoogleIdTokenClaims>(
             &id_token,
@@ -167,12 +171,12 @@ impl OAuthProvider for GoogleProvider {
         }
 
         Ok(OAuthUserProfile {
-            provider_user_id: claims.sub,
-            email: claims.email,
+            provider_user_id: claims.sub.clone(),
+            email: claims.email.clone(),
             email_verified: claims.email_verified.unwrap_or(false),
-            display_name: claims.name,
-            avatar_url: claims.picture,
-            raw: serde_json::to_value(&id_token).unwrap_or_default(),
+            display_name: claims.name.clone(),
+            avatar_url: claims.picture.clone(),
+            raw: serde_json::to_value(&claims).unwrap_or_default(),
         })
     }
 }
@@ -305,7 +309,7 @@ impl OAuthProvider for GitHubProvider {
             .map_err(|e| OAuthError::ProfileFetch(e.to_string()))?
             .json()
             .await
-            .unwrap_or_default();
+            .map_err(|e| OAuthError::ProfileFetch(format!("Failed to parse GitHub emails: {e}")))?;
 
         // Pick the primary verified email, or any verified email.
         let verified_email = emails

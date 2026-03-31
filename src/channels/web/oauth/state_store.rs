@@ -111,12 +111,19 @@ fn generate_state_token() -> String {
     hex::encode(bytes)
 }
 
+/// Validate a redirect URL to prevent open redirect attacks.
+/// Only allows relative paths starting with `/` (and not `//` which browsers
+/// treat as protocol-relative URLs).
+fn sanitize_redirect(url: Option<String>) -> Option<String> {
+    url.filter(|u| u.starts_with('/') && !u.starts_with("//"))
+}
+
 /// Create a `PendingOAuthFlow` with a fresh code verifier.
 pub fn new_oauth_flow(provider: String, redirect_after: Option<String>) -> PendingOAuthFlow {
     PendingOAuthFlow {
         provider,
         code_verifier: OAuthStateStore::generate_code_verifier(),
-        redirect_after,
+        redirect_after: sanitize_redirect(redirect_after),
         created_at: Instant::now(),
     }
 }

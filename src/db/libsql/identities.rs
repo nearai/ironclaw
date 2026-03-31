@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 use super::{fmt_opt_ts, fmt_ts, get_opt_text, get_text, get_ts, opt_text};
 use crate::db::libsql::LibSqlBackend;
-use crate::db::{ApiTokenRecord, DatabaseError, IdentityStore, UserIdentityRecord, UserRecord};
+use crate::db::{DatabaseError, IdentityStore, UserIdentityRecord, UserRecord};
 
 fn row_to_identity(row: &libsql::Row) -> Result<UserIdentityRecord, DatabaseError> {
     let id_str = get_text(row, 0);
@@ -73,8 +73,12 @@ impl IdentityStore for LibSqlBackend {
             .await
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
         let mut result = Vec::new();
-        while let Ok(Some(row)) = rows.next().await {
-            result.push(row_to_identity(&row)?);
+        loop {
+            match rows.next().await {
+                Ok(Some(row)) => result.push(row_to_identity(&row)?),
+                Ok(None) => break,
+                Err(e) => return Err(DatabaseError::Query(e.to_string())),
+            }
         }
         Ok(result)
     }
@@ -128,19 +132,13 @@ impl IdentityStore for LibSqlBackend {
         }
     }
 
-    async fn create_user_with_identity_and_token(
+    async fn create_user_with_identity(
         &self,
         user: &UserRecord,
         identity: &UserIdentityRecord,
-        token_name: &str,
-        token_hash: &[u8; 32],
-        token_prefix: &str,
-    ) -> Result<ApiTokenRecord, DatabaseError> {
+    ) -> Result<(), DatabaseError> {
         let conn = self.connect().await?;
 
-        let token_id = Uuid::new_v4();
-        let now = chrono::Utc::now();
-        let now_str = fmt_ts(&now);
         let metadata_str = serde_json::to_string(&user.metadata)
             .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
         let raw_profile_str = serde_json::to_string(&identity.raw_profile)
@@ -204,41 +202,11 @@ impl IdentityStore for LibSqlBackend {
             return Err(DatabaseError::Query(e.to_string()));
         }
 
-        // Insert API token
-        let token_result = conn
-            .execute(
-                "INSERT INTO api_tokens (id, user_id, token_hash, token_prefix, name, \
-                 expires_at, created_at) VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6)",
-                params![
-                    token_id.to_string(),
-                    user.id.as_str(),
-                    token_hash.to_vec(),
-                    token_prefix,
-                    token_name,
-                    now_str.as_str(),
-                ],
-            )
-            .await;
-
-        if let Err(e) = token_result {
-            let _ = conn.execute("ROLLBACK", ()).await;
-            return Err(DatabaseError::Query(e.to_string()));
-        }
-
         conn.execute("COMMIT", ())
             .await
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
-        Ok(ApiTokenRecord {
-            id: token_id,
-            user_id: user.id.clone(),
-            name: token_name.to_string(),
-            token_prefix: token_prefix.to_string(),
-            expires_at: None,
-            last_used_at: None,
-            created_at: now,
-            revoked_at: None,
-        })
+        Ok(())
     }
 }
 
@@ -362,7 +330,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_create_user_with_identity_and_token() {
+    async fn test_create_user_with_identity() {
         let (db, _dir) = test_backend().await;
         let now = chrono::Utc::now();
 
@@ -391,23 +359,11 @@ mod tests {
             created_at: now,
             updated_at: now,
         };
-        let token_hash = [0u8; 32];
-
-        let token = db
-            .create_user_with_identity_and_token(
-                &user,
-                &identity,
-                "oauth-login",
-                &token_hash,
-                "00000000",
-            )
+        db.create_user_with_identity(&user, &identity)
             .await
             .unwrap();
 
-        assert_eq!(token.user_id, "user-3");
-        assert_eq!(token.name, "oauth-login");
-
-        // Verify all three records exist
+        // Verify both records exist
         let found_user = db.get_user("user-3").await.unwrap();
         assert!(found_user.is_some());
 
@@ -416,8 +372,5 @@ mod tests {
             .await
             .unwrap();
         assert!(found_identity.is_some());
-
-        let tokens = db.list_api_tokens("user-3").await.unwrap();
-        assert_eq!(tokens.len(), 1);
     }
 }
