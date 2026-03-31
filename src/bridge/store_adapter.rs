@@ -1094,10 +1094,7 @@ impl Store for HybridStore {
             .collect())
     }
 
-    async fn list_all_threads(
-        &self,
-        project_id: ProjectId,
-    ) -> Result<Vec<Thread>, EngineError> {
+    async fn list_all_threads(&self, project_id: ProjectId) -> Result<Vec<Thread>, EngineError> {
         Ok(self
             .threads
             .read()
@@ -1108,10 +1105,7 @@ impl Store for HybridStore {
             .collect())
     }
 
-    async fn list_all_missions(
-        &self,
-        project_id: ProjectId,
-    ) -> Result<Vec<Mission>, EngineError> {
+    async fn list_all_missions(&self, project_id: ProjectId) -> Result<Vec<Mission>, EngineError> {
         Ok(self
             .missions
             .read()
