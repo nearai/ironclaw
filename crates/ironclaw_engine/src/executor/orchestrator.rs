@@ -27,7 +27,7 @@ use monty::{
     ExtFunctionResult, LimitedTracker, MontyObject, MontyRun, NameLookupResult, PrintWriter,
     ResourceLimits, RunProgress,
 };
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::capability::lease::LeaseManager;
 use crate::capability::policy::PolicyEngine;
@@ -148,7 +148,7 @@ pub fn load_orchestrator_from_docs(docs: &[crate::types::memory::MemoryDoc]) -> 
                 .unwrap_or(1)
             && failures >= MAX_FAILURES_BEFORE_ROLLBACK
         {
-            warn!(
+            debug!(
                 version,
                 failures, "orchestrator version has too many failures, skipping"
             );
@@ -172,10 +172,13 @@ pub async fn record_orchestrator_failure(
 ) {
     use crate::types::memory::{DocType, MemoryDoc};
 
-    let docs = store
-        .list_memory_docs(project_id, "system")
-        .await
-        .unwrap_or_default();
+    let docs = match store.list_memory_docs(project_id, "system").await {
+        Ok(docs) => docs,
+        Err(e) => {
+            debug!("failed to list memory docs for failure tracker: {e}");
+            return;
+        }
+    };
     let existing = docs.iter().find(|d| d.title == FAILURE_TRACKER_TITLE);
 
     let mut tracker = if let Some(doc) = existing {
@@ -211,7 +214,7 @@ pub async fn record_orchestrator_failure(
     tracker.updated_at = chrono::Utc::now();
 
     if let Err(e) = store.save_memory_doc(&tracker).await {
-        warn!("failed to save orchestrator failure tracker: {e}");
+        debug!("failed to save orchestrator failure tracker: {e}");
     }
 
     debug!(version, count = new_count, "recorded orchestrator failure");
@@ -1225,7 +1228,7 @@ async fn handle_execute_actions_parallel(
                     slot_outputs[idx] = Some(output);
                 }
                 Err(e) => {
-                    warn!("parallel action execution task panicked: {e}");
+                    debug!("parallel action execution task panicked: {e}");
                 }
             }
         }
@@ -1575,7 +1578,7 @@ async fn handle_retrieve_docs(
             ExtFunctionResult::Return(json_to_monty(&serde_json::json!(docs_json)))
         }
         Err(e) => {
-            warn!("retrieve_docs failed: {e}");
+            debug!("retrieve_docs failed: {e}");
             ExtFunctionResult::Return(json_to_monty(&serde_json::json!([])))
         }
     }
@@ -1637,7 +1640,7 @@ async fn handle_get_actions(
             ExtFunctionResult::Return(json_to_monty(&serde_json::json!(actions_json)))
         }
         Err(e) => {
-            warn!("get_actions failed: {e}");
+            debug!("get_actions failed: {e}");
             ExtFunctionResult::Return(json_to_monty(&serde_json::json!([])))
         }
     }

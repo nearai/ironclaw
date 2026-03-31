@@ -16,13 +16,10 @@ use crate::types::capability::LeaseId;
 /// Returns `None` for empty or unrecognizable params.
 pub fn summarize_params(action_name: &str, params: &serde_json::Value) -> Option<String> {
     let summary = match action_name {
-        "http" | "web_fetch" => params.get("url").and_then(|v| v.as_str()).map(|u| {
-            if u.len() > 80 {
-                format!("{}...", &u[..77])
-            } else {
-                u.to_string()
-            }
-        }),
+        "http" | "web_fetch" => params
+            .get("url")
+            .and_then(|v| v.as_str())
+            .map(|u| truncate(u, 80)),
         "web_search" | "llm_context" => params
             .get("query")
             .and_then(|v| v.as_str())

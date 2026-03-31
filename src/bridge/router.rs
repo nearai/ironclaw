@@ -1211,6 +1211,24 @@ pub async fn handle_with_engine(
     message: &IncomingMessage,
     content: &str,
 ) -> Result<Option<String>, Error> {
+    handle_with_engine_inner(agent, message, content, 0).await
+}
+
+/// Maximum depth for auth-retry recursion (credential stored → retry original message).
+const MAX_AUTH_RETRY_DEPTH: u8 = 2;
+
+async fn handle_with_engine_inner(
+    agent: &Agent,
+    message: &IncomingMessage,
+    content: &str,
+    depth: u8,
+) -> Result<Option<String>, Error> {
+    if depth > MAX_AUTH_RETRY_DEPTH {
+        return Ok(Some(
+            "Credential stored, but too many auth retries. Please resend your message.".into(),
+        ));
+    }
+
     // Ensure engine is initialized
     init_engine(agent).await?;
 
@@ -1312,8 +1330,13 @@ pub async fn handle_with_engine(
                         };
                         let retry_content = pending.original_message;
                         drop(guard);
-                        return Box::pin(handle_with_engine(agent, &retry_msg, &retry_content))
-                            .await;
+                        return Box::pin(handle_with_engine_inner(
+                            agent,
+                            &retry_msg,
+                            &retry_content,
+                            depth + 1,
+                        ))
+                        .await;
                     }
                     Err(e) => {
                         return Ok(Some(format!(
@@ -1522,7 +1545,8 @@ async fn await_thread_outcome(
                     "text-based auth fallback triggered — pre-flight gate did not catch this"
                 );
 
-                // Extract credential name from the response text
+                // Extract credential name from the response text and validate
+                // it against the expected pattern (alphanumeric + underscores).
                 let cred_name = text
                     .split("credential_name")
                     .nth(1)
@@ -1530,6 +1554,12 @@ async fn await_thread_outcome(
                         // Handle both JSON ("credential_name":"foo") and prose
                         s.split(&['"', '\'', '`'][..])
                             .find(|seg| !seg.is_empty() && !seg.contains(':') && !seg.contains(' '))
+                    })
+                    .filter(|name| {
+                        // Reject names that don't look like valid credential identifiers
+                        !name.is_empty()
+                            && name.len() <= 64
+                            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
                     })
                     .unwrap_or("unknown")
                     .to_string();
@@ -1541,18 +1571,28 @@ async fn await_thread_outcome(
                     .and_then(|mgr| mgr.get_setup_instructions(&cred_name))
                     .unwrap_or_else(|| format!("Provide your {} token", cred_name));
 
-                // Store pending auth for this user
-                state.pending_auth.write().await.insert(
-                    message.user_id.clone(),
-                    PendingAuth {
-                        credential_name: cred_name.clone(),
-                        original_message: message.content.clone(),
-                        user_id: message.user_id.clone(),
-                        channel: message.channel.clone(),
-                        metadata: message.metadata.clone(),
-                        engine_thread_id: None, // Completed path — thread already finished
-                    },
-                );
+                // Store pending auth for this user (only if not already pending)
+                {
+                    let mut pending = state.pending_auth.write().await;
+                    if pending.contains_key(&message.user_id) {
+                        debug!(
+                            user_id = %message.user_id,
+                            "skipping pending_auth — user already has a pending auth flow"
+                        );
+                    } else {
+                        pending.insert(
+                            message.user_id.clone(),
+                            PendingAuth {
+                                credential_name: cred_name.clone(),
+                                original_message: message.content.clone(),
+                                user_id: message.user_id.clone(),
+                                channel: message.channel.clone(),
+                                metadata: message.metadata.clone(),
+                                engine_thread_id: None, // Completed path — thread already finished
+                            },
+                        );
+                    }
+                }
 
                 // Show auth prompt via channel
                 let _ = agent
@@ -1638,6 +1678,8 @@ async fn await_thread_outcome(
                 .unwrap_or_else(|| format!("Provide your {} token", credential_name));
 
             // Enter the guided auth flow — next user message is treated as a token.
+            // Overwrite is intentional here: the engine-driven path has a concrete
+            // thread_id, so it takes priority over any stale text-fallback entry.
             state.pending_auth.write().await.insert(
                 message.user_id.clone(),
                 PendingAuth {

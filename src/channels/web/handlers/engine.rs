@@ -20,7 +20,13 @@ pub async fn engine_threads_handler(
 ) -> Result<Json<EngineThreadListResponse>, (StatusCode, String)> {
     let threads = crate::bridge::list_engine_threads(None, &user.user_id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|e| {
+            tracing::debug!("engine API error: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Internal engine error".to_string(),
+            )
+        })?;
     Ok(Json(EngineThreadListResponse { threads }))
 }
 
@@ -43,7 +49,13 @@ pub async fn engine_thread_steps_handler(
 ) -> Result<Json<EngineStepListResponse>, (StatusCode, String)> {
     let steps = crate::bridge::list_engine_thread_steps(&id, &user.user_id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|e| {
+            tracing::debug!("engine API error: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Internal engine error".to_string(),
+            )
+        })?;
     Ok(Json(EngineStepListResponse { steps }))
 }
 
@@ -54,7 +66,13 @@ pub async fn engine_thread_events_handler(
 ) -> Result<Json<EngineEventListResponse>, (StatusCode, String)> {
     let events = crate::bridge::list_engine_thread_events(&id, &user.user_id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|e| {
+            tracing::debug!("engine API error: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Internal engine error".to_string(),
+            )
+        })?;
     Ok(Json(EngineEventListResponse { events }))
 }
 
@@ -66,7 +84,13 @@ pub async fn engine_projects_handler(
 ) -> Result<Json<EngineProjectListResponse>, (StatusCode, String)> {
     let projects = crate::bridge::list_engine_projects(&user.user_id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|e| {
+            tracing::debug!("engine API error: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Internal engine error".to_string(),
+            )
+        })?;
     Ok(Json(EngineProjectListResponse { projects }))
 }
 
@@ -90,7 +114,13 @@ pub async fn engine_missions_handler(
 ) -> Result<Json<EngineMissionListResponse>, (StatusCode, String)> {
     let missions = crate::bridge::list_engine_missions(None, &user.user_id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|e| {
+            tracing::debug!("engine API error: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Internal engine error".to_string(),
+            )
+        })?;
     Ok(Json(EngineMissionListResponse { missions }))
 }
 
@@ -100,7 +130,13 @@ pub async fn engine_missions_summary_handler(
 ) -> Result<Json<EngineMissionSummaryResponse>, (StatusCode, String)> {
     let missions = crate::bridge::list_engine_missions(None, &user.user_id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|e| {
+            tracing::debug!("engine API error: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Internal engine error".to_string(),
+            )
+        })?;
 
     let total = missions.len() as u64;
     let active = missions.iter().filter(|m| m.status == "Active").count() as u64;
@@ -136,7 +172,13 @@ pub async fn engine_mission_fire_handler(
 ) -> Result<Json<EngineMissionFireResponse>, (StatusCode, String)> {
     let thread_id = crate::bridge::fire_engine_mission(&id, &user.user_id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|e| {
+            tracing::debug!("engine API error: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Internal engine error".to_string(),
+            )
+        })?;
     Ok(Json(EngineMissionFireResponse {
         fired: thread_id.is_some(),
         thread_id,
@@ -152,12 +194,17 @@ pub async fn engine_mission_pause_handler(
     crate::bridge::pause_engine_mission(&id, &user.user_id, is_admin)
         .await
         .map_err(|e| {
-            let status = if e.to_string().contains("forbidden") {
-                StatusCode::FORBIDDEN
+            let msg = e.to_string();
+            let (status, body) = if msg.contains("forbidden") {
+                (StatusCode::FORBIDDEN, "Forbidden".to_string())
             } else {
-                StatusCode::INTERNAL_SERVER_ERROR
+                tracing::debug!("engine API error: {msg}");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Internal engine error".to_string(),
+                )
             };
-            (status, e.to_string())
+            (status, body)
         })?;
     Ok(Json(EngineActionResponse { ok: true }))
 }
@@ -171,12 +218,17 @@ pub async fn engine_mission_resume_handler(
     crate::bridge::resume_engine_mission(&id, &user.user_id, is_admin)
         .await
         .map_err(|e| {
-            let status = if e.to_string().contains("forbidden") {
-                StatusCode::FORBIDDEN
+            let msg = e.to_string();
+            let (status, body) = if msg.contains("forbidden") {
+                (StatusCode::FORBIDDEN, "Forbidden".to_string())
             } else {
-                StatusCode::INTERNAL_SERVER_ERROR
+                tracing::debug!("engine API error: {msg}");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Internal engine error".to_string(),
+                )
             };
-            (status, e.to_string())
+            (status, body)
         })?;
     Ok(Json(EngineActionResponse { ok: true }))
 }

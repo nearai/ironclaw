@@ -271,7 +271,7 @@ impl ThreadManager {
                     .thread
                     .transition_to(crate::types::thread::ThreadState::Done, None)
             {
-                tracing::warn!(thread_id = %thread_id, "failed to transition to Done: {e}");
+                tracing::debug!(thread_id = %thread_id, "failed to transition to Done: {e}");
             }
 
             // Write trace file if enabled
@@ -281,7 +281,7 @@ impl ThreadManager {
             }
 
             if let Err(e) = store_for_task.append_events(&exec.thread.events).await {
-                tracing::warn!(
+                tracing::debug!(
                     thread_id = %thread_id,
                     "failed to persist thread events: {e}"
                 );
@@ -289,7 +289,7 @@ impl ThreadManager {
 
             // Save final thread state to store
             if let Err(e) = store_for_task.save_thread(&exec.thread).await {
-                tracing::warn!(
+                tracing::debug!(
                     thread_id = %thread_id,
                     "failed to save final thread state: {e}"
                 );

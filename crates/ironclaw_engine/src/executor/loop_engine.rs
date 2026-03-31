@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::capability::lease::LeaseManager;
 use crate::capability::policy::PolicyEngine;
@@ -217,7 +217,7 @@ impl ExecutionLoop {
             let actions = match self.effects.available_actions(&active_leases).await {
                 Ok(a) => a,
                 Err(e) => {
-                    warn!(thread_id = %self.thread.id, "failed to load actions for system prompt: {e}");
+                    debug!(thread_id = %self.thread.id, "failed to load actions for system prompt: {e}");
                     Vec::new()
                 }
             };
@@ -311,7 +311,7 @@ impl ExecutionLoop {
                 Ok(orch_result.outcome)
             }
             Err(e) => {
-                warn!(
+                debug!(
                     thread_id = %self.thread.id,
                     error = %e,
                     orchestrator_version,

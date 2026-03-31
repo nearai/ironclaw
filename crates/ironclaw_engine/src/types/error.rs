@@ -35,6 +35,9 @@ pub enum EngineError {
     #[error("project not found: {0}")]
     ProjectNotFound(ProjectId),
 
+    #[error("lease not found: {lease_id}")]
+    LeaseNotFound { lease_id: String },
+
     #[error("lease expired for capability: {capability_name}")]
     LeaseExpired { capability_name: String },
 

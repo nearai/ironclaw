@@ -223,7 +223,7 @@ pub async fn execute_action_calls(
                 }
                 Err(e) => {
                     // Task panicked — should not happen, but handle gracefully
-                    tracing::warn!("parallel tool execution task panicked: {e}");
+                    tracing::debug!("parallel tool execution task panicked: {e}");
                 }
             }
         }

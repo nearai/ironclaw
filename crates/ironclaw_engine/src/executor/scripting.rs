@@ -24,7 +24,7 @@ use monty::{
     ExcType, ExtFunctionResult, LimitedTracker, MontyException, MontyObject, MontyRun,
     NameLookupResult, PrintWriter, ResourceLimits, RunProgress,
 };
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::capability::lease::LeaseManager;
 use crate::capability::policy::{PolicyDecision, PolicyEngine};
@@ -674,7 +674,7 @@ pub async fn execute_code_with_skills(
                             }
                             Err(e) => {
                                 // tokio task panicked
-                                warn!("async tool task panicked: {e}");
+                                debug!("async tool task panicked: {e}");
                                 ExtFunctionResult::Error(MontyException::new(
                                     ExcType::RuntimeError,
                                     Some(format!("tool execution panicked: {e}")),
@@ -684,7 +684,7 @@ pub async fn execute_code_with_skills(
                         results.push((mid, exec_result));
                     } else {
                         // Unknown call_id — shouldn't happen, but be safe
-                        warn!(call_id = mid, "ResolveFutures: unknown pending call_id");
+                        debug!(call_id = mid, "ResolveFutures: unknown pending call_id");
                         results.push((
                             mid,
                             ExtFunctionResult::Error(MontyException::new(
@@ -767,7 +767,7 @@ pub async fn execute_code_with_skills(
             }
 
             RunProgress::OsCall(os_call) => {
-                warn!(function = ?os_call.function, "Monty: OS call denied");
+                debug!(function = ?os_call.function, "Monty: OS call denied");
                 let err = ExtFunctionResult::Error(MontyException::new(
                     ExcType::OSError,
                     Some("OS operations are not permitted in CodeAct scripts".into()),
