@@ -74,6 +74,10 @@ pub struct Scheduler {
     jobs: Arc<RwLock<HashMap<Uuid, ScheduledJob>>>,
     /// Running sub-tasks (tool executions, background tasks).
     subtasks: Arc<RwLock<HashMap<Uuid, ScheduledSubtask>>>,
+    /// Default approval context for subtasks spawned from jobs on this scheduler.
+    /// Used when spawning subtasks to inherit the parent job's approval context.
+    /// Wrapped in RwLock for interior mutability since Scheduler is behind Arc.
+    default_approval_context: Arc<RwLock<Option<ApprovalContext>>>,
 }
 
 impl Scheduler {
@@ -98,6 +102,7 @@ impl Scheduler {
             http_interceptor: None,
             jobs: Arc::new(RwLock::new(HashMap::new())),
             subtasks: Arc::new(RwLock::new(HashMap::new())),
+            default_approval_context: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -125,7 +130,7 @@ impl Scheduler {
     ///
     /// Returns the new job ID.
     pub async fn dispatch_job(
-        &self,
+        &mut self,
         user_id: &str,
         title: &str,
         description: &str,
@@ -147,7 +152,7 @@ impl Scheduler {
     /// Same as `dispatch_job`, but the worker will use the given `ApprovalContext`
     /// to determine the explicit autonomous allowlist for that job.
     pub async fn dispatch_job_with_context(
-        &self,
+        &mut self,
         user_id: &str,
         title: &str,
         description: &str,
@@ -166,7 +171,7 @@ impl Scheduler {
 
     /// Shared implementation for `dispatch_job` and `dispatch_job_with_context`.
     async fn dispatch_job_inner(
-        &self,
+        &mut self,
         user_id: &str,
         title: &str,
         description: &str,
@@ -242,13 +247,13 @@ impl Scheduler {
     }
 
     /// Schedule a job for execution.
-    pub async fn schedule(&self, job_id: Uuid) -> Result<(), JobError> {
+    pub async fn schedule(&mut self, job_id: Uuid) -> Result<(), JobError> {
         self.schedule_with_context(job_id, None).await
     }
 
     /// Schedule a job with an optional approval context.
     async fn schedule_with_context(
-        &self,
+        &mut self,
         job_id: Uuid,
         approval_context: Option<ApprovalContext>,
     ) -> Result<(), JobError> {
@@ -266,6 +271,9 @@ impl Scheduler {
                     max: self.config.max_parallel_jobs,
                 });
             }
+
+            // Set the default approval context for subtasks spawned from this job.
+            self.default_approval_context = approval_context.clone();
 
             // Transition job to in_progress
             self.context_manager
@@ -372,15 +380,16 @@ impl Scheduler {
                 let tools = self.tools.clone();
                 let context_manager = self.context_manager.clone();
                 let safety = self.safety.clone();
+                // Propagate the parent job's ApprovalContext to subtasks so autonomous
+                // tool execution respects the same allowlist as the parent job.
+                let approval_context = self.default_approval_context.clone();
 
-                // TODO: propagate parent job's ApprovalContext here when subtasks
-                // are used in autonomous/routine paths (currently only used in tests).
                 tokio::spawn(async move {
                     let result = Self::execute_tool_task(
                         tools,
                         context_manager,
                         safety,
-                        None,
+                        approval_context,
                         tool_parent_id,
                         &tool_name,
                         params,
