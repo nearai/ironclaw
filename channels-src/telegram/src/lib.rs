@@ -1226,6 +1226,9 @@ const PHOTO_MIME_TYPES: &[&str] = &["image/jpeg", "image/png", "image/gif", "ima
 /// Audio MIME types that Telegram's sendVoice API supports (ogg/opus container).
 const VOICE_MIME_TYPES: &[&str] = &["audio/ogg", "audio/opus"];
 
+/// Maximum voice note size for Telegram sendVoice (50 MB).
+const MAX_VOICE_SIZE: usize = 50 * 1024 * 1024;
+
 /// Send a voice note via the Telegram Bot API (multipart upload).
 ///
 /// Telegram's `sendVoice` requires ogg/opus audio and displays it as an
@@ -1239,6 +1242,25 @@ fn send_voice(
     message_thread_id: Option<i64>,
 ) -> Result<(), String> {
     let message_thread_id = normalize_thread_id(message_thread_id);
+
+    if data.len() > MAX_VOICE_SIZE {
+        channel_host::log(
+            channel_host::LogLevel::Info,
+            &format!(
+                "Voice note {} exceeds 50MB ({}), sending as document",
+                filename,
+                data.len()
+            ),
+        );
+        return send_document(
+            chat_id,
+            filename,
+            mime_type,
+            data,
+            reply_to_message_id,
+            message_thread_id,
+        );
+    }
 
     let boundary = format!("ironclaw-{}", channel_host::now_millis());
     let mut body = Vec::new();
@@ -1335,6 +1357,33 @@ fn send_response(
     }
 }
 
+/// Extract the base MIME type, stripping any parameters after `;`.
+///
+/// e.g. `"audio/ogg; codecs=opus"` → `"audio/ogg"`
+fn base_mime_type(mime: &str) -> &str {
+    mime.split(';').next().unwrap_or(mime).trim()
+}
+
+/// Attachment routing category.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AttachmentKind {
+    Photo,
+    Voice,
+    Document,
+}
+
+/// Classify an attachment's send method based on its MIME type.
+fn classify_attachment(mime_type: &str) -> AttachmentKind {
+    let base = base_mime_type(mime_type);
+    if PHOTO_MIME_TYPES.contains(&base) {
+        AttachmentKind::Photo
+    } else if VOICE_MIME_TYPES.contains(&base) {
+        AttachmentKind::Voice
+    } else {
+        AttachmentKind::Document
+    }
+}
+
 /// Send a single attachment, choosing sendPhoto, sendVoice, or sendDocument based on MIME type.
 fn send_attachment(
     chat_id: i64,
@@ -1342,33 +1391,31 @@ fn send_attachment(
     reply_to_message_id: Option<i64>,
     message_thread_id: Option<i64>,
 ) -> Result<(), String> {
-    if PHOTO_MIME_TYPES.contains(&attachment.mime_type.as_str()) {
-        send_photo(
+    match classify_attachment(&attachment.mime_type) {
+        AttachmentKind::Photo => send_photo(
             chat_id,
             &attachment.filename,
             &attachment.mime_type,
             &attachment.data,
             reply_to_message_id,
             message_thread_id,
-        )
-    } else if VOICE_MIME_TYPES.contains(&attachment.mime_type.as_str()) {
-        send_voice(
+        ),
+        AttachmentKind::Voice => send_voice(
             chat_id,
             &attachment.filename,
             &attachment.mime_type,
             &attachment.data,
             reply_to_message_id,
             message_thread_id,
-        )
-    } else {
-        send_document(
+        ),
+        AttachmentKind::Document => send_document(
             chat_id,
             &attachment.filename,
             &attachment.mime_type,
             &attachment.data,
             reply_to_message_id,
             message_thread_id,
-        )
+        ),
     }
 }
 
@@ -2845,5 +2892,39 @@ mod tests {
     fn test_max_download_size_constant() {
         // Verify the constant is 20 MB, matching the Slack channel limit
         assert_eq!(MAX_DOWNLOAD_SIZE_BYTES, 20 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_base_mime_type() {
+        assert_eq!(base_mime_type("audio/ogg"), "audio/ogg");
+        assert_eq!(base_mime_type("audio/ogg; codecs=opus"), "audio/ogg");
+        assert_eq!(base_mime_type("image/jpeg"), "image/jpeg");
+        assert_eq!(base_mime_type("text/plain; charset=utf-8"), "text/plain");
+        assert_eq!(base_mime_type(""), "");
+    }
+
+    #[test]
+    fn test_classify_attachment_routing() {
+        // Photos
+        assert_eq!(classify_attachment("image/jpeg"), AttachmentKind::Photo);
+        assert_eq!(classify_attachment("image/png"), AttachmentKind::Photo);
+        assert_eq!(classify_attachment("image/gif"), AttachmentKind::Photo);
+        assert_eq!(classify_attachment("image/webp"), AttachmentKind::Photo);
+
+        // Voice notes — exact and parameterized
+        assert_eq!(classify_attachment("audio/ogg"), AttachmentKind::Voice);
+        assert_eq!(classify_attachment("audio/opus"), AttachmentKind::Voice);
+        assert_eq!(
+            classify_attachment("audio/ogg; codecs=opus"),
+            AttachmentKind::Voice
+        );
+
+        // Everything else falls through to document
+        assert_eq!(
+            classify_attachment("application/pdf"),
+            AttachmentKind::Document
+        );
+        assert_eq!(classify_attachment("audio/mpeg"), AttachmentKind::Document);
+        assert_eq!(classify_attachment("video/mp4"), AttachmentKind::Document);
     }
 }
