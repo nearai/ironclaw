@@ -79,6 +79,7 @@ impl AgentConfig {
 
         Ok(Self {
             name: db_first_or_default(&settings.agent.name, &defaults.name, "AGENT_NAME")?,
+            // Settings stores u32, config uses usize — cast for comparison.
             max_parallel_jobs: db_first_or_default(
                 &(settings.agent.max_parallel_jobs as usize),
                 &(defaults.max_parallel_jobs as usize),

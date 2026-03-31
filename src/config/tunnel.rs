@@ -56,7 +56,7 @@ impl TunnelConfig {
                     if settings.tunnel.cf_token.is_some() {
                         tracing::warn!(
                             "tunnel.cf_token is set in DB/TOML but is now env-only \
-                             (TUNNEL_CF_TOKEN). Remove it from DB settings."
+                             (TUNNEL_CF_TOKEN). Remove it from DB/TOML settings."
                         );
                     }
                     optional_env("TUNNEL_CF_TOKEN")?
@@ -81,7 +81,7 @@ impl TunnelConfig {
                     if settings.tunnel.ngrok_token.is_some() {
                         tracing::warn!(
                             "tunnel.ngrok_token is set in DB/TOML but is now env-only \
-                             (TUNNEL_NGROK_TOKEN). Remove it from DB settings."
+                             (TUNNEL_NGROK_TOKEN). Remove it from DB/TOML settings."
                         );
                     }
                     optional_env("TUNNEL_NGROK_TOKEN")?.map(|auth_token| {

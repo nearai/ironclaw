@@ -265,7 +265,7 @@ impl ChannelsConfig {
                     if cs.gateway_auth_token.is_some() {
                         tracing::warn!(
                             "gateway_auth_token is set in DB/TOML but is now env-only \
-                             (GATEWAY_AUTH_TOKEN). Remove it from DB settings."
+                             (GATEWAY_AUTH_TOKEN). Remove it from DB/TOML settings."
                         );
                     }
                     optional_env("GATEWAY_AUTH_TOKEN")?

@@ -1,10 +1,13 @@
 //! Configuration for IronClaw.
 //!
-//! Settings are loaded with priority: **DB > env > TOML > default**.
+//! Settings are loaded with priority: **DB/TOML > env > default**.
 //!
-//! For concrete (non-`Option`) fields, "DB wins" means the DB value is
-//! used when it differs from the built-in default. A DB value equal to
-//! the default is indistinguishable from "unset" and falls through to env.
+//! DB and TOML are merged into a single `Settings` struct before
+//! resolution (DB wins over TOML when both set the same field).
+//! Resolvers then check settings before env vars.
+//!
+//! For concrete (non-`Option`) fields, a settings value equal to the
+//! built-in default is treated as "unset" and falls through to env.
 //!
 //! Exceptions:
 //! - Bootstrap configs (database, secrets): env-only (DB not yet available)
@@ -197,9 +200,9 @@ impl Config {
 
     /// Load configuration from environment variables and the database.
     ///
-    /// Priority: DB > env > TOML > default. TOML is loaded first as a
+    /// Priority: DB/TOML > env > default. TOML is loaded first as a
     /// base, then DB values are merged on top. Subsystem resolvers check
-    /// DB-backed settings before env vars (except bootstrap/security fields).
+    /// the merged settings before env vars (except bootstrap/security fields).
     pub async fn from_db(
         store: &(dyn crate::db::SettingsStore + Sync),
         user_id: &str,
@@ -209,7 +212,7 @@ impl Config {
 
     /// Load from DB with an optional TOML config file overlay.
     ///
-    /// Priority: DB > env > TOML > default. TOML is loaded as the base,
+    /// Priority: DB/TOML > env > default. TOML is loaded as the base,
     /// then DB values are merged on top. See module docs for exceptions.
     pub async fn from_db_with_toml(
         store: &(dyn crate::db::SettingsStore + Sync),

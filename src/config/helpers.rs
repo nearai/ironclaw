@@ -341,14 +341,11 @@ pub(crate) fn validate_base_url(url: &str, field_name: &str) -> Result<(), Confi
 /// injected vars — those are internal and don't warrant operator warnings.
 /// Values are intentionally NOT logged to avoid leaking sensitive data.
 fn warn_if_db_shadows_env(env_key: &str) {
-    if let Ok(env_val) = std::env::var(env_key)
-        && !env_val.is_empty()
-    {
-        let _ = env_val; // consumed — not logged
+    if std::env::var(env_key).is_ok_and(|v| !v.is_empty()) {
         tracing::warn!(
             env_key = %env_key,
-            "{env_key} env var is set but DB/TOML setting takes priority. \
-             Remove the setting from the DB to use the env var."
+            "{env_key} env var is set but a DB or TOML setting takes priority. \
+             Remove the setting from DB/TOML to use the env var."
         );
     }
 }
