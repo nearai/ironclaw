@@ -427,7 +427,7 @@ pub async fn start_server(
             })?;
 
     // Public routes (no auth)
-    let mut app = Router::new()
+    let public = Router::new()
         .route("/health", get(health_handler))
         .route("/api/health", get(health_handler))
 

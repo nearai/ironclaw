@@ -249,14 +249,15 @@ impl WasmToolRuntime {
     ///
     /// This validates and compiles the component, extracting metadata.
     /// The compiled component is cached for fast instantiation.
-    pub async fn prepare(&self, name: &str, component_bytes: &[u8]) -> Result<Arc<PreparedModule>, WasmError> {
-        // Ensure ticker is running before we prepare any code that might use it
-        self.ensure_ticker_started();
-
-        let mut modules = self.modules.write().await;
+    pub async fn prepare(
+        &self,
+        name: &str,
         wasm_bytes: &[u8],
         limits: Option<ResourceLimits>,
     ) -> Result<Arc<PreparedModule>, WasmError> {
+        // Ensure ticker is running before we prepare any code that might use it
+        self.ensure_ticker_started();
+
         // Check if already prepared
         if let Some(module) = self.modules.read().await.get(name) {
             return Ok(Arc::clone(module));
@@ -358,6 +359,7 @@ impl std::fmt::Debug for WasmToolRuntime {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::Ordering;
     use crate::tools::wasm::limits::ResourceLimits;
     use crate::tools::wasm::runtime::{WasmRuntimeConfig, WasmToolRuntime};
 
@@ -458,6 +460,21 @@ mod tests {
         assert!(dir_a.exists());
         assert!(dir_b.exists());
         assert_ne!(dir_a, dir_b);
+    }
+
+    #[test]
+    fn test_lazy_ticker_initialization() {
+        let config = WasmRuntimeConfig::for_testing();
+        let runtime = WasmToolRuntime::new(config).expect("runtime should init");
+        
+        // Before preparation, ticker should not be started
+        assert!(!runtime.ticker_started.load(Ordering::SeqCst), "ticker should be idle at startup");
+        
+        // After an internal call to ensure_ticker_started (which is called by prepare)
+        runtime.ensure_ticker_started();
+        
+        // Ticker should now be started
+        assert!(runtime.ticker_started.load(Ordering::SeqCst), "ticker should be started after use");
     }
 
     /// The WASM runtime (Wasmtime engine) must initialise successfully even
