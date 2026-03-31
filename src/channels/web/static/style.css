@@ -414,6 +414,7 @@ body {
   align-items: center;
   justify-content: center;
   text-transform: uppercase;
+  z-index: 0;
 }
 
 .user-avatar-dot {
