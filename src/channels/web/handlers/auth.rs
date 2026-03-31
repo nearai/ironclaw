@@ -19,8 +19,7 @@ use crate::channels::web::oauth::state_store::{OAuthStateStore, new_oauth_flow};
 use crate::channels::web::server::GatewayState;
 use crate::db::{UserIdentityRecord, UserRecord};
 
-/// Cookie name for OAuth browser sessions.
-const SESSION_COOKIE_NAME: &str = "ironclaw_session";
+use crate::channels::web::auth::SESSION_COOKIE_NAME;
 /// Session lifetime: 30 days (cookie Max-Age and token expiry).
 const SESSION_LIFETIME_SECS: i64 = 30 * 24 * 60 * 60;
 
@@ -326,10 +325,11 @@ pub async fn near_challenge_handler(
     ))?;
 
     let nonce = nonce_store.generate().await;
+    let message = format!("Sign in to IronClaw\nNonce: {nonce}");
 
     Ok(Json(serde_json::json!({
         "nonce": nonce,
-        "message": "Sign in to IronClaw",
+        "message": message,
         "recipient": "ironclaw",
     })))
 }
@@ -391,8 +391,9 @@ pub async fn near_verify_handler(
         Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
     };
 
-    // The signed message is the nonce bytes (the client signs the hex nonce string).
-    let message = body.nonce.as_bytes();
+    // The signed message matches what the challenge endpoint returns.
+    let message_str = format!("Sign in to IronClaw\nNonce: {}", body.nonce);
+    let message = message_str.as_bytes();
 
     // Verify the Ed25519 signature.
     if let Err(e) =
@@ -624,13 +625,20 @@ async fn resolve_user(
             .await
             .map_err(|e| e.to_string())?
         {
-            // Link this new provider to the existing user.
-            let new_identity = build_identity_record(&identity.user_id, provider, profile);
-            store
-                .create_identity(&new_identity)
+            // Verify the linked user is still active before linking.
+            if let Some(user) = store
+                .get_user(&identity.user_id)
                 .await
-                .map_err(|e| e.to_string())?;
-            return Ok((identity.user_id, false));
+                .map_err(|e| e.to_string())?
+                && user.status == "active"
+            {
+                let new_identity = build_identity_record(&identity.user_id, provider, profile);
+                store
+                    .create_identity(&new_identity)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                return Ok((identity.user_id, false));
+            }
         }
 
         // Check the users table directly for email match.

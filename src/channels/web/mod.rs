@@ -379,7 +379,40 @@ impl GatewayChannel {
             );
         }
 
-        if providers.is_empty() {
+        // Apply domain restrictions to OIDC regardless of whether OAuth providers
+        // are configured — OIDC runs via reverse-proxy header, not our providers.
+        let allowed_domains = config.allowed_domains;
+        if !allowed_domains.is_empty() {
+            self.auth.oidc_allowed_domains = allowed_domains.clone();
+        }
+
+        // Set up NEAR wallet auth if configured (independent of OAuth providers).
+        let near_nonce_store = config.near.as_ref().map(|_| {
+            let store = Arc::new(crate::channels::web::oauth::near::NearNonceStore::new());
+            let sweep = Arc::clone(&store);
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+                loop {
+                    interval.tick().await;
+                    sweep.sweep_expired().await;
+                }
+            });
+            store
+        });
+        let near_rpc_url = config.near.as_ref().map(|n| n.rpc_url.clone());
+
+        let has_near = near_nonce_store.is_some();
+
+        if providers.is_empty() && !has_near {
+            // Still apply domain restrictions even without providers.
+            self.rebuild_state(|s| {
+                s.oauth_allowed_domains = allowed_domains;
+                s.near_nonce_store = near_nonce_store;
+                s.near_rpc_url = near_rpc_url;
+            });
+            if has_near || !self.auth.oidc_allowed_domains.is_empty() {
+                return self;
+            }
             tracing::warn!("OAuth enabled but no providers configured");
             return self;
         }
@@ -404,25 +437,6 @@ impl GatewayChannel {
             }
         });
 
-        // Set up NEAR wallet auth if configured.
-        let near_nonce_store = config.near.as_ref().map(|_| {
-            let store = Arc::new(crate::channels::web::oauth::near::NearNonceStore::new());
-            let sweep = Arc::clone(&store);
-            tokio::spawn(async move {
-                let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
-                loop {
-                    interval.tick().await;
-                    sweep.sweep_expired().await;
-                }
-            });
-            store
-        });
-        let near_rpc_url = config.near.as_ref().map(|n| n.rpc_url.clone());
-
-        let allowed_domains = config.allowed_domains;
-        // Share domain restrictions with both the OAuth handlers (GatewayState)
-        // and the OIDC middleware (CombinedAuthState).
-        self.auth.oidc_allowed_domains = allowed_domains.clone();
         self.rebuild_state(|s| {
             s.oauth_providers = Some(providers);
             s.oauth_state_store = Some(state_store);

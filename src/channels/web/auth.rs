@@ -57,6 +57,10 @@ use tokio::sync::RwLock;
 use crate::config::GatewayOidcConfig;
 use crate::db::Database;
 
+/// Cookie name for OAuth browser sessions. Shared between the auth middleware
+/// (cookie extraction) and the auth handlers (cookie set/clear).
+pub const SESSION_COOKIE_NAME: &str = "ironclaw_session";
+
 // ── User identity ────────────────────────────────────────────────────────
 
 /// Identity resolved from a bearer token or OIDC JWT.
@@ -941,10 +945,11 @@ fn extract_token(headers: &HeaderMap, request: &Request) -> Option<String> {
     if let Some(cookie_header) = headers.get("cookie")
         && let Ok(cookie_str) = cookie_header.to_str()
     {
-        let prefix = concat!("ironclaw_session", "=");
+        // Use a runtime format since const can't be used in concat!().
+        let prefix_match = format!("{SESSION_COOKIE_NAME}=");
         for pair in cookie_str.split(';') {
             let pair = pair.trim();
-            if let Some(value) = pair.strip_prefix(prefix) {
+            if let Some(value) = pair.strip_prefix(prefix_match.as_str()) {
                 let value = value.trim();
                 if !value.is_empty() {
                     return Some(value.to_string());

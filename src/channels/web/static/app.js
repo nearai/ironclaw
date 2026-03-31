@@ -240,13 +240,14 @@ fetch('/auth/providers', { credentials: 'include' })
     if (social) social.style.display = '';
     providers.forEach(function(p) {
       var btn = document.getElementById('auth-' + p + '-btn');
-      if (btn) btn.style.display = '';
+      if (!btn) return;
+      btn.style.display = '';
+      if (p === 'near') {
+        btn.addEventListener('click', authenticateWithNear);
+      } else {
+        btn.addEventListener('click', function() { window.location = '/auth/login/' + p; });
+      }
     });
-    // Wire up NEAR wallet button.
-    if (providers.indexOf('near') !== -1) {
-      var nearBtn = document.getElementById('auth-near-btn');
-      if (nearBtn) nearBtn.addEventListener('click', authenticateWithNear);
-    }
   })
   .catch(function() { /* auth providers not available */ });
 
@@ -282,7 +283,7 @@ async function authenticateWithNear() {
     var nonceBytes = new Uint8Array(challenge.nonce.match(/.{2}/g).map(function(b) { return parseInt(b, 16); }));
 
     var signed = await wallet.signMessage({
-      message: challenge.nonce,
+      message: challenge.message,
       recipient: challenge.recipient || 'ironclaw',
       nonce: nonceBytes,
     });
