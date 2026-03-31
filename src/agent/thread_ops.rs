@@ -2295,8 +2295,6 @@ mod tests {
 
     #[test]
     fn test_processing_arm_state_changed_does_not_queue() {
-        // Regression: if the thread transitions from Processing to Idle between
-        // the state snapshot and the mutable lock, the message must NOT be queued.
         // Instead the Processing arm falls through to normal processing.
         //
         // Exercises the `if thread.state == ThreadState::Processing` re-check.
