@@ -190,10 +190,27 @@
         <span id="tee-shield-label" data-i18n="status.teeVerified">TEE Verified</span>
         <div class="tee-popover" id="tee-popover"></div>
       </div>
-      <div class="status" id="gateway-status-trigger">
-        <div class="dot" id="sse-dot"></div>
-        <span id="sse-status" data-i18n="status.connected">Connected</span>
-        <div class="gateway-popover" id="gateway-popover"></div>
+      <div class="user-account" id="user-account">
+        <button class="user-avatar-btn" id="user-avatar-btn" title="Account">
+          <img id="user-avatar-img" class="user-avatar-img" style="display:none" alt="">
+          <span id="user-avatar-initials" class="user-avatar-initials">?</span>
+          <div class="user-avatar-dot" id="sse-dot"></div>
+        </button>
+        <div class="user-dropdown" id="user-dropdown" style="display:none">
+          <div class="user-dropdown-header">
+            <div class="user-dropdown-name" id="user-dropdown-name"></div>
+            <div class="user-dropdown-email" id="user-dropdown-email"></div>
+            <div class="user-dropdown-role" id="user-dropdown-role"></div>
+          </div>
+          <div class="user-dropdown-divider"></div>
+          <div class="user-dropdown-status">
+            <div class="dot" id="sse-dot-menu"></div>
+            <span id="sse-status">Connected</span>
+          </div>
+          <div class="gateway-popover-inline" id="gateway-popover"></div>
+          <div class="user-dropdown-divider"></div>
+          <button class="user-dropdown-item user-dropdown-logout" id="user-logout-btn">Sign out</button>
+        </div>
       </div>
       <button class="restart-btn" id="restart-btn" data-i18n="status.restartTooltip"
         data-i18n-attr="title" title="Gracefully restart the process" style="display: none;">

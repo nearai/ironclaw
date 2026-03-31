@@ -430,12 +430,20 @@ pub async fn profile_get_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "User not found".to_string()))?;
 
+    // Try to get avatar_url from linked OAuth identities.
+    let avatar_url = store
+        .list_identities_for_user(&user.user_id)
+        .await
+        .ok()
+        .and_then(|ids| ids.into_iter().find_map(|id| id.avatar_url));
+
     Ok(Json(serde_json::json!({
         "id": record.id,
         "email": record.email,
         "display_name": record.display_name,
         "status": record.status,
         "role": record.role,
+        "avatar_url": avatar_url,
         "created_at": record.created_at.to_rfc3339(),
         "last_login_at": record.last_login_at.map(|dt| dt.to_rfc3339()),
     })))

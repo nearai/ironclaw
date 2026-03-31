@@ -367,22 +367,166 @@ body {
   background: var(--accent-tee-bg);
 }
 
-.tab-bar .status {
+/* ── User account avatar + dropdown ─────────────────────────────── */
+
+.user-account {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.user-avatar-btn {
+  position: relative;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  background: transparent;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.user-avatar-img {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  object-fit: cover;
+}
+
+.user-avatar-initials {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: var(--bg);
+  font-size: 14px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-transform: uppercase;
+}
+
+.user-avatar-dot {
+  position: absolute;
+  bottom: 0;
+  right: 0;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--success);
+  border: 2px solid var(--tab-bg);
+}
+
+.user-avatar-dot.disconnected {
+  background: var(--danger);
+}
+
+.user-dropdown {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  margin-top: 8px;
+  background: var(--popover-bg, var(--bg-secondary));
+  backdrop-filter: blur(16px);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 0;
+  min-width: 240px;
+  box-shadow: var(--shadow);
+  z-index: 500;
+}
+
+.user-dropdown-header {
+  padding: 12px 16px;
+}
+
+.user-dropdown-name {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text);
+}
+
+.user-dropdown-email {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.user-dropdown-role {
+  font-size: 11px;
+  color: var(--accent);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-top: 4px;
+}
+
+.user-dropdown-divider {
+  height: 1px;
+  background: var(--border);
+}
+
+.user-dropdown-status {
   display: flex;
   align-items: center;
   gap: var(--space-2);
+  padding: 8px 16px;
   font-size: 12px;
   color: var(--text-secondary);
-  position: relative;
-  cursor: pointer;
 }
 
+.user-dropdown-status .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--success);
+  flex-shrink: 0;
+}
+
+.user-dropdown-status .dot.disconnected {
+  background: var(--danger);
+}
+
+.gateway-popover-inline {
+  padding: 4px 16px 8px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+.user-dropdown-item {
+  display: block;
+  width: 100%;
+  padding: 10px 16px;
+  border: none;
+  background: none;
+  text-align: left;
+  font-size: var(--text-sm);
+  color: var(--text);
+  cursor: pointer;
+  border-radius: 0 0 var(--radius-lg) var(--radius-lg);
+}
+
+.user-dropdown-item:hover {
+  background: var(--bg-hover, rgba(255,255,255,0.05));
+}
+
+.user-dropdown-logout {
+  color: var(--danger);
+}
+
+/* Keep old .status .dot selector for any remaining references */
 .tab-bar .status .dot {
   width: 8px;
   height: 8px;
   border-radius: 50%;
   background: var(--success);
-  position: relative;
 }
 
 .tab-bar .status .dot.disconnected {

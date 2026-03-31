@@ -171,12 +171,33 @@ function initApp() {
   connectSSE();
   connectLogSSE();
   startGatewayStatusPolling();
-  // Hide the Users settings tab for non-admin users.
+  // Fetch user profile and render avatar + account menu.
   apiFetch('/api/profile').then(function(profile) {
-    if (profile && profile.role !== 'admin') {
+    if (!profile) return;
+    window._currentUser = profile;
+    // Hide admin tabs for non-admin users.
+    if (profile.role !== 'admin') {
       var usersTab = document.querySelector('[data-settings-subtab="users"]');
       if (usersTab) usersTab.style.display = 'none';
     }
+    // Render avatar.
+    var avatarImg = document.getElementById('user-avatar-img');
+    var avatarInitials = document.getElementById('user-avatar-initials');
+    if (profile.avatar_url && avatarImg) {
+      avatarImg.src = profile.avatar_url;
+      avatarImg.style.display = '';
+      if (avatarInitials) avatarInitials.style.display = 'none';
+    } else if (avatarInitials) {
+      var name = profile.display_name || profile.email || profile.id || '?';
+      avatarInitials.textContent = name.charAt(0).toUpperCase();
+    }
+    // Populate dropdown.
+    var nameEl = document.getElementById('user-dropdown-name');
+    var emailEl = document.getElementById('user-dropdown-email');
+    var roleEl = document.getElementById('user-dropdown-role');
+    if (nameEl) nameEl.textContent = profile.display_name || profile.id;
+    if (emailEl) emailEl.textContent = profile.email || '';
+    if (roleEl) roleEl.textContent = profile.role;
   }).catch(function() {});
   checkTeeStatus();
   loadThreads();
@@ -515,6 +536,8 @@ function connectSSE() {
 
   eventSource.onopen = () => {
     document.getElementById('sse-dot').classList.remove('disconnected');
+    var dotMenu = document.getElementById('sse-dot-menu');
+    if (dotMenu) dotMenu.classList.remove('disconnected');
     document.getElementById('sse-status').textContent = I18n.t('status.connected');
     _reconnectAttempts = 0;
 
@@ -557,6 +580,8 @@ function connectSSE() {
   eventSource.onerror = () => {
     _reconnectAttempts++;
     document.getElementById('sse-dot').classList.add('disconnected');
+    var dotMenu2 = document.getElementById('sse-dot-menu');
+    if (dotMenu2) dotMenu2.classList.add('disconnected');
     document.getElementById('sse-status').textContent = I18n.t('status.reconnecting');
 
     // Update existing banner with attempt count
@@ -4772,13 +4797,8 @@ function fetchGatewayStatus() {
   }).catch(function() {});
 }
 
-// Show/hide popover on hover
-document.getElementById('gateway-status-trigger').addEventListener('mouseenter', () => {
-  document.getElementById('gateway-popover').classList.add('visible');
-});
-document.getElementById('gateway-status-trigger').addEventListener('mouseleave', () => {
-  document.getElementById('gateway-popover').classList.remove('visible');
-});
+// Gateway popover is now inline in the user dropdown — no hover toggle needed.
+// The popover content is updated by startGatewayStatusPolling() into #gateway-popover.
 
 // --- TEE attestation ---
 
@@ -6295,6 +6315,30 @@ function formatDate(isoString) {
 // --- Event Listener Registration (CSP-safe, no inline handlers) ---
 
 document.getElementById('auth-connect-btn').addEventListener('click', () => authenticate());
+
+// User avatar dropdown toggle.
+document.getElementById('user-avatar-btn').addEventListener('click', function(e) {
+  e.stopPropagation();
+  var dd = document.getElementById('user-dropdown');
+  if (dd) dd.style.display = dd.style.display === 'none' ? '' : 'none';
+});
+// Close dropdown on click outside.
+document.addEventListener('click', function(e) {
+  var dd = document.getElementById('user-dropdown');
+  var account = document.getElementById('user-account');
+  if (dd && account && !account.contains(e.target)) {
+    dd.style.display = 'none';
+  }
+});
+// Logout handler.
+document.getElementById('user-logout-btn').addEventListener('click', function() {
+  fetch('/auth/logout', { method: 'POST', credentials: 'include' })
+    .finally(function() {
+      sessionStorage.removeItem('ironclaw_token');
+      sessionStorage.removeItem('ironclaw_oidc');
+      window.location.reload();
+    });
+});
 document.getElementById('restart-overlay').addEventListener('click', () => cancelRestart());
 document.getElementById('restart-close-btn').addEventListener('click', () => cancelRestart());
 document.getElementById('restart-cancel-btn').addEventListener('click', () => cancelRestart());
