@@ -157,17 +157,31 @@ impl ChannelRoutingConfig {
             .unwrap_or(&self.default_group)
     }
 
-    /// Whether this channel name represents a direct message (bypass routing).
+    /// Whether this message represents a direct message (bypass routing).
     ///
-    /// Uses exact match for short names and prefix-with-delimiter for DM channels.
-    pub fn is_dm(channel: &str) -> bool {
-        // Exact matches for CLI/REPL/web gateway
-        matches!(channel, "cli" | "repl" | "web")
-            // Prefix matches for Slack/Telegram DMs (e.g. "slack-dm-U12345")
-            || channel == "slack-dm"
-            || channel.starts_with("slack-dm-")
-            || channel == "telegram-dm"
-            || channel.starts_with("telegram-dm-")
+    /// Uses the channel name plus metadata for relay channels (Slack/Telegram)
+    /// where DMs arrive on the same WASM channel as group messages.
+    pub fn is_dm(channel: &str, metadata: &serde_json::Value) -> bool {
+        // CLI, REPL, and web gateway are always treated as DM (full tool access)
+        if matches!(channel, "cli" | "repl" | "gateway") {
+            return true;
+        }
+        // For relay channels (slack, telegram, etc.), DMs are identified by
+        // the Slack channel ID starting with 'D' (direct message).
+        if channel == "slack" {
+            return metadata
+                .get("channel")
+                .and_then(|v| v.as_str())
+                .is_some_and(|ch| ch.starts_with('D'));
+        }
+        // Telegram DMs: chat type is "private"
+        if channel == "telegram" {
+            return metadata
+                .get("chat_type")
+                .and_then(|v| v.as_str())
+                .is_some_and(|ct| ct == "private");
+        }
+        false
     }
 
     /// Collect all unique MCP server names across all groups, sorted by
@@ -193,9 +207,10 @@ impl ChannelRoutingConfig {
     pub fn filter_tool_defs(
         &self,
         channel: &str,
+        metadata: &serde_json::Value,
         tools: Vec<ToolDefinition>,
     ) -> Vec<ToolDefinition> {
-        if Self::is_dm(channel) {
+        if Self::is_dm(channel, metadata) {
             return tools;
         }
 
@@ -303,21 +318,32 @@ mod tests {
 
     #[test]
     fn test_is_dm() {
-        // Exact matches
-        assert!(ChannelRoutingConfig::is_dm("slack-dm")); // safety: test assertion
-        assert!(ChannelRoutingConfig::is_dm("telegram-dm")); // safety: test assertion
-        assert!(ChannelRoutingConfig::is_dm("cli")); // safety: test assertion
-        assert!(ChannelRoutingConfig::is_dm("repl")); // safety: test assertion
-        assert!(ChannelRoutingConfig::is_dm("web")); // safety: test assertion
-        // Prefix with delimiter
-        assert!(ChannelRoutingConfig::is_dm("slack-dm-U12345")); // safety: test assertion
-        assert!(ChannelRoutingConfig::is_dm("telegram-dm-12345")); // safety: test assertion
-        // NOT DMs
-        assert!(!ChannelRoutingConfig::is_dm("agentiffai-dev-issues")); // safety: test assertion
-        assert!(!ChannelRoutingConfig::is_dm("web-team-standup")); // safety: test assertion
-        assert!(!ChannelRoutingConfig::is_dm("cli-tools")); // safety: test assertion
-        assert!(!ChannelRoutingConfig::is_dm("repl-server")); // safety: test assertion
-        assert!(!ChannelRoutingConfig::is_dm("webhook")); // safety: test assertion
+        let empty = serde_json::json!({});
+
+        // CLI, REPL, gateway are always DMs (full tool access)
+        assert!(ChannelRoutingConfig::is_dm("cli", &empty));
+        assert!(ChannelRoutingConfig::is_dm("repl", &empty));
+        assert!(ChannelRoutingConfig::is_dm("gateway", &empty));
+
+        // Slack DMs: channel ID starts with 'D'
+        let slack_dm = serde_json::json!({"channel": "D12345"});
+        assert!(ChannelRoutingConfig::is_dm("slack", &slack_dm));
+        // Slack channel message: channel ID starts with 'C'
+        let slack_channel = serde_json::json!({"channel": "C12345"});
+        assert!(!ChannelRoutingConfig::is_dm("slack", &slack_channel));
+        // Slack with no metadata: not a DM
+        assert!(!ChannelRoutingConfig::is_dm("slack", &empty));
+
+        // Telegram DMs: chat_type is "private"
+        let tg_dm = serde_json::json!({"chat_type": "private"});
+        assert!(ChannelRoutingConfig::is_dm("telegram", &tg_dm));
+        let tg_group = serde_json::json!({"chat_type": "group"});
+        assert!(!ChannelRoutingConfig::is_dm("telegram", &tg_group));
+        assert!(!ChannelRoutingConfig::is_dm("telegram", &empty));
+
+        // Unknown channels are not DMs
+        assert!(!ChannelRoutingConfig::is_dm("webhook", &empty));
+        assert!(!ChannelRoutingConfig::is_dm("discord", &empty));
     }
 
     #[test]
@@ -413,13 +439,14 @@ mod tests {
             "default_group": "minimal"
         }"#;
         let config: ChannelRoutingConfig = serde_json::from_str(json).unwrap(); // safety: test
+        let empty = serde_json::json!({});
         let tools = vec![
             make_tool_def("Archon_list_tasks"),
             make_tool_def("Kiro_run_task"),
             make_tool_def("Notion_post_search"),
             make_tool_def("Smartlead_send"),
         ];
-        let filtered = config.filter_tool_defs("agentiffai-dev-issues", tools);
+        let filtered = config.filter_tool_defs("agentiffai-dev-issues", &empty, tools);
         let names: Vec<&str> = filtered.iter().map(|t| t.name.as_str()).collect();
         assert!(names.contains(&"Archon_list_tasks")); // safety: test assertion
         assert!(names.contains(&"Kiro_run_task")); // safety: test assertion
@@ -430,6 +457,7 @@ mod tests {
     #[test]
     fn test_filter_restricts_builtins_when_whitelisted() {
         let config = sample_config();
+        let empty = serde_json::json!({});
         let tools = vec![
             make_tool_def("Archon_list_tasks"),
             make_tool_def("memory_search"),
@@ -437,7 +465,7 @@ mod tests {
             make_tool_def("shell"),
             make_tool_def("http_request"),
         ];
-        let filtered = config.filter_tool_defs("unmapped-channel", tools);
+        let filtered = config.filter_tool_defs("unmapped-channel", &empty, tools);
         let names: Vec<&str> = filtered.iter().map(|t| t.name.as_str()).collect();
         assert!(names.contains(&"Archon_list_tasks")); // safety: test assertion
         assert!(names.contains(&"memory_search")); // safety: test assertion
@@ -449,12 +477,13 @@ mod tests {
     #[test]
     fn test_filter_allows_all_builtins_when_no_whitelist() {
         let config = sample_config();
+        let empty = serde_json::json!({});
         let tools = vec![
             make_tool_def("Archon_list_tasks"),
             make_tool_def("shell"),
             make_tool_def("memory_search"),
         ];
-        let filtered = config.filter_tool_defs("agentiffai-dev-issues", tools);
+        let filtered = config.filter_tool_defs("agentiffai-dev-issues", &empty, tools);
         assert_eq!(filtered.len(), 3); // safety: test assertion
     }
 
@@ -466,8 +495,18 @@ mod tests {
             make_tool_def("Smartlead_send"),
             make_tool_def("shell"),
         ];
-        let filtered = config.filter_tool_defs("slack-dm", tools);
-        assert_eq!(filtered.len(), 3); // safety: test assertion
+        // Gateway (web chat) bypasses routing
+        let empty = serde_json::json!({});
+        let filtered = config.filter_tool_defs("gateway", &empty, tools.clone());
+        assert_eq!(filtered.len(), 3);
+        // Slack DM (channel ID starts with D) bypasses routing
+        let slack_dm = serde_json::json!({"channel": "D12345"});
+        let filtered = config.filter_tool_defs("slack", &slack_dm, tools.clone());
+        assert_eq!(filtered.len(), 3);
+        // Slack channel message does NOT bypass
+        let slack_ch = serde_json::json!({"channel": "C12345"});
+        let filtered = config.filter_tool_defs("slack", &slack_ch, tools);
+        assert!(filtered.len() < 3); // filtered to default_group "minimal"
     }
 
     #[test]
@@ -522,6 +561,7 @@ mod tests {
             "default_group": "minimal"
         }"#;
         let config: ChannelRoutingConfig = serde_json::from_str(json).unwrap(); // safety: test
+        let empty = serde_json::json!({});
 
         let all_tools = vec![
             make_tool_def("Archon_list_tasks"),
@@ -533,7 +573,8 @@ mod tests {
             make_tool_def("create_job"),
         ];
 
-        let content_tools = config.filter_tool_defs("agentiffai-marketing", all_tools.clone());
+        let content_tools =
+            config.filter_tool_defs("agentiffai-marketing", &empty, all_tools.clone());
         let content_names: Vec<&str> = content_tools.iter().map(|t| t.name.as_str()).collect();
         assert_eq!(
             content_names,
