@@ -6,12 +6,16 @@
 //! - Support for common development tasks
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use tokio::fs;
+use tokio::io::AsyncReadExt;
+use tokio::sync::RwLock;
 
 use crate::context::JobContext;
-use crate::tools::builtin::path_utils::validate_path;
+use crate::tools::builtin::file_history::FileHistory;
+use crate::tools::builtin::path_utils::{validate_path, DEFAULT_EXCLUDED_DIRS};
 use crate::tools::tool::{
     ApprovalRequirement, Tool, ToolDomain, ToolError, ToolOutput, require_str,
 };
@@ -44,8 +48,25 @@ fn is_workspace_path(path: &str) -> bool {
         || path.starts_with("context/")
 }
 
-/// Maximum file size for reading (1MB).
-const MAX_READ_SIZE: u64 = 1024 * 1024;
+/// Maximum file size for reading (10MB).
+const MAX_READ_SIZE: u64 = 10 * 1024 * 1024;
+
+/// Default line limit when no offset/limit is specified.
+const DEFAULT_LINE_LIMIT: usize = 2000;
+
+/// Device paths that must not be read (would hang or produce infinite output).
+const BLOCKED_DEVICE_PATHS: &[&str] = &[
+    "/dev/zero",
+    "/dev/urandom",
+    "/dev/random",
+    "/dev/null",
+    "/dev/stdin",
+    "/dev/stdout",
+    "/dev/stderr",
+];
+
+/// Maximum file size for apply_patch operations (10MB).
+const MAX_PATCH_SIZE: u64 = 10 * 1024 * 1024;
 
 /// Maximum file size for writing (5MB).
 const MAX_WRITE_SIZE: usize = 5 * 1024 * 1024;
@@ -77,9 +98,10 @@ impl Tool for ReadFileTool {
     }
 
     fn description(&self) -> &str {
-        "Read a file from the LOCAL FILESYSTEM. NOT for workspace memory paths \
-         (use memory_read for those). Returns file content as text. \
-         For large files, you can specify offset and limit to read a portion."
+        "Read a file from the LOCAL FILESYSTEM. **Always read a file before editing it.** \
+         NOT for workspace memory paths (use memory_read for those). \
+         Returns content with line numbers. Default limit is 2000 lines. \
+         For large files, use offset and limit for partial reads."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -110,8 +132,19 @@ impl Tool for ReadFileTool {
     ) -> Result<ToolOutput, ToolError> {
         let path_str = require_str(&params, "path")?;
 
+        // Block device paths that would hang or produce infinite output
+        if BLOCKED_DEVICE_PATHS.iter().any(|p| path_str.starts_with(p))
+            || (path_str.starts_with("/proc/") && path_str.contains("/fd/"))
+        {
+            return Err(ToolError::InvalidParameters(format!(
+                "Reading device/proc paths is not allowed: {}",
+                path_str
+            )));
+        }
+
         let offset = params.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
         let limit = params.get("limit").and_then(|v| v.as_u64());
+        let has_explicit_range = offset > 0 || limit.is_some();
 
         let start = std::time::Instant::now();
 
@@ -130,6 +163,29 @@ impl Tool for ReadFileTool {
             )));
         }
 
+        // Binary file detection: read first 8KB and check for null bytes
+        {
+            let probe_size = 8192u64.min(metadata.len()) as usize;
+            if probe_size > 0 {
+                let mut f = tokio::fs::File::open(&path)
+                    .await
+                    .map_err(|e| ToolError::ExecutionFailed(format!("Cannot open file: {}", e)))?;
+                let mut probe = vec![0u8; probe_size];
+                let n = f
+                    .read(&mut probe)
+                    .await
+                    .map_err(|e| {
+                        ToolError::ExecutionFailed(format!("Cannot read file: {}", e))
+                    })?;
+                if probe[..n].contains(&0) {
+                    return Err(ToolError::ExecutionFailed(format!(
+                        "File appears to be binary (contains null bytes): {}",
+                        path.display()
+                    )));
+                }
+            }
+        }
+
         // Read file
         let content = fs::read_to_string(&path)
             .await
@@ -144,10 +200,14 @@ impl Tool for ReadFileTool {
         } else {
             0
         };
-        let end_line = if let Some(lim) = limit {
-            (start_line + lim as usize).min(total_lines)
+
+        let (end_line, truncated_by_default) = if let Some(lim) = limit {
+            ((start_line + lim as usize).min(total_lines), false)
+        } else if !has_explicit_range && total_lines > DEFAULT_LINE_LIMIT {
+            // Apply default 2000-line limit when no offset/limit specified
+            (DEFAULT_LINE_LIMIT.min(total_lines), true)
         } else {
-            total_lines
+            (total_lines, false)
         };
 
         let selected_lines: Vec<String> = lines[start_line..end_line]
@@ -160,6 +220,7 @@ impl Tool for ReadFileTool {
             "content": selected_lines.join("\n"),
             "total_lines": total_lines,
             "lines_shown": end_line - start_line,
+            "truncated_by_default": truncated_by_default,
             "path": path.display().to_string()
         });
 
@@ -183,6 +244,7 @@ impl Tool for ReadFileTool {
 #[derive(Debug, Default)]
 pub struct WriteFileTool {
     base_dir: Option<PathBuf>,
+    file_history: Option<Arc<RwLock<FileHistory>>>,
 }
 
 impl WriteFileTool {
@@ -194,6 +256,11 @@ impl WriteFileTool {
         self.base_dir = Some(dir);
         self
     }
+
+    pub fn with_file_history(mut self, history: Arc<RwLock<FileHistory>>) -> Self {
+        self.file_history = Some(history);
+        self
+    }
 }
 
 #[async_trait]
@@ -203,9 +270,10 @@ impl Tool for WriteFileTool {
     }
 
     fn description(&self) -> &str {
-        "Write content to a file on the LOCAL FILESYSTEM. NOT for workspace memory \
-         (use memory_write for that). Creates the file if it doesn't exist, overwrites if it does. \
-         Parent directories are created automatically. Use apply_patch for targeted edits."
+        "Write content to a file on the LOCAL FILESYSTEM. **Only use for creating new files \
+         or complete rewrites.** For targeted edits, use apply_patch instead — it's safer \
+         and more efficient. NOT for workspace memory (use memory_write for that). \
+         Creates parent directories automatically."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -255,6 +323,12 @@ impl Tool for WriteFileTool {
         }
 
         let path = validate_path(path_str, self.base_dir.as_deref())?;
+
+        // Snapshot existing file before overwriting (for file_undo)
+        if let Some(ref history) = self.file_history {
+            let mut h = history.write().await;
+            let _ = h.snapshot(&path, "write_file", 0).await;
+        }
 
         // Create parent directories
         if let Some(parent) = path.parent() {
@@ -450,10 +524,7 @@ async fn list_dir_inner(
             // Skip common non-essential directories
             let name = entry.file_name();
             let name_str = name.to_string_lossy();
-            if !matches!(
-                name_str.as_ref(),
-                "node_modules" | "target" | ".git" | "__pycache__" | "venv" | ".venv"
-            ) {
+            if !DEFAULT_EXCLUDED_DIRS.contains(&name_str.as_ref()) {
                 Box::pin(list_dir_inner(
                     base,
                     &entry_path,
@@ -491,6 +562,7 @@ fn format_size(bytes: u64) -> String {
 #[derive(Debug, Default)]
 pub struct ApplyPatchTool {
     base_dir: Option<PathBuf>,
+    file_history: Option<Arc<RwLock<FileHistory>>>,
 }
 
 impl ApplyPatchTool {
@@ -502,6 +574,11 @@ impl ApplyPatchTool {
         self.base_dir = Some(dir);
         self
     }
+
+    pub fn with_file_history(mut self, history: Arc<RwLock<FileHistory>>) -> Self {
+        self.file_history = Some(history);
+        self
+    }
 }
 
 #[async_trait]
@@ -511,9 +588,10 @@ impl Tool for ApplyPatchTool {
     }
 
     fn description(&self) -> &str {
-        "Apply targeted edits to a file using search/replace. Finds the exact 'old_string' \
-         and replaces it with 'new_string'. Use for surgical code changes without rewriting entire files. \
-         The old_string must match exactly (including whitespace and indentation)."
+        "Apply targeted edits to a file using search/replace. **Prefer this over write_file** \
+         for modifying existing files — it sends only the changed portion. \
+         The old_string must match exactly (including whitespace and indentation). \
+         For multiple occurrences, set replace_all=true."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -548,6 +626,14 @@ impl Tool for ApplyPatchTool {
     ) -> Result<ToolOutput, ToolError> {
         let path_str = require_str(&params, "path")?;
 
+        // Reject workspace paths
+        if is_workspace_path(path_str) {
+            return Err(ToolError::InvalidParameters(format!(
+                "'{}' is a workspace memory file. Use the memory_write tool instead of apply_patch.",
+                path_str
+            )));
+        }
+
         let old_string = require_str(&params, "old_string")?;
 
         let new_string = require_str(&params, "new_string")?;
@@ -560,6 +646,19 @@ impl Tool for ApplyPatchTool {
         let start = std::time::Instant::now();
 
         let path = validate_path(path_str, self.base_dir.as_deref())?;
+
+        // Check file size
+        let metadata = fs::metadata(&path)
+            .await
+            .map_err(|e| ToolError::ExecutionFailed(format!("Cannot access file: {}", e)))?;
+
+        if metadata.len() > MAX_PATCH_SIZE {
+            return Err(ToolError::ExecutionFailed(format!(
+                "File too large ({} bytes). Maximum for apply_patch is {} bytes.",
+                metadata.len(),
+                MAX_PATCH_SIZE
+            )));
+        }
 
         // Read current content
         let content = fs::read_to_string(&path)
@@ -574,6 +673,23 @@ impl Tool for ApplyPatchTool {
             )));
         }
 
+        // Uniqueness validation: when replace_all=false, check for ambiguous matches
+        let match_count = content.matches(old_string).count();
+        if !replace_all && match_count > 1 {
+            return Err(ToolError::ExecutionFailed(format!(
+                "Found {} matches for the specified text in {}. \
+                 Provide more context in old_string to make it unique, or set replace_all=true.",
+                match_count,
+                path.display()
+            )));
+        }
+
+        // Snapshot before modification (for file_undo)
+        if let Some(ref history) = self.file_history {
+            let mut h = history.write().await;
+            let _ = h.snapshot(&path, "apply_patch", 0).await;
+        }
+
         // Apply replacement
         let new_content = if replace_all {
             content.replace(old_string, new_string)
@@ -582,11 +698,7 @@ impl Tool for ApplyPatchTool {
         };
 
         // Count replacements
-        let replacements = if replace_all {
-            content.matches(old_string).count()
-        } else {
-            1
-        };
+        let replacements = if replace_all { match_count } else { 1 };
 
         // Write back
         fs::write(&path, &new_content)
@@ -864,5 +976,347 @@ mod tests {
             "Should allow .. that stays within sandbox: {:?}",
             result
         );
+    }
+
+    // --- ReadFileTool enhancement tests ---
+
+    #[tokio::test]
+    async fn test_read_file_default_limit_2000() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("big.txt");
+        let content: String = (1..=3000).map(|i| format!("line {}\n", i)).collect();
+        std::fs::write(&file_path, &content).unwrap();
+
+        let tool = ReadFileTool::new().with_base_dir(dir.path().to_path_buf());
+        let ctx = JobContext::default();
+
+        let result = tool
+            .execute(
+                serde_json::json!({"path": file_path.to_str().unwrap()}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        let lines_shown = result.result.get("lines_shown").unwrap().as_u64().unwrap();
+        assert_eq!(lines_shown, 2000);
+        assert!(
+            result
+                .result
+                .get("truncated_by_default")
+                .unwrap()
+                .as_bool()
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_read_file_explicit_limit_overrides() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("test.txt");
+        let content: String = (1..=500).map(|i| format!("line {}\n", i)).collect();
+        std::fs::write(&file_path, &content).unwrap();
+
+        let tool = ReadFileTool::new().with_base_dir(dir.path().to_path_buf());
+        let ctx = JobContext::default();
+
+        let result = tool
+            .execute(
+                serde_json::json!({"path": file_path.to_str().unwrap(), "limit": 100}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        let lines_shown = result.result.get("lines_shown").unwrap().as_u64().unwrap();
+        assert_eq!(lines_shown, 100);
+        assert!(
+            !result
+                .result
+                .get("truncated_by_default")
+                .unwrap()
+                .as_bool()
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_read_file_binary_rejected() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("binary.bin");
+        let mut content = vec![0u8; 100];
+        content[50] = 0; // null byte
+        content[0] = b'H';
+        content[1] = b'i';
+        std::fs::write(&file_path, &content).unwrap();
+
+        let tool = ReadFileTool::new().with_base_dir(dir.path().to_path_buf());
+        let ctx = JobContext::default();
+
+        let err = tool
+            .execute(
+                serde_json::json!({"path": file_path.to_str().unwrap()}),
+                &ctx,
+            )
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("binary"));
+    }
+
+    #[tokio::test]
+    async fn test_read_file_blocks_dev_paths() {
+        let tool = ReadFileTool::new();
+        let ctx = JobContext::default();
+
+        for dev_path in &["/dev/zero", "/dev/urandom", "/dev/null"] {
+            let err = tool
+                .execute(
+                    serde_json::json!({"path": dev_path}),
+                    &ctx,
+                )
+                .await
+                .unwrap_err();
+
+            assert!(
+                err.to_string().contains("not allowed"),
+                "Should block {}: {}",
+                dev_path,
+                err
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_read_file_blocks_proc_fd() {
+        let tool = ReadFileTool::new();
+        let ctx = JobContext::default();
+
+        let err = tool
+            .execute(
+                serde_json::json!({"path": "/proc/self/fd/0"}),
+                &ctx,
+            )
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("not allowed"));
+    }
+
+    #[tokio::test]
+    async fn test_read_file_truncated_flag() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("small.txt");
+        std::fs::write(&file_path, "just one line\n").unwrap();
+
+        let tool = ReadFileTool::new().with_base_dir(dir.path().to_path_buf());
+        let ctx = JobContext::default();
+
+        let result = tool
+            .execute(
+                serde_json::json!({"path": file_path.to_str().unwrap()}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        // Small file should not be truncated
+        assert!(
+            !result
+                .result
+                .get("truncated_by_default")
+                .unwrap()
+                .as_bool()
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_read_file_utf8_emoji_not_binary() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("emoji.txt");
+        std::fs::write(&file_path, "Hello World! Rust is great.").unwrap();
+
+        let tool = ReadFileTool::new().with_base_dir(dir.path().to_path_buf());
+        let ctx = JobContext::default();
+
+        let result = tool
+            .execute(
+                serde_json::json!({"path": file_path.to_str().unwrap()}),
+                &ctx,
+            )
+            .await;
+
+        assert!(result.is_ok(), "UTF-8 text with special chars should not be detected as binary");
+    }
+
+    #[tokio::test]
+    async fn test_read_file_offset_without_limit() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("lines.txt");
+        let content: String = (1..=3000).map(|i| format!("line {}\n", i)).collect();
+        std::fs::write(&file_path, &content).unwrap();
+
+        let tool = ReadFileTool::new().with_base_dir(dir.path().to_path_buf());
+        let ctx = JobContext::default();
+
+        // Explicit offset should NOT trigger the 2000-line default
+        let result = tool
+            .execute(
+                serde_json::json!({"path": file_path.to_str().unwrap(), "offset": 2990}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        let lines_shown = result.result.get("lines_shown").unwrap().as_u64().unwrap();
+        // Should read remaining ~10 lines, not cap at 2000
+        assert!(lines_shown <= 11);
+        assert!(
+            !result
+                .result
+                .get("truncated_by_default")
+                .unwrap()
+                .as_bool()
+                .unwrap()
+        );
+    }
+
+    // --- ApplyPatchTool enhancement tests ---
+
+    #[tokio::test]
+    async fn test_apply_patch_rejects_workspace_paths() {
+        let dir = TempDir::new().unwrap();
+        let tool = ApplyPatchTool::new().with_base_dir(dir.path().to_path_buf());
+        let ctx = JobContext::default();
+
+        for filename in &["MEMORY.md", "HEARTBEAT.md", "daily/2024-01-15.md"] {
+            let err = tool
+                .execute(
+                    serde_json::json!({
+                        "path": filename,
+                        "old_string": "old",
+                        "new_string": "new"
+                    }),
+                    &ctx,
+                )
+                .await
+                .unwrap_err();
+
+            assert!(
+                err.to_string().contains("memory_write"),
+                "Should reject workspace path {}: {}",
+                filename,
+                err
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_apply_patch_ambiguous_match_error() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("test.txt");
+        std::fs::write(&file_path, "hello world\nhello world\nhello world\n").unwrap();
+
+        let tool = ApplyPatchTool::new().with_base_dir(dir.path().to_path_buf());
+        let ctx = JobContext::default();
+
+        let err = tool
+            .execute(
+                serde_json::json!({
+                    "path": file_path.to_str().unwrap(),
+                    "old_string": "hello world",
+                    "new_string": "goodbye"
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap_err();
+
+        let msg = err.to_string();
+        assert!(msg.contains("3 matches"), "Should report 3 matches: {}", msg);
+        assert!(
+            msg.contains("replace_all"),
+            "Should suggest replace_all: {}",
+            msg
+        );
+    }
+
+    #[tokio::test]
+    async fn test_apply_patch_ambiguous_with_replace_all() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("test.txt");
+        std::fs::write(&file_path, "hello world\nhello world\nhello world\n").unwrap();
+
+        let tool = ApplyPatchTool::new().with_base_dir(dir.path().to_path_buf());
+        let ctx = JobContext::default();
+
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "path": file_path.to_str().unwrap(),
+                    "old_string": "hello world",
+                    "new_string": "goodbye",
+                    "replace_all": true
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        let replacements = result.result.get("replacements").unwrap().as_u64().unwrap();
+        assert_eq!(replacements, 3);
+        let content = std::fs::read_to_string(&file_path).unwrap();
+        assert!(!content.contains("hello world"));
+    }
+
+    #[tokio::test]
+    async fn test_apply_patch_single_match_succeeds() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("test.txt");
+        std::fs::write(&file_path, "unique line\nanother line\n").unwrap();
+
+        let tool = ApplyPatchTool::new().with_base_dir(dir.path().to_path_buf());
+        let ctx = JobContext::default();
+
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "path": file_path.to_str().unwrap(),
+                    "old_string": "unique line",
+                    "new_string": "replaced line"
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        assert!(result.result.get("success").unwrap().as_bool().unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_apply_patch_overlapping_pattern() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("test.txt");
+        std::fs::write(&file_path, "aaa").unwrap();
+
+        let tool = ApplyPatchTool::new().with_base_dir(dir.path().to_path_buf());
+        let ctx = JobContext::default();
+
+        // "aa" appears twice in "aaa" (overlapping), but str::matches counts non-overlapping
+        // which is 1 match. So this should succeed.
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "path": file_path.to_str().unwrap(),
+                    "old_string": "aa",
+                    "new_string": "bb"
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        assert!(result.result.get("success").unwrap().as_bool().unwrap());
     }
 }

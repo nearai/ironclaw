@@ -15,12 +15,13 @@ use crate::tools::builder::{
     BuildSoftwareTool, BuilderConfig, LlmSoftwareBuilder, SoftwareBuilder,
 };
 use crate::tools::builtin::{
-    ApplyPatchTool, CancelJobTool, CreateJobTool, EchoTool, ExtensionInfoTool, HttpTool,
-    JobEventsTool, JobPromptTool, JobStatusTool, JsonTool, ListDirTool, ListJobsTool,
-    MemoryReadTool, MemorySearchTool, MemoryTreeTool, MemoryWriteTool, PlanUpdateTool, PromptQueue,
-    ReadFileTool, ShellTool, SkillInstallTool, SkillListTool, SkillRemoveTool, SkillSearchTool,
-    TimeTool, ToolActivateTool, ToolAuthTool, ToolInstallTool, ToolListTool, ToolRemoveTool,
-    ToolSearchTool, ToolUpgradeTool, WriteFileTool,
+    ApplyPatchTool, CancelJobTool, CreateJobTool, EchoTool, ExtensionInfoTool, FileUndoTool,
+    GlobTool, GrepTool, HttpTool, JobEventsTool, JobPromptTool, JobStatusTool, JsonTool,
+    ListDirTool, ListJobsTool, MemoryReadTool, MemorySearchTool, MemoryTreeTool, MemoryWriteTool,
+    PlanUpdateTool, PromptQueue, ReadFileTool, ShellTool, SkillInstallTool, SkillListTool,
+    SkillRemoveTool, SkillSearchTool, TimeTool, ToolActivateTool, ToolAuthTool, ToolInstallTool,
+    ToolListTool, ToolRemoveTool, ToolSearchTool, ToolUpgradeTool, WriteFileTool,
+    shared_file_history,
 };
 use crate::tools::rate_limiter::RateLimiter;
 use crate::tools::tool::{ApprovalRequirement, Tool, ToolDomain};
@@ -45,6 +46,9 @@ const PROTECTED_TOOL_NAMES: &[&str] = &[
     "write_file",
     "list_dir",
     "apply_patch",
+    "glob",
+    "grep",
+    "file_undo",
     "memory_search",
     "memory_write",
     "memory_read",
@@ -350,13 +354,22 @@ impl ToolRegistry {
     /// capabilities needed for the software builder. Call this after
     /// `register_builtin_tools()` to enable code generation features.
     pub fn register_dev_tools(&self) {
+        let file_history = shared_file_history();
+
         self.register_sync(Arc::new(ShellTool::new()));
         self.register_sync(Arc::new(ReadFileTool::new()));
-        self.register_sync(Arc::new(WriteFileTool::new()));
+        self.register_sync(Arc::new(
+            WriteFileTool::new().with_file_history(Arc::clone(&file_history)),
+        ));
         self.register_sync(Arc::new(ListDirTool::new()));
-        self.register_sync(Arc::new(ApplyPatchTool::new()));
+        self.register_sync(Arc::new(
+            ApplyPatchTool::new().with_file_history(Arc::clone(&file_history)),
+        ));
+        self.register_sync(Arc::new(GlobTool::new()));
+        self.register_sync(Arc::new(GrepTool::new()));
+        self.register_sync(Arc::new(FileUndoTool::new(file_history)));
 
-        tracing::debug!("Registered 5 development tools");
+        tracing::debug!("Registered 8 development tools");
     }
 
     /// Register memory tools with a workspace resolver.
