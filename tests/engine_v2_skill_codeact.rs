@@ -346,6 +346,8 @@ fn make_github_skill_doc(project_id: ProjectId) -> MemoryDoc {
         }],
         metrics: SkillMetrics::default(),
         parent_version: None,
+        revisions: Vec::new(),
+        repairs: Vec::new(),
         content_hash: String::new(),
     };
 
