@@ -859,7 +859,39 @@ impl Agent {
 
                     output.push_str("\nUse /history or /thread list to see all threads.");
                     Ok(SubmissionResult::response(output))
+                } else if args.first().map(|s| s.as_str()) == Some("list") {
+                    // /thread list - alias for /history
+                    let history = self.handle_history_command(session, tenant).await?;
+                    Ok(SubmissionResult::response(history))
+                } else if args.first().map(|s| s.as_str()) == Some("new") {
+                    // /thread new - delegate to submission parser (should be handled upstream)
+                    // If we get here, create a new thread directly
+                    let session_id = {
+                        let sess = session.lock().await;
+                        sess.id
+                    };
+                    let new_thread = crate::agent::session::Thread::new(session_id);
+                    let new_thread_id = new_thread.id;
+                    {
+                        let mut sess = session.lock().await;
+                        sess.threads.insert(new_thread_id, new_thread);
+                        sess.active_thread = Some(new_thread_id);
+                        sess.last_active_at = chrono::Utc::now();
+                    }
+                    Ok(SubmissionResult::response(format!(
+                        "Created new thread: {}\n\nUse /thread to see current thread info.",
+                        new_thread_id
+                    )))
                 } else {
+                    // Try to parse as UUID for thread switch
+                    if let Some(uuid_str) = args.first() {
+                        if let Ok(target_id) = Uuid::parse_str(uuid_str) {
+                            // Delegate to thread_ops for switch with hydration
+                            return self
+                                .process_switch_thread(message, target_id)
+                                .await;
+                        }
+                    }
                     // Unknown /thread subcommand
                     Ok(SubmissionResult::error(format!(
                         "Unknown /thread subcommand: {}. Use /thread (no args), /thread list, /thread new, or /thread <uuid>.",
