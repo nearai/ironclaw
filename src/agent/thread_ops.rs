@@ -2371,8 +2371,6 @@ mod tests {
 
     /// Build a minimal `Agent` for thread_ops unit tests (no DB, no workspace).
     fn make_thread_ops_test_agent() -> crate::agent::Agent {
-        use std::time::Duration;
-
         use async_trait::async_trait;
         use rust_decimal::Decimal;
 
@@ -2449,27 +2447,14 @@ mod tests {
             transcription: None,
             document_extraction: None,
             owner_id: "test-owner".to_string(),
+            sandbox_readiness: crate::agent::routine_engine::SandboxReadiness::DisabledByConfig,
             builder: None,
+            llm_backend: "test".to_string(),
+            tenant_rates: Arc::new(crate::tenant::TenantRateRegistry::new(4, 2)),
         };
 
         crate::agent::Agent::new(
-            AgentConfig {
-                name: "test-agent".to_string(),
-                max_parallel_jobs: 1,
-                job_timeout: Duration::from_secs(60),
-                stuck_threshold: Duration::from_secs(60),
-                repair_check_interval: Duration::from_secs(30),
-                max_repair_attempts: 1,
-                use_planning: false,
-                session_idle_timeout: Duration::from_secs(300),
-                allow_local_tools: false,
-                max_cost_per_day_cents: None,
-                max_actions_per_hour: None,
-                max_tool_iterations: 50,
-                auto_approve_tools: false,
-                default_timezone: "UTC".to_string(),
-                max_tokens_per_job: 0,
-            },
+            AgentConfig::for_testing(),
             deps,
             Arc::new(ChannelManager::new()),
             None,
@@ -2477,6 +2462,19 @@ mod tests {
             None,
             Some(Arc::new(ContextManager::new(1))),
             None,
+        )
+    }
+
+    /// Build a `TenantCtx` matching `make_thread_ops_test_agent` (no DB, no workspace).
+    fn make_test_tenant() -> crate::tenant::TenantCtx {
+        use crate::agent::cost_guard::{CostGuard, CostGuardConfig};
+
+        crate::tenant::TenantCtx::new(
+            "test-user",
+            None,
+            None,
+            Arc::new(CostGuard::new(CostGuardConfig::default())),
+            Arc::new(crate::tenant::TenantRateState::new(4, 2)),
         )
     }
 
@@ -2510,7 +2508,7 @@ mod tests {
         });
 
         let result = agent
-            .process_user_input(&message, session, thread_id, "")
+            .process_user_input(&message, make_test_tenant(), session, thread_id, "")
             .await;
 
         // The call may fail downstream (no DB, no real LLM), but it must NOT
@@ -2542,7 +2540,7 @@ mod tests {
         let message = IncomingMessage::new("test", "test-user", "");
 
         let result = agent
-            .process_user_input(&message, session, thread_id, "")
+            .process_user_input(&message, make_test_tenant(), session, thread_id, "")
             .await;
 
         match result {
@@ -2587,7 +2585,13 @@ mod tests {
         });
 
         let result = agent
-            .process_user_input(&message, session, thread_id, "describe this image")
+            .process_user_input(
+                &message,
+                make_test_tenant(),
+                session,
+                thread_id,
+                "describe this image",
+            )
             .await;
 
         // Non-empty content with a valid message should NOT be rejected by safety.
@@ -2600,6 +2604,56 @@ mod tests {
             }
             _ => {
                 // Passed safety — expected.
+            }
+        }
+    }
+
+    /// Regression: malicious content in attachment `extracted_text` must be
+    /// caught by the post-augmentation safety check. An oversized transcript
+    /// flowing through `augment_with_attachments` into `effective_content`
+    /// should trigger the max-length validation.
+    #[tokio::test]
+    async fn test_process_user_input_rejects_malicious_attachment_content() {
+        use crate::channels::{AttachmentKind, IncomingAttachment};
+
+        let agent = make_thread_ops_test_agent();
+
+        let mut session = Session::new("test-user");
+        let thread = session.create_thread();
+        let thread_id = thread.id;
+
+        let session = Arc::new(Mutex::new(session));
+
+        let mut message = IncomingMessage::new("test", "test-user", "");
+        message.attachments.push(IncomingAttachment {
+            id: "audio-1".to_string(),
+            kind: AttachmentKind::Audio,
+            mime_type: "audio/mp3".to_string(),
+            filename: Some("voice.mp3".to_string()),
+            size_bytes: Some(5000),
+            source_url: None,
+            storage_key: None,
+            // Oversized transcript exceeding max_length (100,000 bytes default)
+            extracted_text: Some("A".repeat(100_001)),
+            data: vec![],
+            duration_secs: Some(10),
+        });
+
+        let result = agent
+            .process_user_input(&message, make_test_tenant(), session, thread_id, "")
+            .await;
+
+        match &result {
+            Ok(crate::agent::submission::SubmissionResult::Error { message }) => {
+                assert!(
+                    message.contains("Attachment content rejected"),
+                    "Expected post-augmentation safety rejection, got: {message}"
+                );
+            }
+            other => {
+                panic!(
+                    "Expected SubmissionResult::Error for oversized extracted_text, got: {other:?}"
+                );
             }
         }
     }
