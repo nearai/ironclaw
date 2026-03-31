@@ -313,6 +313,46 @@ impl WorkspacePool {
             );
         }
 
+        // If this is a fresh workspace, persist the bootstrap greeting into the
+        // assistant conversation so the web client sees it on first load (before
+        // the user sends any message).
+        if ws.take_bootstrap_pending() {
+            let user_id = identity.user_id.clone();
+            let db = Arc::clone(&self.db);
+            tokio::spawn(async move {
+                static GREETING: &str = include_str!("../../workspace/seeds/GREETING.md");
+                match db
+                    .get_or_create_assistant_conversation(&user_id, "gateway")
+                    .await
+                {
+                    Ok(conv_id) => {
+                        if let Err(e) = db
+                            .add_conversation_message(conv_id, "assistant", GREETING)
+                            .await
+                        {
+                            tracing::warn!(
+                                user_id = user_id,
+                                error = %e,
+                                "Failed to persist bootstrap greeting"
+                            );
+                        } else {
+                            tracing::info!(
+                                user_id = user_id,
+                                "Bootstrap greeting persisted for new OAuth user"
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            user_id = user_id,
+                            error = %e,
+                            "Failed to create assistant conversation for bootstrap"
+                        );
+                    }
+                }
+            });
+        }
+
         ws
     }
 }

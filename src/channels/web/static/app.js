@@ -2192,9 +2192,6 @@ function loadThreads() {
     // Default to assistant thread on first load if no thread selected
     if (!currentThreadId && assistantThreadId) {
       switchToAssistant();
-    } else if (!currentThreadId && !assistantThreadId) {
-      // Brand-new user with no threads — show the welcome card.
-      showWelcomeCard();
     }
 
     // Enable/disable chat input based on channel type
