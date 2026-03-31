@@ -1462,4 +1462,73 @@ mod tests {
             std::env::remove_var("OPENAI_CODEX_AUTH_URL");
         }
     }
+
+    fn clear_llm_decorator_env() {
+        // SAFETY: Only called under ENV_MUTEX in tests.
+        unsafe {
+            std::env::remove_var("LLM_MAX_RETRIES");
+            std::env::remove_var("NEARAI_MAX_RETRIES");
+            std::env::remove_var("LLM_CIRCUIT_BREAKER_THRESHOLD");
+            std::env::remove_var("CIRCUIT_BREAKER_THRESHOLD");
+            std::env::remove_var("LLM_RESPONSE_CACHE_ENABLED");
+            std::env::remove_var("RESPONSE_CACHE_ENABLED");
+        }
+    }
+
+    #[test]
+    fn llm_max_retries_overrides_nearai() {
+        let _guard = lock_env();
+        clear_llm_decorator_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::set_var("NEARAI_MAX_RETRIES", "5");
+            std::env::set_var("LLM_MAX_RETRIES", "10");
+        }
+
+        let cfg = LlmConfig::resolve(&Settings::default()).expect("resolve");
+        assert_eq!(cfg.max_retries, 10);
+
+        unsafe {
+            std::env::remove_var("NEARAI_MAX_RETRIES");
+            std::env::remove_var("LLM_MAX_RETRIES");
+        }
+    }
+
+    #[test]
+    fn nearai_max_retries_used_as_fallback() {
+        let _guard = lock_env();
+        clear_llm_decorator_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::set_var("NEARAI_MAX_RETRIES", "7");
+        }
+
+        let cfg = LlmConfig::resolve(&Settings::default()).expect("resolve");
+        assert_eq!(cfg.max_retries, 7);
+
+        unsafe {
+            std::env::remove_var("NEARAI_MAX_RETRIES");
+        }
+    }
+
+    #[test]
+    fn llm_max_retries_invalid_value_produces_error() {
+        let _guard = lock_env();
+        clear_llm_decorator_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::set_var("LLM_MAX_RETRIES", "not-a-number");
+        }
+
+        let err = LlmConfig::resolve(&Settings::default()).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("LLM_MAX_RETRIES"),
+            "error should name the env var: {msg}"
+        );
+
+        unsafe {
+            std::env::remove_var("LLM_MAX_RETRIES");
+        }
+    }
 }
