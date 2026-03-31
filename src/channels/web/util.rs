@@ -4,6 +4,11 @@ use crate::channels::web::types::{ToolCallInfo, TurnInfo};
 
 pub use ironclaw_common::truncate_preview;
 
+/// Convert stored tool errors into plain text suitable for UI display.
+pub fn tool_error_for_display(error: &str) -> String {
+    ironclaw_safety::SafetyLayer::unwrap_tool_output(error).unwrap_or_else(|| error.to_string())
+}
+
 /// Parse tool call summary JSON objects into `ToolCallInfo` structs.
 fn parse_tool_call_infos(calls: &[serde_json::Value]) -> Vec<ToolCallInfo> {
     calls
@@ -13,7 +18,7 @@ fn parse_tool_call_infos(calls: &[serde_json::Value]) -> Vec<ToolCallInfo> {
             has_result: c.get("result_preview").is_some_and(|v| !v.is_null()),
             has_error: c.get("error").is_some_and(|v| !v.is_null()),
             result_preview: c["result_preview"].as_str().map(String::from),
-            error: c["error"].as_str().map(String::from),
+            error: c["error"].as_str().map(tool_error_for_display),
             rationale: c["rationale"].as_str().map(String::from),
         })
         .collect()
@@ -179,6 +184,29 @@ mod tests {
         assert_eq!(turns[0].tool_calls[1].name, "http");
         assert!(turns[0].tool_calls[1].has_error);
         assert_eq!(turns[0].response.as_deref(), Some("Done"));
+    }
+
+    #[test]
+    fn test_build_turns_unwrap_wrapped_tool_error_for_display() {
+        let tc_json = serde_json::json!([
+            {
+                "name": "http",
+                "error": "<tool_output name=\"http\">\nTool 'http' failed: timeout\n</tool_output>"
+            }
+        ]);
+        let messages = vec![
+            make_msg("user", "Run it", 0),
+            make_msg("tool_calls", &tc_json.to_string(), 500),
+        ];
+
+        let turns = build_turns_from_db_messages(&messages);
+
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].tool_calls.len(), 1);
+        assert_eq!(
+            turns[0].tool_calls[0].error.as_deref(),
+            Some("Tool 'http' failed: timeout")
+        );
     }
 
     #[test]

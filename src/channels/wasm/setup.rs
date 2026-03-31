@@ -139,6 +139,11 @@ async fn register_channel(
     };
 
     let secret_header = loaded.webhook_secret_header().map(|s| s.to_string());
+    let host_webhook_secret = if loaded.webhook_secret_managed_by_host() {
+        webhook_secret.clone()
+    } else {
+        None
+    };
 
     let has_socket_mode = loaded
         .capabilities_file
@@ -151,7 +156,7 @@ async fn register_channel(
     // do NOT register the webhook endpoint — it would be an unauthenticated
     // ingress path. The channel will operate purely via the Socket Mode bridge.
     let webhook_path = format!("/webhook/{}", channel_name);
-    let endpoints = if webhook_secret.is_none() && has_socket_mode {
+    let endpoints = if host_webhook_secret.is_none() && has_socket_mode {
         tracing::info!(
             channel = %channel_name,
             "Skipping webhook registration: no signing secret and Socket Mode configured"
@@ -162,7 +167,7 @@ async fn register_channel(
             channel_name: channel_name.clone(),
             path: webhook_path,
             methods: vec!["POST".to_string()],
-            require_secret: webhook_secret.is_some(),
+            require_secret: host_webhook_secret.is_some(),
         }]
     };
 
@@ -223,7 +228,7 @@ async fn register_channel(
 
     tracing::info!(
         channel = %channel_name,
-        has_webhook_secret = webhook_secret.is_some(),
+        has_webhook_secret = host_webhook_secret.is_some(),
         secret_header = ?secret_header,
         "Registering channel with router"
     );
@@ -232,7 +237,7 @@ async fn register_channel(
         .register(
             Arc::clone(&channel_arc),
             endpoints,
-            webhook_secret.clone(),
+            host_webhook_secret.clone(),
             secret_header,
         )
         .await;
@@ -410,8 +415,9 @@ pub async fn inject_channel_credentials(
 /// placeholders in URLs and headers, so this function fills config fields
 /// that map to secret names.
 ///
-/// Mapping: for a channel named "feishu", secrets `feishu_app_id` and
-/// `feishu_app_secret` are injected as config keys `app_id` and `app_secret`.
+/// Mapping: for a channel named "feishu", secrets `feishu_app_id`,
+/// `feishu_app_secret`, and `feishu_verification_token` are injected as config
+/// keys `app_id`, `app_secret`, and `verification_token`.
 async fn inject_channel_secrets_into_config(
     channel_name: &str,
     secrets_store: &Option<Arc<dyn SecretsStore + Send + Sync>>,
@@ -422,6 +428,7 @@ async fn inject_channel_secrets_into_config(
         "feishu" => &[
             ("app_id", "feishu_app_id"),
             ("app_secret", "feishu_app_secret"),
+            ("verification_token", "feishu_verification_token"),
         ],
         _ => return,
     };

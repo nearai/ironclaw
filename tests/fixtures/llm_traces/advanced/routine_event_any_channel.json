@@ -29,7 +29,7 @@
     {
       "response": {
         "type": "text",
-        "content": "Created the any-channel-bug-watcher routine for bug messages.",
+        "content": "Created the any-channel-bug-watcher routine for bug messages, but it is not verified yet. It should stay unverified until it has a successful run.",
         "input_tokens": 170,
         "output_tokens": 18
       }

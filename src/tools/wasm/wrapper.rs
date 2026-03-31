@@ -431,12 +431,14 @@ impl near::agent::host::Host for StoreData {
                 _ => return Err(format!("Unsupported HTTP method: {}", method)),
             };
 
-            for (key, value) in headers {
-                request = request.header(&key, &value);
+            for (key, value) in &headers {
+                request = request.header(key, value);
             }
 
             if let Some(body_bytes) = body {
                 request = request.body(body_bytes);
+            } else if needs_content_length_zero(&method, &headers) {
+                request = request.header("content-length", "0");
             }
 
             // Caller-specified timeout (default 30s, max 5min)
@@ -759,14 +761,31 @@ impl WasmToolSchemas {
         }
 
         let kept: serde_json::Map<String, serde_json::Value> = all_properties
-            .into_iter()
+            .iter()
             .filter(|(name, prop)| {
-                required.contains(name) || prop.get("enum").is_some() || prop.get("const").is_some()
+                required.contains(name.as_str())
+                    || prop.get("enum").is_some()
+                    || prop.get("const").is_some()
             })
+            .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
 
         if kept.is_empty() {
-            return Self::permissive_schema();
+            // When the schema has typed properties but none survived the
+            // required/enum filter, include all typed properties so the LLM
+            // sees meaningful parameter hints instead of permissive `{}`.
+            let typed: serde_json::Map<String, serde_json::Value> = all_properties
+                .into_iter()
+                .filter(|(_, prop)| schema_is_typed_property(prop))
+                .collect();
+            if typed.is_empty() {
+                return Self::permissive_schema();
+            }
+            return serde_json::json!({
+                "type": "object",
+                "properties": typed,
+                "additionalProperties": true,
+            });
         }
 
         let kept_required: Vec<serde_json::Value> = required
@@ -1247,6 +1266,7 @@ async fn refresh_oauth_token(
                 client_id: &config.client_id,
                 client_secret: config.client_secret.as_deref(),
                 refresh_token: refresh_secret.expose(),
+                resource: None,
                 provider: config.provider.as_deref(),
             },
         )
@@ -1345,6 +1365,14 @@ async fn refresh_oauth_token(
                 .and_then(|v| v.as_str())
                 .map(str::to_string),
             expires_in: token_data.get("expires_in").and_then(|v| v.as_u64()),
+            token_type: token_data
+                .get("token_type")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+            scope: token_data
+                .get("scope")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
         },
         None => {
             tracing::warn!("Token refresh response missing access_token field");
@@ -1743,6 +1771,20 @@ fn build_tool_usage_hint(tool_name: &str, schema: &serde_json::Value) -> String 
     hint
 }
 
+/// Methods with side effects require `Content-Length` even when no body is
+/// sent — some APIs (e.g. Gmail) return 411 without it. Returns `true` when
+/// the host should inject a `Content-Length: 0` header.
+fn needs_content_length_zero(method: &str, headers: &HashMap<String, String>) -> bool {
+    let mutating = method.eq_ignore_ascii_case("POST")
+        || method.eq_ignore_ascii_case("PUT")
+        || method.eq_ignore_ascii_case("PATCH")
+        || method.eq_ignore_ascii_case("DELETE");
+    mutating
+        && !headers
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("content-length"))
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -1991,6 +2033,58 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn test_typed_schema_without_required_is_advertised() {
+        // Regression test for #1303: when a WASM tool exports a typed schema
+        // with no required/enum fields, the advertised schema should still
+        // contain the typed properties instead of falling back to permissive {}.
+        let discovery_schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "query": { "type": "string" },
+                "limit": { "type": "integer" }
+            }
+        });
+
+        let runtime = Arc::new(WasmToolRuntime::new(WasmRuntimeConfig::for_testing()).unwrap());
+        let prepared = runtime
+            .prepare("typed_search", b"\0asm\x0d\0\x01\0", None)
+            .await
+            .unwrap();
+        let mut wrapper =
+            super::WasmToolWrapper::new(Arc::clone(&runtime), prepared, Capabilities::default());
+        wrapper.schemas = super::WasmToolSchemas::new(discovery_schema.clone());
+        wrapper.description = "Typed search tool".to_string();
+
+        let advertised = wrapper.parameters_schema();
+        let props = advertised["properties"].as_object().unwrap();
+
+        // Both typed properties should be preserved in the advertised schema
+        assert!(
+            props.contains_key("query"),
+            "advertised schema should contain 'query' property"
+        );
+        assert!(
+            props.contains_key("limit"),
+            "advertised schema should contain 'limit' property"
+        );
+        assert_eq!(props.len(), 2);
+
+        // The schema should NOT be permissive
+        assert!(
+            !super::WasmToolSchemas::is_permissive_schema(&advertised),
+            "advertised schema should not be permissive when typed properties exist"
+        );
+
+        // No tool_info hint needed since typed properties are visible
+        let schema = wrapper.schema();
+        assert!(
+            !schema.description.contains("tool_info"),
+            "description should not contain tool_info hint: {}",
+            schema.description
+        );
+    }
+
     #[test]
     fn test_compact_schema_keeps_required_and_enum_properties() {
         let schema = serde_json::json!({
@@ -2028,13 +2122,31 @@ mod tests {
     }
 
     #[test]
-    fn test_compact_schema_falls_back_to_permissive_when_empty() {
-        // No required, no enum → permissive fallback
+    fn test_compact_schema_preserves_typed_properties_when_no_required() {
+        // No required, no enum, but typed properties → keep all typed props
         let schema = serde_json::json!({
             "type": "object",
             "properties": {
                 "query": { "type": "string" },
                 "limit": { "type": "integer" }
+            }
+        });
+
+        let compacted = super::WasmToolSchemas::compact_schema(&schema);
+        let props = compacted["properties"].as_object().unwrap();
+        assert_eq!(props.len(), 2);
+        assert!(props.contains_key("query"));
+        assert!(props.contains_key("limit"));
+        assert_eq!(compacted["additionalProperties"], true);
+    }
+
+    #[test]
+    fn test_compact_schema_falls_back_to_permissive_when_no_typed_properties() {
+        // Properties with no type info → permissive fallback
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "data": {}
             }
         });
 
@@ -3171,5 +3283,58 @@ mod tests {
 
         // Should return empty since credential can't be found anywhere
         assert!(result.is_empty(), "no credentials found"); // safety: test code only
+    }
+
+    // --- needs_content_length_zero (regression for #1529) ---
+
+    #[test]
+    fn post_no_body_needs_content_length() {
+        let headers = HashMap::new();
+        assert!(
+            super::needs_content_length_zero("POST", &headers),
+            "POST with no body must get Content-Length: 0 to avoid 411"
+        );
+    }
+
+    #[test]
+    fn put_no_body_needs_content_length() {
+        assert!(super::needs_content_length_zero("PUT", &HashMap::new()));
+    }
+
+    #[test]
+    fn delete_no_body_needs_content_length() {
+        assert!(super::needs_content_length_zero("DELETE", &HashMap::new()));
+    }
+
+    #[test]
+    fn patch_no_body_needs_content_length() {
+        assert!(super::needs_content_length_zero("PATCH", &HashMap::new()));
+    }
+
+    #[test]
+    fn get_no_body_skips_content_length() {
+        assert!(!super::needs_content_length_zero("GET", &HashMap::new()));
+    }
+
+    #[test]
+    fn head_no_body_skips_content_length() {
+        assert!(!super::needs_content_length_zero("HEAD", &HashMap::new()));
+    }
+
+    #[test]
+    fn post_no_body_respects_explicit_content_length() {
+        let mut headers = HashMap::new();
+        headers.insert("Content-Length".to_string(), "0".to_string());
+        assert!(
+            !super::needs_content_length_zero("POST", &headers),
+            "should not double-add when tool already sets Content-Length"
+        );
+    }
+
+    #[test]
+    fn content_length_check_is_case_insensitive() {
+        let mut headers = HashMap::new();
+        headers.insert("content-length".to_string(), "0".to_string());
+        assert!(!super::needs_content_length_zero("POST", &headers));
     }
 }

@@ -185,6 +185,19 @@ impl ChannelCapabilitiesFile {
             .and_then(|w| w.secret_name.clone())
             .unwrap_or_else(|| format!("{}_webhook_secret", self.name))
     }
+
+    /// Whether the host should enforce generic webhook-secret validation.
+    ///
+    /// Defaults to true. Channels can opt out when they validate the shared
+    /// secret themselves using provider-specific request body fields.
+    pub fn webhook_secret_managed_by_host(&self) -> bool {
+        self.capabilities
+            .channel
+            .as_ref()
+            .and_then(|c| c.webhook.as_ref())
+            .and_then(|w| w.managed_by_host)
+            .unwrap_or(true)
+    }
 }
 
 /// Schema for channel capabilities.
@@ -315,6 +328,14 @@ pub struct WebhookSchema {
     /// Secret name in secrets store for HMAC-SHA256 signing (Slack-style).
     #[serde(default)]
     pub hmac_secret_name: Option<String>,
+
+    /// Whether the host/router should enforce generic webhook-secret
+    /// validation before the channel sees the request.
+    ///
+    /// Default: true. Set to false when the provider sends the shared secret
+    /// in a provider-specific request field rather than the configured header.
+    #[serde(default)]
+    pub managed_by_host: Option<bool>,
 }
 
 /// Socket Mode configuration schema.
@@ -656,6 +677,25 @@ mod tests {
             Some("X-Telegram-Bot-Api-Secret-Token")
         );
         assert_eq!(file.webhook_secret_name(), "telegram_webhook_secret");
+        assert!(file.webhook_secret_managed_by_host());
+    }
+
+    #[test]
+    fn test_webhook_schema_can_disable_host_managed_secret_validation() {
+        let json = r#"{
+            "name": "feishu",
+            "capabilities": {
+                "channel": {
+                    "webhook": {
+                        "secret_name": "feishu_verification_token",
+                        "managed_by_host": false
+                    }
+                }
+            }
+        }"#;
+
+        let file = ChannelCapabilitiesFile::from_json(json).unwrap();
+        assert!(!file.webhook_secret_managed_by_host());
     }
 
     #[test]

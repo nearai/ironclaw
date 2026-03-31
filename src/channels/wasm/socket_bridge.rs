@@ -71,9 +71,13 @@ async fn run_bridge(
 
     // Read the app token: try secrets store first, then fall back to env var.
     // The env var name is the UPPER_CASE version of the secret name (e.g., SLACK_APP_TOKEN).
-    let app_token =
-        resolve_app_token(&channel_name, &config, secrets_store.as_deref(), owner_scope_id)
-            .await?;
+    let app_token = resolve_app_token(
+        &channel_name,
+        &config,
+        secrets_store.as_deref(),
+        owner_scope_id,
+    )
+    .await?;
 
     let mut shutdown = std::pin::pin!(shutdown_rx);
     let mut reconnect_attempt: u32 = 0;

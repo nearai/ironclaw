@@ -102,6 +102,8 @@ pub struct OAuthTokenResponse {
     pub access_token: String,
     pub refresh_token: Option<String>,
     pub expires_in: Option<u64>,
+    pub token_type: Option<String>,
+    pub scope: Option<String>,
 }
 
 /// Result of building an OAuth 2.0 authorization URL.
@@ -294,6 +296,14 @@ pub async fn exchange_oauth_code_with_params(
         access_token,
         refresh_token,
         expires_in,
+        token_type: token_data
+            .get("token_type")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        scope: token_data
+            .get("scope")
+            .and_then(|v| v.as_str())
+            .map(String::from),
     })
 }
 
@@ -482,6 +492,12 @@ pub struct PendingOAuthFlow {
     /// Secret name for persisting the client ID (MCP OAuth only).
     /// Needed so token refresh can find the client_id after the session ends.
     pub client_id_secret_name: Option<String>,
+    /// Secret name for persisting the client secret (MCP DCR only).
+    /// Needed for providers that return a client secret during DCR and expect
+    /// it to be replayed during later refreshes.
+    pub client_secret_secret_name: Option<String>,
+    /// Absolute UNIX timestamp when the DCR client secret expires, if any.
+    pub client_secret_expires_at: Option<u64>,
     /// When this flow was created (for expiry).
     pub created_at: std::time::Instant,
 }
@@ -569,6 +585,42 @@ pub async fn sweep_expired_flows(registry: &PendingOAuthRegistry) {
 const HOSTED_STATE_PREFIX: &str = "ic2";
 const HOSTED_STATE_CHECKSUM_BYTES: usize = 12;
 
+/// Maximum length for a legacy flow ID or instance name.
+const LEGACY_STATE_MAX_LEN: usize = 128;
+/// Minimum length for a legacy flow ID.
+const LEGACY_STATE_MIN_LEN: usize = 8;
+
+/// Validate that a legacy state component (flow_id or instance_name) contains
+/// only safe characters: alphanumeric, dash, underscore.
+fn is_valid_legacy_state_component(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= LEGACY_STATE_MAX_LEN
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+fn validate_legacy_flow_id(flow_id: &str) -> Result<(), String> {
+    if flow_id.len() < LEGACY_STATE_MIN_LEN {
+        return Err(format!(
+            "Legacy OAuth flow_id too short ({} chars, minimum {LEGACY_STATE_MIN_LEN})",
+            flow_id.len()
+        ));
+    }
+    if flow_id.len() > LEGACY_STATE_MAX_LEN {
+        return Err(format!(
+            "Legacy OAuth flow_id too long ({} chars, maximum {LEGACY_STATE_MAX_LEN})",
+            flow_id.len()
+        ));
+    }
+    if !flow_id
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
+        return Err("Legacy OAuth flow_id contains invalid characters".to_string());
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecodedHostedOAuthState {
     pub flow_id: String,
@@ -653,6 +705,17 @@ pub fn decode_hosted_oauth_state(state: &str) -> Result<DecodedHostedOAuthState,
         if flow_id.is_empty() {
             return Err("Hosted OAuth legacy state is missing flow_id".to_string());
         }
+        validate_legacy_flow_id(flow_id)?;
+        if !instance_name.is_empty() && !is_valid_legacy_state_component(instance_name) {
+            return Err(format!(
+                "Legacy OAuth instance name contains invalid characters or exceeds max length ({LEGACY_STATE_MAX_LEN})"
+            ));
+        }
+        tracing::debug!(
+            flow_id,
+            instance_name,
+            "Decoded legacy prefixed OAuth state"
+        );
         return Ok(DecodedHostedOAuthState {
             flow_id: flow_id.to_string(),
             instance_name: if instance_name.is_empty() {
@@ -667,6 +730,9 @@ pub fn decode_hosted_oauth_state(state: &str) -> Result<DecodedHostedOAuthState,
     if state.is_empty() {
         return Err("Hosted OAuth state is empty".to_string());
     }
+
+    validate_legacy_flow_id(state)?;
+    tracing::debug!(flow_id = state, "Decoded legacy raw OAuth state");
 
     Ok(DecodedHostedOAuthState {
         flow_id: state.to_string(),
@@ -719,6 +785,7 @@ pub struct ProxyRefreshTokenRequest<'a> {
     pub client_id: &'a str,
     pub client_secret: Option<&'a str>,
     pub refresh_token: &'a str,
+    pub resource: Option<&'a str>,
     pub provider: Option<&'a str>,
 }
 
@@ -751,6 +818,14 @@ fn oauth_token_response_from_json(
         access_token,
         refresh_token,
         expires_in,
+        token_type: token_data
+            .get("token_type")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        scope: token_data
+            .get("scope")
+            .and_then(|v| v.as_str())
+            .map(String::from),
     })
 }
 
@@ -850,6 +925,9 @@ pub async fn refresh_token_via_proxy(
     if let Some(secret) = request.client_secret {
         params.push(("client_secret", secret.to_string()));
     }
+    if let Some(resource) = request.resource {
+        params.push(("resource", resource.to_string()));
+    }
     if let Some(provider) = request.provider {
         params.push(("provider", provider.to_string()));
     }
@@ -938,8 +1016,10 @@ mod tests {
                 });
                 Json(json!({
                     "access_token": "proxy-access-token",
+                    "token_type": "Bearer",
                     "refresh_token": "proxy-refresh-token",
-                    "expires_in": 7200
+                    "expires_in": 7200,
+                    "scope": "scope-a scope-b"
                 }))
             }
 
@@ -957,8 +1037,10 @@ mod tests {
                 });
                 Json(json!({
                     "access_token": "proxy-access-token",
+                    "token_type": "Bearer",
                     "refresh_token": "proxy-refresh-token",
-                    "expires_in": 7200
+                    "expires_in": 7200,
+                    "scope": "scope-a scope-b"
                 }))
             }
 
@@ -1115,6 +1197,8 @@ mod tests {
             Some("proxy-refresh-token")
         );
         assert_eq!(response.expires_in, Some(7200));
+        assert_eq!(response.token_type.as_deref(), Some("Bearer"));
+        assert_eq!(response.scope.as_deref(), Some("scope-a scope-b"));
 
         let requests = server.requests().await;
         assert_eq!(requests.len(), 1);
@@ -1172,6 +1256,7 @@ mod tests {
             client_id: TEST_OAUTH_CLIENT_ID,
             client_secret: Some(TEST_OAUTH_CLIENT_SECRET),
             refresh_token: "refresh-token-123",
+            resource: Some("https://mcp.notion.com"),
             provider: Some("google"),
         })
         .await
@@ -1183,6 +1268,8 @@ mod tests {
             Some("proxy-refresh-token")
         );
         assert_eq!(response.expires_in, Some(7200));
+        assert_eq!(response.token_type.as_deref(), Some("Bearer"));
+        assert_eq!(response.scope.as_deref(), Some("scope-a scope-b"));
 
         let requests = server.requests().await;
         assert_eq!(requests.len(), 1);
@@ -1209,6 +1296,10 @@ mod tests {
         assert_eq!(
             requests[0].form.get("provider").map(String::as_str),
             Some("google")
+        );
+        assert_eq!(
+            requests[0].form.get("resource").map(String::as_str),
+            Some("https://mcp.notion.com")
         );
 
         server.shutdown().await;
@@ -1253,6 +1344,7 @@ mod tests {
             client_id: TEST_OAUTH_CLIENT_ID,
             client_secret: Some(TEST_OAUTH_CLIENT_SECRET),
             refresh_token: "refresh-token-123",
+            resource: Some("https://mcp.notion.com"),
             provider: Some("google"),
         })
         .await
@@ -1734,13 +1826,13 @@ mod tests {
     fn test_decode_hosted_oauth_state_accepts_legacy_formats() {
         use crate::cli::oauth_defaults::decode_hosted_oauth_state;
 
-        let decoded = decode_hosted_oauth_state("kind-deer:abc123").expect("legacy prefixed");
-        assert_eq!(decoded.flow_id, "abc123");
+        let decoded = decode_hosted_oauth_state("kind-deer:abc12345").expect("legacy prefixed");
+        assert_eq!(decoded.flow_id, "abc12345");
         assert_eq!(decoded.instance_name.as_deref(), Some("kind-deer"));
         assert!(decoded.is_legacy);
 
-        let decoded = decode_hosted_oauth_state("abc123").expect("legacy raw");
-        assert_eq!(decoded.flow_id, "abc123");
+        let decoded = decode_hosted_oauth_state("abc12345").expect("legacy raw");
+        assert_eq!(decoded.flow_id, "abc12345");
         assert_eq!(decoded.instance_name, None);
         assert!(decoded.is_legacy);
     }
@@ -1863,5 +1955,73 @@ mod tests {
         assert_eq!(decoded_no_instance.flow_id, nonce);
         assert_eq!(decoded_no_instance.instance_name, None);
         assert!(!decoded_no_instance.is_legacy);
+    }
+
+    /// Legacy flow IDs that are too short must be rejected (#1443).
+    #[test]
+    fn test_legacy_state_rejects_short_flow_id() {
+        use crate::cli::oauth_defaults::decode_hosted_oauth_state;
+
+        let err = decode_hosted_oauth_state("abc").expect_err("short raw flow_id");
+        assert!(err.contains("too short"), "unexpected error: {err}");
+
+        let err = decode_hosted_oauth_state("inst:abc").expect_err("short prefixed flow_id");
+        assert!(err.contains("too short"), "unexpected error: {err}");
+    }
+
+    /// Legacy flow IDs with invalid characters must be rejected (#1443).
+    #[test]
+    fn test_legacy_state_rejects_invalid_characters() {
+        use crate::cli::oauth_defaults::decode_hosted_oauth_state;
+
+        let err = decode_hosted_oauth_state("flow id with spaces!").expect_err("spaces in flow_id");
+        assert!(
+            err.contains("invalid characters"),
+            "unexpected error: {err}"
+        );
+
+        let err = decode_hosted_oauth_state("inst:flow/id?bad=yes")
+            .expect_err("special chars in prefixed flow_id");
+        assert!(
+            err.contains("invalid characters"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// Legacy instance names with invalid characters must be rejected (#1444).
+    #[test]
+    fn test_legacy_state_rejects_invalid_instance_name() {
+        use crate::cli::oauth_defaults::decode_hosted_oauth_state;
+
+        let err = decode_hosted_oauth_state("bad instance!:valid-flow-id-12345")
+            .expect_err("invalid instance name");
+        assert!(err.contains("instance name"), "unexpected error: {err}");
+    }
+
+    /// Excessively long legacy flow IDs must be rejected (#1443).
+    #[test]
+    fn test_legacy_state_rejects_oversized_flow_id() {
+        use crate::cli::oauth_defaults::decode_hosted_oauth_state;
+
+        let long_id = "a".repeat(200);
+        let err = decode_hosted_oauth_state(&long_id).expect_err("oversized flow_id");
+        assert!(err.contains("too long"), "unexpected error: {err}");
+    }
+
+    /// Valid legacy flow IDs at boundary lengths are accepted.
+    #[test]
+    fn test_legacy_state_accepts_boundary_lengths() {
+        use crate::cli::oauth_defaults::decode_hosted_oauth_state;
+
+        // Exactly 8 chars (minimum)
+        let decoded = decode_hosted_oauth_state("abcd1234").expect("8-char flow_id");
+        assert_eq!(decoded.flow_id, "abcd1234");
+        assert!(decoded.is_legacy);
+
+        // Exactly 128 chars (maximum)
+        let max_id = "a".repeat(128);
+        let decoded = decode_hosted_oauth_state(&max_id).expect("128-char flow_id");
+        assert_eq!(decoded.flow_id, max_id);
+        assert!(decoded.is_legacy);
     }
 }

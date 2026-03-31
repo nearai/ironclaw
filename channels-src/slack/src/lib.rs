@@ -26,6 +26,7 @@ wit_bindgen::generate!({
 });
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 // Re-export generated types
 use exports::near::agent::channel::{
@@ -239,17 +240,18 @@ const DM_POLICY_PATH: &str = "state/dm_policy";
 const ALLOW_FROM_PATH: &str = "state/allow_from";
 /// Workspace path for persisting bot_id (from auth.test) across WASM callbacks.
 const BOT_ID_PATH: &str = "state/bot_id";
-/// Workspace path for tracking thread roots where the bot was mentioned.
-/// Stored as a JSON array of thread_ts strings. Threaded channel replies
-/// are only forwarded if the thread root is in this set, preventing
-/// unrelated channel threads from being ingested.
-const BOT_THREADS_PATH: &str = "state/bot_threads";
-/// Maximum number of bot thread roots to track (oldest evicted first).
-const MAX_BOT_THREADS: usize = 500;
+/// Workspace path for tracking recently active Slack threads.
+const ACTIVE_THREADS_PATH: &str = "state/active_threads.json";
+/// Recently active threads expire after 24 hours to avoid reviving stale threads forever.
+const ACTIVE_THREAD_TTL_MS: u64 = 24 * 60 * 60 * 1000;
+/// Cap stored thread markers so the workspace state stays bounded.
+const ACTIVE_THREAD_MAX_ENTRIES: usize = 256;
 /// Channel name for pairing store (used by pairing host APIs).
 const CHANNEL_NAME: &str = "slack";
 /// Maximum retry attempts for transient Slack API errors.
 const MAX_RETRIES: u32 = 3;
+
+type ActiveThreads = BTreeMap<String, u64>;
 
 /// Channel configuration from capabilities file.
 #[derive(Debug, Deserialize)]
@@ -385,16 +387,23 @@ impl Guest for SlackChannel {
             "text": response.content,
         });
 
-        // Add thread_ts for threaded replies
-        if let Some(thread_ts) = response.thread_id.or(metadata.thread_ts) {
-            payload["thread_ts"] = serde_json::Value::String(thread_ts);
+        let thread_ts = response.thread_id.or(metadata.thread_ts);
+        if let Some(ref thread_ts) = thread_ts {
+            payload["thread_ts"] = serde_json::Value::String(thread_ts.clone());
         }
 
         let payload_bytes = serde_json::to_vec(&payload)
             .map_err(|e| format!("Failed to serialize payload: {}", e))?;
 
-        // Post with retry for transient errors
-        post_message_with_retry(&payload_bytes, &metadata.channel)
+        // Post with retry for transient errors; on success, track the thread
+        // so that follow-up replies in this thread are accepted.
+        post_message_with_retry(&payload_bytes, &metadata.channel)?;
+
+        if let Some(thread_ts) = thread_ts {
+            let _ = track_active_thread(&metadata.channel, &thread_ts);
+        }
+
+        Ok(())
     }
 
     fn on_status(_update: StatusUpdate) {}
@@ -691,12 +700,14 @@ fn download_and_store_slack_files(attachments: &[InboundAttachment]) {
 // Event Handling
 // ============================================================================
 
+fn prepare_inbound_attachments(files: &Option<Vec<SlackFile>>) -> Vec<InboundAttachment> {
+    let attachments = extract_slack_attachments(files);
+    download_and_store_slack_files(&attachments);
+    attachments
+}
+
 /// Handle a Slack event and emit message if applicable.
 fn handle_slack_event(event: SlackEvent, team_id: Option<String>, _event_id: Option<String>) {
-    let attachments = extract_slack_attachments(&event.files);
-
-    // Download and store file attachments for host-side processing
-    download_and_store_slack_files(&attachments);
     match event.event_type.as_str() {
         // Direct mention of the bot (always in a channel, not a DM)
         "app_mention" => {
@@ -710,12 +721,10 @@ fn handle_slack_event(event: SlackEvent, team_id: Option<String>, _event_id: Opt
                 if !check_sender_permission(&user, &channel, false) {
                     return;
                 }
-                // Track this thread root so threaded replies are accepted.
-                // The root is thread_ts if replying in an existing thread,
-                // otherwise the mention's own ts becomes the root.
+                let attachments = prepare_inbound_attachments(&event.files);
+                // Track this thread so threaded replies are accepted.
                 let thread_root = event.thread_ts.as_deref().unwrap_or(&ts);
-                register_bot_thread(thread_root);
-
+                let _ = track_active_thread(&channel, thread_root);
                 emit_message(
                     user,
                     text,
@@ -727,7 +736,7 @@ fn handle_slack_event(event: SlackEvent, team_id: Option<String>, _event_id: Opt
             }
         }
 
-        // Direct message or threaded reply to the bot
+        // Direct message or thread follow-up to the bot
         "message" => {
             // Skip messages from bots (including ourselves)
             if event.bot_id.is_some() {
@@ -746,16 +755,19 @@ fn handle_slack_event(event: SlackEvent, team_id: Option<String>, _event_id: Opt
                 event.ts.clone(),
             ) {
                 let is_dm = channel.starts_with('D');
-                let is_threaded_reply = event.thread_ts.is_some();
 
-                // Process DMs (channel IDs starting with D) and threaded
-                // replies in channels. Threaded replies catch approval
-                // responses ("yes"/"no") and follow-up messages in threads
-                // where the bot was @mentioned.
-                if is_dm {
-                    if !check_sender_permission(&user, &channel, true) {
+                // Check if this is a reply in a thread where we previously participated
+                let is_active_thread = !is_dm
+                    && event
+                        .thread_ts
+                        .as_ref()
+                        .is_some_and(|thread_ts| is_active_thread(&channel, thread_ts));
+
+                if is_dm || is_active_thread {
+                    if !check_sender_permission(&user, &channel, is_dm) {
                         return;
                     }
+                    let attachments = prepare_inbound_attachments(&event.files);
                     emit_message(
                         user,
                         text,
@@ -764,18 +776,6 @@ fn handle_slack_event(event: SlackEvent, team_id: Option<String>, _event_id: Opt
                         team_id,
                         attachments,
                     );
-                } else if is_threaded_reply {
-                    // Only forward threaded replies in channels where the
-                    // bot was @mentioned (registered as a bot thread).
-                    // Prevents unrelated channel threads from being ingested.
-                    let thread_root = event.thread_ts.as_deref().unwrap_or("");
-                    if !is_bot_thread(thread_root) {
-                        return;
-                    }
-                    if !check_sender_permission(&user, &channel, false) {
-                        return;
-                    }
-                    emit_message(user, text, channel, event.thread_ts, team_id, vec![]);
                 }
             }
         }
@@ -787,6 +787,93 @@ fn handle_slack_event(event: SlackEvent, team_id: Option<String>, _event_id: Opt
             );
         }
     }
+}
+
+fn active_thread_key(channel: &str, thread_ts: &str) -> String {
+    format!("{channel}/{thread_ts}")
+}
+
+fn is_thread_marker_fresh(last_seen_millis: u64, now_millis: u64) -> bool {
+    now_millis.saturating_sub(last_seen_millis) <= ACTIVE_THREAD_TTL_MS
+}
+
+fn prune_active_threads(active_threads: &mut ActiveThreads, now_millis: u64) -> bool {
+    let mut changed = false;
+    active_threads.retain(|_, last_seen_millis| {
+        let keep = is_thread_marker_fresh(*last_seen_millis, now_millis);
+        if !keep {
+            changed = true;
+        }
+        keep
+    });
+
+    if active_threads.len() > ACTIVE_THREAD_MAX_ENTRIES {
+        let mut oldest_first: Vec<_> = active_threads
+            .iter()
+            .map(|(key, last_seen_millis)| (key.clone(), *last_seen_millis))
+            .collect();
+        oldest_first.sort_by_key(|(_, last_seen_millis)| *last_seen_millis);
+
+        for (key, _) in oldest_first
+            .into_iter()
+            .take(active_threads.len() - ACTIVE_THREAD_MAX_ENTRIES)
+        {
+            active_threads.remove(&key);
+            changed = true;
+        }
+    }
+
+    changed
+}
+
+fn load_active_threads() -> ActiveThreads {
+    let Some(raw) = channel_host::workspace_read(ACTIVE_THREADS_PATH) else {
+        return ActiveThreads::new();
+    };
+
+    match serde_json::from_str(&raw) {
+        Ok(active_threads) => active_threads,
+        Err(e) => {
+            channel_host::log(
+                channel_host::LogLevel::Warn,
+                &format!("Failed to parse active thread state: {e}"),
+            );
+            ActiveThreads::new()
+        }
+    }
+}
+
+fn persist_active_threads(active_threads: &ActiveThreads) -> Result<(), String> {
+    let serialized = serde_json::to_string(active_threads)
+        .map_err(|e| format!("Failed to serialize active thread state: {e}"))?;
+    channel_host::workspace_write(ACTIVE_THREADS_PATH, &serialized)
+        .map_err(|e| format!("Failed to persist active thread state: {e}"))
+}
+
+fn track_active_thread(channel: &str, thread_ts: &str) -> Result<(), String> {
+    let now_millis = channel_host::now_millis();
+    let mut active_threads = load_active_threads();
+    prune_active_threads(&mut active_threads, now_millis);
+    active_threads.insert(active_thread_key(channel, thread_ts), now_millis);
+    prune_active_threads(&mut active_threads, now_millis);
+    persist_active_threads(&active_threads)
+}
+
+fn is_active_thread(channel: &str, thread_ts: &str) -> bool {
+    let now_millis = channel_host::now_millis();
+    let mut active_threads = load_active_threads();
+    let changed = prune_active_threads(&mut active_threads, now_millis);
+
+    if changed {
+        if let Err(e) = persist_active_threads(&active_threads) {
+            channel_host::log(
+                channel_host::LogLevel::Warn,
+                &format!("Failed to prune active thread state: {e}"),
+            );
+        }
+    }
+
+    active_threads.contains_key(&active_thread_key(channel, thread_ts))
 }
 
 /// Emit a message to the agent.
@@ -826,34 +913,6 @@ fn emit_message(
         metadata_json,
         attachments,
     });
-}
-
-// ============================================================================
-// Bot Thread Tracking
-// ============================================================================
-
-/// Record a thread root as bot-owned (the bot was @mentioned or started it).
-fn register_bot_thread(thread_ts: &str) {
-    let mut threads: Vec<String> = channel_host::workspace_read(BOT_THREADS_PATH)
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default();
-
-    if !threads.contains(&thread_ts.to_string()) {
-        threads.push(thread_ts.to_string());
-        // Evict oldest if over capacity
-        if threads.len() > MAX_BOT_THREADS {
-            threads.drain(..threads.len() - MAX_BOT_THREADS);
-        }
-        let json = serde_json::to_string(&threads).unwrap_or_else(|_| "[]".to_string());
-        let _ = channel_host::workspace_write(BOT_THREADS_PATH, &json);
-    }
-}
-
-/// Check if a thread root was started by / involves the bot.
-fn is_bot_thread(thread_ts: &str) -> bool {
-    channel_host::workspace_read(BOT_THREADS_PATH)
-        .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
-        .is_some_and(|threads| threads.contains(&thread_ts.to_string()))
 }
 
 // ============================================================================
@@ -901,8 +960,7 @@ fn check_sender_permission(user_id: &str, channel_id: &str, is_dm: bool) -> bool
     }
 
     // 4. Check sender (Slack events only have user ID, not username)
-    let is_allowed =
-        allowed.contains(&"*".to_string()) || allowed.contains(&user_id.to_string());
+    let is_allowed = allowed.contains(&"*".to_string()) || allowed.contains(&user_id.to_string());
 
     if is_allowed {
         return true;
@@ -920,10 +978,7 @@ fn check_sender_permission(user_id: &str, channel_id: &str, is_dm: bool) -> bool
             Ok(result) => {
                 channel_host::log(
                     channel_host::LogLevel::Info,
-                    &format!(
-                        "Pairing request for user {}: code {}",
-                        user_id, result.code
-                    ),
+                    &format!("Pairing request for user {}: code {}", user_id, result.code),
                 );
                 if result.created {
                     let _ = send_pairing_reply(channel_id, &result.code);
@@ -1361,5 +1416,64 @@ mod tests {
     fn test_max_download_size_constant() {
         // Verify the constant is 20 MB
         assert_eq!(MAX_DOWNLOAD_SIZE_BYTES, 20 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_active_thread_key_scopes_by_channel_and_thread() {
+        assert_eq!(
+            active_thread_key("C123", "1742486400.000100"),
+            "C123/1742486400.000100"
+        );
+    }
+
+    #[test]
+    fn test_prune_active_threads_removes_expired_entries() {
+        let now_millis = ACTIVE_THREAD_TTL_MS + 1_000;
+        let mut active_threads = ActiveThreads::from([
+            (
+                "C1/expired".to_string(),
+                now_millis - ACTIVE_THREAD_TTL_MS - 1,
+            ),
+            ("C1/fresh".to_string(), now_millis - ACTIVE_THREAD_TTL_MS),
+        ]);
+
+        let changed = prune_active_threads(&mut active_threads, now_millis);
+
+        assert!(changed);
+        assert!(!active_threads.contains_key("C1/expired"));
+        assert!(active_threads.contains_key("C1/fresh"));
+    }
+
+    #[test]
+    fn test_prune_active_threads_trims_oldest_entries_when_over_limit() {
+        let now_millis = ACTIVE_THREAD_TTL_MS + 1_000;
+        let mut active_threads = ActiveThreads::new();
+
+        for i in 0..=ACTIVE_THREAD_MAX_ENTRIES {
+            active_threads.insert(format!("C1/{i}"), now_millis + i as u64);
+        }
+
+        let changed = prune_active_threads(
+            &mut active_threads,
+            now_millis + ACTIVE_THREAD_MAX_ENTRIES as u64,
+        );
+
+        assert!(changed);
+        assert_eq!(active_threads.len(), ACTIVE_THREAD_MAX_ENTRIES);
+        assert!(!active_threads.contains_key("C1/0"));
+        assert!(active_threads.contains_key(&format!("C1/{ACTIVE_THREAD_MAX_ENTRIES}")));
+    }
+
+    #[test]
+    fn test_is_thread_marker_fresh_respects_ttl_boundary() {
+        let now_millis = ACTIVE_THREAD_TTL_MS + 1_000;
+        assert!(is_thread_marker_fresh(
+            now_millis - ACTIVE_THREAD_TTL_MS,
+            now_millis
+        ));
+        assert!(!is_thread_marker_fresh(
+            now_millis - ACTIVE_THREAD_TTL_MS - 1,
+            now_millis
+        ));
     }
 }
