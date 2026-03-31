@@ -14,7 +14,7 @@ use tokio::process::Command;
 use crate::context::JobContext;
 use crate::tools::builtin::path_utils::validate_path;
 use crate::tools::tool::{
-    ApprovalRequirement, Tool, ToolDomain, ToolDiscoverySummary, ToolError, ToolOutput, require_str,
+    ApprovalRequirement, Tool, ToolDiscoverySummary, ToolDomain, ToolError, ToolOutput, require_str,
 };
 
 /// Maximum output size before truncation (64KB, same as ShellTool).
@@ -25,8 +25,8 @@ const DEFAULT_HEAD_LIMIT: usize = 250;
 
 /// Safe environment variables forwarded to rg (same policy as ShellTool).
 const SAFE_ENV_VARS: &[&str] = &[
-    "PATH", "HOME", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "USER", "LOGNAME",
-    "TMPDIR", "TMP", "TEMP",
+    "PATH", "HOME", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "USER", "LOGNAME", "TMPDIR", "TMP",
+    "TEMP",
 ];
 
 /// Grep tool for searching file contents using ripgrep.
@@ -151,10 +151,7 @@ impl Tool for GrepTool {
             .get("head_limit")
             .and_then(|v| v.as_u64())
             .map(|v| v as usize);
-        let offset = params
-            .get("offset")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0) as usize;
+        let offset = params.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
         let multiline = params
             .get("multiline")
             .and_then(|v| v.as_bool())
@@ -235,9 +232,7 @@ impl Tool for GrepTool {
         // Execute with timeout
         let output = tokio::time::timeout(Duration::from_secs(30), cmd.output())
             .await
-            .map_err(|_| {
-                ToolError::Timeout(Duration::from_secs(30))
-            })?
+            .map_err(|_| ToolError::Timeout(Duration::from_secs(30)))?
             .map_err(|e| {
                 if e.kind() == std::io::ErrorKind::NotFound {
                     ToolError::ExecutionFailed(
@@ -277,7 +272,7 @@ impl Tool for GrepTool {
         // Split into lines and apply pagination
         let lines: Vec<&str> = truncated_output.lines().collect();
         let effective_limit = match head_limit {
-            Some(0) => lines.len(),       // 0 = unlimited
+            Some(0) => lines.len(), // 0 = unlimited
             Some(n) => n,
             None => DEFAULT_HEAD_LIMIT,
         };
@@ -313,8 +308,7 @@ impl Tool for GrepTool {
 
                 file_entries.sort_by(|a, b| b.1.cmp(&a.1));
 
-                let files: Vec<String> =
-                    file_entries.into_iter().map(|(path, _)| path).collect();
+                let files: Vec<String> = file_entries.into_iter().map(|(path, _)| path).collect();
                 let count = files.len();
 
                 serde_json::json!({
@@ -438,11 +432,7 @@ mod tests {
             "pub fn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n\n// TODO: add tests\n",
         )
         .unwrap();
-        fs::write(
-            dir.join("README.md"),
-            "# Project\n\nA simple project.\n",
-        )
-        .unwrap();
+        fs::write(dir.join("README.md"), "# Project\n\nA simple project.\n").unwrap();
     }
 
     #[tokio::test]
@@ -633,11 +623,7 @@ mod tests {
     async fn test_grep_before_after_context() {
         require_rg!();
         let dir = TempDir::new().unwrap();
-        fs::write(
-            dir.path().join("test.txt"),
-            "a\nb\nc\nMATCH\nd\ne\nf\n",
-        )
-        .unwrap();
+        fs::write(dir.path().join("test.txt"), "a\nb\nc\nMATCH\nd\ne\nf\n").unwrap();
 
         let tool = GrepTool::new().with_base_dir(dir.path().to_path_buf());
         let ctx = JobContext::default();
@@ -731,11 +717,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
 
         for i in 0..10 {
-            fs::write(
-                dir.path().join(format!("f{:02}.txt", i)),
-                "MATCH",
-            )
-            .unwrap();
+            fs::write(dir.path().join(format!("f{:02}.txt", i)), "MATCH").unwrap();
         }
 
         let tool = GrepTool::new().with_base_dir(dir.path().to_path_buf());
@@ -764,11 +746,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
 
         for i in 0..20 {
-            fs::write(
-                dir.path().join(format!("f{:02}.txt", i)),
-                "MATCH",
-            )
-            .unwrap();
+            fs::write(dir.path().join(format!("f{:02}.txt", i)), "MATCH").unwrap();
         }
 
         let tool = GrepTool::new().with_base_dir(dir.path().to_path_buf());

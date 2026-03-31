@@ -11,7 +11,12 @@ use crate::tools::tool::ToolError;
 ///
 /// Shared across `ListDirTool`, `GlobTool`, and other tools that walk the filesystem.
 pub const DEFAULT_EXCLUDED_DIRS: &[&str] = &[
-    "node_modules", "target", ".git", "__pycache__", "venv", ".venv",
+    "node_modules",
+    "target",
+    ".git",
+    "__pycache__",
+    "venv",
+    ".venv",
 ];
 
 /// Normalize a path by resolving `.` and `..` components lexically (no filesystem access).
