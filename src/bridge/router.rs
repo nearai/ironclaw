@@ -1511,6 +1511,35 @@ async fn await_thread_outcome(
     result
 }
 
+// ── Shared event display helpers ────────────────────────────
+
+/// Format an action name with optional parameter summary for display.
+/// e.g., `"http(https://api.github.com/...)"` or just `"web_search"`.
+fn format_action_display_name(action_name: &str, params_summary: &Option<String>) -> String {
+    match params_summary {
+        Some(summary) => format!("{}({})", action_name, summary),
+        None => action_name.to_string(),
+    }
+}
+
+/// Interpret a MessageAdded event into a human-readable status message.
+/// Returns `None` for events that don't need UI surfacing.
+fn interpret_message_event(role: &str, content_preview: &str) -> Option<&'static str> {
+    if role == "User" && content_preview.starts_with("[stdout]") {
+        Some("Code executed")
+    } else if role == "User" && content_preview.starts_with("[code ") {
+        Some("Code executed (no output)")
+    } else if role == "User"
+        && (content_preview.contains("Error") || content_preview.starts_with("Traceback"))
+    {
+        Some("Code error — retrying...")
+    } else if role == "Assistant" {
+        Some("Executing code...")
+    } else {
+        None
+    }
+}
+
 /// Forward an engine ThreadEvent to the channel as a StatusUpdate.
 async fn forward_event_to_channel(
     event: &ironclaw_engine::ThreadEvent,
@@ -1536,12 +1565,7 @@ async fn forward_event_to_channel(
             params_summary,
             ..
         } => {
-            // Format tool name with params summary: "http(https://api.github.com/...)"
-            let display_name = match params_summary {
-                Some(summary) => format!("{}({})", action_name, summary),
-                None => action_name.clone(),
-            };
-
+            let display_name = format_action_display_name(action_name, params_summary);
             let _ = channels
                 .send_status(
                     channel_name,
@@ -1570,11 +1594,7 @@ async fn forward_event_to_channel(
             params_summary,
             ..
         } => {
-            let display_name = match params_summary {
-                Some(summary) => format!("{}({})", action_name, summary),
-                None => action_name.clone(),
-            };
-
+            let display_name = format_action_display_name(action_name, params_summary);
             let _ = channels
                 .send_status(
                     channel_name,
@@ -1636,23 +1656,13 @@ async fn forward_event_to_channel(
             role,
             content_preview,
         } => {
-            // Surface code execution and tool results as thinking status
-            let msg = if role == "User" && content_preview.starts_with("[stdout]") {
-                Some("Code executed".to_string())
-            } else if role == "User" && content_preview.starts_with("[code ") {
-                Some("Code executed (no output)".to_string())
-            } else if role == "User"
-                && (content_preview.contains("Error") || content_preview.starts_with("Traceback"))
-            {
-                Some("Code error — retrying...".to_string())
-            } else if role == "Assistant" {
-                Some("Executing code...".to_string())
-            } else {
-                None
-            };
-            if let Some(text) = msg {
+            if let Some(text) = interpret_message_event(role, content_preview) {
                 let _ = channels
-                    .send_status(channel_name, StatusUpdate::Thinking(text), metadata)
+                    .send_status(
+                        channel_name,
+                        StatusUpdate::Thinking(text.into()),
+                        metadata,
+                    )
                     .await;
             }
         }
@@ -1692,10 +1702,7 @@ fn thread_event_to_app_events(
             params_summary,
             ..
         } => {
-            let display_name = match params_summary {
-                Some(s) => format!("{}({})", action_name, s),
-                None => action_name.clone(),
-            };
+            let display_name = format_action_display_name(action_name, params_summary);
             vec![
                 AppEvent::ToolStarted {
                     name: display_name.clone(),
@@ -1716,10 +1723,7 @@ fn thread_event_to_app_events(
             params_summary,
             ..
         } => {
-            let display_name = match params_summary {
-                Some(s) => format!("{}({})", action_name, s),
-                None => action_name.clone(),
-            };
+            let display_name = format_action_display_name(action_name, params_summary);
             vec![
                 AppEvent::ToolStarted {
                     name: display_name.clone(),
@@ -1744,27 +1748,13 @@ fn thread_event_to_app_events(
         EventKind::MessageAdded {
             role,
             content_preview,
-        } => {
-            let msg = if role == "User" && content_preview.starts_with("[stdout]") {
-                Some("Code executed")
-            } else if role == "User" && content_preview.starts_with("[code ") {
-                Some("Code executed (no output)")
-            } else if role == "User"
-                && (content_preview.contains("Error") || content_preview.starts_with("Traceback"))
-            {
-                Some("Code error — retrying...")
-            } else if role == "Assistant" {
-                Some("Executing code...")
-            } else {
-                None
-            };
-            msg.map(|text| AppEvent::Thinking {
+        } => interpret_message_event(role, content_preview)
+            .map(|text| AppEvent::Thinking {
                 message: text.into(),
                 thread_id: Some(thread_id.into()),
             })
             .into_iter()
-            .collect()
-        }
+            .collect(),
         EventKind::StateChanged { from, to, reason } => {
             vec![AppEvent::ThreadStateChanged {
                 thread_id: thread_id.into(),

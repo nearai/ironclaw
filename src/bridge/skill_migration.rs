@@ -84,7 +84,7 @@ pub async fn migrate_v1_skill_list(
     }
 
     if migrated > 0 {
-        tracing::info!("migrated {migrated} v1 skill(s) to v2 engine");
+        tracing::debug!("migrated {migrated} v1 skill(s) to v2 engine");
     }
 
     Ok(migrated)

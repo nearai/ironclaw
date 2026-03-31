@@ -727,6 +727,7 @@ fn deserialize_knowledge_doc(content: &str) -> Option<MemoryDoc> {
         "Issue" => DocType::Issue,
         "Spec" => DocType::Spec,
         "Skill" => DocType::Skill,
+        "Plan" => DocType::Plan,
         _ => DocType::Note,
     };
 
@@ -820,10 +821,11 @@ fn compact_thread_summary(thread: &Thread) -> ThreadArchiveSummary {
 
 fn truncate_for_readme(s: &str, max: usize) -> String {
     let trimmed = s.trim().replace('\n', " ");
-    if trimmed.len() <= max {
+    if trimmed.chars().count() <= max {
         trimmed
     } else {
-        format!("{}...", &trimmed[..max.min(trimmed.len())])
+        let truncated: String = trimmed.chars().take(max).collect();
+        format!("{truncated}...")
     }
 }
 
