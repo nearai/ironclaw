@@ -2348,4 +2348,17 @@ mod tests {
             Ok(None)
         }
     }
+
+    #[test]
+    fn test_requires_preexisting_uuid_thread() {
+        // Gateway and test channels require pre-existing UUIDs
+        assert!(requires_preexisting_uuid_thread("gateway"));
+        assert!(requires_preexisting_uuid_thread("test"));
+
+        // Other channels can create new threads on-the-fly
+        assert!(!requires_preexisting_uuid_thread("telegram"));
+        assert!(!requires_preexisting_uuid_thread("discord"));
+        assert!(!requires_preexisting_uuid_thread("cli"));
+        assert!(!requires_preexisting_uuid_thread(""));
+    }
 }
