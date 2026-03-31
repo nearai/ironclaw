@@ -137,6 +137,10 @@ impl JobStore for LibSqlBackend {
                     // TODO(#661): persist user_timezone in agent_jobs table so
                     // background/routine jobs retain the session's timezone context.
                     user_timezone: "UTC".to_string(),
+                    // TODO(#1125): approval_context is #[serde(skip)] so it's lost on
+                    // DB restore. Tools that were allowed before restart will be blocked
+                    // until the scheduler re-sets the context on the next dispatch.
+                    approval_context: None,
                 }))
             }
             None => Ok(None),

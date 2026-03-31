@@ -853,7 +853,7 @@ CREATE INDEX IF NOT EXISTS idx_api_tokens_hash ON api_tokens(token_hash);
 "#,
     ),
     (
-        15,
+        17,
         "workspaces",
         r#"
 CREATE TABLE IF NOT EXISTS workspaces (
@@ -1033,7 +1033,45 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_settings_workspace
 PRAGMA foreign_keys=ON;
 "#,
     ),
+    (
+        16,
+        "conversation_source_channel",
+        // Add source_channel to conversations for cross-channel approval authorization.
+        // Marked as idempotent (see IDEMPOTENT_ADD_COLUMN_MIGRATIONS below)
+        // because SQLite does not support IF NOT EXISTS for ADD COLUMN.
+        // The runner checks pragma_table_info before executing the ALTER.
+        r#"
+ALTER TABLE conversations ADD COLUMN source_channel TEXT;
+"#,
+    ),
 ];
+
+/// Migrations whose ADD COLUMN should be skipped when the column already
+/// exists (e.g. because the base SCHEMA was updated to include it).
+/// Each entry is `(version, table_name, column_name)`.
+const IDEMPOTENT_ADD_COLUMN_MIGRATIONS: &[(i64, &str, &str)] =
+    &[(16, "conversations", "source_channel")];
+
+/// Check whether `table` already contains `column` via `pragma_table_info`.
+async fn column_exists(
+    conn: &libsql::Connection,
+    table: &str,
+    column: &str,
+) -> Result<bool, crate::error::DatabaseError> {
+    use crate::error::DatabaseError;
+
+    let sql = format!(
+        "SELECT 1 FROM pragma_table_info('{}') WHERE name = ?1",
+        table
+    );
+    let mut rows = conn
+        .query(&sql, libsql::params![column])
+        .await
+        .map_err(|e| {
+            DatabaseError::Migration(format!("Failed to check column {table}.{column}: {e}"))
+        })?;
+    Ok(rows.next().await.ok().flatten().is_some())
+}
 
 /// Run incremental migrations that haven't been applied yet.
 ///
@@ -1059,6 +1097,18 @@ pub async fn run_incremental(conn: &libsql::Connection) -> Result<(), crate::err
             continue; // Already applied
         }
 
+        // For ADD COLUMN migrations, skip the ALTER if the column already
+        // exists (e.g. because the base SCHEMA was updated to include it)
+        // and just record the migration as applied.
+        let skip_sql = if let Some(&(_, table, column)) = IDEMPOTENT_ADD_COLUMN_MIGRATIONS
+            .iter()
+            .find(|(v, _, _)| *v == version)
+        {
+            column_exists(conn, table, column).await?
+        } else {
+            false
+        };
+
         // Wrap migration + recording in a transaction for atomicity.
         // If the process crashes mid-migration, the transaction rolls back
         // and the migration will be retried on next startup.
@@ -1068,9 +1118,19 @@ pub async fn run_incremental(conn: &libsql::Connection) -> Result<(), crate::err
             ))
         })?;
 
-        tx.execute_batch(sql).await.map_err(|e| {
-            DatabaseError::Migration(format!("libSQL migration V{version} ({name}) failed: {e}"))
-        })?;
+        if skip_sql {
+            tracing::debug!(
+                version,
+                name,
+                "libSQL: column already exists, recording migration as applied"
+            );
+        } else {
+            tx.execute_batch(sql).await.map_err(|e| {
+                DatabaseError::Migration(format!(
+                    "libSQL migration V{version} ({name}) failed: {e}"
+                ))
+            })?;
+        }
 
         // Record as applied (inside the same transaction)
         tx.execute(

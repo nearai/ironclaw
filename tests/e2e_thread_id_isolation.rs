@@ -48,7 +48,14 @@ mod tests {
         let store = rig.database();
         assert!(
             store
-                .ensure_conversation(foreign_thread_id, "gateway", "victim-user", None)
+                .ensure_conversation(
+                    foreign_thread_id,
+                    "gateway",
+                    "victim-user",
+                    None,
+                    None,
+                    Some("gateway")
+                )
                 .await
                 .expect("failed to create victim conversation"),
             "test setup failed: victim conversation was not created"

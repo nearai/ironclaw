@@ -655,7 +655,7 @@ pub async fn chat_new_thread_handler(
         .await;
     let (thread_id, info) = {
         let mut sess = session.lock().await;
-        let thread = sess.create_thread();
+        let thread = sess.create_thread(Some("web"));
         let id = thread.id;
         let info = ThreadInfo {
             id: thread.id,
@@ -677,7 +677,14 @@ pub async fn chat_new_thread_handler(
             resolve_chat_workspace_id(&state, &identity, workspace_query.workspace.as_deref())
                 .await?;
         match store
-            .ensure_conversation(thread_id, "gateway", &identity.user_id, workspace_id, None)
+            .ensure_conversation(
+                thread_id,
+                "gateway",
+                &identity.user_id,
+                workspace_id,
+                None,
+                Some("gateway"),
+            )
             .await
         {
             Ok(true) => {}

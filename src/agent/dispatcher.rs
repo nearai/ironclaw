@@ -220,6 +220,11 @@ impl Agent {
                 reason: format!("Exceeded maximum tool iterations ({max_tool_iterations})"),
             }
             .into()),
+            LoopOutcome::Failure(reason) => Err(crate::error::LlmError::InvalidResponse {
+                provider: "agent".to_string(),
+                reason,
+            }
+            .into()),
             LoopOutcome::NeedApproval(pending) => Ok(AgenticLoopResult::NeedApproval { pending }),
         }
     }
@@ -463,6 +468,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
     async fn handle_text_response(
         &self,
         text: &str,
+        _metadata: crate::llm::ResponseMetadata,
         _reason_ctx: &mut ReasoningContext,
     ) -> TextAction {
         // Strip internal "[Called tool ...]" text that can leak when
@@ -2310,7 +2316,7 @@ mod tests {
         // Initialize a thread in the session so the loop can record tool calls.
         let thread_id = {
             let mut sess = session.lock().await;
-            sess.create_thread().id
+            sess.create_thread(Some("test")).id
         };
 
         let message = IncomingMessage::new("test", "test-user", "do something");
@@ -2423,7 +2429,7 @@ mod tests {
         let session = Arc::new(Mutex::new(Session::new("test-user")));
         let thread_id = {
             let mut sess = session.lock().await;
-            sess.create_thread().id
+            sess.create_thread(Some("test")).id
         };
 
         let message = IncomingMessage::new("test", "test-user", "keep calling tools");

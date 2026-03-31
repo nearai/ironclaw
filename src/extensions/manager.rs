@@ -2779,19 +2779,24 @@ impl ExtensionManager {
         };
 
         // Try DCR if no client_id configured
-        let (client_id, client_secret) = if let Some(ref oauth) = server.oauth {
-            (oauth.client_id.clone(), None)
-        } else if let Some(ref reg_endpoint) = metadata.registration_endpoint {
-            let registration = register_client(reg_endpoint, &redirect_uri)
-                .await
-                .map_err(|e| ExtensionError::AuthFailed(e.to_string()))?;
+        let (client_id, client_secret, client_secret_expires_at) =
+            if let Some(ref oauth) = server.oauth {
+                (oauth.client_id.clone(), None, None)
+            } else if let Some(ref reg_endpoint) = metadata.registration_endpoint {
+                let registration = register_client(reg_endpoint, &redirect_uri)
+                    .await
+                    .map_err(|e| ExtensionError::AuthFailed(e.to_string()))?;
 
-            (registration.client_id, None)
-        } else {
-            return Err(ExtensionError::AuthNotSupported(
-                "Server doesn't support OAuth or Dynamic Client Registration".to_string(),
-            ));
-        };
+                (
+                    registration.client_id,
+                    registration.client_secret,
+                    registration.client_secret_expires_at,
+                )
+            } else {
+                return Err(ExtensionError::AuthNotSupported(
+                    "Server doesn't support OAuth or Dynamic Client Registration".to_string(),
+                ));
+            };
 
         // RFC 8707: resource parameter to scope the token to this MCP server
         let resource = canonical_resource_uri(&server.url);
@@ -2823,6 +2828,7 @@ impl ExtensionManager {
         let code_verifier = oauth_result.code_verifier;
 
         if is_gateway {
+            let persist_client_secret = server.oauth.is_none() && client_secret.is_some();
             let mut token_exchange_extra_params = HashMap::new();
             token_exchange_extra_params.insert("resource".to_string(), resource.clone());
 
@@ -2849,6 +2855,12 @@ impl ExtensionManager {
                 } else {
                     None
                 },
+                client_secret_secret_name: if persist_client_secret {
+                    Some(server.client_secret_secret_name())
+                } else {
+                    None
+                },
+                client_secret_expires_at,
                 created_at: std::time::Instant::now(),
             };
 
@@ -3106,6 +3118,7 @@ impl ExtensionManager {
                 let token_secret_name = server.token_secret_name();
                 plan.add_base_secret(&token_secret_name);
                 plan.add_base_secret(server.client_id_secret_name());
+                plan.add_base_secret(server.client_secret_secret_name());
                 // MCP OAuth can persist companion secrets through two paths:
                 // the MCP auth helper uses `mcp_<name>_refresh_token`, while the
                 // hosted gateway callback stores companions alongside the access
@@ -3614,6 +3627,8 @@ impl ExtensionManager {
                 gateway_token: self.oauth_proxy_auth_token.clone(),
                 token_exchange_extra_params: std::collections::HashMap::new(),
                 client_id_secret_name: None,
+                client_secret_secret_name: None,
+                client_secret_expires_at: None,
                 created_at: std::time::Instant::now(),
             };
 
@@ -3839,18 +3854,40 @@ impl ExtensionManager {
         // authoritative signal — setup secrets (client_id/secret) are
         // intermediate and may be auto-resolved via builtins.
         if let Some(ref auth) = cap_file.auth {
-            let has_token = self
+            let token_is_managed = self
                 .secrets
                 .exists(user_id, &auth.secret_name)
                 .await
-                .unwrap_or(false)
-                || auth
-                    .env_var
-                    .as_ref()
-                    .is_some_and(|v| std::env::var(v).is_ok());
-            return if has_token {
-                ToolAuthState::Ready
-            } else if auth.oauth.is_some() {
+                .unwrap_or(false);
+            let has_env_token = auth
+                .env_var
+                .as_ref()
+                .is_some_and(|v| std::env::var(v).is_ok());
+
+            if token_is_managed {
+                // Token lives in the secrets store — check whether the merged
+                // scope set of all tools sharing this secret is satisfied.
+                if let Some(ref oauth) = auth.oauth {
+                    let merged = self
+                        .collect_shared_scopes(&auth.secret_name, &oauth.scopes, user_id)
+                        .await;
+                    if self
+                        .needs_scope_expansion(&auth.secret_name, &merged, user_id)
+                        .await
+                    {
+                        return ToolAuthState::NeedsAuth;
+                    }
+                }
+                return ToolAuthState::Ready;
+            }
+
+            if has_env_token {
+                // Externally-managed token (env var) — skip scope checks;
+                // the user is responsible for granting adequate scopes.
+                return ToolAuthState::Ready;
+            }
+
+            return if auth.oauth.is_some() {
                 ToolAuthState::NeedsAuth
             } else {
                 ToolAuthState::NeedsSetup
@@ -6335,7 +6372,8 @@ mod tests {
         telegram_message_matches_verification_code,
     };
     use crate::extensions::{
-        ExtensionError, ExtensionKind, ExtensionSource, InstallResult, VerificationChallenge,
+        ExtensionError, ExtensionKind, ExtensionSource, InstallResult, ToolAuthState,
+        VerificationChallenge,
     };
     use crate::pairing::PairingStore;
     use crate::secrets::CreateSecretParams;
@@ -7899,6 +7937,8 @@ mod tests {
                 gateway_token: None,
                 token_exchange_extra_params: std::collections::HashMap::new(),
                 client_id_secret_name: None,
+                client_secret_secret_name: None,
+                client_secret_expires_at: None,
                 created_at: std::time::Instant::now(),
             },
         );
@@ -7923,6 +7963,8 @@ mod tests {
                 gateway_token: None,
                 token_exchange_extra_params: std::collections::HashMap::new(),
                 client_id_secret_name: None,
+                client_secret_secret_name: None,
+                client_secret_expires_at: None,
                 created_at: std::time::Instant::now(),
             },
         );
@@ -9020,5 +9062,261 @@ mod tests {
             Some("dcr-secret".to_string()),
             "non-builtin provider secret must be kept"
         );
+    }
+
+    #[tokio::test]
+    async fn test_shared_google_oauth_status_requires_scope_expansion_for_second_tool()
+    -> Result<(), String> {
+        let dir = tempfile::tempdir().map_err(|err| format!("temp dir: {err}"))?;
+        let tools_dir = dir.path().join("tools");
+        std::fs::create_dir_all(&tools_dir).map_err(|err| format!("tools dir: {err}"))?;
+
+        let name = "google-docs";
+        let scope = "https://www.googleapis.com/auth/documents";
+        std::fs::write(tools_dir.join(format!("{name}.wasm")), b"\0asm")
+            .map_err(|err| format!("write {name}.wasm: {err}"))?;
+
+        let caps = serde_json::json!({
+            "auth": {
+                "secret_name": "google_oauth_token",
+                "display_name": "Google",
+                "oauth": {
+                    "authorization_url": "https://accounts.google.com/o/oauth2/v2/auth",
+                    "token_url": "https://oauth2.googleapis.com/token",
+                    "client_id_env": "GOOGLE_OAUTH_CLIENT_ID",
+                    "client_secret_env": "GOOGLE_OAUTH_CLIENT_SECRET",
+                    "scopes": [scope],
+                    "use_pkce": false,
+                    "extra_params": {
+                        "access_type": "offline",
+                        "prompt": "consent"
+                    }
+                },
+                "env_var": "GOOGLE_OAUTH_TOKEN"
+            }
+        });
+        std::fs::write(
+            tools_dir.join(format!("{name}.capabilities.json")),
+            serde_json::to_vec(&caps).map_err(|err| format!("serialize {name}: {err}"))?,
+        )
+        .map_err(|err| format!("write {name}.capabilities.json: {err}"))?;
+
+        let mgr = make_test_manager(None, tools_dir.clone());
+        mgr.secrets
+            .create(
+                "test",
+                crate::secrets::CreateSecretParams::new("google_oauth_token", "token")
+                    .with_provider("google-docs"),
+            )
+            .await
+            .map_err(|err| format!("store token: {err}"))?;
+        mgr.secrets
+            .create(
+                "test",
+                crate::secrets::CreateSecretParams::new(
+                    "google_oauth_token_scopes",
+                    "https://www.googleapis.com/auth/documents",
+                )
+                .with_provider("google-docs"),
+            )
+            .await
+            .map_err(|err| format!("store scopes: {err}"))?;
+
+        assert_eq!(
+            mgr.check_tool_auth_status("google-docs", "test").await,
+            ToolAuthState::Ready
+        );
+
+        std::fs::write(tools_dir.join("google-slides.wasm"), b"\0asm")
+            .map_err(|err| format!("write google-slides.wasm: {err}"))?;
+        let slides_caps = serde_json::json!({
+            "auth": {
+                "secret_name": "google_oauth_token",
+                "display_name": "Google",
+                "oauth": {
+                    "authorization_url": "https://accounts.google.com/o/oauth2/v2/auth",
+                    "token_url": "https://oauth2.googleapis.com/token",
+                    "client_id_env": "GOOGLE_OAUTH_CLIENT_ID",
+                    "client_secret_env": "GOOGLE_OAUTH_CLIENT_SECRET",
+                    "scopes": ["https://www.googleapis.com/auth/presentations"],
+                    "use_pkce": false,
+                    "extra_params": {
+                        "access_type": "offline",
+                        "prompt": "consent"
+                    }
+                },
+                "env_var": "GOOGLE_OAUTH_TOKEN"
+            }
+        });
+        std::fs::write(
+            tools_dir.join("google-slides.capabilities.json"),
+            serde_json::to_vec(&slides_caps)
+                .map_err(|err| format!("serialize google-slides: {err}"))?,
+        )
+        .map_err(|err| format!("write google-slides.capabilities.json: {err}"))?;
+
+        assert_eq!(
+            mgr.check_tool_auth_status("google-docs", "test").await,
+            ToolAuthState::NeedsAuth,
+            "adding the second shared-auth Google tool should require reauth for the existing tool"
+        );
+        assert_eq!(
+            mgr.check_tool_auth_status("google-slides", "test").await,
+            ToolAuthState::NeedsAuth,
+            "second Google tool should require scope expansion when the shared token lacks its scope",
+        );
+
+        Ok(())
+    }
+
+    /// Env-var-provided tokens must always return Ready — the user manages
+    /// scopes externally, so the scope-expansion check must not apply.
+    /// Uses `HOME` as env_var since it always exists, avoiding `set_var`
+    /// which is unsafe in multi-threaded test runs.
+    #[tokio::test]
+    async fn test_env_var_token_skips_scope_expansion() -> Result<(), String> {
+        let dir = tempfile::tempdir().map_err(|err| format!("temp dir: {err}"))?;
+        let tools_dir = dir.path().join("tools");
+        std::fs::create_dir_all(&tools_dir).map_err(|err| format!("tools dir: {err}"))?;
+
+        let caps = serde_json::json!({
+            "auth": {
+                "secret_name": "google_oauth_token",
+                "display_name": "Google",
+                "oauth": {
+                    "authorization_url": "https://accounts.google.com/o/oauth2/v2/auth",
+                    "token_url": "https://oauth2.googleapis.com/token",
+                    "client_id_env": "GOOGLE_OAUTH_CLIENT_ID",
+                    "client_secret_env": "GOOGLE_OAUTH_CLIENT_SECRET",
+                    "scopes": ["https://www.googleapis.com/auth/documents"],
+                    "use_pkce": false,
+                    "extra_params": {
+                        "access_type": "offline",
+                        "prompt": "consent"
+                    }
+                },
+                "env_var": "HOME"
+            }
+        });
+        std::fs::write(tools_dir.join("google-docs.wasm"), b"\0asm")
+            .map_err(|err| format!("write wasm: {err}"))?;
+        std::fs::write(
+            tools_dir.join("google-docs.capabilities.json"),
+            serde_json::to_vec(&caps).map_err(|err| format!("serialize: {err}"))?,
+        )
+        .map_err(|err| format!("write caps: {err}"))?;
+
+        // No managed token in secrets store — only the env var (HOME) is present.
+        let mgr = make_test_manager(None, tools_dir);
+
+        assert_eq!(
+            mgr.check_tool_auth_status("google-docs", "test").await,
+            ToolAuthState::Ready,
+            "env-var token should be Ready without scope expansion check"
+        );
+
+        Ok(())
+    }
+
+    /// When both a managed token AND an env-var token exist, the managed
+    /// path (with scope expansion checks) must take priority.
+    #[tokio::test]
+    async fn test_managed_token_takes_priority_over_env_var() -> Result<(), String> {
+        let dir = tempfile::tempdir().map_err(|err| format!("temp dir: {err}"))?;
+        let tools_dir = dir.path().join("tools");
+        std::fs::create_dir_all(&tools_dir).map_err(|err| format!("tools dir: {err}"))?;
+
+        // Both tools point env_var at HOME (always set) so the env-var path
+        // would return Ready — but the managed token path should win.
+        let caps = serde_json::json!({
+            "auth": {
+                "secret_name": "google_oauth_token",
+                "display_name": "Google",
+                "oauth": {
+                    "authorization_url": "https://accounts.google.com/o/oauth2/v2/auth",
+                    "token_url": "https://oauth2.googleapis.com/token",
+                    "client_id_env": "GOOGLE_OAUTH_CLIENT_ID",
+                    "client_secret_env": "GOOGLE_OAUTH_CLIENT_SECRET",
+                    "scopes": ["https://www.googleapis.com/auth/documents"],
+                    "use_pkce": false,
+                    "extra_params": {
+                        "access_type": "offline",
+                        "prompt": "consent"
+                    }
+                },
+                "env_var": "HOME"
+            }
+        });
+        std::fs::write(tools_dir.join("google-docs.wasm"), b"\0asm")
+            .map_err(|err| format!("write wasm: {err}"))?;
+        std::fs::write(
+            tools_dir.join("google-docs.capabilities.json"),
+            serde_json::to_vec(&caps).map_err(|err| format!("serialize: {err}"))?,
+        )
+        .map_err(|err| format!("write caps: {err}"))?;
+
+        // Second tool requires an additional scope.
+        let slides_caps = serde_json::json!({
+            "auth": {
+                "secret_name": "google_oauth_token",
+                "display_name": "Google",
+                "oauth": {
+                    "authorization_url": "https://accounts.google.com/o/oauth2/v2/auth",
+                    "token_url": "https://oauth2.googleapis.com/token",
+                    "client_id_env": "GOOGLE_OAUTH_CLIENT_ID",
+                    "client_secret_env": "GOOGLE_OAUTH_CLIENT_SECRET",
+                    "scopes": ["https://www.googleapis.com/auth/presentations"],
+                    "use_pkce": false,
+                    "extra_params": {
+                        "access_type": "offline",
+                        "prompt": "consent"
+                    }
+                },
+                "env_var": "HOME"
+            }
+        });
+        std::fs::write(tools_dir.join("google-slides.wasm"), b"\0asm")
+            .map_err(|err| format!("write wasm: {err}"))?;
+        std::fs::write(
+            tools_dir.join("google-slides.capabilities.json"),
+            serde_json::to_vec(&slides_caps).map_err(|err| format!("serialize: {err}"))?,
+        )
+        .map_err(|err| format!("write caps: {err}"))?;
+
+        let mgr = make_test_manager(None, tools_dir);
+
+        // Store a managed token with only the docs scope.
+        mgr.secrets
+            .create(
+                "test",
+                crate::secrets::CreateSecretParams::new("google_oauth_token", "managed-token")
+                    .with_provider("google-docs"),
+            )
+            .await
+            .map_err(|err| format!("store token: {err}"))?;
+        mgr.secrets
+            .create(
+                "test",
+                crate::secrets::CreateSecretParams::new(
+                    "google_oauth_token_scopes",
+                    "https://www.googleapis.com/auth/documents",
+                )
+                .with_provider("google-docs"),
+            )
+            .await
+            .map_err(|err| format!("store scopes: {err}"))?;
+
+        assert_eq!(
+            mgr.check_tool_auth_status("google-docs", "test").await,
+            ToolAuthState::NeedsAuth,
+            "managed token path must win: merged scopes unsatisfied despite env var being set"
+        );
+        assert_eq!(
+            mgr.check_tool_auth_status("google-slides", "test").await,
+            ToolAuthState::NeedsAuth,
+            "slides scope missing from managed token even though env var is set"
+        );
+
+        Ok(())
     }
 }

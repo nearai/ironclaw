@@ -102,9 +102,10 @@ impl ConversationStore for PgBackend {
         user_id: &str,
         workspace_id: Option<Uuid>,
         thread_id: Option<&str>,
+        source_channel: Option<&str>,
     ) -> Result<bool, DatabaseError> {
         self.store
-            .ensure_conversation(id, channel, user_id, workspace_id, thread_id)
+            .ensure_conversation(id, channel, user_id, workspace_id, thread_id, source_channel)
             .await
     }
 
@@ -231,6 +232,15 @@ impl ConversationStore for PgBackend {
     ) -> Result<bool, DatabaseError> {
         self.store
             .conversation_belongs_to_user(conversation_id, user_id, workspace_id)
+            .await
+    }
+
+    async fn get_conversation_source_channel(
+        &self,
+        conversation_id: Uuid,
+    ) -> Result<Option<String>, DatabaseError> {
+        self.store
+            .get_conversation_source_channel(conversation_id)
             .await
     }
 }

@@ -198,37 +198,46 @@ mod tests {
         }
     }
 
-    fn owner_gate_trace(include_completion: bool) -> LlmTrace {
-        let mut steps = vec![TraceStep {
-            request_hint: None,
-            response: TraceResponse::ToolCalls {
-                tool_calls: vec![TraceToolCall {
-                    id: "call_owner_gate".to_string(),
-                    name: "owner_gate".to_string(),
-                    arguments: serde_json::json!({}),
-                }],
-                input_tokens: 40,
-                output_tokens: 10,
+    fn owner_gate_trace() -> LlmTrace {
+        // The worker calls the LLM which returns a tool_call for owner_gate.
+        // After tool execution (success or blocked-by-approval error), the
+        // worker calls the LLM again. The worker first calls `select_tools()`,
+        // then falls back to `respond_with_tools()` when no tool calls are
+        // returned — both consume a trace step, so we always need two text
+        // responses after the tool call.
+        let steps = vec![
+            TraceStep {
+                request_hint: None,
+                response: TraceResponse::ToolCalls {
+                    tool_calls: vec![TraceToolCall {
+                        id: "call_owner_gate".to_string(),
+                        name: "owner_gate".to_string(),
+                        arguments: serde_json::json!({}),
+                    }],
+                    input_tokens: 40,
+                    output_tokens: 10,
+                },
+                expected_tool_results: vec![],
             },
-            expected_tool_results: vec![],
-        }];
-        if include_completion {
-            // The worker first calls `select_tools()`, then falls back to
-            // `respond_with_tools()` when no tool calls are returned. Both
-            // methods consume a trace step, so the successful completion path
-            // needs two text responses after the tool call.
-            for _ in 0..2 {
-                steps.push(TraceStep {
-                    request_hint: None,
-                    response: TraceResponse::Text {
-                        content: "I have completed the task.".to_string(),
-                        input_tokens: 20,
-                        output_tokens: 5,
-                    },
-                    expected_tool_results: vec![],
-                });
-            }
-        }
+            TraceStep {
+                request_hint: None,
+                response: TraceResponse::Text {
+                    content: "I have completed the task.".to_string(),
+                    input_tokens: 20,
+                    output_tokens: 5,
+                },
+                expected_tool_results: vec![],
+            },
+            TraceStep {
+                request_hint: None,
+                response: TraceResponse::Text {
+                    content: "I have completed the task.".to_string(),
+                    input_tokens: 20,
+                    output_tokens: 5,
+                },
+                expected_tool_results: vec![],
+            },
+        ];
         LlmTrace::single_turn("test-owner-gate", "run owner gate", steps)
     }
 
@@ -382,6 +391,33 @@ mod tests {
             assert!(
                 std::time::Instant::now() < deadline,
                 "timed out waiting for routine run {run_id} to complete"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    /// Wait for a `tool_result` job event with `success: false` for the given tool.
+    /// Job events are persisted via `tokio::spawn`, so they may lag slightly
+    /// behind run completion.
+    async fn wait_for_tool_denial_event(db: &Arc<dyn Database>, job_id: Uuid, tool_name: &str) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let events = db
+                .list_job_events(job_id, None)
+                .await
+                .expect("list_job_events");
+            let denied = events.iter().any(|e| {
+                e.event_type == "tool_result"
+                    && e.data.get("tool_name").and_then(|v| v.as_str()) == Some(tool_name)
+                    && e.data.get("success") == Some(&serde_json::json!(false))
+            });
+            if denied {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for tool denial event for '{tool_name}' in job {job_id}. \
+                 Events: {events:?}"
             );
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
@@ -1385,7 +1421,7 @@ mod tests {
         let tools_dir = tmp.path().join("wasm-tools");
         let engine = setup_owner_gate_engine(
             db.clone(),
-            owner_gate_trace(true),
+            owner_gate_trace(),
             tools_dir.as_path(),
             Some("default"),
             true,
@@ -1461,7 +1497,7 @@ mod tests {
         let tools_dir = tmp.path().join("wasm-tools");
         let engine = setup_owner_gate_engine(
             db.clone(),
-            owner_gate_trace(true),
+            owner_gate_trace(),
             tools_dir.as_path(),
             Some("default"),
             true,
@@ -1493,17 +1529,18 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Test: autonomous runs fail loudly when an extension tool is inactive
+    // Test: autonomous runs deny inactive extension tools at execution time
+    // (job completes but tool is blocked by the approval context)
     // -----------------------------------------------------------------------
 
     #[tokio::test]
-    async fn full_job_blocks_without_active_owner_extension_tool() {
+    async fn full_job_denies_tool_without_active_owner_extension() {
         let (backend, tmp) = create_test_backend().await;
         let db: Arc<dyn Database> = backend;
         let tools_dir = tmp.path().join("wasm-tools");
         let engine = setup_owner_gate_engine(
             db.clone(),
-            owner_gate_trace(false),
+            owner_gate_trace(),
             tools_dir.as_path(),
             Some("default"),
             false,
@@ -1519,31 +1556,30 @@ mod tests {
             .expect("fire manual");
         let run = wait_for_run_completion(&db, routine.id, run_id).await;
 
-        assert_eq!(run.status, RunStatus::Failed);
+        // The job runs (full_job no longer requires sandbox) but the tool is
+        // blocked by the approval context — the LLM receives an error and
+        // completes without executing owner_gate.
+        assert_eq!(run.status, RunStatus::Ok);
         assert_eq!(owner_gate_count(&db).await, 0);
-        let failure_reason = db
-            .get_agent_job_failure_reason(run.job_id.expect("linked job id"))
-            .await
-            .expect("load job failure reason")
-            .expect("missing job failure reason");
-        assert!(
-            failure_reason.contains("owner_gate"),
-            "expected missing-tool failure reason, got {failure_reason}"
-        );
+
+        // Verify the tool was actually attempted and denied (not just never called).
+        let job_id = run.job_id.expect("run should be linked to a job");
+        wait_for_tool_denial_event(&db, job_id, "owner_gate").await;
     }
 
     // -----------------------------------------------------------------------
-    // Test: extension tools activated for another owner are not inherited
+    // Test: extension tools activated for another owner are denied at execution
+    // time (job completes but tool is blocked by the approval context)
     // -----------------------------------------------------------------------
 
     #[tokio::test]
-    async fn full_job_blocks_when_extension_belongs_to_another_owner() {
+    async fn full_job_denies_tool_when_extension_belongs_to_another_owner() {
         let (backend, tmp) = create_test_backend().await;
         let db: Arc<dyn Database> = backend;
         let tools_dir = tmp.path().join("wasm-tools");
         let engine = setup_owner_gate_engine(
             db.clone(),
-            owner_gate_trace(false),
+            owner_gate_trace(),
             tools_dir.as_path(),
             Some("someone-else"),
             true,
@@ -1559,17 +1595,16 @@ mod tests {
             .expect("fire manual");
         let run = wait_for_run_completion(&db, routine.id, run_id).await;
 
-        assert_eq!(run.status, RunStatus::Failed);
+        // The job runs (full_job no longer requires sandbox) but the tool is
+        // blocked by the approval context (extension belongs to "someone-else",
+        // not "default") — the LLM receives an error and completes without
+        // executing owner_gate.
+        assert_eq!(run.status, RunStatus::Ok);
         assert_eq!(owner_gate_count(&db).await, 0);
-        let failure_reason = db
-            .get_agent_job_failure_reason(run.job_id.expect("linked job id"))
-            .await
-            .expect("load job failure reason")
-            .expect("missing job failure reason");
-        assert!(
-            failure_reason.contains("owner_gate"),
-            "expected owner-mismatch failure reason, got {failure_reason}"
-        );
+
+        // Verify the tool was actually attempted and denied (not just never called).
+        let job_id = run.job_id.expect("run should be linked to a job");
+        wait_for_tool_denial_event(&db, job_id, "owner_gate").await;
     }
 
     // -----------------------------------------------------------------------
@@ -1623,7 +1658,7 @@ mod tests {
         let tools_dir = tmp.path().join("wasm-tools");
         let engine = setup_owner_gate_engine(
             db.clone(),
-            owner_gate_trace(false),
+            owner_gate_trace(),
             tools_dir.as_path(),
             None,
             false,

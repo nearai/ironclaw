@@ -408,6 +408,7 @@ pub trait ConversationStore: Send + Sync {
         user_id: &str,
         workspace_id: Option<Uuid>,
         thread_id: Option<&str>,
+        source_channel: Option<&str>,
     ) -> Result<bool, DatabaseError>;
     async fn list_conversations_with_preview(
         &self,
@@ -481,6 +482,11 @@ pub trait ConversationStore: Send + Sync {
         user_id: &str,
         workspace_id: Option<Uuid>,
     ) -> Result<bool, DatabaseError>;
+    /// Get the source_channel for a conversation (the channel that created it).
+    async fn get_conversation_source_channel(
+        &self,
+        conversation_id: Uuid,
+    ) -> Result<Option<String>, DatabaseError>;
 }
 
 #[async_trait]
