@@ -13,7 +13,7 @@
 FROM rust:1.92-slim-bookworm AS chef
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    pkg-config libssl-dev cmake gcc g++ \
+    pkg-config libssl-dev cmake gcc g++ python3-dev \
     && rm -rf /var/lib/apt/lists/* \
     && rustup target add wasm32-wasip2 \
     && cargo install cargo-chef wasm-tools
