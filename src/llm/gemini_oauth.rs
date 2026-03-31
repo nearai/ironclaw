@@ -1628,8 +1628,10 @@ impl GeminiOauthProvider {
                                 }
                             });
                             // Echo back the original thoughtSignature if present.
-                            if let Some(ref sig) = call.thought_signature {
-                                part.as_object_mut().unwrap().insert(
+                            if let Some(ref sig) = call.thought_signature
+                                && let Some(obj) = part.as_object_mut()
+                            {
+                                obj.insert(
                                     "thoughtSignature".to_string(),
                                     serde_json::Value::String(sig.clone()),
                                 );

@@ -480,6 +480,10 @@ impl Thread {
                         name: tc.name.clone(),
                         arguments: tc.parameters.clone(),
                         reasoning: None,
+                        // Known limitation: thought_signature is not persisted
+                        // in the DB, so Gemini signatures are lost on round-trip.
+                        // The ensure_thought_signatures() fallback in gemini_oauth.rs
+                        // synthesizes replacements at request time.
                         thought_signature: None,
                     })
                     .collect();
