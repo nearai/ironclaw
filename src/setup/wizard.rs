@@ -2987,7 +2987,19 @@ impl SetupWizard {
         use crate::sandbox::container::{ContainerRunner, connect_docker};
 
         let image_name = self.settings.sandbox.image.clone();
-        let docker = connect_docker().await?;
+        let docker = match connect_docker().await {
+            Ok(d) => d,
+            Err(e) => {
+                // check_docker() may report Available (via CLI fallback) even when
+                // connect_docker() fails (e.g. on Windows). Don't hard-fail setup.
+                print_info(&format!(
+                    "Could not connect to Docker API to verify image: {}",
+                    e
+                ));
+                print_info("Image check skipped. The image will be pulled at first job run.");
+                return Ok(());
+            }
+        };
         let runner = ContainerRunner::for_image_ops(docker, image_name.clone());
 
         if runner.image_exists().await {
@@ -3000,57 +3012,78 @@ impl SetupWizard {
         print_info("This image is required for sandboxed job execution.");
         println!();
 
-        // Look for Dockerfile.worker in common locations relative to the
-        // current working directory (expected to be the ironclaw repo root).
-        let dockerfile_candidates = [
-            std::path::PathBuf::from("Dockerfile.worker"),
-            std::path::PathBuf::from("docker/sandbox.Dockerfile"),
-        ];
-
-        let dockerfile_path = dockerfile_candidates.iter().find(|p| p.exists()).cloned();
-
-        match dockerfile_path {
-            Some(path) => {
-                print_info(&format!("Found Dockerfile at: {}", path.display()));
-                if confirm(
-                    "Build the worker image now? (this may take a few minutes)",
-                    true,
-                )
-                .map_err(SetupError::Io)?
-                {
-                    print_info("Building worker image... This may take a few minutes.");
-                    match runner.build_image(&path).await {
-                        Ok(()) => {
-                            print_success(&format!("Successfully built image '{}'.", image_name));
-                        }
-                        Err(e) => {
-                            print_error(&format!("Failed to build image: {}", e));
-                            print_info("You can build it manually later with:");
-                            print_info(&format!(
-                                "  docker build -f {} -t {} .",
-                                path.display(),
-                                image_name
-                            ));
-                        }
+        // Images that contain '/' look like registry references (e.g.
+        // "ghcr.io/nearai/ironclaw-worker:v1"). For those, or when
+        // auto_pull_image is enabled, attempt a pull before offering a
+        // local build — the runtime would do the same thing via
+        // SandboxManager::ensure_ready().
+        let is_registry_image = image_name.contains('/');
+        if is_registry_image || self.settings.sandbox.auto_pull_image {
+            print_info(&format!("Attempting to pull '{}'...", image_name));
+            match runner.pull_image().await {
+                Ok(()) => {
+                    print_success(&format!("Successfully pulled image '{}'.", image_name));
+                    return Ok(());
+                }
+                Err(e) => {
+                    if is_registry_image {
+                        // Registry image that can't be pulled — don't offer local build.
+                        print_error(&format!("Failed to pull image: {}", e));
+                        print_info("Ensure the image is published and accessible, or set");
+                        print_info("SANDBOX_IMAGE to a local image name and try again.");
+                        return Ok(());
                     }
-                } else {
-                    print_info("Skipped image build. Build it manually with:");
                     print_info(&format!(
-                        "  docker build -f {} -t {} .",
-                        path.display(),
-                        image_name
+                        "Pull failed ({}). Checking for local Dockerfile...",
+                        e
                     ));
                 }
             }
-            None => {
-                print_info("No Dockerfile found in current directory.");
-                print_info("To use Docker sandbox, build the worker image manually:");
+        }
+
+        // Only offer local build for default-style local images.
+        let dockerfile_path = std::path::PathBuf::from("Dockerfile.worker");
+
+        if dockerfile_path.exists() {
+            print_info(&format!(
+                "Found Dockerfile at: {}",
+                dockerfile_path.display()
+            ));
+            if confirm(
+                "Build the worker image now? (this may take a few minutes)",
+                true,
+            )
+            .map_err(SetupError::Io)?
+            {
+                print_info("Building worker image... This may take a few minutes.");
+                match runner.build_image(&dockerfile_path).await {
+                    Ok(()) => {
+                        print_success(&format!("Successfully built image '{}'.", image_name));
+                    }
+                    Err(e) => {
+                        print_error(&format!("Failed to build image: {}", e));
+                        print_info("You can build it manually later with:");
+                        print_info(&format!(
+                            "  docker build -f Dockerfile.worker -t {} .",
+                            image_name
+                        ));
+                    }
+                }
+            } else {
+                print_info("Skipped image build. Build it manually with:");
                 print_info(&format!(
                     "  docker build -f Dockerfile.worker -t {} .",
                     image_name
                 ));
-                print_info("or clone the IronClaw repository and build from source.");
             }
+        } else {
+            print_info("No Dockerfile.worker found in current directory.");
+            print_info("To use Docker sandbox, build the worker image manually:");
+            print_info(&format!(
+                "  docker build -f Dockerfile.worker -t {} .",
+                image_name
+            ));
+            print_info("or clone the IronClaw repository and build from source.");
         }
 
         Ok(())
