@@ -809,7 +809,11 @@ async fn process_resolved_approval(
         "engine v2: tool approval received"
     );
 
-    if approved && always {
+    if approved {
+        // Auto-approve this tool for the remainder of the session.
+        // Without this, the resumed thread issues a new tool call which
+        // triggers another approval prompt — an infinite loop.
+        // "always" makes this persistent; plain "yes" makes it session-scoped.
         let registry_name = pending.action_name.replace('_', "-");
         state
             .effect_adapter
@@ -818,6 +822,7 @@ async fn process_resolved_approval(
         state.effect_adapter.auto_approve_tool(&registry_name).await;
         debug!(
             tool = %pending.action_name,
+            always,
             "engine v2: tool auto-approved for session"
         );
     }
