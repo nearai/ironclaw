@@ -1221,9 +1221,12 @@ impl Agent {
                 Submission::Clear => {
                     return crate::bridge::handle_clear(self, message).await;
                 }
+                Submission::Expected { description } => {
+                    return crate::bridge::handle_expected(self, message, description).await;
+                }
                 // Undo/Redo/Resume/SwitchThread: v1-only (engine has no undo;
                 // thread switching is implicit via ConversationManager).
-                // Compact/Summarize/Suggest: orthogonal to engine (use workspace/LLM directly).
+                // Compact/Summarize/Suggest: orthogonal to engine (compaction is internal).
                 // Heartbeat/SystemCommand/JobStatus/JobCancel/Quit: v1 infrastructure.
                 _ => {}
             }

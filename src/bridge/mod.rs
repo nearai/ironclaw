@@ -30,6 +30,7 @@ pub use router::{
     handle_approval,
     handle_clear,
     handle_exec_approval,
+    handle_expected,
     handle_interrupt,
     handle_new_thread,
     handle_with_engine,
