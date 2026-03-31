@@ -885,6 +885,15 @@ impl Channel for ReplChannel {
             StatusUpdate::TurnCost { .. } => {
                 // Cost display is handled by the TUI channel
             }
+            StatusUpdate::JobStatus { .. }
+            | StatusUpdate::JobResult { .. }
+            | StatusUpdate::RoutineUpdate { .. }
+            | StatusUpdate::ContextPressure { .. }
+            | StatusUpdate::SandboxStatus { .. }
+            | StatusUpdate::SecretsStatus { .. }
+            | StatusUpdate::CostGuard { .. } => {
+                // Infrastructure status events are only rendered by the TUI
+            }
         }
         Ok(())
     }

@@ -52,52 +52,11 @@ impl TuiWidget for ConversationWidget {
 
         let usable_width = (area.width as usize).saturating_sub(4);
         let mut all_lines: Vec<Line<'_>> = Vec::new();
-        let mut turn_count = 0u32;
+
 
         // Welcome block when the conversation is empty
         if state.messages.is_empty() {
-            // ASCII banner
-            for banner_line in BANNER {
-                all_lines.push(Line::from(Span::styled(
-                    (*banner_line).to_string(),
-                    self.theme.accent_style(),
-                )));
-            }
-            all_lines.push(Line::from(Span::styled(
-                format!("  {BANNER_TAGLINE}"),
-                self.theme.dim_style(),
-            )));
-            all_lines.push(Line::from(""));
-
-            // Session metadata line: "  IronClaw v0.22.0  ·  gpt-4  ·  128k context"
-            let context_label = format!("{} context", format_tokens(state.context_window));
-            all_lines.push(Line::from(vec![
-                Span::styled("  IronClaw".to_string(), self.theme.accent_style()),
-                Span::styled(format!(" v{}", state.version), self.theme.accent_style()),
-                Span::styled("  \u{00B7}  ".to_string(), self.theme.dim_style()),
-                Span::styled(state.model.clone(), self.theme.dim_style()),
-                Span::styled("  \u{00B7}  ".to_string(), self.theme.dim_style()),
-                Span::styled(context_label, self.theme.dim_style()),
-            ]));
-
-            // Session start time: "  Session started 08:15 UTC"
-            let time_str = state.session_start.format("%H:%M UTC").to_string();
-            all_lines.push(Line::from(Span::styled(
-                format!("  Session started {time_str}"),
-                self.theme.dim_style(),
-            )));
-
-            // Blank line
-            all_lines.push(Line::from(""));
-
-            // Welcome prompt
-            all_lines.push(Line::from(vec![
-                Span::styled(
-                    "  What can I help you with?".to_string(),
-                    self.theme.bold_style(),
-                ),
-                Span::styled("  /help for commands".to_string(), self.theme.dim_style()),
-            ]));
+            self.render_welcome_screen(state, usable_width, &mut all_lines);
         }
 
         for msg in &state.messages {
@@ -121,9 +80,8 @@ impl TuiWidget for ConversationWidget {
                 all_lines.push(user_line);
                 all_lines.push(Line::from(""));
             } else if msg.role == MessageRole::Assistant {
-                // Separator with turn counter before assistant response
-                turn_count += 1;
-                let turn_label = format!(" Turn {turn_count} ");
+                // Separator with label before assistant response
+                let turn_label = " ironclaw ";
                 let sep_left_len = 2usize;
                 let sep_right_len = usable_width
                     .min(60)
@@ -132,7 +90,7 @@ impl TuiWidget for ConversationWidget {
                 let sep_right = "\u{2500}".repeat(sep_right_len);
                 all_lines.push(Line::from(vec![
                     Span::styled(format!("  {sep_left}"), self.theme.dim_style()),
-                    Span::styled(turn_label, self.theme.dim_style()),
+                    Span::styled(turn_label, self.theme.accent_style()),
                     Span::styled(sep_right, self.theme.dim_style()),
                 ]));
 
@@ -468,6 +426,265 @@ impl ConversationWidget {
             Span::styled(rest_part, self.theme.dim_style()),
             Span::raw(padding),
             Span::styled(duration_text, self.theme.dim_style()),
+        ])
+    }
+
+    /// Render the Hermes-style welcome screen with two columns:
+    /// left = ASCII art + model info, right = tools + skills.
+    fn render_welcome_screen(
+        &self,
+        state: &AppState,
+        _usable_width: usize,
+        all_lines: &mut Vec<Line<'_>>,
+    ) {
+        let has_tools = !state.welcome_tools.is_empty();
+        let has_skills = !state.welcome_skills.is_empty();
+
+        // If no tools/skills data, fall back to simple centered layout
+        if !has_tools && !has_skills {
+            self.render_welcome_simple(state, all_lines);
+            return;
+        }
+
+        // Build left-column lines (banner + metadata)
+        let mut left_lines: Vec<Line<'_>> = Vec::new();
+
+        // ASCII banner
+        for banner_line in BANNER {
+            left_lines.push(Line::from(Span::styled(
+                (*banner_line).to_string(),
+                self.theme.accent_style(),
+            )));
+        }
+        left_lines.push(Line::from(Span::styled(
+            format!("  {BANNER_TAGLINE}"),
+            self.theme.dim_style(),
+        )));
+
+        // Padding between banner and metadata
+        left_lines.push(Line::from(""));
+        left_lines.push(Line::from(""));
+
+        // Left column width: widest banner line + some padding
+        let left_col_width = BANNER
+            .iter()
+            .map(|l| UnicodeWidthStr::width(*l))
+            .max()
+            .unwrap_or(40)
+            + 4;
+        // Max text width inside the left column (minus the 2-char indent)
+        let left_text_max = left_col_width.saturating_sub(2);
+
+        // Model + version
+        let model_text = truncate(&state.model, left_text_max);
+        left_lines.push(Line::from(vec![
+            Span::styled("  ".to_string(), Style::default()),
+            Span::styled(model_text, self.theme.accent_style()),
+        ]));
+
+        // Workspace path (truncated to fit left column)
+        if !state.workspace_path.is_empty() {
+            let path_text = truncate(&state.workspace_path, left_text_max);
+            left_lines.push(Line::from(vec![
+                Span::styled("  ".to_string(), Style::default()),
+                Span::styled(path_text, self.theme.dim_style()),
+            ]));
+        }
+
+        // Session ID
+        let session_id = state
+            .session_start
+            .format("%Y%m%d_%H%M%S")
+            .to_string();
+        left_lines.push(Line::from(vec![
+            Span::styled("  Session: ".to_string(), self.theme.dim_style()),
+            Span::styled(session_id, self.theme.dim_style()),
+        ]));
+
+        // Build right-column lines (tools + skills)
+        let mut right_lines: Vec<Line<'_>> = Vec::new();
+
+        // Available Tools heading
+        if has_tools {
+            right_lines.push(Line::from(Span::styled(
+                "Available Tools".to_string(),
+                self.theme.bold_style(),
+            )));
+
+            let max_display = 12;
+            let tool_count = state.welcome_tools.len();
+            for cat in state.welcome_tools.iter().take(max_display) {
+                right_lines
+                    .push(Self::format_category_line(&cat.name, &cat.tools, &self.theme, true));
+            }
+            if tool_count > max_display {
+                right_lines.push(Line::from(Span::styled(
+                    format!("(and {} more toolsets...)", tool_count - max_display),
+                    self.theme.dim_style(),
+                )));
+            }
+        }
+
+        // Blank separator
+        if has_tools && has_skills {
+            right_lines.push(Line::from(""));
+        }
+
+        // Available Skills heading
+        if has_skills {
+            right_lines.push(Line::from(Span::styled(
+                "Available Skills".to_string(),
+                self.theme.bold_style(),
+            )));
+
+            let max_display = 20;
+            let skill_count = state.welcome_skills.len();
+            for cat in state.welcome_skills.iter().take(max_display) {
+                right_lines.push(Self::format_category_line(
+                    &cat.name,
+                    &cat.skills,
+                    &self.theme,
+                    false,
+                ));
+            }
+            if skill_count > max_display {
+                right_lines.push(Line::from(Span::styled(
+                    format!("(and {} more...)", skill_count - max_display),
+                    self.theme.dim_style(),
+                )));
+            }
+        }
+
+        // Footer summary
+        let total_tools: usize = state.welcome_tools.iter().map(|c| c.tools.len()).sum();
+        let total_skills: usize = state.welcome_skills.iter().map(|c| c.skills.len()).sum();
+        right_lines.push(Line::from(""));
+        right_lines.push(Line::from(vec![
+            Span::styled(
+                format!("{total_tools} tools"),
+                self.theme.accent_style(),
+            ),
+            Span::styled("  \u{00B7}  ".to_string(), self.theme.dim_style()),
+            Span::styled(
+                format!("{total_skills} skills"),
+                self.theme.accent_style(),
+            ),
+            Span::styled("  \u{00B7}  ".to_string(), self.theme.dim_style()),
+            Span::styled("/help for commands".to_string(), self.theme.dim_style()),
+        ]));
+
+        // Compose two columns side-by-side
+        let total_rows = left_lines.len().max(right_lines.len());
+
+        for row in 0..total_rows {
+            let left = left_lines.get(row);
+            let right = right_lines.get(row);
+
+            match (left, right) {
+                (Some(l), Some(r)) => {
+                    // Compute visual width of left line
+                    let left_visual: usize = l
+                        .spans
+                        .iter()
+                        .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+                        .sum();
+                    let padding_needed = left_col_width.saturating_sub(left_visual);
+
+                    let mut spans: Vec<Span<'_>> = Vec::new();
+                    for s in &l.spans {
+                        spans.push(Span::styled(s.content.to_string(), s.style));
+                    }
+                    spans.push(Span::raw(" ".repeat(padding_needed)));
+                    for s in &r.spans {
+                        spans.push(Span::styled(s.content.to_string(), s.style));
+                    }
+                    all_lines.push(Line::from(spans));
+                }
+                (Some(l), None) => {
+                    let spans: Vec<Span<'_>> = l
+                        .spans
+                        .iter()
+                        .map(|s| Span::styled(s.content.to_string(), s.style))
+                        .collect();
+                    all_lines.push(Line::from(spans));
+                }
+                (None, Some(r)) => {
+                    let mut spans = vec![Span::raw(" ".repeat(left_col_width))];
+                    for s in &r.spans {
+                        spans.push(Span::styled(s.content.to_string(), s.style));
+                    }
+                    all_lines.push(Line::from(spans));
+                }
+                (None, None) => {}
+            }
+        }
+
+        // Trailing blank line
+        all_lines.push(Line::from(""));
+    }
+
+    /// Simple welcome screen (no tools/skills data).
+    fn render_welcome_simple(&self, state: &AppState, all_lines: &mut Vec<Line<'_>>) {
+        for banner_line in BANNER {
+            all_lines.push(Line::from(Span::styled(
+                (*banner_line).to_string(),
+                self.theme.accent_style(),
+            )));
+        }
+        all_lines.push(Line::from(Span::styled(
+            format!("  {BANNER_TAGLINE}"),
+            self.theme.dim_style(),
+        )));
+        all_lines.push(Line::from(""));
+
+        let context_label = format!("{} context", format_tokens(state.context_window));
+        all_lines.push(Line::from(vec![
+            Span::styled("  IronClaw".to_string(), self.theme.accent_style()),
+            Span::styled(format!(" v{}", state.version), self.theme.accent_style()),
+            Span::styled("  \u{00B7}  ".to_string(), self.theme.dim_style()),
+            Span::styled(state.model.clone(), self.theme.dim_style()),
+            Span::styled("  \u{00B7}  ".to_string(), self.theme.dim_style()),
+            Span::styled(context_label, self.theme.dim_style()),
+        ]));
+
+        let time_str = state.session_start.format("%H:%M UTC").to_string();
+        all_lines.push(Line::from(Span::styled(
+            format!("  Session started {time_str}"),
+            self.theme.dim_style(),
+        )));
+        all_lines.push(Line::from(""));
+        all_lines.push(Line::from(vec![
+            Span::styled(
+                "  What can I help you with?".to_string(),
+                self.theme.bold_style(),
+            ),
+            Span::styled("  /help for commands".to_string(), self.theme.dim_style()),
+        ]));
+    }
+
+    /// Format a "category: item1, item2, item3, ..." line.
+    fn format_category_line<'a>(
+        name: &str,
+        items: &[String],
+        theme: &Theme,
+        is_tool: bool,
+    ) -> Line<'a> {
+        let label_style = if is_tool {
+            theme.warning_style()
+        } else {
+            theme.accent_style()
+        };
+
+        let mut items_str = items.join(", ");
+        // Truncate if too long
+        if items_str.len() > 60 {
+            items_str.truncate(57);
+            items_str.push_str("...");
+        }
+
+        Line::from(vec![
+            Span::styled(format!("{name}: "), label_style),
+            Span::styled(items_str, theme.dim_style()),
         ])
     }
 

@@ -393,6 +393,16 @@ impl CostGuard {
     pub async fn model_usage(&self) -> HashMap<String, ModelTokens> {
         self.model_tokens.lock().await.clone()
     }
+
+    /// Whether the daily budget has been exceeded.
+    pub fn is_budget_exceeded(&self) -> bool {
+        self.budget_exceeded.load(Ordering::Relaxed)
+    }
+
+    /// Configured daily budget limit in cents, if any.
+    pub fn budget_limit_cents(&self) -> Option<u64> {
+        self.config.max_cost_per_day_cents
+    }
 }
 
 /// Convert a Decimal USD amount to whole cents (truncated).

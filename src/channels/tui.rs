@@ -11,12 +11,63 @@ use async_trait::async_trait;
 use tokio::sync::{Mutex, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 
-use ironclaw_tui::{TuiAppConfig, TuiEvent, TuiLayout, start_tui};
+use ironclaw_tui::{SkillCategory, ToolCategory, TuiAppConfig, TuiEvent, TuiLayout, start_tui};
 
 use crate::channels::web::log_layer::LogBroadcaster;
 use crate::channels::{Channel, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate};
 use crate::error::ChannelError;
 use crate::llm::infer_context_length;
+
+/// Group tool names by their prefix (text before the first `_`).
+///
+/// Tools like `memory_search`, `memory_write` become `memory: search, write`.
+/// Tools without an underscore are placed in a "general" category.
+pub fn group_tools_by_prefix(mut names: Vec<String>) -> Vec<ToolCategory> {
+    use std::collections::BTreeMap;
+    names.sort();
+
+    let mut groups: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for name in &names {
+        if let Some(pos) = name.find('_') {
+            let prefix = &name[..pos];
+            let suffix = &name[pos + 1..];
+            groups
+                .entry(prefix.to_string())
+                .or_default()
+                .push(suffix.to_string());
+        } else {
+            groups
+                .entry("general".to_string())
+                .or_default()
+                .push(name.clone());
+        }
+    }
+
+    groups
+        .into_iter()
+        .map(|(name, tools)| ToolCategory { name, tools })
+        .collect()
+}
+
+/// Group skills by their first tag.
+///
+/// Skills without tags are placed in a "general" category.
+pub fn group_skills_by_tag(
+    skills: &[(String, Vec<String>)], // (name, tags)
+) -> Vec<SkillCategory> {
+    use std::collections::BTreeMap;
+
+    let mut groups: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (name, tags) in skills {
+        let category = tags.first().cloned().unwrap_or_else(|| "general".to_string());
+        groups.entry(category).or_default().push(name.clone());
+    }
+
+    groups
+        .into_iter()
+        .map(|(name, skills)| SkillCategory { name, skills })
+        .collect()
+}
 
 /// TUI channel backed by `ironclaw_tui`.
 pub struct TuiChannel {
@@ -27,6 +78,9 @@ pub struct TuiChannel {
     model: String,
     layout: TuiLayout,
     log_broadcaster: Option<Arc<LogBroadcaster>>,
+    tools: Vec<ToolCategory>,
+    skills: Vec<SkillCategory>,
+    workspace_path: String,
 }
 
 impl TuiChannel {
@@ -44,6 +98,9 @@ impl TuiChannel {
             model: model.into(),
             layout: TuiLayout::default(),
             log_broadcaster: None,
+            tools: Vec::new(),
+            skills: Vec::new(),
+            workspace_path: String::new(),
         }
     }
 
@@ -56,6 +113,24 @@ impl TuiChannel {
     /// Set the log broadcaster for forwarding log entries to the TUI.
     pub fn with_log_broadcaster(mut self, broadcaster: Arc<LogBroadcaster>) -> Self {
         self.log_broadcaster = Some(broadcaster);
+        self
+    }
+
+    /// Set tool categories for the welcome screen.
+    pub fn with_tools(mut self, tools: Vec<ToolCategory>) -> Self {
+        self.tools = tools;
+        self
+    }
+
+    /// Set skill categories for the welcome screen.
+    pub fn with_skills(mut self, skills: Vec<SkillCategory>) -> Self {
+        self.skills = skills;
+        self
+    }
+
+    /// Set workspace path for the welcome screen.
+    pub fn with_workspace_path(mut self, path: impl Into<String>) -> Self {
+        self.workspace_path = path.into();
         self
     }
 }
@@ -81,6 +156,9 @@ impl Channel for TuiChannel {
             context_window: infer_context_length(&self.model)
                 .map(u64::from)
                 .unwrap_or(128_000),
+            tools: self.tools.clone(),
+            skills: self.skills.clone(),
+            workspace_path: self.workspace_path.clone(),
         };
 
         let ironclaw_tui::TuiAppHandle {
@@ -186,6 +264,27 @@ impl Channel for TuiChannel {
             StatusUpdate::JobStarted { job_id, title, .. } => {
                 TuiEvent::JobStarted { job_id, title }
             }
+            StatusUpdate::JobStatus { job_id, status } => {
+                TuiEvent::JobStatus { job_id, status }
+            }
+            StatusUpdate::JobResult { job_id, status } => {
+                TuiEvent::JobResult { job_id, status }
+            }
+            StatusUpdate::RoutineUpdate {
+                id,
+                name,
+                trigger_type,
+                enabled,
+                last_run,
+                next_fire,
+            } => TuiEvent::RoutineUpdate {
+                id,
+                name,
+                trigger_type,
+                enabled,
+                last_run,
+                next_fire,
+            },
             StatusUpdate::ApprovalNeeded {
                 request_id,
                 tool_name,
@@ -228,6 +327,44 @@ impl Channel for TuiChannel {
                 input_tokens,
                 output_tokens,
                 cost_usd,
+            },
+            StatusUpdate::ContextPressure {
+                used_tokens,
+                max_tokens,
+                percentage,
+                warning,
+            } => TuiEvent::ContextPressure {
+                used_tokens,
+                max_tokens,
+                percentage,
+                warning,
+            },
+            StatusUpdate::SandboxStatus {
+                docker_available,
+                running_containers,
+                status,
+            } => TuiEvent::SandboxStatus {
+                docker_available,
+                running_containers,
+                status,
+            },
+            StatusUpdate::SecretsStatus {
+                count,
+                vault_unlocked,
+            } => TuiEvent::SecretsStatus {
+                count,
+                vault_unlocked,
+            },
+            StatusUpdate::CostGuard {
+                session_budget_usd,
+                spent_usd,
+                remaining_usd,
+                limit_reached,
+            } => TuiEvent::CostGuard {
+                session_budget_usd,
+                spent_usd,
+                remaining_usd,
+                limit_reached,
             },
             StatusUpdate::Suggestions { suggestions } => TuiEvent::Suggestions { suggestions },
             StatusUpdate::ImageGenerated { .. } => return Ok(()),

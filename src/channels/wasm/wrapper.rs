@@ -3871,8 +3871,16 @@ fn status_to_wit(
             },
             metadata_json,
         },
-        // Suggestions and turn cost are web-gateway-only; skip for WASM channels
-        StatusUpdate::Suggestions { .. } | StatusUpdate::TurnCost { .. } => return None,
+        // Suggestions, turn cost, and job/routine lifecycle are web-gateway/TUI-only; skip for WASM
+        StatusUpdate::Suggestions { .. }
+        | StatusUpdate::TurnCost { .. }
+        | StatusUpdate::JobStatus { .. }
+        | StatusUpdate::JobResult { .. }
+        | StatusUpdate::RoutineUpdate { .. }
+        | StatusUpdate::ContextPressure { .. }
+        | StatusUpdate::SandboxStatus { .. }
+        | StatusUpdate::SecretsStatus { .. }
+        | StatusUpdate::CostGuard { .. } => return None,
         StatusUpdate::ReasoningUpdate {
             narrative,
             decisions,

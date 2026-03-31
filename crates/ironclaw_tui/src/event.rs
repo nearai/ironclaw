@@ -104,6 +104,22 @@ pub enum TuiEvent {
     /// A sandbox job started.
     JobStarted { job_id: String, title: String },
 
+    /// A sandbox job's status changed.
+    JobStatus { job_id: String, status: String },
+
+    /// A sandbox job completed with final result.
+    JobResult { job_id: String, status: String },
+
+    /// A routine was created, updated, or deleted.
+    RoutineUpdate {
+        id: String,
+        name: String,
+        trigger_type: String,
+        enabled: bool,
+        last_run: Option<String>,
+        next_fire: Option<String>,
+    },
+
     /// Tool requires user approval.
     ApprovalNeeded {
         request_id: String,
@@ -138,6 +154,32 @@ pub enum TuiEvent {
 
     /// Suggestions for follow-up messages.
     Suggestions { suggestions: Vec<String> },
+
+    /// Context pressure update (token usage warning).
+    ContextPressure {
+        used_tokens: u64,
+        max_tokens: u64,
+        percentage: u8,
+        warning: Option<String>,
+    },
+
+    /// Sandbox / Docker status update.
+    SandboxStatus {
+        docker_available: bool,
+        running_containers: u32,
+        status: String,
+    },
+
+    /// Secrets vault status update.
+    SecretsStatus { count: u32, vault_unlocked: bool },
+
+    /// Cost guard / budget status update.
+    CostGuard {
+        session_budget_usd: Option<String>,
+        spent_usd: String,
+        remaining_usd: Option<String>,
+        limit_reached: bool,
+    },
 
     /// A log entry captured from the tracing subscriber.
     Log {

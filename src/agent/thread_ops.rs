@@ -583,6 +583,107 @@ impl Agent {
                             &message.metadata,
                         )
                         .await;
+
+                    // Emit context pressure after each turn
+                    let ctx_messages = thread.messages();
+                    let used = self.context_monitor.estimate_tokens(&ctx_messages);
+                    let limit = self.context_monitor.limit();
+                    let pct = if limit > 0 {
+                        ((used as f64 / limit as f64) * 100.0).round() as u8
+                    } else {
+                        0
+                    };
+                    let warning = if pct >= 90 {
+                        Some("COMPACT NOW".to_string())
+                    } else if pct >= 70 {
+                        Some("consider /compact".to_string())
+                    } else {
+                        None
+                    };
+                    let _ = self
+                        .channels
+                        .send_status(
+                            &message.channel,
+                            StatusUpdate::ContextPressure {
+                                used_tokens: used as u64,
+                                max_tokens: limit as u64,
+                                percentage: pct,
+                                warning,
+                            },
+                            &message.metadata,
+                        )
+                        .await;
+
+                    // Emit cost guard / budget status
+                    let daily_spend = self.cost_guard().daily_spend().await;
+                    let budget_cents = self.cost_guard().budget_limit_cents();
+                    let limit_reached = self.cost_guard().is_budget_exceeded();
+                    let daily_spend_f64 =
+                        daily_spend.to_string().parse::<f64>().unwrap_or(0.0);
+                    let session_budget_usd = budget_cents
+                        .map(|c| format!("${:.2}", c as f64 / 100.0));
+                    let remaining_usd = budget_cents.map(|c| {
+                        let remaining = (c as f64 / 100.0) - daily_spend_f64;
+                        format!("${:.2}", remaining.max(0.0))
+                    });
+                    let _ = self
+                        .channels
+                        .send_status(
+                            &message.channel,
+                            StatusUpdate::CostGuard {
+                                session_budget_usd,
+                                spent_usd: format!("${:.4}", daily_spend_f64),
+                                remaining_usd,
+                                limit_reached,
+                            },
+                            &message.metadata,
+                        )
+                        .await;
+
+                    // Emit sandbox / Docker status
+                    let (docker_available, sandbox_status) = match self.deps.sandbox_readiness {
+                        crate::agent::routine_engine::SandboxReadiness::Available => {
+                            (true, "available".to_string())
+                        }
+                        crate::agent::routine_engine::SandboxReadiness::DisabledByConfig => {
+                            (false, "disabled".to_string())
+                        }
+                        crate::agent::routine_engine::SandboxReadiness::DockerUnavailable => {
+                            (false, "docker unavailable".to_string())
+                        }
+                    };
+                    let _ = self
+                        .channels
+                        .send_status(
+                            &message.channel,
+                            StatusUpdate::SandboxStatus {
+                                docker_available,
+                                running_containers: 0,
+                                status: sandbox_status,
+                            },
+                            &message.metadata,
+                        )
+                        .await;
+
+                    // Emit secrets vault status
+                    if let Some(ref secrets) = self.deps.secrets_store {
+                        let count = secrets
+                            .list(&message.user_id)
+                            .await
+                            .map(|refs| refs.len() as u32)
+                            .unwrap_or(0);
+                        let _ = self
+                            .channels
+                            .send_status(
+                                &message.channel,
+                                StatusUpdate::SecretsStatus {
+                                    count,
+                                    vault_unlocked: true,
+                                },
+                                &message.metadata,
+                            )
+                            .await;
+                    }
                 }
 
                 Ok(SubmissionResult::response(response))

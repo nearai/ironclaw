@@ -43,4 +43,4 @@ pub use app::{TuiAppConfig, TuiAppHandle, start_tui};
 pub use event::{TuiEvent, TuiLogEntry};
 pub use layout::TuiLayout;
 pub use theme::Theme;
-pub use widgets::AppState;
+pub use widgets::{AppState, SkillCategory, ToolCategory};

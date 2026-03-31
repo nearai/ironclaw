@@ -130,6 +130,7 @@ impl TuiWidget for StatusBarWidget {
             left_spans.extend(parts);
         }
 
+        // Context pressure: tokens + visual bar
         left_spans.extend([
             sep.clone(),
             Span::styled(
@@ -141,7 +142,45 @@ impl TuiWidget for StatusBarWidget {
             Span::styled(format!(" {pct}%"), self.theme.dim_style()),
         ]);
 
-        if state.total_cost_usd != "$0.00" {
+        // Context pressure warning when usage is high
+        if let Some(ref cp) = state.context_pressure {
+            if let Some(ref warning) = cp.warning {
+                left_spans.push(Span::styled(
+                    format!(" {warning}"),
+                    if cp.percentage >= 90 {
+                        self.theme.error_style()
+                    } else {
+                        self.theme.warning_style()
+                    },
+                ));
+            }
+        } else if pct >= 90 {
+            left_spans.push(Span::styled(" CRITICAL", self.theme.error_style()));
+        } else if pct >= 70 {
+            left_spans.push(Span::styled(" HIGH", self.theme.warning_style()));
+        }
+
+        // Cost: show session spending, and budget if available
+        if let Some(ref cg) = state.cost_guard {
+            left_spans.push(sep.clone());
+            if let Some(ref budget) = cg.session_budget_usd {
+                // Show spent/budget with color coding
+                let cost_style = if cg.limit_reached {
+                    self.theme.error_style()
+                } else {
+                    self.theme.dim_style()
+                };
+                left_spans.push(Span::styled(
+                    format!("{}/{budget}", cg.spent_usd),
+                    cost_style,
+                ));
+                if cg.limit_reached {
+                    left_spans.push(Span::styled(" LIMIT", self.theme.error_style()));
+                }
+            } else {
+                left_spans.push(Span::styled(cg.spent_usd.clone(), self.theme.dim_style()));
+            }
+        } else if state.total_cost_usd != "$0.00" {
             left_spans.push(sep.clone());
             left_spans.push(Span::styled(
                 state.total_cost_usd.clone(),

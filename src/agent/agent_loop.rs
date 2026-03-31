@@ -184,6 +184,8 @@ pub struct AgentDeps {
     pub llm_backend: String,
     /// Per-tenant rate limiting registry (lazily creates rate state per user).
     pub tenant_rates: Arc<crate::tenant::TenantRateRegistry>,
+    /// Secrets store for querying vault status in TUI.
+    pub secrets_store: Option<Arc<dyn crate::secrets::SecretsStore + Send + Sync>>,
 }
 
 /// The main agent that coordinates all components.

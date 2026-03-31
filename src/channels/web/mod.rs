@@ -504,6 +504,26 @@ impl Channel for GatewayChannel {
                 cost_usd,
                 thread_id,
             },
+            StatusUpdate::JobStatus { job_id, status } => {
+                AppEvent::JobStatus {
+                    job_id,
+                    message: status,
+                }
+            }
+            StatusUpdate::JobResult { job_id, status } => AppEvent::JobResult {
+                job_id,
+                status,
+                session_id: None,
+                fallback_deliverable: None,
+            },
+            StatusUpdate::RoutineUpdate { .. }
+            | StatusUpdate::ContextPressure { .. }
+            | StatusUpdate::SandboxStatus { .. }
+            | StatusUpdate::SecretsStatus { .. }
+            | StatusUpdate::CostGuard { .. } => {
+                // Infrastructure status events are only rendered by the TUI
+                return Ok(());
+            }
         };
 
         // Scope events to the user when user_id is available in metadata.

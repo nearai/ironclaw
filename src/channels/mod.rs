@@ -34,7 +34,7 @@ pub mod relay;
 mod repl;
 mod signal;
 #[cfg(feature = "tui")]
-mod tui;
+pub mod tui;
 pub mod wasm;
 pub mod web;
 mod webhook_server;

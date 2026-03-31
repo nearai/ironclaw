@@ -67,6 +67,12 @@ pub struct AppState {
     /// Active threads.
     pub threads: Vec<ThreadInfo>,
 
+    /// Tracked sandbox jobs.
+    pub jobs: Vec<JobInfo>,
+
+    /// Tracked routines.
+    pub routines: Vec<RoutineInfo>,
+
     /// Current thinking/status text.
     pub status_text: String,
 
@@ -112,6 +118,27 @@ pub struct AppState {
 
     /// Search state for conversation.
     pub search: SearchState,
+
+    /// Context pressure status (derived from token usage).
+    pub context_pressure: Option<ContextPressureInfo>,
+
+    /// Sandbox / Docker status.
+    pub sandbox_status: Option<SandboxInfo>,
+
+    /// Secrets vault status.
+    pub secrets_status: Option<SecretsInfo>,
+
+    /// Cost guard / budget status.
+    pub cost_guard: Option<CostGuardInfo>,
+
+    /// Tool categories for the welcome screen.
+    pub welcome_tools: Vec<ToolCategory>,
+
+    /// Skill categories for the welcome screen.
+    pub welcome_skills: Vec<SkillCategory>,
+
+    /// Workspace directory path (for display on welcome screen).
+    pub workspace_path: String,
 }
 
 impl Default for AppState {
@@ -128,6 +155,8 @@ impl Default for AppState {
             active_tools: Vec::new(),
             recent_tools: Vec::new(),
             threads: Vec::new(),
+            jobs: Vec::new(),
+            routines: Vec::new(),
             status_text: String::new(),
             is_streaming: false,
             sidebar_visible: true,
@@ -144,6 +173,13 @@ impl Default for AppState {
             history_draft: String::new(),
             suggestions: Vec::new(),
             search: SearchState::default(),
+            context_pressure: None,
+            sandbox_status: None,
+            secrets_status: None,
+            cost_guard: None,
+            welcome_tools: Vec::new(),
+            welcome_skills: Vec::new(),
+            workspace_path: String::new(),
         }
     }
 }
@@ -195,6 +231,47 @@ pub enum ToolStatus {
     Failed,
 }
 
+/// Status of a sandbox job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum JobStatus {
+    #[default]
+    Pending,
+    Running,
+    Completed,
+    Failed,
+}
+
+impl std::fmt::Display for JobStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Pending => write!(f, "pending"),
+            Self::Running => write!(f, "running"),
+            Self::Completed => write!(f, "done"),
+            Self::Failed => write!(f, "failed"),
+        }
+    }
+}
+
+/// A sandbox job tracked in the sidebar.
+#[derive(Debug, Clone)]
+pub struct JobInfo {
+    pub id: String,
+    pub title: String,
+    pub status: JobStatus,
+    pub started_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// A routine tracked in the sidebar.
+#[derive(Debug, Clone)]
+pub struct RoutineInfo {
+    pub id: String,
+    pub name: String,
+    pub trigger_type: String,
+    pub enabled: bool,
+    pub last_run: Option<String>,
+    pub next_fire: Option<String>,
+}
+
 /// Execution status of a thread or job.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ThreadStatus {
@@ -232,6 +309,70 @@ pub struct ThreadInfo {
     pub status: ThreadStatus,
     /// When the thread was created / started.
     pub started_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Context pressure status for the status bar.
+#[derive(Debug, Clone)]
+pub struct ContextPressureInfo {
+    /// Tokens consumed so far.
+    pub used_tokens: u64,
+    /// Maximum context window.
+    pub max_tokens: u64,
+    /// Usage percentage (0–100).
+    pub percentage: u8,
+    /// Warning message when pressure is high.
+    pub warning: Option<String>,
+}
+
+/// Sandbox / Docker status for the sidebar.
+#[derive(Debug, Clone)]
+pub struct SandboxInfo {
+    /// Whether the Docker daemon is reachable.
+    pub docker_available: bool,
+    /// Number of currently running containers.
+    pub running_containers: u32,
+    /// Human-readable status summary.
+    pub status: String,
+}
+
+/// Secrets vault status for the sidebar.
+#[derive(Debug, Clone)]
+pub struct SecretsInfo {
+    /// Number of stored secrets.
+    pub count: u32,
+    /// Whether the vault is currently unlocked.
+    pub vault_unlocked: bool,
+}
+
+/// A group of tools under a shared category for the welcome screen.
+#[derive(Debug, Clone, Default)]
+pub struct ToolCategory {
+    /// Category name (e.g. "memory", "file", "browser").
+    pub name: String,
+    /// Tool names in this category.
+    pub tools: Vec<String>,
+}
+
+/// A group of skills under a shared category for the welcome screen.
+#[derive(Debug, Clone, Default)]
+pub struct SkillCategory {
+    /// Category name (e.g. "apple", "creative", "research").
+    pub name: String,
+    /// Skill names in this category.
+    pub skills: Vec<String>,
+}
+
+/// Cost guard / budget information for the status bar.
+#[derive(Debug, Clone)]
+pub struct CostGuardInfo {
+    /// Session spending budget (USD), if configured.
+    pub session_budget_usd: Option<String>,
+    /// Amount spent so far (USD).
+    pub spent_usd: String,
+    /// Amount remaining (USD), if budget is set.
+    pub remaining_usd: Option<String>,
+    /// Whether the spending limit has been reached.
+    pub limit_reached: bool,
 }
 
 /// Search state for Ctrl+F in conversation.

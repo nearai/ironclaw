@@ -32,8 +32,9 @@ use crate::widgets::command_palette::CommandPaletteWidget;
 use crate::widgets::logs::LogsWidget;
 use crate::widgets::registry::{BuiltinWidgets, create_default_widgets};
 use crate::widgets::{
-    ActiveTab, AppState, ChatMessage, MessageRole, ToolActivity, ToolStatus, TuiWidget,
-    TurnCostSummary,
+    ActiveTab, AppState, ChatMessage, ContextPressureInfo, CostGuardInfo, JobInfo, JobStatus,
+    MessageRole, RoutineInfo, SandboxInfo, SecretsInfo, SkillCategory, ThreadInfo, ThreadStatus,
+    ToolActivity, ToolCategory, ToolStatus, TuiWidget, TurnCostSummary,
 };
 
 /// Handle returned when the TUI is started. The main crate uses this to
@@ -54,6 +55,12 @@ pub struct TuiAppConfig {
     pub layout: TuiLayout,
     /// Maximum context window size in tokens (e.g., 128_000, 200_000).
     pub context_window: u64,
+    /// Tool categories for the welcome screen.
+    pub tools: Vec<ToolCategory>,
+    /// Skill categories for the welcome screen.
+    pub skills: Vec<SkillCategory>,
+    /// Workspace directory path.
+    pub workspace_path: String,
 }
 
 /// Start the TUI application. Returns a handle for bi-directional communication.
@@ -113,6 +120,9 @@ async fn run_tui(
         model: config.model,
         sidebar_visible: config.layout.sidebar.visible,
         context_window: config.context_window,
+        welcome_tools: config.tools,
+        welcome_skills: config.skills,
+        workspace_path: config.workspace_path,
         ..AppState::default()
     };
 
@@ -580,12 +590,109 @@ async fn handle_event(
         }
 
         TuiEvent::JobStarted { job_id, title } => {
+            let now = chrono::Utc::now();
             state.messages.push(ChatMessage {
                 role: MessageRole::System,
                 content: format!("[job] {title} ({job_id})"),
-                timestamp: chrono::Utc::now(),
+                timestamp: now,
                 cost_summary: None,
             });
+            state.jobs.push(JobInfo {
+                id: job_id.clone(),
+                title: title.clone(),
+                status: JobStatus::Running,
+                started_at: now,
+            });
+            // Mirror to threads for the sidebar widget
+            state.threads.push(ThreadInfo {
+                id: job_id,
+                label: title,
+                is_foreground: false,
+                is_running: true,
+                duration_secs: 0,
+                status: ThreadStatus::Active,
+                started_at: now,
+            });
+        }
+
+        TuiEvent::JobStatus { job_id, status } => {
+            let new_status = match status.as_str() {
+                "running" | "in_progress" => JobStatus::Running,
+                "completed" | "done" => JobStatus::Completed,
+                "failed" => JobStatus::Failed,
+                _ => JobStatus::Running,
+            };
+            if let Some(job) = state.jobs.iter_mut().find(|j| j.id == job_id) {
+                job.status = new_status;
+            }
+            // Update matching thread
+            if let Some(thread) = state.threads.iter_mut().find(|t| t.id == job_id) {
+                match new_status {
+                    JobStatus::Running => {
+                        thread.status = ThreadStatus::Active;
+                        thread.is_running = true;
+                    }
+                    JobStatus::Completed => {
+                        thread.status = ThreadStatus::Completed;
+                        thread.is_running = false;
+                    }
+                    JobStatus::Failed => {
+                        thread.status = ThreadStatus::Failed;
+                        thread.is_running = false;
+                    }
+                    JobStatus::Pending => {
+                        thread.status = ThreadStatus::Idle;
+                        thread.is_running = false;
+                    }
+                }
+            }
+        }
+
+        TuiEvent::JobResult { job_id, status } => {
+            let new_status = if status == "failed" {
+                JobStatus::Failed
+            } else {
+                JobStatus::Completed
+            };
+            if let Some(job) = state.jobs.iter_mut().find(|j| j.id == job_id) {
+                job.status = new_status;
+            }
+            // Update matching thread
+            if let Some(thread) = state.threads.iter_mut().find(|t| t.id == job_id) {
+                thread.is_running = false;
+                thread.status = if new_status == JobStatus::Failed {
+                    ThreadStatus::Failed
+                } else {
+                    ThreadStatus::Completed
+                };
+            }
+        }
+
+        TuiEvent::RoutineUpdate {
+            id,
+            name,
+            trigger_type,
+            enabled,
+            last_run,
+            next_fire,
+        } => {
+            // Upsert: update existing or insert new
+            if let Some(routine) = state.routines.iter_mut().find(|r| r.id == id) {
+                routine.name = name;
+                routine.trigger_type = trigger_type;
+                routine.enabled = enabled;
+                routine.last_run = last_run;
+                routine.next_fire = next_fire;
+            } else {
+                state.routines.push(RoutineInfo {
+                    id,
+                    name,
+                    trigger_type,
+                    enabled,
+                    last_run,
+                    next_fire,
+                });
+            }
         }
 
         TuiEvent::ApprovalNeeded {
@@ -667,6 +774,56 @@ async fn handle_event(
 
         TuiEvent::Suggestions { suggestions } => {
             state.suggestions = suggestions;
+        }
+
+        TuiEvent::ContextPressure {
+            used_tokens,
+            max_tokens,
+            percentage,
+            warning,
+        } => {
+            state.context_pressure = Some(ContextPressureInfo {
+                used_tokens,
+                max_tokens,
+                percentage,
+                warning,
+            });
+        }
+
+        TuiEvent::SandboxStatus {
+            docker_available,
+            running_containers,
+            status,
+        } => {
+            state.sandbox_status = Some(SandboxInfo {
+                docker_available,
+                running_containers,
+                status,
+            });
+        }
+
+        TuiEvent::SecretsStatus {
+            count,
+            vault_unlocked,
+        } => {
+            state.secrets_status = Some(SecretsInfo {
+                count,
+                vault_unlocked,
+            });
+        }
+
+        TuiEvent::CostGuard {
+            session_budget_usd,
+            spent_usd,
+            remaining_usd,
+            limit_reached,
+        } => {
+            state.cost_guard = Some(CostGuardInfo {
+                session_budget_usd,
+                spent_usd,
+                remaining_usd,
+                limit_reached,
+            });
         }
 
         TuiEvent::Log {

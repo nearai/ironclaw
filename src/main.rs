@@ -403,12 +403,40 @@ async fn async_main() -> anyhow::Result<()> {
 
     #[cfg(feature = "tui")]
     if tui_mode && cli.message.is_none() {
+        // Build welcome-screen data: tool categories + skill categories
+        let tool_names = components.tools.list().await;
+        let tool_categories = ironclaw::channels::tui::group_tools_by_prefix(tool_names);
+
+        let skill_categories = if let Some(ref sr) = components.skill_registry {
+            let sr_guard = sr.read().unwrap_or_else(|e| e.into_inner());
+            let skill_data: Vec<(String, Vec<String>)> = sr_guard
+                .skills()
+                .iter()
+                .map(|s| {
+                    (
+                        s.manifest.name.clone(),
+                        s.manifest.activation.tags.clone(),
+                    )
+                })
+                .collect();
+            ironclaw::channels::tui::group_skills_by_tag(&skill_data)
+        } else {
+            Vec::new()
+        };
+
+        let workspace_path = std::env::current_dir()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default();
+
         let tui_channel = ironclaw::channels::TuiChannel::new(
             config.owner_id.clone(),
             env!("CARGO_PKG_VERSION"),
             components.llm.model_name(),
         )
-        .with_log_broadcaster(Arc::clone(&log_broadcaster));
+        .with_log_broadcaster(Arc::clone(&log_broadcaster))
+        .with_tools(tool_categories)
+        .with_skills(skill_categories)
+        .with_workspace_path(workspace_path);
         channels.add(Box::new(tui_channel)).await;
         channel_names.push("tui".to_string());
         tracing::debug!("TUI mode enabled");
@@ -936,6 +964,10 @@ async fn async_main() -> anyhow::Result<()> {
         .as_ref()
         .map(|db| Arc::clone(db) as Arc<dyn ironclaw::db::SettingsStore>);
 
+    // Clone secrets_store before move into AgentDeps (SIGHUP handler also needs it)
+    #[cfg(unix)]
+    let sighup_secrets_store_pre = components.secrets_store.clone();
+
     let deps = AgentDeps {
         owner_id: config.owner_id.clone(),
         store: components.db,
@@ -973,6 +1005,7 @@ async fn async_main() -> anyhow::Result<()> {
             config.agent.max_llm_concurrent_per_user.unwrap_or(4),
             config.agent.max_jobs_concurrent_per_user.unwrap_or(3),
         )),
+        secrets_store: components.secrets_store,
     };
 
     let channels_for_warnings = Arc::clone(&channels);
@@ -1024,7 +1057,7 @@ async fn async_main() -> anyhow::Result<()> {
 
         let sighup_webhook_server = webhook_server.clone();
         let sighup_settings_store_clone = sighup_settings_store.clone();
-        let sighup_secrets_store = components.secrets_store.clone();
+        let sighup_secrets_store = sighup_secrets_store_pre.clone();
         let sighup_owner_id = config.owner_id.clone();
         let mut shutdown_rx = shutdown_tx.subscribe();
 
