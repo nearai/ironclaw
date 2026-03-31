@@ -407,6 +407,7 @@ impl Submission {
                 | Self::JobStatus { .. }
                 | Self::JobCancel { .. }
                 | Self::SystemCommand { .. }
+                | Self::Quit
         )
     }
 }
@@ -991,5 +992,184 @@ mod tests {
         ));
         assert!(matches!(SubmissionParser::parse("/QUIT"), Submission::Quit));
         assert!(matches!(SubmissionParser::parse("/Exit"), Submission::Quit));
+    }
+
+    #[test]
+    fn test_parser_thread_commands() {
+        // /thread new
+        assert!(matches!(
+            SubmissionParser::parse("/thread new"),
+            Submission::NewThread
+        ));
+        assert!(matches!(
+            SubmissionParser::parse("/THREAD NEW"),
+            Submission::NewThread
+        ));
+
+        // /new alias
+        assert!(matches!(
+            SubmissionParser::parse("/new"),
+            Submission::NewThread
+        ));
+
+        // /thread list → SystemCommand { "history" }
+        assert!(
+            matches!(SubmissionParser::parse("/thread list"), Submission::SystemCommand { command, args } if command == "history" && args.is_empty())
+        );
+
+        // /thread with valid UUID
+        let uuid = Uuid::new_v4();
+        let input = format!("/thread {}", uuid);
+        assert!(matches!(
+            SubmissionParser::parse(&input),
+            Submission::SwitchThread { thread_id } if thread_id == uuid
+        ));
+
+        // /thread with invalid UUID → UserInput (not a valid command)
+        let submission = SubmissionParser::parse("/thread not-a-uuid");
+        assert!(matches!(submission, Submission::UserInput { .. }));
+
+        // /resume with valid UUID
+        let uuid = Uuid::new_v4();
+        let input = format!("/resume {}", uuid);
+        assert!(matches!(
+            SubmissionParser::parse(&input),
+            Submission::Resume { checkpoint_id } if checkpoint_id == uuid
+        ));
+
+        // /resume with invalid UUID → UserInput
+        let submission = SubmissionParser::parse("/resume not-a-uuid");
+        assert!(matches!(submission, Submission::UserInput { .. }));
+    }
+
+    #[test]
+    fn test_parser_reasoning_command() {
+        // /reasoning alone
+        assert!(
+            matches!(SubmissionParser::parse("/reasoning"), Submission::SystemCommand { command, args } if command == "reasoning" && args.is_empty())
+        );
+
+        // /reasoning on
+        assert!(
+            matches!(SubmissionParser::parse("/reasoning on"), Submission::SystemCommand { command, args } if command == "reasoning" && args == vec!["on"])
+        );
+
+        // /reasoning off
+        assert!(
+            matches!(SubmissionParser::parse("/reasoning off"), Submission::SystemCommand { command, args } if command == "reasoning" && args == vec!["off"])
+        );
+
+        // /reasoning with model name
+        assert!(
+            matches!(SubmissionParser::parse("/reasoning claude-3-7-sonnet"), Submission::SystemCommand { command, args } if command == "reasoning" && args == vec!["claude-3-7-sonnet"])
+        );
+
+        // Case insensitive command (args preserve original case)
+        assert!(
+            matches!(SubmissionParser::parse("/REASONING ON"), Submission::SystemCommand { command, args } if command == "reasoning" && args == vec!["ON"])
+        );
+
+        // Multiple args (model with spaces would be split)
+        assert!(
+            matches!(SubmissionParser::parse("/reasoning set gpt-4"), Submission::SystemCommand { command, args } if command == "reasoning" && args == vec!["set", "gpt-4"])
+        );
+    }
+
+    #[test]
+    fn test_parser_restart_command() {
+        // /restart
+        assert!(
+            matches!(SubmissionParser::parse("/restart"), Submission::SystemCommand { command, args } if command == "restart" && args.is_empty())
+        );
+        assert!(
+            matches!(SubmissionParser::parse("/RESTART"), Submission::SystemCommand { command, args } if command == "restart" && args.is_empty())
+        );
+    }
+
+    #[test]
+    fn test_parser_control_vs_system_commands() {
+        // Control commands should return true for is_control()
+        assert!(SubmissionParser::parse("/undo").is_control());
+        assert!(SubmissionParser::parse("/redo").is_control());
+        assert!(SubmissionParser::parse("/interrupt").is_control());
+        assert!(SubmissionParser::parse("/stop").is_control());
+        assert!(SubmissionParser::parse("/compact").is_control());
+        assert!(SubmissionParser::parse("/clear").is_control());
+        assert!(SubmissionParser::parse("/heartbeat").is_control());
+        assert!(SubmissionParser::parse("/summarize").is_control());
+        assert!(SubmissionParser::parse("/suggest").is_control());
+        assert!(SubmissionParser::parse("/new").is_control());
+        assert!(SubmissionParser::parse("/thread new").is_control());
+        assert!(SubmissionParser::parse("/quit").is_control());
+        assert!(SubmissionParser::parse("/exit").is_control());
+
+        // System commands also return true for is_control()
+        assert!(SubmissionParser::parse("/help").is_control());
+        assert!(SubmissionParser::parse("/version").is_control());
+        assert!(SubmissionParser::parse("/tools").is_control());
+        assert!(SubmissionParser::parse("/skills").is_control());
+        assert!(SubmissionParser::parse("/ping").is_control());
+        assert!(SubmissionParser::parse("/debug").is_control());
+        assert!(SubmissionParser::parse("/model").is_control());
+        assert!(SubmissionParser::parse("/reasoning").is_control());
+        assert!(SubmissionParser::parse("/restart").is_control());
+
+        // UserInput should NOT be control
+        assert!(!SubmissionParser::parse("hello world").is_control());
+        assert!(!SubmissionParser::parse("/unknowncommand").is_control());
+    }
+
+    #[test]
+    fn test_parser_whitespace_handling() {
+        // Leading/trailing whitespace should be trimmed
+        assert!(matches!(
+            SubmissionParser::parse("  /undo  "),
+            Submission::Undo
+        ));
+        assert!(matches!(
+            SubmissionParser::parse("\t/compact\n"),
+            Submission::Compact
+        ));
+
+        // Empty input → UserInput
+        assert!(matches!(
+            SubmissionParser::parse(""),
+            Submission::UserInput { content } if content.is_empty()
+        ));
+        assert!(matches!(
+            SubmissionParser::parse("   "),
+            Submission::UserInput { content } if content.trim().is_empty()
+        ));
+    }
+
+    #[test]
+    fn test_parser_edge_cases() {
+        // Mixed case commands
+        assert!(matches!(SubmissionParser::parse("/UnDo"), Submission::Undo));
+        assert!(matches!(
+            SubmissionParser::parse("/CoMpAcT"),
+            Submission::Compact
+        ));
+
+        // Commands that are substrings of others
+        assert!(matches!(
+            SubmissionParser::parse("/summarize"),
+            Submission::Summarize
+        ));
+        assert!(matches!(
+            SubmissionParser::parse("/summary"),
+            Submission::Summarize
+        ));
+
+        // Slash in middle of text → UserInput
+        assert!(matches!(
+            SubmissionParser::parse("hello /world test"),
+            Submission::UserInput { .. }
+        ));
+
+        // Multiple spaces in args
+        assert!(
+            matches!(SubmissionParser::parse("/skills  search   markdown"), Submission::SystemCommand { command, args } if command == "skills" && args == vec!["search", "markdown"])
+        );
     }
 }
