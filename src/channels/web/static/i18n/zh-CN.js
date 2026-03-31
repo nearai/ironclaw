@@ -261,6 +261,7 @@ I18n.register('zh-CN', {
   'routines.summary.total': '总计',
   'routines.summary.enabled': '已启用',
   'routines.summary.disabled': '已禁用',
+  'routines.summary.unverified': '未验证',
   'routines.summary.failing': '失败',
   'routines.summary.runsToday': '今日运行',
   

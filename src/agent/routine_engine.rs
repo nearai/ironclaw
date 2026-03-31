@@ -23,7 +23,8 @@ use uuid::Uuid;
 
 use crate::agent::Scheduler;
 use crate::agent::routine::{
-    NotifyConfig, Routine, RoutineAction, RoutineRun, RunStatus, Trigger, next_cron_fire,
+    NotifyConfig, Routine, RoutineAction, RoutineRun, RunStatus, Trigger,
+    apply_routine_verification_result, next_cron_fire, routine_verification_fingerprint,
 };
 use crate::channels::{IncomingMessage, OutgoingResponse};
 use crate::config::RoutineConfig;
@@ -621,7 +622,7 @@ impl RoutineEngine {
         );
 
         // Load the routine to update consecutive_failures and send notification
-        let routine = match self.store.get_routine(run.routine_id).await {
+        let mut routine = match self.store.get_routine(run.routine_id).await {
             Ok(Some(r)) => r,
             Ok(None) => {
                 tracing::warn!(
@@ -649,6 +650,12 @@ impl RoutineEngine {
         };
 
         let now = Utc::now();
+        routine.state = apply_routine_verification_result(
+            &routine.state,
+            routine_verification_fingerprint(&routine),
+            status,
+            now,
+        );
         let next_fire = if let Trigger::Cron {
             ref schedule,
             ref timezone,
@@ -1085,7 +1092,7 @@ struct EngineContext {
 }
 
 /// Execute a routine run. Handles both lightweight and full_job modes.
-async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) {
+async fn execute_routine(ctx: EngineContext, mut routine: Routine, run: RoutineRun) {
     // Increment running count (atomic: survives panics in the execution below)
     ctx.running_count.fetch_add(1, Ordering::Relaxed);
 
@@ -1143,8 +1150,15 @@ async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) 
         tracing::error!(routine = %routine.name, "Failed to complete run record: {}", e);
     }
 
-    // Update routine runtime state
     let now = Utc::now();
+    routine.state = apply_routine_verification_result(
+        &routine.state,
+        routine_verification_fingerprint(&routine),
+        status,
+        now,
+    );
+
+    // Update routine runtime state
     let next_fire = if let Trigger::Cron {
         ref schedule,
         ref timezone,

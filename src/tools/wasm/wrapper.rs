@@ -1266,6 +1266,7 @@ async fn refresh_oauth_token(
                 client_id: &config.client_id,
                 client_secret: config.client_secret.as_deref(),
                 refresh_token: refresh_secret.expose(),
+                resource: None,
                 provider: config.provider.as_deref(),
             },
         )
@@ -1364,6 +1365,14 @@ async fn refresh_oauth_token(
                 .and_then(|v| v.as_str())
                 .map(str::to_string),
             expires_in: token_data.get("expires_in").and_then(|v| v.as_u64()),
+            token_type: token_data
+                .get("token_type")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+            scope: token_data
+                .get("scope")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
         },
         None => {
             tracing::warn!("Token refresh response missing access_token field");

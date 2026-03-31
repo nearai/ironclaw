@@ -565,7 +565,16 @@ impl Tool for HttpTool {
             None
         };
 
-        // Credential injection from shared registry.
+        // Leak detection on outbound request BEFORE credential injection.
+        // Credentials are injected by the system, not the LLM — they are not
+        // exfiltration attempts. Scanning after injection would false-positive
+        // on the injected Authorization header values.
+        let detector = LeakDetector::new();
+        detector
+            .scan_http_request(parsed_url.as_str(), &headers_vec, body_bytes.as_deref())
+            .map_err(|e| ToolError::NotAuthorized(format!("{}", e)))?;
+
+        // Credential injection from shared registry (after leak check).
         // If a credential is registered but not yet configured, we proceed
         // without auth and check the response status — many endpoints (e.g.
         // GitHub public repo search) work without authentication.  Only if
@@ -625,12 +634,6 @@ impl Tool for HttpTool {
                 }
             }
         }
-
-        // Leak detection on outbound request (url/headers/body)
-        let detector = LeakDetector::new();
-        detector
-            .scan_http_request(parsed_url.as_str(), &headers_vec, body_bytes.as_deref())
-            .map_err(|e| ToolError::NotAuthorized(format!("{}", e)))?;
 
         // Build the interceptor request descriptor for recording/replay
         let intercept_req = crate::llm::recording::HttpExchangeRequest {

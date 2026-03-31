@@ -1437,6 +1437,7 @@ mod tests {
                 multi_tenant: false,
                 max_llm_concurrent_per_user: None,
                 max_jobs_concurrent_per_user: None,
+                engine_v2: false,
             },
             deps,
             Arc::new(ChannelManager::new()),
@@ -2319,6 +2320,7 @@ mod tests {
                 multi_tenant: false,
                 max_llm_concurrent_per_user: None,
                 max_jobs_concurrent_per_user: None,
+                engine_v2: false,
             },
             deps,
             Arc::new(ChannelManager::new()),
@@ -2348,7 +2350,7 @@ mod tests {
         // Initialize a thread in the session so the loop can record tool calls.
         let thread_id = {
             let mut sess = session.lock().await;
-            sess.create_thread().id
+            sess.create_thread(Some("test")).id
         };
 
         let message = IncomingMessage::new("test", "test-user", "do something");
@@ -2447,6 +2449,7 @@ mod tests {
                     multi_tenant: false,
                     max_llm_concurrent_per_user: None,
                     max_jobs_concurrent_per_user: None,
+                    engine_v2: false,
                 },
                 deps,
                 Arc::new(ChannelManager::new()),
@@ -2461,7 +2464,7 @@ mod tests {
         let session = Arc::new(Mutex::new(Session::new("test-user")));
         let thread_id = {
             let mut sess = session.lock().await;
-            sess.create_thread().id
+            sess.create_thread(Some("test")).id
         };
 
         let message = IncomingMessage::new("test", "test-user", "keep calling tools");

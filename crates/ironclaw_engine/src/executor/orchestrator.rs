@@ -9,6 +9,7 @@
 //! - `__llm_complete__` — make an LLM call
 //! - `__execute_code_step__` — run user CodeAct code in a nested Monty VM
 //! - `__execute_action__` — execute a single tool action
+//! - `__execute_actions_parallel__` — execute multiple tool actions concurrently
 //! - `__check_signals__` — poll for stop/inject signals
 //! - `__emit_event__` — broadcast a ThreadEvent
 //! - `__add_message__` — append a message to the thread
@@ -26,7 +27,7 @@ use monty::{
     ExtFunctionResult, LimitedTracker, MontyObject, MontyRun, NameLookupResult, PrintWriter,
     ResourceLimits, RunProgress,
 };
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::capability::lease::LeaseManager;
 use crate::capability::policy::PolicyEngine;
@@ -88,9 +89,6 @@ pub async fn load_orchestrator(
         return (DEFAULT_ORCHESTRATOR.to_string(), 0);
     };
 
-    // System operation: load all orchestrator docs for the project.
-    // Use list_all_threads-style approach — pass a broad user_id.
-    // The orchestrator is a system-level resource, not user-scoped.
     let docs = match store.list_memory_docs(project_id, "system").await {
         Ok(d) => d,
         Err(_) => {
@@ -99,6 +97,14 @@ pub async fn load_orchestrator(
         }
     };
 
+    load_orchestrator_from_docs(&docs)
+}
+
+/// Load orchestrator from pre-fetched system memory docs.
+///
+/// When the caller already has the `list_memory_docs` result, use this to
+/// avoid a duplicate Store query. Returns `(code, version)`.
+pub fn load_orchestrator_from_docs(docs: &[crate::types::memory::MemoryDoc]) -> (String, u64) {
     // Find all orchestrator versions, sorted by version number descending
     let mut versions: Vec<_> = docs
         .iter()
@@ -124,7 +130,7 @@ pub async fn load_orchestrator(
     }
 
     // Check failure count for the latest version
-    let failures = load_failure_count(&docs);
+    let failures = load_failure_count(docs);
 
     for doc in &versions {
         let version = doc
@@ -142,7 +148,7 @@ pub async fn load_orchestrator(
                 .unwrap_or(1)
             && failures >= MAX_FAILURES_BEFORE_ROLLBACK
         {
-            warn!(
+            debug!(
                 version,
                 failures, "orchestrator version has too many failures, skipping"
             );
@@ -166,10 +172,13 @@ pub async fn record_orchestrator_failure(
 ) {
     use crate::types::memory::{DocType, MemoryDoc};
 
-    let docs = store
-        .list_memory_docs(project_id, "system")
-        .await
-        .unwrap_or_default();
+    let docs = match store.list_memory_docs(project_id, "system").await {
+        Ok(docs) => docs,
+        Err(e) => {
+            debug!("failed to list memory docs for failure tracker: {e}");
+            return;
+        }
+    };
     let existing = docs.iter().find(|d| d.title == FAILURE_TRACKER_TITLE);
 
     let mut tracker = if let Some(doc) = existing {
@@ -205,7 +214,7 @@ pub async fn record_orchestrator_failure(
     tracker.updated_at = chrono::Utc::now();
 
     if let Err(e) = store.save_memory_doc(&tracker).await {
-        warn!("failed to save orchestrator failure tracker: {e}");
+        debug!("failed to save orchestrator failure tracker: {e}");
     }
 
     debug!(version, count = new_count, "recorded orchestrator failure");
@@ -359,6 +368,14 @@ pub async fn execute_orchestrator(
                     "__execute_action__" => {
                         handle_execute_action(
                             args, kwargs, thread, effects, leases, policy, event_tx,
+                        )
+                        .await
+                    }
+
+                    // __execute_actions_parallel__(calls)
+                    "__execute_actions_parallel__" => {
+                        handle_execute_actions_parallel(
+                            args, thread, effects, leases, policy, event_tx,
                         )
                         .await
                     }
@@ -941,6 +958,438 @@ async fn handle_execute_action(
     }
 }
 
+/// Handle `__execute_actions_parallel__(calls)`.
+///
+/// Batch host function that receives a list of action calls and executes them
+/// concurrently. Each call is a dict with `name`, `params`, and optionally `call_id`.
+///
+/// Returns a list of result dicts (one per call, in order). Each result has the
+/// same shape as `__execute_action__` output, plus an optional `need_approval` or
+/// `need_authentication` flag.
+///
+/// Events are emitted and ActionResult messages are added to the thread in
+/// original call order after all parallel executions complete.
+async fn handle_execute_actions_parallel(
+    args: &[MontyObject],
+    thread: &mut Thread,
+    effects: &Arc<dyn EffectExecutor>,
+    leases: &Arc<LeaseManager>,
+    policy: &Arc<PolicyEngine>,
+    event_tx: Option<&tokio::sync::broadcast::Sender<ThreadEvent>>,
+) -> ExtFunctionResult {
+    // Parse the calls list from the first argument (list of dicts)
+    let calls_json = args
+        .first()
+        .map(monty_to_json)
+        .unwrap_or(serde_json::json!([]));
+    let calls_array = match calls_json.as_array() {
+        Some(arr) => arr.clone(),
+        None => {
+            return ExtFunctionResult::Error(monty::MontyException::new(
+                monty::ExcType::TypeError,
+                Some("__execute_actions_parallel__ requires a list of call dicts".into()),
+            ));
+        }
+    };
+
+    if calls_array.is_empty() {
+        return ExtFunctionResult::Return(json_to_monty(&serde_json::json!([])));
+    }
+
+    // Parse each call dict into (name, params, call_id)
+    struct ParsedCall {
+        name: String,
+        params: serde_json::Value,
+        call_id: String,
+    }
+
+    let mut parsed: Vec<ParsedCall> = Vec::with_capacity(calls_array.len());
+    for c in &calls_array {
+        let name = c
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let params = c.get("params").cloned().unwrap_or(serde_json::json!({}));
+        let call_id = c
+            .get("call_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        parsed.push(ParsedCall {
+            name,
+            params,
+            call_id,
+        });
+    }
+
+    let step_id = StepId::new();
+
+    // ── Phase 1: Preflight (sequential) ─────────────────────────
+    // Check leases and policies. Denied → error result. Approval → interrupt.
+
+    enum PfOutcome {
+        Runnable {
+            lease: crate::types::capability::CapabilityLease,
+        },
+        Error {
+            result_json: serde_json::Value,
+            event: EventKind,
+            output: serde_json::Value,
+        },
+    }
+
+    let mut preflight: Vec<Option<PfOutcome>> = Vec::with_capacity(parsed.len());
+
+    for pc in &parsed {
+        // Find lease
+        let lease = match leases.find_lease_for_action(thread.id, &pc.name).await {
+            Some(l) => l,
+            None => {
+                let error = format!("No lease for action '{}'", pc.name);
+                let output = serde_json::json!({"error": &error});
+                let result_json = serde_json::json!({
+                    "output": &output,
+                    "is_error": true,
+                });
+                let event = EventKind::ActionFailed {
+                    step_id,
+                    action_name: pc.name.clone(),
+                    call_id: pc.call_id.clone(),
+                    error,
+                    params_summary: None,
+                };
+                preflight.push(Some(PfOutcome::Error {
+                    result_json,
+                    event,
+                    output,
+                }));
+                continue;
+            }
+        };
+
+        // Check policy
+        let action_def = effects
+            .available_actions(std::slice::from_ref(&lease))
+            .await
+            .ok()
+            .and_then(|actions| actions.into_iter().find(|a| a.name == pc.name));
+
+        if let Some(ref ad) = action_def {
+            match policy.evaluate(ad, &lease, &[]) {
+                crate::capability::policy::PolicyDecision::Deny { reason } => {
+                    let output = serde_json::json!({"error": format!("Denied: {reason}")});
+                    let result_json = serde_json::json!({
+                        "output": &output,
+                        "is_error": true,
+                    });
+                    let event = EventKind::ActionFailed {
+                        step_id,
+                        action_name: pc.name.clone(),
+                        call_id: pc.call_id.clone(),
+                        error: reason,
+                        params_summary: None,
+                    };
+                    preflight.push(Some(PfOutcome::Error {
+                        result_json,
+                        event,
+                        output,
+                    }));
+                    continue;
+                }
+                crate::capability::policy::PolicyDecision::RequireApproval { .. } => {
+                    // Emit events for earlier errors, then interrupt
+                    let mut results_json = Vec::with_capacity(preflight.len() + 1);
+                    for pf in preflight {
+                        match pf {
+                            Some(PfOutcome::Error {
+                                result_json,
+                                event,
+                                output: _,
+                            }) => {
+                                let ev = ThreadEvent::new(thread.id, event);
+                                if let Some(tx) = event_tx {
+                                    let _ = tx.send(ev.clone());
+                                }
+                                thread.events.push(ev);
+                                // Don't add ActionResult message for earlier errors during approval interrupt
+                                results_json.push(result_json);
+                            }
+                            Some(PfOutcome::Runnable { .. }) | None => {
+                                results_json.push(serde_json::json!(null));
+                            }
+                        }
+                    }
+                    // Add the approval entry
+                    let output = serde_json::json!({"status": "awaiting_approval"});
+                    let ev = ThreadEvent::new(
+                        thread.id,
+                        EventKind::ApprovalRequested {
+                            action_name: pc.name.clone(),
+                            call_id: pc.call_id.clone(),
+                        },
+                    );
+                    if let Some(tx) = event_tx {
+                        let _ = tx.send(ev.clone());
+                    }
+                    thread.events.push(ev);
+                    thread.updated_at = chrono::Utc::now();
+                    thread.add_message(ThreadMessage::action_result(
+                        &pc.call_id,
+                        &pc.name,
+                        output.to_string(),
+                    ));
+
+                    results_json.push(serde_json::json!({
+                        "need_approval": true,
+                        "action_name": &pc.name,
+                    }));
+                    return ExtFunctionResult::Return(json_to_monty(&serde_json::json!(
+                        results_json
+                    )));
+                }
+                crate::capability::policy::PolicyDecision::Allow => {}
+            }
+        }
+
+        // Consume lease
+        if let Err(e) = leases.consume_use(lease.id).await {
+            debug!(error = %e, "lease consumption failed (non-fatal)");
+        }
+
+        preflight.push(Some(PfOutcome::Runnable { lease }));
+    }
+
+    // ── Phase 2: Execute in parallel ────────────────────────────
+
+    // Slot array: index → execution result
+    let mut slot_results: Vec<Option<serde_json::Value>> = vec![None; parsed.len()];
+    let mut slot_events: Vec<Option<EventKind>> = vec![None; parsed.len()];
+    let mut slot_outputs: Vec<Option<serde_json::Value>> = vec![None; parsed.len()];
+
+    // Separate runnable from errors
+    let mut runnable: Vec<(usize, crate::types::capability::CapabilityLease)> = Vec::new();
+    for (idx, pf) in preflight.into_iter().enumerate() {
+        match pf {
+            Some(PfOutcome::Error {
+                result_json,
+                event,
+                output,
+            }) => {
+                slot_results[idx] = Some(result_json);
+                slot_events[idx] = Some(event);
+                slot_outputs[idx] = Some(output);
+            }
+            Some(PfOutcome::Runnable { lease }) => {
+                runnable.push((idx, lease));
+            }
+            None => {}
+        }
+    }
+
+    if runnable.len() == 1 {
+        // Single call: execute directly
+        let (idx, lease) = runnable.into_iter().next().unwrap(); // safety: len()==1 checked above
+        let pc = &parsed[idx];
+        let exec_ctx = ThreadExecutionContext {
+            thread_id: thread.id,
+            thread_type: thread.thread_type,
+            project_id: thread.project_id,
+            user_id: thread.user_id.clone(),
+            step_id,
+        };
+        let ps = summarize_params(&pc.name, &pc.params);
+        let (result_json, event, output) = execute_single_action(
+            effects,
+            &pc.name,
+            pc.params.clone(),
+            &pc.call_id,
+            &lease,
+            &exec_ctx,
+            ps,
+        )
+        .await;
+        slot_results[idx] = Some(result_json);
+        slot_events[idx] = Some(event);
+        slot_outputs[idx] = Some(output);
+    } else if runnable.len() > 1 {
+        // Multiple calls: execute in parallel via JoinSet
+        let mut join_set = tokio::task::JoinSet::new();
+        let effects = effects.clone();
+
+        for (idx, lease) in runnable {
+            let pc_name = parsed[idx].name.clone();
+            let pc_params = parsed[idx].params.clone();
+            let pc_call_id = parsed[idx].call_id.clone();
+            let effects = effects.clone();
+            let lease = lease.clone();
+            let exec_ctx = ThreadExecutionContext {
+                thread_id: thread.id,
+                thread_type: thread.thread_type,
+                project_id: thread.project_id,
+                user_id: thread.user_id.clone(),
+                step_id,
+            };
+            let ps = summarize_params(&pc_name, &pc_params);
+
+            join_set.spawn(async move {
+                let (result_json, event, output) = execute_single_action(
+                    &effects,
+                    &pc_name,
+                    pc_params,
+                    &pc_call_id,
+                    &lease,
+                    &exec_ctx,
+                    ps,
+                )
+                .await;
+                (idx, result_json, event, output)
+            });
+        }
+
+        while let Some(join_result) = join_set.join_next().await {
+            match join_result {
+                Ok((idx, result_json, event, output)) => {
+                    slot_results[idx] = Some(result_json);
+                    slot_events[idx] = Some(event);
+                    slot_outputs[idx] = Some(output);
+                }
+                Err(e) => {
+                    debug!("parallel action execution task panicked: {e}");
+                }
+            }
+        }
+    }
+
+    // ── Phase 3: Emit events and add messages in order ──────────
+
+    let mut results_json = Vec::with_capacity(parsed.len());
+    for idx in 0..parsed.len() {
+        let result_json = slot_results[idx].take().unwrap_or(
+            serde_json::json!({"is_error": true, "output": {"error": "execution slot empty"}}),
+        );
+        let output = slot_outputs[idx]
+            .take()
+            .unwrap_or(serde_json::json!({"error": "no output"}));
+
+        if let Some(event) = slot_events[idx].take() {
+            let ev = ThreadEvent::new(thread.id, event);
+            if let Some(tx) = event_tx {
+                let _ = tx.send(ev.clone());
+            }
+            thread.events.push(ev);
+        }
+
+        thread.add_message(ThreadMessage::action_result(
+            &parsed[idx].call_id,
+            &parsed[idx].name,
+            output.to_string(),
+        ));
+
+        results_json.push(result_json.clone());
+    }
+
+    thread.updated_at = chrono::Utc::now();
+    ExtFunctionResult::Return(json_to_monty(&serde_json::json!(results_json)))
+}
+
+/// Execute a single action and return (result_json, event, output) for the
+/// batch handler to record. Shared by both single-call and parallel paths.
+async fn execute_single_action(
+    effects: &Arc<dyn EffectExecutor>,
+    name: &str,
+    params: serde_json::Value,
+    call_id: &str,
+    lease: &crate::types::capability::CapabilityLease,
+    exec_ctx: &ThreadExecutionContext,
+    params_summary: Option<String>,
+) -> (serde_json::Value, EventKind, serde_json::Value) {
+    match effects.execute_action(name, params, lease, exec_ctx).await {
+        Ok(r) => {
+            let event = EventKind::ActionExecuted {
+                step_id: exec_ctx.step_id,
+                action_name: name.to_string(),
+                call_id: call_id.to_string(),
+                duration_ms: r.duration.as_millis() as u64,
+                params_summary: params_summary.clone(),
+            };
+            let result_json = serde_json::json!({
+                "action_name": r.action_name,
+                "output": r.output,
+                "is_error": r.is_error,
+                "duration_ms": r.duration.as_millis(),
+            });
+            (result_json, event, r.output)
+        }
+        Err(EngineError::NeedApproval { .. }) => {
+            let output = serde_json::json!({"status": "awaiting_approval"});
+            let event = EventKind::ApprovalRequested {
+                action_name: name.to_string(),
+                call_id: call_id.to_string(),
+            };
+            let result_json = serde_json::json!({
+                "need_approval": true,
+                "action_name": name,
+            });
+            (result_json, event, output)
+        }
+        Err(EngineError::GatePaused {
+            gate_name,
+            action_name: _,
+            call_id: _,
+            parameters: _,
+            resume_kind,
+        }) => {
+            let output = serde_json::json!({"status": "gate_paused", "gate_name": &gate_name});
+            let event = EventKind::ApprovalRequested {
+                action_name: name.to_string(),
+                call_id: call_id.to_string(),
+            };
+            let result_json = serde_json::json!({
+                "gate_paused": true,
+                "gate_name": gate_name,
+                "action_name": name,
+                "resume_kind": serde_json::to_value(&*resume_kind).unwrap_or_default(),
+            });
+            (result_json, event, output)
+        }
+        Err(EngineError::NeedAuthentication {
+            credential_name, ..
+        }) => {
+            let output = serde_json::json!({"status": "authentication_required", "credential_name": &credential_name});
+            let error_msg = format!("authentication required for credential '{credential_name}'");
+            let event = EventKind::ActionFailed {
+                step_id: exec_ctx.step_id,
+                action_name: name.to_string(),
+                call_id: call_id.to_string(),
+                error: error_msg,
+                params_summary,
+            };
+            let result_json = serde_json::json!({
+                "need_authentication": true,
+                "credential_name": credential_name,
+                "action_name": name,
+            });
+            (result_json, event, output)
+        }
+        Err(e) => {
+            let output = serde_json::json!({"error": e.to_string()});
+            let event = EventKind::ActionFailed {
+                step_id: exec_ctx.step_id,
+                action_name: name.to_string(),
+                call_id: call_id.to_string(),
+                error: e.to_string(),
+                params_summary,
+            };
+            let result_json = serde_json::json!({
+                "output": &output,
+                "is_error": true,
+            });
+            (result_json, event, output)
+        }
+    }
+}
+
 /// Handle `__check_signals__()`.
 fn handle_check_signals(signal_rx: &mut SignalReceiver) -> ExtFunctionResult {
     match signal_rx.try_recv() {
@@ -1176,7 +1625,7 @@ async fn handle_retrieve_docs(
             ExtFunctionResult::Return(json_to_monty(&serde_json::json!(docs_json)))
         }
         Err(e) => {
-            warn!("retrieve_docs failed: {e}");
+            debug!("retrieve_docs failed: {e}");
             ExtFunctionResult::Return(json_to_monty(&serde_json::json!([])))
         }
     }
@@ -1238,7 +1687,7 @@ async fn handle_get_actions(
             ExtFunctionResult::Return(json_to_monty(&serde_json::json!(actions_json)))
         }
         Err(e) => {
-            warn!("get_actions failed: {e}");
+            debug!("get_actions failed: {e}");
             ExtFunctionResult::Return(json_to_monty(&serde_json::json!([])))
         }
     }
@@ -1309,7 +1758,7 @@ async fn handle_record_skill_usage(
         return ExtFunctionResult::Return(MontyObject::None);
     };
 
-    let tracker = crate::capability::skill_tracker::SkillTracker::new(Arc::clone(store));
+    let tracker = crate::memory::SkillTracker::new(Arc::clone(store));
     if let Err(e) = tracker
         .record_usage(crate::types::memory::DocId(uuid), success)
         .await
@@ -1514,6 +1963,225 @@ mod tests {
     use super::*;
     use crate::types::memory::{DocType, MemoryDoc};
     use crate::types::project::ProjectId;
+
+    // ── Python helper unit tests via Monty ──────────────────────
+    //
+    // Extracts the helper functions from the default orchestrator and
+    // evaluates `signals_tool_intent(text)` directly, mirroring the V1
+    // Rust unit test suite in src/llm/reasoning.rs.
+
+    /// Run a Python expression that returns a bool by prepending the
+    /// orchestrator helper definitions and wrapping in `FINAL(expr)`.
+    fn eval_python_bool(expr: &str) -> bool {
+        // Extract only the helper functions (everything before run_loop)
+        let helpers_end = DEFAULT_ORCHESTRATOR
+            .find("\ndef run_loop(")
+            .unwrap_or(DEFAULT_ORCHESTRATOR.len());
+        let helpers = &DEFAULT_ORCHESTRATOR[..helpers_end];
+
+        let code = format!("{helpers}\nFINAL({expr})");
+
+        let runner = MontyRun::new(code.to_string(), "test.py", vec![])
+            .expect("Failed to parse orchestrator helpers");
+        let mut stdout = String::new();
+        let tracker = LimitedTracker::new(ResourceLimits::new().max_allocations(500_000));
+
+        let mut progress = runner
+            .start(vec![], tracker, PrintWriter::Collect(&mut stdout))
+            .expect("Failed to start orchestrator test");
+
+        // Drive the VM — handle the FINAL() host call
+        loop {
+            match progress {
+                RunProgress::Complete(obj) => {
+                    return match obj {
+                        MontyObject::Bool(v) => v,
+                        other => panic!("Expected bool, got: {other:?}"),
+                    };
+                }
+                RunProgress::FunctionCall(call) => {
+                    if call.function_name == "FINAL" {
+                        let val = call.args.first().cloned().unwrap_or(MontyObject::None);
+                        // Resume and discard — we already have the value
+                        let _ = call.resume(
+                            ExtFunctionResult::Return(MontyObject::None),
+                            PrintWriter::Collect(&mut stdout),
+                        );
+                        return match val {
+                            MontyObject::Bool(v) => v,
+                            other => panic!("FINAL() received non-bool: {other:?}"),
+                        };
+                    }
+                    // Unknown host function — return None and continue
+                    progress = call
+                        .resume(
+                            ExtFunctionResult::Return(MontyObject::None),
+                            PrintWriter::Collect(&mut stdout),
+                        )
+                        .expect("resume failed");
+                }
+                RunProgress::NameLookup(lookup) => {
+                    progress = lookup
+                        .resume(
+                            NameLookupResult::Undefined,
+                            PrintWriter::Collect(&mut stdout),
+                        )
+                        .expect("name lookup resume failed");
+                }
+                _ => panic!("Unexpected RunProgress variant in test"),
+            }
+        }
+    }
+
+    // ── True positives (should trigger nudge) ───────────────────
+
+    #[test]
+    fn signals_tool_intent_true_positives() {
+        assert!(eval_python_bool(
+            r#"signals_tool_intent("Let me search for that file.")"#
+        ));
+        assert!(eval_python_bool(
+            r#"signals_tool_intent("I'll fetch the data now.")"#
+        ));
+        assert!(eval_python_bool(
+            r#"signals_tool_intent("I'm going to check the logs.")"#
+        ));
+        assert!(eval_python_bool(
+            r#"signals_tool_intent("Let me add it now.")"#
+        ));
+        assert!(eval_python_bool(
+            r#"signals_tool_intent("I will run the tests to verify.")"#
+        ));
+        assert!(eval_python_bool(
+            r#"signals_tool_intent("I'll look up the documentation.")"#
+        ));
+        assert!(eval_python_bool(
+            r#"signals_tool_intent("Let me read the file contents.")"#
+        ));
+        assert!(eval_python_bool(
+            r#"signals_tool_intent("I'm going to execute the command.")"#
+        ));
+    }
+
+    // ── True negatives: conversational phrases ──────────────────
+
+    #[test]
+    fn signals_tool_intent_true_negatives_conversational() {
+        assert!(!eval_python_bool(
+            r#"signals_tool_intent("Let me explain how this works.")"#
+        ));
+        assert!(!eval_python_bool(
+            r#"signals_tool_intent("Let me know if you need anything.")"#
+        ));
+        assert!(!eval_python_bool(
+            r#"signals_tool_intent("Let me think about this.")"#
+        ));
+        assert!(!eval_python_bool(
+            r#"signals_tool_intent("Let me summarize the findings.")"#
+        ));
+        assert!(!eval_python_bool(
+            r#"signals_tool_intent("Let me clarify what I mean.")"#
+        ));
+    }
+
+    // ── Exclusion takes precedence ──────────────────────────────
+
+    #[test]
+    fn signals_tool_intent_exclusion_takes_precedence() {
+        assert!(!eval_python_bool(
+            r#"signals_tool_intent("Let me explain the approach, then I'll search for the file.")"#
+        ));
+    }
+
+    // ── Code blocks are stripped ────────────────────────────────
+
+    #[test]
+    fn signals_tool_intent_ignores_code_blocks() {
+        assert!(!eval_python_bool(
+            r#"signals_tool_intent("Here's the code:\n\n```\nfn main() {\n    println!(\"Let me search the database\");\n}\n```")"#
+        ));
+    }
+
+    #[test]
+    fn signals_tool_intent_ignores_indented_code() {
+        assert!(!eval_python_bool(
+            r#"signals_tool_intent("Here's the code:\n\n    println!(\"I'll fetch the data\");\n\nThat's it.")"#
+        ));
+    }
+
+    // ── Plain informational text ────────────────────────────────
+
+    #[test]
+    fn signals_tool_intent_ignores_plain_text() {
+        assert!(!eval_python_bool(
+            r#"signals_tool_intent("The task is complete.")"#
+        ));
+        assert!(!eval_python_bool(
+            r#"signals_tool_intent("Here are the results you asked for.")"#
+        ));
+        assert!(!eval_python_bool(
+            r#"signals_tool_intent("I found 3 matching files.")"#
+        ));
+    }
+
+    // ── Quoted strings are stripped ─────────────────────────────
+
+    #[test]
+    fn signals_tool_intent_ignores_quoted_strings() {
+        assert!(!eval_python_bool(
+            r#"signals_tool_intent("The button says \"Let me search the database\" to the user.")"#
+        ));
+        // But unquoted intent should still trigger
+        assert!(eval_python_bool(
+            r#"signals_tool_intent("I'll fetch the results for you.")"#
+        ));
+    }
+
+    // ── Shadowed prefix (exclusion cancels all) ─────────────────
+
+    #[test]
+    fn signals_tool_intent_shadowed_prefix() {
+        // "let me think" is an exclusion → entire text returns false
+        assert!(!eval_python_bool(
+            r#"signals_tool_intent("Sure, let me think about it. Actually, let me search for the file.")"#
+        ));
+    }
+
+    // ── Regression: trace false positive (news content) ─────────
+
+    #[test]
+    fn signals_tool_intent_no_false_positive_news_content() {
+        // "I can" + "call" in news content triggered false positive in old code
+        let news_response = concat!(
+            "The latest headlines suggest this is a fast-moving war.\n",
+            "- Reuters: Iran is calling US peace proposals unrealistic.\n",
+            "If you want, I can do one of these next:\n",
+            "1. give you a 5-bullet update\n",
+            "2. focus just on military developments",
+        );
+        assert!(!eval_python_bool(&format!(
+            "signals_tool_intent({news_response:?})"
+        )));
+    }
+
+    #[test]
+    fn signals_tool_intent_no_false_positive_past_tense() {
+        // "I fetched" / "I already called" should not trigger
+        assert!(!eval_python_bool(
+            r#"signals_tool_intent("I already completed the needed action call by fetching current news feeds.")"#
+        ));
+        assert!(!eval_python_bool(
+            r#"signals_tool_intent("Current status from the live feeds I fetched:")"#
+        ));
+    }
+
+    #[test]
+    fn signals_tool_intent_no_false_positive_offer() {
+        // "If you want, I can fetch..." uses "I can" which is not a V1 prefix
+        assert!(!eval_python_bool(
+            r#"signals_tool_intent("If you want, I can next fetch a cleaner update.")"#
+        ));
+    }
 
     #[tokio::test]
     async fn load_orchestrator_without_store_returns_default() {

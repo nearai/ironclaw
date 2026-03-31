@@ -8,7 +8,6 @@ pub mod lease;
 pub mod planner;
 pub mod policy;
 pub mod registry;
-pub mod skill_tracker;
 
 pub use lease::LeaseManager;
 pub use policy::{PolicyDecision, PolicyEngine};

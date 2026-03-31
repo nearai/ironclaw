@@ -114,7 +114,7 @@ fn default_version() -> u32 {
 }
 
 fn default_trust() -> SkillTrust {
-    SkillTrust::Trusted
+    SkillTrust::Installed
 }
 
 #[cfg(test)]
@@ -202,7 +202,7 @@ mod tests {
         assert_eq!(parsed.name, "");
         assert_eq!(parsed.version, 1);
         assert_eq!(parsed.source, V2SkillSource::Authored);
-        assert_eq!(parsed.trust, SkillTrust::Trusted);
+        assert_eq!(parsed.trust, SkillTrust::Installed);
         assert!(parsed.code_snippets.is_empty());
         assert!((parsed.metrics.confidence() - 1.0).abs() < f64::EPSILON);
     }

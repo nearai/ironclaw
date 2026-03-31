@@ -418,16 +418,5 @@ class TestV2EngineApprovalFlow:
             f"Got {len(turns)} turns."
         )
 
-    async def test_approval_prompt_contains_tool_name(self, v2_approval_server):
-        """The approval prompt should mention the tool name.
-
-        NOTE: This test must run BEFORE test_approval_always, because once
-        'always' is granted the tool auto-approves and no prompt appears.
-        Pytest runs tests in file order within a class, so this is placed
-        before test_approval_always above.
-        """
-        # This assertion is already covered by test_approval_yes (the prompt
-        # text was verified there).  Kept as an explicit check.
-        # After 'always' is granted (by a prior test run in the same server),
-        # the tool auto-approves.  So we check via the initial approval tests.
-        pass
+    # test_approval_prompt_contains_tool_name was removed — the assertion
+    # is covered by test_approval_yes which verifies the prompt text.

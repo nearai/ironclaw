@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use tokio::sync::RwLock;
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::memory::RetrievalEngine;
 use crate::runtime::manager::ThreadManager;
@@ -157,7 +157,7 @@ impl MissionManager {
         }
 
         if mission.is_terminal() {
-            warn!(mission_id = %id, status = ?mission.status, "cannot fire terminal mission");
+            debug!(mission_id = %id, status = ?mission.status, "cannot fire terminal mission");
             return Ok(None);
         }
 
@@ -249,7 +249,7 @@ impl MissionManager {
                         debug!(count = spawned.len(), "cron ticker spawned mission threads");
                     }
                     Err(e) => {
-                        warn!("cron ticker error: {e}");
+                        debug!("cron ticker error: {e}");
                     }
                     _ => {}
                 }
@@ -419,7 +419,7 @@ impl MissionManager {
                                 )
                                 .await
                             {
-                                warn!("event listener: failed to fire error diagnosis: {e}");
+                                debug!("event listener: failed to fire error diagnosis: {e}");
                             }
                         }
 
@@ -477,7 +477,7 @@ impl MissionManager {
                                 )
                                 .await
                             {
-                                warn!("event listener: failed to fire skill extraction: {e}");
+                                debug!("event listener: failed to fire skill extraction: {e}");
                             }
                         }
 
@@ -528,7 +528,7 @@ impl MissionManager {
                                 )
                                 .await
                             {
-                                warn!("event listener: failed to fire conversation insights: {e}");
+                                debug!("event listener: failed to fire conversation insights: {e}");
                             }
                         }
                     }
@@ -813,11 +813,11 @@ impl MissionManager {
                     if let Err(e) =
                         process_mission_outcome(&store, mission_id, thread_id, &outcome).await
                     {
-                        warn!(mission_id = %mission_id, "failed to process outcome: {e}");
+                        debug!(mission_id = %mission_id, "failed to process outcome: {e}");
                     }
                 }
                 Err(e) => {
-                    warn!(mission_id = %mission_id, "thread join failed: {e}");
+                    debug!(mission_id = %mission_id, "thread join failed: {e}");
                 }
             }
         });
@@ -952,7 +952,7 @@ async fn process_mission_outcome(
             if is_self_improvement_mission(&mission)
                 && let Err(e) = process_self_improvement_output(store, &mission, text).await
             {
-                warn!(
+                debug!(
                     mission_id = %mission_id,
                     "failed to process self-improvement output: {e}"
                 );

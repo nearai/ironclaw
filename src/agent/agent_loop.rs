@@ -520,7 +520,7 @@ impl Agent {
 
         // Eagerly initialize engine v2 so gateway API endpoints can serve
         // data (projects, missions, threads) before the first chat message.
-        if crate::bridge::is_engine_v2_enabled()
+        if self.config.engine_v2
             && let Err(e) = crate::bridge::init_engine(&self).await
         {
             tracing::debug!("engine v2: eager init failed: {e}");
@@ -907,7 +907,10 @@ impl Agent {
             {
                 use crate::agent::session::Thread;
                 let mut sess = session.lock().await;
-                let thread = Thread::with_id(id, sess.id);
+                // Bootstrap thread has no incoming message -- use the
+                // "__bootstrap__" sentinel so approvals from any channel are
+                // permitted. None means "deny by default" (fail-closed).
+                let thread = Thread::with_id(id, sess.id, Some("__bootstrap__"));
                 sess.active_thread = Some(id);
                 sess.threads.entry(id).or_insert(thread);
             }
@@ -1180,7 +1183,7 @@ impl Agent {
         }
 
         // Engine V2 routing (Strategy C: parallel deployment)
-        if crate::bridge::is_engine_v2_enabled() {
+        if self.config.engine_v2 {
             match &submission {
                 Submission::UserInput { content } => {
                     return crate::bridge::handle_with_engine(self, message, content).await;
@@ -1218,9 +1221,12 @@ impl Agent {
                 Submission::Clear => {
                     return crate::bridge::handle_clear(self, message).await;
                 }
+                Submission::Expected { description } => {
+                    return crate::bridge::handle_expected(self, message, description).await;
+                }
                 // Undo/Redo/Resume/SwitchThread: v1-only (engine has no undo;
                 // thread switching is implicit via ConversationManager).
-                // Compact/Summarize/Suggest: orthogonal to engine (use workspace/LLM directly).
+                // Compact/Summarize/Suggest: orthogonal to engine (compaction is internal).
                 // Heartbeat/SystemCommand/JobStatus/JobCancel/Quit: v1 infrastructure.
                 _ => {}
             }
@@ -1259,7 +1265,37 @@ impl Agent {
                 .get_or_create_session(&message.user_id)
                 .await;
             let mut sess = session.lock().await;
-            if sess.threads.contains_key(&target_thread_id) {
+            if let Some(thread) = sess.threads.get(&target_thread_id) {
+                // Verify the thread actually has a pending approval before
+                // allowing approval-shaped messages to target it. Without this
+                // check, an attacker could use approval messages to hijack any
+                // thread by UUID.
+                if thread.pending_approval.is_none() {
+                    tracing::warn!(
+                        %target_thread_id,
+                        approval_channel = %message.channel,
+                        "Blocked approval for thread with no pending approval"
+                    );
+                    drop(sess);
+                    return Ok(Some("Error: no pending approval on this thread".into()));
+                }
+
+                let authorized = crate::agent::session::is_approval_authorized(
+                    thread.source_channel.as_deref(),
+                    &message.channel,
+                );
+                if !authorized {
+                    tracing::warn!(
+                        %target_thread_id,
+                        source_channel = ?thread.source_channel,
+                        approval_channel = %message.channel,
+                        "Blocked cross-channel approval attempt"
+                    );
+                    drop(sess);
+                    return Ok(Some(
+                        "Error: approval not authorized for this channel".into(),
+                    ));
+                }
                 sess.active_thread = Some(target_thread_id);
                 sess.last_active_at = chrono::Utc::now();
                 drop(sess);

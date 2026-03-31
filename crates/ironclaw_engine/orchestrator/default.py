@@ -8,6 +8,7 @@
 #   __llm_complete__(messages, actions, config)  -> response dict  (args ignored; Rust builds context from thread)
 #   __execute_code_step__(code, state)           -> result dict
 #   __execute_action__(name, params)             -> result dict
+#   __execute_actions_parallel__(calls)          -> list of result dicts (parallel execution)
 #   __check_signals__()                          -> None | "stop" | {"inject": msg}
 #   __emit_event__(kind, **data)                 -> None
 #   __add_message__(role, content)               -> None
@@ -59,16 +60,82 @@ def extract_final(text):
     return None
 
 
+def strip_quoted_strings(line):
+    """Remove double-quoted string literals from a line."""
+    result = []
+    in_quote = False
+    prev = ""
+    for ch in line:
+        if ch == '"' and prev != "\\":
+            in_quote = not in_quote
+            prev = ch
+            continue
+        if not in_quote:
+            result.append(ch)
+        prev = ch
+    return "".join(result)
+
+
+def strip_code_blocks(text):
+    """Strip fenced code blocks, indented code lines, and double-quoted strings."""
+    result = []
+    in_fence = False
+    for line in text.split("\n"):
+        trimmed = line.lstrip()
+        if trimmed.startswith("```"):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        if line.startswith("    ") or line.startswith("\t"):
+            continue
+        result.append(strip_quoted_strings(line))
+    return "\n".join(result)
+
+
 def signals_tool_intent(text):
-    """Check if text describes tool usage without actually executing tools."""
-    lower = text.lower()
-    intent_phrases = ["i will", "i'll", "let me", "i would", "i should",
-                      "i can", "i need to", "we should", "we can"]
-    tool_phrases = ["search", "fetch", "call", "run", "execute",
-                    "use the", "query", "look up"]
-    has_intent = any(p in lower for p in intent_phrases)
-    has_tool = any(p in lower for p in tool_phrases)
-    return has_intent and has_tool
+    """Detect when text expresses intent to call a tool without actually doing so.
+
+    Ported from V1 Rust llm_signals_tool_intent(): strips code blocks and
+    quoted strings, checks exclusion phrases, then requires a future-tense
+    prefix ("let me", "I'll", "I will", "I'm going to") immediately followed
+    by an action verb ("search", "fetch", "check", etc.).
+    """
+    stripped = strip_code_blocks(text)
+    lower = stripped.lower()
+
+    EXCLUSIONS = [
+        "let me explain", "let me know", "let me think",
+        "let me summarize", "let me clarify", "let me describe",
+        "let me help", "let me understand", "let me break",
+        "let me outline", "let me walk you", "let me provide",
+        "let me suggest", "let me elaborate", "let me start by",
+    ]
+    for exc in EXCLUSIONS:
+        if exc in lower:
+            return False
+
+    PREFIXES = ["let me ", "i'll ", "i will ", "i'm going to "]
+    ACTION_VERBS = [
+        "search", "look up", "check", "fetch", "find",
+        "read the", "write the", "create", "run the", "execute",
+        "query", "retrieve", "add it", "add the", "add this",
+        "add that", "update the", "delete", "remove the", "look into",
+    ]
+
+    for prefix in PREFIXES:
+        start = 0
+        while True:
+            i = lower.find(prefix, start)
+            if i < 0:
+                break
+            after = lower[i + len(prefix):]
+            for verb in ACTION_VERBS:
+                if after.startswith(verb) or (" " + verb) in after.split("\n")[0]:
+                    return True
+            start = i + 1
+
+    return False
 
 
 def format_output(result, max_chars=8000):
@@ -238,7 +305,7 @@ def run_loop(context, goal, actions, state, config):
     max_nudges = config.get("max_tool_intent_nudges", 2)
     nudge_enabled = config.get("enable_tool_intent_nudge", True)
     max_consecutive_errors = config.get("max_consecutive_errors", 5)
-    nudge_count = 0
+    consecutive_nudges = 0
     consecutive_errors = 0
     step_count = config.get("step_count", 0)
 
@@ -306,13 +373,19 @@ def run_loop(context, goal, actions, state, config):
                 __transition_to__("completed", "FINAL() in text")
                 return {"outcome": "completed", "response": final_answer}
 
-            # Check for tool intent nudge
-            if nudge_enabled and nudge_count < max_nudges and signals_tool_intent(text):
-                nudge_count += 1
+            # Check for tool intent nudge (V1 semantics: consecutive counter,
+            # only resets on non-intent text, NOT on action/code responses)
+            if nudge_enabled and consecutive_nudges < max_nudges and signals_tool_intent(text):
+                consecutive_nudges += 1
                 __add_message__("user",
-                    "You expressed intent to use a tool but didn't make an action call. "
-                    "Please go ahead and call the appropriate action.")
+                    "You said you would perform an action, but you did not include any tool calls.\n"
+                    "Do NOT describe what you intend to do — actually call the tool now.\n"
+                    "Use the tool_calls mechanism to invoke the appropriate tool.")
                 continue
+
+            # Non-intent text response — reset nudge counter and finish
+            if not signals_tool_intent(text):
+                consecutive_nudges = 0
 
             # Plain text response - done
             __transition_to__("completed", "text response")
@@ -320,7 +393,6 @@ def run_loop(context, goal, actions, state, config):
 
         elif resp_type == "code":
             code = response.get("code", "")
-            nudge_count = 0
             __add_message__("assistant", "```repl\n" + code + "\n```")
 
             # Execute code in nested Monty VM
@@ -363,7 +435,7 @@ def run_loop(context, goal, actions, state, config):
             if result.get("need_approval") is not None:
                 approval = result["need_approval"]
                 __save_checkpoint__(state, {
-                    "nudge_count": nudge_count,
+                    "nudge_count": consecutive_nudges,
                     "consecutive_errors": consecutive_errors,
                 })
                 if approval.get("need_authentication"):
@@ -394,7 +466,7 @@ def run_loop(context, goal, actions, state, config):
                 consecutive_errors = 0
 
             __save_checkpoint__(state, {
-                "nudge_count": nudge_count,
+                "nudge_count": consecutive_nudges,
                 "consecutive_errors": consecutive_errors,
             })
 
@@ -402,64 +474,68 @@ def run_loop(context, goal, actions, state, config):
             # Tier 0: structured tool calls.
             # The assistant message with structured action_calls is added by
             # __llm_complete__ in Rust — do NOT add it here.
-            nudge_count = 0
+            # NOTE: consecutive_nudges is NOT reset here (V1 semantics).
+            # Only non-intent text responses reset the counter.
             calls = response.get("calls", [])
 
-            for call in calls:
-                name = call.get("name", "")
-                params = call.get("params", {})
-                call_id = call.get("call_id", "")
+            # Execute all tool calls in parallel via the batch host function.
+            # Rust handles preflight (lease/policy), parallel execution via
+            # JoinSet, event emission, and message addition in call order.
+            results = __execute_actions_parallel__(calls)
 
-                # __execute_action__ handles event emission, message addition,
-                # and lease consumption in Rust — no duplicate logic needed here.
-                r = __execute_action__(name, params, call_id=call_id)
+            # Check results for auth/approval interrupts
+            for r_idx, r in enumerate(results):
+                if r is None:
+                    continue
 
                 if r.get("gate_paused"):
                     # Unified gate pause (replaces separate need_approval/need_authentication)
                     __save_checkpoint__(state, {
-                        "nudge_count": nudge_count,
+                        "nudge_count": consecutive_nudges,
                         "consecutive_errors": consecutive_errors,
                     })
                     gate = r
+                    # Get action info from the original call or the result
+                    orig_call = calls[r_idx] if r_idx < len(calls) else {}
                     __transition_to__("waiting", "gate paused: " + gate.get("gate_name", "unknown"))
                     return {
                         "outcome": "gate_paused",
                         "gate_name": gate.get("gate_name", ""),
-                        "action_name": name,
-                        "call_id": call_id,
-                        "parameters": params,
+                        "action_name": gate.get("action_name", orig_call.get("name", "")),
+                        "call_id": orig_call.get("call_id", ""),
+                        "parameters": orig_call.get("params", {}),
                         "resume_kind": gate.get("resume_kind", {}),
                     }
 
                 if r.get("need_authentication"):
                     __save_checkpoint__(state, {
-                        "nudge_count": nudge_count,
+                        "nudge_count": consecutive_nudges,
                         "consecutive_errors": consecutive_errors,
                     })
                     __transition_to__("waiting", "authentication needed")
                     return {
                         "outcome": "need_authentication",
                         "credential_name": r.get("credential_name", ""),
-                        "action_name": name,
-                        "call_id": call_id,
-                        "parameters": params,
+                        "action_name": r.get("action_name", ""),
+                        "call_id": r.get("call_id", ""),
+                        "parameters": r.get("parameters", {}),
                     }
 
                 if r.get("need_approval"):
                     __save_checkpoint__(state, {
-                        "nudge_count": nudge_count,
+                        "nudge_count": consecutive_nudges,
                         "consecutive_errors": consecutive_errors,
                     })
                     __transition_to__("waiting", "approval needed")
                     return {
                         "outcome": "need_approval",
-                        "action_name": name,
-                        "call_id": call_id,
-                        "parameters": params,
+                        "action_name": r.get("action_name", ""),
+                        "call_id": r.get("call_id", ""),
+                        "parameters": r.get("parameters", {}),
                     }
 
             __save_checkpoint__(state, {
-                "nudge_count": nudge_count,
+                "nudge_count": consecutive_nudges,
                 "consecutive_errors": consecutive_errors,
             })
 

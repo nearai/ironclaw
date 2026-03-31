@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 use chrono::Utc;
 use serde::Serialize;
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::types::event::ThreadEvent;
 use crate::types::thread::{Thread, ThreadId, ThreadState};
@@ -120,12 +120,12 @@ pub fn write_trace(trace: &ExecutionTrace) -> Option<PathBuf> {
                 Some(path)
             }
             Err(e) => {
-                warn!("Failed to write trace: {e}");
+                debug!("Failed to write trace: {e}");
                 None
             }
         },
         Err(e) => {
-            warn!("Failed to serialize trace: {e}");
+            debug!("Failed to serialize trace: {e}");
             None
         }
     }
@@ -147,13 +147,13 @@ pub fn log_trace_summary(trace: &ExecutionTrace) {
 
     for issue in &trace.issues {
         match issue.severity {
-            IssueSeverity::Error => warn!(
+            IssueSeverity::Error => debug!(
                 category = %issue.category,
                 step = ?issue.step,
                 "ISSUE: {}",
                 issue.description
             ),
-            IssueSeverity::Warning => warn!(
+            IssueSeverity::Warning => debug!(
                 category = %issue.category,
                 step = ?issue.step,
                 "WARNING: {}",

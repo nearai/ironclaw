@@ -4440,7 +4440,7 @@ dependencies = [
 [[package]]
 name = "monty"
 version = "0.0.9"
-source = "git+https://github.com/pydantic/monty.git?branch=main#7a0d4b75b72e6ddacafaf36e26486186cdb6eb68"
+source = "git+https://github.com/pydantic/monty.git?rev=7a0d4b75b72e6ddacafaf36e26486186cdb6eb68#7a0d4b75b72e6ddacafaf36e26486186cdb6eb68"
 dependencies = [
  "ahash 0.8.12",
  "bytemuck",

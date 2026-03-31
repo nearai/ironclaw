@@ -703,12 +703,14 @@ fn deserialize_knowledge_doc(content: &str) -> Option<MemoryDoc> {
     }
 
     // Find closing ---
-    let after_first = &content[3..];
-    let after_first_line = after_first.find('\n').map(|pos| &after_first[pos + 1..])?;
+    // All slice points are at ASCII boundaries (---, \n) so UTF-8 safe.
+    let after_first = content.get(3..)?;
+    let nl_pos = after_first.find('\n')?;
+    let after_first_line = after_first.get(nl_pos + 1..)?;
     let yaml_end = after_first_line.find("\n---")?;
-    let yaml_str = &after_first_line[..yaml_end];
+    let yaml_str = after_first_line.get(..yaml_end)?;
     let body_start = yaml_end + 4; // skip \n---
-    let body = after_first_line[body_start..].trim_start_matches('\n');
+    let body = after_first_line.get(body_start..)?.trim_start_matches('\n');
 
     // Parse YAML frontmatter
     let yaml: serde_json::Value = serde_yml::from_str(yaml_str).ok()?;

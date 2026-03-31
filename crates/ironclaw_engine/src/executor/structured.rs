@@ -2,6 +2,9 @@
 //!
 //! Executes action calls by delegating to the `EffectExecutor` trait,
 //! checking leases and policies for each call.
+//!
+//! Uses a two-phase approach: sequential preflight (lease/policy checks)
+//! followed by parallel execution of all approved actions via `JoinSet`.
 
 use std::sync::Arc;
 
@@ -9,6 +12,7 @@ use crate::capability::lease::LeaseManager;
 use crate::capability::policy::{PolicyDecision, PolicyEngine};
 use crate::runtime::messaging::ThreadOutcome;
 use crate::traits::effect::{EffectExecutor, ThreadExecutionContext};
+use crate::types::capability::CapabilityLease;
 use crate::types::error::EngineError;
 use crate::types::event::EventKind;
 use crate::types::step::{ActionCall, ActionResult};
@@ -24,16 +28,29 @@ pub struct ActionBatchResult {
     pub need_approval: Option<ThreadOutcome>,
 }
 
+/// Outcome of preflight checking a single action call.
+enum PreflightOutcome {
+    /// Action passed preflight — ready for parallel execution.
+    Runnable {
+        index: usize,
+        lease: CapabilityLease,
+    },
+    /// Action was denied or had no lease — error result already produced.
+    Error {
+        index: usize,
+        result: ActionResult,
+        event: EventKind,
+    },
+}
+
 /// Execute a batch of action calls using the Tier 0 (structured) approach.
 ///
-/// For each action call:
-/// 1. Find the lease that grants this action
-/// 2. Check policy (deny/allow/approve)
-/// 3. Consume a lease use
-/// 4. Call `EffectExecutor::execute_action()`
-/// 5. Record result and emit event
-///
-/// Stops at the first action that requires approval.
+/// Two-phase execution:
+/// 1. **Preflight** (sequential): For each call, find lease and check policy.
+///    Denied calls produce error results immediately. RequireApproval interrupts
+///    the entire batch.
+/// 2. **Execute** (parallel): All approved calls run concurrently via `JoinSet`.
+///    Results are collected and merged in original call order.
 pub async fn execute_action_calls(
     calls: &[ActionCall],
     thread: &Thread,
@@ -43,10 +60,15 @@ pub async fn execute_action_calls(
     context: &ThreadExecutionContext,
     capability_policies: &[crate::types::capability::PolicyRule],
 ) -> Result<ActionBatchResult, EngineError> {
-    let mut results = Vec::with_capacity(calls.len());
-    let mut events = Vec::new();
+    let mut preflight_results: Vec<PreflightOutcome> = Vec::with_capacity(calls.len());
+    let mut early_events = Vec::new();
+    let mut early_results = Vec::new();
 
-    for call in calls {
+    // ── Phase 1: Preflight (sequential) ─────────────────────────
+    // Check leases and policies for every call. RequireApproval interrupts
+    // the entire batch immediately. Denied/no-lease calls become error results.
+
+    for (idx, call) in calls.iter().enumerate() {
         // 1. Find the lease for this action
         let lease = match leases
             .find_lease_for_action(thread.id, &call.action_name)
@@ -63,14 +85,18 @@ pub async fn execute_action_calls(
                     is_error: true,
                     duration: std::time::Duration::ZERO,
                 };
-                events.push(EventKind::ActionFailed {
+                let event = EventKind::ActionFailed {
                     step_id: context.step_id,
                     action_name: call.action_name.clone(),
                     call_id: call.id.clone(),
                     error: format!("no lease for action '{}'", call.action_name),
                     params_summary: None,
+                };
+                preflight_results.push(PreflightOutcome::Error {
+                    index: idx,
+                    result: error_result,
+                    event,
                 });
-                results.push(error_result);
                 continue;
             }
         };
@@ -93,24 +119,35 @@ pub async fn execute_action_calls(
                         is_error: true,
                         duration: std::time::Duration::ZERO,
                     };
-                    events.push(EventKind::ActionFailed {
+                    let event = EventKind::ActionFailed {
                         step_id: context.step_id,
                         action_name: call.action_name.clone(),
                         call_id: call.id.clone(),
                         error: reason,
                         params_summary: None,
+                    };
+                    preflight_results.push(PreflightOutcome::Error {
+                        index: idx,
+                        result: error_result,
+                        event,
                     });
-                    results.push(error_result);
                     continue;
                 }
                 PolicyDecision::RequireApproval { .. } => {
-                    events.push(EventKind::ApprovalRequested {
+                    // Collect error results from earlier preflight failures
+                    for pf in preflight_results {
+                        if let PreflightOutcome::Error { result, event, .. } = pf {
+                            early_results.push(result);
+                            early_events.push(event);
+                        }
+                    }
+                    early_events.push(EventKind::ApprovalRequested {
                         action_name: call.action_name.clone(),
                         call_id: call.id.clone(),
                     });
                     return Ok(ActionBatchResult {
-                        results,
-                        events,
+                        results: early_results,
+                        events: early_events,
                         need_approval: Some(ThreadOutcome::NeedApproval {
                             action_name: call.action_name.clone(),
                             call_id: call.id.clone(),
@@ -125,99 +162,217 @@ pub async fn execute_action_calls(
         // 3. Consume a lease use
         leases.consume_use(lease.id).await?;
 
-        // 4. Execute the action
-        let result = effects
+        preflight_results.push(PreflightOutcome::Runnable { index: idx, lease });
+    }
+
+    // ── Phase 2: Execute (parallel) ─────────────────────────────
+    // All approved calls run concurrently. Results are collected in a
+    // HashMap keyed by original index, then merged in order.
+
+    // Separate runnable from preflight errors
+    let mut slot_results: Vec<Option<(ActionResult, EventKind)>> = vec![None; calls.len()];
+    let mut runnable_indices = Vec::new();
+
+    for pf in preflight_results {
+        match pf {
+            PreflightOutcome::Error {
+                index,
+                result,
+                event,
+                ..
+            } => {
+                slot_results[index] = Some((result, event));
+            }
+            PreflightOutcome::Runnable { index, lease } => {
+                runnable_indices.push((index, lease));
+            }
+        }
+    }
+
+    // Short-circuit: single runnable call — execute directly without JoinSet overhead
+    if runnable_indices.len() == 1 {
+        let (idx, lease) = runnable_indices.into_iter().next().unwrap(); // safety: len()==1 checked above
+        let call = &calls[idx];
+        let exec_result = effects
             .execute_action(&call.action_name, call.parameters.clone(), &lease, context)
             .await;
+        slot_results[idx] = Some(classify_exec_result(exec_result, call, context));
+    } else if runnable_indices.len() > 1 {
+        // Multiple calls: execute in parallel via JoinSet
+        let mut join_set = tokio::task::JoinSet::new();
+        let effects = effects.clone();
 
-        match result {
-            Ok(mut action_result) => {
-                // EffectExecutor doesn't receive call_id; stamp it from the
-                // original ActionCall so downstream messages carry the correct ID.
-                action_result.call_id = call.id.clone();
-                events.push(EventKind::ActionExecuted {
-                    step_id: context.step_id,
-                    action_name: call.action_name.clone(),
-                    call_id: call.id.clone(),
-                    duration_ms: action_result.duration.as_millis() as u64,
-                    params_summary: None,
-                });
-                results.push(action_result);
+        for (idx, lease) in runnable_indices {
+            let call = calls[idx].clone();
+            let ctx = context.clone();
+            let effects = effects.clone();
+            let lease = lease.clone();
+
+            join_set.spawn(async move {
+                let result = effects
+                    .execute_action(&call.action_name, call.parameters.clone(), &lease, &ctx)
+                    .await;
+                (idx, classify_exec_result(result, &call, &ctx))
+            });
+        }
+
+        while let Some(join_result) = join_set.join_next().await {
+            match join_result {
+                Ok((idx, classified)) => {
+                    slot_results[idx] = Some(classified);
+                }
+                Err(e) => {
+                    // Task panicked — should not happen, but handle gracefully
+                    tracing::debug!("parallel tool execution task panicked: {e}");
+                }
             }
-            Err(crate::types::error::EngineError::NeedAuthentication {
-                credential_name,
-                action_name,
-                call_id,
-                parameters,
-            }) => {
-                // Interrupt the batch — thread should pause for authentication.
-                events.push(EventKind::ActionFailed {
-                    step_id: context.step_id,
-                    action_name: action_name.clone(),
-                    call_id: call_id.clone(),
-                    error: format!("authentication required for credential '{credential_name}'"),
-                    params_summary: None,
-                });
-                return Ok(ActionBatchResult {
-                    results,
-                    events,
-                    need_approval: Some(ThreadOutcome::NeedAuthentication {
+        }
+    }
+
+    // ── Phase 3: Merge results in original call order ───────────
+
+    let mut results = Vec::with_capacity(calls.len());
+    let mut events = Vec::new();
+    let mut first_interrupt: Option<ThreadOutcome> = None;
+
+    for (idx, slot) in slot_results.into_iter().enumerate() {
+        if let Some((result, event)) = slot {
+            // Check for NeedAuthentication or GatePaused — record the first
+            // one as the batch interrupt but still collect all other results.
+            if first_interrupt.is_none() {
+                if let EventKind::ActionFailed { ref error, .. } = event
+                    && error.starts_with("authentication required")
+                {
+                    let call = &calls[idx];
+                    let credential_name = error
+                        .strip_prefix("authentication required for credential '")
+                        .and_then(|s| s.strip_suffix('\''))
+                        .unwrap_or("")
+                        .to_string();
+                    first_interrupt = Some(ThreadOutcome::NeedAuthentication {
                         credential_name,
-                        action_name,
-                        call_id,
-                        parameters,
-                    }),
-                });
-            }
-            Err(crate::types::error::EngineError::GatePaused {
-                gate_name,
-                action_name,
-                call_id,
-                parameters,
-                resume_kind,
-            }) => {
-                // Unified gate pause — interrupt the batch.
-                events.push(EventKind::ApprovalRequested {
-                    action_name: action_name.clone(),
-                    call_id: call_id.clone(),
-                });
-                return Ok(ActionBatchResult {
-                    results,
-                    events,
-                    need_approval: Some(ThreadOutcome::GatePaused {
+                        action_name: call.action_name.clone(),
+                        call_id: call.id.clone(),
+                        parameters: call.parameters.clone(),
+                    });
+                } else if let EventKind::ApprovalRequested {
+                    ref action_name,
+                    ref call_id,
+                } = event
+                    && result.output.get("status").and_then(|v| v.as_str()) == Some("gate_paused")
+                {
+                    let gate_name = result
+                        .output
+                        .get("gate")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown")
+                        .to_string();
+                    let call = &calls[idx];
+                    first_interrupt = Some(ThreadOutcome::GatePaused {
                         gate_name,
-                        action_name,
-                        call_id,
-                        parameters: *parameters,
-                        resume_kind: *resume_kind,
-                    }),
-                });
+                        action_name: action_name.clone(),
+                        call_id: call_id.clone(),
+                        parameters: call.parameters.clone(),
+                        resume_kind: crate::gate::ResumeKind::Approval {
+                            allow_always: false,
+                        },
+                    });
+                }
             }
-            Err(e) => {
-                let error_result = ActionResult {
-                    call_id: call.id.clone(),
-                    action_name: call.action_name.clone(),
-                    output: serde_json::json!({"error": e.to_string()}),
-                    is_error: true,
-                    duration: std::time::Duration::ZERO,
-                };
-                events.push(EventKind::ActionFailed {
-                    step_id: context.step_id,
-                    action_name: call.action_name.clone(),
-                    call_id: call.id.clone(),
-                    error: e.to_string(),
-                    params_summary: None,
-                });
-                results.push(error_result);
-            }
+            results.push(result);
+            events.push(event);
         }
     }
 
     Ok(ActionBatchResult {
         results,
         events,
-        need_approval: None,
+        need_approval: first_interrupt,
     })
+}
+
+/// Classify an execution result into an `(ActionResult, EventKind)` pair.
+///
+/// Used by both the single-call fast path and the parallel JoinSet path
+/// to produce uniform output.
+fn classify_exec_result(
+    result: Result<ActionResult, EngineError>,
+    call: &ActionCall,
+    context: &ThreadExecutionContext,
+) -> (ActionResult, EventKind) {
+    match result {
+        Ok(mut action_result) => {
+            action_result.call_id = call.id.clone();
+            let event = EventKind::ActionExecuted {
+                step_id: context.step_id,
+                action_name: call.action_name.clone(),
+                call_id: call.id.clone(),
+                duration_ms: action_result.duration.as_millis() as u64,
+                params_summary: None,
+            };
+            (action_result, event)
+        }
+        Err(EngineError::NeedAuthentication {
+            credential_name,
+            action_name,
+            call_id,
+            ..
+        }) => {
+            let error_msg = format!("authentication required for credential '{credential_name}'");
+            let error_result = ActionResult {
+                call_id: call.id.clone(),
+                action_name: call.action_name.clone(),
+                output: serde_json::json!({"error": &error_msg}),
+                is_error: true,
+                duration: std::time::Duration::ZERO,
+            };
+            let event = EventKind::ActionFailed {
+                step_id: context.step_id,
+                action_name,
+                call_id,
+                error: error_msg,
+                params_summary: None,
+            };
+            (error_result, event)
+        }
+        Err(EngineError::GatePaused {
+            gate_name,
+            action_name,
+            call_id,
+            ..
+        }) => {
+            let _error_msg = format!("gate paused: {gate_name}");
+            let error_result = ActionResult {
+                call_id: call.id.clone(),
+                action_name: call.action_name.clone(),
+                output: serde_json::json!({"status": "gate_paused", "gate": gate_name}),
+                is_error: true,
+                duration: std::time::Duration::ZERO,
+            };
+            let event = EventKind::ApprovalRequested {
+                action_name,
+                call_id,
+            };
+            (error_result, event)
+        }
+        Err(e) => {
+            let error_result = ActionResult {
+                call_id: call.id.clone(),
+                action_name: call.action_name.clone(),
+                output: serde_json::json!({"error": e.to_string()}),
+                is_error: true,
+                duration: std::time::Duration::ZERO,
+            };
+            let event = EventKind::ActionFailed {
+                step_id: context.step_id,
+                action_name: call.action_name.clone(),
+                call_id: call.id.clone(),
+                error: e.to_string(),
+                params_summary: None,
+            };
+            (error_result, event)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -559,8 +714,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn need_authentication_stops_before_subsequent_calls() {
-        // Two calls: first needs auth, second should never execute
+    async fn need_authentication_flags_batch_with_parallel_results() {
+        // Two calls: first needs auth, second succeeds.
+        // With parallel execution, both run concurrently — the batch is flagged
+        // with NeedAuthentication but results from all calls are available.
         let thread = Thread::new(
             "test",
             ThreadType::Foreground,
@@ -577,11 +734,10 @@ mod tests {
                     call_id: "call_1".into(),
                     parameters: serde_json::json!({}),
                 }),
-                // This should never be called
                 Ok(ActionResult {
                     call_id: String::new(),
                     action_name: "echo".into(),
-                    output: serde_json::json!("should not appear"),
+                    output: serde_json::json!("second ran"),
                     is_error: false,
                     duration: Duration::from_millis(1),
                 }),
@@ -610,12 +766,22 @@ mod tests {
             .await
             .unwrap();
 
-        // Second call should NOT have executed
-        assert!(
-            result.results.is_empty(),
-            "no results should be returned before the interrupted call"
-        );
+        // Both calls executed in parallel — results from both are available
+        assert_eq!(result.results.len(), 2);
+        // First call should be an auth error
+        assert!(result.results[0].is_error);
+        assert_eq!(result.results[0].call_id, "call_1");
+        // Second call succeeded
+        assert_eq!(result.results[1].call_id, "call_2");
+        assert!(!result.results[1].is_error);
+        // Batch is still flagged with NeedAuthentication
         assert!(result.need_approval.is_some());
+        match result.need_approval.unwrap() {
+            ThreadOutcome::NeedAuthentication {
+                credential_name, ..
+            } => assert_eq!(credential_name, "api_key"),
+            other => panic!("expected NeedAuthentication, got {:?}", other),
+        }
     }
 
     /// Regular EngineError::Effect (not NeedAuthentication) should NOT interrupt —

@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::capability::lease::LeaseManager;
 use crate::capability::policy::PolicyEngine;
@@ -153,16 +153,34 @@ impl ExecutionLoop {
             return Ok(());
         };
 
-        if let Some(step) = step {
-            store.save_step(step).await?;
-        }
-        if *persisted_event_count < self.thread.events.len() {
-            store
-                .append_events(&self.thread.events[*persisted_event_count..])
-                .await?;
-            *persisted_event_count = self.thread.events.len();
-        }
-        store.save_thread(&self.thread).await?;
+        // All three store writes are independent — run them in parallel.
+        let step_fut = async {
+            if let Some(step) = step {
+                store.save_step(step).await
+            } else {
+                Ok(())
+            }
+        };
+
+        let new_event_count = self.thread.events.len();
+        let events_fut = async {
+            if *persisted_event_count < new_event_count {
+                store
+                    .append_events(&self.thread.events[*persisted_event_count..])
+                    .await
+            } else {
+                Ok(())
+            }
+        };
+
+        let thread_fut = store.save_thread(&self.thread);
+
+        let (step_res, events_res, thread_res) = tokio::join!(step_fut, events_fut, thread_fut);
+        step_res?;
+        events_res?;
+        thread_res?;
+
+        *persisted_event_count = new_event_count;
         Ok(())
     }
 
@@ -176,6 +194,17 @@ impl ExecutionLoop {
             self.thread.transition_to(ThreadState::Running, None)?;
         }
 
+        // Pre-fetch system memory docs once — used by both prompt overlay and
+        // orchestrator loading, avoiding a duplicate Store query.
+        let system_docs = if let Some(store) = self.store.as_ref() {
+            store
+                .list_memory_docs(self.thread.project_id, "system")
+                .await
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+
         // Inject CodeAct/RLM system prompt if none exists
         if !self
             .thread
@@ -183,22 +212,21 @@ impl ExecutionLoop {
             .iter()
             .any(|m| m.role == crate::types::message::MessageRole::System)
         {
-            // Get available actions for the prompt
+            // Fetch active leases (needed for action list)
             let active_leases = self.leases.active_for_thread(self.thread.id).await;
             let actions = match self.effects.available_actions(&active_leases).await {
                 Ok(a) => a,
                 Err(e) => {
-                    warn!(thread_id = %self.thread.id, "failed to load actions for system prompt: {e}");
+                    debug!(thread_id = %self.thread.id, "failed to load actions for system prompt: {e}");
                     Vec::new()
                 }
             };
-            let system_prompt = crate::executor::prompt::build_codeact_system_prompt(
+            // Build prompt using pre-fetched docs (no extra Store query)
+            let system_prompt = crate::executor::prompt::build_codeact_system_prompt_with_docs(
                 &actions,
-                self.store.as_ref(),
-                self.thread.project_id,
+                &system_docs,
                 self.platform_info.as_ref(),
-            )
-            .await;
+            );
 
             // Skill selection and injection happens in the Python orchestrator
             // via __list_skills__() host function — not here in Rust.
@@ -210,13 +238,9 @@ impl ExecutionLoop {
         self.persist_runtime_state(None, &mut persisted_event_count)
             .await?;
 
-        // Load versioned Python orchestrator (runtime version or compiled-in v0)
+        // Load versioned Python orchestrator using pre-fetched docs
         let (orchestrator_code, orchestrator_version) =
-            crate::executor::orchestrator::load_orchestrator(
-                self.store.as_ref(),
-                self.thread.project_id,
-            )
-            .await;
+            crate::executor::orchestrator::load_orchestrator_from_docs(&system_docs);
 
         debug!(
             thread_id = %self.thread.id,
@@ -289,7 +313,7 @@ impl ExecutionLoop {
                 Ok(orch_result.outcome)
             }
             Err(e) => {
-                warn!(
+                debug!(
                     thread_id = %self.thread.id,
                     error = %e,
                     orchestrator_version,
@@ -724,7 +748,7 @@ mod tests {
             exec.thread
                 .messages
                 .iter()
-                .any(|m| m.content.contains("didn't make an action call"))
+                .any(|m| m.content.contains("did not include any tool calls"))
         );
     }
 

@@ -30,7 +30,21 @@ pub async fn build_step_context(
     user_id: &str,
     goal: &str,
 ) -> Result<(Vec<ThreadMessage>, Vec<ActionDef>), EngineError> {
-    let actions = effects.available_actions(leases).await?;
+    // Fetch actions and memory docs in parallel — they are independent.
+    let actions_fut = effects.available_actions(leases);
+    let docs_fut = async {
+        if let Some(engine) = retrieval {
+            engine
+                .retrieve_context(project_id, user_id, goal, MAX_CONTEXT_DOCS)
+                .await
+        } else {
+            Ok(Vec::new())
+        }
+    };
+
+    let (actions_result, docs_result) = tokio::join!(actions_fut, docs_fut);
+    let actions = actions_result?;
+    let docs = docs_result?;
 
     let mut ctx_messages = messages.to_vec();
 
@@ -38,22 +52,17 @@ pub async fn build_step_context(
     // Many providers require all system messages at the beginning (or a single
     // system message), so we append to the first system message rather than
     // inserting a separate one.
-    if let Some(engine) = retrieval {
-        let docs = engine
-            .retrieve_context(project_id, user_id, goal, MAX_CONTEXT_DOCS)
-            .await?;
-        if !docs.is_empty() {
-            let context_section = format_docs_as_context(&docs);
-            if !ctx_messages.is_empty()
-                && ctx_messages[0].role == crate::types::message::MessageRole::System
-            {
-                // Append to existing system prompt
-                ctx_messages[0].content.push_str("\n\n");
-                ctx_messages[0].content.push_str(&context_section);
-            } else {
-                // No system message — prepend as one
-                ctx_messages.insert(0, ThreadMessage::system(context_section));
-            }
+    if !docs.is_empty() {
+        let context_section = format_docs_as_context(&docs);
+        if !ctx_messages.is_empty()
+            && ctx_messages[0].role == crate::types::message::MessageRole::System
+        {
+            // Append to existing system prompt
+            ctx_messages[0].content.push_str("\n\n");
+            ctx_messages[0].content.push_str(&context_section);
+        } else {
+            // No system message — prepend as one
+            ctx_messages.insert(0, ThreadMessage::system(context_section));
         }
     }
 

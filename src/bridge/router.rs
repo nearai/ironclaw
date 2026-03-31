@@ -813,7 +813,11 @@ async fn process_resolved_approval(
         "engine v2: tool approval received"
     );
 
-    if approved && always {
+    if approved {
+        // Auto-approve this tool for the remainder of the session.
+        // Without this, the resumed thread issues a new tool call which
+        // triggers another approval prompt — an infinite loop.
+        // "always" makes this persistent; plain "yes" makes it session-scoped.
         let registry_name = pending.action_name.replace('_', "-");
         state
             .effect_adapter
@@ -822,6 +826,7 @@ async fn process_resolved_approval(
         state.effect_adapter.auto_approve_tool(&registry_name).await;
         debug!(
             tool = %pending.action_name,
+            always,
             "engine v2: tool auto-approved for session"
         );
     }
@@ -1172,6 +1177,167 @@ pub async fn handle_clear(
     Ok(Some("Conversation cleared.".into()))
 }
 
+/// Handle `/expected <description>` — collect context from the engine thread
+/// and fire the expected-behavior learning mission.
+///
+/// In v2, conversation history lives in engine threads (not v1 sessions).
+/// This handler finds the most recent thread for the user's conversation,
+/// extracts the last N messages, and fires the system event.
+pub async fn handle_expected(
+    agent: &Agent,
+    message: &IncomingMessage,
+    description: &str,
+) -> Result<Option<String>, Error> {
+    init_engine(agent).await?;
+
+    let lock = ENGINE_STATE
+        .get()
+        .ok_or_else(|| engine_err("init", "engine state not initialized"))?;
+    let guard = lock.read().await;
+    let state = guard
+        .as_ref()
+        .ok_or_else(|| engine_err("init", "engine state is empty"))?;
+
+    // Find the conversation for this channel+user
+    let scope = message.conversation_scope();
+    let channel_key = match scope {
+        Some(tid) => format!("{}:{}", message.channel, tid),
+        None => message.channel.clone(),
+    };
+
+    let conv_id = state
+        .conversation_manager
+        .get_or_create_conversation(&channel_key, &message.user_id)
+        .await
+        .map_err(|e| engine_err("conversation error", e))?;
+
+    let conv = state.conversation_manager.get_conversation(conv_id).await;
+
+    // Find the most recent thread in this conversation (active or completed)
+    let recent_thread = find_most_recent_thread(state, &conv, &message.user_id).await;
+
+    let Some(thread) = recent_thread else {
+        return Ok(Some(
+            "No conversation history to attach feedback to.".into(),
+        ));
+    };
+
+    // Extract recent messages (last 10) as context for the learning mission
+    let start = thread.messages.len().saturating_sub(10);
+    let recent_messages: Vec<serde_json::Value> = thread.messages[start..]
+        .iter()
+        .map(|m| {
+            serde_json::json!({
+                "role": m.role,
+                "content_preview": m.content.chars().take(500).collect::<String>(),
+                "action_name": m.action_name,
+            })
+        })
+        .collect();
+
+    // Extract tool call events for richer context
+    let tool_events: Vec<serde_json::Value> = thread
+        .events
+        .iter()
+        .filter_map(|e| match &e.kind {
+            ironclaw_engine::EventKind::ActionExecuted {
+                action_name,
+                params_summary,
+                ..
+            } => Some(serde_json::json!({
+                "tool": action_name,
+                "params": params_summary,
+                "success": true,
+            })),
+            ironclaw_engine::EventKind::ActionFailed {
+                action_name, error, ..
+            } => Some(serde_json::json!({
+                "tool": action_name,
+                "error": error,
+                "success": false,
+            })),
+            _ => None,
+        })
+        .collect();
+
+    let payload = serde_json::json!({
+        "expected_behavior": description,
+        "thread_id": thread.id.to_string(),
+        "goal": thread.goal,
+        "recent_messages": recent_messages,
+        "tool_events": tool_events,
+        "step_count": thread.step_count,
+        "thread_state": thread.state,
+    });
+
+    // Fire the expected-behavior learning mission
+    let mgr = state.effect_adapter.mission_manager().await;
+    let fired = if let Some(mgr) = mgr {
+        match mgr
+            .fire_on_system_event(
+                "user_feedback",
+                "expected_behavior",
+                &message.user_id,
+                Some(payload),
+            )
+            .await
+        {
+            Ok(ids) => ids.len(),
+            Err(e) => {
+                debug!("failed to fire expected-behavior mission: {e}");
+                0
+            }
+        }
+    } else {
+        0
+    };
+
+    if fired > 0 {
+        Ok(Some(format!(
+            "Feedback captured. Fired {fired} self-improvement thread(s) to investigate."
+        )))
+    } else {
+        Ok(Some(
+            "Feedback noted but no self-improvement missions are configured to handle it. \
+             The engine will use this context in future learning cycles."
+                .into(),
+        ))
+    }
+}
+
+/// Find the most recent thread in a conversation (checks active threads first,
+/// then falls back to the last completed thread visible in conversation entries).
+async fn find_most_recent_thread(
+    state: &EngineState,
+    conv: &Option<ironclaw_engine::ConversationSurface>,
+    user_id: &str,
+) -> Option<ironclaw_engine::Thread> {
+    let conv = conv.as_ref()?;
+
+    // Try active threads first (most recent interaction)
+    for tid in conv.active_threads.iter().rev() {
+        if let Ok(Some(thread)) = state.store.load_thread(*tid).await
+            && thread.user_id == user_id
+        {
+            return Some(thread);
+        }
+    }
+
+    // Fall back to the most recent thread referenced in entries
+    for entry in conv.entries.iter().rev() {
+        let Some(tid) = entry.origin_thread_id else {
+            continue;
+        };
+        if let Ok(Some(thread)) = state.store.load_thread(tid).await
+            && thread.user_id == user_id
+        {
+            return Some(thread);
+        }
+    }
+
+    None
+}
+
 /// Stop all active threads and clear conversation entries.
 async fn clear_engine_conversation(agent: &Agent, message: &IncomingMessage) -> Result<(), Error> {
     init_engine(agent).await?;
@@ -1281,6 +1447,24 @@ pub async fn handle_with_engine(
     message: &IncomingMessage,
     content: &str,
 ) -> Result<Option<String>, Error> {
+    handle_with_engine_inner(agent, message, content, 0).await
+}
+
+/// Maximum depth for auth-retry recursion (credential stored → retry original message).
+const MAX_AUTH_RETRY_DEPTH: u8 = 2;
+
+async fn handle_with_engine_inner(
+    agent: &Agent,
+    message: &IncomingMessage,
+    content: &str,
+    depth: u8,
+) -> Result<Option<String>, Error> {
+    if depth > MAX_AUTH_RETRY_DEPTH {
+        return Ok(Some(
+            "Credential stored, but too many auth retries. Please resend your message.".into(),
+        ));
+    }
+
     // Ensure engine is initialized
     init_engine(agent).await?;
 
@@ -1382,8 +1566,13 @@ pub async fn handle_with_engine(
                         };
                         let retry_content = pending.original_message;
                         drop(guard);
-                        return Box::pin(handle_with_engine(agent, &retry_msg, &retry_content))
-                            .await;
+                        return Box::pin(handle_with_engine_inner(
+                            agent,
+                            &retry_msg,
+                            &retry_content,
+                            depth + 1,
+                        ))
+                        .await;
                     }
                     Err(e) => {
                         return Ok(Some(format!(
@@ -1453,7 +1642,13 @@ pub async fn handle_with_engine(
         {
             // Ensure the v1 conversation exists for this thread
             let _ = db
-                .ensure_conversation(uuid, &message.channel, &message.user_id, Some(tid))
+                .ensure_conversation(
+                    uuid,
+                    &message.channel,
+                    &message.user_id,
+                    Some(tid),
+                    Some(&message.channel),
+                )
                 .await;
             Some(uuid)
         } else {
@@ -1586,7 +1781,8 @@ async fn await_thread_outcome(
                     "text-based auth fallback triggered — pre-flight gate did not catch this"
                 );
 
-                // Extract credential name from the response text
+                // Extract credential name from the response text and validate
+                // it against the expected pattern (alphanumeric + underscores).
                 let cred_name = text
                     .split("credential_name")
                     .nth(1)
@@ -1594,6 +1790,12 @@ async fn await_thread_outcome(
                         // Handle both JSON ("credential_name":"foo") and prose
                         s.split(&['"', '\'', '`'][..])
                             .find(|seg| !seg.is_empty() && !seg.contains(':') && !seg.contains(' '))
+                    })
+                    .filter(|name| {
+                        // Reject names that don't look like valid credential identifiers
+                        !name.is_empty()
+                            && name.len() <= 64
+                            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
                     })
                     .unwrap_or("unknown")
                     .to_string();
@@ -1605,18 +1807,28 @@ async fn await_thread_outcome(
                     .and_then(|mgr| mgr.get_setup_instructions(&cred_name))
                     .unwrap_or_else(|| format!("Provide your {} token", cred_name));
 
-                // Store pending auth for this user
-                state.pending_auth.write().await.insert(
-                    message.user_id.clone(),
-                    PendingAuth {
-                        credential_name: cred_name.clone(),
-                        original_message: message.content.clone(),
-                        user_id: message.user_id.clone(),
-                        channel: message.channel.clone(),
-                        metadata: message.metadata.clone(),
-                        engine_thread_id: None, // Completed path — thread already finished
-                    },
-                );
+                // Store pending auth for this user (only if not already pending)
+                {
+                    let mut pending = state.pending_auth.write().await;
+                    if pending.contains_key(&message.user_id) {
+                        debug!(
+                            user_id = %message.user_id,
+                            "skipping pending_auth — user already has a pending auth flow"
+                        );
+                    } else {
+                        pending.insert(
+                            message.user_id.clone(),
+                            PendingAuth {
+                                credential_name: cred_name.clone(),
+                                original_message: message.content.clone(),
+                                user_id: message.user_id.clone(),
+                                channel: message.channel.clone(),
+                                metadata: message.metadata.clone(),
+                                engine_thread_id: None, // Completed path — thread already finished
+                            },
+                        );
+                    }
+                }
 
                 // Show auth prompt via channel
                 let _ = agent
@@ -1702,6 +1914,8 @@ async fn await_thread_outcome(
                 .unwrap_or_else(|| format!("Provide your {} token", credential_name));
 
             // Enter the guided auth flow — next user message is treated as a token.
+            // Overwrite is intentional here: the engine-driven path has a concrete
+            // thread_id, so it takes priority over any stale text-fallback entry.
             state.pending_auth.write().await.insert(
                 message.user_id.clone(),
                 PendingAuth {
@@ -2646,6 +2860,17 @@ pub async fn resume_engine_mission(
         .map_err(|e| engine_err("resume mission", e))
 }
 
+/// Reset the global engine state so a fresh engine can be initialized.
+///
+/// Used by the test rig to isolate engine v2 tests — each test gets a clean
+/// engine state instead of inheriting the prior test's `OnceLock` singleton.
+#[cfg(feature = "libsql")]
+pub async fn reset_engine_state() {
+    if let Some(lock) = ENGINE_STATE.get() {
+        *lock.write().await = None;
+    }
+}
+
 /// Resolve the effective user_id for mission management operations.
 ///
 /// If the mission is system-owned, requires admin role and returns "system"
@@ -3113,5 +3338,186 @@ mod tests {
                 .await
                 .unwrap();
         assert!(matches!(resolved, PendingApprovalResolution::Ambiguous));
+    }
+
+    // ── /expected command tests ─────────────────────────────────
+
+    /// Build a minimal EngineState backed by a TestStore for /expected tests.
+    fn make_expected_test_state(store: Arc<TestStore>) -> EngineState {
+        use ironclaw_engine::{
+            CapabilityRegistry, ConversationManager, LeaseManager, PolicyEngine, ThreadManager,
+        };
+
+        // Minimal mocks — /expected doesn't execute threads, just reads state
+        struct NoopLlm;
+        #[async_trait::async_trait]
+        impl ironclaw_engine::LlmBackend for NoopLlm {
+            async fn complete(
+                &self,
+                _: &[ironclaw_engine::ThreadMessage],
+                _: &[ironclaw_engine::ActionDef],
+                _: &ironclaw_engine::LlmCallConfig,
+            ) -> Result<ironclaw_engine::LlmOutput, ironclaw_engine::EngineError> {
+                Ok(ironclaw_engine::LlmOutput {
+                    response: ironclaw_engine::LlmResponse::Text("done".into()),
+                    usage: ironclaw_engine::TokenUsage::default(),
+                })
+            }
+            fn model_name(&self) -> &str {
+                "noop"
+            }
+        }
+
+        struct NoopEffects;
+        #[async_trait::async_trait]
+        impl ironclaw_engine::EffectExecutor for NoopEffects {
+            async fn execute_action(
+                &self,
+                _: &str,
+                _: serde_json::Value,
+                _: &ironclaw_engine::CapabilityLease,
+                _: &ironclaw_engine::ThreadExecutionContext,
+            ) -> Result<ironclaw_engine::ActionResult, ironclaw_engine::EngineError> {
+                unreachable!()
+            }
+            async fn available_actions(
+                &self,
+                _: &[ironclaw_engine::CapabilityLease],
+            ) -> Result<Vec<ironclaw_engine::ActionDef>, ironclaw_engine::EngineError> {
+                Ok(vec![])
+            }
+        }
+
+        let store_dyn: Arc<dyn Store> = store;
+        let effect_adapter = Arc::new(EffectBridgeAdapter::new(
+            Arc::new(crate::tools::ToolRegistry::new()),
+            Arc::new(ironclaw_safety::SafetyLayer::new(
+                &ironclaw_safety::SafetyConfig {
+                    max_output_length: 10_000,
+                    injection_check_enabled: false,
+                },
+            )),
+            Arc::new(crate::hooks::HookRegistry::default()),
+        ));
+
+        let tm = Arc::new(ThreadManager::new(
+            Arc::new(NoopLlm),
+            Arc::new(NoopEffects),
+            store_dyn.clone(),
+            Arc::new(CapabilityRegistry::new()),
+            Arc::new(LeaseManager::new()),
+            Arc::new(PolicyEngine::new()),
+        ));
+
+        let cm = ConversationManager::new(Arc::clone(&tm), store_dyn.clone());
+
+        EngineState {
+            thread_manager: tm,
+            conversation_manager: cm,
+            effect_adapter,
+            store: store_dyn,
+            default_project_id: ironclaw_engine::ProjectId::new(),
+            pending_approvals: RwLock::new(HashMap::new()),
+            pending_auth: RwLock::new(HashMap::new()),
+            pending_gates: Arc::new(crate::gate::store::PendingGateStore::in_memory()),
+            sse: None,
+            db: None,
+            secrets_store: None,
+            auth_manager: None,
+        }
+    }
+
+    /// find_most_recent_thread returns the active thread when one exists.
+    #[tokio::test]
+    async fn find_recent_thread_returns_active() {
+        let store = Arc::new(TestStore::new());
+        let state = make_expected_test_state(store.clone());
+
+        let project_id = state.default_project_id;
+        let mut thread = ironclaw_engine::Thread::new(
+            "test goal",
+            ironclaw_engine::ThreadType::Foreground,
+            project_id,
+            "alice",
+            ironclaw_engine::ThreadConfig::default(),
+        );
+        thread.add_message(ironclaw_engine::ThreadMessage::user("hello"));
+        thread.add_message(ironclaw_engine::ThreadMessage::assistant("hi there"));
+        let tid = thread.id;
+        store.save_thread(&thread).await.unwrap();
+
+        let mut conv = ironclaw_engine::ConversationSurface::new("web", "alice");
+        conv.track_thread(tid);
+        let conv_opt = Some(conv);
+
+        let result = find_most_recent_thread(&state, &conv_opt, "alice").await;
+        assert!(result.is_some(), "should find thread");
+        assert_eq!(result.unwrap().id, tid);
+    }
+
+    /// find_most_recent_thread returns None for empty conversation.
+    #[tokio::test]
+    async fn find_recent_thread_empty_conv_returns_none() {
+        let store = Arc::new(TestStore::new());
+        let state = make_expected_test_state(store);
+
+        let conv = Some(ironclaw_engine::ConversationSurface::new("web", "alice"));
+        let result = find_most_recent_thread(&state, &conv, "alice").await;
+        assert!(result.is_none());
+    }
+
+    /// find_most_recent_thread filters by user_id (tenant isolation).
+    #[tokio::test]
+    async fn find_recent_thread_filters_by_user() {
+        let store = Arc::new(TestStore::new());
+        let state = make_expected_test_state(store.clone());
+
+        let project_id = state.default_project_id;
+        let thread = ironclaw_engine::Thread::new(
+            "bob's thread",
+            ironclaw_engine::ThreadType::Foreground,
+            project_id,
+            "bob", // owned by bob
+            ironclaw_engine::ThreadConfig::default(),
+        );
+        let tid = thread.id;
+        store.save_thread(&thread).await.unwrap();
+
+        let mut conv = ironclaw_engine::ConversationSurface::new("web", "alice");
+        conv.track_thread(tid);
+
+        // Alice should NOT see Bob's thread
+        let result = find_most_recent_thread(&state, &Some(conv), "alice").await;
+        assert!(result.is_none(), "alice should not see bob's thread"); // safety: test-only
+    }
+
+    /// find_most_recent_thread falls back to entry-referenced threads
+    /// when no active threads exist.
+    #[tokio::test]
+    async fn find_recent_thread_falls_back_to_entries() {
+        let store = Arc::new(TestStore::new());
+        let state = make_expected_test_state(store.clone());
+
+        let project_id = state.default_project_id;
+        let mut thread = ironclaw_engine::Thread::new(
+            "completed goal",
+            ironclaw_engine::ThreadType::Foreground,
+            project_id,
+            "alice",
+            ironclaw_engine::ThreadConfig::default(),
+        );
+        thread.add_message(ironclaw_engine::ThreadMessage::user("do something"));
+        thread.add_message(ironclaw_engine::ThreadMessage::assistant("done"));
+        let tid = thread.id;
+        store.save_thread(&thread).await.unwrap();
+
+        // Conversation with no active threads, but an entry referencing the thread
+        let mut conv = ironclaw_engine::ConversationSurface::new("web", "alice");
+        conv.add_entry(ironclaw_engine::ConversationEntry::agent(tid, "done"));
+        // Thread is NOT in active_threads (it completed and was untracked)
+
+        let result = find_most_recent_thread(&state, &Some(conv), "alice").await;
+        assert!(result.is_some(), "should find thread via entry fallback");
+        assert_eq!(result.unwrap().id, tid);
     }
 }

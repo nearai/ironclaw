@@ -55,8 +55,8 @@ impl LeaseManager {
         let leases = self.active.read().await;
         let lease = leases
             .get(&lease_id)
-            .ok_or_else(|| EngineError::LeaseExpired {
-                capability_name: format!("lease {lease_id:?} not found"),
+            .ok_or_else(|| EngineError::LeaseNotFound {
+                lease_id: format!("{lease_id:?}"),
             })?;
         if !lease.is_valid() {
             return Err(EngineError::LeaseExpired {
