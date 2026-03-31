@@ -53,13 +53,13 @@ use crate::channels::wasm::schema::ChannelConfig;
 use crate::channels::{Channel, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate};
 use crate::error::ChannelError;
 use crate::pairing::PairingStore;
-use crate::safety::LeakDetector;
 use crate::secrets::SecretsStore;
 use crate::tools::wasm::LogLevel;
 use crate::tools::wasm::WasmResourceLimiter;
 use crate::tools::wasm::credential_injector::{
     InjectedCredentials, host_matches_pattern, inject_credential,
 };
+use ironclaw_safety::LeakDetector;
 
 const WEBSOCKET_EVENT_QUEUE_RELATIVE_PATH: &str = "state/gateway_event_queue";
 const WEBSOCKET_EVENT_PROCESSING_QUEUE_RELATIVE_PATH: &str = "state/gateway_event_queue_processing";
@@ -335,11 +335,31 @@ impl near::agent::channel_host::Host for ChannelStoreData {
             format!("Rate limit exceeded: {}", e)
         })?;
 
-        // Parse headers and inject credentials into header values
-        // This allows patterns like "Authorization": "Bearer {WHATSAPP_ACCESS_TOKEN}"
-        let raw_headers: std::collections::HashMap<String, String> =
-            serde_json::from_str(&headers_json).unwrap_or_default();
+        // Parse headers from WASM — scan for leaks BEFORE credential injection.
+        // Host-injected tokens (e.g., xoxb- Slack bot token) would otherwise
+        // trigger the leak detector. The URL has template substitution applied
+        // (`injected_url`) but not yet host credential injection.
+        let raw_headers: std::collections::HashMap<String, String> = serde_json::from_str(
+            &headers_json,
+        )
+        .unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "Malformed headers JSON from WASM — scanning empty headers");
+            std::collections::HashMap::new()
+        });
 
+        let mut url = injected_url;
+
+        let leak_detector = LeakDetector::new();
+        let raw_header_vec: Vec<(String, String)> = raw_headers
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        leak_detector
+            .scan_http_request(&url, &raw_header_vec, body.as_deref())
+            .map_err(|e| format!("Potential secret leak blocked: {}", e))?;
+
+        // Now inject credentials into header values
+        // This allows patterns like "Authorization": "Bearer {WHATSAPP_ACCESS_TOKEN}"
         let mut headers: std::collections::HashMap<String, String> = raw_headers
             .into_iter()
             .map(|(k, v)| {
@@ -358,26 +378,6 @@ impl near::agent::channel_host::Host for ChannelStoreData {
             headers_changed = headers_changed,
             "Parsed and injected request headers"
         );
-
-        let mut url = injected_url;
-
-        // Leak scan runs on the ORIGINAL WASM-provided values (before ANY
-        // credential injection) to prevent false positives. Host-injected
-        // tokens (e.g., xoxb- Slack bot token) would otherwise trigger the
-        // leak detector — WASM never saw the real value.
-        let leak_detector = LeakDetector::new();
-        {
-            let raw_url_for_scan = &url;
-            let raw_headers_map: std::collections::HashMap<String, String> =
-                serde_json::from_str(&headers_json).unwrap_or_else(|e| {
-                    tracing::warn!(error = %e, "Malformed headers JSON from WASM — scanning empty headers");
-                    std::collections::HashMap::new()
-                });
-            let raw_header_vec: Vec<(String, String)> = raw_headers_map.into_iter().collect();
-            leak_detector
-                .scan_http_request(raw_url_for_scan, &raw_header_vec, body.as_deref())
-                .map_err(|e| format!("Potential secret leak blocked: {}", e))?;
-        }
 
         // Inject pre-resolved host credentials (Bearer tokens, API keys, etc.)
         // after the leak scan so host-injected secrets don't trigger false positives.
@@ -5958,7 +5958,7 @@ mod tests {
     /// detector since WASM never saw those values.
     #[test]
     fn test_leak_scan_uses_pre_injection_headers() {
-        use crate::safety::LeakDetector;
+        use ironclaw_safety::LeakDetector;
 
         let detector = LeakDetector::new();
 
