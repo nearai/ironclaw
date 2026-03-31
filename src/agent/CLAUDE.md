@@ -145,6 +145,7 @@ All commands parsed by `SubmissionParser::parse()`:
 | `/summarize`, `/summary` | `Summarize` | |
 | `/suggest` | `Suggest` | |
 | `/new`, `/thread new` | `NewThread` | |
+| `/thread list` | `SystemCommand { "history" }` | Alias for /history |
 | `/thread <uuid>` | `SwitchThread` | Must be valid UUID |
 | `/resume <uuid>` | `Resume` | Must be valid UUID |
 | `/status [id]`, `/progress [id]`, `/list` | `JobStatus` | `/list` = all jobs |
