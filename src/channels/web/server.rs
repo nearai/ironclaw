@@ -2044,6 +2044,24 @@ async fn chat_threads_handler(
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
+        // Seed the bootstrap greeting if this is a fresh assistant thread.
+        if let Ok(preview) = store
+            .list_conversations_with_preview(&user.user_id, "gateway", 1)
+            .await
+        {
+            let is_empty = preview
+                .iter()
+                .find(|c| c.id == assistant_id)
+                .map(|c| c.message_count == 0)
+                .unwrap_or(true);
+            if is_empty {
+                static GREETING: &str = include_str!("../../workspace/seeds/GREETING.md");
+                let _ = store
+                    .add_conversation_message(assistant_id, "assistant", GREETING)
+                    .await;
+            }
+        }
+
         match store
             .list_conversations_all_channels(&user.user_id, 50)
             .await
