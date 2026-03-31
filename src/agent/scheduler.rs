@@ -217,6 +217,8 @@ impl Scheduler {
                 })
                 .await?
         } else {
+            // Currently unreachable via dispatch_job() which always provides
+            // Some(approval_context), but kept as a safe fallback.
             self.context_manager.get_context(job_id).await?
         };
 

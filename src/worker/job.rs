@@ -30,9 +30,7 @@ use crate::safety::SafetyLayer;
 use crate::tenant::AdminScope;
 use crate::tools::execute::process_tool_result;
 use crate::tools::rate_limiter::RateLimitResult;
-use crate::tools::{
-    ApprovalContext, ToolRegistry, autonomous_unavailable_error, prepare_tool_params, redact_params,
-};
+use crate::tools::{ApprovalContext, ToolRegistry, prepare_tool_params, redact_params};
 use crate::worker::autonomous_recovery::{
     AutonomousRecoveryAction, AutonomousRecoveryState, EMPTY_TOOL_COMPLETION_FAILURE,
     EMPTY_TOOL_COMPLETION_NUDGE, FORCE_TEXT_RECOVERY_PROMPT,
@@ -515,7 +513,7 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
         let mut job_ctx = deps.context_manager.get_context(job_id).await?;
 
         // Check approval: additive semantics - BOTH job-level AND worker-level must approve
-        let requirement = tool.requires_approval(params);
+        let requirement = tool.requires_approval(&normalized_params);
 
         // Check job-level approval context (if set by tools like the builder)
         let job_level_blocked = job_ctx
@@ -553,17 +551,10 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
             }
             .into());
         }
+
         // Propagate http_interceptor for trace recording/replay
         if job_ctx.http_interceptor.is_none() {
             job_ctx.http_interceptor = deps.http_interceptor.clone();
-        }
-
-        // Check approval: use context-aware check if available, else block all non-Never tools
-        let requirement = tool.requires_approval(&normalized_params);
-        let blocked =
-            ApprovalContext::is_blocked_or_default(&deps.approval_context, tool_name, requirement);
-        if blocked {
-            return Err(autonomous_unavailable_error(tool_name, &job_ctx.user_id).into());
         }
 
         // Check per-tool rate limit before running hooks or executing (cheaper check first)
