@@ -127,10 +127,7 @@ impl FileHistory {
     ///
     /// Returns the snapshot that was restored, or `None` if no snapshot exists.
     pub async fn restore_latest(&mut self, path: &Path) -> Result<Option<FileSnapshot>, ToolError> {
-        let idx = self
-            .snapshots
-            .iter()
-            .rposition(|s| s.path == path);
+        let idx = self.snapshots.iter().rposition(|s| s.path == path);
 
         let Some(idx) = idx else {
             return Ok(None);
@@ -142,9 +139,7 @@ impl FileHistory {
 
         tokio::fs::write(&snapshot.path, &snapshot.content_before)
             .await
-            .map_err(|e| {
-                ToolError::ExecutionFailed(format!("Failed to restore file: {}", e))
-            })?;
+            .map_err(|e| ToolError::ExecutionFailed(format!("Failed to restore file: {}", e)))?;
 
         Ok(Some(snapshot))
     }
@@ -345,10 +340,7 @@ mod tests {
         for i in 0..5 {
             let file_path = dir.path().join(format!("file{}.txt", i));
             std::fs::write(&file_path, format!("content {}", i)).unwrap();
-            history
-                .snapshot(&file_path, "write_file", i)
-                .await
-                .unwrap();
+            history.snapshot(&file_path, "write_file", i).await.unwrap();
         }
 
         // Should only keep 3 most recent
@@ -369,10 +361,7 @@ mod tests {
         let file_path = dir.path().join("does_not_exist.txt");
 
         let mut history = FileHistory::new();
-        let id = history
-            .snapshot(&file_path, "write_file", 1)
-            .await
-            .unwrap();
+        let id = history.snapshot(&file_path, "write_file", 1).await.unwrap();
 
         // No snapshot created for non-existent files
         assert!(id.is_none());
@@ -421,8 +410,7 @@ mod tests {
         }
         std::fs::write(&file_path, "fn main() { println!(\"hello\"); }").unwrap();
 
-        let tool = FileUndoTool::new(Arc::clone(&history))
-            .with_base_dir(dir.path().to_path_buf());
+        let tool = FileUndoTool::new(Arc::clone(&history)).with_base_dir(dir.path().to_path_buf());
         let ctx = JobContext::default();
 
         let result = tool
@@ -445,8 +433,7 @@ mod tests {
         std::fs::write(&file_path, "content").unwrap();
 
         let history = shared_file_history();
-        let tool = FileUndoTool::new(history)
-            .with_base_dir(dir.path().to_path_buf());
+        let tool = FileUndoTool::new(history).with_base_dir(dir.path().to_path_buf());
         let ctx = JobContext::default();
 
         let err = tool
@@ -484,8 +471,7 @@ mod tests {
         assert_eq!(content, modified);
 
         // Step 4: Undo via tool
-        let tool = FileUndoTool::new(Arc::clone(&history))
-            .with_base_dir(dir.path().to_path_buf());
+        let tool = FileUndoTool::new(Arc::clone(&history)).with_base_dir(dir.path().to_path_buf());
         let ctx = JobContext::default();
 
         let result = tool

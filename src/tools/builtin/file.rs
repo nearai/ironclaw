@@ -15,7 +15,7 @@ use tokio::sync::RwLock;
 
 use crate::context::JobContext;
 use crate::tools::builtin::file_history::FileHistory;
-use crate::tools::builtin::path_utils::{validate_path, DEFAULT_EXCLUDED_DIRS};
+use crate::tools::builtin::path_utils::{DEFAULT_EXCLUDED_DIRS, validate_path};
 use crate::tools::tool::{
     ApprovalRequirement, Tool, ToolDomain, ToolError, ToolOutput, require_str,
 };
@@ -174,9 +174,7 @@ impl Tool for ReadFileTool {
                 let n = f
                     .read(&mut probe)
                     .await
-                    .map_err(|e| {
-                        ToolError::ExecutionFailed(format!("Cannot read file: {}", e))
-                    })?;
+                    .map_err(|e| ToolError::ExecutionFailed(format!("Cannot read file: {}", e)))?;
                 if probe[..n].contains(&0) {
                     return Err(ToolError::ExecutionFailed(format!(
                         "File appears to be binary (contains null bytes): {}",
@@ -1071,10 +1069,7 @@ mod tests {
 
         for dev_path in &["/dev/zero", "/dev/urandom", "/dev/null"] {
             let err = tool
-                .execute(
-                    serde_json::json!({"path": dev_path}),
-                    &ctx,
-                )
+                .execute(serde_json::json!({"path": dev_path}), &ctx)
                 .await
                 .unwrap_err();
 
@@ -1093,10 +1088,7 @@ mod tests {
         let ctx = JobContext::default();
 
         let err = tool
-            .execute(
-                serde_json::json!({"path": "/proc/self/fd/0"}),
-                &ctx,
-            )
+            .execute(serde_json::json!({"path": "/proc/self/fd/0"}), &ctx)
             .await
             .unwrap_err();
 
@@ -1147,7 +1139,10 @@ mod tests {
             )
             .await;
 
-        assert!(result.is_ok(), "UTF-8 text with special chars should not be detected as binary");
+        assert!(
+            result.is_ok(),
+            "UTF-8 text with special chars should not be detected as binary"
+        );
     }
 
     #[tokio::test]
@@ -1234,7 +1229,11 @@ mod tests {
             .unwrap_err();
 
         let msg = err.to_string();
-        assert!(msg.contains("3 matches"), "Should report 3 matches: {}", msg);
+        assert!(
+            msg.contains("3 matches"),
+            "Should report 3 matches: {}",
+            msg
+        );
         assert!(
             msg.contains("replace_all"),
             "Should suggest replace_all: {}",

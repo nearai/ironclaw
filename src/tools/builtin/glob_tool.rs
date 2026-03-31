@@ -11,9 +11,9 @@ use async_trait::async_trait;
 use glob::{MatchOptions, glob_with};
 
 use crate::context::JobContext;
-use crate::tools::builtin::path_utils::{validate_path, DEFAULT_EXCLUDED_DIRS};
+use crate::tools::builtin::path_utils::{DEFAULT_EXCLUDED_DIRS, validate_path};
 use crate::tools::tool::{
-    ApprovalRequirement, Tool, ToolDomain, ToolDiscoverySummary, ToolError, ToolOutput, require_str,
+    ApprovalRequirement, Tool, ToolDiscoverySummary, ToolDomain, ToolError, ToolOutput, require_str,
 };
 
 /// Maximum results returned by default.
@@ -126,9 +126,7 @@ impl Tool for GlobTool {
             }
 
             // Skip excluded directories
-            let relative = path
-                .strip_prefix(&search_root)
-                .unwrap_or(&path);
+            let relative = path.strip_prefix(&search_root).unwrap_or(&path);
             if is_excluded_path(relative) {
                 continue;
             }
