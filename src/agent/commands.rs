@@ -887,9 +887,7 @@ impl Agent {
                     if let Some(uuid_str) = args.first() {
                         if let Ok(target_id) = Uuid::parse_str(uuid_str) {
                             // Delegate to thread_ops for switch with hydration
-                            return self
-                                .process_switch_thread(message, target_id)
-                                .await;
+                            return self.process_switch_thread(message, target_id).await;
                         }
                     }
                     // Unknown /thread subcommand
