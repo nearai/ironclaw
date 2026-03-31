@@ -855,7 +855,8 @@ impl Tool for ShellTool {
                 },
                 "timeout": {
                     "type": "integer",
-                    "description": "Timeout in seconds (optional, default 120)"
+                    "description": "Timeout in seconds (optional, default 120)",
+                    "minimum": 1
                 }
             },
             "required": ["command"]
@@ -869,11 +870,21 @@ impl Tool for ShellTool {
     ) -> Result<ToolOutput, ToolError> {
         let command = require_str(&params, "command")?;
 
-        let workdir = params
-            .get("workdir")
-            .and_then(|v| v.as_str())
-            .map(str::trim)
-            .filter(|s| !s.is_empty());
+        let workdir = match params.get("workdir") {
+            None => None,
+            Some(v) if v.is_null() => None,
+            Some(v) => {
+                let s = v.as_str().ok_or_else(|| {
+                    ToolError::InvalidParameters("workdir must be a string".to_string())
+                })?;
+                let trimmed = s.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed)
+                }
+            }
+        };
 
         let timeout = match params.get("timeout") {
             None => None,
@@ -881,7 +892,7 @@ impl Tool for ShellTool {
             Some(v) => {
                 let n = v.as_u64().ok_or_else(|| {
                     ToolError::InvalidParameters(
-                        "timeout must be an integer number of seconds".to_string(),
+                        "timeout must be a positive integer number of seconds".to_string(),
                     )
                 })?;
 
@@ -1036,6 +1047,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_execute_rejects_non_string_workdir() {
+        let tool = ShellTool::new();
+        let result = execute_shell(
+            &tool,
+            serde_json::json!({
+                "command": "pwd",
+                "workdir": 42
+            }),
+        )
+        .await;
+
+        assert_invalid_parameters(result, "workdir must be a string");
+    }
+
+    #[tokio::test]
     async fn test_execute_treats_missing_or_null_timeout_as_none() {
         let tool = ShellTool::new();
 
@@ -1062,7 +1088,10 @@ mod tests {
         )
         .await;
 
-        assert_invalid_parameters(result, "timeout must be an integer number of seconds");
+        assert_invalid_parameters(
+            result,
+            "timeout must be a positive integer number of seconds",
+        );
     }
 
     #[tokio::test]
@@ -1092,7 +1121,10 @@ mod tests {
         )
         .await;
 
-        assert_invalid_parameters(result, "timeout must be an integer number of seconds");
+        assert_invalid_parameters(
+            result,
+            "timeout must be a positive integer number of seconds",
+        );
     }
 
     #[tokio::test]
