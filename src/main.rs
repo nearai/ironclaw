@@ -300,6 +300,11 @@ async fn async_main() -> anyhow::Result<()> {
         wizard.run().await?;
     }
 
+    // CLI flag overrides for config
+    if cli.auto_approve {
+        ironclaw::config::set_runtime_env("AGENT_AUTO_APPROVE_TOOLS", "true");
+    }
+
     // Load initial config from env + disk + optional TOML (before DB is available).
     // Credentials may be missing at this point — that's fine. LlmConfig::resolve()
     // defers gracefully, and AppBuilder::build_all() re-resolves after loading

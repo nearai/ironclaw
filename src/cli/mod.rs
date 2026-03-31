@@ -92,6 +92,14 @@ pub struct Cli {
     /// Skip first-run onboarding check
     #[arg(long, global = true)]
     pub no_onboard: bool,
+
+    /// Auto-approve tool execution (shell, file writes, HTTP, etc.)
+    ///
+    /// Skips interactive approval prompts for standard tools. Destructive
+    /// operations still require explicit approval. Other safeguards remain
+    /// active: rate limits, hooks, authentication gates.
+    #[arg(long, global = true)]
+    pub auto_approve: bool,
 }
 
 #[derive(Subcommand, Debug)]
