@@ -125,6 +125,65 @@ impl LeaseManager {
             .find(|l| l.thread_id == thread_id && l.is_valid() && l.covers_action(action_name))
             .cloned()
     }
+
+    /// Derive child leases from a parent thread's active leases.
+    ///
+    /// Implements intersection semantics: the child gets only leases for
+    /// actions that are both in the parent's active set AND in the
+    /// `requested_actions` set. If `requested_actions` is `None`, the child
+    /// inherits all of the parent's valid leases.
+    ///
+    /// Invariants:
+    /// - A child can never have more privileges than its parent.
+    /// - Child leases inherit the parent's expiry (never outlive parent).
+    /// - Child leases inherit the parent's remaining budget.
+    /// - Expired parent leases yield no child leases.
+    pub async fn derive_child_leases(
+        &self,
+        parent_thread_id: ThreadId,
+        child_thread_id: ThreadId,
+        requested_actions: Option<&std::collections::HashSet<String>>,
+    ) -> Vec<CapabilityLease> {
+        let parent_leases = self.active_for_thread(parent_thread_id).await;
+        let mut child_leases = Vec::new();
+
+        for parent in &parent_leases {
+            if !parent.is_valid() {
+                continue;
+            }
+
+            let child_actions: Vec<String> = match requested_actions {
+                Some(req) => parent
+                    .granted_actions
+                    .iter()
+                    .filter(|a| req.contains(*a))
+                    .cloned()
+                    .collect(),
+                None => parent.granted_actions.clone(),
+            };
+
+            // Skip if intersection is empty and parent has specific grants
+            if !parent.granted_actions.is_empty() && child_actions.is_empty() {
+                continue;
+            }
+
+            let child = CapabilityLease {
+                id: LeaseId::new(),
+                thread_id: child_thread_id,
+                capability_name: parent.capability_name.clone(),
+                granted_actions: child_actions,
+                granted_at: Utc::now(),
+                expires_at: parent.expires_at,   // never outlive parent
+                max_uses: parent.uses_remaining, // budget from parent's remaining
+                uses_remaining: parent.uses_remaining,
+                revoked: false,
+            };
+            self.active.write().await.insert(child.id, child.clone());
+            child_leases.push(child);
+        }
+
+        child_leases
+    }
 }
 
 impl Default for LeaseManager {
@@ -233,5 +292,118 @@ mod tests {
             .await;
         assert!(mgr.check(lease.id).await.is_err());
         assert!(mgr.active_for_thread(tid).await.is_empty());
+    }
+
+    // ── derive_child_leases ──────────────────────────────────
+
+    #[tokio::test]
+    async fn test_child_inherits_subset_of_parent() {
+        let mgr = LeaseManager::new();
+        let parent = ThreadId::new();
+        let child = ThreadId::new();
+
+        mgr.grant(
+            parent,
+            "tools",
+            vec!["A".into(), "B".into(), "C".into()],
+            None,
+            None,
+        )
+        .await;
+
+        let mut requested = std::collections::HashSet::new();
+        requested.insert("B".into());
+        requested.insert("C".into());
+        requested.insert("D".into()); // not in parent
+
+        let child_leases = mgr
+            .derive_child_leases(parent, child, Some(&requested))
+            .await;
+        assert_eq!(child_leases.len(), 1);
+        let actions = &child_leases[0].granted_actions;
+        assert!(actions.contains(&"B".to_string()));
+        assert!(actions.contains(&"C".to_string()));
+        assert!(!actions.contains(&"D".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_child_never_exceeds_parent_expiry() {
+        let mgr = LeaseManager::new();
+        let parent = ThreadId::new();
+        let child = ThreadId::new();
+
+        let parent_lease = mgr
+            .grant(
+                parent,
+                "tools",
+                vec!["read".into()],
+                Some(chrono::Duration::hours(1)),
+                None,
+            )
+            .await;
+
+        let child_leases = mgr.derive_child_leases(parent, child, None).await;
+        assert_eq!(child_leases.len(), 1);
+        assert_eq!(child_leases[0].expires_at, parent_lease.expires_at);
+    }
+
+    #[tokio::test]
+    async fn test_expired_parent_yields_empty_child() {
+        let mgr = LeaseManager::new();
+        let parent = ThreadId::new();
+        let child = ThreadId::new();
+
+        mgr.grant(
+            parent,
+            "tools",
+            vec!["read".into()],
+            Some(chrono::Duration::seconds(-10)), // already expired
+            None,
+        )
+        .await;
+
+        let child_leases = mgr.derive_child_leases(parent, child, None).await;
+        assert!(child_leases.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_child_inherits_remaining_budget() {
+        let mgr = LeaseManager::new();
+        let parent = ThreadId::new();
+        let child = ThreadId::new();
+
+        let parent_lease = mgr
+            .grant(parent, "tools", vec!["read".into()], None, Some(10))
+            .await;
+
+        // Consume 3 uses from parent
+        mgr.consume_use(parent_lease.id).await.unwrap();
+        mgr.consume_use(parent_lease.id).await.unwrap();
+        mgr.consume_use(parent_lease.id).await.unwrap();
+
+        let child_leases = mgr.derive_child_leases(parent, child, None).await;
+        assert_eq!(child_leases.len(), 1);
+        // Parent had 10, consumed 3, so 7 remaining
+        assert_eq!(child_leases[0].uses_remaining, Some(7));
+    }
+
+    #[tokio::test]
+    async fn test_child_with_none_inherits_all() {
+        let mgr = LeaseManager::new();
+        let parent = ThreadId::new();
+        let child = ThreadId::new();
+
+        mgr.grant(
+            parent,
+            "tools",
+            vec!["read".into(), "write".into()],
+            None,
+            None,
+        )
+        .await;
+
+        let child_leases = mgr.derive_child_leases(parent, child, None).await;
+        assert_eq!(child_leases.len(), 1);
+        assert_eq!(child_leases[0].granted_actions.len(), 2);
     }
 }

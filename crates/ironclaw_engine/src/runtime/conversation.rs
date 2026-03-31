@@ -269,6 +269,17 @@ impl ConversationManager {
                     ));
                     // Thread stays active — waiting for OAuth completion
                 }
+                ThreadOutcome::GatePaused {
+                    gate_name,
+                    action_name,
+                    ..
+                } => {
+                    conv.add_entry(ConversationEntry::system_for_thread(
+                        thread_id,
+                        format!("Gate '{gate_name}' paused execution of action: {action_name}"),
+                    ));
+                    // Thread stays active — waiting for gate resolution
+                }
             }
             self.store.save_conversation(conv).await?;
         }

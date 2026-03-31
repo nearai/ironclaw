@@ -44,5 +44,6 @@ pub use router::{
     list_engine_threads,
     pause_engine_mission,
     pending_approval_for_user_thread,
+    resolve_gate,
     resume_engine_mission,
 };

@@ -92,6 +92,11 @@ impl EffectBridgeAdapter {
             .insert(tool_name.to_string());
     }
 
+    /// Revoke auto-approve for a tool (rollback on resume failure).
+    pub async fn revoke_auto_approve(&self, tool_name: &str) {
+        self.auto_approved.write().await.remove(tool_name);
+    }
+
     /// Set the auth manager for pre-flight credential checks.
     pub async fn set_auth_manager(&self, mgr: Arc<AuthManager>) {
         *self.auth_manager.write().await = Some(mgr);
@@ -135,7 +140,13 @@ impl EffectBridgeAdapter {
                     .and_then(|v| v.as_str())
                     .unwrap_or("manual");
                 match mgr
-                    .create_mission(context.project_id, &context.user_id, name, goal, parse_cadence(cadence_str))
+                    .create_mission(
+                        context.project_id,
+                        &context.user_id,
+                        name,
+                        goal,
+                        parse_cadence(cadence_str),
+                    )
                     .await
                 {
                     Ok(id) => {
@@ -144,7 +155,10 @@ impl EffectBridgeAdapter {
                     Err(e) => Err(e),
                 }
             }
-            "mission_list" => match mgr.list_missions(context.project_id, &context.user_id).await {
+            "mission_list" => match mgr
+                .list_missions(context.project_id, &context.user_id)
+                .await
+            {
                 Ok(missions) => {
                     let list: Vec<serde_json::Value> = missions
                         .iter()

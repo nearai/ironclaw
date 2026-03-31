@@ -184,7 +184,11 @@ impl Store for TestStore {
     async fn load_thread(&self, id: ThreadId) -> Result<Option<Thread>, EngineError> {
         Ok(self.threads.read().await.get(&id).cloned())
     }
-    async fn list_threads(&self, pid: ProjectId, _user_id: &str) -> Result<Vec<Thread>, EngineError> {
+    async fn list_threads(
+        &self,
+        pid: ProjectId,
+        _user_id: &str,
+    ) -> Result<Vec<Thread>, EngineError> {
         Ok(self
             .threads
             .read()
@@ -247,7 +251,11 @@ impl Store for TestStore {
     async fn load_memory_doc(&self, id: DocId) -> Result<Option<MemoryDoc>, EngineError> {
         Ok(self.docs.read().await.iter().find(|d| d.id == id).cloned())
     }
-    async fn list_memory_docs(&self, pid: ProjectId, _user_id: &str) -> Result<Vec<MemoryDoc>, EngineError> {
+    async fn list_memory_docs(
+        &self,
+        pid: ProjectId,
+        _user_id: &str,
+    ) -> Result<Vec<MemoryDoc>, EngineError> {
         Ok(self
             .docs
             .read()
@@ -282,7 +290,11 @@ impl Store for TestStore {
             .find(|m| m.id == id)
             .cloned())
     }
-    async fn list_missions(&self, pid: ProjectId, _user_id: &str) -> Result<Vec<Mission>, EngineError> {
+    async fn list_missions(
+        &self,
+        pid: ProjectId,
+        _user_id: &str,
+    ) -> Result<Vec<Mission>, EngineError> {
         Ok(self
             .missions
             .read()

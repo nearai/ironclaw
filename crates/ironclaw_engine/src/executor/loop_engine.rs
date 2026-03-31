@@ -261,12 +261,14 @@ impl ExecutionLoop {
                 }
                 let _ = &orch_result.tokens_used;
 
-                // Safety net: if the orchestrator returned NeedApproval or
-                // NeedAuthentication but didn't transition to Waiting, do it
-                // now so resume_thread works.
+                // Safety net: if the orchestrator returned NeedApproval,
+                // NeedAuthentication, or GatePaused but didn't transition to
+                // Waiting, do it now so resume_thread works.
                 if matches!(
                     orch_result.outcome,
-                    ThreadOutcome::NeedApproval { .. } | ThreadOutcome::NeedAuthentication { .. }
+                    ThreadOutcome::NeedApproval { .. }
+                        | ThreadOutcome::NeedAuthentication { .. }
+                        | ThreadOutcome::GatePaused { .. }
                 ) && self.thread.state != ThreadState::Waiting
                 {
                     debug!(
