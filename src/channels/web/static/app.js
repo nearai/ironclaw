@@ -188,14 +188,12 @@ function initApp() {
       avatarInitials.textContent = displayName.charAt(0).toUpperCase();
     }
     if (profile.avatar_url && avatarImg) {
-      var img = new Image();
-      img.onload = function() {
-        avatarImg.src = profile.avatar_url;
-        avatarImg.hidden = false;
+      avatarImg.referrerPolicy = 'no-referrer';
+      avatarImg.onload = function() {
         if (avatarInitials) avatarInitials.hidden = true;
       };
-      img.onerror = function() { /* keep initials */ };
-      img.src = profile.avatar_url;
+      avatarImg.src = profile.avatar_url;
+      avatarImg.hidden = false;
     }
     // Populate dropdown.
     var nameEl = document.getElementById('user-dropdown-name');
