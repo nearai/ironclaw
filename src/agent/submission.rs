@@ -194,6 +194,7 @@ impl SubmissionParser {
         }
 
         // /resume <uuid> - resume from checkpoint
+        #[allow(clippy::collapsible_if)]
         if let Some(rest) = lower.strip_prefix("/resume ") {
             if let Ok(id) = Uuid::parse_str(rest.trim()) {
                 return Submission::Resume { checkpoint_id: id };
@@ -201,6 +202,7 @@ impl SubmissionParser {
         }
 
         // Try structured JSON approval (from web gateway's /api/chat/approval endpoint)
+        #[allow(clippy::collapsible_if)]
         if trimmed.starts_with('{') {
             if let Ok(submission) = serde_json::from_str::<Submission>(trimmed) {
                 if matches!(submission, Submission::ExecApproval { .. }) {
