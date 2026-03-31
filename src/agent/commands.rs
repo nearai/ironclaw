@@ -883,16 +883,11 @@ impl Agent {
                         new_thread_id
                     )))
                 } else {
-                    // Try to parse as UUID for thread switch
-                    if let Some(uuid_str) = args.first() {
-                        if let Ok(target_id) = Uuid::parse_str(uuid_str) {
-                            // Delegate to thread_ops for switch with hydration
-                            return self.process_switch_thread(message, target_id).await;
-                        }
-                    }
-                    // Unknown /thread subcommand
+                    // /thread <uuid> is parsed by SubmissionParser as Submission::SwitchThread
+                    // and handled in agent_loop.rs -> process_switch_thread with proper message context.
+                    // This branch handles unknown /thread subcommands.
                     Ok(SubmissionResult::error(format!(
-                        "Unknown /thread subcommand: {}. Use /thread (no args), /thread list, /thread new, or /thread <uuid>.",
+                        "Unknown /thread subcommand: {}. Use /thread (no args), /thread list, or /thread new.",
                         args.join(" ")
                     )))
                 }
