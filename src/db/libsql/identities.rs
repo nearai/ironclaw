@@ -111,6 +111,32 @@ impl IdentityStore for LibSqlBackend {
         Ok(())
     }
 
+    async fn update_identity_profile(
+        &self,
+        provider: &str,
+        provider_user_id: &str,
+        display_name: Option<&str>,
+        avatar_url: Option<&str>,
+    ) -> Result<(), DatabaseError> {
+        let conn = self.connect().await?;
+        conn.execute(
+            "UPDATE user_identities SET \
+             display_name = COALESCE(?3, display_name), \
+             avatar_url = COALESCE(?4, avatar_url), \
+             updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') \
+             WHERE provider = ?1 AND provider_user_id = ?2",
+            params![
+                provider,
+                provider_user_id,
+                opt_text(display_name),
+                opt_text(avatar_url),
+            ],
+        )
+        .await
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        Ok(())
+    }
+
     async fn find_identity_by_verified_email(
         &self,
         email: &str,

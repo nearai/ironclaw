@@ -536,9 +536,8 @@ function connectSSE() {
 
   eventSource.onopen = () => {
     document.getElementById('sse-dot').classList.remove('disconnected');
-    var dotMenu = document.getElementById('sse-dot-menu');
-    if (dotMenu) dotMenu.classList.remove('disconnected');
-    document.getElementById('sse-status').textContent = I18n.t('status.connected');
+    var statusEl = document.getElementById('sse-status');
+    if (statusEl) statusEl.textContent = I18n.t('status.connected');
     _reconnectAttempts = 0;
 
     // Dismiss connection-lost banner and show reconnected flash
@@ -580,9 +579,8 @@ function connectSSE() {
   eventSource.onerror = () => {
     _reconnectAttempts++;
     document.getElementById('sse-dot').classList.add('disconnected');
-    var dotMenu2 = document.getElementById('sse-dot-menu');
-    if (dotMenu2) dotMenu2.classList.add('disconnected');
-    document.getElementById('sse-status').textContent = I18n.t('status.reconnecting');
+    var statusEl2 = document.getElementById('sse-status');
+    if (statusEl2) statusEl2.textContent = I18n.t('status.reconnecting');
 
     // Update existing banner with attempt count
     const existingBanner = document.getElementById('connection-banner');

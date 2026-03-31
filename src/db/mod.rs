@@ -958,6 +958,15 @@ pub trait IdentityStore: Send + Sync {
     /// Create a new identity link.
     async fn create_identity(&self, identity: &UserIdentityRecord) -> Result<(), DatabaseError>;
 
+    /// Update display_name and avatar_url on an existing identity (e.g. on re-login).
+    async fn update_identity_profile(
+        &self,
+        provider: &str,
+        provider_user_id: &str,
+        display_name: Option<&str>,
+        avatar_url: Option<&str>,
+    ) -> Result<(), DatabaseError>;
+
     /// Find identities with a given verified email (for automatic account linking).
     async fn find_identity_by_verified_email(
         &self,

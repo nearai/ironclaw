@@ -998,6 +998,24 @@ impl IdentityStore for PgBackend {
         Ok(())
     }
 
+    async fn update_identity_profile(
+        &self,
+        provider: &str,
+        provider_user_id: &str,
+        display_name: Option<&str>,
+        avatar_url: Option<&str>,
+    ) -> Result<(), DatabaseError> {
+        let conn = self.store.pool().get().await?;
+        conn.execute(
+            "UPDATE user_identities SET display_name = COALESCE($3, display_name), \
+             avatar_url = COALESCE($4, avatar_url), updated_at = NOW() \
+             WHERE provider = $1 AND provider_user_id = $2",
+            &[&provider, &provider_user_id, &display_name, &avatar_url],
+        )
+        .await?;
+        Ok(())
+    }
+
     async fn find_identity_by_verified_email(
         &self,
         email: &str,

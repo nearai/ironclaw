@@ -626,6 +626,15 @@ async fn resolve_user(
             if user.status != "active" {
                 return Err(format!("Account is {}", user.status));
             }
+            // Update profile fields that may have changed at the provider.
+            let _ = store
+                .update_identity_profile(
+                    provider,
+                    &profile.provider_user_id,
+                    profile.display_name.as_deref(),
+                    profile.avatar_url.as_deref(),
+                )
+                .await;
             return Ok((existing.user_id, false));
         }
     }

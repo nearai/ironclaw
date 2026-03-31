@@ -472,34 +472,6 @@ body {
   background: var(--border);
 }
 
-.user-dropdown-status {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  padding: 8px 16px;
-  font-size: 12px;
-  color: var(--text-secondary);
-}
-
-.user-dropdown-status .dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--success);
-  flex-shrink: 0;
-}
-
-.user-dropdown-status .dot.disconnected {
-  background: var(--danger);
-}
-
-.gateway-popover-inline {
-  padding: 4px 16px 8px;
-  font-size: 11px;
-  color: var(--text-secondary);
-  line-height: 1.5;
-}
-
 .user-dropdown-item {
   display: block;
   width: 100%;
