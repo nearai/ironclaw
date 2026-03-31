@@ -93,12 +93,10 @@ fn format_docs_as_context(docs: &[MemoryDoc]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::capability::{CapabilityLease, LeaseId};
-    use crate::types::event::ThreadEvent;
-    use crate::types::memory::{DocId, DocType};
-    use crate::types::project::{Project, ProjectId};
-    use crate::types::step::{ActionResult, Step};
-    use crate::types::thread::{Thread, ThreadId, ThreadState};
+    use crate::types::capability::CapabilityLease;
+    use crate::types::memory::DocType;
+    use crate::types::project::ProjectId;
+    use crate::types::step::ActionResult;
 
     struct MockEffects;
 
@@ -128,112 +126,19 @@ mod tests {
         }
     }
 
-    struct DocStore(Vec<MemoryDoc>);
-
-    #[async_trait::async_trait]
-    impl crate::traits::store::Store for DocStore {
-        async fn save_thread(&self, _: &Thread) -> Result<(), EngineError> {
-            Ok(())
-        }
-        async fn load_thread(&self, _: ThreadId) -> Result<Option<Thread>, EngineError> {
-            Ok(None)
-        }
-        async fn list_threads(&self, _: ProjectId, _: &str) -> Result<Vec<Thread>, EngineError> {
-            Ok(vec![])
-        }
-        async fn update_thread_state(
-            &self,
-            _: ThreadId,
-            _: ThreadState,
-        ) -> Result<(), EngineError> {
-            Ok(())
-        }
-        async fn save_step(&self, _: &Step) -> Result<(), EngineError> {
-            Ok(())
-        }
-        async fn load_steps(&self, _: ThreadId) -> Result<Vec<Step>, EngineError> {
-            Ok(vec![])
-        }
-        async fn append_events(&self, _: &[ThreadEvent]) -> Result<(), EngineError> {
-            Ok(())
-        }
-        async fn load_events(&self, _: ThreadId) -> Result<Vec<ThreadEvent>, EngineError> {
-            Ok(vec![])
-        }
-        async fn save_project(&self, _: &Project) -> Result<(), EngineError> {
-            Ok(())
-        }
-        async fn load_project(&self, _: ProjectId) -> Result<Option<Project>, EngineError> {
-            Ok(None)
-        }
-        async fn save_memory_doc(&self, _: &MemoryDoc) -> Result<(), EngineError> {
-            Ok(())
-        }
-        async fn load_memory_doc(&self, _: DocId) -> Result<Option<MemoryDoc>, EngineError> {
-            Ok(None)
-        }
-        async fn list_memory_docs(
-            &self,
-            pid: ProjectId,
-            _: &str,
-        ) -> Result<Vec<MemoryDoc>, EngineError> {
-            Ok(self
-                .0
-                .iter()
-                .filter(|d| d.project_id == pid)
-                .cloned()
-                .collect())
-        }
-        async fn save_lease(&self, _: &CapabilityLease) -> Result<(), EngineError> {
-            Ok(())
-        }
-        async fn load_active_leases(
-            &self,
-            _: ThreadId,
-        ) -> Result<Vec<CapabilityLease>, EngineError> {
-            Ok(vec![])
-        }
-        async fn revoke_lease(&self, _: LeaseId, _: &str) -> Result<(), EngineError> {
-            Ok(())
-        }
-        async fn save_mission(
-            &self,
-            _: &crate::types::mission::Mission,
-        ) -> Result<(), EngineError> {
-            Ok(())
-        }
-        async fn load_mission(
-            &self,
-            _: crate::types::mission::MissionId,
-        ) -> Result<Option<crate::types::mission::Mission>, EngineError> {
-            Ok(None)
-        }
-        async fn list_missions(
-            &self,
-            _: ProjectId,
-            _: &str,
-        ) -> Result<Vec<crate::types::mission::Mission>, EngineError> {
-            Ok(vec![])
-        }
-        async fn update_mission_status(
-            &self,
-            _: crate::types::mission::MissionId,
-            _: crate::types::mission::MissionStatus,
-        ) -> Result<(), EngineError> {
-            Ok(())
-        }
-    }
-
     #[tokio::test]
     async fn context_injects_docs_after_system_prompt() {
         let project = ProjectId::new();
-        let store: Arc<dyn crate::traits::store::Store> = Arc::new(DocStore(vec![MemoryDoc::new(
-            project,
-            "test-user",
-            DocType::Lesson,
-            "web tool alias",
-            "Use web-search not web_search",
-        )]));
+        let store: Arc<dyn crate::traits::store::Store> =
+            Arc::new(crate::tests::InMemoryStore::with_docs(vec![
+                MemoryDoc::new(
+                    project,
+                    "test-user",
+                    DocType::Lesson,
+                    "web tool alias",
+                    "Use web-search not web_search",
+                ),
+            ]));
         let retrieval = RetrievalEngine::new(store);
         let effects: Arc<dyn EffectExecutor> = Arc::new(MockEffects);
 
@@ -291,7 +196,8 @@ mod tests {
     #[tokio::test]
     async fn context_no_docs_means_no_injection() {
         let project = ProjectId::new();
-        let store: Arc<dyn crate::traits::store::Store> = Arc::new(DocStore(vec![]));
+        let store: Arc<dyn crate::traits::store::Store> =
+            Arc::new(crate::tests::InMemoryStore::new());
         let retrieval = RetrievalEngine::new(store);
         let effects: Arc<dyn EffectExecutor> = Arc::new(MockEffects);
 

@@ -87,7 +87,6 @@ pub(crate) mod tests {
 
     use crate::traits::store::Store;
     use crate::types::capability::{CapabilityLease, LeaseId};
-    use crate::types::conversation::{ConversationId, ConversationSurface};
     use crate::types::error::EngineError;
     use crate::types::event::ThreadEvent;
     use crate::types::memory::{DocId, MemoryDoc};
@@ -97,73 +96,126 @@ pub(crate) mod tests {
     use crate::types::thread::{Thread, ThreadId, ThreadState};
 
     /// Shared in-memory Store implementation for tests.
+    ///
+    /// Stores all entity types with proper CRUD semantics and filtering by
+    /// project_id / user_id. Use this instead of defining per-module mocks.
     pub struct InMemoryStore {
+        threads: RwLock<Vec<Thread>>,
+        steps: RwLock<Vec<Step>>,
+        events: RwLock<Vec<ThreadEvent>>,
+        projects: RwLock<Vec<Project>>,
         docs: RwLock<Vec<MemoryDoc>>,
+        leases: RwLock<Vec<CapabilityLease>>,
         missions: RwLock<Vec<Mission>>,
     }
 
     impl InMemoryStore {
+        pub fn new() -> Self {
+            Self {
+                threads: RwLock::new(Vec::new()),
+                steps: RwLock::new(Vec::new()),
+                events: RwLock::new(Vec::new()),
+                projects: RwLock::new(Vec::new()),
+                docs: RwLock::new(Vec::new()),
+                leases: RwLock::new(Vec::new()),
+                missions: RwLock::new(Vec::new()),
+            }
+        }
+
         pub fn with_docs(docs: Vec<MemoryDoc>) -> Self {
             Self {
                 docs: RwLock::new(docs),
-                missions: RwLock::new(Vec::new()),
+                ..Self::new()
             }
         }
     }
 
     #[async_trait::async_trait]
     impl Store for InMemoryStore {
-        async fn save_thread(&self, _: &Thread) -> Result<(), EngineError> {
+        async fn save_thread(&self, thread: &Thread) -> Result<(), EngineError> {
+            let mut threads = self.threads.write().await;
+            threads.retain(|t| t.id != thread.id);
+            threads.push(thread.clone());
             Ok(())
         }
-        async fn load_thread(&self, _: ThreadId) -> Result<Option<Thread>, EngineError> {
-            Ok(None)
+        async fn load_thread(&self, id: ThreadId) -> Result<Option<Thread>, EngineError> {
+            Ok(self
+                .threads
+                .read()
+                .await
+                .iter()
+                .find(|t| t.id == id)
+                .cloned())
         }
-        async fn list_threads(&self, _: ProjectId, _: &str) -> Result<Vec<Thread>, EngineError> {
-            Ok(vec![])
+        async fn list_threads(
+            &self,
+            project_id: ProjectId,
+            user_id: &str,
+        ) -> Result<Vec<Thread>, EngineError> {
+            Ok(self
+                .threads
+                .read()
+                .await
+                .iter()
+                .filter(|t| t.project_id == project_id && t.user_id == user_id)
+                .cloned()
+                .collect())
         }
         async fn update_thread_state(
             &self,
-            _: ThreadId,
-            _: ThreadState,
+            id: ThreadId,
+            state: ThreadState,
         ) -> Result<(), EngineError> {
+            let mut threads = self.threads.write().await;
+            if let Some(t) = threads.iter_mut().find(|t| t.id == id) {
+                t.state = state;
+            }
             Ok(())
         }
-        async fn save_step(&self, _: &Step) -> Result<(), EngineError> {
+        async fn save_step(&self, step: &Step) -> Result<(), EngineError> {
+            let mut steps = self.steps.write().await;
+            steps.retain(|s| s.id != step.id);
+            steps.push(step.clone());
             Ok(())
         }
-        async fn load_steps(&self, _: ThreadId) -> Result<Vec<Step>, EngineError> {
-            Ok(vec![])
+        async fn load_steps(&self, thread_id: ThreadId) -> Result<Vec<Step>, EngineError> {
+            Ok(self
+                .steps
+                .read()
+                .await
+                .iter()
+                .filter(|s| s.thread_id == thread_id)
+                .cloned()
+                .collect())
         }
-        async fn append_events(&self, _: &[ThreadEvent]) -> Result<(), EngineError> {
+        async fn append_events(&self, events: &[ThreadEvent]) -> Result<(), EngineError> {
+            self.events.write().await.extend(events.iter().cloned());
             Ok(())
         }
-        async fn load_events(&self, _: ThreadId) -> Result<Vec<ThreadEvent>, EngineError> {
-            Ok(vec![])
+        async fn load_events(&self, thread_id: ThreadId) -> Result<Vec<ThreadEvent>, EngineError> {
+            Ok(self
+                .events
+                .read()
+                .await
+                .iter()
+                .filter(|e| e.thread_id == thread_id)
+                .cloned()
+                .collect())
         }
-        async fn save_project(&self, _: &Project) -> Result<(), EngineError> {
+        async fn save_project(&self, project: &Project) -> Result<(), EngineError> {
+            let mut projects = self.projects.write().await;
+            projects.retain(|p| p.id != project.id);
+            projects.push(project.clone());
             Ok(())
         }
-        async fn load_project(&self, _: ProjectId) -> Result<Option<Project>, EngineError> {
-            Ok(None)
-        }
-        async fn list_projects(&self, _: &str) -> Result<Vec<Project>, EngineError> {
-            Ok(vec![])
-        }
-        async fn save_conversation(&self, _: &ConversationSurface) -> Result<(), EngineError> {
-            Ok(())
-        }
-        async fn load_conversation(
-            &self,
-            _: ConversationId,
-        ) -> Result<Option<ConversationSurface>, EngineError> {
-            Ok(None)
-        }
-        async fn list_conversations(
-            &self,
-            _: &str,
-        ) -> Result<Vec<ConversationSurface>, EngineError> {
-            Ok(vec![])
+        async fn load_project(&self, id: ProjectId) -> Result<Option<Project>, EngineError> {
+            Ok(self
+                .projects
+                .read()
+                .await
+                .iter()
+                .find(|p| p.id == id)
+                .cloned())
         }
         async fn save_memory_doc(&self, doc: &MemoryDoc) -> Result<(), EngineError> {
             let mut docs = self.docs.write().await;
@@ -177,27 +229,41 @@ pub(crate) mod tests {
         async fn list_memory_docs(
             &self,
             project_id: ProjectId,
-            _user_id: &str,
+            user_id: &str,
         ) -> Result<Vec<MemoryDoc>, EngineError> {
             Ok(self
                 .docs
                 .read()
                 .await
                 .iter()
-                .filter(|d| d.project_id == project_id)
+                .filter(|d| d.project_id == project_id && d.user_id == user_id)
                 .cloned()
                 .collect())
         }
-        async fn save_lease(&self, _: &CapabilityLease) -> Result<(), EngineError> {
+        async fn save_lease(&self, lease: &CapabilityLease) -> Result<(), EngineError> {
+            let mut leases = self.leases.write().await;
+            leases.retain(|l| l.id != lease.id);
+            leases.push(lease.clone());
             Ok(())
         }
         async fn load_active_leases(
             &self,
-            _: ThreadId,
+            thread_id: ThreadId,
         ) -> Result<Vec<CapabilityLease>, EngineError> {
-            Ok(vec![])
+            Ok(self
+                .leases
+                .read()
+                .await
+                .iter()
+                .filter(|l| l.thread_id == thread_id && !l.revoked)
+                .cloned()
+                .collect())
         }
-        async fn revoke_lease(&self, _: LeaseId, _: &str) -> Result<(), EngineError> {
+        async fn revoke_lease(&self, lease_id: LeaseId, _reason: &str) -> Result<(), EngineError> {
+            let mut leases = self.leases.write().await;
+            if let Some(l) = leases.iter_mut().find(|l| l.id == lease_id) {
+                l.revoked = true;
+            }
             Ok(())
         }
         async fn save_mission(&self, mission: &Mission) -> Result<(), EngineError> {
@@ -218,14 +284,14 @@ pub(crate) mod tests {
         async fn list_missions(
             &self,
             project_id: ProjectId,
-            _: &str,
+            user_id: &str,
         ) -> Result<Vec<Mission>, EngineError> {
             Ok(self
                 .missions
                 .read()
                 .await
                 .iter()
-                .filter(|m| m.project_id == project_id)
+                .filter(|m| m.project_id == project_id && m.user_id == user_id)
                 .cloned()
                 .collect())
         }

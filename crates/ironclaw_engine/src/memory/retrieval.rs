@@ -134,118 +134,10 @@ fn doc_type_weight(doc_type: DocType) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::capability::{CapabilityLease, LeaseId};
-    use crate::types::event::ThreadEvent;
-    use crate::types::memory::DocId;
-    use crate::types::project::{Project, ProjectId};
-    use crate::types::step::Step;
-    use crate::types::thread::{Thread, ThreadId, ThreadState};
+    use crate::types::project::ProjectId;
 
-    /// Mock Store that returns a fixed set of memory docs.
-    struct DocStore {
-        docs: tokio::sync::Mutex<Vec<MemoryDoc>>,
-    }
-
-    impl DocStore {
-        fn new(docs: Vec<MemoryDoc>) -> Arc<Self> {
-            Arc::new(Self {
-                docs: tokio::sync::Mutex::new(docs),
-            })
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl crate::traits::store::Store for DocStore {
-        async fn save_thread(&self, _: &Thread) -> Result<(), EngineError> {
-            Ok(())
-        }
-        async fn load_thread(&self, _: ThreadId) -> Result<Option<Thread>, EngineError> {
-            Ok(None)
-        }
-        async fn list_threads(&self, _: ProjectId, _: &str) -> Result<Vec<Thread>, EngineError> {
-            Ok(vec![])
-        }
-        async fn update_thread_state(
-            &self,
-            _: ThreadId,
-            _: ThreadState,
-        ) -> Result<(), EngineError> {
-            Ok(())
-        }
-        async fn save_step(&self, _: &Step) -> Result<(), EngineError> {
-            Ok(())
-        }
-        async fn load_steps(&self, _: ThreadId) -> Result<Vec<Step>, EngineError> {
-            Ok(vec![])
-        }
-        async fn append_events(&self, _: &[ThreadEvent]) -> Result<(), EngineError> {
-            Ok(())
-        }
-        async fn load_events(&self, _: ThreadId) -> Result<Vec<ThreadEvent>, EngineError> {
-            Ok(vec![])
-        }
-        async fn save_project(&self, _: &Project) -> Result<(), EngineError> {
-            Ok(())
-        }
-        async fn load_project(&self, _: ProjectId) -> Result<Option<Project>, EngineError> {
-            Ok(None)
-        }
-        async fn save_memory_doc(&self, _: &MemoryDoc) -> Result<(), EngineError> {
-            Ok(())
-        }
-        async fn load_memory_doc(&self, _: DocId) -> Result<Option<MemoryDoc>, EngineError> {
-            Ok(None)
-        }
-        async fn list_memory_docs(
-            &self,
-            project_id: ProjectId,
-            user_id: &str,
-        ) -> Result<Vec<MemoryDoc>, EngineError> {
-            let docs = self.docs.lock().await;
-            Ok(docs
-                .iter()
-                .filter(|d| d.project_id == project_id && d.user_id == user_id)
-                .cloned()
-                .collect())
-        }
-        async fn save_lease(&self, _: &CapabilityLease) -> Result<(), EngineError> {
-            Ok(())
-        }
-        async fn load_active_leases(
-            &self,
-            _: ThreadId,
-        ) -> Result<Vec<CapabilityLease>, EngineError> {
-            Ok(vec![])
-        }
-        async fn revoke_lease(&self, _: LeaseId, _: &str) -> Result<(), EngineError> {
-            Ok(())
-        }
-        async fn save_mission(
-            &self,
-            _: &crate::types::mission::Mission,
-        ) -> Result<(), EngineError> {
-            Ok(())
-        }
-        async fn load_mission(
-            &self,
-            _: crate::types::mission::MissionId,
-        ) -> Result<Option<crate::types::mission::Mission>, EngineError> {
-            Ok(None)
-        }
-        async fn list_missions(
-            &self,
-            _: ProjectId,
-            _: &str,
-        ) -> Result<Vec<crate::types::mission::Mission>, EngineError> {
-            Ok(vec![])
-        }
-        async fn update_mission_status(
-            &self,
-            _: crate::types::mission::MissionId,
-            _: crate::types::mission::MissionStatus,
-        ) -> Result<(), EngineError> {
-            Ok(())
-        }
+    fn make_store(docs: Vec<MemoryDoc>) -> Arc<crate::tests::InMemoryStore> {
+        Arc::new(crate::tests::InMemoryStore::with_docs(docs))
     }
 
     #[test]
@@ -301,7 +193,7 @@ mod tests {
     #[tokio::test]
     async fn retrieve_returns_relevant_docs_by_keyword() {
         let project = ProjectId::new();
-        let store = DocStore::new(vec![
+        let store = make_store(vec![
             MemoryDoc::new(
                 project,
                 "test-user",
@@ -340,7 +232,7 @@ mod tests {
     async fn retrieve_respects_project_scoping() {
         let project_a = ProjectId::new();
         let project_b = ProjectId::new();
-        let store = DocStore::new(vec![
+        let store = make_store(vec![
             MemoryDoc::new(
                 project_a,
                 "test-user",
@@ -376,7 +268,7 @@ mod tests {
     #[tokio::test]
     async fn retrieve_respects_max_docs_limit() {
         let project = ProjectId::new();
-        let store = DocStore::new(vec![
+        let store = make_store(vec![
             MemoryDoc::new(
                 project,
                 "test-user",
@@ -411,7 +303,7 @@ mod tests {
     #[tokio::test]
     async fn retrieve_empty_store_returns_empty() {
         let project = ProjectId::new();
-        let store = DocStore::new(vec![]);
+        let store = make_store(vec![]);
         let engine = RetrievalEngine::new(store);
 
         let docs = engine
@@ -424,7 +316,7 @@ mod tests {
     #[tokio::test]
     async fn retrieve_spec_ranks_above_summary() {
         let project = ProjectId::new();
-        let store = DocStore::new(vec![
+        let store = make_store(vec![
             MemoryDoc::new(
                 project,
                 "test-user",
