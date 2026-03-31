@@ -11,6 +11,7 @@ use uuid::Uuid;
 
 use crate::agent::Agent;
 use crate::agent::session::{PendingApproval, Session, ThreadState};
+use crate::agent::session_manager::SessionGuardTimer;
 use crate::channels::{IncomingMessage, StatusUpdate};
 use crate::context::JobContext;
 use crate::error::Error;
@@ -263,7 +264,7 @@ struct ChatDelegate<'a> {
 #[async_trait]
 impl<'a> LoopDelegate for ChatDelegate<'a> {
     async fn check_signals(&self) -> LoopSignal {
-        let sess = self.session.lock().await;
+        let sess = SessionGuardTimer::new(self.session.lock().await, "check_signals");
         if let Some(thread) = sess.threads.get(&self.thread_id)
             && thread.state == ThreadState::Interrupted
         {
@@ -562,7 +563,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                 };
                 redacted_args.push(safe);
             }
-            let mut sess = self.session.lock().await;
+            let mut sess = SessionGuardTimer::new(self.session.lock().await, "record_tool_calls");
             if let Some(thread) = sess.threads.get_mut(&self.thread_id)
                 && let Some(turn) = thread.last_turn_mut()
             {
@@ -671,7 +672,10 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                 let needs_approval = match requirement {
                     ApprovalRequirement::Never => false,
                     ApprovalRequirement::UnlessAutoApproved => {
-                        let sess = self.session.lock().await;
+                        let sess = SessionGuardTimer::new(
+                            self.session.lock().await,
+                            "check_auto_approval",
+                        );
                         !sess.is_tool_auto_approved(&tc.name)
                     }
                     ApprovalRequirement::Always => true,
@@ -850,7 +854,10 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                         &error_msg,
                     );
                     {
-                        let mut sess = self.session.lock().await;
+                        let mut sess = SessionGuardTimer::new(
+                            self.session.lock().await,
+                            "record_preflight_error",
+                        );
                         if let Some(thread) = sess.threads.get_mut(&self.thread_id)
                             && let Some(turn) = thread.last_turn_mut()
                         {
@@ -934,7 +941,10 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                     {
                         let auth_data = parse_auth_result(&tool_result);
                         {
-                            let mut sess = self.session.lock().await;
+                            let mut sess = SessionGuardTimer::new(
+                                self.session.lock().await,
+                                "enter_auth_mode",
+                            );
                             if let Some(thread) = sess.threads.get_mut(&self.thread_id) {
                                 thread.enter_auth_mode(ext_name.clone());
                             }
@@ -975,7 +985,8 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
 
                     // Record sanitized result in thread (identity-based matching).
                     {
-                        let mut sess = self.session.lock().await;
+                        let mut sess =
+                            SessionGuardTimer::new(self.session.lock().await, "record_tool_result");
                         if let Some(thread) = sess.threads.get_mut(&self.thread_id)
                             && let Some(turn) = thread.last_turn_mut()
                         {
