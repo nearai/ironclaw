@@ -449,6 +449,7 @@ async fn async_main() -> anyhow::Result<()> {
             &components.secrets_store,
             components.extension_manager.as_ref(),
             components.db.as_ref(),
+            &channel_names,
         )
         .await;
 
@@ -678,6 +679,9 @@ async fn async_main() -> anyhow::Result<()> {
                     }
                 }
             }
+        }
+        if let Some(ref ss) = components.secrets_store {
+            gw = gw.with_secrets_store(Arc::clone(ss));
         }
         if let Some(ref jm) = container_job_manager {
             gw = gw.with_job_manager(Arc::clone(jm));

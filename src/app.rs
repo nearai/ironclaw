@@ -229,18 +229,35 @@ impl AppBuilder {
         let store = crate::secrets::create_secrets_store(crypto, handles);
 
         if let Some(ref secrets) = store {
+            // Migrate any plaintext API keys from the settings table to the
+            // encrypted secrets store. Idempotent — safe to run on every startup.
+            if let Some(ref db) = self.db {
+                crate::config::migrate_plaintext_llm_keys(
+                    db.as_ref(),
+                    secrets.as_ref(),
+                    &self.config.owner_id,
+                )
+                .await;
+            }
+
             // Inject LLM API keys from encrypted storage
             crate::config::inject_llm_keys_from_secrets(secrets.as_ref(), &self.config.owner_id)
                 .await;
 
-            // Re-resolve only the LLM config with newly available keys.
-            let store: Option<&(dyn crate::db::SettingsStore + Sync)> =
+            // Re-resolve only the LLM config with newly available keys,
+            // including keys hydrated from the secrets store.
+            let settings_store: Option<&(dyn crate::db::SettingsStore + Sync)> =
                 self.db.as_ref().map(|db| db.as_ref() as _);
             let toml_path = self.toml_path.as_deref();
             let owner_id = self.config.owner_id.clone();
             if let Err(e) = self
                 .config
-                .re_resolve_llm(store, &owner_id, toml_path)
+                .re_resolve_llm_with_secrets(
+                    settings_store,
+                    &owner_id,
+                    toml_path,
+                    Some(secrets.as_ref()),
+                )
                 .await
             {
                 tracing::warn!("Failed to re-resolve LLM config after secret injection: {e}");

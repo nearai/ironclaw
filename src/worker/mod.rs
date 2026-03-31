@@ -25,6 +25,7 @@
 //! ```
 
 pub mod api;
+mod autonomous_recovery;
 pub mod claude_bridge;
 pub mod container;
 pub mod job;

@@ -59,9 +59,18 @@ impl ApprovalContext {
     }
 
     /// Check whether a tool invocation is blocked in this context.
-    pub fn is_blocked(&self, tool_name: &str, _requirement: ApprovalRequirement) -> bool {
+    ///
+    /// - `Never` tools are always allowed (no approval needed).
+    /// - `UnlessAutoApproved` tools are allowed in autonomous contexts
+    ///   (autonomous execution implies auto-approve).
+    /// - `Always` tools are only allowed if explicitly listed in `allowed_tools`.
+    pub fn is_blocked(&self, tool_name: &str, requirement: ApprovalRequirement) -> bool {
         match self {
-            Self::Autonomous { allowed_tools } => !allowed_tools.contains(tool_name),
+            Self::Autonomous { allowed_tools } => match requirement {
+                ApprovalRequirement::Never => false,
+                ApprovalRequirement::UnlessAutoApproved => false,
+                ApprovalRequirement::Always => !allowed_tools.contains(tool_name),
+            },
         }
     }
 
@@ -445,6 +454,53 @@ pub fn require_param<'a>(
     params
         .get(name)
         .ok_or_else(|| ToolError::InvalidParameters(format!("missing '{}' parameter", name)))
+}
+
+/// Check if a tool invocation is allowed based on the job's approval context.
+///
+/// This helper function should be called by tools that execute sub-tools
+/// (like the builder) to ensure proper approval checking is done even when
+/// bypassing the worker's normal approval flow.
+///
+/// Returns `Ok(())` if the tool is allowed, `Err(ToolError::NotAuthorized)` if blocked.
+///
+/// # Security semantics
+///
+/// When `approval_context` is `None`, this function uses **legacy blocking behavior**:
+/// - `Never` tools: allowed
+/// - `UnlessAutoApproved` tools: blocked (require interactive approval)
+/// - `Always` tools: blocked (require explicit approval)
+///
+/// This matches the worker-level `ApprovalContext::is_blocked_or_default()` semantics
+/// to prevent privilege escalation.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// # use ironclaw::context::JobContext;
+/// # use ironclaw::tools::{Tool, ToolError, ToolOutput, check_approval_in_context};
+/// # use serde_json::Value;
+/// async fn execute(&self, params: Value, ctx: &JobContext) -> Result<ToolOutput, ToolError> {
+///     // If this tool executes sub-tools, check their approval first
+///     check_approval_in_context(ctx, "sub_tool_name", self.requires_approval(&params))?;
+///
+///     // ... rest of implementation
+///     # todo!()
+/// }
+/// ```
+pub fn check_approval_in_context(
+    ctx: &crate::context::JobContext,
+    tool_name: &str,
+    requirement: ApprovalRequirement,
+) -> Result<(), ToolError> {
+    // Match worker-level approval semantics exactly to prevent inconsistency
+    if ApprovalContext::is_blocked_or_default(&ctx.approval_context, tool_name, requirement) {
+        return Err(ToolError::NotAuthorized(format!(
+            "Tool '{}' requires approval in this context",
+            tool_name
+        )));
+    }
+    Ok(())
 }
 
 /// Replace sensitive parameter values with `"[REDACTED]"`.
@@ -1006,10 +1062,12 @@ mod tests {
     }
 
     #[test]
-    fn test_approval_context_autonomous_blocks_tools_not_in_scope() {
+    fn test_approval_context_autonomous_blocks_always_but_allows_soft() {
         let ctx = ApprovalContext::autonomous();
-        assert!(ctx.is_blocked("shell", ApprovalRequirement::Never));
-        assert!(ctx.is_blocked("shell", ApprovalRequirement::UnlessAutoApproved));
+        // Never and UnlessAutoApproved are always allowed in autonomous context
+        assert!(!ctx.is_blocked("shell", ApprovalRequirement::Never));
+        assert!(!ctx.is_blocked("shell", ApprovalRequirement::UnlessAutoApproved));
+        // Always tools are blocked unless explicitly listed
         assert!(ctx.is_blocked("shell", ApprovalRequirement::Always));
     }
 
@@ -1024,9 +1082,12 @@ mod tests {
     }
 
     #[test]
-    fn test_approval_context_blocks_never_when_not_in_scope() {
+    fn test_approval_context_never_always_passes() {
         let ctx = ApprovalContext::autonomous();
-        assert!(ctx.is_blocked("any_tool", ApprovalRequirement::Never));
+        assert!(
+            !ctx.is_blocked("any_tool", ApprovalRequirement::Never),
+            "Never tools should always be allowed regardless of allowlist"
+        );
     }
 
     #[test]
@@ -1064,7 +1125,8 @@ mod tests {
             "other",
             ApprovalRequirement::Always
         ));
-        assert!(ApprovalContext::is_blocked_or_default(
+        // UnlessAutoApproved is allowed in autonomous context (auto-approved)
+        assert!(!ApprovalContext::is_blocked_or_default(
             &ctx,
             "any",
             ApprovalRequirement::UnlessAutoApproved

@@ -38,6 +38,9 @@ use crate::channels::web::handlers::jobs::{
     jobs_events_handler, jobs_list_handler, jobs_prompt_handler, jobs_restart_handler,
     jobs_summary_handler,
 };
+use crate::channels::web::handlers::llm::{
+    llm_list_models_handler, llm_providers_handler, llm_test_connection_handler,
+};
 use crate::channels::web::handlers::memory::{
     memory_list_handler, memory_read_handler, memory_search_handler, memory_tree_handler,
     memory_write_handler,
@@ -45,6 +48,10 @@ use crate::channels::web::handlers::memory::{
 use crate::channels::web::handlers::routines::{
     routines_delete_handler, routines_detail_handler, routines_list_handler,
     routines_summary_handler, routines_toggle_handler, routines_trigger_handler,
+};
+use crate::channels::web::handlers::settings::{
+    settings_delete_handler, settings_export_handler, settings_get_handler,
+    settings_import_handler, settings_list_handler, settings_set_handler,
 };
 use crate::channels::web::handlers::skills::{
     skills_install_handler, skills_list_handler, skills_remove_handler, skills_search_handler,
@@ -529,6 +536,13 @@ pub async fn start_server(
             "/api/settings/{key}",
             axum::routing::delete(settings_delete_handler),
         )
+        // LLM utilities
+        .route(
+            "/api/llm/test_connection",
+            post(llm_test_connection_handler),
+        )
+        .route("/api/llm/list_models", post(llm_list_models_handler))
+        .route("/api/llm/providers", get(llm_providers_handler))
         // User management (admin)
         .route(
             "/api/admin/users",
@@ -1000,7 +1014,42 @@ async fn oauth_callback_handler(
             flow.secrets
                 .create(&flow.user_id, params)
                 .await
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| {
+                    tracing::warn!(
+                        extension = %flow.extension_name,
+                        secret_name = %client_id_secret,
+                        error = %e,
+                        "Failed to store OAuth client_id secret after callback"
+                    );
+                    "failed to store client credentials".to_string()
+                })?;
+        }
+
+        if let (Some(client_secret_name), Some(client_secret)) = (
+            flow.client_secret_secret_name.as_ref(),
+            flow.client_secret.as_deref(),
+        ) {
+            let mut params =
+                crate::secrets::CreateSecretParams::new(client_secret_name, client_secret)
+                    .with_provider(flow.provider.as_ref().cloned().unwrap_or_default());
+            if let Some(expires_at) = flow.client_secret_expires_at
+                && let Some(dt) =
+                    chrono::DateTime::<chrono::Utc>::from_timestamp(expires_at as i64, 0)
+            {
+                params = params.with_expiry(dt);
+            }
+            flow.secrets
+                .create(&flow.user_id, params)
+                .await
+                .map_err(|e| {
+                    tracing::warn!(
+                        extension = %flow.extension_name,
+                        secret_name = %client_secret_name,
+                        error = %e,
+                        "Failed to store OAuth client_secret secret after callback"
+                    );
+                    "failed to store client credentials".to_string()
+                })?;
         }
 
         Ok(())
@@ -2014,7 +2063,7 @@ async fn chat_new_thread_handler(
     let session = session_manager.get_or_create_session(&user.user_id).await;
     let (thread_id, info) = {
         let mut sess = session.lock().await;
-        let thread = sess.create_thread();
+        let thread = sess.create_thread(Some("gateway"));
         let id = thread.id;
         let info = ThreadInfo {
             id: thread.id,
@@ -2033,7 +2082,7 @@ async fn chat_new_thread_handler(
     // so that the subsequent loadThreads() call from the frontend sees it.
     if let Some(ref store) = state.store {
         match store
-            .ensure_conversation(thread_id, "gateway", &user.user_id, None)
+            .ensure_conversation(thread_id, "gateway", &user.user_id, None, Some("gateway"))
             .await
         {
             Ok(true) => {}
@@ -2724,135 +2773,6 @@ async fn routines_runs_handler(
     })))
 }
 
-// --- Settings handlers ---
-
-async fn settings_list_handler(
-    State(state): State<Arc<GatewayState>>,
-    AuthenticatedUser(user): AuthenticatedUser,
-) -> Result<Json<SettingsListResponse>, StatusCode> {
-    let store = state
-        .store
-        .as_ref()
-        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
-    let rows = store.list_settings(&user.user_id).await.map_err(|e| {
-        tracing::error!("Failed to list settings: {}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-
-    let settings = rows
-        .into_iter()
-        .map(|r| SettingResponse {
-            key: r.key,
-            value: r.value,
-            updated_at: r.updated_at.to_rfc3339(),
-        })
-        .collect();
-
-    Ok(Json(SettingsListResponse { settings }))
-}
-
-async fn settings_get_handler(
-    State(state): State<Arc<GatewayState>>,
-    AuthenticatedUser(user): AuthenticatedUser,
-    Path(key): Path<String>,
-) -> Result<Json<SettingResponse>, StatusCode> {
-    let store = state
-        .store
-        .as_ref()
-        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
-    let row = store
-        .get_setting_full(&user.user_id, &key)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to get setting '{}': {}", key, e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?
-        .ok_or(StatusCode::NOT_FOUND)?;
-
-    Ok(Json(SettingResponse {
-        key: row.key,
-        value: row.value,
-        updated_at: row.updated_at.to_rfc3339(),
-    }))
-}
-
-async fn settings_set_handler(
-    State(state): State<Arc<GatewayState>>,
-    AuthenticatedUser(user): AuthenticatedUser,
-    Path(key): Path<String>,
-    Json(body): Json<SettingWriteRequest>,
-) -> Result<StatusCode, StatusCode> {
-    let store = state
-        .store
-        .as_ref()
-        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
-    store
-        .set_setting(&user.user_id, &key, &body.value)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to set setting '{}': {}", key, e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-
-    Ok(StatusCode::NO_CONTENT)
-}
-
-async fn settings_delete_handler(
-    State(state): State<Arc<GatewayState>>,
-    AuthenticatedUser(user): AuthenticatedUser,
-    Path(key): Path<String>,
-) -> Result<StatusCode, StatusCode> {
-    let store = state
-        .store
-        .as_ref()
-        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
-    store
-        .delete_setting(&user.user_id, &key)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to delete setting '{}': {}", key, e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-
-    Ok(StatusCode::NO_CONTENT)
-}
-
-async fn settings_export_handler(
-    State(state): State<Arc<GatewayState>>,
-    AuthenticatedUser(user): AuthenticatedUser,
-) -> Result<Json<SettingsExportResponse>, StatusCode> {
-    let store = state
-        .store
-        .as_ref()
-        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
-    let settings = store.get_all_settings(&user.user_id).await.map_err(|e| {
-        tracing::error!("Failed to export settings: {}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-
-    Ok(Json(SettingsExportResponse { settings }))
-}
-
-async fn settings_import_handler(
-    State(state): State<Arc<GatewayState>>,
-    AuthenticatedUser(user): AuthenticatedUser,
-    Json(body): Json<SettingsImportRequest>,
-) -> Result<StatusCode, StatusCode> {
-    let store = state
-        .store
-        .as_ref()
-        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
-    store
-        .set_all_settings(&user.user_id, &body.settings)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to import settings: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-
-    Ok(StatusCode::NO_CONTENT)
-}
-
 // --- Gateway control plane handlers ---
 
 async fn gateway_status_handler(
@@ -3292,6 +3212,8 @@ mod tests {
             gateway_token: oauth_proxy_auth_token,
             token_exchange_extra_params: std::collections::HashMap::new(),
             client_id_secret_name: None,
+            client_secret_secret_name: None,
+            client_secret_expires_at: None,
             created_at: std::time::Instant::now(),
         }
     }
@@ -3657,6 +3579,8 @@ mod tests {
             gateway_token: None,
             token_exchange_extra_params: std::collections::HashMap::new(),
             client_id_secret_name: None,
+            client_secret_secret_name: None,
+            client_secret_expires_at: None,
             created_at,
         };
 
@@ -3726,6 +3650,8 @@ mod tests {
             gateway_token: None,
             token_exchange_extra_params: std::collections::HashMap::new(),
             client_id_secret_name: None,
+            client_secret_secret_name: None,
+            client_secret_expires_at: None,
             created_at,
         };
 
@@ -3829,6 +3755,8 @@ mod tests {
             gateway_token: None,
             token_exchange_extra_params: std::collections::HashMap::new(),
             client_id_secret_name: None,
+            client_secret_secret_name: None,
+            client_secret_expires_at: None,
             // Expired — handler will reject after lookup (no network I/O)
             created_at,
         };
@@ -3916,6 +3844,8 @@ mod tests {
             gateway_token: None,
             token_exchange_extra_params: std::collections::HashMap::new(),
             client_id_secret_name: None,
+            client_secret_secret_name: None,
+            client_secret_expires_at: None,
             created_at,
         };
 
@@ -3997,6 +3927,8 @@ mod tests {
             gateway_token: None,
             token_exchange_extra_params: std::collections::HashMap::new(),
             client_id_secret_name: None,
+            client_secret_secret_name: None,
+            client_secret_expires_at: None,
             created_at,
         };
 

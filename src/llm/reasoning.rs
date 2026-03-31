@@ -337,6 +337,23 @@ impl TokenUsage {
     }
 }
 
+/// Structured anomaly classification for LLM responses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResponseAnomaly {
+    /// Tool mode was requested, but the provider returned no usable tool calls
+    /// and no recoverable text content.
+    EmptyToolCompletion,
+    /// Text mode returned no usable content after cleaning/truncation.
+    EmptyTextResponse,
+}
+
+/// Metadata attached to `RespondOutput` so callers can react to malformed
+/// provider behavior without inferring it from fallback strings.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ResponseMetadata {
+    pub anomaly: Option<ResponseAnomaly>,
+}
+
 /// Result of a response with potential tool calls.
 ///
 /// Used by the agent loop to handle tool execution before returning a final response.
@@ -359,6 +376,7 @@ pub struct RespondOutput {
     pub result: RespondResult,
     pub usage: TokenUsage,
     pub finish_reason: FinishReason,
+    pub metadata: ResponseMetadata,
 }
 
 /// Reasoning engine for the agent.
@@ -744,12 +762,11 @@ Respond in JSON format:
                     },
                     usage,
                     finish_reason: response.finish_reason,
+                    metadata: ResponseMetadata::default(),
                 });
             }
 
-            let content = response
-                .content
-                .unwrap_or_else(|| "I'm not sure how to respond to that.".to_string());
+            let content = response.content.unwrap_or_default();
 
             // Some models (e.g. GLM-4.7) emit tool calls as XML tags in content
             // instead of using the structured tool_calls field. Try to recover
@@ -772,6 +789,7 @@ Respond in JSON format:
                     },
                     usage,
                     finish_reason: response.finish_reason,
+                    metadata: ResponseMetadata::default(),
                 });
             }
 
@@ -785,11 +803,18 @@ Respond in JSON format:
             // Pre-truncate at tool tags to preserve text before the tag.
             let pre_truncated = truncate_at_tool_tags(&content);
             let cleaned = clean_response(&pre_truncated);
-            let final_text = if cleaned.trim().is_empty() {
+            let metadata = if cleaned.trim().is_empty() {
                 tracing::warn!(
                     "LLM response was empty after cleaning (original len={}), using fallback",
                     content.len()
                 );
+                ResponseMetadata {
+                    anomaly: Some(ResponseAnomaly::EmptyToolCompletion),
+                }
+            } else {
+                ResponseMetadata::default()
+            };
+            let final_text = if metadata.anomaly.is_some() {
                 "I'm not sure how to respond to that.".to_string()
             } else {
                 cleaned
@@ -798,6 +823,7 @@ Respond in JSON format:
                 result: RespondResult::Text(final_text),
                 usage,
                 finish_reason: response.finish_reason,
+                metadata,
             })
         } else {
             // No tools, use simple completion
@@ -812,11 +838,18 @@ Respond in JSON format:
             let response = self.llm.complete(request).await?;
             let pre_truncated = truncate_at_tool_tags(&response.content);
             let cleaned = clean_response(&pre_truncated);
-            let final_text = if cleaned.trim().is_empty() {
+            let metadata = if cleaned.trim().is_empty() {
                 tracing::warn!(
                     "LLM response was empty after cleaning (original len={}), using fallback",
                     response.content.len()
                 );
+                ResponseMetadata {
+                    anomaly: Some(ResponseAnomaly::EmptyTextResponse),
+                }
+            } else {
+                ResponseMetadata::default()
+            };
+            let final_text = if metadata.anomaly.is_some() {
                 "I'm not sure how to respond to that.".to_string()
             } else {
                 cleaned
@@ -830,6 +863,7 @@ Respond in JSON format:
                     cache_creation_input_tokens: response.cache_creation_input_tokens,
                 },
                 finish_reason: response.finish_reason,
+                metadata,
             })
         }
     }
@@ -3159,9 +3193,104 @@ That's my plan."#;
         context.force_text = true;
 
         let output = reasoning.respond_with_tools(&context).await.unwrap();
+        let metadata = output.metadata;
         match output.result {
             RespondResult::Text(text) => {
                 assert_eq!(text, "I'm not sure how to respond to that.");
+                assert_eq!(metadata.anomaly, Some(ResponseAnomaly::EmptyTextResponse));
+            }
+            RespondResult::ToolCalls { .. } => {
+                panic!("Expected fallback text, not tool calls");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_respond_with_tools_flags_empty_tool_completion() {
+        use crate::testing::StubLlm;
+        let llm = Arc::new(StubLlm::new(""));
+        let reasoning = Reasoning::new(llm);
+
+        let context = ReasoningContext::new()
+            .with_message(ChatMessage::user("list tools"))
+            .with_tools(vec![ToolDefinition {
+                name: "tool_list".to_string(),
+                description: "Lists tools".to_string(),
+                parameters: serde_json::json!({}),
+            }]);
+
+        let output = reasoning.respond_with_tools(&context).await.unwrap();
+        let metadata = output.metadata;
+        match output.result {
+            RespondResult::Text(text) => {
+                assert_eq!(text, "I'm not sure how to respond to that.");
+                assert_eq!(metadata.anomaly, Some(ResponseAnomaly::EmptyToolCompletion));
+            }
+            RespondResult::ToolCalls { .. } => {
+                panic!("Expected fallback text, not tool calls");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_respond_with_tools_flags_empty_tool_completion_when_content_is_none() {
+        use crate::llm::{
+            FinishReason, LlmProvider, ToolCompletionRequest, ToolCompletionResponse,
+        };
+        use async_trait::async_trait;
+        use rust_decimal::Decimal;
+
+        struct NoneContentToolLlm;
+
+        #[async_trait]
+        impl LlmProvider for NoneContentToolLlm {
+            fn model_name(&self) -> &str {
+                "none-content-tool-llm"
+            }
+
+            fn cost_per_token(&self) -> (Decimal, Decimal) {
+                (Decimal::ZERO, Decimal::ZERO)
+            }
+
+            async fn complete(
+                &self,
+                _request: crate::llm::CompletionRequest,
+            ) -> Result<crate::llm::CompletionResponse, crate::llm::LlmError> {
+                unreachable!("tool-mode test should not call complete()")
+            }
+
+            async fn complete_with_tools(
+                &self,
+                _request: ToolCompletionRequest,
+            ) -> Result<ToolCompletionResponse, crate::llm::LlmError> {
+                Ok(ToolCompletionResponse {
+                    content: None,
+                    tool_calls: Vec::new(),
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    finish_reason: FinishReason::Stop,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                })
+            }
+        }
+
+        let reasoning = Reasoning::new(Arc::new(NoneContentToolLlm));
+
+        let context = ReasoningContext::new()
+            .with_message(ChatMessage::user("list tools"))
+            .with_tools(vec![ToolDefinition {
+                name: "tool_list".to_string(),
+                description: "Lists tools".to_string(),
+                parameters: serde_json::json!({}),
+            }]);
+
+        let output = reasoning.respond_with_tools(&context).await.unwrap();
+        let metadata = output.metadata;
+        match output.result {
+            RespondResult::Text(text) => {
+                assert_eq!(text, "I'm not sure how to respond to that.");
+                assert_eq!(metadata.anomaly, Some(ResponseAnomaly::EmptyToolCompletion));
             }
             RespondResult::ToolCalls { .. } => {
                 panic!("Expected fallback text, not tool calls");

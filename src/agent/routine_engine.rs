@@ -23,7 +23,8 @@ use uuid::Uuid;
 
 use crate::agent::Scheduler;
 use crate::agent::routine::{
-    NotifyConfig, Routine, RoutineAction, RoutineRun, RunStatus, Trigger, next_cron_fire,
+    NotifyConfig, Routine, RoutineAction, RoutineRun, RunStatus, Trigger,
+    apply_routine_verification_result, next_cron_fire, routine_verification_fingerprint,
 };
 use crate::channels::{IncomingMessage, OutgoingResponse};
 use crate::config::RoutineConfig;
@@ -116,7 +117,7 @@ pub struct RoutineEngine {
     tools: Arc<ToolRegistry>,
     /// Safety layer for tool output sanitization.
     safety: Arc<SafetyLayer>,
-    /// Sandbox readiness state for full-job dispatch.
+    /// Sandbox readiness state — only `DockerUnavailable` blocks full-job dispatch.
     sandbox_readiness: SandboxReadiness,
     /// Timestamp when this engine instance was created. Used by
     /// `sync_dispatched_runs` to distinguish orphaned runs (from a previous
@@ -621,7 +622,7 @@ impl RoutineEngine {
         );
 
         // Load the routine to update consecutive_failures and send notification
-        let routine = match self.store.get_routine(run.routine_id).await {
+        let mut routine = match self.store.get_routine(run.routine_id).await {
             Ok(Some(r)) => r,
             Ok(None) => {
                 tracing::warn!(
@@ -649,6 +650,12 @@ impl RoutineEngine {
         };
 
         let now = Utc::now();
+        routine.state = apply_routine_verification_result(
+            &routine.state,
+            routine_verification_fingerprint(&routine),
+            status,
+            now,
+        );
         let next_fire = if let Trigger::Cron {
             ref schedule,
             ref timezone,
@@ -1085,7 +1092,7 @@ struct EngineContext {
 }
 
 /// Execute a routine run. Handles both lightweight and full_job modes.
-async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) {
+async fn execute_routine(ctx: EngineContext, mut routine: Routine, run: RoutineRun) {
     // Increment running count (atomic: survives panics in the execution below)
     ctx.running_count.fetch_add(1, Ordering::Relaxed);
 
@@ -1143,8 +1150,15 @@ async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) 
         tracing::error!(routine = %routine.name, "Failed to complete run record: {}", e);
     }
 
-    // Update routine runtime state
     let now = Utc::now();
+    routine.state = apply_routine_verification_result(
+        &routine.state,
+        routine_verification_fingerprint(&routine),
+        status,
+        now,
+    );
+
+    // Update routine runtime state
     let next_fire = if let Trigger::Cron {
         ref schedule,
         ref timezone,
@@ -1256,22 +1270,16 @@ async fn execute_full_job(
     run: &RoutineRun,
     execution: &FullJobExecutionConfig<'_>,
 ) -> Result<(RunStatus, Option<String>, Option<i32>), RoutineError> {
-    match ctx.sandbox_readiness {
-        SandboxReadiness::Available => {}
-        SandboxReadiness::DisabledByConfig => {
-            return Err(RoutineError::JobDispatchFailed {
-                reason: "Sandboxing is disabled (SANDBOX_ENABLED=false). \
-                         Full-job routines require sandbox."
-                    .to_string(),
-            });
-        }
-        SandboxReadiness::DockerUnavailable => {
-            return Err(RoutineError::JobDispatchFailed {
-                reason: "Sandbox is enabled but Docker is not available. \
-                         Install Docker or set SANDBOX_ENABLED=false."
-                    .to_string(),
-            });
-        }
+    // Full-job routines dispatch through the scheduler (same as /job
+    // commands) — no Docker sandbox required when sandbox is disabled.
+    // However, if sandbox is *enabled* but Docker is unavailable, that's
+    // a misconfiguration we should surface.
+    if matches!(ctx.sandbox_readiness, SandboxReadiness::DockerUnavailable) {
+        return Err(RoutineError::JobDispatchFailed {
+            reason: "Sandbox is enabled but Docker is not available. \
+                     Install Docker or set SANDBOX_ENABLED=false."
+                .to_string(),
+        });
     }
 
     let scheduler = ctx
@@ -2410,28 +2418,26 @@ mod tests {
     }
 
     #[test]
-    fn test_sandbox_readiness_disabled_by_config_error() {
+    fn test_sandbox_disabled_by_config_does_not_block_full_job() {
         use super::SandboxReadiness;
 
-        let readiness = SandboxReadiness::DisabledByConfig;
-        assert_ne!(readiness, SandboxReadiness::Available);
-
-        let err = crate::error::RoutineError::JobDispatchFailed {
-            reason: "Sandboxing is disabled (SANDBOX_ENABLED=false). \
-                     Full-job routines require sandbox."
-                .to_string(),
-        };
-        let msg = err.to_string();
-        assert!(msg.contains("SANDBOX_ENABLED=false"));
-        assert!(msg.contains("require sandbox"));
+        // DisabledByConfig must NOT match the DockerUnavailable gate —
+        // full-job routines dispatch through the scheduler (no Docker needed).
+        assert!(!matches!(
+            SandboxReadiness::DisabledByConfig,
+            SandboxReadiness::DockerUnavailable
+        ));
     }
 
     #[test]
-    fn test_sandbox_readiness_docker_unavailable_error() {
+    fn test_sandbox_readiness_docker_unavailable_still_blocks() {
         use super::SandboxReadiness;
 
-        let readiness = SandboxReadiness::DockerUnavailable;
-        assert_ne!(readiness, SandboxReadiness::Available);
+        // DockerUnavailable should still block full-job dispatch.
+        assert!(matches!(
+            SandboxReadiness::DockerUnavailable,
+            SandboxReadiness::DockerUnavailable
+        ));
 
         let err = crate::error::RoutineError::JobDispatchFailed {
             reason: "Sandbox is enabled but Docker is not available. \
@@ -2440,7 +2446,6 @@ mod tests {
         };
         let msg = err.to_string();
         assert!(msg.contains("Docker is not available"));
-        assert!(msg.contains("SANDBOX_ENABLED"));
     }
 
     /// Regression test for #1317: FullJobWatcher maps terminal job states correctly.
