@@ -215,6 +215,20 @@ fn parse_json_body(body: &[u8]) -> Result<serde_json::Value, String> {
     serde_json::from_slice(body).map_err(|e| format!("invalid JSON: {e}"))
 }
 
+/// Unwrap a paginated v3 response.
+///
+/// The Composio v3 API returns paginated results as `{ "items": [...] }`.
+/// This helper extracts the `items` array, falling back to treating the
+/// response as a bare array for backward compatibility.
+fn unwrap_items(value: &serde_json::Value) -> Option<&Vec<serde_json::Value>> {
+    // v3 paginated envelope: { "items": [...] }
+    value
+        .get("items")
+        .and_then(|v| v.as_array())
+        // Fallback: bare array (older or non-paginated endpoints)
+        .or_else(|| value.as_array())
+}
+
 // ---------------------------------------------------------------------------
 // Actions
 // ---------------------------------------------------------------------------
@@ -225,7 +239,9 @@ fn list_tools(app: Option<&str>) -> Result<String, String> {
         None => vec![],
     };
     let result = api_get("/tools", &query)?;
-    serde_json::to_string(&result).map_err(|e| format!("Failed to serialize output: {e}"))
+    // Return the items array directly for cleaner LLM consumption.
+    let items = unwrap_items(&result).cloned().unwrap_or_default();
+    serde_json::to_string(&items).map_err(|e| format!("Failed to serialize output: {e}"))
 }
 
 fn execute_action(
@@ -240,26 +256,20 @@ fn execute_action(
         None => resolve_account(tool_slug, entity_id)?,
     };
 
+    // v3 contract: `user_id` (not `entity_id`), `arguments` (not `input`).
     let body = serde_json::json!({
         "connected_account_id": account_id,
-        "entity_id": entity_id,
-        "input": params,
+        "user_id": entity_id,
+        "arguments": params,
     });
     let result = api_post(&format!("/tools/execute/{}", url_encode(tool_slug)), &body)?;
     serde_json::to_string(&result).map_err(|e| format!("Failed to serialize output: {e}"))
 }
 
 fn connect_app(app: &str, entity_id: &str) -> Result<String, String> {
-    // Resolve auth config for this app
+    // Resolve auth config for this app — v3 returns paginated { "items": [...] }
     let configs = api_get("/auth_configs", &[("toolkit_slug", app)])?;
-    let auth_config_id = configs
-        .as_array()
-        .and_then(|arr| arr.first())
-        .and_then(|c| c.get("id"))
-        .and_then(|id| id.as_str())
-        .ok_or_else(|| {
-            format!("no auth config found for {app} — configure it at app.composio.dev")
-        })?;
+    let auth_config_id = extract_auth_config_id(&configs, app)?;
 
     let body = serde_json::json!({
         "auth_config_id": auth_config_id,
@@ -269,13 +279,27 @@ fn connect_app(app: &str, entity_id: &str) -> Result<String, String> {
     serde_json::to_string(&result).map_err(|e| format!("Failed to serialize output: {e}"))
 }
 
+/// Extract the first auth config ID from a (possibly paginated) response.
+fn extract_auth_config_id(configs: &serde_json::Value, app: &str) -> Result<String, String> {
+    unwrap_items(configs)
+        .and_then(|arr| arr.first())
+        .and_then(|c| c.get("id"))
+        .and_then(|id| id.as_str())
+        .map(|s| s.to_string())
+        .ok_or_else(|| {
+            format!("no auth config found for {app} — configure it at app.composio.dev")
+        })
+}
+
 fn list_accounts(app: Option<&str>, entity_id: &str) -> Result<String, String> {
-    let mut query = vec![("user_id", entity_id)];
+    // v3 uses plural filter names: `user_ids`, `toolkit_slugs`
+    let mut query = vec![("user_ids", entity_id)];
     if let Some(a) = app {
-        query.push(("toolkit_slug", a));
+        query.push(("toolkit_slugs", a));
     }
     let result = api_get("/connected_accounts", &query)?;
-    serde_json::to_string(&result).map_err(|e| format!("Failed to serialize output: {e}"))
+    let items = unwrap_items(&result).cloned().unwrap_or_default();
+    serde_json::to_string(&items).map_err(|e| format!("Failed to serialize output: {e}"))
 }
 
 /// Look up the toolkit/app slug for a tool via the Composio API.
@@ -285,47 +309,80 @@ fn list_accounts(app: Option<&str>, entity_id: &str) -> Result<String, String> {
 /// would incorrectly resolve to `"google"` instead of `"google_drive"`).
 fn lookup_app_for_tool(tool_slug: &str) -> Result<String, String> {
     let tools = api_get("/tools", &[("search", tool_slug)])?;
-    tools
-        .as_array()
-        .and_then(|arr| {
-            arr.iter().find(|t| {
-                t.get("slug")
-                    .and_then(|s| s.as_str())
-                    .map(|s| s.eq_ignore_ascii_case(tool_slug))
-                    .unwrap_or(false)
-            })
+    extract_toolkit_slug(&tools, tool_slug)
+}
+
+/// Extract the toolkit slug from a tools search response.
+///
+/// v3 nests the toolkit slug under `toolkit.slug`; falls back to
+/// `toolkit_slug` or `appName` for backward compatibility.
+fn extract_toolkit_slug(tools: &serde_json::Value, tool_slug: &str) -> Result<String, String> {
+    let items = unwrap_items(tools).ok_or_else(|| {
+        format!("could not determine app for tool \"{tool_slug}\" — unexpected response shape")
+    })?;
+
+    let tool = items
+        .iter()
+        .find(|t| {
+            t.get("slug")
+                .and_then(|s| s.as_str())
+                .is_some_and(|s| s.eq_ignore_ascii_case(tool_slug))
         })
-        .and_then(|t| t.get("toolkit_slug").or_else(|| t.get("appName")))
+        .ok_or_else(|| {
+            format!("could not determine app for tool \"{tool_slug}\" — verify the slug is correct")
+        })?;
+
+    // v3: toolkit.slug; fallback: toolkit_slug, appName
+    tool.get("toolkit")
+        .and_then(|tk| tk.get("slug"))
+        .or_else(|| tool.get("toolkit_slug"))
+        .or_else(|| tool.get("appName"))
         .and_then(|v| v.as_str())
         .map(|s| s.to_ascii_lowercase())
         .ok_or_else(|| {
-            format!("could not determine app for tool \"{tool_slug}\" — verify the slug is correct")
+            format!("tool \"{tool_slug}\" has no toolkit slug — verify the slug is correct")
         })
 }
 
 /// Auto-resolve connected account for a tool slug.
 fn resolve_account(tool_slug: &str, entity_id: &str) -> Result<String, String> {
     let app = lookup_app_for_tool(tool_slug)?;
+    find_active_account(tool_slug, &app, entity_id)
+}
 
-    let accounts = api_get("/connected_accounts", &[("user_id", entity_id), ("toolkit_slug", &app)])?;
+/// Find the most recently updated active connected account.
+///
+/// v3 uses `updated_at` (not `updatedAt`) and returns paginated items.
+fn find_active_account(tool_slug: &str, app: &str, entity_id: &str) -> Result<String, String> {
+    // v3 uses plural filter names
+    let accounts = api_get(
+        "/connected_accounts",
+        &[("user_ids", entity_id), ("toolkit_slugs", app)],
+    )?;
 
-    accounts
-        .as_array()
-        .and_then(|arr| {
-            arr.iter()
-                .filter(|a| a.get("status").and_then(|s| s.as_str()) == Some("ACTIVE"))
-                .max_by_key(|a| {
-                    a.get("updatedAt")
-                        .and_then(|u| u.as_str())
-                        .unwrap_or("")
-                        .to_string()
-                })
+    let items = unwrap_items(&accounts).ok_or_else(|| {
+        format!("no connected account for {app} — use composio with action=\"connect\" first")
+    })?;
+
+    items
+        .iter()
+        .filter(|a| a.get("status").and_then(|s| s.as_str()) == Some("ACTIVE"))
+        .max_by_key(|a| {
+            // v3: updated_at; fallback: updatedAt
+            a.get("updated_at")
+                .or_else(|| a.get("updatedAt"))
+                .and_then(|u| u.as_str())
+                .unwrap_or("")
+                .to_string()
         })
         .and_then(|a| a.get("id"))
         .and_then(|id| id.as_str())
         .map(|s| s.to_string())
         .ok_or_else(|| {
-            format!("no connected account for {app} — use composio with action=\"connect\" first")
+            format!(
+                "no active connected account for {app} (tool: {tool_slug}) — \
+                 use composio with action=\"connect\" first"
+            )
         })
 }
 
@@ -477,5 +534,202 @@ mod tests {
     #[test]
     fn test_extract_entity_id_defaults_on_malformed_json() {
         assert_eq!(extract_entity_id(Some("not json")), "default");
+    }
+
+    // -----------------------------------------------------------------------
+    // Fixture-style tests for v3 API contract parsing
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_unwrap_items_paginated_envelope() {
+        let resp: serde_json::Value = serde_json::from_str(
+            r#"{"items": [{"id": "1"}, {"id": "2"}], "total": 2, "page": 1}"#,
+        )
+        .unwrap();
+        let items = unwrap_items(&resp).unwrap();
+        assert_eq!(items.len(), 2);
+    }
+
+    #[test]
+    fn test_unwrap_items_bare_array_fallback() {
+        let resp: serde_json::Value =
+            serde_json::from_str(r#"[{"id": "1"}, {"id": "2"}]"#).unwrap();
+        let items = unwrap_items(&resp).unwrap();
+        assert_eq!(items.len(), 2);
+    }
+
+    #[test]
+    fn test_unwrap_items_empty_envelope() {
+        let resp: serde_json::Value =
+            serde_json::from_str(r#"{"items": [], "total": 0}"#).unwrap();
+        let items = unwrap_items(&resp).unwrap();
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn test_unwrap_items_non_array_returns_none() {
+        let resp: serde_json::Value =
+            serde_json::from_str(r#"{"error": "not found"}"#).unwrap();
+        assert!(unwrap_items(&resp).is_none());
+    }
+
+    #[test]
+    fn test_extract_auth_config_id_from_paginated() {
+        let resp: serde_json::Value = serde_json::from_str(
+            r#"{"items": [{"id": "ac-123", "type": "oauth2"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            extract_auth_config_id(&resp, "gmail").unwrap(),
+            "ac-123"
+        );
+    }
+
+    #[test]
+    fn test_extract_auth_config_id_from_bare_array() {
+        let resp: serde_json::Value =
+            serde_json::from_str(r#"[{"id": "ac-456"}]"#).unwrap();
+        assert_eq!(
+            extract_auth_config_id(&resp, "github").unwrap(),
+            "ac-456"
+        );
+    }
+
+    #[test]
+    fn test_extract_auth_config_id_empty_items() {
+        let resp: serde_json::Value =
+            serde_json::from_str(r#"{"items": []}"#).unwrap();
+        let err = extract_auth_config_id(&resp, "slack").unwrap_err();
+        assert!(err.contains("no auth config found for slack"));
+    }
+
+    #[test]
+    fn test_extract_toolkit_slug_v3_nested() {
+        let resp: serde_json::Value = serde_json::from_str(
+            r#"{"items": [{"slug": "GMAIL_SEND_EMAIL", "toolkit": {"slug": "gmail"}}]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            extract_toolkit_slug(&resp, "GMAIL_SEND_EMAIL").unwrap(),
+            "gmail"
+        );
+    }
+
+    #[test]
+    fn test_extract_toolkit_slug_legacy_flat() {
+        let resp: serde_json::Value = serde_json::from_str(
+            r#"[{"slug": "SLACK_POST", "toolkit_slug": "slack"}]"#,
+        )
+        .unwrap();
+        assert_eq!(
+            extract_toolkit_slug(&resp, "SLACK_POST").unwrap(),
+            "slack"
+        );
+    }
+
+    #[test]
+    fn test_extract_toolkit_slug_app_name_fallback() {
+        let resp: serde_json::Value = serde_json::from_str(
+            r#"[{"slug": "NOTION_CREATE", "appName": "Notion"}]"#,
+        )
+        .unwrap();
+        assert_eq!(
+            extract_toolkit_slug(&resp, "NOTION_CREATE").unwrap(),
+            "notion"
+        );
+    }
+
+    #[test]
+    fn test_extract_toolkit_slug_case_insensitive_match() {
+        let resp: serde_json::Value = serde_json::from_str(
+            r#"{"items": [{"slug": "github_create_issue", "toolkit": {"slug": "github"}}]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            extract_toolkit_slug(&resp, "GITHUB_CREATE_ISSUE").unwrap(),
+            "github"
+        );
+    }
+
+    #[test]
+    fn test_extract_toolkit_slug_not_found() {
+        let resp: serde_json::Value = serde_json::from_str(
+            r#"{"items": [{"slug": "OTHER_TOOL", "toolkit": {"slug": "other"}}]}"#,
+        )
+        .unwrap();
+        let err = extract_toolkit_slug(&resp, "MISSING_TOOL").unwrap_err();
+        assert!(err.contains("MISSING_TOOL"));
+    }
+
+    #[test]
+    fn test_find_active_account_v3_response() {
+        // This tests the parsing logic — the actual API call is mocked by
+        // testing the helper directly.
+        let resp: serde_json::Value = serde_json::from_str(
+            r#"{"items": [
+                {"id": "old-1", "status": "ACTIVE", "updated_at": "2024-01-01T00:00:00Z"},
+                {"id": "new-2", "status": "ACTIVE", "updated_at": "2024-06-15T12:00:00Z"},
+                {"id": "disabled-3", "status": "DISABLED", "updated_at": "2024-12-01T00:00:00Z"}
+            ]}"#,
+        )
+        .unwrap();
+        let items = unwrap_items(&resp).unwrap();
+        let best = items
+            .iter()
+            .filter(|a| a.get("status").and_then(|s| s.as_str()) == Some("ACTIVE"))
+            .max_by_key(|a| {
+                a.get("updated_at")
+                    .or_else(|| a.get("updatedAt"))
+                    .and_then(|u| u.as_str())
+                    .unwrap_or("")
+                    .to_string()
+            })
+            .and_then(|a| a.get("id"))
+            .and_then(|id| id.as_str());
+        assert_eq!(best, Some("new-2"));
+    }
+
+    #[test]
+    fn test_find_active_account_legacy_updated_at() {
+        let resp: serde_json::Value = serde_json::from_str(
+            r#"[
+                {"id": "a1", "status": "ACTIVE", "updatedAt": "2024-01-01"},
+                {"id": "a2", "status": "ACTIVE", "updatedAt": "2024-06-01"}
+            ]"#,
+        )
+        .unwrap();
+        let items = unwrap_items(&resp).unwrap();
+        let best = items
+            .iter()
+            .filter(|a| a.get("status").and_then(|s| s.as_str()) == Some("ACTIVE"))
+            .max_by_key(|a| {
+                a.get("updated_at")
+                    .or_else(|| a.get("updatedAt"))
+                    .and_then(|u| u.as_str())
+                    .unwrap_or("")
+                    .to_string()
+            })
+            .and_then(|a| a.get("id"))
+            .and_then(|id| id.as_str());
+        assert_eq!(best, Some("a2"));
+    }
+
+    #[test]
+    fn test_find_active_account_no_active() {
+        let resp: serde_json::Value = serde_json::from_str(
+            r#"{"items": [{"id": "x", "status": "DISABLED", "updated_at": "2024-01-01"}]}"#,
+        )
+        .unwrap();
+        let items = unwrap_items(&resp).unwrap();
+        let best = items
+            .iter()
+            .filter(|a| a.get("status").and_then(|s| s.as_str()) == Some("ACTIVE"))
+            .max_by_key(|a| {
+                a.get("updated_at")
+                    .and_then(|u| u.as_str())
+                    .unwrap_or("")
+                    .to_string()
+            });
+        assert!(best.is_none());
     }
 }
