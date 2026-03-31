@@ -251,6 +251,10 @@ body {
   height: 1px;
   background: var(--border);
 }
+.auth-divider[style*="cursor"] span {
+  text-decoration: underline;
+  text-decoration-style: dotted;
+}
 
 .auth-social-buttons {
   display: flex;

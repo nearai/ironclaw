@@ -250,6 +250,21 @@ fetch('/auth/providers', { credentials: 'include' })
         btn.addEventListener('click', function() { window.location = '/auth/login/' + p; });
       }
     });
+    // When social providers are available, collapse the token form
+    // and show the "or use a token" divider instead.
+    var tokenForm = document.getElementById('auth-token-form');
+    var tokenDivider = document.getElementById('auth-token-divider');
+    if (tokenForm && tokenDivider) {
+      tokenForm.style.display = 'none';
+      tokenDivider.style.display = '';
+      tokenDivider.style.cursor = 'pointer';
+      tokenDivider.addEventListener('click', function() {
+        tokenForm.style.display = '';
+        tokenDivider.style.display = 'none';
+        var input = document.getElementById('token-input');
+        if (input) input.focus();
+      });
+    }
   })
   .catch(function() { /* auth providers not available */ });
 

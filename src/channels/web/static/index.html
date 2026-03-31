@@ -35,19 +35,19 @@
         <h1 data-i18n="auth.title">IronClaw</h1>
         <p class="auth-tagline" data-i18n="auth.tagline">Secure AI Assistant</p>
       </div>
-      <div class="auth-form">
-        <label for="token-input" data-i18n="auth.tokenLabel">Gateway Token</label>
-        <input type="password" id="token-input" data-i18n="auth.tokenPlaceholder" data-i18n-attr="placeholder" placeholder="Paste your auth token" autofocus>
-        <button id="auth-connect-btn" data-i18n="auth.connect">Connect</button>
-      </div>
       <div id="auth-social" style="display:none">
-        <div class="auth-divider"><span>or</span></div>
         <div class="auth-social-buttons">
           <button id="auth-google-btn" class="auth-social-btn" style="display:none">Sign in with Google</button>
           <button id="auth-github-btn" class="auth-social-btn" style="display:none">Sign in with GitHub</button>
           <button id="auth-apple-btn" class="auth-social-btn" style="display:none">Sign in with Apple</button>
           <button id="auth-near-btn" class="auth-social-btn" style="display:none">Sign in with NEAR</button>
         </div>
+        <div class="auth-divider" id="auth-token-divider" style="display:none"><span>or use a token</span></div>
+      </div>
+      <div class="auth-form" id="auth-token-form">
+        <label for="token-input" data-i18n="auth.tokenLabel">Gateway Token</label>
+        <input type="password" id="token-input" data-i18n="auth.tokenPlaceholder" data-i18n-attr="placeholder" placeholder="Paste your auth token" autofocus>
+        <button id="auth-connect-btn" data-i18n="auth.connect">Connect</button>
       </div>
       <div id="auth-error"></div>
     </div>
