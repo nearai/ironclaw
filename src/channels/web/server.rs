@@ -754,15 +754,15 @@ pub async fn start_server(
             header::HeaderName::from_static("content-security-policy"),
             header::HeaderValue::from_static(
                 "default-src 'self'; \
-                 script-src 'self' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com; \
+                 script-src 'self' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://esm.sh; \
                  style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; \
                  font-src https://fonts.gstatic.com; \
-                 connect-src 'self'; \
-                 img-src 'self' data:; \
+                 connect-src 'self' https://esm.sh https://*.near.org; \
+                 img-src 'self' data: https://*.googleusercontent.com https://avatars.githubusercontent.com; \
                  object-src 'none'; \
                  frame-ancestors 'none'; \
                  base-uri 'self'; \
-                 form-action 'self'",
+                 form-action 'self' https://accounts.google.com https://github.com https://appleid.apple.com",
             ),
         ))
         .with_state(state.clone());
