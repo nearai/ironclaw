@@ -1212,15 +1212,19 @@ async fn async_main() -> anyhow::Result<()> {
     // Clone context_manager for the reaper before it's moved into Agent::new()
     let reaper_context_manager = Arc::clone(&components.context_manager);
 
-    // Load channel routing config from database before components.db is moved
-    let channel_routing_config = if let Some(ref db) = components.db {
-        ironclaw::agent::channel_routing::ChannelRoutingConfig::load_from_store(
-            db.as_ref(),
-            "default",
-        )
-        .await
-    } else {
-        None
+    // Load channel routing config from database before components.db is moved.
+    // Arc shared with SIGHUP handler for hot-reload.
+    let channel_routing_arc = {
+        let initial = if let Some(ref db) = components.db {
+            ironclaw::agent::channel_routing::ChannelRoutingConfig::load_from_store(
+                db.as_ref(),
+                &config.owner_id,
+            )
+            .await
+        } else {
+            None
+        };
+        Arc::new(tokio::sync::RwLock::new(initial))
     };
 
     // Capture settings store for SIGHUP handler before AppComponents is consumed.
@@ -1291,7 +1295,7 @@ async fn async_main() -> anyhow::Result<()> {
             config.agent.max_llm_concurrent_per_user.unwrap_or(4),
             config.agent.max_jobs_concurrent_per_user.unwrap_or(3),
         )),
-        channel_routing: Arc::new(tokio::sync::RwLock::new(channel_routing_config)),
+        channel_routing: Arc::clone(&channel_routing_arc),
     };
 
     let channels_for_warnings = Arc::clone(&channels);
@@ -1345,6 +1349,7 @@ async fn async_main() -> anyhow::Result<()> {
         let sighup_settings_store_clone = sighup_settings_store.clone();
         let sighup_secrets_store = components.secrets_store.clone();
         let sighup_owner_id = config.owner_id.clone();
+        let sighup_channel_routing = Arc::clone(&channel_routing_arc);
         let mut shutdown_rx = shutdown_tx.subscribe();
 
         tokio::spawn(async move {
@@ -1501,6 +1506,24 @@ async fn async_main() -> anyhow::Result<()> {
                     // Update all channels that support secret swapping
                     for updater in &secret_updaters {
                         updater.update_secret(new_secret.clone()).await;
+                    }
+                }
+
+                // Hot-reload channel routing config from SettingsStore
+                if let Some(ref store) = sighup_settings_store_clone {
+                    let new_routing =
+                        ironclaw::agent::channel_routing::ChannelRoutingConfig::load_from_store(
+                            store.as_ref(),
+                            &sighup_owner_id,
+                        )
+                        .await;
+                    let mut guard = sighup_channel_routing.write().await;
+                    let changed = new_routing.is_some() != guard.is_some();
+                    *guard = new_routing;
+                    if changed {
+                        tracing::info!("SIGHUP: channel routing config reloaded");
+                    } else {
+                        tracing::debug!("SIGHUP: channel routing config unchanged");
                     }
                 }
             }

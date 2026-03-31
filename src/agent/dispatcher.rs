@@ -100,12 +100,13 @@ impl Agent {
     async fn apply_channel_routing(
         &self,
         channel: &str,
+        metadata: &serde_json::Value,
         tools: Vec<crate::llm::ToolDefinition>,
     ) -> Vec<crate::llm::ToolDefinition> {
         let guard = self.deps.channel_routing.read().await;
         if let Some(ref routing) = *guard {
             let before = tools.len();
-            let filtered = routing.filter_tool_defs(channel, tools);
+            let filtered = routing.filter_tool_defs(channel, metadata, tools);
             if filtered.len() < before {
                 tracing::info!(
                     channel,
@@ -283,7 +284,7 @@ impl Agent {
         // (normal iterations) and without (force_text final iteration).
         let initial_tool_defs = self.tools().tool_definitions().await;
         let initial_tool_defs = self
-            .apply_channel_routing(&message.channel, initial_tool_defs)
+            .apply_channel_routing(&message.channel, &message.metadata, initial_tool_defs)
             .await;
         let initial_tool_defs = if !active_skills.is_empty() {
             crate::skills::attenuate_tools(&initial_tool_defs, &active_skills).tools
@@ -483,7 +484,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
         let tool_defs = self.agent.tools().tool_definitions().await;
         let tool_defs = self
             .agent
-            .apply_channel_routing(&self.message.channel, tool_defs)
+            .apply_channel_routing(&self.message.channel, &self.message.metadata, tool_defs)
             .await;
 
         // Apply trust-based tool attenuation if skills are active.
