@@ -369,7 +369,7 @@ mod tests {
             &params,
         );
         // RelayChannelGate doesn't care about mode — it only checks channel suffix
-        assert!(matches!(gate.evaluate(&c).await, GateDecision::Allow));
+        assert!(matches!(gate.evaluate(&c).await, GateDecision::Allow)); // safety: test-only
     }
 
     // ── RelayChannelGate ─────────────────────────────────────
