@@ -66,7 +66,9 @@ where
                     Value::String(s) => out.push(s),
                     Value::Object(map) => {
                         for (name, spec) in map {
-                            out.push(flatten_dep(&name, &spec));
+                            if let Some(dep) = flatten_dep(&name, &spec) {
+                                out.push(dep);
+                            }
                         }
                     }
                     other => {
@@ -79,10 +81,10 @@ where
             Ok(out)
         }
         Value::Object(map) => {
-            let mut out = Vec::with_capacity(map.len());
-            for (name, spec) in map {
-                out.push(flatten_dep(&name, &spec));
-            }
+            let out: Vec<String> = map
+                .into_iter()
+                .filter_map(|(name, spec)| flatten_dep(&name, &spec))
+                .collect();
             Ok(out)
         }
         Value::Null => Ok(Vec::new()),
@@ -94,14 +96,22 @@ where
 
 /// Flatten a dependency entry like `("ureq", "2")` or `("serde", {"version":"1","features":["derive"]})`
 /// into a TOML-compatible string like `ureq = "2"` or `serde = { version = "1", features = ["derive"] }`.
-fn flatten_dep(name: &str, spec: &serde_json::Value) -> String {
+/// Returns `None` for values that cannot produce valid TOML (null, bool, array, number).
+fn flatten_dep(name: &str, spec: &serde_json::Value) -> Option<String> {
     match spec {
-        serde_json::Value::String(version) => format!("{name} = \"{version}\""),
+        serde_json::Value::String(version) => Some(format!("{name} = \"{version}\"")),
         serde_json::Value::Object(map) => {
             let parts: Vec<String> = map.iter().map(|(k, v)| format!("{k} = {v}")).collect();
-            format!("{name} = {{ {} }}", parts.join(", "))
+            Some(format!("{name} = {{ {} }}", parts.join(", ")))
         }
-        other => format!("{name} = {other}"),
+        _ => {
+            tracing::warn!(
+                name,
+                ?spec,
+                "Skipping dependency with unsupported value type"
+            );
+            None
+        }
     }
 }
 
