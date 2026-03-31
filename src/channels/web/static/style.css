@@ -3860,6 +3860,35 @@ mark {
   border-left: 2px solid var(--accent);
 }
 
+.thread-delete-btn {
+  display: inline-flex;
+  visibility: hidden;
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+  padding: 0 2px;
+  margin-left: 4px;
+  border-radius: 3px;
+  flex-shrink: 0;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--transition-fast), color var(--transition-fast);
+}
+
+.thread-item:hover .thread-delete-btn {
+  visibility: visible;
+  opacity: 0.5;
+  pointer-events: auto;
+}
+
+.thread-delete-btn:hover {
+  opacity: 1;
+  color: var(--error);
+}
+
 .thread-label {
   font-family: var(--font-mono);
   font-size: 12px;

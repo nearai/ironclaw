@@ -623,6 +623,71 @@ impl ConversationStore for LibSqlBackend {
             None => Ok(None),
         }
     }
+
+    async fn delete_conversation(
+        &self,
+        conversation_id: Uuid,
+        user_id: &str,
+    ) -> Result<bool, DatabaseError> {
+        let conn = self.connect().await?;
+        let cid = conversation_id.to_string();
+
+        conn.execute("BEGIN IMMEDIATE", params![])
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        let result: Result<bool, DatabaseError> = async {
+            // Verify ownership first
+            let mut rows = conn
+                .query(
+                    "SELECT 1 FROM conversations WHERE id = ?1 AND user_id = ?2",
+                    params![cid.clone(), user_id],
+                )
+                .await
+                .map_err(|e| DatabaseError::Query(e.to_string()))?;
+            let found = rows
+                .next()
+                .await
+                .map_err(|e| DatabaseError::Query(e.to_string()))?;
+            if found.is_none() {
+                return Ok(false);
+            }
+
+            // Delete messages first (foreign key child)
+            conn.execute(
+                "DELETE FROM conversation_messages WHERE conversation_id = ?1",
+                params![cid.clone()],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+            // Delete the conversation itself
+            let affected = conn
+                .execute(
+                    "DELETE FROM conversations WHERE id = ?1 AND user_id = ?2",
+                    params![cid, user_id],
+                )
+                .await
+                .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+            Ok(affected > 0)
+        }
+        .await;
+
+        match &result {
+            Ok(true) => {
+                conn.execute("COMMIT", params![])
+                    .await
+                    .map_err(|e| DatabaseError::Query(e.to_string()))?;
+            }
+            _ => {
+                // Rollback on error or when no rows were affected (Ok(false))
+                let _ = conn.execute("ROLLBACK", params![]).await;
+            }
+        }
+
+        result
+    }
 }
 
 #[cfg(test)]

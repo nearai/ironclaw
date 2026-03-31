@@ -17,10 +17,11 @@ use tower::ServiceExt;
 use uuid::Uuid;
 
 use crate::channels::web::auth::{
-    AuthenticatedUser, MultiAuthState, UserIdentity, auth_middleware,
+    AuthenticatedUser, CombinedAuthState, MultiAuthState, UserIdentity, auth_middleware,
 };
 use crate::channels::web::server::{
-    ActiveConfigSnapshot, GatewayState, PerUserRateLimiter, PromptQueue, RateLimiter, WorkspacePool,
+    ActiveConfigSnapshot, GatewayState, PerUserRateLimiter, PromptQueue, RateLimiter,
+    WorkspacePool, start_server,
 };
 use crate::channels::web::sse::SseManager;
 
@@ -948,5 +949,229 @@ mod db_auth_cache {
             // Cache must be bounded at capacity, not grown to 10.
             assert_eq!(c.len(), 4, "cache should be bounded to capacity"); // safety: test assertion
         }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Chat Thread Delete API Tests
+// ═══════════════════════════════════════════════════════════════════════
+
+#[cfg(feature = "libsql")]
+mod chat_thread_delete {
+    use super::*;
+    use reqwest::Client;
+
+    async fn start_chat_server(
+        state: Arc<GatewayState>,
+        auth: MultiAuthState,
+    ) -> (std::net::SocketAddr, Client) {
+        let addr = start_server(
+            "127.0.0.1:0".parse().expect("valid localhost addr"),
+            Arc::clone(&state),
+            CombinedAuthState::from(auth),
+        )
+        .await
+        .expect("failed to start web server");
+
+        let client = Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .expect("failed to build reqwest client");
+
+        (addr, client)
+    }
+
+    async fn shutdown_server(state: &Arc<GatewayState>) {
+        if let Some(tx) = state.shutdown_tx.write().await.take() {
+            let _ = tx.send(());
+        }
+    }
+
+    #[tokio::test]
+    async fn delete_thread_successfully_removes_thread() {
+        let (db, _dir) = test_db().await;
+        let state = build_state(Some(Arc::clone(&db)), None);
+        let auth = two_user_auth();
+
+        let thread_id = Uuid::new_v4();
+        db.ensure_conversation(thread_id, "gateway", "alice", None, Some("gateway"))
+            .await
+            .expect("seed thread");
+
+        let (addr, client) = start_chat_server(Arc::clone(&state), auth).await;
+
+        let resp = client
+            .delete(format!("http://{addr}/api/chat/thread/{thread_id}"))
+            .bearer_auth("tok-alice")
+            .send()
+            .await
+            .expect("delete request failed");
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: serde_json::Value = resp.json().await.expect("delete response json");
+        assert_eq!(body["ok"], serde_json::Value::Bool(true));
+
+        let still_belongs = db
+            .conversation_belongs_to_user(thread_id, "alice")
+            .await
+            .expect("conversation lookup failed");
+        assert!(
+            !still_belongs,
+            "thread should be removed after successful delete"
+        );
+
+        shutdown_server(&state).await;
+    }
+
+    #[tokio::test]
+    async fn delete_nonexistent_thread_returns_not_found() {
+        let (db, _dir) = test_db().await;
+        let state = build_state(Some(db), None);
+        let auth = two_user_auth();
+
+        let missing_id = Uuid::new_v4();
+        let (addr, client) = start_chat_server(Arc::clone(&state), auth).await;
+
+        let resp = client
+            .delete(format!("http://{addr}/api/chat/thread/{missing_id}"))
+            .bearer_auth("tok-alice")
+            .send()
+            .await
+            .expect("delete request failed");
+
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let body = resp.text().await.expect("response body");
+        assert!(
+            body.contains("Thread not found"),
+            "expected not found message, got: {body}"
+        );
+
+        shutdown_server(&state).await;
+    }
+
+    #[tokio::test]
+    async fn delete_foreign_user_thread_returns_not_found() {
+        let (db, _dir) = test_db().await;
+        let state = build_state(Some(Arc::clone(&db)), None);
+        let auth = two_user_auth();
+
+        let alice_thread_id = Uuid::new_v4();
+        db.ensure_conversation(alice_thread_id, "gateway", "alice", None, Some("gateway"))
+            .await
+            .expect("seed alice thread");
+
+        let (addr, client) = start_chat_server(Arc::clone(&state), auth).await;
+
+        let resp = client
+            .delete(format!("http://{addr}/api/chat/thread/{alice_thread_id}"))
+            .bearer_auth("tok-bob")
+            .send()
+            .await
+            .expect("delete request failed");
+
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        let still_exists_for_alice = db
+            .conversation_belongs_to_user(alice_thread_id, "alice")
+            .await
+            .expect("conversation lookup failed");
+        assert!(
+            still_exists_for_alice,
+            "foreign delete attempt must not remove alice thread"
+        );
+
+        shutdown_server(&state).await;
+    }
+
+    #[tokio::test]
+    async fn delete_assistant_thread_returns_forbidden() {
+        let (db, _dir) = test_db().await;
+        let state = build_state(Some(Arc::clone(&db)), None);
+        let auth = two_user_auth();
+
+        let assistant_id = db
+            .get_or_create_assistant_conversation("alice", "gateway")
+            .await
+            .expect("create assistant thread");
+
+        let (addr, client) = start_chat_server(Arc::clone(&state), auth).await;
+
+        let resp = client
+            .delete(format!("http://{addr}/api/chat/thread/{assistant_id}"))
+            .bearer_auth("tok-alice")
+            .send()
+            .await
+            .expect("delete request failed");
+
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let body = resp.text().await.expect("response body");
+        assert!(
+            body.contains("Cannot delete the assistant thread"),
+            "expected assistant-thread protection error, got: {body}"
+        );
+
+        let still_exists = db
+            .conversation_belongs_to_user(assistant_id, "alice")
+            .await
+            .expect("assistant lookup failed");
+        assert!(still_exists, "assistant thread must remain intact");
+
+        shutdown_server(&state).await;
+    }
+
+    #[tokio::test]
+    async fn delete_thread_rate_limited_returns_429() {
+        let (db, _dir) = test_db().await;
+        let mut state = build_state(Some(Arc::clone(&db)), None);
+
+        // Tight limit so second delete attempt is throttled.
+        Arc::get_mut(&mut state)
+            .expect("state must be uniquely owned during setup")
+            .chat_rate_limiter = PerUserRateLimiter::new(1, 60);
+
+        let auth = two_user_auth();
+        let thread_ok = Uuid::new_v4();
+        let thread_blocked = Uuid::new_v4();
+        db.ensure_conversation(thread_ok, "gateway", "alice", None, Some("gateway"))
+            .await
+            .expect("seed first thread");
+        db.ensure_conversation(thread_blocked, "gateway", "alice", None, Some("gateway"))
+            .await
+            .expect("seed second thread");
+
+        let (addr, client) = start_chat_server(Arc::clone(&state), auth).await;
+
+        let first = client
+            .delete(format!("http://{addr}/api/chat/thread/{thread_ok}"))
+            .bearer_auth("tok-alice")
+            .send()
+            .await
+            .expect("first delete failed");
+        assert_eq!(first.status(), StatusCode::OK);
+
+        let second = client
+            .delete(format!("http://{addr}/api/chat/thread/{thread_blocked}"))
+            .bearer_auth("tok-alice")
+            .send()
+            .await
+            .expect("second delete failed");
+        assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        let second_body = second.text().await.expect("429 response body");
+        assert!(
+            second_body.contains("Too many requests"),
+            "expected rate-limit message, got: {second_body}"
+        );
+
+        let blocked_still_exists = db
+            .conversation_belongs_to_user(thread_blocked, "alice")
+            .await
+            .expect("blocked thread lookup failed");
+        assert!(
+            blocked_still_exists,
+            "rate-limited delete should not remove the target thread"
+        );
+
+        shutdown_server(&state).await;
     }
 }

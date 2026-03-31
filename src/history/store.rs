@@ -1933,6 +1933,47 @@ impl Store {
         Ok(row.and_then(|r| r.get::<_, Option<String>>(0)))
     }
 
+    /// Delete a conversation and all its messages. Returns true if the
+    /// conversation existed and was deleted.
+    pub async fn delete_conversation(
+        &self,
+        conversation_id: Uuid,
+        user_id: &str,
+    ) -> Result<bool, DatabaseError> {
+        let mut conn = self.conn().await?;
+        let tx = conn.transaction().await?;
+
+        // Verify ownership
+        let row = tx
+            .query_opt(
+                "SELECT 1 FROM conversations WHERE id = $1 AND user_id = $2",
+                &[&conversation_id, &user_id],
+            )
+            .await?;
+        if row.is_none() {
+            tx.rollback().await?;
+            return Ok(false);
+        }
+
+        // Delete messages first
+        tx.execute(
+            "DELETE FROM conversation_messages WHERE conversation_id = $1",
+            &[&conversation_id],
+        )
+        .await?;
+
+        // Delete the conversation
+        let affected = tx
+            .execute(
+                "DELETE FROM conversations WHERE id = $1 AND user_id = $2",
+                &[&conversation_id, &user_id],
+            )
+            .await?;
+
+        tx.commit().await?;
+        Ok(affected > 0)
+    }
+
     /// Load messages for a conversation with cursor-based pagination.
     ///
     /// Returns `(messages_oldest_first, has_more)`.

@@ -458,6 +458,10 @@ pub async fn start_server(
         .route("/api/chat/history", get(chat_history_handler))
         .route("/api/chat/threads", get(chat_threads_handler))
         .route("/api/chat/thread/new", post(chat_new_thread_handler))
+        .route(
+            "/api/chat/thread/{id}",
+            axum::routing::delete(chat_delete_thread_handler),
+        )
         // Memory
         .route("/api/memory/tree", get(memory_tree_handler))
         .route("/api/memory/list", get(memory_list_handler))
@@ -2103,6 +2107,68 @@ async fn chat_new_thread_handler(
     }
 
     Ok(Json(info))
+}
+
+async fn chat_delete_thread_handler(
+    State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    // Rate-limit delete requests using the shared chat rate limiter
+    if !state.chat_rate_limiter.check(&user.user_id) {
+        return Err((
+            StatusCode::TOO_MANY_REQUESTS,
+            "Too many requests".to_string(),
+        ));
+    }
+
+    let thread_id = Uuid::parse_str(&id)
+        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid thread ID".to_string()))?;
+
+    let store = state.store.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Database not available".to_string(),
+    ))?;
+
+    // Prevent deletion of assistant threads across all channels
+    let metadata = store.get_conversation_metadata(thread_id).await.map_err(|e| {
+        tracing::error!("Failed to fetch metadata for thread {}: {}", thread_id, e);
+        (StatusCode::INTERNAL_SERVER_ERROR, "Internal error".to_string())
+    })?;
+    if let Some(meta) = metadata {
+        if meta.get("thread_type").and_then(|v| v.as_str()) == Some("assistant") {
+            return Err((
+                StatusCode::FORBIDDEN,
+                "Cannot delete the assistant thread".to_string(),
+            ));
+        }
+    }
+
+    let deleted = store
+        .delete_conversation(thread_id, &user.user_id)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to delete conversation {}: {}", thread_id, e);
+            (StatusCode::INTERNAL_SERVER_ERROR, "Delete failed".to_string())
+        })?;
+
+    if !deleted {
+        return Err((StatusCode::NOT_FOUND, "Thread not found".to_string()));
+    }
+
+    // Also remove from in-memory session if present
+    if let Some(ref sm) = state.session_manager {
+        let session = sm.get_or_create_session(&user.user_id).await;
+        let mut sess = session.lock().await;
+        sess.threads.remove(&thread_id);
+        // If the deleted thread was the active one, clear it.
+        // Frontend will fall back to assistant thread when available.
+        if sess.active_thread == Some(thread_id) {
+            sess.active_thread = None;
+        }
+    }
+
+    Ok(Json(serde_json::json!({"ok": true})))
 }
 
 // Job handlers moved to handlers/jobs.rs

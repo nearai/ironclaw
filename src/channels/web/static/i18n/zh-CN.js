@@ -106,6 +106,10 @@ I18n.register('zh-CN', {
   
   // 聊天标签页
   'chat.newThread': '新对话',
+  'chat.deleteThread': '删除对话',
+  'chat.confirmDeleteThread': '确认删除“{title}”？',
+  'chat.threadDeleted': '对话已删除',
+  'chat.deleteThreadFailed': '删除失败：{message}',
   'chat.toggleSidebar': '切换侧边栏',
   'chat.assistant': '助手',
   'chat.conversations': '对话列表',
