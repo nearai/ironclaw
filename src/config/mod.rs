@@ -2,6 +2,10 @@
 //!
 //! Settings are loaded with priority: **DB > env > TOML > default**.
 //!
+//! For concrete (non-`Option`) fields, "DB wins" means the DB value is
+//! used when it differs from the built-in default. A DB value equal to
+//! the default is indistinguishable from "unset" and falls through to env.
+//!
 //! Exceptions:
 //! - Bootstrap configs (database, secrets): env-only (DB not yet available)
 //! - Security-sensitive fields (allow_local_tools, allow_full_access,

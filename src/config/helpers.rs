@@ -337,9 +337,10 @@ pub(crate) fn validate_base_url(url: &str, field_name: &str) -> Result<(), Confi
 
 /// Log a warning when a DB/TOML setting shadows a set env var.
 ///
-/// Values are intentionally NOT logged — some callers handle sensitive
-/// fields (tunnel tokens, API keys) and we must not leak them.
-fn warn_if_db_shadows_env(env_key: &str, _db_value: &dyn std::fmt::Display) {
+/// Only checks real env vars (`std::env::var`), not runtime overrides or
+/// injected vars — those are internal and don't warrant operator warnings.
+/// Values are intentionally NOT logged to avoid leaking sensitive data.
+fn warn_if_db_shadows_env(env_key: &str) {
     if let Ok(env_val) = std::env::var(env_key)
         && !env_val.is_empty()
     {
@@ -357,6 +358,12 @@ fn warn_if_db_shadows_env(env_key: &str, _db_value: &dyn std::fmt::Display) {
 /// If `settings_val != default_val`, the settings value wins (it was explicitly
 /// set in DB or TOML). Otherwise falls back to `optional_env(env_key)`, then
 /// `default_val`.
+///
+/// **Limitation:** Uses `settings_val != default_val` as a heuristic for
+/// "was this field explicitly set." If a user deliberately sets a DB value
+/// equal to the default, it's indistinguishable from "unset" and the env
+/// var will win. This matches `merge_from()` semantics and is acceptable
+/// since setting a value to its default is effectively a no-op.
 pub(crate) fn db_first_or_default<T>(
     settings_val: &T,
     default_val: &T,
@@ -367,7 +374,7 @@ where
     T::Err: std::fmt::Display,
 {
     if settings_val != default_val {
-        warn_if_db_shadows_env(env_key, settings_val);
+        warn_if_db_shadows_env(env_key);
         return Ok(settings_val.clone());
     }
     parse_optional_env(env_key, default_val.clone())
@@ -380,7 +387,7 @@ pub(crate) fn db_first_bool(
     env_key: &str,
 ) -> Result<bool, ConfigError> {
     if settings_val != default_val {
-        warn_if_db_shadows_env(env_key, &settings_val);
+        warn_if_db_shadows_env(env_key);
         return Ok(settings_val);
     }
     parse_bool_env(env_key, default_val)
@@ -396,7 +403,7 @@ pub(crate) fn db_first_optional_string(
     if let Some(val) = settings_val
         && !val.is_empty()
     {
-        warn_if_db_shadows_env(env_key, val);
+        warn_if_db_shadows_env(env_key);
         return Ok(Some(val.clone()));
     }
     optional_env(env_key)
@@ -414,7 +421,7 @@ where
     T::Err: std::fmt::Display,
 {
     if let Some(val) = settings_val {
-        warn_if_db_shadows_env(env_key, val);
+        warn_if_db_shadows_env(env_key);
         return Ok(Some(val.clone()));
     }
     parse_option_env(env_key)

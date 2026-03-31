@@ -1,4 +1,4 @@
-use crate::config::helpers::{db_first_or_default, parse_optional_env};
+use crate::config::helpers::{db_first_option, db_first_or_default, parse_optional_env};
 use crate::error::ConfigError;
 use crate::settings::Settings;
 use crate::workspace::FusionStrategy;
@@ -64,11 +64,10 @@ impl WorkspaceSearchConfig {
         };
 
         // Weights: DB (Some) > env > per-strategy default.
-        let fts_weight = ss
-            .fts_weight
+        // Uses db_first_option for shadow warnings when DB overrides env.
+        let fts_weight = db_first_option(&ss.fts_weight, "SEARCH_FTS_WEIGHT")?
             .unwrap_or(parse_optional_env("SEARCH_FTS_WEIGHT", default_fts)?);
-        let vector_weight = ss
-            .vector_weight
+        let vector_weight = db_first_option(&ss.vector_weight, "SEARCH_VECTOR_WEIGHT")?
             .unwrap_or(parse_optional_env("SEARCH_VECTOR_WEIGHT", default_vec)?);
 
         if !fts_weight.is_finite() || fts_weight < 0.0 {

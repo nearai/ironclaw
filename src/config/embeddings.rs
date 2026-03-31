@@ -102,8 +102,9 @@ impl EmbeddingsConfig {
             None => optional_env("OLLAMA_BASE_URL")?.unwrap_or(default_ollama_url),
         };
 
-        let dim_default = default_dimension_for_model(&model);
-        let dimension = db_first_or_default(&dim_default, &dim_default, "EMBEDDING_DIMENSION")?;
+        // Dimension depends on the resolved model, not on a DB setting — env-only.
+        let dimension =
+            parse_optional_env("EMBEDDING_DIMENSION", default_dimension_for_model(&model))?;
 
         let enabled = db_first_bool(
             settings.embeddings.enabled,

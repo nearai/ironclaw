@@ -1106,8 +1106,8 @@ impl Settings {
             "# IronClaw configuration file.\n\
              #\n\
              # Priority: DB settings > env vars > this file > defaults.\n\
-             # Exceptions: bootstrap fields (DATABASE_URL, etc.) and\n\
-             # security-sensitive fields are env-only.\n\
+             # A DB value equal to the built-in default is treated as unset.\n\
+             # Exceptions: bootstrap and security-sensitive fields are env-only.\n\
              # Uncomment and edit values to override defaults.\n\
              # Run `ironclaw config init` to regenerate this file.\n\
              #\n\

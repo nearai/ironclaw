@@ -52,8 +52,16 @@ impl TunnelConfig {
             Some(crate::tunnel::TunnelProviderConfig {
                 provider: provider_name.clone(),
                 // Security: tunnel auth tokens are env-only (sensitive credentials).
-                cloudflare: optional_env("TUNNEL_CF_TOKEN")?
-                    .map(|token| crate::tunnel::CloudflareTunnelConfig { token }),
+                cloudflare: {
+                    if settings.tunnel.cf_token.is_some() {
+                        tracing::warn!(
+                            "tunnel.cf_token is set in DB/TOML but is now env-only \
+                             (TUNNEL_CF_TOKEN). Remove it from DB settings."
+                        );
+                    }
+                    optional_env("TUNNEL_CF_TOKEN")?
+                        .map(|token| crate::tunnel::CloudflareTunnelConfig { token })
+                },
                 tailscale: Some(crate::tunnel::TailscaleTunnelConfig {
                     funnel: db_first_bool(
                         settings.tunnel.ts_funnel,
@@ -70,6 +78,12 @@ impl TunnelConfig {
                         &settings.tunnel.ngrok_domain,
                         "TUNNEL_NGROK_DOMAIN",
                     )?;
+                    if settings.tunnel.ngrok_token.is_some() {
+                        tracing::warn!(
+                            "tunnel.ngrok_token is set in DB/TOML but is now env-only \
+                             (TUNNEL_NGROK_TOKEN). Remove it from DB settings."
+                        );
+                    }
                     optional_env("TUNNEL_NGROK_TOKEN")?.map(|auth_token| {
                         crate::tunnel::NgrokTunnelConfig {
                             auth_token,

@@ -261,7 +261,15 @@ impl ChannelsConfig {
                     }
                 },
                 // Security: auth token is env-only — never read from DB settings.
-                auth_token: optional_env("GATEWAY_AUTH_TOKEN")?,
+                auth_token: {
+                    if cs.gateway_auth_token.is_some() {
+                        tracing::warn!(
+                            "gateway_auth_token is set in DB/TOML but is now env-only \
+                             (GATEWAY_AUTH_TOKEN). Remove it from DB settings."
+                        );
+                    }
+                    optional_env("GATEWAY_AUTH_TOKEN")?
+                },
                 workspace_read_scopes,
                 memory_layers,
                 oidc,
@@ -276,7 +284,9 @@ impl ChannelsConfig {
         let signal = if signal_enabled || signal_url.is_some() {
             let http_url = signal_url.ok_or(ConfigError::InvalidValue {
                 key: "SIGNAL_HTTP_URL".to_string(),
-                message: "SIGNAL_HTTP_URL is required when Signal is enabled".to_string(),
+                message: "SIGNAL_HTTP_URL is required when signal_enabled is set in DB/TOML \
+                         or SIGNAL_ENABLED env var is true"
+                    .to_string(),
             })?;
             let account = db_first_optional_string(&cs.signal_account, "SIGNAL_ACCOUNT")?.ok_or(
                 ConfigError::InvalidValue {
