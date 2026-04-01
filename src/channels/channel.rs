@@ -355,6 +355,16 @@ pub enum StatusUpdate {
     },
 }
 
+/// Shared chat-style approval prompt formatting used by non-web channels.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatApprovalPrompt {
+    pub request_id: String,
+    pub tool_name: String,
+    pub description: String,
+    pub parameters: serde_json::Value,
+    pub allow_always: bool,
+}
+
 impl StatusUpdate {
     /// Build a `ToolCompleted` status with redacted parameters.
     ///
@@ -384,6 +394,96 @@ impl StatusUpdate {
                 None
             },
         }
+    }
+}
+
+impl ChatApprovalPrompt {
+    /// Build a shared chat approval prompt from a status update.
+    pub fn from_status(status: &StatusUpdate) -> Option<Self> {
+        let StatusUpdate::ApprovalNeeded {
+            request_id,
+            tool_name,
+            description,
+            parameters,
+            allow_always,
+        } = status
+        else {
+            return None;
+        };
+
+        Some(Self {
+            request_id: request_id.clone(),
+            tool_name: tool_name.clone(),
+            description: description.clone(),
+            parameters: parameters.clone(),
+            allow_always: *allow_always,
+        })
+    }
+
+    /// Pretty-printed tool parameters for display.
+    pub fn parameters_json(&self) -> String {
+        serde_json::to_string_pretty(&self.parameters)
+            .unwrap_or_else(|_| self.parameters.to_string())
+    }
+
+    /// Shared reply vocabulary summary for compact status surfaces.
+    pub fn reply_summary(&self) -> &'static str {
+        if self.allow_always {
+            "yes (or /approve), no (or /deny), or always (or /always)"
+        } else {
+            "yes (or /approve) or no (or /deny)"
+        }
+    }
+
+    /// Approval prompt formatted for plain-text chat channels.
+    pub fn plain_text_message(&self) -> String {
+        let mut lines = vec![
+            format!("Approval needed: {}", self.tool_name),
+            self.description.clone(),
+            String::new(),
+            format!("Request ID: {}", self.request_id),
+            "Parameters:".to_string(),
+            self.parameters_json(),
+            String::new(),
+            "Reply with:".to_string(),
+            "- yes, y, approve, or /approve to approve this request".to_string(),
+        ];
+
+        if self.allow_always {
+            lines.push(format!(
+                "- always, a, or /always to approve this request and auto-approve future {} requests",
+                self.tool_name
+            ));
+        }
+
+        lines.push("- no, n, deny, or /deny to deny this request".to_string());
+        lines.join("\n")
+    }
+
+    /// Approval prompt formatted for Markdown-capable chat channels.
+    pub fn markdown_message(&self) -> String {
+        let mut lines = vec![
+            "⚠️ *Approval Required*".to_string(),
+            String::new(),
+            format!("*Request ID:* `{}`", self.request_id),
+            format!("*Tool:* {}", self.tool_name),
+            format!("*Description:* {}", self.description),
+            "*Parameters:*".to_string(),
+            format!("```json\n{}\n```", self.parameters_json()),
+            String::new(),
+            "Reply with:".to_string(),
+            "• `yes`, `y`, `approve`, or `/approve` - Approve this request".to_string(),
+        ];
+
+        if self.allow_always {
+            lines.push(format!(
+                "• `always`, `a`, or `/always` - Approve this request and auto-approve future {} requests",
+                self.tool_name
+            ));
+        }
+
+        lines.push("• `no`, `n`, `deny`, or `/deny` - Deny this request".to_string());
+        lines.join("\n")
     }
 }
 
@@ -655,5 +755,40 @@ mod tests {
     fn routing_target_returns_none_for_empty_metadata() {
         let metadata = serde_json::json!({});
         assert!(routing_target_from_metadata(&metadata).is_none());
+    }
+
+    #[test]
+    fn chat_approval_prompt_plain_text_includes_all_reply_forms() {
+        let prompt = ChatApprovalPrompt::from_status(&StatusUpdate::ApprovalNeeded {
+            request_id: "req-123".into(),
+            tool_name: "http".into(),
+            description: "Fetch weather data".into(),
+            parameters: serde_json::json!({"url": "https://api.weather.test"}),
+            allow_always: true,
+        })
+        .expect("approval prompt");
+
+        let text = prompt.plain_text_message();
+        assert!(text.contains("Request ID: req-123"));
+        assert!(text.contains("approve, or /approve"));
+        assert!(text.contains("always, a, or /always"));
+        assert!(text.contains("deny, or /deny"));
+    }
+
+    #[test]
+    fn chat_approval_prompt_hides_always_when_not_allowed() {
+        let prompt = ChatApprovalPrompt::from_status(&StatusUpdate::ApprovalNeeded {
+            request_id: "req-456".into(),
+            tool_name: "shell".into(),
+            description: "Run command".into(),
+            parameters: serde_json::json!({"command": "rm -rf /tmp/demo"}),
+            allow_always: false,
+        })
+        .expect("approval prompt");
+
+        let markdown = prompt.markdown_message();
+        assert!(markdown.contains("`/approve`"));
+        assert!(markdown.contains("`/deny`"));
+        assert!(!markdown.contains("`/always`"));
     }
 }
