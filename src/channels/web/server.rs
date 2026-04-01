@@ -35,6 +35,10 @@ use crate::channels::relay::DEFAULT_RELAY_NAME;
 use crate::channels::web::auth::{
     AuthenticatedUser, CombinedAuthState, UserIdentity, auth_middleware,
 };
+use crate::channels::web::handlers::collections::{
+    collections_delete_handler, collections_insert_handler, collections_list_handler,
+    collections_query_handler, collections_register_handler, collections_update_handler,
+};
 use crate::channels::web::handlers::engine::{
     engine_mission_detail_handler, engine_mission_fire_handler, engine_mission_pause_handler,
     engine_mission_resume_handler, engine_missions_handler, engine_missions_summary_handler,
@@ -456,6 +460,10 @@ pub struct GatewayState {
     /// When this sender is dropped, the sweep loops exit gracefully.
     #[allow(dead_code)]
     pub oauth_sweep_shutdown: Option<tokio::sync::watch::Sender<()>>,
+    /// Broadcast channel for collection write events (consumed by routine engine).
+    pub collection_write_tx: Option<tokio::sync::broadcast::Sender<crate::agent::collection_events::CollectionWriteEvent>>,
+    /// Skills directory for writing per-collection SKILL.md files.
+    pub skills_dir: Option<std::path::PathBuf>,
 }
 
 /// Start the gateway HTTP server.
@@ -637,6 +645,13 @@ pub async fn start_server(
             "/api/engine/missions/{id}/resume",
             post(engine_mission_resume_handler),
         )
+        // Collections
+        .route("/api/collections", get(collections_list_handler))
+        .route("/api/collections/register", post(collections_register_handler))
+        .route("/api/collections/{collection}/records", get(collections_query_handler))
+        .route("/api/collections/{collection}/records", post(collections_insert_handler))
+        .route("/api/collections/{collection}/records/{record_id}", axum::routing::put(collections_update_handler))
+        .route("/api/collections/{collection}/records/{record_id}", axum::routing::delete(collections_delete_handler))
         // Skills
         .route("/api/skills", get(skills_list_handler))
         .route("/api/skills/search", post(skills_search_handler))
@@ -3442,6 +3457,8 @@ mod tests {
             near_rpc_url: None,
             near_network: None,
             oauth_sweep_shutdown: None,
+            collection_write_tx: None,
+            skills_dir: None,
         })
     }
 

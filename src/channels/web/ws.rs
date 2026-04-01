@@ -547,6 +547,8 @@ mod tests {
             near_rpc_url: None,
             near_network: None,
             oauth_sweep_shutdown: None,
+            collection_write_tx: None,
+            skills_dir: None,
         }
     }
 }

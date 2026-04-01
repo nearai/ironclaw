@@ -146,6 +146,8 @@ impl GatewayChannel {
             near_rpc_url: None,
             near_network: None,
             oauth_sweep_shutdown: None,
+            collection_write_tx: None,
+            skills_dir: None,
         });
 
         Self {
@@ -196,6 +198,8 @@ impl GatewayChannel {
             near_rpc_url: self.state.near_rpc_url.clone(),
             near_network: self.state.near_network.clone(),
             oauth_sweep_shutdown: None, // sweep tasks are managed by with_oauth
+            collection_write_tx: self.state.collection_write_tx.clone(),
+            skills_dir: self.state.skills_dir.clone(),
         };
         mutate(&mut new_state);
         self.state = Arc::new(new_state);
