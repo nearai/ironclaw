@@ -72,17 +72,10 @@ impl NearNonceStore {
 /// NEP-413 tag: `2^31 + 413 = 2147484061`.
 const NEP413_TAG: u32 = (1 << 31) + 413;
 
-/// Build the NEP-413 borsh-serialized payload that wallets sign.
+/// Build the NEP-413 borsh-serialized payload (tag → message → nonce → recipient → callback_url).
 ///
-/// Format (borsh):
-///   u32_le(2^31 + 413)        — discriminant tag
-///   u32_le(len(message))      — message length prefix
-///   message bytes
-///   nonce (32 bytes)           — raw nonce bytes
-///   u32_le(len(recipient))    — recipient length prefix
-///   recipient bytes
-///   u8(0)                      — None for optional callback_url
-pub fn build_nep413_payload(message: &str, nonce: &[u8; 32], recipient: &str) -> Vec<u8> {
+/// This is the original NEP-413 spec field order from the NEAR Enhancement Proposal.
+fn build_nep413_v1(message: &str, nonce: &[u8; 32], recipient: &str) -> Vec<u8> {
     let mut buf = Vec::new();
     buf.extend_from_slice(&NEP413_TAG.to_le_bytes());
     buf.extend_from_slice(&(message.len() as u32).to_le_bytes());
@@ -94,18 +87,79 @@ pub fn build_nep413_payload(message: &str, nonce: &[u8; 32], recipient: &str) ->
     buf
 }
 
-/// Verify an Ed25519 signature over a NEP-413 payload.
-pub fn verify_signature(
-    public_key_bytes: &[u8; 32],
-    signature_bytes: &[u8; 64],
-    message: &[u8],
-) -> Result<(), OAuthError> {
-    let key = VerifyingKey::from_bytes(public_key_bytes)
-        .map_err(|e| OAuthError::ProfileFetch(format!("Invalid public key: {e}")))?;
+/// Build NEP-413 payload with alternative field order (tag → message → recipient → nonce).
+///
+/// Some wallet implementations (near-connect, HOT) use this field order
+/// as documented at docs.near.org/web3-apps/backend-login.
+fn build_nep413_v2(message: &str, nonce: &[u8; 32], recipient: &str) -> Vec<u8> {
+    let mut buf = Vec::new();
+    buf.extend_from_slice(&NEP413_TAG.to_le_bytes());
+    buf.extend_from_slice(&(message.len() as u32).to_le_bytes());
+    buf.extend_from_slice(message.as_bytes());
+    buf.extend_from_slice(&(recipient.len() as u32).to_le_bytes());
+    buf.extend_from_slice(recipient.as_bytes());
+    buf.extend_from_slice(nonce);
+    buf
+}
+
+/// Verify an Ed25519 signature over a message.
+fn verify_ed25519(public_key_bytes: &[u8; 32], signature_bytes: &[u8; 64], message: &[u8]) -> bool {
+    let Ok(key) = VerifyingKey::from_bytes(public_key_bytes) else {
+        return false;
+    };
     let sig = Signature::from_bytes(signature_bytes);
     use ed25519_dalek::Verifier;
-    key.verify(message, &sig)
-        .map_err(|_| OAuthError::ProfileFetch("Invalid signature".to_string()))
+    key.verify(message, &sig).is_ok()
+}
+
+/// Try all known payload formats that NEAR wallets may use for signMessage.
+///
+/// Different wallets implement NEP-413 differently:
+/// 1. Full NEP-413 borsh: tag || len(msg) || msg || nonce || len(recipient) || recipient || 0
+/// 2. SHA256 of the NEP-413 borsh payload
+/// 3. Borsh payload without the tag prefix
+/// 4. Raw message string bytes
+/// 5. SHA256 of the raw message
+pub fn verify_near_signature(
+    public_key_bytes: &[u8; 32],
+    signature_bytes: &[u8; 64],
+    message: &str,
+    nonce: &[u8; 32],
+    recipient: &str,
+) -> Result<(), OAuthError> {
+    use sha2::{Digest, Sha256};
+
+    // Build both known NEP-413 field orderings.
+    let payloads = [
+        build_nep413_v1(message, nonce, recipient), // tag → msg → nonce → recipient → callback
+        build_nep413_v2(message, nonce, recipient), // tag → msg → recipient → nonce
+    ];
+
+    for payload in &payloads {
+        // Direct borsh payload
+        if verify_ed25519(public_key_bytes, signature_bytes, payload) {
+            return Ok(());
+        }
+        // SHA256 of the borsh payload
+        if verify_ed25519(public_key_bytes, signature_bytes, &Sha256::digest(payload)) {
+            return Ok(());
+        }
+        // Without tag prefix
+        if payload.len() > 4 && verify_ed25519(public_key_bytes, signature_bytes, &payload[4..]) {
+            return Ok(());
+        }
+    }
+
+    // Raw message string
+    let raw = message.as_bytes();
+    if verify_ed25519(public_key_bytes, signature_bytes, raw) {
+        return Ok(());
+    }
+    if verify_ed25519(public_key_bytes, signature_bytes, &Sha256::digest(raw)) {
+        return Ok(());
+    }
+
+    Err(OAuthError::ProfileFetch("Invalid signature".to_string()))
 }
 
 /// Verify that a public key is an active access key on a NEAR account via RPC.
@@ -201,7 +255,7 @@ mod tests {
     }
 
     #[test]
-    fn test_verify_signature_valid() {
+    fn test_verify_near_signature_raw_message() {
         use ed25519_dalek::{Signer, SigningKey};
         let signing_key = SigningKey::from_bytes(&{
             let mut b = [0u8; 32];
@@ -210,16 +264,26 @@ mod tests {
         });
         let verifying_key = signing_key.verifying_key();
 
-        let message = b"Sign in to IronClaw";
-        let signature = signing_key.sign(message);
+        let message = "Sign in to IronClaw\nNonce: abcd1234";
+        let nonce = [0u8; 32];
+
+        // Sign the raw message bytes (what some wallets do).
+        let signature = signing_key.sign(message.as_bytes());
 
         assert!(
-            verify_signature(verifying_key.as_bytes(), &signature.to_bytes(), message,).is_ok()
+            verify_near_signature(
+                verifying_key.as_bytes(),
+                &signature.to_bytes(),
+                message,
+                &nonce,
+                "ironclaw",
+            )
+            .is_ok()
         );
     }
 
     #[test]
-    fn test_verify_signature_wrong_message() {
+    fn test_verify_near_signature_nep413_v2() {
         use ed25519_dalek::{Signer, SigningKey};
         let signing_key = SigningKey::from_bytes(&{
             let mut b = [0u8; 32];
@@ -228,13 +292,50 @@ mod tests {
         });
         let verifying_key = signing_key.verifying_key();
 
-        let signature = signing_key.sign(b"original message");
+        let message = "Sign in to IronClaw\nNonce: abcd1234";
+        let nonce = [42u8; 32];
+
+        // Sign the v2 NEP-413 payload (tag → message → recipient → nonce).
+        let payload = build_nep413_v2(message, &nonce, "ironclaw");
+        let signature = signing_key.sign(&payload);
 
         assert!(
-            verify_signature(
+            verify_near_signature(
                 verifying_key.as_bytes(),
                 &signature.to_bytes(),
-                b"different message",
+                message,
+                &nonce,
+                "ironclaw",
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_verify_near_signature_wrong_key() {
+        use ed25519_dalek::{Signer, SigningKey};
+        let signing_key = SigningKey::from_bytes(&{
+            let mut b = [0u8; 32];
+            OsRng.fill_bytes(&mut b);
+            b
+        });
+        let wrong_key = SigningKey::from_bytes(&{
+            let mut b = [0u8; 32];
+            OsRng.fill_bytes(&mut b);
+            b
+        });
+
+        let message = "test message";
+        let nonce = [0u8; 32];
+        let signature = signing_key.sign(message.as_bytes());
+
+        assert!(
+            verify_near_signature(
+                wrong_key.verifying_key().as_bytes(),
+                &signature.to_bytes(),
+                message,
+                &nonce,
+                "ironclaw",
             )
             .is_err()
         );
