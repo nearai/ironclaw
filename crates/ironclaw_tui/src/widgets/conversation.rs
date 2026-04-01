@@ -80,18 +80,21 @@ impl TuiWidget for ConversationWidget {
                 all_lines.push(user_line);
                 all_lines.push(Line::from(""));
             } else if msg.role == MessageRole::Assistant {
-                // Separator with label before assistant response
+                // Separator with label and timestamp before assistant response
+                let time_str = msg.timestamp.format("%H:%M").to_string();
                 let turn_label = " ironclaw ";
+                let time_label = format!(" {time_str} ");
                 let sep_left_len = 2usize;
                 let sep_right_len = usable_width
                     .min(60)
-                    .saturating_sub(sep_left_len + turn_label.len());
+                    .saturating_sub(sep_left_len + turn_label.len() + time_label.len());
                 let sep_left = "\u{2500}".repeat(sep_left_len);
                 let sep_right = "\u{2500}".repeat(sep_right_len);
                 all_lines.push(Line::from(vec![
                     Span::styled(format!("  {sep_left}"), self.theme.dim_style()),
                     Span::styled(turn_label, self.theme.accent_style()),
                     Span::styled(sep_right, self.theme.dim_style()),
+                    Span::styled(time_label, self.theme.dim_style()),
                 ]));
 
                 let wrapped =
@@ -120,8 +123,25 @@ impl TuiWidget for ConversationWidget {
 
                 all_lines.push(Line::from(""));
             } else {
-                let wrapped = wrap_text(&msg.content, usable_width, style);
-                all_lines.extend(wrapped);
+                // System messages with timestamp
+                let time_str = msg.timestamp.format("%H:%M").to_string();
+                let wrapped = wrap_text(&msg.content, usable_width.saturating_sub(8), style);
+                for (i, line) in wrapped.into_iter().enumerate() {
+                    if i == 0 {
+                        let mut spans: Vec<Span<'_>> = line
+                            .spans
+                            .into_iter()
+                            .map(|s| Span::styled(s.content.to_string(), s.style))
+                            .collect();
+                        spans.push(Span::styled(
+                            format!("  {time_str}"),
+                            self.theme.dim_style(),
+                        ));
+                        all_lines.push(Line::from(spans));
+                    } else {
+                        all_lines.push(line);
+                    }
+                }
             }
         }
 
@@ -300,6 +320,20 @@ impl TuiWidget for ConversationWidget {
             ]);
             visible.insert(0, search_line);
             // Remove the last line to keep the total count consistent
+            if visible.len() > visible_height {
+                visible.pop();
+            }
+        } else if scroll > 0 && start > 0 {
+            // Scroll position indicator when not at bottom
+            let indicator = format!("\u{2191} {start} more ");
+            let indicator_line = Line::from(vec![
+                Span::styled(
+                    " ".repeat(area.width as usize - indicator.chars().count() - 1),
+                    self.theme.dim_style(),
+                ),
+                Span::styled(indicator, self.theme.dim_style()),
+            ]);
+            visible.insert(0, indicator_line);
             if visible.len() > visible_height {
                 visible.pop();
             }

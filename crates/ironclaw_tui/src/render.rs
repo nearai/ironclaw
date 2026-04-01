@@ -1,6 +1,6 @@
 //! Rendering utilities for converting text to styled Ratatui spans.
 
-use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
@@ -126,10 +126,22 @@ pub fn render_markdown(text: &str, max_width: usize, theme: &Theme) -> Vec<Line<
                 ctx.first_block = false;
             }
 
-            Event::Start(Tag::CodeBlock(_)) => {
+            Event::Start(Tag::CodeBlock(kind)) => {
                 if ctx.need_blank_line && !ctx.first_block {
                     ctx.lines.push(Line::from(""));
                     ctx.need_blank_line = false;
+                }
+                // Language badge for fenced code blocks
+                if let CodeBlockKind::Fenced(ref lang) = kind {
+                    let lang_str = lang.split(',').next().unwrap_or("").trim();
+                    if !lang_str.is_empty() {
+                        ctx.lines.push(Line::from(Span::styled(
+                            format!("[{lang_str}]"),
+                            theme
+                                .accent_style()
+                                .add_modifier(Modifier::BOLD),
+                        )));
+                    }
                 }
                 ctx.in_code_block = true;
             }

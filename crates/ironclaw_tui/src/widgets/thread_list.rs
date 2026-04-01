@@ -153,6 +153,22 @@ impl TuiWidget for ThreadListWidget {
 
         let now = chrono::Utc::now();
 
+        // Global empty state hint
+        let has_any_data = !state.jobs.is_empty()
+            || !state.routines.is_empty()
+            || !state.threads.is_empty()
+            || state.sandbox_status.is_some()
+            || state.secrets_status.is_some();
+        if !has_any_data {
+            lines.push(Line::from(Span::styled(
+                " No active jobs or routines",
+                self.theme.dim_style(),
+            )));
+            let paragraph = ratatui::widgets::Paragraph::new(lines);
+            paragraph.render(inner, buf);
+            return;
+        }
+
         // ── SYSTEM section ────────────────────────────────────────────
         let system_items = state.sandbox_status.is_some() as usize
             + state.secrets_status.is_some() as usize;
@@ -359,12 +375,8 @@ mod tests {
         let state = make_state();
         let buf = render_to_buffer(&widget, &state, 40, 10);
         let text = buffer_text(&buf);
-        assert!(text.contains("JOBS (0)"));
-        assert!(text.contains("(no jobs)"));
-        assert!(text.contains("ROUTINES (0)"));
-        assert!(text.contains("(no routines)"));
-        assert!(text.contains("THREADS (0)"));
-        assert!(text.contains("(no threads)"));
+        // With no data at all, the widget shows an empty-state message
+        assert!(text.contains("No active jobs or routines"));
     }
 
     #[test]

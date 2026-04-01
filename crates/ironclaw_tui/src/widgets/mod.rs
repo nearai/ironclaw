@@ -9,10 +9,12 @@ pub mod approval;
 pub mod command_palette;
 pub mod conversation;
 pub mod header;
+pub mod help_overlay;
 pub mod input_box;
 pub mod logs;
 pub mod registry;
 pub mod status_bar;
+pub mod tab_bar;
 pub mod thread_list;
 pub mod tool_panel;
 
@@ -145,6 +147,18 @@ pub struct AppState {
 
     /// Identity files loaded at startup (e.g. "AGENTS.md", "SOUL.md").
     pub identity_files: Vec<String>,
+
+    /// Whether the help overlay (F1) is visible.
+    pub help_visible: bool,
+
+    /// Log level filter for the Logs tab.
+    pub log_level_filter: LogLevelFilter,
+
+    /// Active notification toasts.
+    pub toasts: Vec<Toast>,
+
+    /// Tool detail modal (Ctrl+E).
+    pub tool_detail_modal: Option<ToolDetailModal>,
 }
 
 impl Default for AppState {
@@ -188,6 +202,10 @@ impl Default for AppState {
             workspace_path: String::new(),
             memory_count: 0,
             identity_files: Vec::new(),
+            help_visible: false,
+            log_level_filter: LogLevelFilter::default(),
+            toasts: Vec::new(),
+            tool_detail_modal: None,
         }
     }
 }
@@ -381,6 +399,78 @@ pub struct CostGuardInfo {
     pub remaining_usd: Option<String>,
     /// Whether the spending limit has been reached.
     pub limit_reached: bool,
+}
+
+/// Log level filter for the Logs tab.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LogLevelFilter {
+    /// Show all log entries.
+    #[default]
+    All,
+    /// Show only ERROR entries.
+    Error,
+    /// Show ERROR and WARN entries.
+    Warn,
+    /// Show ERROR, WARN, and INFO entries.
+    Info,
+    /// Show everything except TRACE.
+    Debug,
+}
+
+impl std::fmt::Display for LogLevelFilter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::All => write!(f, "ALL"),
+            Self::Error => write!(f, "ERROR"),
+            Self::Warn => write!(f, "WARN+"),
+            Self::Info => write!(f, "INFO+"),
+            Self::Debug => write!(f, "DEBUG+"),
+        }
+    }
+}
+
+impl LogLevelFilter {
+    /// Returns true if the given log level passes this filter.
+    pub fn accepts(&self, level: &str) -> bool {
+        match self {
+            Self::All => true,
+            Self::Error => level == "ERROR",
+            Self::Warn => matches!(level, "ERROR" | "WARN"),
+            Self::Info => matches!(level, "ERROR" | "WARN" | "INFO"),
+            Self::Debug => matches!(level, "ERROR" | "WARN" | "INFO" | "DEBUG"),
+        }
+    }
+}
+
+/// A notification toast displayed briefly in the bottom-right corner.
+#[derive(Debug, Clone)]
+pub struct Toast {
+    /// Short message to display.
+    pub message: String,
+    /// Visual style of the toast.
+    pub kind: ToastKind,
+    /// When the toast was created (for auto-dismiss).
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Visual style for notification toasts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToastKind {
+    Info,
+    Success,
+    Warning,
+    Error,
+}
+
+/// Modal showing full tool output, scrollable.
+#[derive(Debug, Clone)]
+pub struct ToolDetailModal {
+    /// Name of the tool whose output is shown.
+    pub tool_name: String,
+    /// Full tool output content.
+    pub content: String,
+    /// Scroll offset within the modal.
+    pub scroll: u16,
 }
 
 /// Search state for Ctrl+F in conversation.

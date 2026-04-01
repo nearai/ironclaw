@@ -24,6 +24,8 @@ impl InputBoxWidget {
         textarea.set_cursor_line_style(ratatui::style::Style::default());
         textarea
             .set_block(ratatui::widgets::Block::default().borders(ratatui::widgets::Borders::NONE));
+        textarea.set_placeholder_text("Ask anything... (/ for commands, F1 for help)");
+        textarea.set_placeholder_style(theme.dim_style());
         Self { theme, textarea }
     }
 

@@ -123,6 +123,14 @@ impl TuiWidget for ToolPanelWidget {
             }
         }
 
+        // Empty state
+        if lines.is_empty() {
+            lines.push(Line::from(Span::styled(
+                " Waiting for tool activity...",
+                self.theme.dim_style(),
+            )));
+        }
+
         let paragraph = ratatui::widgets::Paragraph::new(lines);
         paragraph.render(inner, buf);
     }

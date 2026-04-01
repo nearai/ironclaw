@@ -31,10 +31,12 @@ use crate::widgets::approval::{ApprovalAction, ApprovalWidget};
 use crate::widgets::command_palette::CommandPaletteWidget;
 use crate::widgets::logs::LogsWidget;
 use crate::widgets::registry::{BuiltinWidgets, create_default_widgets};
+use crate::widgets::help_overlay::HelpOverlayWidget;
 use crate::widgets::{
     ActiveTab, AppState, ChatMessage, ContextPressureInfo, CostGuardInfo, JobInfo, JobStatus,
     MessageRole, RoutineInfo, SandboxInfo, SecretsInfo, SkillCategory, ThreadInfo, ThreadStatus,
-    ToolActivity, ToolCategory, ToolStatus, TuiWidget, TurnCostSummary,
+    Toast, ToastKind, ToolActivity, ToolCategory, ToolDetailModal, ToolStatus, TuiWidget,
+    TurnCostSummary,
 };
 
 /// Handle returned when the TUI is started. The main crate uses this to
@@ -189,7 +191,7 @@ async fn run_tui(
     loop {
         // Render
         terminal.draw(|frame| {
-            render_frame(frame, &state, &widgets, &layout);
+            render_frame(frame, &mut state, &widgets, &layout);
         })?;
 
         // Wait for event
@@ -248,7 +250,18 @@ async fn handle_event(
             let approval_active = state.pending_approval.is_some();
             let palette_active = state.command_palette.visible;
             let search_active = state.search.active;
-            let action = map_key(key, approval_active, palette_active, search_active);
+            let help_active = state.help_visible;
+            let tool_detail_active = state.tool_detail_modal.is_some();
+            let logs_active = state.active_tab == ActiveTab::Logs;
+            let action = map_key(
+                key,
+                approval_active,
+                palette_active,
+                search_active,
+                help_active,
+                tool_detail_active,
+                logs_active,
+            );
 
             match action {
                 InputAction::Submit => {
@@ -434,6 +447,43 @@ async fn handle_event(
                         }
                     }
                 }
+                InputAction::ToggleHelp => {
+                    state.help_visible = !state.help_visible;
+                }
+                InputAction::ExpandTool => {
+                    // Show the most recent tool with a result preview
+                    if let Some(tool) = state
+                        .recent_tools
+                        .iter()
+                        .rev()
+                        .find(|t| t.result_preview.is_some())
+                    {
+                        state.tool_detail_modal = Some(ToolDetailModal {
+                            tool_name: tool.name.clone(),
+                            content: tool
+                                .result_preview
+                                .clone()
+                                .unwrap_or_default(),
+                            scroll: 0,
+                        });
+                    }
+                }
+                InputAction::ToolDetailClose => {
+                    state.tool_detail_modal = None;
+                }
+                InputAction::ToolDetailScrollUp => {
+                    if let Some(ref mut modal) = state.tool_detail_modal {
+                        modal.scroll = modal.scroll.saturating_add(5);
+                    }
+                }
+                InputAction::ToolDetailScrollDown => {
+                    if let Some(ref mut modal) = state.tool_detail_modal {
+                        modal.scroll = modal.scroll.saturating_sub(5);
+                    }
+                }
+                InputAction::LogFilter(level) => {
+                    state.log_level_filter = level;
+                }
                 InputAction::Forward => {
                     if state.search.active {
                         // Update the search query with the key event
@@ -603,6 +653,11 @@ async fn handle_event(
                 timestamp: now,
                 cost_summary: None,
             });
+            state.toasts.push(Toast {
+                message: format!("Job started: {title}"),
+                kind: ToastKind::Info,
+                created_at: now,
+            });
             state.jobs.push(JobInfo {
                 id: job_id.clone(),
                 title: title.clone(),
@@ -727,6 +782,11 @@ async fn handle_event(
             } else {
                 format!("Authentication required for {extension_name}")
             };
+            state.toasts.push(Toast {
+                message: format!("Auth needed: {extension_name}"),
+                kind: ToastKind::Warning,
+                created_at: chrono::Utc::now(),
+            });
             state.messages.push(ChatMessage {
                 role: MessageRole::System,
                 content: msg,
@@ -741,6 +801,15 @@ async fn handle_event(
             message,
         } => {
             let prefix = if success { "\u{2713}" } else { "\u{2717}" };
+            state.toasts.push(Toast {
+                message: format!("{prefix} {extension_name}"),
+                kind: if success {
+                    ToastKind::Success
+                } else {
+                    ToastKind::Error
+                },
+                created_at: chrono::Utc::now(),
+            });
             state.messages.push(ChatMessage {
                 role: MessageRole::System,
                 content: format!("{prefix} {extension_name}: {message}"),
@@ -824,6 +893,13 @@ async fn handle_event(
             remaining_usd,
             limit_reached,
         } => {
+            if limit_reached {
+                state.toasts.push(Toast {
+                    message: "Cost limit reached".to_string(),
+                    kind: ToastKind::Error,
+                    created_at: chrono::Utc::now(),
+                });
+            }
             state.cost_guard = Some(CostGuardInfo {
                 session_budget_usd,
                 spent_usd,
@@ -851,21 +927,23 @@ async fn handle_event(
 /// Render a single frame.
 fn render_frame(
     frame: &mut ratatui::Frame<'_>,
-    state: &AppState,
+    state: &mut AppState,
     widgets: &BuiltinWidgets,
     layout: &TuiLayout,
 ) {
     let size = frame.area();
 
-    // Vertical layout: header (1) | main | input (3) | status (1)
+    // Vertical layout: header (0-1) | tab bar (1) | main | input (3) | status (1)
     let header_height = if layout.header.visible { 1 } else { 0 };
     let status_height = if layout.status_bar.visible { 1 } else { 0 };
+    let tab_bar_height = 1u16;
     let input_height = 3u16;
 
     let vertical = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(header_height),
+            Constraint::Length(tab_bar_height),
             Constraint::Min(4),
             Constraint::Length(input_height),
             Constraint::Length(status_height),
@@ -873,9 +951,10 @@ fn render_frame(
         .split(size);
 
     let header_area = vertical[0];
-    let main_area = vertical[1];
-    let input_area = vertical[2];
-    let status_area = vertical[3];
+    let tab_bar_area = vertical[1];
+    let main_area = vertical[2];
+    let input_area = vertical[3];
+    let status_area = vertical[4];
 
     // Header
     if layout.header.visible {
@@ -883,6 +962,11 @@ fn render_frame(
             .header
             .render(header_area, frame.buffer_mut(), state);
     }
+
+    // Tab bar
+    widgets
+        .tab_bar
+        .render(tab_bar_area, frame.buffer_mut(), state);
 
     // Main area: conversation/logs | sidebar
     match state.active_tab {
@@ -979,6 +1063,22 @@ fn render_frame(
             .approval
             .render(modal_area, frame.buffer_mut(), state);
     }
+
+    // Tool detail modal (Ctrl+E)
+    if state.tool_detail_modal.is_some() {
+        render_tool_detail_modal(frame, size, state, layout);
+    }
+
+    // Help overlay (F1)
+    if state.help_visible {
+        let help_area = HelpOverlayWidget::modal_area(size);
+        widgets
+            .help
+            .render(help_area, frame.buffer_mut(), state);
+    }
+
+    // Notification toasts (bottom-right, above status bar)
+    render_toasts(frame, size, state, layout);
 }
 
 /// Check input text and open/close the command palette accordingly.
@@ -1020,5 +1120,128 @@ fn render_horizontal_border(frame: &mut ratatui::Frame<'_>, area: Rect, layout: 
             cell.set_symbol("\u{2500}");
             cell.set_style(border_style);
         }
+    }
+}
+
+/// Render the tool detail modal (Ctrl+E).
+#[allow(clippy::cast_possible_truncation)]
+fn render_tool_detail_modal(
+    frame: &mut ratatui::Frame<'_>,
+    size: Rect,
+    state: &AppState,
+    layout: &TuiLayout,
+) {
+    use ratatui::style::Modifier;
+    use ratatui::text::{Line, Span};
+    use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget, Wrap};
+
+    let Some(ref modal) = state.tool_detail_modal else {
+        return;
+    };
+    let theme = layout.resolve_theme();
+
+    let width = (size.width * 3 / 4).max(40).min(size.width.saturating_sub(4));
+    let height = (size.height * 3 / 4).max(10).min(size.height.saturating_sub(4));
+    let x = (size.width.saturating_sub(width)) / 2;
+    let y = (size.height.saturating_sub(height)) / 2;
+    let area = Rect::new(x, y, width, height);
+
+    Clear.render(area, frame.buffer_mut());
+
+    let title = format!(" {} ", modal.tool_name);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(theme.accent_style())
+        .title(Span::styled(
+            title,
+            theme.accent_style().add_modifier(Modifier::BOLD),
+        ));
+    let inner = block.inner(area);
+    block.render(area, frame.buffer_mut());
+
+    let lines: Vec<Line<'_>> = modal
+        .content
+        .lines()
+        .map(|l| Line::from(l.to_string()))
+        .collect();
+
+    let paragraph = Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .scroll((modal.scroll, 0));
+    paragraph.render(inner, frame.buffer_mut());
+}
+
+/// Render notification toasts in the bottom-right corner.
+fn render_toasts(
+    frame: &mut ratatui::Frame<'_>,
+    size: Rect,
+    state: &mut AppState,
+    layout: &TuiLayout,
+) {
+    use ratatui::style::Modifier;
+    use ratatui::text::{Line, Span};
+    use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget};
+
+    // Prune expired toasts (older than 5 seconds)
+    let now = chrono::Utc::now();
+    state
+        .toasts
+        .retain(|t| now.signed_duration_since(t.created_at).num_seconds() < 5);
+
+    if state.toasts.is_empty() {
+        return;
+    }
+
+    let theme = layout.resolve_theme();
+    let max_toasts = 3usize;
+    let toast_width = 40u16.min(size.width.saturating_sub(2));
+
+    // Stack toasts from bottom up, above status bar
+    let start_y = size.height.saturating_sub(3); // above status bar + input
+    let visible_toasts = state.toasts.iter().rev().take(max_toasts);
+
+    for (i, toast) in visible_toasts.enumerate() {
+        let y = start_y.saturating_sub((i as u16) * 3);
+        let x = size.width.saturating_sub(toast_width + 1);
+        let area = Rect::new(x, y, toast_width, 3);
+
+        if area.y == 0 {
+            continue;
+        }
+
+        Clear.render(area, frame.buffer_mut());
+
+        let (icon, border_style) = match toast.kind {
+            ToastKind::Info => ("\u{2139}", theme.accent_style()),
+            ToastKind::Success => ("\u{2713}", theme.success_style()),
+            ToastKind::Warning => ("\u{26A0}", theme.warning_style()),
+            ToastKind::Error => ("\u{2717}", theme.error_style()),
+        };
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(border_style);
+        let inner = block.inner(area);
+        block.render(area, frame.buffer_mut());
+
+        let msg_width = inner.width as usize;
+        let display_msg = if toast.message.len() > msg_width.saturating_sub(3) {
+            format!(
+                "{}...",
+                &toast.message[..msg_width.saturating_sub(6).min(toast.message.len())]
+            )
+        } else {
+            toast.message.clone()
+        };
+
+        let line = Line::from(vec![
+            Span::styled(
+                format!(" {icon} "),
+                border_style.add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(display_msg, ratatui::style::Style::default().fg(theme.fg.to_color())),
+        ]);
+        let paragraph = Paragraph::new(line);
+        paragraph.render(inner, frame.buffer_mut());
     }
 }

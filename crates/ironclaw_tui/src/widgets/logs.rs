@@ -67,9 +67,14 @@ impl TuiWidget for LogsWidget {
             return;
         }
 
-        // Title line
+        // Title line with active filter
+        let filter_label = if state.log_level_filter == crate::widgets::LogLevelFilter::All {
+            String::new()
+        } else {
+            format!(" [{}]", state.log_level_filter)
+        };
         let title = format!(
-            " Logs ({} entries) \u{2500} Ctrl-L to return ",
+            " Logs ({} entries){filter_label} \u{2500} 1-5 filter \u{2500} Ctrl-L to return ",
             state.log_entries.len()
         );
         let title_line = Line::from(Span::styled(title, self.theme.accent_style()));
@@ -78,7 +83,11 @@ impl TuiWidget for LogsWidget {
         let usable_width = area.width as usize;
         let mut all_lines: Vec<Line<'_>> = vec![title_line];
 
-        for entry in state.log_entries.iter() {
+        for entry in state
+            .log_entries
+            .iter()
+            .filter(|e| state.log_level_filter.accepts(&e.level))
+        {
             let ts = Self::short_timestamp(&entry.timestamp);
             let level_style = self.level_style(&entry.level);
 

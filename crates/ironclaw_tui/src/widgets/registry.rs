@@ -10,9 +10,11 @@ use super::TuiWidget;
 use super::command_palette::CommandPaletteWidget;
 use super::conversation::ConversationWidget;
 use super::header::HeaderWidget;
+use super::help_overlay::HelpOverlayWidget;
 use super::input_box::InputBoxWidget;
 use super::logs::LogsWidget;
 use super::status_bar::StatusBarWidget;
+use super::tab_bar::TabBarWidget;
 use super::thread_list::ThreadListWidget;
 use super::tool_panel::ToolPanelWidget;
 
@@ -22,6 +24,7 @@ pub fn create_default_widgets(layout: &TuiLayout) -> BuiltinWidgets {
 
     BuiltinWidgets {
         header: HeaderWidget::new(theme.clone()),
+        tab_bar: TabBarWidget::new(theme.clone()),
         conversation: ConversationWidget::new(theme.clone()),
         logs: LogsWidget::new(theme.clone()),
         input_box: InputBoxWidget::new(theme.clone()),
@@ -29,6 +32,7 @@ pub fn create_default_widgets(layout: &TuiLayout) -> BuiltinWidgets {
         tool_panel: ToolPanelWidget::new(theme.clone()),
         thread_list: ThreadListWidget::new(theme.clone()),
         approval: super::approval::ApprovalWidget::new(theme.clone()),
+        help: HelpOverlayWidget::new(theme.clone()),
         command_palette: CommandPaletteWidget::new(theme),
     }
 }
@@ -39,6 +43,7 @@ pub fn create_default_widgets(layout: &TuiLayout) -> BuiltinWidgets {
 /// access widget-specific methods (e.g., `input_box.take_input()`).
 pub struct BuiltinWidgets {
     pub header: HeaderWidget,
+    pub tab_bar: TabBarWidget,
     pub conversation: ConversationWidget,
     pub logs: LogsWidget,
     pub input_box: InputBoxWidget,
@@ -46,6 +51,7 @@ pub struct BuiltinWidgets {
     pub tool_panel: ToolPanelWidget,
     pub thread_list: ThreadListWidget,
     pub approval: super::approval::ApprovalWidget,
+    pub help: HelpOverlayWidget,
     pub command_palette: CommandPaletteWidget,
 }
 
@@ -54,6 +60,7 @@ impl BuiltinWidgets {
     pub fn all(&self) -> Vec<&dyn TuiWidget> {
         vec![
             &self.header,
+            &self.tab_bar,
             &self.conversation,
             &self.logs,
             &self.input_box,
@@ -61,6 +68,7 @@ impl BuiltinWidgets {
             &self.tool_panel,
             &self.thread_list,
             &self.approval,
+            &self.help,
         ]
         // Note: command_palette is not included here because it renders
         // via a custom method (render_palette) rather than the TuiWidget trait.
