@@ -1,5 +1,6 @@
 //! Built-in tools that come with the agent.
 
+pub mod collections;
 mod echo;
 pub mod extension_tools;
 mod file;
