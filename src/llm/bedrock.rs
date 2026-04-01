@@ -97,6 +97,10 @@ impl LlmProvider for BedrockProvider {
 
         let mut messages = request.messages;
         crate::llm::provider::sanitize_tool_messages(&mut messages);
+        // Bedrock requires toolConfig when messages contain ToolUse/ToolResult
+        // blocks. Messages may carry tool history from prior agentic iterations,
+        // but complete() has no tools to build a toolConfig — strip them.
+        strip_tool_blocks(&mut messages);
 
         let (system_blocks, bedrock_messages) = convert_messages(&messages)?;
 
@@ -150,6 +154,14 @@ impl LlmProvider for BedrockProvider {
         let mut messages = request.messages;
         crate::llm::provider::sanitize_tool_messages(&mut messages);
 
+        let tool_config = build_tool_config(&request.tools, request.tool_choice.as_deref())?;
+
+        // When tool_config is None (empty tools or tool_choice="none") but messages
+        // contain tool history, strip tool blocks to avoid Bedrock validation error.
+        if tool_config.is_none() {
+            strip_tool_blocks(&mut messages);
+        }
+
         let (system_blocks, bedrock_messages) = convert_messages(&messages)?;
 
         if bedrock_messages.is_empty() {
@@ -158,8 +170,6 @@ impl LlmProvider for BedrockProvider {
                 reason: "Bedrock requires at least one user or assistant message".to_string(),
             });
         }
-
-        let tool_config = build_tool_config(&request.tools, request.tool_choice.as_deref())?;
 
         let mut builder = self
             .client
@@ -265,6 +275,51 @@ fn build_inference_config(
         Some(builder.build())
     } else {
         None
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tool-block stripping for tool-free requests
+// ---------------------------------------------------------------------------
+
+/// Strip tool interaction data from messages so they can be sent without `toolConfig`.
+///
+/// Bedrock's Converse API requires `toolConfig` whenever messages contain `toolUse`
+/// or `toolResult` content blocks. When `complete()` is called (no tools) or
+/// `complete_with_tools()` resolves to an empty tool config, this converts:
+/// - Assistant messages with `tool_calls` → keep text only, drop tool_calls
+/// - `Role::Tool` messages → `Role::User` with text representation
+///
+/// Note: this intentionally loses structured tool_call_id correlation — the text
+/// representation is sufficient for force_text mode where no further tool dispatch
+/// occurs.
+fn strip_tool_blocks(messages: &mut [crate::llm::provider::ChatMessage]) {
+    use crate::llm::provider::Role;
+
+    let mut stripped = 0u32;
+    for msg in messages.iter_mut() {
+        match msg.role {
+            Role::Assistant if msg.tool_calls.is_some() => {
+                // May leave content empty; convert_messages() skips empty assistant messages.
+                msg.tool_calls = None;
+                stripped += 1;
+            }
+            Role::Tool => {
+                let tool_name = msg.name.as_deref().unwrap_or("unknown");
+                msg.role = Role::User;
+                msg.content = format!("[Tool `{}` returned: {}]", tool_name, msg.content);
+                msg.tool_call_id = None;
+                msg.name = None;
+                stripped += 1;
+            }
+            _ => {}
+        }
+    }
+    if stripped > 0 {
+        tracing::debug!(
+            stripped,
+            "Stripped tool blocks from messages (no toolConfig)"
+        );
     }
 }
 
@@ -1154,5 +1209,211 @@ mod tests {
         let messages = vec![ChatMessage::system("System only, no user messages")];
         let (_, bedrock_msgs) = convert_messages(&messages).unwrap();
         assert!(bedrock_msgs.is_empty());
+    }
+
+    #[test]
+    fn test_strip_tool_blocks_removes_tool_content() {
+        let tc = crate::llm::provider::ToolCall {
+            id: "call_1".to_string(),
+            name: "echo".to_string(),
+            arguments: serde_json::json!({"text": "hi"}),
+            reasoning: None,
+        };
+
+        let mut messages = vec![
+            ChatMessage::user("Do things"),
+            ChatMessage::assistant_with_tool_calls(Some("Let me help.".to_string()), vec![tc]),
+            ChatMessage::tool_result("call_1", "echo", "hi back"),
+            ChatMessage::user("Thanks"),
+        ];
+
+        strip_tool_blocks(&mut messages);
+
+        // Assistant keeps text, loses tool_calls
+        assert_eq!(messages[1].role, Role::Assistant);
+        assert!(messages[1].tool_calls.is_none());
+        assert_eq!(messages[1].content, "Let me help.");
+
+        // Tool result converted to user message
+        assert_eq!(messages[2].role, Role::User);
+        assert!(
+            messages[2]
+                .content
+                .contains("[Tool `echo` returned: hi back]")
+        );
+        assert!(messages[2].tool_call_id.is_none());
+        assert!(messages[2].name.is_none());
+
+        // Other messages unchanged
+        assert_eq!(messages[0].role, Role::User);
+        assert_eq!(messages[3].role, Role::User);
+        assert_eq!(messages[3].content, "Thanks");
+    }
+
+    /// Regression test for: "The toolConfig field must be defined when using
+    /// toolUse and toolResult content blocks."
+    ///
+    /// Reproduces the exact scenario: force_text iteration sends messages with
+    /// tool history to complete(), which has no toolConfig.
+    #[test]
+    fn test_strip_tool_blocks_then_convert_produces_no_tool_blocks() {
+        let tc = crate::llm::provider::ToolCall {
+            id: "call_abc".to_string(),
+            name: "get_weather".to_string(),
+            arguments: serde_json::json!({"city": "NYC"}),
+            reasoning: None,
+        };
+
+        let mut messages = vec![
+            ChatMessage::system("You are helpful."),
+            ChatMessage::user("What's the weather?"),
+            ChatMessage::assistant_with_tool_calls(Some("Checking...".to_string()), vec![tc]),
+            ChatMessage::tool_result("call_abc", "get_weather", "72°F and sunny"),
+            ChatMessage::user("Now summarize."),
+        ];
+
+        // Simulate the complete() pipeline
+        crate::llm::provider::sanitize_tool_messages(&mut messages);
+        strip_tool_blocks(&mut messages);
+
+        let (_, bedrock_msgs) = convert_messages(&messages).unwrap();
+
+        for msg in &bedrock_msgs {
+            for block in msg.content() {
+                assert!(
+                    !block.is_tool_use(),
+                    "ToolUse block found — would cause Bedrock validation error"
+                );
+                assert!(
+                    !block.is_tool_result(),
+                    "ToolResult block found — would cause Bedrock validation error"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_complete_with_tools_empty_tools_strips_history() {
+        let tc = crate::llm::provider::ToolCall {
+            id: "call_1".to_string(),
+            name: "time".to_string(),
+            arguments: serde_json::json!({}),
+            reasoning: None,
+        };
+
+        let mut messages = vec![
+            ChatMessage::user("Do something"),
+            ChatMessage::assistant_with_tool_calls(None, vec![tc]),
+            ChatMessage::tool_result("call_1", "time", "12:00"),
+        ];
+
+        // Simulate complete_with_tools() with empty tools
+        crate::llm::provider::sanitize_tool_messages(&mut messages);
+        let tool_config = build_tool_config(&[], None).unwrap();
+        assert!(tool_config.is_none());
+
+        if tool_config.is_none() {
+            strip_tool_blocks(&mut messages);
+        }
+
+        let (_, bedrock_msgs) = convert_messages(&messages).unwrap();
+
+        for msg in &bedrock_msgs {
+            for block in msg.content() {
+                assert!(!block.is_tool_use());
+                assert!(!block.is_tool_result());
+            }
+        }
+    }
+
+    #[test]
+    fn test_strip_tool_only_assistant_then_convert_maintains_alternation() {
+        // Edge case: assistant message with ONLY tool_calls (no text) becomes
+        // empty after stripping. convert_messages() should skip it, and the
+        // subsequent tool-result-turned-user message should merge correctly.
+        let tc = crate::llm::provider::ToolCall {
+            id: "call_1".to_string(),
+            name: "search".to_string(),
+            arguments: serde_json::json!({"q": "test"}),
+            reasoning: None,
+        };
+
+        let mut messages = vec![
+            ChatMessage::user("Find it"),
+            ChatMessage::assistant_with_tool_calls(None, vec![tc]),
+            ChatMessage::tool_result("call_1", "search", "found 3 results"),
+            ChatMessage::user("Thanks"),
+        ];
+
+        crate::llm::provider::sanitize_tool_messages(&mut messages);
+        strip_tool_blocks(&mut messages);
+
+        let (_, bedrock_msgs) = convert_messages(&messages).unwrap();
+
+        // Empty assistant is skipped; tool-result-as-user merges with first user.
+        // Result: User("Find it" + tool text) → User("Thanks")
+        // push_message merges consecutive users, so we get 1 merged user message
+        // then "Thanks" as a second user — but these are also consecutive users
+        // so they merge too. Final: single User message.
+        //
+        // Verify: strict user/assistant alternation and no tool blocks.
+        for (i, msg) in bedrock_msgs.iter().enumerate() {
+            let expected_role = if i % 2 == 0 {
+                ConversationRole::User
+            } else {
+                ConversationRole::Assistant
+            };
+            assert_eq!(
+                *msg.role(),
+                expected_role,
+                "Message {} has wrong role for alternation",
+                i
+            );
+            for block in msg.content() {
+                assert!(!block.is_tool_use());
+                assert!(!block.is_tool_result());
+            }
+        }
+    }
+
+    #[test]
+    fn test_complete_with_tools_choice_none_strips_history() {
+        // tool_choice="none" causes build_tool_config to return None,
+        // which should trigger stripping of tool blocks from messages.
+        let tools = vec![ToolDefinition {
+            name: "echo".to_string(),
+            description: "Echoes".to_string(),
+            parameters: serde_json::json!({"type": "object"}),
+        }];
+
+        let tc = crate::llm::provider::ToolCall {
+            id: "call_1".to_string(),
+            name: "echo".to_string(),
+            arguments: serde_json::json!({}),
+            reasoning: None,
+        };
+
+        let mut messages = vec![
+            ChatMessage::user("Do it"),
+            ChatMessage::assistant_with_tool_calls(None, vec![tc]),
+            ChatMessage::tool_result("call_1", "echo", "done"),
+        ];
+
+        crate::llm::provider::sanitize_tool_messages(&mut messages);
+        let tool_config = build_tool_config(&tools, Some("none")).unwrap();
+        assert!(tool_config.is_none());
+
+        if tool_config.is_none() {
+            strip_tool_blocks(&mut messages);
+        }
+
+        let (_, bedrock_msgs) = convert_messages(&messages).unwrap();
+
+        for msg in &bedrock_msgs {
+            for block in msg.content() {
+                assert!(!block.is_tool_use());
+                assert!(!block.is_tool_result());
+            }
+        }
     }
 }

@@ -23,15 +23,17 @@ use crate::context::{ContextManager, JobState};
 use crate::error::Error;
 use crate::hooks::HookRegistry;
 use crate::llm::{
-    ActionPlan, ChatMessage, LlmProvider, Reasoning, ReasoningContext, RespondResult, ToolCall,
-    ToolSelection,
+    ActionPlan, ChatMessage, LlmProvider, Reasoning, ReasoningContext, RespondResult,
+    ResponseMetadata, ToolCall, ToolSelection,
 };
 use crate::safety::SafetyLayer;
 use crate::tenant::AdminScope;
 use crate::tools::execute::process_tool_result;
 use crate::tools::rate_limiter::RateLimitResult;
-use crate::tools::{
-    ApprovalContext, ToolRegistry, autonomous_unavailable_error, prepare_tool_params, redact_params,
+use crate::tools::{ApprovalContext, ToolRegistry, prepare_tool_params, redact_params};
+use crate::worker::autonomous_recovery::{
+    AutonomousRecoveryAction, AutonomousRecoveryState, EMPTY_TOOL_COMPLETION_FAILURE,
+    EMPTY_TOOL_COMPLETION_NUDGE, FORCE_TEXT_RECOVERY_PROMPT,
 };
 use ironclaw_common::AppEvent;
 
@@ -391,6 +393,8 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
             worker: self,
             rx: tokio::sync::Mutex::new(rx),
             consecutive_rate_limits: std::sync::atomic::AtomicUsize::new(0),
+            recovery_state: tokio::sync::Mutex::new(AutonomousRecoveryState::default()),
+            has_text_response: std::sync::atomic::AtomicBool::new(false),
         };
 
         let config = AgenticLoopConfig {
@@ -408,6 +412,9 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
             LoopOutcome::MaxIterations => {
                 self.mark_failed("Maximum iterations exceeded: job hit the iteration cap")
                     .await?;
+            }
+            LoopOutcome::Failure(reason) => {
+                self.mark_failed(&reason).await?;
             }
             LoopOutcome::Stopped => {
                 // Stop signal handled — nothing more to do
@@ -502,20 +509,52 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
 
         let normalized_params = prepare_tool_params(tool.as_ref(), params);
 
-        // Fetch job context early so we have the real user_id for approval, hooks,
-        // and rate limiting decisions.
+        // Fetch job context early for approval checking and other needs
         let mut job_ctx = deps.context_manager.get_context(job_id).await?;
+
+        // Check approval: additive semantics - BOTH job-level AND worker-level must approve
+        let requirement = tool.requires_approval(&normalized_params);
+
+        // Check job-level approval context (if set by tools like the builder)
+        let job_level_blocked = job_ctx
+            .approval_context
+            .as_ref()
+            .map(|ctx| ctx.is_blocked(tool_name, requirement))
+            .unwrap_or(false);
+
+        // Check worker-level approval context (set by scheduler for autonomous jobs)
+        let worker_level_blocked =
+            ApprovalContext::is_blocked_or_default(&deps.approval_context, tool_name, requirement);
+
+        // Tool is blocked if EITHER level blocks it (additive/intersection semantics)
+        // This maintains defense in depth: job-level cannot bypass worker-level restrictions
+        if job_level_blocked || worker_level_blocked {
+            let reason = if job_level_blocked && worker_level_blocked {
+                format!(
+                    "Tool '{}' is blocked by both job-level and worker-level approval context",
+                    tool_name
+                )
+            } else if job_level_blocked {
+                format!(
+                    "Tool '{}' is not in the job-level allowed tools list",
+                    tool_name
+                )
+            } else {
+                format!(
+                    "Tool '{}' is not available for autonomous execution",
+                    tool_name
+                )
+            };
+            return Err(crate::error::ToolError::AutonomousUnavailable {
+                name: tool_name.to_string(),
+                reason,
+            }
+            .into());
+        }
+
         // Propagate http_interceptor for trace recording/replay
         if job_ctx.http_interceptor.is_none() {
             job_ctx.http_interceptor = deps.http_interceptor.clone();
-        }
-
-        // Check approval: use context-aware check if available, else block all non-Never tools
-        let requirement = tool.requires_approval(&normalized_params);
-        let blocked =
-            ApprovalContext::is_blocked_or_default(&deps.approval_context, tool_name, requirement);
-        if blocked {
-            return Err(autonomous_unavailable_error(tool_name, &job_ctx.user_id).into());
         }
 
         // Check per-tool rate limit before running hooks or executing (cheaper check first)
@@ -827,14 +866,11 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                     }),
                 );
 
-                if matches!(
-                    &e,
-                    Error::Tool(crate::error::ToolError::AutonomousUnavailable { .. })
-                ) {
-                    Err(e)
-                } else {
-                    Ok(())
-                }
+                // All tool errors (including AutonomousUnavailable) are
+                // recoverable — the error message is already recorded in
+                // reason_ctx so the LLM can see it and try a different
+                // approach. Returning Err here would kill the entire job.
+                Ok(())
             }
         }
     }
@@ -929,17 +965,31 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
 
-        // Plan completed, check with LLM if job is done
+        // Plan completed — ask the LLM whether the job is done.
+        let msg_count_before = reason_ctx.messages.len();
         reason_ctx.messages.push(ChatMessage::user(
-            "All planned actions have been executed. Is the job complete? If not, what else needs to be done?",
+            "All planned actions have been executed. Assess the results: \
+             if the job is fully complete, state that the job is complete. \
+             Otherwise, briefly list what remains.",
         ));
 
         let response = reasoning.respond(reason_ctx).await?;
-        reason_ctx.messages.push(ChatMessage::assistant(&response));
+        let response = crate::agent::strip_suggestions(&response);
 
         if crate::util::llm_signals_completion(&response) {
+            reason_ctx.messages.push(ChatMessage::assistant(&response));
             self.mark_completed().await?;
         } else {
+            // Replace the completion-check exchange with an action-oriented
+            // continuation prompt. Leaving the "Is the job complete?" / "No"
+            // dialogue in context causes the agentic loop to repeat the same
+            // analysis instead of calling tools (self-dialogue loop).
+            reason_ctx.messages.truncate(msg_count_before);
+            reason_ctx.messages.push(ChatMessage::user(format!(
+                "The planned actions are done but the job is not yet complete. \
+                 Remaining work:\n\n{response}\n\n\
+                 Continue executing now — use tools to finish the job."
+            )));
             tracing::info!(
                 "Job {} plan completed but work remains, falling back to direct selection",
                 self.job_id
@@ -1101,6 +1151,15 @@ fn store_fallback_in_metadata(
 }
 
 /// Job delegate: implements `LoopDelegate` for the background job context.
+/// Whether an LLM error represents a completion-eligible empty response.
+///
+/// Only `EmptyResponse` (provider returned no choices/content) qualifies.
+/// Infrastructure errors (`AuthFailed`, `Http`, `Io`, etc.) never qualify —
+/// they must propagate even if prior text output was produced.
+fn is_completion_eligible_error(error: &crate::error::LlmError) -> bool {
+    matches!(error, crate::error::LlmError::EmptyResponse { .. })
+}
+
 ///
 /// Handles: signal channel (stop/ping/user messages), cancellation checks,
 /// rate-limit retry, parallel tool execution, DB persistence, SSE broadcasting.
@@ -1109,6 +1168,11 @@ struct JobDelegate<'a> {
     rx: tokio::sync::Mutex<&'a mut mpsc::Receiver<WorkerMessage>>,
     /// Tracks consecutive rate-limit errors to fail fast instead of burning iterations.
     consecutive_rate_limits: std::sync::atomic::AtomicUsize,
+    recovery_state: tokio::sync::Mutex<AutonomousRecoveryState>,
+    /// Whether a substantive (non-empty) text response has been produced.
+    /// When true, an empty follow-up response is treated as job completion
+    /// rather than a retry signal (prevents spurious failures in routines).
+    has_text_response: std::sync::atomic::AtomicBool,
 }
 
 impl<'a> JobDelegate<'a> {
@@ -1159,6 +1223,55 @@ impl<'a> JobDelegate<'a> {
             result: RespondResult::Text(String::new()),
             usage: crate::llm::TokenUsage::default(),
             finish_reason: crate::llm::FinishReason::Stop,
+            metadata: ResponseMetadata::default(),
+        })
+    }
+
+    /// Mark the job as completed, logging a warning on failure.
+    async fn mark_completed_or_warn(&self, context: &str) {
+        if let Err(e) = self.worker.mark_completed().await {
+            tracing::warn!(
+                job_id = %self.worker.job_id,
+                error = %e,
+                "Failed to mark job completed ({context})"
+            );
+        }
+    }
+
+    /// If a substantive text response was already produced and the error
+    /// indicates the LLM simply returned nothing, treat it as successful
+    /// completion rather than a fatal failure.
+    ///
+    /// Only swallows `EmptyResponse` — infrastructure errors (`AuthFailed`,
+    /// `ContextLengthExceeded`, `Http`, `Io`, etc.) always propagate.
+    ///
+    /// Returns `Some(empty RespondOutput)` when the error should be swallowed,
+    /// `None` when it should propagate normally.
+    async fn try_complete_on_error(
+        &self,
+        context: &str,
+        error: &crate::error::LlmError,
+    ) -> Option<crate::llm::RespondOutput> {
+        if !is_completion_eligible_error(error) {
+            return None;
+        }
+        if !self
+            .has_text_response
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return None;
+        }
+        tracing::info!(
+            job_id = %self.worker.job_id,
+            error = %error,
+            "{context} empty response after text output — treating as completion"
+        );
+        self.mark_completed_or_warn(context).await;
+        Some(crate::llm::RespondOutput {
+            result: RespondResult::Text(String::new()),
+            usage: crate::llm::TokenUsage::default(),
+            finish_reason: crate::llm::FinishReason::Stop,
+            metadata: ResponseMetadata::default(),
         })
     }
 }
@@ -1250,8 +1363,21 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
         reason_ctx: &mut ReasoningContext,
         _iteration: usize,
     ) -> Option<LoopOutcome> {
-        // Refresh tool definitions so newly built tools become visible
-        reason_ctx.available_tools = self.worker.tools().tool_definitions().await;
+        let force_text_recovery = {
+            let mut recovery = self.recovery_state.lock().await;
+            recovery.begin_iteration()
+        };
+
+        if force_text_recovery {
+            tracing::warn!(
+                job_id = %self.worker.job_id,
+                "Switching to text-only recovery after malformed tool completions"
+            );
+            reason_ctx.available_tools.clear();
+        } else {
+            // Refresh tool definitions so newly built tools become visible
+            reason_ctx.available_tools = self.worker.tools().tool_definitions().await;
+        }
 
         // Claude 4.6 rejects assistant prefill; NEAR AI rejects any non-user-ending
         // conversation. Ensure the last message is user-role before calling the LLM.
@@ -1285,13 +1411,19 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
                     },
                     usage: crate::llm::TokenUsage::default(),
                     finish_reason: crate::llm::FinishReason::ToolUse,
+                    metadata: ResponseMetadata::default(),
                 });
             }
             Ok(_) => {} // empty selections, fall through
             Err(crate::error::LlmError::RateLimited { retry_after, .. }) => {
                 return self.handle_rate_limit(retry_after, "tool selection").await;
             }
-            Err(e) => return Err(e.into()),
+            Err(e) => {
+                if let Some(output) = self.try_complete_on_error("select_tools", &e).await {
+                    return Ok(output);
+                }
+                return Err(e.into());
+            }
         };
 
         // Fall back to respond_with_tools
@@ -1321,35 +1453,112 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
                 self.handle_rate_limit(retry_after, "respond_with_tools")
                     .await
             }
-            Err(e) => Err(e.into()),
+            Err(e) => {
+                if let Some(output) = self.try_complete_on_error("respond_with_tools", &e).await {
+                    return Ok(output);
+                }
+                Err(e.into())
+            }
         }
     }
 
     async fn handle_text_response(
         &self,
         text: &str,
+        metadata: ResponseMetadata,
         reason_ctx: &mut ReasoningContext,
     ) -> TextAction {
-        // Empty text from rate-limit backoff retry — skip processing and let the
-        // loop proceed to the next iteration which will re-call the LLM.
+        let action = {
+            let mut recovery = self.recovery_state.lock().await;
+            recovery.on_text_response(metadata, text)
+        };
+
+        match action {
+            AutonomousRecoveryAction::ToolModeNudge => {
+                tracing::warn!(
+                    job_id = %self.worker.job_id,
+                    "Malformed empty tool completion detected; retrying in tool mode"
+                );
+                self.worker.log_event(
+                    "status",
+                    serde_json::json!({
+                        "message": "Model returned an empty tool-completion response; retrying with a stronger tool-use nudge.",
+                    }),
+                );
+                reason_ctx
+                    .messages
+                    .push(ChatMessage::user(EMPTY_TOOL_COMPLETION_NUDGE));
+                return TextAction::Continue;
+            }
+            AutonomousRecoveryAction::ForceTextRecovery => {
+                tracing::warn!(
+                    job_id = %self.worker.job_id,
+                    "Repeated malformed tool completions detected; switching to text-only recovery"
+                );
+                self.worker.log_event(
+                    "status",
+                    serde_json::json!({
+                        "message": "Model returned repeated empty tool-completion responses; requesting a final status update without tools.",
+                    }),
+                );
+                reason_ctx
+                    .messages
+                    .push(ChatMessage::user(FORCE_TEXT_RECOVERY_PROMPT));
+                return TextAction::Continue;
+            }
+            AutonomousRecoveryAction::Fail => {
+                tracing::warn!(
+                    job_id = %self.worker.job_id,
+                    "Failing fast after repeated malformed autonomous responses"
+                );
+                return TextAction::Return(LoopOutcome::Failure(
+                    EMPTY_TOOL_COMPLETION_FAILURE.to_string(),
+                ));
+            }
+            AutonomousRecoveryAction::Continue => {}
+        }
+
+        // Empty text after a substantive response means the LLM has finished.
+        // Treat as successful completion rather than continuing the loop (which
+        // would produce "Response contained no message or tool call (empty)").
         if text.is_empty() {
+            if self
+                .has_text_response
+                .load(std::sync::atomic::Ordering::Relaxed)
+            {
+                tracing::debug!(
+                    job_id = %self.worker.job_id,
+                    "Empty response after text output — treating as completion"
+                );
+                self.mark_completed_or_warn("empty text response").await;
+                return TextAction::Return(LoopOutcome::Response(String::new()));
+            }
+            // No prior text response — this is likely a rate-limit backoff retry.
             return TextAction::Continue;
         }
 
-        // Check for explicit completion
-        if crate::util::llm_signals_completion(text) {
-            if let Err(e) = self.worker.mark_completed().await {
-                tracing::warn!(
-                    "Failed to mark job {} as completed: {}",
-                    self.worker.job_id,
-                    e
-                );
-            }
-            return TextAction::Return(LoopOutcome::Response(text.to_string()));
+        // Jobs run autonomously — strip <suggestions> tags that are only
+        // meaningful for interactive chat sessions.
+        let text = crate::agent::strip_suggestions(text);
+
+        // A non-empty text response with no tool intent (already filtered
+        // by the agentic loop's nudge mechanism) is the LLM's final answer.
+        // Mark the job complete and stop the loop. Without this, the LLM
+        // restates its summary every iteration until the cap is hit.
+        if let Err(e) = self.worker.mark_completed().await {
+            tracing::warn!(
+                "Failed to mark job {} as completed: {}",
+                self.worker.job_id,
+                e
+            );
         }
 
+        // Track that a substantive response has been produced.
+        self.has_text_response
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+
         // Add assistant response to context
-        reason_ctx.messages.push(ChatMessage::assistant(text));
+        reason_ctx.messages.push(ChatMessage::assistant(&text));
 
         self.worker.log_event(
             "message",
@@ -1359,7 +1568,7 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
             }),
         );
 
-        TextAction::Continue
+        TextAction::Return(LoopOutcome::Response(text))
     }
 
     async fn execute_tool_calls(
@@ -1368,6 +1577,14 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
         content: Option<String>,
         reason_ctx: &mut ReasoningContext,
     ) -> Result<Option<LoopOutcome>, crate::error::Error> {
+        {
+            let mut recovery = self.recovery_state.lock().await;
+            recovery.on_valid_tool_call();
+        }
+
+        // Strip suggestions from accompanying text (not useful in job context).
+        let content = content.map(|c| crate::agent::strip_suggestions(&c));
+
         if let Some(ref text) = content {
             self.worker.log_event(
                 "message",
@@ -1987,6 +2204,105 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_additive_approval_semantics_both_levels_must_approve() {
+        // Test additive semantics: BOTH job-level AND worker-level must approve
+        // If either blocks, the tool is blocked (defense in depth)
+
+        // Scenario 1: Worker-level allows, job-level blocks → BLOCKED
+        let worker = make_worker_with_approval(
+            vec![Arc::new(AlwaysApprovalTool)],
+            // Worker-level allows the tool
+            Some(crate::tools::ApprovalContext::autonomous_with_tools([
+                "always_approval".to_string(),
+            ])),
+        )
+        .await;
+
+        // Set job-level context to block the tool (by not listing it)
+        worker
+            .context_manager()
+            .update_context(worker.job_id, |ctx| {
+                ctx.approval_context = Some(crate::tools::ApprovalContext::autonomous());
+            })
+            .await
+            .unwrap();
+
+        let result = worker
+            .execute_tool("always_approval", &serde_json::json!({}))
+            .await;
+        assert!(
+            result.is_err(),
+            "Tool should be blocked when job-level doesn't allow it, \
+             even if worker-level does (additive semantics)"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_additive_approval_worker_block_overrides_job_allow() {
+        // Scenario 2: Job-level allows, worker-level blocks → BLOCKED
+        let worker = make_worker_with_approval(
+            vec![Arc::new(AlwaysApprovalTool)],
+            // Worker-level does NOT allow the tool
+            Some(crate::tools::ApprovalContext::autonomous()),
+        )
+        .await;
+
+        // Set job-level context to allow the tool
+        worker
+            .context_manager()
+            .update_context(worker.job_id, |ctx| {
+                ctx.approval_context =
+                    Some(crate::tools::ApprovalContext::autonomous_with_tools([
+                        "always_approval".to_string(),
+                    ]));
+            })
+            .await
+            .unwrap();
+
+        let result = worker
+            .execute_tool("always_approval", &serde_json::json!({}))
+            .await;
+        assert!(
+            result.is_err(),
+            "Tool should be blocked when worker-level doesn't allow it, \
+             even if job-level does (additive semantics)"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_additive_approval_both_levels_allow() {
+        // Scenario 3: Both levels allow → ALLOWED
+        let worker = make_worker_with_approval(
+            vec![Arc::new(AlwaysApprovalTool)],
+            // Worker-level allows
+            Some(crate::tools::ApprovalContext::autonomous_with_tools([
+                "always_approval".to_string(),
+            ])),
+        )
+        .await;
+
+        // Job-level also allows
+        worker
+            .context_manager()
+            .update_context(worker.job_id, |ctx| {
+                ctx.approval_context =
+                    Some(crate::tools::ApprovalContext::autonomous_with_tools([
+                        "always_approval".to_string(),
+                    ]));
+            })
+            .await
+            .unwrap();
+
+        let result = worker
+            .execute_tool("always_approval", &serde_json::json!({}))
+            .await;
+        assert!(
+            result.is_ok(),
+            "Tool should be allowed when both job-level and worker-level allow it"
+        );
+    }
+
+    #[tokio::test]
     async fn test_token_budget_exceeded_fails_job() {
         let worker = make_worker(vec![]).await;
 
@@ -2066,6 +2382,55 @@ mod tests {
             JobState::Failed,
             "Iteration cap should transition to Failed, not Stuck"
         );
+    }
+
+    /// Regression: a text response without rigid completion phrases (e.g.
+    /// "Weekly review completed and saved to Notion") must still terminate the
+    /// agentic loop and mark the job complete, rather than continuing until
+    /// max_iterations.
+    #[tokio::test]
+    async fn test_text_response_terminates_loop_without_explicit_completion_phrase() {
+        let worker = make_worker(vec![]).await;
+        worker
+            .context_manager()
+            .update_context(worker.job_id, |ctx| {
+                ctx.transition_to(JobState::InProgress, None)
+            })
+            .await
+            .unwrap() // safety: test
+            .unwrap(); // safety: test
+
+        let (_, mut rx) = tokio::sync::mpsc::channel(1);
+        let delegate = JobDelegate {
+            worker: &worker,
+            rx: tokio::sync::Mutex::new(&mut rx),
+            consecutive_rate_limits: std::sync::atomic::AtomicUsize::new(0),
+            recovery_state: tokio::sync::Mutex::new(AutonomousRecoveryState::default()),
+            has_text_response: std::sync::atomic::AtomicBool::new(false),
+        };
+
+        let mut reason_ctx = ReasoningContext::new();
+
+        // Text that a real LLM would produce but doesn't match llm_signals_completion
+        let action = delegate
+            .handle_text_response(
+                "Weekly review created in Notion and notification sent.",
+                ResponseMetadata::default(),
+                &mut reason_ctx,
+            )
+            .await;
+
+        assert!(
+            matches!(action, TextAction::Return(_)),
+            "Text response should terminate the loop, got Continue"
+        ); // safety: test
+
+        let ctx = worker
+            .context_manager()
+            .get_context(worker.job_id)
+            .await
+            .unwrap(); // safety: test
+        assert_eq!(ctx.state, JobState::Completed); // safety: test
     }
 
     /// Regression test: selections_to_tool_calls must preserve tool_call_id
@@ -2284,5 +2649,96 @@ mod tests {
         assert_eq!(telegram.len(), 1);
         assert_eq!(telegram[0].0, "owner-scope");
         assert_eq!(telegram[0].1.content, "hello from routine");
+    }
+
+    /// Regression test: only `EmptyResponse` errors are eligible for
+    /// completion-swallowing. Infrastructure errors must always propagate.
+    #[test]
+    fn is_completion_eligible_only_matches_empty_response() {
+        use crate::error::LlmError;
+
+        // EmptyResponse is eligible
+        assert!(super::is_completion_eligible_error(
+            &LlmError::EmptyResponse {
+                provider: "test".to_string(),
+            }
+        ));
+
+        // All other variants are NOT eligible
+        assert!(!super::is_completion_eligible_error(
+            &LlmError::InvalidResponse {
+                provider: "test".to_string(),
+                reason: "parse error".to_string(),
+            }
+        ));
+        assert!(!super::is_completion_eligible_error(
+            &LlmError::AuthFailed {
+                provider: "test".to_string(),
+            }
+        ));
+        assert!(!super::is_completion_eligible_error(
+            &LlmError::ContextLengthExceeded {
+                used: 100_000,
+                limit: 50_000,
+            }
+        ));
+        assert!(!super::is_completion_eligible_error(
+            &LlmError::ModelNotAvailable {
+                provider: "test".to_string(),
+                model: "gpt-4".to_string(),
+            }
+        ));
+        assert!(!super::is_completion_eligible_error(
+            &LlmError::RequestFailed {
+                provider: "test".to_string(),
+                reason: "timeout".to_string(),
+            }
+        ));
+        assert!(!super::is_completion_eligible_error(
+            &LlmError::SessionExpired {
+                provider: "test".to_string(),
+            }
+        ));
+        assert!(!super::is_completion_eligible_error(
+            &LlmError::SessionRenewalFailed {
+                provider: "test".to_string(),
+                reason: "timeout".to_string(),
+            }
+        ));
+    }
+
+    /// Regression test: AutonomousUnavailable errors must be recoverable.
+    /// Previously the job worker treated them as fatal, killing the entire
+    /// job instead of feeding the error back to the LLM.
+    #[tokio::test]
+    async fn test_autonomous_unavailable_is_recoverable() {
+        let worker = make_worker(vec![]).await;
+        let mut reason_ctx = ReasoningContext::new();
+        let selection = ToolSelection {
+            tool_name: "secret_list".to_string(),
+            parameters: serde_json::json!({}),
+            reasoning: "list secrets".to_string(),
+            alternatives: vec![],
+            tool_call_id: "call_123".to_string(),
+        };
+        let err = Error::Tool(crate::error::ToolError::AutonomousUnavailable {
+            name: "secret_list".to_string(),
+            reason: "not available in autonomous jobs".to_string(),
+        });
+
+        let result = worker
+            .process_tool_result_job(&mut reason_ctx, &selection, Err(err))
+            .await;
+
+        assert!(
+            result.is_ok(),
+            "AutonomousUnavailable must be recoverable, not fatal: {:?}",
+            result
+        );
+        // The error should be fed back to the LLM as a message.
+        assert!(
+            !reason_ctx.messages.is_empty(),
+            "Error message should be added to reason_ctx for the LLM"
+        );
     }
 }

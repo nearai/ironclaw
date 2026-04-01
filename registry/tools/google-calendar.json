@@ -2,7 +2,7 @@
   "name": "google-calendar",
   "display_name": "Google Calendar",
   "kind": "tool",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "wit_version": "0.3.0",
   "description": "Create, read, update, and delete Google Calendar events",
   "keywords": [
@@ -18,8 +18,8 @@
   },
   "artifacts": {
     "wasm32-wasip2": {
-      "url": "https://github.com/nearai/ironclaw/releases/download/v0.18.0/google-calendar-0.2.0-wasm32-wasip2.tar.gz",
-      "sha256": "2fa47150ea222e787c122182ad6f4dfa2ffaf5fe490d05e8de887a76445f8d2d"
+      "url": "https://github.com/nearai/ironclaw/releases/download/ironclaw-v0.22.0/tool-google-calendar-0.2.1-wasm32-wasip2.tar.gz",
+      "sha256": "86bcc075010b08f5ab2f98f504cec1c6c9e0ca144857d185cbecf72a11f504bf"
     }
   },
   "auth_summary": {

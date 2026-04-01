@@ -16,7 +16,7 @@ use axum::{
         IntoResponse,
         sse::{Event, KeepAlive, Sse},
     },
-    routing::{get, post},
+    routing::{get, post, put},
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -31,12 +31,15 @@ use crate::bootstrap::ironclaw_base_dir;
 use crate::channels::IncomingMessage;
 use crate::channels::relay::DEFAULT_RELAY_NAME;
 use crate::channels::web::auth::{
-    AuthenticatedUser, MultiAuthState, UserIdentity, auth_middleware,
+    AuthenticatedUser, CombinedAuthState, UserIdentity, auth_middleware,
 };
 use crate::channels::web::handlers::jobs::{
     job_files_list_handler, job_files_read_handler, jobs_cancel_handler, jobs_detail_handler,
     jobs_events_handler, jobs_list_handler, jobs_prompt_handler, jobs_restart_handler,
     jobs_summary_handler,
+};
+use crate::channels::web::handlers::llm::{
+    llm_list_models_handler, llm_providers_handler, llm_test_connection_handler,
 };
 use crate::channels::web::handlers::memory::{
     memory_list_handler, memory_read_handler, memory_search_handler, memory_tree_handler,
@@ -45,6 +48,10 @@ use crate::channels::web::handlers::memory::{
 use crate::channels::web::handlers::routines::{
     routines_delete_handler, routines_detail_handler, routines_list_handler,
     routines_summary_handler, routines_toggle_handler, routines_trigger_handler,
+};
+use crate::channels::web::handlers::settings::{
+    settings_delete_handler, settings_export_handler, settings_get_handler,
+    settings_import_handler, settings_list_handler, settings_set_handler,
 };
 use crate::channels::web::handlers::skills::{
     skills_install_handler, skills_list_handler, skills_remove_handler, skills_search_handler,
@@ -290,7 +297,22 @@ impl WorkspacePool {
         }
 
         let ws = Arc::new(ws);
+
         cache.insert(identity.user_id.clone(), Arc::clone(&ws));
+
+        // Seed identity files after inserting into cache (so the lock can be
+        // dropped) but before returning, so callers see a seeded workspace.
+        // Drop the write lock explicitly before the async seed to avoid
+        // blocking other workspace lookups.
+        drop(cache);
+        if let Err(e) = ws.seed_if_empty().await {
+            tracing::warn!(
+                user_id = identity.user_id,
+                "Failed to seed workspace: {}",
+                e
+            );
+        }
+
         ws
     }
 }
@@ -347,8 +369,6 @@ pub struct GatewayState {
     pub prompt_queue: Option<PromptQueue>,
     /// Durable owner scope for persistence and unauthenticated callback flows.
     pub owner_id: String,
-    /// Default sender/routing identity for gateway-originated messages.
-    pub default_sender_id: String,
     /// Shutdown signal sender.
     pub shutdown_tx: tokio::sync::RwLock<Option<oneshot::Sender<()>>>,
     /// WebSocket connection tracker.
@@ -378,6 +398,10 @@ pub struct GatewayState {
     pub startup_time: std::time::Instant,
     /// Snapshot of active (resolved) configuration for the frontend.
     pub active_config: ActiveConfigSnapshot,
+    /// Secrets store for admin secret provisioning.
+    pub secrets_store: Option<Arc<dyn crate::secrets::SecretsStore + Send + Sync>>,
+    /// DB auth cache for invalidation on security-critical actions.
+    pub db_auth: Option<Arc<crate::channels::web::auth::DbAuthenticator>>,
 }
 
 /// Start the gateway HTTP server.
@@ -386,7 +410,7 @@ pub struct GatewayState {
 pub async fn start_server(
     addr: SocketAddr,
     state: Arc<GatewayState>,
-    auth: MultiAuthState,
+    auth: CombinedAuthState,
 ) -> Result<SocketAddr, crate::error::ChannelError> {
     let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
         crate::error::ChannelError::StartupFailed {
@@ -512,6 +536,64 @@ pub async fn start_server(
             "/api/settings/{key}",
             axum::routing::delete(settings_delete_handler),
         )
+        // LLM utilities
+        .route(
+            "/api/llm/test_connection",
+            post(llm_test_connection_handler),
+        )
+        .route("/api/llm/list_models", post(llm_list_models_handler))
+        .route("/api/llm/providers", get(llm_providers_handler))
+        // User management (admin)
+        .route(
+            "/api/admin/users",
+            get(super::handlers::users::users_list_handler)
+                .post(super::handlers::users::users_create_handler),
+        )
+        .route(
+            "/api/admin/users/{id}",
+            get(super::handlers::users::users_detail_handler)
+                .patch(super::handlers::users::users_update_handler)
+                .delete(super::handlers::users::users_delete_handler),
+        )
+        .route(
+            "/api/admin/users/{id}/suspend",
+            post(super::handlers::users::users_suspend_handler),
+        )
+        .route(
+            "/api/admin/users/{id}/activate",
+            post(super::handlers::users::users_activate_handler),
+        )
+        // Admin secrets provisioning (per-user)
+        .route(
+            "/api/admin/users/{user_id}/secrets",
+            get(super::handlers::secrets::secrets_list_handler),
+        )
+        .route(
+            "/api/admin/users/{user_id}/secrets/{name}",
+            put(super::handlers::secrets::secrets_put_handler)
+                .delete(super::handlers::secrets::secrets_delete_handler),
+        )
+        // Usage reporting (admin)
+        .route(
+            "/api/admin/usage",
+            get(super::handlers::users::usage_stats_handler),
+        )
+        // User self-service profile
+        .route(
+            "/api/profile",
+            get(super::handlers::users::profile_get_handler)
+                .patch(super::handlers::users::profile_update_handler),
+        )
+        // Token management
+        .route(
+            "/api/tokens",
+            get(super::handlers::tokens::tokens_list_handler)
+                .post(super::handlers::tokens::tokens_create_handler),
+        )
+        .route(
+            "/api/tokens/{id}",
+            axum::routing::delete(super::handlers::tokens::tokens_revoke_handler),
+        )
         // Gateway control plane
         .route("/api/gateway/status", get(gateway_status_handler))
         // OpenAI-compatible API
@@ -520,6 +602,15 @@ pub async fn start_server(
             post(super::openai_compat::chat_completions_handler),
         )
         .route("/v1/models", get(super::openai_compat::models_handler))
+        // OpenAI Responses API (routes through the full agent loop)
+        .route(
+            "/v1/responses",
+            post(super::responses_api::create_response_handler),
+        )
+        .route(
+            "/v1/responses/{id}",
+            get(super::responses_api::get_response_handler),
+        )
         .route_layer(middleware::from_fn_with_state(
             auth_state.clone(),
             auth_middleware,
@@ -562,6 +653,7 @@ pub async fn start_server(
             axum::http::Method::GET,
             axum::http::Method::POST,
             axum::http::Method::PUT,
+            axum::http::Method::PATCH,
             axum::http::Method::DELETE,
         ])
         .allow_headers(AllowHeaders::list([
@@ -576,6 +668,33 @@ pub async fn start_server(
         .merge(projects)
         .merge(protected)
         .layer(DefaultBodyLimit::max(10 * 1024 * 1024)) // 10 MB max request body (image uploads)
+        .layer(tower_http::catch_panic::CatchPanicLayer::custom(
+            |panic_info: Box<dyn std::any::Any + Send + 'static>| {
+                let detail = if let Some(s) = panic_info.downcast_ref::<String>() {
+                    s.clone()
+                } else if let Some(s) = panic_info.downcast_ref::<&str>() {
+                    (*s).to_string()
+                } else {
+                    "unknown panic".to_string()
+                };
+                // Truncate panic payload to avoid leaking sensitive data into logs.
+                // Use floor_char_boundary to avoid panicking on multi-byte UTF-8.
+                let safe_detail = if detail.len() > 200 {
+                    let end = detail.floor_char_boundary(200);
+                    format!("{}…", &detail[..end])
+                } else {
+                    detail
+                };
+                tracing::error!("Handler panicked: {}", safe_detail);
+                axum::http::Response::builder()
+                    .status(axum::http::StatusCode::INTERNAL_SERVER_ERROR)
+                    .header("content-type", "text/plain")
+                    .body(axum::body::Body::from("Internal Server Error"))
+                    .unwrap_or_else(|_| {
+                        axum::http::Response::new(axum::body::Body::from("Internal Server Error"))
+                    })
+            },
+        ))
         .layer(cors)
         .layer(SetResponseHeaderLayer::if_not_present(
             header::X_CONTENT_TYPE_OPTIONS,
@@ -836,10 +955,10 @@ async fn oauth_callback_handler(
 
     let result: Result<(), String> = async {
         let token_response = if let Some(proxy_url) = &exchange_proxy_url {
-            let gateway_token = flow.gateway_token.as_deref().unwrap_or_default();
+            let oauth_proxy_auth_token = flow.oauth_proxy_auth_token().unwrap_or_default();
             oauth_defaults::exchange_via_proxy(oauth_defaults::ProxyTokenExchangeRequest {
                 proxy_url,
-                gateway_token,
+                gateway_token: oauth_proxy_auth_token,
                 token_url: &flow.token_url,
                 client_id: &flow.client_id,
                 client_secret: flow.client_secret.as_deref(),
@@ -895,7 +1014,42 @@ async fn oauth_callback_handler(
             flow.secrets
                 .create(&flow.user_id, params)
                 .await
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| {
+                    tracing::warn!(
+                        extension = %flow.extension_name,
+                        secret_name = %client_id_secret,
+                        error = %e,
+                        "Failed to store OAuth client_id secret after callback"
+                    );
+                    "failed to store client credentials".to_string()
+                })?;
+        }
+
+        if let (Some(client_secret_name), Some(client_secret)) = (
+            flow.client_secret_secret_name.as_ref(),
+            flow.client_secret.as_deref(),
+        ) {
+            let mut params =
+                crate::secrets::CreateSecretParams::new(client_secret_name, client_secret)
+                    .with_provider(flow.provider.as_ref().cloned().unwrap_or_default());
+            if let Some(expires_at) = flow.client_secret_expires_at
+                && let Some(dt) =
+                    chrono::DateTime::<chrono::Utc>::from_timestamp(expires_at as i64, 0)
+            {
+                params = params.with_expiry(dt);
+            }
+            flow.secrets
+                .create(&flow.user_id, params)
+                .await
+                .map_err(|e| {
+                    tracing::warn!(
+                        extension = %flow.extension_name,
+                        secret_name = %client_secret_name,
+                        error = %e,
+                        "Failed to store OAuth client_secret secret after callback"
+                    );
+                    "failed to store client credentials".to_string()
+                })?;
         }
 
         Ok(())
@@ -1177,11 +1331,31 @@ async fn slack_relay_oauth_callback_handler(
 
         // Store team_id in settings
         let team_id_key = format!("relay:{}:team_id", DEFAULT_RELAY_NAME);
-        let _ = store
+        tracing::info!(
+            relay = DEFAULT_RELAY_NAME,
+            owner_id = %state.owner_id,
+            team_id_key = %team_id_key,
+            "relay OAuth callback: storing team_id in settings"
+        );
+        store
             .set_setting(&state.owner_id, &team_id_key, &serde_json::json!(team_id))
-            .await;
+            .await
+            .map_err(|e| {
+                tracing::error!(
+                    relay = DEFAULT_RELAY_NAME,
+                    owner_id = %state.owner_id,
+                    error = %e,
+                    "relay OAuth callback: failed to persist team_id to settings store"
+                );
+                format!("Failed to persist relay team_id: {e}")
+            })?;
 
         // Activate the relay channel
+        tracing::info!(
+            relay = DEFAULT_RELAY_NAME,
+            owner_id = %state.owner_id,
+            "relay OAuth callback: activating relay channel"
+        );
         ext_mgr
             .activate_stored_relay(DEFAULT_RELAY_NAME, &state.owner_id)
             .await
@@ -1303,9 +1477,6 @@ async fn chat_send_handler(
     }
 
     let mut msg = IncomingMessage::new("gateway", &user.user_id, &req.content);
-    if state.owner_id != state.default_sender_id && user.user_id == state.owner_id {
-        msg = msg.with_sender_id(&state.default_sender_id);
-    }
     // Prefer timezone from JSON body, fall back to X-Timezone header
     let tz = req
         .timezone
@@ -1407,9 +1578,6 @@ async fn chat_approval_handler(
     })?;
 
     let mut msg = IncomingMessage::new("gateway", &user.user_id, content);
-    if state.owner_id != state.default_sender_id && user.user_id == state.owner_id {
-        msg = msg.with_sender_id(&state.default_sender_id);
-    }
 
     if let Some(ref thread_id) = req.thread_id {
         msg = msg.with_thread(thread_id);
@@ -1861,7 +2029,7 @@ async fn chat_threads_handler(
 
     // Fallback: in-memory only (no assistant thread without DB)
     let mut sorted_threads: Vec<_> = sess.threads.values().collect();
-    sorted_threads.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    sorted_threads.sort_by_key(|t| std::cmp::Reverse(t.updated_at));
     let threads: Vec<ThreadInfo> = sorted_threads
         .into_iter()
         .map(|t| ThreadInfo {
@@ -1895,7 +2063,7 @@ async fn chat_new_thread_handler(
     let session = session_manager.get_or_create_session(&user.user_id).await;
     let (thread_id, info) = {
         let mut sess = session.lock().await;
-        let thread = sess.create_thread();
+        let thread = sess.create_thread(Some("gateway"));
         let id = thread.id;
         let info = ThreadInfo {
             id: thread.id,
@@ -1914,7 +2082,7 @@ async fn chat_new_thread_handler(
     // so that the subsequent loadThreads() call from the frontend sees it.
     if let Some(ref store) = state.store {
         match store
-            .ensure_conversation(thread_id, "gateway", &user.user_id, None)
+            .ensure_conversation(thread_id, "gateway", &user.user_id, None, Some("gateway"))
             .await
         {
             Ok(true) => {}
@@ -2040,27 +2208,12 @@ async fn extensions_list_handler(
     let extensions = installed
         .into_iter()
         .map(|ext| {
-            let activation_status = if ext.kind == crate::extensions::ExtensionKind::WasmChannel {
-                let has_paired = pairing_store
-                    .read_allow_from(&ext.name)
-                    .map(|list| !list.is_empty())
-                    .unwrap_or(false);
-                crate::channels::web::types::classify_wasm_channel_activation(
+            let activation_status =
+                crate::channels::web::handlers::extensions::derive_activation_status(
                     &ext,
-                    has_paired,
+                    &pairing_store,
                     owner_bound_channels.contains(&ext.name),
-                )
-            } else if ext.kind == crate::extensions::ExtensionKind::ChannelRelay {
-                Some(if ext.active {
-                    ExtensionActivationStatus::Active
-                } else if ext.authenticated {
-                    ExtensionActivationStatus::Configured
-                } else {
-                    ExtensionActivationStatus::Installed
-                })
-            } else {
-                None
-            };
+                );
             ExtensionInfo {
                 name: ext.name,
                 display_name: ext.display_name,
@@ -2181,6 +2334,11 @@ async fn extensions_activate_handler(
     AuthenticatedUser(user): AuthenticatedUser,
     Path(name): Path<String>,
 ) -> Result<Json<ActionResponse>, (StatusCode, String)> {
+    tracing::trace!(
+        extension = %name,
+        user_id = %user.user_id,
+        "extensions_activate_handler: received activate request"
+    );
     let ext_mgr = state.extension_manager.as_ref().ok_or((
         StatusCode::NOT_IMPLEMENTED,
         "Extension manager not available (secrets store required)".to_string(),
@@ -2188,6 +2346,10 @@ async fn extensions_activate_handler(
 
     match ext_mgr.activate(&name, &user.user_id).await {
         Ok(result) => {
+            tracing::info!(
+                extension = %name,
+                "extensions_activate_handler: activation succeeded"
+            );
             // Activation loaded the WASM module. Check if the tool needs
             // OAuth scope expansion (e.g., adding google-docs when gmail
             // already has a token but missing the documents scope).
@@ -2206,6 +2368,13 @@ async fn extensions_activate_handler(
                 crate::extensions::ExtensionError::AuthRequired
             );
 
+            tracing::trace!(
+                extension = %name,
+                error = %activate_err,
+                needs_auth = needs_auth,
+                "extensions_activate_handler: activation failed, attempting auth fallback"
+            );
+
             if !needs_auth {
                 return Ok(Json(ActionResponse::fail(activate_err.to_string())));
             }
@@ -2213,10 +2382,21 @@ async fn extensions_activate_handler(
             // Activation failed due to auth; try authenticating first.
             match ext_mgr.auth(&name, &user.user_id).await {
                 Ok(auth_result) if auth_result.is_authenticated() => {
+                    tracing::trace!(
+                        extension = %name,
+                        "extensions_activate_handler: auth reports authenticated, retrying activate"
+                    );
                     // Auth succeeded, retry activation.
                     match ext_mgr.activate(&name, &user.user_id).await {
                         Ok(result) => Ok(Json(ActionResponse::ok(result.message))),
-                        Err(e) => Ok(Json(ActionResponse::fail(e.to_string()))),
+                        Err(e) => {
+                            tracing::warn!(
+                                extension = %name,
+                                error = %e,
+                                "extensions_activate_handler: retry after auth still failed"
+                            );
+                            Ok(Json(ActionResponse::fail(e.to_string())))
+                        }
                     }
                 }
                 Ok(auth_result) => {
@@ -2593,135 +2773,6 @@ async fn routines_runs_handler(
     })))
 }
 
-// --- Settings handlers ---
-
-async fn settings_list_handler(
-    State(state): State<Arc<GatewayState>>,
-    AuthenticatedUser(user): AuthenticatedUser,
-) -> Result<Json<SettingsListResponse>, StatusCode> {
-    let store = state
-        .store
-        .as_ref()
-        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
-    let rows = store.list_settings(&user.user_id).await.map_err(|e| {
-        tracing::error!("Failed to list settings: {}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-
-    let settings = rows
-        .into_iter()
-        .map(|r| SettingResponse {
-            key: r.key,
-            value: r.value,
-            updated_at: r.updated_at.to_rfc3339(),
-        })
-        .collect();
-
-    Ok(Json(SettingsListResponse { settings }))
-}
-
-async fn settings_get_handler(
-    State(state): State<Arc<GatewayState>>,
-    AuthenticatedUser(user): AuthenticatedUser,
-    Path(key): Path<String>,
-) -> Result<Json<SettingResponse>, StatusCode> {
-    let store = state
-        .store
-        .as_ref()
-        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
-    let row = store
-        .get_setting_full(&user.user_id, &key)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to get setting '{}': {}", key, e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?
-        .ok_or(StatusCode::NOT_FOUND)?;
-
-    Ok(Json(SettingResponse {
-        key: row.key,
-        value: row.value,
-        updated_at: row.updated_at.to_rfc3339(),
-    }))
-}
-
-async fn settings_set_handler(
-    State(state): State<Arc<GatewayState>>,
-    AuthenticatedUser(user): AuthenticatedUser,
-    Path(key): Path<String>,
-    Json(body): Json<SettingWriteRequest>,
-) -> Result<StatusCode, StatusCode> {
-    let store = state
-        .store
-        .as_ref()
-        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
-    store
-        .set_setting(&user.user_id, &key, &body.value)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to set setting '{}': {}", key, e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-
-    Ok(StatusCode::NO_CONTENT)
-}
-
-async fn settings_delete_handler(
-    State(state): State<Arc<GatewayState>>,
-    AuthenticatedUser(user): AuthenticatedUser,
-    Path(key): Path<String>,
-) -> Result<StatusCode, StatusCode> {
-    let store = state
-        .store
-        .as_ref()
-        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
-    store
-        .delete_setting(&user.user_id, &key)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to delete setting '{}': {}", key, e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-
-    Ok(StatusCode::NO_CONTENT)
-}
-
-async fn settings_export_handler(
-    State(state): State<Arc<GatewayState>>,
-    AuthenticatedUser(user): AuthenticatedUser,
-) -> Result<Json<SettingsExportResponse>, StatusCode> {
-    let store = state
-        .store
-        .as_ref()
-        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
-    let settings = store.get_all_settings(&user.user_id).await.map_err(|e| {
-        tracing::error!("Failed to export settings: {}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-
-    Ok(Json(SettingsExportResponse { settings }))
-}
-
-async fn settings_import_handler(
-    State(state): State<Arc<GatewayState>>,
-    AuthenticatedUser(user): AuthenticatedUser,
-    Json(body): Json<SettingsImportRequest>,
-) -> Result<StatusCode, StatusCode> {
-    let store = state
-        .store
-        .as_ref()
-        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
-    store
-        .set_all_settings(&user.user_id, &body.settings)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to import settings: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-
-    Ok(StatusCode::NO_CONTENT)
-}
-
 // --- Gateway control plane handlers ---
 
 async fn gateway_status_handler(
@@ -2985,7 +3036,6 @@ mod tests {
             job_manager: None,
             prompt_queue: None,
             owner_id: "test".to_string(),
-            default_sender_id: "test".to_string(),
             shutdown_tx: tokio::sync::RwLock::new(None),
             ws_tracker: None,
             llm_provider: None,
@@ -3000,6 +3050,8 @@ mod tests {
             routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
             startup_time: std::time::Instant::now(),
             active_config: ActiveConfigSnapshot::default(),
+            secrets_store: None,
+            db_auth: None,
         })
     }
 
@@ -3008,6 +3060,162 @@ mod tests {
         Router::new()
             .route("/oauth/callback", get(oauth_callback_handler))
             .with_state(state)
+    }
+
+    #[derive(Clone, Debug)]
+    struct RecordedOauthProxyRequest {
+        authorization: Option<String>,
+        form: std::collections::HashMap<String, String>,
+    }
+
+    #[derive(Clone)]
+    struct MockOauthProxyState {
+        requests: Arc<tokio::sync::Mutex<Vec<RecordedOauthProxyRequest>>>,
+    }
+
+    struct MockOauthProxyServer {
+        addr: std::net::SocketAddr,
+        requests: Arc<tokio::sync::Mutex<Vec<RecordedOauthProxyRequest>>>,
+        shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
+        server_task: Option<tokio::task::JoinHandle<()>>,
+    }
+
+    impl MockOauthProxyServer {
+        async fn start() -> Self {
+            async fn exchange_handler(
+                State(state): State<MockOauthProxyState>,
+                headers: axum::http::HeaderMap,
+                axum::Form(form): axum::Form<std::collections::HashMap<String, String>>,
+            ) -> Json<serde_json::Value> {
+                state.requests.lock().await.push(RecordedOauthProxyRequest {
+                    authorization: headers
+                        .get(axum::http::header::AUTHORIZATION)
+                        .and_then(|value| value.to_str().ok())
+                        .map(str::to_string),
+                    form,
+                });
+                Json(serde_json::json!({
+                    "access_token": "proxy-access-token",
+                    "refresh_token": "proxy-refresh-token",
+                    "expires_in": 7200
+                }))
+            }
+
+            let requests = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind mock oauth proxy");
+            let addr = listener.local_addr().expect("mock oauth proxy addr");
+            let app = Router::new()
+                .route("/oauth/exchange", post(exchange_handler))
+                .with_state(MockOauthProxyState {
+                    requests: Arc::clone(&requests),
+                });
+            let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+            let server_task = tokio::spawn(async move {
+                let _ = axum::serve(listener, app)
+                    .with_graceful_shutdown(async {
+                        let _ = shutdown_rx.await;
+                    })
+                    .await;
+            });
+
+            Self {
+                addr,
+                requests,
+                shutdown_tx: Some(shutdown_tx),
+                server_task: Some(server_task),
+            }
+        }
+
+        fn base_url(&self) -> String {
+            format!("http://{}", self.addr)
+        }
+
+        async fn requests(&self) -> Vec<RecordedOauthProxyRequest> {
+            self.requests.lock().await.clone()
+        }
+
+        async fn shutdown(mut self) {
+            if let Some(tx) = self.shutdown_tx.take() {
+                let _ = tx.send(());
+            }
+            if let Some(task) = self.server_task.take() {
+                let _ = task.await;
+            }
+        }
+    }
+
+    impl Drop for MockOauthProxyServer {
+        fn drop(&mut self) {
+            if let Some(tx) = self.shutdown_tx.take() {
+                let _ = tx.send(());
+            }
+            if let Some(task) = self.server_task.take() {
+                task.abort();
+            }
+        }
+    }
+
+    struct EnvVarGuard {
+        key: &'static str,
+        original: Option<String>,
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            // SAFETY: Tests use lock_env() to serialize environment access.
+            unsafe {
+                if let Some(ref value) = self.original {
+                    std::env::set_var(self.key, value);
+                } else {
+                    std::env::remove_var(self.key);
+                }
+            }
+        }
+    }
+
+    fn set_env_var(key: &'static str, value: Option<&str>) -> EnvVarGuard {
+        let original = std::env::var(key).ok();
+        // SAFETY: Tests use lock_env() to serialize environment access.
+        unsafe {
+            if let Some(value) = value {
+                std::env::set_var(key, value);
+            } else {
+                std::env::remove_var(key);
+            }
+        }
+        EnvVarGuard { key, original }
+    }
+
+    fn fresh_pending_oauth_flow(
+        secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync>,
+        sse_manager: Option<Arc<SseManager>>,
+        oauth_proxy_auth_token: Option<String>,
+    ) -> crate::cli::oauth_defaults::PendingOAuthFlow {
+        crate::cli::oauth_defaults::PendingOAuthFlow {
+            extension_name: "test_tool".to_string(),
+            display_name: "Test Tool".to_string(),
+            token_url: "https://example.com/token".to_string(),
+            client_id: "client123".to_string(),
+            client_secret: None,
+            redirect_uri: "https://example.com/oauth/callback".to_string(),
+            code_verifier: Some("test-code-verifier".to_string()),
+            access_token_field: "access_token".to_string(),
+            secret_name: "test_token".to_string(),
+            provider: Some("google".to_string()),
+            validation_endpoint: None,
+            scopes: vec!["email".to_string()],
+            user_id: "test".to_string(),
+            secrets,
+            sse_manager,
+            gateway_token: oauth_proxy_auth_token,
+            token_exchange_extra_params: std::collections::HashMap::new(),
+            client_id_secret_name: None,
+            client_secret_secret_name: None,
+            client_secret_expires_at: None,
+            created_at: std::time::Instant::now(),
+        }
     }
 
     #[tokio::test]
@@ -3066,6 +3274,7 @@ mod tests {
         // without needing the full auth middleware layer.
         req.extensions_mut().insert(UserIdentity {
             user_id: "test".to_string(),
+            role: "admin".to_string(),
             workspace_read_scopes: Vec::new(),
         });
 
@@ -3150,6 +3359,7 @@ mod tests {
         // without needing the full auth middleware layer.
         req.extensions_mut().insert(UserIdentity {
             user_id: "test".to_string(),
+            role: "admin".to_string(),
             workspace_read_scopes: Vec::new(),
         });
 
@@ -3199,7 +3409,10 @@ mod tests {
         let state = test_gateway_state(None);
 
         let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-        let auth = MultiAuthState::single("test-token".to_string(), "test".to_string());
+        let auth = CombinedAuthState::from(crate::channels::web::auth::MultiAuthState::single(
+            "test-token".to_string(),
+            "test".to_string(),
+        ));
         let bound = start_server(addr, state.clone(), auth)
             .await
             .expect("server should start");
@@ -3366,6 +3579,8 @@ mod tests {
             gateway_token: None,
             token_exchange_extra_params: std::collections::HashMap::new(),
             client_id_secret_name: None,
+            client_secret_secret_name: None,
+            client_secret_expires_at: None,
             created_at,
         };
 
@@ -3435,6 +3650,8 @@ mod tests {
             gateway_token: None,
             token_exchange_extra_params: std::collections::HashMap::new(),
             client_id_secret_name: None,
+            client_secret_secret_name: None,
+            client_secret_expires_at: None,
             created_at,
         };
 
@@ -3538,6 +3755,8 @@ mod tests {
             gateway_token: None,
             token_exchange_extra_params: std::collections::HashMap::new(),
             client_id_secret_name: None,
+            client_secret_secret_name: None,
+            client_secret_expires_at: None,
             // Expired — handler will reject after lookup (no network I/O)
             created_at,
         };
@@ -3625,6 +3844,8 @@ mod tests {
             gateway_token: None,
             token_exchange_extra_params: std::collections::HashMap::new(),
             client_id_secret_name: None,
+            client_secret_secret_name: None,
+            client_secret_expires_at: None,
             created_at,
         };
 
@@ -3665,6 +3886,286 @@ mod tests {
                 .get("test_nonce")
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn test_oauth_callback_accepts_versioned_hosted_state_without_instance_name() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> =
+            Arc::new(crate::secrets::InMemorySecretsStore::new(Arc::new(
+                crate::secrets::SecretsCrypto::new(secrecy::SecretString::from(
+                    TEST_GATEWAY_CRYPTO_KEY.to_string(),
+                ))
+                .expect("crypto"),
+            )));
+        let (ext_mgr, _wasm_tools_dir, _wasm_channels_dir) = test_ext_mgr(secrets.clone());
+
+        let Some(created_at) = expired_flow_created_at() else {
+            eprintln!(
+                "Skipping versioned OAuth state without instance test: monotonic uptime below expiry window"
+            );
+            return;
+        };
+        let flow = crate::cli::oauth_defaults::PendingOAuthFlow {
+            extension_name: "test_tool".to_string(),
+            display_name: "Test Tool".to_string(),
+            token_url: "https://example.com/token".to_string(),
+            client_id: "client123".to_string(),
+            client_secret: None,
+            redirect_uri: "https://example.com/oauth/callback".to_string(),
+            code_verifier: None,
+            access_token_field: "access_token".to_string(),
+            secret_name: "test_token".to_string(),
+            provider: None,
+            validation_endpoint: None,
+            scopes: vec![],
+            user_id: "test".to_string(),
+            secrets,
+            sse_manager: None,
+            gateway_token: None,
+            token_exchange_extra_params: std::collections::HashMap::new(),
+            client_id_secret_name: None,
+            client_secret_secret_name: None,
+            client_secret_expires_at: None,
+            created_at,
+        };
+
+        ext_mgr
+            .pending_oauth_flows()
+            .write()
+            .await
+            .insert("test_nonce".to_string(), flow);
+
+        let state = test_gateway_state(Some(ext_mgr.clone()));
+        let app = test_oauth_router(state);
+        let versioned_state =
+            crate::cli::oauth_defaults::encode_hosted_oauth_state("test_nonce", None);
+
+        let req = axum::http::Request::builder()
+            .uri(format!(
+                "/oauth/callback?code=fake_code&state={}",
+                urlencoding::encode(&versioned_state)
+            ))
+            .body(Body::empty())
+            .expect("request");
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+            .await
+            .expect("body");
+        let html = String::from_utf8_lossy(&body);
+        assert!(html.contains("Authorization Failed"));
+        assert!(
+            ext_mgr
+                .pending_oauth_flows()
+                .read()
+                .await
+                .get("test_nonce")
+                .is_none()
+        );
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn test_oauth_callback_happy_path_with_gateway_token_fallback() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let proxy = MockOauthProxyServer::start().await;
+        // Keep the process-wide env locked for the full callback so the handler
+        // sees a stable proxy URL/token configuration throughout the test.
+        let _env_guard = crate::config::helpers::lock_env();
+        let _exchange_url_guard =
+            set_env_var("IRONCLAW_OAUTH_EXCHANGE_URL", Some(&proxy.base_url()));
+        let _proxy_auth_guard = set_env_var("IRONCLAW_OAUTH_PROXY_AUTH_TOKEN", None);
+        let _gateway_token_guard = set_env_var("GATEWAY_AUTH_TOKEN", Some("gateway-test-token"));
+
+        let secrets = test_secrets_store();
+        let (ext_mgr, _wasm_tools_dir, _wasm_channels_dir) = test_ext_mgr(Arc::clone(&secrets));
+        let sse_mgr = Arc::new(SseManager::new());
+        let mut receiver = sse_mgr.sender().subscribe();
+        let flow = fresh_pending_oauth_flow(
+            Arc::clone(&secrets),
+            Some(Arc::clone(&sse_mgr)),
+            crate::cli::oauth_defaults::oauth_proxy_auth_token(),
+        );
+
+        ext_mgr
+            .pending_oauth_flows()
+            .write()
+            .await
+            .insert("test_nonce".to_string(), flow);
+
+        let state = test_gateway_state(Some(ext_mgr.clone()));
+        let app = test_oauth_router(state);
+        let versioned_state =
+            crate::cli::oauth_defaults::encode_hosted_oauth_state("test_nonce", Some("myinstance"));
+
+        let req = axum::http::Request::builder()
+            .uri(format!(
+                "/oauth/callback?code=fake_code&state={}",
+                urlencoding::encode(&versioned_state)
+            ))
+            .body(Body::empty())
+            .expect("request");
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+            .await
+            .expect("body");
+        let html = String::from_utf8_lossy(&body);
+        assert!(html.contains("Test Tool Connected"));
+
+        let requests = proxy.requests().await;
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0].authorization.as_deref(),
+            Some("Bearer gateway-test-token")
+        );
+        assert_eq!(
+            requests[0].form.get("code").map(String::as_str),
+            Some("fake_code")
+        );
+        assert_eq!(
+            requests[0].form.get("code_verifier").map(String::as_str),
+            Some("test-code-verifier")
+        );
+
+        let access_token = secrets
+            .get_decrypted("test", "test_token")
+            .await
+            .expect("access token stored");
+        assert_eq!(access_token.expose(), "proxy-access-token");
+
+        let refresh_token = secrets
+            .get_decrypted("test", "test_token_refresh_token")
+            .await
+            .expect("refresh token stored");
+        assert_eq!(refresh_token.expose(), "proxy-refresh-token");
+
+        match receiver.recv().await.expect("auth_completed event").event {
+            crate::channels::web::types::AppEvent::AuthCompleted {
+                extension_name,
+                success,
+                ..
+            } => {
+                assert_eq!(extension_name, "test_tool");
+                assert!(success, "OAuth callback should broadcast success");
+            }
+            event => panic!("expected AuthCompleted event, got {event:?}"),
+        }
+
+        proxy.shutdown().await;
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn test_oauth_callback_happy_path_with_dedicated_proxy_auth_token() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let proxy = MockOauthProxyServer::start().await;
+        // Keep the process-wide env locked for the full callback so the handler
+        // sees a stable proxy URL/token configuration throughout the test.
+        let _env_guard = crate::config::helpers::lock_env();
+        let _exchange_url_guard =
+            set_env_var("IRONCLAW_OAUTH_EXCHANGE_URL", Some(&proxy.base_url()));
+        let _proxy_auth_guard = set_env_var(
+            "IRONCLAW_OAUTH_PROXY_AUTH_TOKEN",
+            Some("shared-oauth-proxy-secret"),
+        );
+        let _gateway_token_guard = set_env_var("GATEWAY_AUTH_TOKEN", None);
+
+        let secrets = test_secrets_store();
+        let (ext_mgr, _wasm_tools_dir, _wasm_channels_dir) = test_ext_mgr(Arc::clone(&secrets));
+        let sse_mgr = Arc::new(SseManager::new());
+        let mut receiver = sse_mgr.sender().subscribe();
+        let flow = fresh_pending_oauth_flow(
+            Arc::clone(&secrets),
+            Some(Arc::clone(&sse_mgr)),
+            crate::cli::oauth_defaults::oauth_proxy_auth_token(),
+        );
+
+        ext_mgr
+            .pending_oauth_flows()
+            .write()
+            .await
+            .insert("test_nonce".to_string(), flow);
+
+        let state = test_gateway_state(Some(ext_mgr.clone()));
+        let app = test_oauth_router(state);
+        let versioned_state =
+            crate::cli::oauth_defaults::encode_hosted_oauth_state("test_nonce", None);
+
+        let req = axum::http::Request::builder()
+            .uri(format!(
+                "/oauth/callback?code=fake_code&state={}",
+                urlencoding::encode(&versioned_state)
+            ))
+            .body(Body::empty())
+            .expect("request");
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+            .await
+            .expect("body");
+        let html = String::from_utf8_lossy(&body);
+        assert!(html.contains("Test Tool Connected"));
+
+        let requests = proxy.requests().await;
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0].authorization.as_deref(),
+            Some("Bearer shared-oauth-proxy-secret")
+        );
+        assert_eq!(
+            requests[0].form.get("code").map(String::as_str),
+            Some("fake_code")
+        );
+        assert_eq!(
+            requests[0].form.get("code_verifier").map(String::as_str),
+            Some("test-code-verifier")
+        );
+
+        let access_token = secrets
+            .get_decrypted("test", "test_token")
+            .await
+            .expect("access token stored");
+        assert_eq!(access_token.expose(), "proxy-access-token");
+
+        let refresh_token = secrets
+            .get_decrypted("test", "test_token_refresh_token")
+            .await
+            .expect("refresh token stored");
+        assert_eq!(refresh_token.expose(), "proxy-refresh-token");
+
+        match receiver.recv().await.expect("auth_completed event").event {
+            crate::channels::web::types::AppEvent::AuthCompleted {
+                extension_name,
+                success,
+                ..
+            } => {
+                assert_eq!(extension_name, "test_tool");
+                assert!(success, "OAuth callback should broadcast success");
+            }
+            event => panic!("expected AuthCompleted event, got {event:?}"),
+        }
+
+        proxy.shutdown().await;
     }
 
     // --- Slack relay OAuth CSRF tests ---

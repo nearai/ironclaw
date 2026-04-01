@@ -35,16 +35,27 @@ function switchLanguage(lang) {
   if (I18n.setLanguage(lang)) {
     // Update slash commands
     updateSlashCommands();
-    
+
     // Update language menu active state
     updateLanguageMenu();
-    
+
+    // Re-render dynamically built sections that use I18n.t()
+    if (typeof renderProviders === 'function' && typeof _configLoaded !== 'undefined' && _configLoaded) {
+      renderProviders();
+    }
+    if (typeof loadInferenceSettings === 'function') {
+      var inferencePanel = document.getElementById('settings-inference');
+      if (inferencePanel && inferencePanel.classList.contains('active')) {
+        loadInferenceSettings();
+      }
+    }
+
     // Close menu
     const menu = document.getElementById('language-menu');
     if (menu) {
       menu.style.display = 'none';
     }
-    
+
     // Show toast notification
     showToast(I18n.t('language.switch') + ': ' + (lang === 'zh-CN' ? '简体中文' : 'English'));
   }

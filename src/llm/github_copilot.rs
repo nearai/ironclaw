@@ -231,9 +231,8 @@ impl LlmProvider for GithubCopilotProvider {
                 .choices
                 .into_iter()
                 .next()
-                .ok_or_else(|| LlmError::InvalidResponse {
+                .ok_or_else(|| LlmError::EmptyResponse {
                     provider: "github_copilot".to_string(),
-                    reason: "No choices in response".to_string(),
                 })?;
 
         let (content, _tool_calls) = extract_choice_content(&choice);
@@ -309,9 +308,8 @@ impl LlmProvider for GithubCopilotProvider {
                 .choices
                 .into_iter()
                 .next()
-                .ok_or_else(|| LlmError::InvalidResponse {
+                .ok_or_else(|| LlmError::EmptyResponse {
                     provider: "github_copilot".to_string(),
-                    reason: "No choices in response".to_string(),
                 })?;
 
         let (content, tool_calls) = extract_choice_content(&choice);

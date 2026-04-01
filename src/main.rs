@@ -449,6 +449,7 @@ async fn async_main() -> anyhow::Result<()> {
             &components.secrets_store,
             components.extension_manager.as_ref(),
             components.db.as_ref(),
+            &channel_names,
         )
         .await;
 
@@ -591,27 +592,7 @@ async fn async_main() -> anyhow::Result<()> {
     let mut gateway_url: Option<String> = None;
     let mut sse_manager: Option<std::sync::Arc<ironclaw::channels::web::sse::SseManager>> = None;
     if let Some(ref gw_config) = config.channels.gateway {
-        // Build multi-user auth state if user_tokens is configured, else single-user.
-        let mut gw = if let Some(ref user_tokens) = gw_config.user_tokens {
-            use ironclaw::channels::web::auth::{MultiAuthState, UserIdentity};
-            let tokens = user_tokens
-                .iter()
-                .map(|(token, cfg)| {
-                    (
-                        token.clone(),
-                        UserIdentity {
-                            user_id: cfg.user_id.clone(),
-                            workspace_read_scopes: cfg.workspace_read_scopes.clone(),
-                        },
-                    )
-                })
-                .collect();
-            let auth = MultiAuthState::multi(tokens);
-            GatewayChannel::new_multi_auth(gw_config.clone(), auth)
-        } else {
-            GatewayChannel::new(gw_config.clone())
-        };
-        gw = gw.with_owner_scope(config.owner_id.clone());
+        let mut gw = GatewayChannel::new(gw_config.clone(), config.owner_id.clone());
         gw = gw.with_llm_provider(Arc::clone(&components.llm));
         if let Some(ref ws) = components.workspace {
             gw = gw.with_workspace(Arc::clone(ws));
@@ -650,6 +631,57 @@ async fn async_main() -> anyhow::Result<()> {
         }
         if let Some(ref d) = components.db {
             gw = gw.with_store(Arc::clone(d));
+            gw = gw.with_db_auth(Arc::clone(d));
+            if let Some(ref ss) = components.secrets_store {
+                gw = gw.with_secrets_store(Arc::clone(ss));
+            }
+
+            // Bootstrap: create the first admin user from single-user config
+            // so the owner appears in the Users admin panel immediately.
+            if let Ok(false) = d.has_any_users().await {
+                let now = chrono::Utc::now();
+                let user = ironclaw::db::UserRecord {
+                    id: config.owner_id.clone(),
+                    email: None,
+                    display_name: config.owner_id.clone(),
+                    status: "active".to_string(),
+                    role: "admin".to_string(),
+                    created_at: now,
+                    updated_at: now,
+                    last_login_at: None,
+                    created_by: None,
+                    metadata: serde_json::json!({"source": "bootstrap"}),
+                };
+                // Create admin user + bootstrap token atomically.
+                let auth_token = gw.auth_token();
+                if auth_token.is_empty() {
+                    if let Err(e) = d.create_user(&user).await {
+                        tracing::warn!("Failed to bootstrap admin user: {}", e);
+                    }
+                } else {
+                    use ironclaw::channels::web::auth::hash_token;
+                    let hash = hash_token(auth_token);
+                    let prefix = if auth_token.len() >= 8 {
+                        &auth_token[..8]
+                    } else {
+                        auth_token
+                    };
+                    if let Err(e) = d
+                        .create_user_with_token(&user, "bootstrap", &hash, prefix, None)
+                        .await
+                    {
+                        tracing::warn!("Failed to bootstrap admin user: {}", e);
+                    } else {
+                        tracing::info!(
+                            user_id = config.owner_id,
+                            "Bootstrapped admin user from gateway config"
+                        );
+                    }
+                }
+            }
+        }
+        if let Some(ref ss) = components.secrets_store {
+            gw = gw.with_secrets_store(Arc::clone(ss));
         }
         if let Some(ref jm) = container_job_manager {
             gw = gw.with_job_manager(Arc::clone(jm));
@@ -791,12 +823,7 @@ async fn async_main() -> anyhow::Result<()> {
         .await;
 
     // Default user ID for extension operations (single-user mode).
-    let ext_user_id = config
-        .channels
-        .gateway
-        .as_ref()
-        .map(|g| g.user_id.clone())
-        .unwrap_or_else(|| "default".to_string());
+    let ext_user_id = config.owner_id.clone();
 
     // Wire up channel runtime for hot-activation of WASM channels.
     if let Some(ref ext_mgr) = components.extension_manager

@@ -41,7 +41,58 @@
         <button id="auth-connect-btn" data-i18n="auth.connect">Connect</button>
       </div>
       <div id="auth-error"></div>
-      <p class="auth-hint" data-i18n="auth.hint">Enter the GATEWAY_AUTH_TOKEN from your .env configuration.</p>
+    </div>
+  </div>
+
+  <!-- Provider Add/Edit Dialog -->
+  <div id="provider-dialog" class="provider-dialog" style="display:none">
+    <div class="provider-dialog-overlay" id="provider-dialog-overlay"></div>
+    <div class="provider-dialog-content">
+      <div class="provider-dialog-header">
+        <h2 id="provider-form-title" data-i18n="config.newProvider">New Provider</h2>
+        <button class="provider-dialog-close" id="cancel-provider-btn" title="Close">×</button>
+      </div>
+      <div class="provider-dialog-body">
+        <div class="config-form">
+          <div class="config-form-row" id="provider-name-row">
+            <label data-i18n="config.providerName">Display Name</label>
+            <input type="text" id="provider-name" data-i18n="config.providerNamePlaceholder" data-i18n-attr="placeholder" placeholder="My Provider">
+          </div>
+          <div class="config-form-row" id="provider-id-row">
+            <label data-i18n="config.providerId">Provider ID</label>
+            <input type="text" id="provider-id" data-i18n="config.providerIdPlaceholder" data-i18n-attr="placeholder" placeholder="my-provider">
+            <span class="config-form-hint" data-i18n="config.providerIdHint">Lowercase letters, numbers, hyphens, underscores</span>
+          </div>
+          <div class="config-form-row" id="provider-adapter-row">
+            <label data-i18n="config.providerAdapter">API Adapter</label>
+            <select id="provider-adapter">
+              <option value="open_ai_completions" data-i18n="config.adapterOpenAI">OpenAI Compatible</option>
+              <option value="anthropic" data-i18n="config.adapterAnthropic">Anthropic</option>
+              <option value="ollama" data-i18n="config.adapterOllama">Ollama</option>
+            </select>
+          </div>
+          <div class="config-form-row" id="provider-base-url-row">
+            <label data-i18n="config.providerBaseUrl">Base URL</label>
+            <input type="text" id="provider-base-url" placeholder="https://api.example.com/v1">
+          </div>
+          <div class="config-form-row" id="provider-api-key-row">
+            <label data-i18n="config.providerApiKey">API Key</label>
+            <input type="password" id="provider-api-key" placeholder="sk-...">
+          </div>
+          <div class="config-form-row">
+            <label data-i18n="config.providerModel">Default Model</label>
+            <input type="text" id="provider-model" placeholder="gpt-4o">
+            <button id="fetch-models-btn" class="btn-fetch-models" type="button" data-i18n="config.fetchModels">↻ Fetch available models</button>
+            <select id="provider-model-select" style="display:none"></select>
+          </div>
+          <div id="test-connection-result" class="test-connection-result" style="display:none"></div>
+        </div>
+      </div>
+      <div class="provider-dialog-footer">
+        <button id="save-provider-btn" data-i18n="common.save">Save</button>
+        <button id="test-provider-btn" class="btn-secondary" data-i18n="config.testConnection">Test</button>
+        <button id="cancel-provider-footer-btn" class="btn-secondary" data-i18n="common.cancel">Cancel</button>
+      </div>
     </div>
   </div>
 
@@ -293,6 +344,7 @@
           <button class="settings-subtab" data-settings-subtab="extensions" data-i18n="tab.extensions">Extensions</button>
           <button class="settings-subtab" data-settings-subtab="mcp" data-i18n="settings.mcp">MCP</button>
           <button class="settings-subtab" data-settings-subtab="skills" data-i18n="tab.skills">Skills</button>
+          <button class="settings-subtab" data-settings-subtab="users" data-i18n="settings.users">Users</button>
           <button class="settings-theme-toggle" id="settings-theme-toggle" data-i18n="theme.tooltipSystem" title="Toggle theme">Theme</button>
         </div>
         <div class="settings-content">
@@ -305,8 +357,23 @@
             <button id="settings-import-btn" class="settings-toolbar-btn" data-i18n="settings.import">Import</button>
           </div>
           <div class="settings-subpanel active" id="settings-inference">
-            <div class="extensions-container" id="settings-inference-content">
-              <div class="empty-state" data-i18n="common.loading">Loading settings...</div>
+            <div class="extensions-container">
+              <div id="settings-inference-content">
+                <div class="empty-state" data-i18n="common.loading">Loading settings...</div>
+              </div>
+              <div class="extensions-section" id="providers-section">
+                <div class="config-section-header">
+                  <h3 data-i18n="config.modelProviders">Model Providers</h3>
+                  <button id="add-provider-btn" class="btn-add-provider" data-i18n="config.addProvider">+ Add Provider</button>
+                </div>
+                <div class="config-notice" id="config-restart-notice" style="display:none">
+                  <span>⚠</span>
+                  <span data-i18n="config.restartNotice">Changes take effect after restart.</span>
+                </div>
+                <div id="providers-list" class="providers-list">
+                  <div class="empty-state" data-i18n="common.loading">Loading...</div>
+                </div>
+              </div>
             </div>
           </div>
           <div class="settings-subpanel" id="settings-agent">
@@ -388,6 +455,29 @@
                   <button id="skill-install-btn" data-i18n="extensions.install">Install</button>
                 </div>
               </div>
+            </div>
+          </div>
+          <div class="settings-subpanel" id="settings-users">
+            <div class="users-container">
+              <div class="users-header">
+                <h3 data-i18n="users.heading">User Management</h3>
+                <button id="users-create-btn" class="btn-primary" data-i18n="users.newUser">+ New User</button>
+              </div>
+              <div id="users-create-form" style="display:none" class="users-form" autocomplete="off">
+                <input type="text" id="user-display-name" data-i18n-placeholder="users.displayNamePlaceholder" placeholder="Display name" autocomplete="off" />
+                <input type="text" id="user-email" data-i18n-placeholder="users.emailPlaceholder" placeholder="Email (optional)" autocomplete="off" />
+                <select id="user-role"><option value="member" data-i18n="users.roleMember">Member</option><option value="admin" data-i18n="users.roleAdmin">Admin</option></select>
+                <button id="users-create-submit" class="btn-primary" data-i18n="users.create">Create</button>
+                <button id="users-create-cancel" class="btn-secondary" data-i18n="users.cancel">Cancel</button>
+              </div>
+              <div id="users-token-result" style="display:none" class="users-token-banner"></div>
+              <table class="routines-table" id="users-table">
+                <thead><tr>
+                  <th data-i18n="users.columns.id">ID</th><th data-i18n="users.columns.displayName">Display Name</th><th data-i18n="users.columns.email">Email</th><th data-i18n="users.columns.role">Role</th><th data-i18n="users.columns.status">Status</th><th data-i18n="users.columns.jobs">Jobs</th><th data-i18n="users.columns.cost">Cost</th><th data-i18n="users.columns.lastActive">Last Active</th><th data-i18n="users.columns.created">Created</th><th data-i18n="users.columns.actions">Actions</th>
+                </tr></thead>
+                <tbody id="users-tbody"></tbody>
+              </table>
+              <div id="users-empty" class="empty-state" style="display:none" data-i18n="users.emptyState">No users found. Create the first user to get started.</div>
             </div>
           </div>
         </div>

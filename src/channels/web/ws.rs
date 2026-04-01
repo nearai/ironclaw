@@ -521,7 +521,6 @@ mod tests {
             prompt_queue: None,
             scheduler: None,
             owner_id: "test".to_string(),
-            default_sender_id: "test".to_string(),
             shutdown_tx: tokio::sync::RwLock::new(None),
             ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
             llm_provider: None,
@@ -535,6 +534,8 @@ mod tests {
             routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
             startup_time: std::time::Instant::now(),
             active_config: crate::channels::web::server::ActiveConfigSnapshot::default(),
+            secrets_store: None,
+            db_auth: None,
         }
     }
 }
