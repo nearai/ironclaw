@@ -371,4 +371,161 @@ mod tests {
         let e = bob.next().await.unwrap(); // safety: test-only
         assert!(matches!(e, AppEvent::Heartbeat)); // safety: test assertion
     }
+
+    #[tokio::test]
+    async fn test_tool_lifecycle_events() {
+        let manager = SseManager::new();
+        let mut stream = Box::pin(
+            manager
+                .subscribe_raw(Some("user1".to_string()))
+                .expect("subscribe"),
+        );
+
+        // ToolStarted
+        manager.broadcast_for_user(
+            "user1",
+            AppEvent::ToolStarted {
+                name: "terminal".to_string(),
+                thread_id: Some("thread-123".to_string()),
+            },
+        );
+
+        // ToolCompleted
+        manager.broadcast_for_user(
+            "user1",
+            AppEvent::ToolCompleted {
+                name: "terminal".to_string(),
+                success: true,
+                error: None,
+                parameters: Some(r#"{"command": "ls"}"#.to_string()),
+                thread_id: Some("thread-123".to_string()),
+            },
+        );
+
+        // ToolResult
+        manager.broadcast_for_user(
+            "user1",
+            AppEvent::ToolResult {
+                name: "terminal".to_string(),
+                preview: "file1.txt\nfile2.txt".to_string(),
+                thread_id: Some("thread-123".to_string()),
+            },
+        );
+
+        // Verify all events received in order
+        let e1 = stream.next().await.unwrap();
+        assert!(matches!(e1, AppEvent::ToolStarted { name, .. } if name == "terminal"));
+
+        let e2 = stream.next().await.unwrap();
+        assert!(matches!(e2, AppEvent::ToolCompleted { name, success, .. } if name == "terminal" && success));
+
+        let e3 = stream.next().await.unwrap();
+        assert!(matches!(e3, AppEvent::ToolResult { name, preview, .. } if name == "terminal" && preview.contains("file1.txt")));
+    }
+
+    #[tokio::test]
+    async fn test_job_lifecycle_events() {
+        let manager = SseManager::new();
+        let mut stream = Box::pin(
+            manager
+                .subscribe_raw(Some("user1".to_string()))
+                .expect("subscribe"),
+        );
+
+        let job_id = "job-456".to_string();
+
+        // JobStarted
+        manager.broadcast(AppEvent::JobStarted {
+            job_id: job_id.clone(),
+            title: "Analyze repository".to_string(),
+            browse_url: "/jobs/job-456".to_string(),
+        });
+
+        // JobMessage
+        manager.broadcast(AppEvent::JobMessage {
+            job_id: job_id.clone(),
+            role: "assistant".to_string(),
+            content: "Starting analysis...".to_string(),
+        });
+
+        // JobToolUse
+        manager.broadcast(AppEvent::JobToolUse {
+            job_id: job_id.clone(),
+            tool_name: "read_file".to_string(),
+            input: serde_json::json!({"path": "README.md"}),
+        });
+
+        // JobToolResult
+        manager.broadcast(AppEvent::JobToolResult {
+            job_id: job_id.clone(),
+            tool_name: "read_file".to_string(),
+            output: "# Project\nDescription".to_string(),
+        });
+
+        // JobStatus
+        manager.broadcast(AppEvent::JobStatus {
+            job_id: job_id.clone(),
+            message: "Analysis complete".to_string(),
+        });
+
+        // JobResult
+        manager.broadcast(AppEvent::JobResult {
+            job_id: job_id.clone(),
+            status: "completed".to_string(),
+            session_id: Some("session-789".to_string()),
+            fallback_deliverable: None,
+        });
+
+        // JobReasoning
+        manager.broadcast(AppEvent::JobReasoning {
+            job_id: job_id.clone(),
+            narrative: "Decided to analyze README first".to_string(),
+            decisions: vec![crate::channels::web::types::ToolDecisionDto {
+                tool_name: "read_file".to_string(),
+                rationale: "Get project overview".to_string(),
+            }],
+        });
+
+        // Verify all 7 events received in order
+        for i in 0..7 {
+            assert!(stream.next().await.is_some(), "Should receive event {}", i);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_approval_needed_event() {
+        let manager = SseManager::new();
+        let mut stream = Box::pin(
+            manager
+                .subscribe_raw(Some("user1".to_string()))
+                .expect("subscribe"),
+        );
+
+        manager.broadcast_for_user(
+            "user1",
+            AppEvent::ApprovalNeeded {
+                request_id: "req-123".to_string(),
+                tool_name: "terminal".to_string(),
+                description: "Execute shell command".to_string(),
+                parameters: r#"{"command": "rm -rf /"}"#.to_string(),
+                thread_id: Some("thread-123".to_string()),
+                allow_always: false,
+            },
+        );
+
+        let e = stream.next().await.unwrap();
+        match e {
+            AppEvent::ApprovalNeeded {
+                request_id,
+                tool_name,
+                allow_always,
+                ..
+            } => {
+                assert_eq!(request_id, "req-123");
+                assert_eq!(tool_name, "terminal");
+                assert!(!allow_always);
+            }
+            _ => panic!("Expected ApprovalNeeded event"),
+        }
+    }
 }

@@ -1361,17 +1361,34 @@ mod tests {
     #[test]
     fn test_format_history_line_variations() {
         let id = Uuid::new_v4();
-        
+
         // Different prefixes
-        let line_star = format_history_line('*', id, "Idle/tg", "turns", 5, "2026-01-01T00:00:00Z", None);
+        let line_star =
+            format_history_line('*', id, "Idle/tg", "turns", 5, "2026-01-01T00:00:00Z", None);
         assert!(line_star.starts_with("* "));
-        
-        let line_space = format_history_line(' ', id, "Processing/web", "msgs", 10, "2026-02-01T00:00:00Z", Some("Test"));
+
+        let line_space = format_history_line(
+            ' ',
+            id,
+            "Processing/web",
+            "msgs",
+            10,
+            "2026-02-01T00:00:00Z",
+            Some("Test"),
+        );
         assert!(line_space.starts_with("  "));
         assert!(line_space.contains("— Test"));
-        
+
         // Different states and channels
-        let line_completed = format_history_line(' ', id, "Completed/discord", "turns", 100, "2026-03-01T00:00:00Z", Some("Long title here"));
+        let line_completed = format_history_line(
+            ' ',
+            id,
+            "Completed/discord",
+            "turns",
+            100,
+            "2026-03-01T00:00:00Z",
+            Some("Long title here"),
+        );
         assert!(line_completed.contains("Completed/discord"));
         assert!(line_completed.contains("— Long title here"));
     }
@@ -1379,14 +1396,31 @@ mod tests {
     #[test]
     fn test_format_history_line_special_characters() {
         let id = Uuid::new_v4();
-        
+
         // Title with special chars
-        let line = format_history_line(' ', id, "Idle/tg", "turns", 1, "2026-01-01T00:00:00Z", Some("Test: with \"quotes\" & symbols"));
+        let line = format_history_line(
+            ' ',
+            id,
+            "Idle/tg",
+            "turns",
+            1,
+            "2026-01-01T00:00:00Z",
+            Some("Test: with \"quotes\" & symbols"),
+        );
         assert!(line.contains("Test: with \"quotes\" & symbols"));
-        
+
         // Empty string vs None
-        let line_empty = format_history_line(' ', id, "Idle/tg", "turns", 1, "2026-01-01T00:00:00Z", Some(""));
-        let line_none = format_history_line(' ', id, "Idle/tg", "turns", 1, "2026-01-01T00:00:00Z", None);
+        let line_empty = format_history_line(
+            ' ',
+            id,
+            "Idle/tg",
+            "turns",
+            1,
+            "2026-01-01T00:00:00Z",
+            Some(""),
+        );
+        let line_none =
+            format_history_line(' ', id, "Idle/tg", "turns", 1, "2026-01-01T00:00:00Z", None);
         assert_eq!(line_empty, line_none);
     }
 }

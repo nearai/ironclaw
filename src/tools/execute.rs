@@ -117,7 +117,10 @@ pub async fn execute_tool_with_safety(
 
     // Apply truncation based on SafetyConfig max_output_length
     // This ensures execute_tool_with_safety respects the safety layer's output limits
-    Ok(truncate_output_if_needed(output, safety.config().max_output_length))
+    Ok(truncate_output_if_needed(
+        output,
+        safety.config().max_output_length,
+    ))
 }
 
 /// Truncate output string if it exceeds max_length, preserving char boundaries.
@@ -134,7 +137,9 @@ fn truncate_output_if_needed(output: String, max_length: usize) -> String {
     let truncated = &output[..cut];
     format!(
         "{}\n\n[... truncated: showing {}/{} bytes]",
-        truncated, cut, output.len()
+        truncated,
+        cut,
+        output.len()
     )
 }
 

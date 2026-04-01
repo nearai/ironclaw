@@ -47,8 +47,8 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Bonjour/mDNS discovery | ✅ | ❌ | |
 | Tailscale integration | ✅ | ❌ | |
 | Health check endpoints | ✅ | ✅ | /api/health + /api/gateway/status + /healthz + /readyz, with channel-backed readiness probes |
-| `doctor` diagnostics | ✅ | 🚧 | 16 checks: settings, LLM, DB, embeddings, routines, gateway, MCP, skills, secrets, service, Docker daemon, tunnel binaries |
-| Agent event broadcast | ✅ | 🚧 | SSE broadcast manager exists (SseManager) but tool/job-state events not fully wired |
+|| `doctor` diagnostics | ✅ | 🚧 | 16 checks: settings, LLM, DB, embeddings, routines, gateway, MCP, skills, secrets, service, Docker daemon, tunnel binaries |
+|| Agent event broadcast | ✅ | ✅ | SSE broadcast manager (SseManager) with full tool/job-state event wiring: ToolStarted/Completed/Result, JobStarted/Message/ToolUse/ToolResult/Status/Result/Reasoning, ApprovalNeeded, AuthRequired/Completed, ImageGenerated, Suggestions, TurnCost, ReasoningUpdate, ExtensionStatus, Heartbeat. Multi-user scoping with user_id filtering. See docs/SSE_EVENT_SYSTEM.md |
 | Channel health monitor | ✅ | ❌ | Auto-restart with configurable interval |
 | Presence system | ✅ | ❌ | Beacons on connect, system presence for agents |
 | Trusted-proxy auth mode | ✅ | ❌ | Header-based auth for reverse proxies |
