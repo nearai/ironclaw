@@ -870,28 +870,41 @@ async fn validate_oidc_jwt(oidc: &OidcState, jwt: &str) -> Result<String, OidcEr
     Ok(sub)
 }
 
-/// Extract the `email` claim from an OIDC JWT without signature validation.
+/// Extract `email` and `email_verified` claims from an OIDC JWT without
+/// signature validation.
 ///
 /// Used only after signature has been validated by `validate_oidc_jwt()` to
 /// enforce domain restrictions.
-fn extract_oidc_email_claim(jwt: &str) -> Option<String> {
+fn extract_oidc_email_claims(jwt: &str) -> (Option<String>, bool) {
     let normalized = normalize_jwt_for_claims(jwt);
     let mut validation = Validation::default();
     validation.insecure_disable_signature_validation();
     validation.validate_aud = false;
     validation.validate_exp = false;
 
-    let data = jsonwebtoken::decode::<serde_json::Value>(
+    let data = match jsonwebtoken::decode::<serde_json::Value>(
         &normalized,
         &DecodingKey::from_secret(&[]),
         &validation,
-    )
-    .ok()?;
+    ) {
+        Ok(d) => d,
+        Err(_) => return (None, false),
+    };
 
-    data.claims
+    let email = data
+        .claims
         .get("email")
         .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
+        .map(|s| s.to_string());
+
+    // email_verified may be a boolean or a string "true"/"false".
+    let verified = match data.claims.get("email_verified") {
+        Some(serde_json::Value::Bool(b)) => *b,
+        Some(serde_json::Value::String(s)) => s == "true",
+        _ => false,
+    };
+
+    (email, verified)
 }
 
 // ── Token extraction helpers ─────────────────────────────────────────────
@@ -1019,8 +1032,19 @@ pub async fn auth_middleware(
         match validate_oidc_jwt(oidc, jwt).await {
             Ok(sub) => {
                 // Enforce email domain restriction if configured.
+                // Require a verified email — an unverified email could be
+                // set to any value and bypass the domain allowlist.
                 if !auth.oidc_allowed_domains.is_empty() {
-                    let email = extract_oidc_email_claim(jwt);
+                    let (email, email_verified) = extract_oidc_email_claims(jwt);
+                    if !email_verified {
+                        tracing::warn!(sub = %sub, email = ?email, "OIDC login rejected: domain restriction requires verified email");
+                        return (
+                            StatusCode::FORBIDDEN,
+                            "Login requires a verified email address from an authorized domain."
+                                .to_string(),
+                        )
+                            .into_response();
+                    }
                     if let Err(msg) = crate::channels::web::handlers::auth::check_email_domain(
                         email.as_deref(),
                         &auth.oidc_allowed_domains,

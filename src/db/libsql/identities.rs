@@ -228,6 +228,22 @@ impl IdentityStore for LibSqlBackend {
             return Err(DatabaseError::Query(e.to_string()));
         }
 
+        // Atomically promote to admin if this is the only user in the table.
+        // This prevents the TOCTOU race where two concurrent first logins both
+        // see an empty users table and both get role=admin.
+        let promote_result = conn
+            .execute(
+                "UPDATE users SET role = 'admin' \
+                 WHERE id = ?1 AND (SELECT COUNT(*) FROM users) = 1",
+                params![user.id.as_str()],
+            )
+            .await;
+
+        if let Err(e) = promote_result {
+            let _ = conn.execute("ROLLBACK", ()).await;
+            return Err(DatabaseError::Query(e.to_string()));
+        }
+
         conn.execute("COMMIT", ())
             .await
             .map_err(|e| DatabaseError::Query(e.to_string()))?;

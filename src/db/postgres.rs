@@ -112,6 +112,9 @@ impl ConversationStore for PgBackend {
                 &[&id, &conversation_id, &role, &content],
             )
             .await?;
+        if result > 0 {
+            self.store.touch_conversation(conversation_id).await?;
+        }
         Ok(result > 0)
     }
 
@@ -1098,6 +1101,16 @@ impl IdentityStore for PgBackend {
                 &identity.created_at,
                 &identity.updated_at,
             ],
+        )
+        .await?;
+
+        // Atomically promote to admin if this is the only user in the table.
+        // This prevents the TOCTOU race where two concurrent first logins both
+        // see an empty users table and both get role=admin.
+        tx.execute(
+            "UPDATE users SET role = 'admin' \
+             WHERE id = $1 AND (SELECT COUNT(*) FROM users) = 1",
+            &[&user.id],
         )
         .await?;
 

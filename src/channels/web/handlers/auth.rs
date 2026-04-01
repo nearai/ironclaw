@@ -290,8 +290,10 @@ async fn handle_callback(
     let redirect_to = flow.redirect_after.as_deref().unwrap_or("/");
 
     // Build the response with a session cookie.
+    // Use 303 See Other (not 307 Temporary) so POST callbacks (Apple form_post)
+    // are converted to GET on redirect, preventing the browser from re-POSTing.
     let cookie_value = build_session_cookie(&plaintext_token, is_secure(base_url));
-    let mut response = Redirect::temporary(redirect_to).into_response();
+    let mut response = Redirect::to(redirect_to).into_response();
     if let Ok(hv) = HeaderValue::from_str(&cookie_value) {
         response.headers_mut().insert(header::SET_COOKIE, hv);
     }
@@ -716,13 +718,10 @@ async fn resolve_user(
     }
 
     // 3. Create a new user.
-    // Note: has_any_users() + create is not atomic, so two concurrent first
-    // logins could both see false. This is acceptable — the second insert will
-    // succeed as a normal member, and the admin can promote via the admin API.
-    // A truly empty deployment (no bootstrap user) is the only window, and the
-    // unique constraint on user_identities prevents duplicate identity links.
-    let is_first_user = !store.has_any_users().await.map_err(|e| e.to_string())?;
-    let role = if is_first_user { "admin" } else { "member" };
+    // Role is always "member" here — create_user_with_identity atomically
+    // promotes to "admin" inside the DB transaction if this is the sole user,
+    // preventing the TOCTOU race where two concurrent first logins both get admin.
+    let role = "member";
 
     let user_id = Uuid::new_v4().to_string();
     let now = chrono::Utc::now();
