@@ -439,18 +439,35 @@ pub async fn near_verify_handler(
         _ => return (StatusCode::BAD_REQUEST, "Invalid nonce format").into_response(),
     };
     let message_str = format!("Sign in to IronClaw\nNonce: {}", body.nonce);
-    let payload = crate::channels::web::oauth::near::build_nep413_payload(
+
+    // Try NEP-413 borsh payload first, then fall back to raw message bytes.
+    // Different wallets may sign the structured NEP-413 payload or just the
+    // raw message string.
+    let nep413_payload = crate::channels::web::oauth::near::build_nep413_payload(
         &message_str,
         &nonce_bytes,
         "ironclaw",
     );
-    let message = payload.as_slice();
+    let raw_message = message_str.as_bytes();
 
-    // Verify the Ed25519 signature.
-    if let Err(e) =
-        crate::channels::web::oauth::near::verify_signature(&pub_key_bytes, &sig_bytes, message)
-    {
-        tracing::warn!(account_id = %body.account_id, error = %e, "NEAR signature verification failed");
+    let sig_valid = crate::channels::web::oauth::near::verify_signature(
+        &pub_key_bytes,
+        &sig_bytes,
+        &nep413_payload,
+    )
+    .is_ok()
+        || crate::channels::web::oauth::near::verify_signature(
+            &pub_key_bytes,
+            &sig_bytes,
+            raw_message,
+        )
+        .is_ok();
+
+    if !sig_valid {
+        tracing::warn!(
+            account_id = %body.account_id,
+            "NEAR signature verification failed (tried NEP-413 and raw message)"
+        );
         return (StatusCode::UNAUTHORIZED, "Invalid signature").into_response();
     }
 
