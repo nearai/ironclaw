@@ -1075,7 +1075,9 @@ impl Agent {
                         output.push_str("No active thread.\n");
                     }
 
-                    output.push_str("\nUse /history or /thread list to see all threads.");
+                    output.push_str(
+                        "\nUse /history or /thread list to see all threads.\nUse /history messages <id> [--limit N] [--page N] to inspect thread messages.",
+                    );
                     Ok(SubmissionResult::response(output))
                 } else if args.first().map(|s| s.as_str()) == Some("list") {
                     // /thread list - alias for /history

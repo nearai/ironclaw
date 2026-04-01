@@ -43,7 +43,7 @@
 - Submission parsing precedes chat handling.
 - Skills selected deterministically; tool approval/auth are special paths.
 - Persistent memory = workspace system (file-like semantics, chunking/search).
-- Thread commands: `/thread` (current info), `/thread list` (alias for `/history`), `/thread new`, `/thread <uuid>` (switch).
+- Thread commands: `/thread` (current info), `/thread list` (alias for `/history`), `/thread new`, `/thread <uuid>` (switch), `/history messages <id> [--limit N] [--page N]` (browse thread messages).
 
 ## Tools, Channels, Extensions
 - Built-in Rust tool: core internal capabilities.

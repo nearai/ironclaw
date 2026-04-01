@@ -197,6 +197,11 @@ Use /thread <id> to switch threads.
 /thread new                                     # Create new thread
 ```
 
+**Inspect thread messages:**
+```bash
+/history messages <id> [--limit N] [--page N]   # page 1 is newest; higher pages show older messages
+```
+
 **Key behaviors:**
 - `[DB]` indicator = thread exists in database but not yet hydrated in current session
 - `*` prefix = currently active thread
