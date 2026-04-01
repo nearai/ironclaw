@@ -3,7 +3,9 @@ use std::path::PathBuf;
 use secrecy::SecretString;
 
 use crate::bootstrap::ironclaw_base_dir;
-use crate::config::helpers::{optional_env, parse_optional_env, validate_base_url};
+use crate::config::helpers::{
+    allow_local_network, optional_env, parse_optional_env, validate_base_url,
+};
 use crate::error::ConfigError;
 use crate::llm::config::*;
 use crate::llm::registry::{ProviderProtocol, ProviderRegistry};
@@ -125,7 +127,7 @@ impl LlmConfig {
         // Session config (used by NearAI provider for OAuth/session-token auth)
         let nearai_auth_url = optional_env("NEARAI_AUTH_URL")?
             .unwrap_or_else(|| "https://private.near.ai".to_string());
-        validate_base_url(&nearai_auth_url, "NEARAI_AUTH_URL")?;
+        validate_base_url(&nearai_auth_url, "NEARAI_AUTH_URL", false, false)?;
         let session = SessionConfig {
             auth_base_url: nearai_auth_url,
             session_path: optional_env("NEARAI_SESSION_PATH")?
@@ -160,7 +162,7 @@ impl LlmConfig {
         } else {
             "https://private.near.ai".to_string()
         };
-        validate_base_url(&nearai_base_url, "NEARAI_BASE_URL")?;
+        validate_base_url(&nearai_base_url, "NEARAI_BASE_URL", false, false)?;
         let nearai = NearAiConfig {
             model: nearai_model,
             cheap_model: optional_env("NEARAI_CHEAP_MODEL")?,
@@ -255,10 +257,10 @@ impl LlmConfig {
                 .unwrap_or_else(|| "gpt-5.3-codex".to_string());
             let auth_endpoint = optional_env("OPENAI_CODEX_AUTH_URL")?
                 .unwrap_or_else(|| "https://auth.openai.com".to_string());
-            validate_base_url(&auth_endpoint, "OPENAI_CODEX_AUTH_URL")?;
+            validate_base_url(&auth_endpoint, "OPENAI_CODEX_AUTH_URL", false, false)?;
             let api_base_url = optional_env("OPENAI_CODEX_API_URL")?
                 .unwrap_or_else(|| "https://chatgpt.com/backend-api/codex".to_string());
-            validate_base_url(&api_base_url, "OPENAI_CODEX_API_URL")?;
+            validate_base_url(&api_base_url, "OPENAI_CODEX_API_URL", false, false)?;
             let client_id = optional_env("OPENAI_CODEX_CLIENT_ID")?
                 .unwrap_or_else(|| "app_EMoamEEZ73f0CkXaXp7hrann".to_string());
             let session_path = optional_env("OPENAI_CODEX_SESSION_PATH")?
@@ -357,6 +359,8 @@ impl LlmConfig {
             validate_base_url(
                 &base_url,
                 &format!("custom provider '{}' base_url", custom.id),
+                allow_local_network()?,
+                true,
             )?;
         }
 
@@ -530,7 +534,7 @@ impl LlmConfig {
         // Validate base URL to prevent SSRF (#1103).
         if !base_url.is_empty() {
             let field = base_url_env.unwrap_or("LLM_BASE_URL");
-            validate_base_url(&base_url, field)?;
+            validate_base_url(&base_url, field, allow_local_network()?, true)?;
         }
 
         // Resolve model: selected_model (DB) > per-provider override (DB) > env var > registry default

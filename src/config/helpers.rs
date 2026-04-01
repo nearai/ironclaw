@@ -186,6 +186,83 @@ pub(crate) fn parse_string_env(
     Ok(optional_env(key)?.unwrap_or_else(|| default.into()))
 }
 
+/// Returns true if the IP is a cloud metadata endpoint (169.254.169.254)
+/// or its IPv4-mapped IPv6 equivalent. Always blocked regardless of config.
+fn is_cloud_metadata(ip: &std::net::IpAddr) -> bool {
+    use std::net::Ipv4Addr;
+    let metadata = Ipv4Addr::new(169, 254, 169, 254);
+    match ip {
+        std::net::IpAddr::V4(v4) => *v4 == metadata,
+        std::net::IpAddr::V6(v6) => v6.to_ipv4_mapped().is_some_and(|v4| v4 == metadata),
+    }
+}
+
+/// Check whether an IPv4 address is in a dangerous range.
+/// When `allow_local` is true, private (RFC 1918) and loopback IPs are permitted.
+fn is_dangerous_ipv4(v4: &std::net::Ipv4Addr, allow_local: bool) -> bool {
+    let is_private_or_loopback = v4.is_private() || v4.is_loopback();
+    if allow_local && is_private_or_loopback {
+        return false;
+    }
+    is_private_or_loopback
+        || v4.is_link_local()
+        || v4.is_multicast()
+        || v4.is_unspecified()
+        || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xC0) == 64) // CGN 100.64.0.0/10
+}
+
+/// Check whether an IP is in a blocked range (private, loopback,
+/// link-local, multicast, metadata, CGN, ULA).
+/// When `allow_local` is true, private/loopback IPs are permitted but
+/// cloud metadata and other non-routable IPs remain blocked.
+fn is_dangerous_ip(ip: &std::net::IpAddr, allow_local: bool) -> bool {
+    use std::net::IpAddr;
+    if is_cloud_metadata(ip) {
+        return true;
+    }
+    match ip {
+        IpAddr::V4(v4) => is_dangerous_ipv4(v4, allow_local),
+        IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                is_dangerous_ipv4(&v4, allow_local)
+            } else {
+                let is_loopback = v6.is_loopback();
+                let is_ula = (v6.octets()[0] & 0xfe) == 0xfc; // fc00::/7
+                if allow_local && (is_loopback || is_ula) {
+                    return false;
+                }
+                is_loopback
+                    || v6.is_unspecified()
+                    || is_ula
+                    || (v6.segments()[0] & 0xffc0) == 0xfe80 // link-local (fe80::/10)
+                    || v6.octets()[0] == 0xff // multicast (ff00::/8)
+            }
+        }
+    }
+}
+
+/// Returns true if the IP is a private/LAN address (RFC 1918, loopback, ULA).
+fn is_private_ip(ip: &std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => v4.is_private() || v4.is_loopback(),
+        std::net::IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                v4.is_private() || v4.is_loopback()
+            } else {
+                v6.is_loopback() || (v6.octets()[0] & 0xfe) == 0xfc // ULA fc00::/7
+            }
+        }
+    }
+}
+
+/// Read `LLM_ALLOW_LOCAL_NETWORK` env var.
+///
+/// Returns `ConfigError` if the value is set but not a valid boolean,
+/// so misconfigurations surface immediately instead of silently defaulting.
+pub(crate) fn allow_local_network() -> Result<bool, ConfigError> {
+    parse_bool_env("LLM_ALLOW_LOCAL_NETWORK", false)
+}
+
 /// Validate a user-configurable base URL to prevent SSRF attacks (#1103).
 ///
 /// Rejects:
@@ -193,10 +270,23 @@ pub(crate) fn parse_string_env(
 /// - HTTPS URLs pointing at private/loopback/link-local IPs
 /// - HTTP URLs pointing at anything other than localhost/127.0.0.1/::1
 ///
+/// When `allow_local` is true, private/LAN IPs are permitted over both
+/// HTTP and HTTPS. Cloud metadata endpoints remain blocked regardless.
+///
 /// This is intended for config-time validation of base URLs like
 /// `OLLAMA_BASE_URL`, `EMBEDDING_BASE_URL`, `NEARAI_BASE_URL`, etc.
-pub(crate) fn validate_base_url(url: &str, field_name: &str) -> Result<(), ConfigError> {
-    use std::net::{IpAddr, Ipv4Addr};
+///
+/// When `hint_local_env` is true, error messages will suggest setting
+/// `LLM_ALLOW_LOCAL_NETWORK=true` for private/LAN IPs. Callers that
+/// hardcode `allow_local=false` (e.g. auth endpoints) should pass
+/// `hint_local_env=false` to avoid misleading suggestions.
+pub(crate) fn validate_base_url(
+    url: &str,
+    field_name: &str,
+    allow_local: bool,
+    hint_local_env: bool,
+) -> Result<(), ConfigError> {
+    use std::net::IpAddr;
 
     let parsed = reqwest::Url::parse(url).map_err(|e| ConfigError::InvalidValue {
         key: field_name.to_string(),
@@ -218,69 +308,87 @@ pub(crate) fn validate_base_url(url: &str, field_name: &str) -> Result<(), Confi
 
     let host_lower = host.to_lowercase();
 
+    // Only suggest LLM_ALLOW_LOCAL_NETWORK for RFC 1918 private IPs,
+    // not for metadata, CGN, link-local, or other non-routable addresses.
+    // Suppress hint entirely when caller hardcodes allow_local (hint_local_env=false).
+    let ssrf_hint_for = |ip: &std::net::IpAddr| -> &'static str {
+        if allow_local || !hint_local_env {
+            return "";
+        }
+        match ip {
+            std::net::IpAddr::V4(v4) if v4.is_private() || v4.is_loopback() => {
+                " Set LLM_ALLOW_LOCAL_NETWORK=true to allow local network endpoints."
+            }
+            std::net::IpAddr::V6(v6) => {
+                if v6.is_loopback() || (v6.octets()[0] & 0xfe) == 0xfc {
+                    " Set LLM_ALLOW_LOCAL_NETWORK=true to allow local network endpoints."
+                } else if let Some(v4) = v6.to_ipv4_mapped() {
+                    if v4.is_private() || v4.is_loopback() {
+                        " Set LLM_ALLOW_LOCAL_NETWORK=true to allow local network endpoints."
+                    } else {
+                        ""
+                    }
+                } else {
+                    ""
+                }
+            }
+            _ => "",
+        }
+    };
+
     // For HTTP (non-TLS), only allow localhost — remote HTTP endpoints
     // risk credential leakage (e.g. NEAR AI bearer tokens sent over plaintext).
+    // When `allow_local` is true, also permit private/LAN IPs over HTTP
+    // (common for self-hosted Ollama, vLLM, LocalAI on the local network).
     if scheme == "http" {
         let is_localhost = host_lower == "localhost"
             || host_lower == "127.0.0.1"
             || host_lower == "::1"
             || host_lower == "[::1]"
             || host_lower.ends_with(".localhost");
-        if !is_localhost {
+        if is_localhost {
+            return Ok(());
+        }
+        if !allow_local {
+            let hint = if hint_local_env {
+                " Set LLM_ALLOW_LOCAL_NETWORK=true to allow local network endpoints."
+            } else {
+                ""
+            };
             return Err(ConfigError::InvalidValue {
                 key: field_name.to_string(),
                 message: format!(
                     "HTTP (non-TLS) is only allowed for localhost, got '{}'. \
-                     Use HTTPS for remote endpoints.",
-                    host
+                     Use HTTPS for remote endpoints.{}",
+                    host, hint
                 ),
             });
         }
-        return Ok(());
+        // allow_local=true: validate IP/hostname to ensure it's actually local,
+        // blocking public hosts and non-routable addresses over plaintext.
     }
 
-    // Check whether an IP is in a blocked range (private, loopback,
-    // link-local, multicast, metadata, CGN, ULA).
-    let is_dangerous_ip = |ip: &IpAddr| -> bool {
-        match ip {
-            IpAddr::V4(v4) => {
-                v4.is_private()
-                    || v4.is_loopback()
-                    || v4.is_link_local()
-                    || v4.is_multicast()
-                    || v4.is_unspecified()
-                    || *v4 == Ipv4Addr::new(169, 254, 169, 254)
-                    || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xC0) == 64) // CGN
-            }
-            IpAddr::V6(v6) => {
-                if let Some(v4) = v6.to_ipv4_mapped() {
-                    v4.is_private()
-                        || v4.is_loopback()
-                        || v4.is_link_local()
-                        || v4.is_multicast()
-                        || v4.is_unspecified()
-                        || v4 == Ipv4Addr::new(169, 254, 169, 254)
-                        || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xC0) == 64) // CGN
-                } else {
-                    v6.is_loopback()
-                        || v6.is_unspecified()
-                        || (v6.octets()[0] & 0xfe) == 0xfc // ULA (fc00::/7)
-                        || (v6.segments()[0] & 0xffc0) == 0xfe80 // link-local (fe80::/10)
-                        || v6.octets()[0] == 0xff // multicast (ff00::/8)
-                }
-            }
-        }
-    };
-
-    // For HTTPS, reject private/loopback/link-local/metadata IPs.
+    // Validate the host IP (both HTTP with allow_local and HTTPS).
     // Check both IP literals and resolved hostnames to prevent DNS-based SSRF.
     if let Ok(ip) = host.parse::<IpAddr>() {
-        if is_dangerous_ip(&ip) {
+        if is_dangerous_ip(&ip, allow_local) {
             return Err(ConfigError::InvalidValue {
                 key: field_name.to_string(),
                 message: format!(
                     "URL points to a private/internal IP '{}'. \
-                     This is blocked to prevent SSRF attacks.",
+                     This is blocked to prevent SSRF attacks.{}",
+                    ip,
+                    ssrf_hint_for(&ip)
+                ),
+            });
+        }
+        // For HTTP with allow_local: only permit actually-private IPs, not public ones.
+        if scheme == "http" && !ip.is_loopback() && !is_private_ip(&ip) {
+            return Err(ConfigError::InvalidValue {
+                key: field_name.to_string(),
+                message: format!(
+                    "HTTP (non-TLS) with LLM_ALLOW_LOCAL_NETWORK only permits \
+                     private/LAN IPs, got public IP '{}'. Use HTTPS for remote endpoints.",
                     ip
                 ),
             });
@@ -292,26 +400,47 @@ pub(crate) fn validate_base_url(url: &str, field_name: &str) -> Result<(), Confi
         // would require pinning the resolved IP in the HTTP client's connector.
         // This validation catches the common case of misconfigured or malicious URLs.
         //
-        // NOTE: `to_socket_addrs()` performs blocking DNS resolution. This is
-        // acceptable because `validate_base_url` runs at config-load time only,
-        // before the async runtime is fully driving I/O. If this ever moves to
-        // a hot path, wrap in `tokio::task::spawn_blocking` or use
-        // `tokio::net::lookup_host`.
+        // NOTE: `to_socket_addrs()` performs blocking DNS resolution. At
+        // config-load time this is fine (runs before the async runtime drives
+        // I/O). Callers on async paths (e.g. web handlers) MUST wrap this
+        // function in `tokio::task::spawn_blocking` to avoid stalling a
+        // worker thread.
         use std::net::ToSocketAddrs;
-        let port = parsed.port().unwrap_or(443);
+        let port = parsed
+            .port()
+            .unwrap_or(if scheme == "https" { 443 } else { 80 });
         match (host, port).to_socket_addrs() {
             Ok(addrs) => {
-                for addr in addrs {
-                    if is_dangerous_ip(&addr.ip()) {
+                let addrs: Vec<_> = addrs.collect();
+                for addr in &addrs {
+                    if is_dangerous_ip(&addr.ip(), allow_local) {
                         return Err(ConfigError::InvalidValue {
                             key: field_name.to_string(),
                             message: format!(
                                 "hostname '{}' resolves to private/internal IP '{}'. \
-                                 This is blocked to prevent SSRF attacks.",
+                                 This is blocked to prevent SSRF attacks.{}",
                                 host,
-                                addr.ip()
+                                addr.ip(),
+                                ssrf_hint_for(&addr.ip())
                             ),
                         });
+                    }
+                }
+                // For HTTP with allow_local: resolved IPs must be private, not public.
+                if scheme == "http" {
+                    for addr in &addrs {
+                        let ip = addr.ip();
+                        if !ip.is_loopback() && !is_private_ip(&ip) {
+                            return Err(ConfigError::InvalidValue {
+                                key: field_name.to_string(),
+                                message: format!(
+                                    "HTTP (non-TLS) with LLM_ALLOW_LOCAL_NETWORK only permits \
+                                     private/LAN hosts, but '{}' resolves to public IP '{}'. \
+                                     Use HTTPS for remote endpoints.",
+                                    host, ip
+                                ),
+                            });
+                        }
                     }
                 }
             }
@@ -500,111 +629,113 @@ mod tests {
     #[test]
     fn validate_base_url_allows_https() {
         // Use IP literals to avoid DNS resolution in sandboxed test environments.
-        assert!(validate_base_url("https://8.8.8.8", "TEST").is_ok());
-        assert!(validate_base_url("https://8.8.8.8/v1", "TEST").is_ok());
+        assert!(validate_base_url("https://8.8.8.8", "TEST", false, true).is_ok());
+        assert!(validate_base_url("https://8.8.8.8/v1", "TEST", false, true).is_ok());
     }
 
     #[test]
     fn validate_base_url_allows_http_localhost() {
-        assert!(validate_base_url("http://localhost:11434", "TEST").is_ok());
-        assert!(validate_base_url("http://127.0.0.1:11434", "TEST").is_ok());
-        assert!(validate_base_url("http://[::1]:11434", "TEST").is_ok());
+        assert!(validate_base_url("http://localhost:11434", "TEST", false, true).is_ok());
+        assert!(validate_base_url("http://127.0.0.1:11434", "TEST", false, true).is_ok());
+        assert!(validate_base_url("http://[::1]:11434", "TEST", false, true).is_ok());
     }
 
     #[test]
     fn validate_base_url_rejects_http_remote() {
-        assert!(validate_base_url("http://evil.example.com", "TEST").is_err());
-        assert!(validate_base_url("http://192.168.1.1", "TEST").is_err());
+        assert!(validate_base_url("http://evil.example.com", "TEST", false, true).is_err());
+        assert!(validate_base_url("http://192.168.1.1", "TEST", false, true).is_err());
     }
 
     #[test]
     fn validate_base_url_rejects_non_http_schemes() {
-        assert!(validate_base_url("file:///etc/passwd", "TEST").is_err());
-        assert!(validate_base_url("ftp://evil.com", "TEST").is_err());
+        assert!(validate_base_url("file:///etc/passwd", "TEST", false, true).is_err());
+        assert!(validate_base_url("ftp://evil.com", "TEST", false, true).is_err());
     }
 
     #[test]
     fn validate_base_url_rejects_cloud_metadata() {
-        assert!(validate_base_url("https://169.254.169.254", "TEST").is_err());
+        assert!(validate_base_url("https://169.254.169.254", "TEST", false, true).is_err());
     }
 
     #[test]
     fn validate_base_url_rejects_private_ips() {
-        assert!(validate_base_url("https://10.0.0.1", "TEST").is_err());
-        assert!(validate_base_url("https://192.168.1.1", "TEST").is_err());
-        assert!(validate_base_url("https://172.16.0.1", "TEST").is_err());
+        assert!(validate_base_url("https://10.0.0.1", "TEST", false, true).is_err());
+        assert!(validate_base_url("https://192.168.1.1", "TEST", false, true).is_err());
+        assert!(validate_base_url("https://172.16.0.1", "TEST", false, true).is_err());
     }
 
     #[test]
     fn validate_base_url_rejects_cgn_range() {
         // Carrier-grade NAT: 100.64.0.0/10
-        assert!(validate_base_url("https://100.64.0.1", "TEST").is_err());
-        assert!(validate_base_url("https://100.127.255.254", "TEST").is_err());
+        assert!(validate_base_url("https://100.64.0.1", "TEST", false, true).is_err());
+        assert!(validate_base_url("https://100.127.255.254", "TEST", false, true).is_err());
     }
 
     #[test]
     fn validate_base_url_rejects_ipv4_mapped_ipv6() {
         // ::ffff:10.0.0.1 is an IPv4-mapped IPv6 address pointing to private IP
-        assert!(validate_base_url("https://[::ffff:10.0.0.1]", "TEST").is_err());
-        assert!(validate_base_url("https://[::ffff:169.254.169.254]", "TEST").is_err());
+        assert!(validate_base_url("https://[::ffff:10.0.0.1]", "TEST", false, true).is_err());
+        assert!(
+            validate_base_url("https://[::ffff:169.254.169.254]", "TEST", false, true).is_err()
+        );
     }
 
     #[test]
     fn validate_base_url_rejects_ula_ipv6() {
         // fc00::/7 — unique local addresses
-        assert!(validate_base_url("https://[fc00::1]", "TEST").is_err());
-        assert!(validate_base_url("https://[fd12:3456:789a::1]", "TEST").is_err());
+        assert!(validate_base_url("https://[fc00::1]", "TEST", false, true).is_err());
+        assert!(validate_base_url("https://[fd12:3456:789a::1]", "TEST", false, true).is_err());
     }
 
     #[test]
     fn validate_base_url_handles_url_with_credentials() {
         // URLs with embedded credentials — validate_base_url checks the host,
         // not the credentials. Use IP literal to avoid DNS in sandboxed envs.
-        let result = validate_base_url("https://user:pass@8.8.8.8", "TEST");
+        let result = validate_base_url("https://user:pass@8.8.8.8", "TEST", false, true);
         assert!(result.is_ok());
     }
 
     #[test]
     fn validate_base_url_rejects_empty_and_invalid() {
-        assert!(validate_base_url("", "TEST").is_err());
-        assert!(validate_base_url("not-a-url", "TEST").is_err());
-        assert!(validate_base_url("://missing-scheme", "TEST").is_err());
+        assert!(validate_base_url("", "TEST", false, true).is_err());
+        assert!(validate_base_url("not-a-url", "TEST", false, true).is_err());
+        assert!(validate_base_url("://missing-scheme", "TEST", false, true).is_err());
     }
 
     #[test]
     fn validate_base_url_rejects_unspecified_ipv4() {
-        assert!(validate_base_url("https://0.0.0.0", "TEST").is_err());
+        assert!(validate_base_url("https://0.0.0.0", "TEST", false, true).is_err());
     }
 
     #[test]
     fn validate_base_url_rejects_ipv6_loopback_https() {
         // IPv6 loopback is allowed over HTTP (localhost equivalent),
         // but must be rejected over HTTPS as a dangerous IP.
-        assert!(validate_base_url("https://[::1]", "TEST").is_err());
+        assert!(validate_base_url("https://[::1]", "TEST", false, true).is_err());
     }
 
     #[test]
     fn validate_base_url_rejects_ipv6_link_local() {
         // fe80::/10 — link-local addresses
-        assert!(validate_base_url("https://[fe80::1]", "TEST").is_err());
+        assert!(validate_base_url("https://[fe80::1]", "TEST", false, true).is_err());
     }
 
     #[test]
     fn validate_base_url_rejects_ipv6_multicast() {
         // ff00::/8 — multicast addresses
-        assert!(validate_base_url("https://[ff02::1]", "TEST").is_err());
+        assert!(validate_base_url("https://[ff02::1]", "TEST", false, true).is_err());
     }
 
     #[test]
     fn validate_base_url_rejects_ipv6_unspecified() {
         // :: — unspecified address
-        assert!(validate_base_url("https://[::]", "TEST").is_err());
+        assert!(validate_base_url("https://[::]", "TEST", false, true).is_err());
     }
 
     #[test]
     fn validate_base_url_rejects_dns_failure() {
         // .invalid TLD is guaranteed to never resolve (RFC 6761)
-        let result = validate_base_url("https://ssrf-test.invalid", "TEST");
+        let result = validate_base_url("https://ssrf-test.invalid", "TEST", false, true);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
@@ -751,5 +882,132 @@ mod tests {
         assert_eq!(result, Some(99));
 
         unsafe { std::env::remove_var(key) };
+    }
+
+    // --- allow_local=true tests ---
+
+    #[test]
+    fn allow_local_permits_http_private_ip() {
+        assert!(validate_base_url("http://192.168.1.100:11434", "TEST", true, true).is_ok());
+        assert!(validate_base_url("http://10.0.0.5:8080", "TEST", true, true).is_ok());
+        assert!(validate_base_url("http://172.16.0.1:1234", "TEST", true, true).is_ok());
+    }
+
+    #[test]
+    fn allow_local_permits_https_private_ip() {
+        assert!(validate_base_url("https://192.168.1.100:8443", "TEST", true, true).is_ok());
+        assert!(validate_base_url("https://10.0.0.5:443", "TEST", true, true).is_ok());
+    }
+
+    #[test]
+    fn allow_local_still_blocks_cloud_metadata() {
+        assert!(validate_base_url("http://169.254.169.254", "TEST", true, true).is_err());
+        assert!(validate_base_url("https://169.254.169.254", "TEST", true, true).is_err());
+    }
+
+    #[test]
+    fn allow_local_rejects_http_public_ip() {
+        // Even with allow_local, HTTP to public IPs is still blocked
+        // to prevent credential leakage over plaintext.
+        assert!(validate_base_url("http://8.8.8.8:11434", "TEST", true, true).is_err());
+    }
+
+    #[test]
+    fn allow_local_rejects_http_evil_hostname() {
+        // Hostnames resolving to non-private IPs must be rejected over HTTP
+        // even with allow_local=true. .invalid TLD won't resolve at all.
+        assert!(validate_base_url("http://ssrf-test.invalid:11434", "TEST", true, true).is_err());
+    }
+
+    #[test]
+    fn allow_local_false_rejects_private_ip() {
+        assert!(validate_base_url("http://192.168.1.100:11434", "TEST", false, true).is_err());
+        assert!(validate_base_url("https://10.0.0.5:8080", "TEST", false, true).is_err());
+    }
+
+    #[test]
+    fn allow_local_ipv4_mapped_ipv6_metadata_blocked() {
+        // ::ffff:169.254.169.254 must remain blocked (cloud metadata) regardless of allow_local
+        assert!(validate_base_url("https://[::ffff:169.254.169.254]", "TEST", true, true).is_err());
+        assert!(
+            validate_base_url("https://[::ffff:169.254.169.254]", "TEST", false, true).is_err()
+        );
+    }
+
+    #[test]
+    fn allow_local_still_blocks_cgn_range() {
+        // CGN (100.64.0.0/10) must remain blocked even with allow_local=true
+        assert!(validate_base_url("https://100.64.0.1", "TEST", true, true).is_err());
+        assert!(validate_base_url("http://100.127.255.254:8080", "TEST", true, true).is_err());
+    }
+
+    #[test]
+    fn allow_local_still_blocks_unspecified() {
+        // 0.0.0.0 must remain blocked even with allow_local=true
+        assert!(validate_base_url("https://0.0.0.0", "TEST", true, true).is_err());
+    }
+
+    #[test]
+    fn ssrf_hint_only_for_rfc1918() {
+        // Private IPs should include the LLM_ALLOW_LOCAL_NETWORK hint
+        let err = validate_base_url("https://192.168.1.1", "TEST", false, true)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("LLM_ALLOW_LOCAL_NETWORK"),
+            "RFC 1918 IP should suggest LLM_ALLOW_LOCAL_NETWORK, got: {err}"
+        );
+
+        // Cloud metadata should NOT include the hint
+        let err = validate_base_url("https://169.254.169.254", "TEST", false, true)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            !err.contains("LLM_ALLOW_LOCAL_NETWORK"),
+            "Cloud metadata error should not suggest LLM_ALLOW_LOCAL_NETWORK, got: {err}"
+        );
+
+        // CGN should NOT include the hint
+        let err = validate_base_url("https://100.64.0.1", "TEST", false, true)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            !err.contains("LLM_ALLOW_LOCAL_NETWORK"),
+            "CGN error should not suggest LLM_ALLOW_LOCAL_NETWORK, got: {err}"
+        );
+    }
+
+    #[test]
+    fn hint_suppressed_for_hardcoded_callers() {
+        // When hint_local_env=false (auth endpoints that hardcode allow_local=false),
+        // the error should NOT suggest LLM_ALLOW_LOCAL_NETWORK since it won't help.
+        let err = validate_base_url("https://192.168.1.1", "TEST", false, false)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            !err.contains("LLM_ALLOW_LOCAL_NETWORK"),
+            "hint_local_env=false should suppress LLM_ALLOW_LOCAL_NETWORK hint, got: {err}"
+        );
+
+        // HTTP rejection should also not suggest the env var
+        let err = validate_base_url("http://192.168.1.1", "TEST", false, false)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            !err.contains("LLM_ALLOW_LOCAL_NETWORK"),
+            "HTTP rejection with hint_local_env=false should suppress hint, got: {err}"
+        );
+    }
+
+    #[test]
+    fn allow_local_network_env_propagates_error() {
+        let _guard = lock_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe { std::env::set_var("LLM_ALLOW_LOCAL_NETWORK", "banana") };
+        let result = allow_local_network();
+        assert!(result.is_err(), "invalid bool should propagate error");
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("must be 'true' or 'false'"), "got: {err}");
+        unsafe { std::env::remove_var("LLM_ALLOW_LOCAL_NETWORK") };
     }
 }

@@ -1,6 +1,8 @@
 use secrecy::SecretString;
 
-use crate::config::helpers::{optional_env, parse_bool_env, validate_base_url};
+use crate::config::helpers::{
+    allow_local_network, optional_env, parse_bool_env, validate_base_url,
+};
 use crate::error::ConfigError;
 use crate::settings::Settings;
 
@@ -63,7 +65,7 @@ impl TranscriptionConfig {
 
         // Validate base URL to prevent SSRF (#1103).
         if let Some(ref url) = base_url {
-            validate_base_url(url, "TRANSCRIPTION_BASE_URL")?;
+            validate_base_url(url, "TRANSCRIPTION_BASE_URL", allow_local_network()?, true)?;
         }
 
         Ok(Self {

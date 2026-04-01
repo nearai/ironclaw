@@ -6,7 +6,7 @@ use axum::{Json, extract::State};
 
 use crate::channels::web::auth::AuthenticatedUser;
 use crate::channels::web::server::GatewayState;
-use crate::config::helpers::validate_base_url;
+use crate::config::helpers::{allow_local_network, validate_base_url};
 
 // ---------------------------------------------------------------------------
 // Test connection
@@ -56,11 +56,34 @@ pub async fn llm_test_connection_handler(
 }
 
 async fn test_provider_connection(req: TestConnectionRequest) -> TestConnectionResponse {
-    if let Err(e) = validate_base_url(&req.base_url, "base_url") {
-        return TestConnectionResponse {
-            ok: false,
-            message: format!("Invalid base URL: {e}"),
-        };
+    let allow_local = match allow_local_network() {
+        Ok(v) => v,
+        Err(e) => {
+            return TestConnectionResponse {
+                ok: false,
+                message: format!("Invalid LLM_ALLOW_LOCAL_NETWORK value: {e}"),
+            };
+        }
+    };
+    // validate_base_url does blocking DNS resolution; run off the async executor.
+    let base_url = req.base_url.clone();
+    let validation = tokio::task::spawn_blocking(move || {
+        validate_base_url(&base_url, "base_url", allow_local, true)
+    });
+    match validation.await {
+        Ok(Err(e)) => {
+            return TestConnectionResponse {
+                ok: false,
+                message: format!("Invalid base URL: {e}"),
+            };
+        }
+        Err(e) => {
+            return TestConnectionResponse {
+                ok: false,
+                message: format!("URL validation failed: {e}"),
+            };
+        }
+        Ok(Ok(())) => {}
     }
 
     if req.model.trim().is_empty() {
@@ -234,12 +257,37 @@ pub async fn llm_list_models_handler(
 }
 
 async fn fetch_provider_models(req: ListModelsRequest) -> ListModelsResponse {
-    if let Err(e) = validate_base_url(&req.base_url, "base_url") {
-        return ListModelsResponse {
-            ok: false,
-            models: vec![],
-            message: format!("Invalid base URL: {e}"),
-        };
+    let allow_local = match allow_local_network() {
+        Ok(v) => v,
+        Err(e) => {
+            return ListModelsResponse {
+                ok: false,
+                models: vec![],
+                message: format!("Invalid LLM_ALLOW_LOCAL_NETWORK value: {e}"),
+            };
+        }
+    };
+    // validate_base_url does blocking DNS resolution; run off the async executor.
+    let base_url = req.base_url.clone();
+    let validation = tokio::task::spawn_blocking(move || {
+        validate_base_url(&base_url, "base_url", allow_local, true)
+    });
+    match validation.await {
+        Ok(Err(e)) => {
+            return ListModelsResponse {
+                ok: false,
+                models: vec![],
+                message: format!("Invalid base URL: {e}"),
+            };
+        }
+        Err(e) => {
+            return ListModelsResponse {
+                ok: false,
+                models: vec![],
+                message: format!("URL validation failed: {e}"),
+            };
+        }
+        Ok(Ok(())) => {}
     }
 
     let client = match reqwest::Client::builder()
