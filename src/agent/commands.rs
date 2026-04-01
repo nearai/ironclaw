@@ -50,6 +50,41 @@ fn format_history_line(
     line
 }
 
+/// Parse pagination arguments from command arguments.
+///
+/// Returns `(limit, page)` with defaults and clamping applied.
+/// `limit` is clamped to `1..=200`, `page` to `1..=100`.
+/// `start_index` lets callers skip leading positional args (like thread_id).
+fn parse_pagination_args(args: &[String], start_index: usize) -> (i64, i64) {
+    let mut limit: i64 = 50;
+    let mut page: i64 = 1;
+    let mut i = start_index;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--limit" | "-l" => {
+                if i + 1 < args.len() {
+                    limit = args[i + 1].parse().unwrap_or(50);
+                    limit = limit.clamp(1, 200); // Cap at 200 to avoid excessive output
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            "--page" | "-p" => {
+                if i + 1 < args.len() {
+                    page = args[i + 1].parse().unwrap_or(1);
+                    page = page.clamp(1, 100);
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    (limit, page)
+}
+
 fn history_messages_page_window(
     total_messages: usize,
     limit: i64,
@@ -179,32 +214,7 @@ impl Agent {
         args: &[String],
     ) -> Result<String, Error> {
         // Parse pagination arguments: --limit N (default: 50), --page N (default: 1)
-        let mut limit: i64 = 50;
-        let mut page: i64 = 1;
-        let mut i = 0;
-        while i < args.len() {
-            match args[i].as_str() {
-                "--limit" | "-l" => {
-                    if i + 1 < args.len() {
-                        limit = args[i + 1].parse().unwrap_or(50);
-                        limit = limit.clamp(1, 200); // Cap at 200 to avoid excessive output
-                        i += 2;
-                    } else {
-                        i += 1;
-                    }
-                }
-                "--page" | "-p" => {
-                    if i + 1 < args.len() {
-                        page = args[i + 1].parse().unwrap_or(1);
-                        page = page.clamp(1, 100);
-                        i += 2;
-                    } else {
-                        i += 1;
-                    }
-                }
-                _ => i += 1,
-            }
-        }
+        let (limit, page) = parse_pagination_args(args, 0);
         let offset = (page - 1) * limit;
 
         let (session_id, active_thread, threads) = {
@@ -327,33 +337,8 @@ impl Agent {
             message: format!("Invalid UUID '{}': {}", thread_id_str, e),
         })?;
 
-        // Parse pagination arguments
-        let mut limit: i64 = 50;
-        let mut page: i64 = 1;
-        let mut i = 1;
-        while i < args.len() {
-            match args[i].as_str() {
-                "--limit" | "-l" => {
-                    if i + 1 < args.len() {
-                        limit = args[i + 1].parse().unwrap_or(50);
-                        limit = limit.clamp(1, 200);
-                        i += 2;
-                    } else {
-                        i += 1;
-                    }
-                }
-                "--page" | "-p" => {
-                    if i + 1 < args.len() {
-                        page = args[i + 1].parse().unwrap_or(1);
-                        page = page.clamp(1, 100);
-                        i += 2;
-                    } else {
-                        i += 1;
-                    }
-                }
-                _ => i += 1,
-            }
-        }
+        // Parse pagination arguments (start from index 1 to skip thread_id)
+        let (limit, page) = parse_pagination_args(args, 1);
 
         // Try to get messages from database first (persistent threads)
         if let Some(store) = tenant.store() {
@@ -1602,85 +1587,115 @@ mod tests {
     fn test_history_pagination_args_parsing() {
         // Test default values
         let args: Vec<String> = vec![];
-        let mut limit: i64 = 50;
-        let mut page: i64 = 1;
-        let mut i = 0;
-        while i < args.len() {
-            match args[i].as_str() {
-                "--limit" | "-l" => {
-                    if i + 1 < args.len() {
-                        limit = args[i + 1].parse().unwrap_or(50);
-                        limit = limit.clamp(1, 200);
-                        i += 2;
-                    } else {
-                        i += 1;
-                    }
-                }
-                "--page" | "-p" => {
-                    if i + 1 < args.len() {
-                        page = args[i + 1].parse().unwrap_or(1);
-                        page = page.clamp(1, 100);
-                        i += 2;
-                    } else {
-                        i += 1;
-                    }
-                }
-                _ => i += 1,
-            }
-        }
+        let (limit, page) = parse_pagination_args(&args, 0);
         assert_eq!(limit, 50);
         assert_eq!(page, 1);
 
         // Test custom limit
         let args: Vec<String> = vec!["--limit".to_string(), "25".to_string()];
-        limit = 50;
-        page = 1;
-        i = 0;
-        while i < args.len() {
-            match args[i].as_str() {
-                "--limit" | "-l" => {
-                    if i + 1 < args.len() {
-                        limit = args[i + 1].parse().unwrap_or(50);
-                        limit = limit.clamp(1, 200);
-                        i += 2;
-                    } else {
-                        i += 1;
-                    }
-                }
-                "--page" | "-p" => {
-                    if i + 1 < args.len() {
-                        page = args[i + 1].parse().unwrap_or(1);
-                        page = page.clamp(1, 100);
-                        i += 2;
-                    } else {
-                        i += 1;
-                    }
-                }
-                _ => i += 1,
-            }
-        }
+        let (limit, page) = parse_pagination_args(&args, 0);
         assert_eq!(limit, 25);
         assert_eq!(page, 1);
 
-        // Test clamping
+        // Test custom page
+        let args: Vec<String> = vec!["--page".to_string(), "3".to_string()];
+        let (limit, page) = parse_pagination_args(&args, 0);
+        assert_eq!(limit, 50);
+        assert_eq!(page, 3);
+
+        // Test short options
+        let args: Vec<String> = vec![
+            "-l".to_string(),
+            "10".to_string(),
+            "-p".to_string(),
+            "2".to_string(),
+        ];
+        let (limit, page) = parse_pagination_args(&args, 0);
+        assert_eq!(limit, 10);
+        assert_eq!(page, 2);
+
+        // Test limit clamping (max 200)
         let args: Vec<String> = vec!["--limit".to_string(), "500".to_string()];
-        limit = 50;
-        i = 0;
-        while i < args.len() {
-            match args[i].as_str() {
-                "--limit" | "-l" => {
-                    if i + 1 < args.len() {
-                        limit = args[i + 1].parse().unwrap_or(50);
-                        limit = limit.clamp(1, 200);
-                        i += 2;
-                    } else {
-                        i += 1;
-                    }
-                }
-                _ => i += 1,
-            }
-        }
-        assert_eq!(limit, 200); // Clamped to max
+        let (limit, page) = parse_pagination_args(&args, 0);
+        assert_eq!(limit, 200);
+        assert_eq!(page, 1);
+
+        // Test limit clamping (min 1)
+        let args: Vec<String> = vec!["--limit".to_string(), "0".to_string()];
+        let (limit, page) = parse_pagination_args(&args, 0);
+        assert_eq!(limit, 1);
+        assert_eq!(page, 1);
+
+        // Test negative values clamp to minimums
+        let args: Vec<String> = vec![
+            "--limit".to_string(),
+            "-5".to_string(),
+            "--page".to_string(),
+            "-2".to_string(),
+        ];
+        let (limit, page) = parse_pagination_args(&args, 0);
+        assert_eq!(limit, 1);
+        assert_eq!(page, 1);
+
+        // Test page clamping (min 1)
+        let args: Vec<String> = vec!["--page".to_string(), "0".to_string()];
+        let (limit, page) = parse_pagination_args(&args, 0);
+        assert_eq!(limit, 50);
+        assert_eq!(page, 1);
+
+        // Test page clamping (max 100)
+        let args: Vec<String> = vec!["--page".to_string(), "999".to_string()];
+        let (limit, page) = parse_pagination_args(&args, 0);
+        assert_eq!(limit, 50);
+        assert_eq!(page, 100);
+
+        // Test with start_index (for history messages command where arg[0] is thread_id)
+        let args: Vec<String> = vec![
+            "thread-id-uuid".to_string(),
+            "--limit".to_string(),
+            "75".to_string(),
+            "--page".to_string(),
+            "5".to_string(),
+        ];
+        let (limit, page) = parse_pagination_args(&args, 1);
+        assert_eq!(limit, 75);
+        assert_eq!(page, 5);
+
+        // Test mixed valid and unknown args
+        let args: Vec<String> = vec![
+            "unknown-arg".to_string(),
+            "--limit".to_string(),
+            "30".to_string(),
+            "another-unknown".to_string(),
+            "--page".to_string(),
+            "4".to_string(),
+        ];
+        let (limit, page) = parse_pagination_args(&args, 0);
+        assert_eq!(limit, 30);
+        assert_eq!(page, 4);
+
+        // Test missing value for --limit (should use default)
+        let args: Vec<String> = vec!["--limit".to_string()];
+        let (limit, page) = parse_pagination_args(&args, 0);
+        assert_eq!(limit, 50);
+        assert_eq!(page, 1);
+
+        // Test missing value for --page (should use default)
+        let args: Vec<String> = vec!["--page".to_string()];
+        let (limit, page) = parse_pagination_args(&args, 0);
+        assert_eq!(limit, 50);
+        assert_eq!(page, 1);
+
+        // Test invalid number parsing (should use defaults)
+        let args: Vec<String> = vec![
+            "--limit".to_string(),
+            "not-a-number".to_string(),
+            "--page".to_string(),
+            "also-not-a-number".to_string(),
+        ];
+        let (limit, page) = parse_pagination_args(&args, 0);
+        assert_eq!(limit, 50);
+        assert_eq!(page, 1);
     }
 
     #[test]
