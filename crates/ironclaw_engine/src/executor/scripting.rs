@@ -1366,6 +1366,8 @@ pub(crate) fn monty_to_string(obj: &MontyObject) -> String {
     }
 }
 
+// Dispatch logic moved to orchestrator.rs (__execute_action__ handler).
+// GatePaused is handled via EngineError → JSON in orchestrator.rs.
 // ── MontyObject ↔ JSON ──────────────────────────────────────
 
 pub(crate) fn monty_to_json(obj: &MontyObject) -> serde_json::Value {

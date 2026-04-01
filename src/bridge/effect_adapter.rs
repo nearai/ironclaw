@@ -92,6 +92,16 @@ impl EffectBridgeAdapter {
             .insert(tool_name.to_string());
     }
 
+    /// Revoke auto-approve for a tool (rollback on resume failure).
+    pub async fn revoke_auto_approve(&self, tool_name: &str) {
+        self.auto_approved.write().await.remove(tool_name);
+    }
+
+    /// Access the underlying tool registry (for param redaction, etc.).
+    pub fn tools(&self) -> &Arc<ToolRegistry> {
+        &self.tools
+    }
+
     /// Set the auth manager for pre-flight credential checks.
     pub async fn set_auth_manager(&self, mgr: Arc<AuthManager>) {
         *self.auth_manager.write().await = Some(mgr);

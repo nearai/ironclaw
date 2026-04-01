@@ -46,6 +46,15 @@ pub enum ThreadOutcome {
         call_id: String,
         parameters: serde_json::Value,
     },
+    /// A unified execution gate paused the thread. Replaces separate
+    /// `NeedApproval` and `NeedAuthentication` for new code paths.
+    GatePaused {
+        gate_name: String,
+        action_name: String,
+        call_id: String,
+        parameters: serde_json::Value,
+        resume_kind: crate::gate::ResumeKind,
+    },
 }
 
 /// A mailbox for sending signals to a running thread.

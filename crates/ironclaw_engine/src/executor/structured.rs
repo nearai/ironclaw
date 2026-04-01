@@ -241,25 +241,47 @@ pub async fn execute_action_calls(
 
     for (idx, slot) in slot_results.into_iter().enumerate() {
         if let Some((result, event)) = slot {
-            // Check for NeedAuthentication — record the first one as the
-            // batch interrupt but still collect all other results.
-            if first_interrupt.is_none()
-                && let EventKind::ActionFailed { ref error, .. } = event
-                && error.starts_with("authentication required")
-            {
-                let call = &calls[idx];
-                // Extract credential name from the error message
-                let credential_name = error
-                    .strip_prefix("authentication required for credential '")
-                    .and_then(|s| s.strip_suffix('\''))
-                    .unwrap_or("")
-                    .to_string();
-                first_interrupt = Some(ThreadOutcome::NeedAuthentication {
-                    credential_name,
-                    action_name: call.action_name.clone(),
-                    call_id: call.id.clone(),
-                    parameters: call.parameters.clone(),
-                });
+            // Check for NeedAuthentication or GatePaused — record the first
+            // one as the batch interrupt but still collect all other results.
+            if first_interrupt.is_none() {
+                if let EventKind::ActionFailed { ref error, .. } = event
+                    && error.starts_with("authentication required")
+                {
+                    let call = &calls[idx];
+                    let credential_name = error
+                        .strip_prefix("authentication required for credential '")
+                        .and_then(|s| s.strip_suffix('\''))
+                        .unwrap_or("")
+                        .to_string();
+                    first_interrupt = Some(ThreadOutcome::NeedAuthentication {
+                        credential_name,
+                        action_name: call.action_name.clone(),
+                        call_id: call.id.clone(),
+                        parameters: call.parameters.clone(),
+                    });
+                } else if let EventKind::ApprovalRequested {
+                    ref action_name,
+                    ref call_id,
+                } = event
+                    && result.output.get("status").and_then(|v| v.as_str()) == Some("gate_paused")
+                {
+                    let gate_name = result
+                        .output
+                        .get("gate")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown")
+                        .to_string();
+                    let call = &calls[idx];
+                    first_interrupt = Some(ThreadOutcome::GatePaused {
+                        gate_name,
+                        action_name: action_name.clone(),
+                        call_id: call_id.clone(),
+                        parameters: call.parameters.clone(),
+                        resume_kind: crate::gate::ResumeKind::Approval {
+                            allow_always: false,
+                        },
+                    });
+                }
             }
             results.push(result);
             events.push(event);
@@ -314,6 +336,26 @@ fn classify_exec_result(
                 call_id,
                 error: error_msg,
                 params_summary: None,
+            };
+            (error_result, event)
+        }
+        Err(EngineError::GatePaused {
+            gate_name,
+            action_name,
+            call_id,
+            ..
+        }) => {
+            let _error_msg = format!("gate paused: {gate_name}");
+            let error_result = ActionResult {
+                call_id: call.id.clone(),
+                action_name: call.action_name.clone(),
+                output: serde_json::json!({"status": "gate_paused", "gate": gate_name}),
+                is_error: true,
+                duration: std::time::Duration::ZERO,
+            };
+            let event = EventKind::ApprovalRequested {
+                action_name,
+                call_id,
             };
             (error_result, event)
         }

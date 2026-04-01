@@ -901,6 +901,33 @@ async fn handle_execute_action(
             });
             ExtFunctionResult::Return(json_to_monty(&result))
         }
+        Err(EngineError::GatePaused {
+            gate_name,
+            action_name: _,
+            call_id: _,
+            parameters: _,
+            resume_kind,
+        }) => {
+            let output = serde_json::json!({"status": "gate_paused", "gate_name": gate_name});
+            emit_and_record(
+                thread,
+                event_tx,
+                EventKind::ApprovalRequested {
+                    action_name: name.clone(),
+                    call_id: call_id.clone(),
+                },
+                &call_id,
+                &name,
+                &output,
+            );
+            let result = serde_json::json!({
+                "gate_paused": true,
+                "gate_name": gate_name,
+                "action_name": name,
+                "resume_kind": serde_json::to_value(&*resume_kind).unwrap_or_default(),
+            });
+            ExtFunctionResult::Return(json_to_monty(&result))
+        }
         Err(EngineError::NeedAuthentication {
             credential_name, ..
         }) => {
@@ -1323,6 +1350,26 @@ async fn execute_single_action(
             let result_json = serde_json::json!({
                 "need_approval": true,
                 "action_name": name,
+            });
+            (result_json, event, output)
+        }
+        Err(EngineError::GatePaused {
+            gate_name,
+            action_name: _,
+            call_id: _,
+            parameters: _,
+            resume_kind,
+        }) => {
+            let output = serde_json::json!({"status": "gate_paused", "gate_name": &gate_name});
+            let event = EventKind::ApprovalRequested {
+                action_name: name.to_string(),
+                call_id: call_id.to_string(),
+            };
+            let result_json = serde_json::json!({
+                "gate_paused": true,
+                "gate_name": gate_name,
+                "action_name": name,
+                "resume_kind": serde_json::to_value(&*resume_kind).unwrap_or_default(),
             });
             (result_json, event, output)
         }
@@ -1855,6 +1902,39 @@ fn parse_outcome(result: &serde_json::Value) -> ThreadOutcome {
                 .cloned()
                 .unwrap_or(serde_json::json!({})),
         },
+        "gate_paused" => {
+            let resume_kind_value = result
+                .get("resume_kind")
+                .cloned()
+                .unwrap_or(serde_json::json!({}));
+            let resume_kind = serde_json::from_value(resume_kind_value).unwrap_or(
+                crate::gate::ResumeKind::Approval {
+                    allow_always: false,
+                },
+            );
+            ThreadOutcome::GatePaused {
+                gate_name: result
+                    .get("gate_name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown")
+                    .to_string(),
+                action_name: result
+                    .get("action_name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                call_id: result
+                    .get("call_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                parameters: result
+                    .get("parameters")
+                    .cloned()
+                    .unwrap_or(serde_json::json!({})),
+                resume_kind,
+            }
+        }
         _ => ThreadOutcome::Completed { response: None },
     }
 }

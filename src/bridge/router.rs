@@ -122,6 +122,9 @@ struct EngineState {
     pending_approvals: RwLock<HashMap<String, PendingApproval>>,
     /// Per-user pending credential auth (keyed by user_id).
     pending_auth: RwLock<HashMap<String, PendingAuth>>,
+    /// Unified pending gate store — keyed by (user_id, thread_id).
+    /// New code paths should use this instead of the legacy per-user maps.
+    pending_gates: Arc<crate::gate::store::PendingGateStore>,
     /// SSE manager for broadcasting AppEvents to the web gateway.
     sse: Option<Arc<SseManager>>,
     /// V1 database for writing conversation messages (gateway reads from here).
@@ -464,6 +467,7 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
         default_project_id: project_id,
         pending_approvals: RwLock::new(HashMap::new()),
         pending_auth: RwLock::new(HashMap::new()),
+        pending_gates: Arc::new(crate::gate::store::PendingGateStore::in_memory()),
         sse: agent.deps.sse_tx.clone(),
         db: agent.deps.store.clone(),
         secrets_store: agent.tools().secrets_store().cloned(),
@@ -905,6 +909,233 @@ async fn process_resolved_approval(
         .is_some_and(|cached| cached.thread_id == pending.thread_id)
     {
         approvals.remove(&message.user_id);
+    }
+
+    await_thread_outcome(
+        agent,
+        state,
+        message,
+        pending.conversation_id,
+        pending.thread_id,
+    )
+    .await
+}
+
+/// Resolve a unified pending gate.
+///
+/// This is the single entry point for resolving gates stored in the
+/// [`PendingGateStore`]. It atomically verifies request_id, channel
+/// authorization, and expiry before resuming or stopping the thread.
+///
+/// Replaces the separate approval and auth resolution paths for new
+/// code paths using the unified gate abstraction.
+pub async fn resolve_gate(
+    agent: &Agent,
+    message: &IncomingMessage,
+    thread_id: ironclaw_engine::ThreadId,
+    request_id: uuid::Uuid,
+    resolution: ironclaw_engine::GateResolution,
+) -> Result<Option<String>, Error> {
+    init_engine(agent).await?;
+
+    let lock = ENGINE_STATE
+        .get()
+        .ok_or_else(|| engine_err("init", "engine state not initialized"))?;
+    let guard = lock.read().await;
+    let state = guard
+        .as_ref()
+        .ok_or_else(|| engine_err("init", "engine state is empty"))?;
+
+    let key = crate::gate::pending::PendingGateKey {
+        user_id: message.user_id.clone(),
+        thread_id,
+    };
+
+    let pending = state
+        .pending_gates
+        .take_verified(&key, request_id, &message.channel)
+        .await
+        .map_err(|e| {
+            use crate::gate::store::GateStoreError;
+            match e {
+                GateStoreError::ChannelMismatch { expected, actual } => engine_err(
+                    "authorization",
+                    format!("Channel '{actual}' cannot resolve gates from channel '{expected}'"),
+                ),
+                GateStoreError::RequestIdMismatch => {
+                    engine_err("stale", "Approval request is stale or already resolved")
+                }
+                GateStoreError::Expired => engine_err("expired", "Approval request has expired"),
+                other => engine_err("gate", other),
+            }
+        })?;
+
+    match resolution {
+        ironclaw_engine::GateResolution::Approved { always } => {
+            if always {
+                state
+                    .effect_adapter
+                    .auto_approve_tool(&pending.action_name)
+                    .await;
+                // Also approve hyphenated variant
+                let registry_name = pending.action_name.replace('_', "-");
+                state.effect_adapter.auto_approve_tool(&registry_name).await;
+            }
+
+            let resume_msg = ironclaw_engine::ThreadMessage::user(format!(
+                "User approved action '{}'. Continue from the pending step \
+                 and reuse the approved action if still needed.",
+                pending.action_name
+            ));
+
+            state.effect_adapter.reset_call_count();
+            match state
+                .thread_manager
+                .resume_thread(
+                    pending.thread_id,
+                    message.user_id.clone(),
+                    Some(resume_msg),
+                    Some((pending.call_id.clone(), true)),
+                )
+                .await
+            {
+                Ok(()) => {}
+                Err(e) => {
+                    // Rollback auto-approve on resume failure (fix: e75fa8c4)
+                    // Revoke both underscore and hyphenated variants
+                    if always {
+                        let registry_name = pending.action_name.replace('_', "-");
+                        state
+                            .effect_adapter
+                            .revoke_auto_approve(&pending.action_name)
+                            .await;
+                        state
+                            .effect_adapter
+                            .revoke_auto_approve(&registry_name)
+                            .await;
+                    }
+                    return Err(engine_err("resume error", e));
+                }
+            }
+        }
+
+        ironclaw_engine::GateResolution::Denied { reason } => {
+            let _ = agent
+                .channels
+                .send_status(
+                    &message.channel,
+                    StatusUpdate::Status("Tool call denied.".into()),
+                    &message.metadata,
+                )
+                .await;
+
+            let deny_msg = ironclaw_engine::ThreadMessage::user(format!(
+                "User denied action '{}'. Do not execute it; choose an alternative approach.{}",
+                pending.action_name,
+                reason
+                    .as_deref()
+                    .map(|r| format!(" Reason: {r}"))
+                    .unwrap_or_default()
+            ));
+
+            state.effect_adapter.reset_call_count();
+            state
+                .thread_manager
+                .resume_thread(
+                    pending.thread_id,
+                    message.user_id.clone(),
+                    Some(deny_msg),
+                    Some((pending.call_id.clone(), false)),
+                )
+                .await
+                .map_err(|e| engine_err("resume error", e))?;
+        }
+
+        ironclaw_engine::GateResolution::Cancelled => {
+            // Stop the thread entirely (fix: 49b4c398 — cancel during auth
+            // was misrouted to approval handler)
+            if let Err(e) = state
+                .thread_manager
+                .stop_thread(pending.thread_id, &message.user_id)
+                .await
+            {
+                tracing::debug!(error = %e, "Failed to stop thread on cancel");
+            }
+            return Ok(Some("Cancelled.".into()));
+        }
+
+        ironclaw_engine::GateResolution::CredentialProvided { token } => {
+            // Store credential then RESUME (not retry) — preserves thread work
+            if let ironclaw_engine::ResumeKind::Authentication {
+                ref credential_name,
+                ..
+            } = pending.resume_kind
+            {
+                if let Some(ref ss) = state.secrets_store {
+                    let params = crate::secrets::CreateSecretParams::new(credential_name, &token);
+                    ss.create(&message.user_id, params)
+                        .await
+                        .map_err(|e| engine_err("secrets", e))?;
+
+                    let _ = agent
+                        .channels
+                        .send_status(
+                            &message.channel,
+                            StatusUpdate::AuthCompleted {
+                                extension_name: credential_name.clone(),
+                                success: true,
+                                message: format!(
+                                    "Credential '{}' stored. Resuming...",
+                                    credential_name
+                                ),
+                            },
+                            &message.metadata,
+                        )
+                        .await;
+                }
+
+                let resume_msg = ironclaw_engine::ThreadMessage::user(format!(
+                    "Credential '{}' stored. Retrying action '{}'.",
+                    credential_name, pending.action_name
+                ));
+
+                state.effect_adapter.reset_call_count();
+                state
+                    .thread_manager
+                    .resume_thread(
+                        pending.thread_id,
+                        message.user_id.clone(),
+                        Some(resume_msg),
+                        Some((pending.call_id.clone(), true)),
+                    )
+                    .await
+                    .map_err(|e| engine_err("resume error", e))?;
+            } else {
+                return Err(engine_err(
+                    "resolution mismatch",
+                    "CredentialProvided sent for non-authentication gate",
+                ));
+            }
+        }
+
+        ironclaw_engine::GateResolution::ExternalCallback { .. } => {
+            let resume_msg = ironclaw_engine::ThreadMessage::user(format!(
+                "External confirmation received for action '{}'.",
+                pending.action_name
+            ));
+
+            state.effect_adapter.reset_call_count();
+            state
+                .thread_manager
+                .resume_thread(
+                    pending.thread_id,
+                    message.user_id.clone(),
+                    Some(resume_msg),
+                    Some((pending.call_id.clone(), true)),
+                )
+                .await
+                .map_err(|e| engine_err("resume error", e))?;
+        }
     }
 
     await_thread_outcome(
@@ -1758,6 +1989,111 @@ async fn await_thread_outcome(
                 "Authentication required for '{}'. Paste your token below (or type 'cancel'):",
                 credential_name
             )))
+        }
+        ThreadOutcome::GatePaused {
+            gate_name,
+            action_name,
+            call_id,
+            parameters,
+            resume_kind,
+        } => {
+            use crate::gate::pending::PendingGate;
+
+            // Redact sensitive params before storing/broadcasting
+            let redacted_params =
+                if let Some(tool) = state.effect_adapter.tools().get(&action_name).await {
+                    crate::tools::redact_params(&parameters, tool.sensitive_params())
+                } else {
+                    parameters.clone()
+                };
+
+            // Store in unified PendingGateStore (keyed by user_id + thread_id)
+            let pending = PendingGate {
+                request_id: uuid::Uuid::new_v4(),
+                gate_name: gate_name.clone(),
+                user_id: message.user_id.clone(),
+                thread_id,
+                conversation_id: conv_id,
+                source_channel: message.channel.clone(),
+                action_name: action_name.clone(),
+                call_id,
+                parameters: redacted_params,
+                description: format!(
+                    "Tool '{}' requires {} (gate: {gate_name})",
+                    action_name,
+                    resume_kind.kind_name()
+                ),
+                resume_kind: resume_kind.clone(),
+                created_at: chrono::Utc::now(),
+                expires_at: chrono::Utc::now() + chrono::Duration::minutes(30),
+            };
+
+            if let Err(e) = state.pending_gates.insert(pending.clone()).await {
+                tracing::debug!(
+                    gate = %gate_name,
+                    error = %e,
+                    "failed to store pending gate (may be duplicate)"
+                );
+            }
+
+            // Send appropriate StatusUpdate via channel
+            match &resume_kind {
+                ironclaw_engine::ResumeKind::Approval { allow_always } => {
+                    let _ = agent
+                        .channels
+                        .send_status(
+                            &message.channel,
+                            StatusUpdate::ApprovalNeeded {
+                                request_id: pending.request_id.to_string(),
+                                tool_name: action_name.clone(),
+                                description: pending.description.clone(),
+                                parameters: pending.parameters.clone(),
+                                allow_always: *allow_always,
+                            },
+                            &message.metadata,
+                        )
+                        .await;
+
+                    Ok(Some(format!(
+                        "Tool '{}' requires approval. Reply 'yes' to approve, 'no' to deny.",
+                        action_name
+                    )))
+                }
+                ironclaw_engine::ResumeKind::Authentication {
+                    credential_name,
+                    instructions,
+                    auth_url,
+                } => {
+                    let _ = agent
+                        .channels
+                        .send_status(
+                            &message.channel,
+                            StatusUpdate::AuthRequired {
+                                extension_name: credential_name.clone(),
+                                instructions: Some(instructions.clone()),
+                                auth_url: auth_url.clone(),
+                                setup_url: None,
+                            },
+                            &message.metadata,
+                        )
+                        .await;
+
+                    Ok(Some(format!(
+                        "Authentication required for '{}'. Paste your token below (or type 'cancel'):",
+                        credential_name
+                    )))
+                }
+                ironclaw_engine::ResumeKind::External { callback_id } => {
+                    tracing::debug!(
+                        gate = %gate_name,
+                        callback = %callback_id,
+                        "GatePaused(External)"
+                    );
+                    Ok(Some(format!(
+                        "Waiting for external confirmation (gate: {gate_name})..."
+                    )))
+                }
+            }
         }
     };
 
@@ -3126,6 +3462,7 @@ mod tests {
             default_project_id: ironclaw_engine::ProjectId::new(),
             pending_approvals: RwLock::new(HashMap::new()),
             pending_auth: RwLock::new(HashMap::new()),
+            pending_gates: Arc::new(crate::gate::store::PendingGateStore::in_memory()),
             sse: None,
             db: None,
             secrets_store: None,

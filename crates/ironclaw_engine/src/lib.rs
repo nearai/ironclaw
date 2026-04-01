@@ -16,6 +16,7 @@
 
 pub mod capability;
 pub mod executor;
+pub mod gate;
 pub mod memory;
 pub mod reliability;
 pub mod runtime;
@@ -52,6 +53,15 @@ pub use capability::lease::LeaseManager;
 pub use capability::planner::{CapabilityGrantPlan, LeasePlanner};
 pub use capability::policy::{PolicyDecision, PolicyEngine};
 pub use capability::registry::CapabilityRegistry;
+
+// ── Re-exports: gate ─────────────────────────────────────────
+
+pub use gate::lease::LeaseGate;
+pub use gate::pipeline::GatePipeline;
+pub use gate::tool_tier::{ToolTier, classify_tool_tier};
+pub use gate::{
+    ExecutionGate, ExecutionMode, GateContext, GateDecision, GateResolution, ResumeKind,
+};
 
 // ── Re-exports: runtime ───────────────────────────────────────
 

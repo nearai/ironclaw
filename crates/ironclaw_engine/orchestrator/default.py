@@ -414,7 +414,24 @@ def run_loop(context, goal, actions, state, config):
                 __transition_to__("completed", "FINAL() in code")
                 return {"outcome": "completed", "response": result["final_answer"]}
 
-            # Check for approval or authentication needed
+            # Check for unified gate pause (new path)
+            if result.get("need_approval") is not None and isinstance(result["need_approval"], dict) and result["need_approval"].get("gate_paused"):
+                gate = result["need_approval"]
+                __save_checkpoint__(state, {
+                    "nudge_count": nudge_count,
+                    "consecutive_errors": consecutive_errors,
+                })
+                __transition_to__("waiting", "gate paused: " + gate.get("gate_name", "unknown"))
+                return {
+                    "outcome": "gate_paused",
+                    "gate_name": gate.get("gate_name", ""),
+                    "action_name": gate.get("action_name", ""),
+                    "call_id": gate.get("call_id", ""),
+                    "parameters": gate.get("parameters", {}),
+                    "resume_kind": gate.get("resume_kind", {}),
+                }
+
+            # Check for approval or authentication needed (legacy path)
             if result.get("need_approval") is not None:
                 approval = result["need_approval"]
                 __save_checkpoint__(state, {
@@ -467,9 +484,28 @@ def run_loop(context, goal, actions, state, config):
             results = __execute_actions_parallel__(calls)
 
             # Check results for auth/approval interrupts
-            for r in results:
+            for r_idx, r in enumerate(results):
                 if r is None:
                     continue
+
+                if r.get("gate_paused"):
+                    # Unified gate pause (replaces separate need_approval/need_authentication)
+                    __save_checkpoint__(state, {
+                        "nudge_count": consecutive_nudges,
+                        "consecutive_errors": consecutive_errors,
+                    })
+                    gate = r
+                    # Get action info from the original call or the result
+                    orig_call = calls[r_idx] if r_idx < len(calls) else {}
+                    __transition_to__("waiting", "gate paused: " + gate.get("gate_name", "unknown"))
+                    return {
+                        "outcome": "gate_paused",
+                        "gate_name": gate.get("gate_name", ""),
+                        "action_name": gate.get("action_name", orig_call.get("name", "")),
+                        "call_id": orig_call.get("call_id", ""),
+                        "parameters": orig_call.get("params", {}),
+                        "resume_kind": gate.get("resume_kind", {}),
+                    }
 
                 if r.get("need_authentication"):
                     __save_checkpoint__(state, {

@@ -79,6 +79,15 @@ pub enum EngineError {
 
     #[error("access denied: user '{user_id}' cannot access {entity}")]
     AccessDenied { user_id: String, entity: String },
+
+    #[error("gate paused: {gate_name} requires {action_name}")]
+    GatePaused {
+        gate_name: String,
+        action_name: String,
+        call_id: String,
+        parameters: Box<serde_json::Value>,
+        resume_kind: Box<crate::gate::ResumeKind>,
+    },
 }
 
 use crate::types::project::ProjectId;
