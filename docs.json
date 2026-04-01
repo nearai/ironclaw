@@ -42,33 +42,40 @@
                 ]
               },
               {
-                "group": "Core Capabilities",
+                "group": "Capabilities",
                 "icon": "cubes",
                 "pages": [
+                  "capabilities/overview",
                   {
-                    "group": "Memory",
+                    "group": "Core Capabilities",
                     "pages": [
-                      "capabilities/memory/memory",
-                      "capabilities/memory/identity"
+                      "security",
+                      {
+                        "group": "Memory",
+                        "pages": [
+                          "capabilities/memory/memory",
+                          "capabilities/memory/identity"
+                        ]
+                      },
+                      {
+                        "group": "Routines",
+                        "pages": [
+                          "capabilities/routines/cron",
+                          "capabilities/routines/heartbeat",
+                          "capabilities/routines/reactive"
+                        ]
+                      },
+                      {
+                        "group": "Jobs",
+                        "pages": [
+                          "capabilities/jobs/jobs",
+                          "capabilities/jobs/self-repair"
+                        ]
+                      },
+                      "capabilities/skills",
+                      "capabilities/sandboxed-tools"
                     ]
-                  },
-                  {
-                    "group": "Routines",
-                    "pages": [
-                      "capabilities/routines/cron",
-                      "capabilities/routines/heartbeat",
-                      "capabilities/routines/reactive"
-                    ]
-                  },
-                  {
-                    "group": "Jobs",
-                    "pages": [
-                      "capabilities/jobs/jobs",
-                      "capabilities/jobs/self-repair"
-                    ]
-                  },
-                  "capabilities/skills",
-                  "capabilities/sandboxed-tools"
+                  }
                 ]
               },
               {
@@ -77,7 +84,7 @@
                 "pages": [
                   "channels/overview",
                   {
-                    "group": "Built-in",
+                    "group": "Built-in Channels",
                     "pages": [
                       "tunnel",
                       "channels/local",
@@ -94,7 +101,7 @@
                 "pages": [
                   "extensions/overview",
                   {
-                    "group": "Built-in",
+                    "group": "Built-in Extensions",
                     "pages": [
                       "extensions/file-tools",
                       "extensions/github",

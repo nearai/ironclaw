@@ -6,7 +6,6 @@ description: Parallel job scheduling and the job state machine
 
 Every unit of work in IronClaw is a **job**. Jobs run in parallel, each with isolated context, and each progressing through a defined state machine until they complete, fail, or get recovered.
 
-
 ---
 
 ## Configuration
@@ -46,8 +45,6 @@ InProgress ──────────────┬──► Completed
 ### Transitions
 
 A job enters **Stuck** when the self-repair system detects it has been InProgress with no activity for longer than the configured timeout. The system then attempts recovery by re-entering InProgress with a fresh worker. If recovery fails repeatedly, the job transitions to **Failed**.
-
-See [Self-Repair](/agents/self-repair) for the full recovery flow.
 
 ---
 
