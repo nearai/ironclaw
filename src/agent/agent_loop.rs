@@ -507,12 +507,17 @@ impl Agent {
                         }
                         Ok(RepairResult::Failed { message }) => {
                             tracing::error!("Repair failed: {}", message);
-                            Some(format!(
-                                "Job {} was stuck for {}s, recovery failed permanently: {}",
-                                job.job_id,
-                                job.stuck_duration.as_secs(),
-                                message
-                            ))
+                            // Dedup: only notify once per job (same pattern as ManualRequired)
+                            if notified_manual.insert(job.job_id) {
+                                Some(format!(
+                                    "Job {} was stuck for {}s, recovery failed permanently: {}",
+                                    job.job_id,
+                                    job.stuck_duration.as_secs(),
+                                    message
+                                ))
+                            } else {
+                                None
+                            }
                         }
                         Ok(RepairResult::ManualRequired { message }) => {
                             tracing::warn!("Manual intervention needed: {}", message);

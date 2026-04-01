@@ -204,19 +204,23 @@ impl SelfRepair for DefaultSelfRepair {
             // Transition to Failed so detect_stuck_jobs() stops finding this job.
             // Without this, the repair loop re-detects the job every cycle and
             // sends a ManualRequired notification each time (notification spam).
-            let transition_ok = self
-                .context_manager
-                .update_context(job.job_id, |ctx| {
-                    ctx.transition_to(
-                        JobState::Failed,
-                        Some(format!(
-                            "exceeded max repair attempts ({})",
-                            self.max_repair_attempts
-                        )),
-                    )
-                })
-                .await
-                .is_ok();
+            // update_context returns Result<Result<(), String>, JobError>.
+            // Outer Err = job not found. Inner Err = invalid state transition.
+            // Both mean the job was NOT transitioned to Failed.
+            let transition_ok = matches!(
+                self.context_manager
+                    .update_context(job.job_id, |ctx| {
+                        ctx.transition_to(
+                            JobState::Failed,
+                            Some(format!(
+                                "exceeded max repair attempts ({})",
+                                self.max_repair_attempts
+                            )),
+                        )
+                    })
+                    .await,
+                Ok(Ok(()))
+            );
 
             if !transition_ok {
                 tracing::error!(
@@ -553,6 +557,18 @@ mod tests {
     async fn repair_stuck_job_returns_manual_when_limit_exceeded() {
         let cm = Arc::new(ContextManager::new(10));
         let job_id = cm.create_job("Unrepairable", "desc").await.unwrap();
+
+        // Transition through the production path: Pending → InProgress → Stuck
+        cm.update_context(job_id, |ctx| ctx.transition_to(JobState::InProgress, None))
+            .await
+            .unwrap()
+            .unwrap();
+        cm.update_context(job_id, |ctx| {
+            ctx.transition_to(JobState::Stuck, Some("test".into()))
+        })
+        .await
+        .unwrap()
+        .unwrap();
 
         let repair = DefaultSelfRepair::new(cm.clone(), Duration::from_secs(60), 2);
 
