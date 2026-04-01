@@ -41,8 +41,6 @@ impl LlmConfig {
             gemini_oauth: None,
             openai_codex: None,
             request_timeout_secs: 120,
-            cheap_model: None,
-            smart_routing_cascade: false,
         }
     }
 
