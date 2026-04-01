@@ -87,7 +87,7 @@ pub async fn create_client_from_config(
                 let nearai_session_manager = nearai_session_manager.ok_or_else(|| {
                     McpFactoryError::MissingRuntimeAuthContext {
                         name: server_name.clone(),
-                        reason: "NearAI companion MCP servers require a NearAI session manager"
+                        reason: "NEAR AI MCP servers require a NEAR AI session manager"
                             .to_string(),
                     }
                 })?;

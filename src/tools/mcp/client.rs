@@ -47,11 +47,11 @@ pub struct McpClient {
     /// Session manager (shared across clients).
     session_manager: Option<Arc<McpSessionManager>>,
 
-    /// NEAR AI auth/session manager for companion MCP servers that reuse the
+    /// NEAR AI auth/session manager for NEAR AI MCP servers that reuse the
     /// active provider bearer token.
     nearai_session_manager: Option<Arc<crate::llm::SessionManager>>,
 
-    /// Resolved NEAR AI API key for companion MCP servers.
+    /// Resolved NEAR AI API key for NEAR AI MCP servers.
     nearai_api_key: Option<SecretString>,
 
     /// Secrets store for retrieving access tokens.
@@ -253,7 +253,7 @@ impl McpClient {
         self
     }
 
-    /// Attach the NEAR AI session manager for companion MCP auth reuse.
+    /// Attach the NEAR AI session manager for NEAR AI MCP auth reuse.
     pub fn with_nearai_session_manager(
         mut self,
         nearai_session_manager: Arc<crate::llm::SessionManager>,
@@ -262,7 +262,7 @@ impl McpClient {
         self
     }
 
-    /// Attach the resolved NEAR AI API key for companion MCP auth reuse.
+    /// Attach the resolved NEAR AI API key for NEAR AI MCP auth reuse.
     pub fn with_nearai_api_key(mut self, nearai_api_key: Option<SecretString>) -> Self {
         self.nearai_api_key = nearai_api_key;
         self
@@ -348,7 +348,7 @@ impl McpClient {
         }
     }
 
-    /// Resolve a runtime-provided auth token for companion MCP servers.
+    /// Resolve a runtime-provided auth token for NEAR AI MCP servers.
     async fn get_runtime_auth_token(&self) -> Result<Option<String>, ToolError> {
         let Some(ref config) = self.server_config else {
             return Ok(None);
@@ -358,7 +358,7 @@ impl McpClient {
             Some(McpAuthSource::NearAi) => {
                 let Some(ref session_manager) = self.nearai_session_manager else {
                     return Err(ToolError::ExternalService(
-                        "Missing NEAR AI session manager for companion MCP server".to_string(),
+                        "Missing NEAR AI session manager for NEAR AI MCP server".to_string(),
                     ));
                 };
 
@@ -1474,7 +1474,7 @@ mod tests {
         };
         assert!(
             err.contains(crate::tools::mcp::config::NEARAI_COMPANION_MCP_NAME),
-            "error should mention reserved companion requirement: {err}"
+            "error should mention reserved NEAR AI MCP requirement: {err}"
         );
     }
 

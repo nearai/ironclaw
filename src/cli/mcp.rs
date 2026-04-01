@@ -175,7 +175,7 @@ async fn add_server(args: McpAddArgs) -> anyhow::Result<()> {
 
     if config::is_nearai_companion_server_name(&name) {
         anyhow::bail!(
-            "Server name '{}' is reserved for the NEAR AI companion MCP server",
+            "Server name '{}' is reserved for the NEAR AI MCP server",
             name
         );
     }
@@ -689,7 +689,7 @@ async fn load_persisted_servers(
     })
 }
 
-/// Load MCP servers plus any derived runtime companions.
+/// Load MCP servers plus the derived NEAR AI MCP server when the NEAR AI backend is active.
 async fn load_servers_with_derived(
     db: Option<&dyn Database>,
 ) -> Result<McpServersFile, config::ConfigError> {

@@ -553,7 +553,7 @@ impl AppBuilder {
                             let companion_name = companion.name.clone();
                             if !servers.insert_if_absent(companion) {
                                 tracing::debug!(
-                                    "Skipping derived MCP companion '{}': an existing config with that name is already present",
+                                    "Skipping derived NEAR AI MCP '{}': an existing config with that name is already present",
                                     companion_name
                                 );
                             }

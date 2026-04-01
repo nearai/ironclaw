@@ -53,7 +53,7 @@ pub struct McpServerConfig {
 
     /// Built-in auth source provided by IronClaw at runtime.
     ///
-    /// This is used for companion MCP servers that should reuse an existing
+    /// This is used for NEAR AI MCP servers that should reuse an existing
     /// provider identity instead of running their own MCP OAuth flow.
     ///
     /// Security: this field is runtime-only. Persisted user config must not be
@@ -70,7 +70,7 @@ pub struct McpServerConfig {
     pub description: Option<String>,
 }
 
-/// Runtime-provided auth sources for MCP companion servers.
+/// Runtime-provided auth sources for NEAR AI MCP servers.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum McpAuthSource {
@@ -318,7 +318,7 @@ impl McpServerConfig {
     }
 }
 
-/// Reserved name used for the companion MCP server derived from active NEAR AI config.
+/// Reserved name used for the NEAR AI MCP server derived from active NEAR AI config.
 pub const NEARAI_COMPANION_MCP_NAME: &str = "_nearai_companion_mcp";
 
 pub fn is_nearai_companion_server_name(name: &str) -> bool {
@@ -336,14 +336,14 @@ fn strip_reserved_nearai_companion_servers(config: &mut McpServersFile, source: 
         tracing::warn!(
             count = removed,
             source,
-            "Ignoring persisted reserved MCP companion config(s); this name is system-managed"
+            "Ignoring persisted reserved NEAR AI MCP config(s); this name is system-managed"
         );
     }
 
     removed
 }
 
-/// Build the companion MCP server from the active NEAR AI config.
+/// Build the NEAR AI MCP server from the active NEAR AI config.
 ///
 /// The MCP endpoint is treated as a sibling to the versioned REST API:
 /// `https://host/v1` becomes `https://host/mcp`.
@@ -353,11 +353,11 @@ pub fn derive_nearai_companion_mcp_server(
     derive_nearai_companion_mcp_server_from_llm(&config.llm)
 }
 
-/// Build the companion MCP server from an LLM config.
+/// Build the NEAR AI MCP server from an LLM config.
 ///
 /// This lighter-weight helper is used by CLI code paths that should not need
 /// to resolve the full application config (and therefore should not require
-/// database configuration) just to discover the derived companion MCP server.
+/// database configuration) just to discover the derived NEAR AI MCP server.
 pub fn derive_nearai_companion_mcp_server_from_llm(
     llm: &crate::config::LlmConfig,
 ) -> Option<McpServerConfig> {
@@ -374,7 +374,7 @@ pub fn derive_nearai_companion_mcp_server_from_llm(
     Some(
         McpServerConfig::new(NEARAI_COMPANION_MCP_NAME, format!("{mcp_base}/mcp"))
             .with_auth_source(McpAuthSource::NearAi)
-            .with_description("Companion MCP server derived from the active NEAR AI provider"),
+            .with_description("NEAR AI MCP server derived from the active NEAR AI provider"),
     )
 }
 
@@ -584,7 +584,7 @@ pub async fn add_mcp_server(config: McpServerConfig) -> Result<(), ConfigError> 
     if is_nearai_companion_server_name(&config.name) {
         return Err(ConfigError::InvalidConfig {
             reason: format!(
-                "Server name '{}' is reserved for the NEAR AI companion MCP server",
+                "Server name '{}' is reserved for the NEAR AI MCP server",
                 config.name
             ),
         });
@@ -684,7 +684,7 @@ pub async fn add_mcp_server_db(
     if is_nearai_companion_server_name(&config.name) {
         return Err(ConfigError::InvalidConfig {
             reason: format!(
-                "Server name '{}' is reserved for the NEAR AI companion MCP server",
+                "Server name '{}' is reserved for the NEAR AI MCP server",
                 config.name
             ),
         });
@@ -993,7 +993,7 @@ mod tests {
 
         let err = config
             .validate()
-            .expect_err("runtime auth should be reserved for the companion server");
+            .expect_err("runtime auth should be reserved for the NEAR AI MCP server");
         assert!(
             err.to_string().contains(NEARAI_COMPANION_MCP_NAME),
             "expected reserved-name validation message, got: {err}"

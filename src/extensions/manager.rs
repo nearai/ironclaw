@@ -423,7 +423,7 @@ pub struct ExtensionManager {
     user_id: String,
     /// Optional database store for DB-backed MCP config.
     store: Option<Arc<dyn crate::db::Database>>,
-    /// Companion MCP server derived from the active provider config.
+    /// NEAR AI MCP server derived from the active provider config.
     companion_mcp_server: Option<McpServerConfig>,
     /// Names of WASM channels that were successfully loaded at startup.
     active_channel_names: RwLock<HashSet<String>>,
@@ -1313,7 +1313,7 @@ impl ExtensionManager {
 
         if crate::tools::mcp::config::is_nearai_companion_server_name(name) {
             return Err(ExtensionError::Config(
-                "This extension name is reserved for the NEAR AI companion MCP server".to_string(),
+                "This extension name is reserved for the NEAR AI MCP server".to_string(),
             ));
         }
 
@@ -1392,7 +1392,7 @@ impl ExtensionManager {
         }
     }
 
-    /// Activate the derived NEAR AI companion MCP server if auth is already
+    /// Activate the derived NEAR AI MCP server if auth is already
     /// available and the companion is not active yet.
     ///
     /// Returns `Ok(true)` only when this call performed an activation.
@@ -1459,7 +1459,7 @@ impl ExtensionManager {
                             if crate::tools::mcp::config::is_nearai_companion_server_name(
                                 &server.name,
                             ) {
-                                Some("NEAR AI Companion".to_string())
+                                Some("NEAR AI MCP".to_string())
                             } else {
                                 self.registry
                                     .get_with_kind(&server.name, Some(ExtensionKind::McpServer))
@@ -9186,7 +9186,7 @@ mod tests {
                 "test",
             )
             .await
-            .expect_err("runtime-auth companion should reject manual token configuration");
+            .expect_err("runtime-auth NEAR AI MCP should reject manual token configuration");
 
         assert!(
             err.to_string().contains("active NEAR AI authentication"),
@@ -9197,7 +9197,7 @@ mod tests {
                 .exists("test", &token_secret_name)
                 .await
                 .unwrap_or(false),
-            "configure_token must not persist a manual MCP token for the runtime-auth companion"
+            "configure_token must not persist a manual MCP token for the runtime-auth NEAR AI MCP server"
         );
     }
 
