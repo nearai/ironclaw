@@ -152,6 +152,9 @@ pub enum AcpConfigError {
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
 
+    #[error("Database error: {0}")]
+    Database(String),
+
     #[error("Invalid configuration: {reason}")]
     InvalidConfig { reason: String },
 
@@ -266,7 +269,7 @@ pub async fn get_acp_agent(name: &str) -> Result<AcpAgentConfig, AcpConfigError>
 
 /// Load ACP agent configurations from the database settings table.
 ///
-/// Falls back to the disk file if DB has no entry.
+/// Falls back to the disk file only if DB has no entry.
 pub async fn load_acp_agents_from_db(
     store: &dyn crate::db::Database,
     user_id: &str,
@@ -284,13 +287,7 @@ pub async fn load_acp_agents_from_db(
             Ok(config)
         }
         Ok(None) => load_acp_agents().await,
-        Err(e) => {
-            tracing::warn!(
-                "Failed to load ACP agents from DB: {}, falling back to disk",
-                e
-            );
-            load_acp_agents().await
-        }
+        Err(e) => Err(AcpConfigError::Database(e.to_string())),
     }
 }
 
