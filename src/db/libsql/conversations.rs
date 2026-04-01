@@ -159,6 +159,16 @@ impl ConversationStore for LibSqlBackend {
         user_id: &str,
         limit: i64,
     ) -> Result<Vec<ConversationSummary>, DatabaseError> {
+        self.list_conversations_all_channels_paginated(user_id, limit, 0)
+            .await
+    }
+
+    async fn list_conversations_all_channels_paginated(
+        &self,
+        user_id: &str,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<ConversationSummary>, DatabaseError> {
         let conn = self.connect().await?;
         let mut rows = conn
             .query(
@@ -179,9 +189,9 @@ impl ConversationStore for LibSqlBackend {
                 FROM conversations c
                 WHERE c.user_id = ?1
                 ORDER BY datetime(c.last_activity) DESC
-                LIMIT ?2
+                LIMIT ?2 OFFSET ?3
                 "#,
-                params![user_id, limit],
+                params![user_id, limit, offset],
             )
             .await
             .map_err(|e| DatabaseError::Query(e.to_string()))?;

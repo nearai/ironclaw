@@ -132,7 +132,37 @@ impl Agent {
         &self,
         session: Arc<Mutex<Session>>,
         tenant: &crate::tenant::TenantCtx,
+        args: &[String],
     ) -> Result<String, Error> {
+        // Parse pagination arguments: --limit N (default: 50), --page N (default: 1)
+        let mut limit: i64 = 50;
+        let mut page: i64 = 1;
+        let mut i = 0;
+        while i < args.len() {
+            match args[i].as_str() {
+                "--limit" | "-l" => {
+                    if i + 1 < args.len() {
+                        limit = args[i + 1].parse().unwrap_or(50);
+                        limit = limit.clamp(1, 200); // Cap at 200 to avoid excessive output
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
+                "--page" | "-p" => {
+                    if i + 1 < args.len() {
+                        page = args[i + 1].parse().unwrap_or(1);
+                        page = page.clamp(1, 100);
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
+                _ => i += 1,
+            }
+        }
+        let offset = (page - 1) * limit;
+
         let (session_id, active_thread, threads) = {
             let sess = session.lock().await;
             (
@@ -152,7 +182,7 @@ impl Agent {
         let mut seen_threads = std::collections::HashSet::new();
 
         if let Some(store) = tenant.store() {
-            match store.list_conversations_all_channels(50).await {
+            match store.list_conversations_all_channels_paginated(limit, offset).await {
                 Ok(mut summaries) if !summaries.is_empty() => {
                     summaries.sort_by_key(|s| std::cmp::Reverse(s.last_activity));
                     output.push_str("Persistent threads (use /thread <id> to hydrate):\n");
@@ -815,7 +845,7 @@ impl Agent {
             }
 
             "history" => {
-                let history = self.handle_history_command(session, tenant).await?;
+                let history = self.handle_history_command(session, tenant, args).await?;
                 Ok(SubmissionResult::response(history))
             }
 
@@ -861,7 +891,7 @@ impl Agent {
                     Ok(SubmissionResult::response(output))
                 } else if args.first().map(|s| s.as_str()) == Some("list") {
                     // /thread list - alias for /history
-                    let history = self.handle_history_command(session, tenant).await?;
+                    let history = self.handle_history_command(session, tenant, args).await?;
                     Ok(SubmissionResult::response(history))
                 } else if args.first().map(|s| s.as_str()) == Some("new") {
                     // /thread new - delegate to submission parser (should be handled upstream)
@@ -1296,6 +1326,91 @@ mod tests {
         assert_eq!(format_count(5, "items"), "5 items");
         assert_eq!(format_count(1500, "messages"), "1.5K messages");
         assert_eq!(format_count(2500000, "tokens"), "2.5M tokens");
+    }
+
+    #[test]
+    fn test_history_pagination_args_parsing() {
+        // Test default values
+        let args: Vec<String> = vec![];
+        let mut limit: i64 = 50;
+        let mut page: i64 = 1;
+        let mut i = 0;
+        while i < args.len() {
+            match args[i].as_str() {
+                "--limit" | "-l" => {
+                    if i + 1 < args.len() {
+                        limit = args[i + 1].parse().unwrap_or(50);
+                        limit = limit.clamp(1, 200);
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
+                "--page" | "-p" => {
+                    if i + 1 < args.len() {
+                        page = args[i + 1].parse().unwrap_or(1);
+                        page = page.clamp(1, 100);
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
+                _ => i += 1,
+            }
+        }
+        assert_eq!(limit, 50);
+        assert_eq!(page, 1);
+
+        // Test custom limit
+        let args: Vec<String> = vec!["--limit".to_string(), "25".to_string()];
+        limit = 50;
+        page = 1;
+        i = 0;
+        while i < args.len() {
+            match args[i].as_str() {
+                "--limit" | "-l" => {
+                    if i + 1 < args.len() {
+                        limit = args[i + 1].parse().unwrap_or(50);
+                        limit = limit.clamp(1, 200);
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
+                "--page" | "-p" => {
+                    if i + 1 < args.len() {
+                        page = args[i + 1].parse().unwrap_or(1);
+                        page = page.clamp(1, 100);
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
+                _ => i += 1,
+            }
+        }
+        assert_eq!(limit, 25);
+        assert_eq!(page, 1);
+
+        // Test clamping
+        let args: Vec<String> = vec!["--limit".to_string(), "500".to_string()];
+        limit = 50;
+        i = 0;
+        while i < args.len() {
+            match args[i].as_str() {
+                "--limit" | "-l" => {
+                    if i + 1 < args.len() {
+                        limit = args[i + 1].parse().unwrap_or(50);
+                        limit = limit.clamp(1, 200);
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
+                _ => i += 1,
+            }
+        }
+        assert_eq!(limit, 200); // Clamped to max
     }
 
     #[test]

@@ -348,6 +348,12 @@ pub trait ConversationStore: Send + Sync {
         user_id: &str,
         limit: i64,
     ) -> Result<Vec<ConversationSummary>, DatabaseError>;
+    async fn list_conversations_all_channels_paginated(
+        &self,
+        user_id: &str,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<ConversationSummary>, DatabaseError>;
     async fn get_or_create_routine_conversation(
         &self,
         routine_id: Uuid,

@@ -126,6 +126,17 @@ impl ConversationStore for PgBackend {
             .await
     }
 
+async fn list_conversations_all_channels_paginated(
+        &self,
+        user_id: &str,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<ConversationSummary>, DatabaseError> {
+        self.store
+            .list_conversations_all_channels_paginated(user_id, limit, offset)
+            .await
+    }
+
     async fn get_or_create_routine_conversation(
         &self,
         routine_id: Uuid,

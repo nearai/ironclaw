@@ -1666,6 +1666,17 @@ impl Store {
         user_id: &str,
         limit: i64,
     ) -> Result<Vec<ConversationSummary>, DatabaseError> {
+        self.list_conversations_all_channels_paginated(user_id, limit, 0)
+            .await
+    }
+
+    /// List conversations across all channels with pagination support.
+    pub async fn list_conversations_all_channels_paginated(
+        &self,
+        user_id: &str,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<ConversationSummary>, DatabaseError> {
         let conn = self.conn().await?;
         let rows = conn
             .query(
@@ -1686,9 +1697,9 @@ impl Store {
                 FROM conversations c
                 WHERE c.user_id = $1
                 ORDER BY c.last_activity DESC
-                LIMIT $2
+                LIMIT $2 OFFSET $3
                 "#,
-                &[&user_id, &limit],
+                &[&user_id, &limit, &offset],
             )
             .await?;
 

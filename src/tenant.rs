@@ -294,6 +294,16 @@ impl TenantScope {
             .await
     }
 
+    pub async fn list_conversations_all_channels_paginated(
+        &self,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<ConversationSummary>, DatabaseError> {
+        self.inner
+            .list_conversations_all_channels_paginated(&self.user_id, limit, offset)
+            .await
+    }
+
     pub async fn get_or_create_routine_conversation(
         &self,
         routine_id: Uuid,
