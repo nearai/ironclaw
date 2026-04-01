@@ -702,6 +702,29 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_telegram_bundled_setup_includes_webhook_secret() {
+        let json = include_str!("../../../channels-src/telegram/telegram.capabilities.json");
+        let file = ChannelCapabilitiesFile::from_json(json).unwrap();
+
+        let webhook_secret = file
+            .setup
+            .required_secrets
+            .iter()
+            .find(|secret| secret.name == "telegram_webhook_secret")
+            .expect("telegram webhook secret should be declared in the bundled manifest");
+
+        assert!(webhook_secret.optional);
+        assert_eq!(
+            webhook_secret
+                .auto_generate
+                .as_ref()
+                .expect("telegram webhook secret should auto-generate")
+                .length,
+            64
+        );
+    }
+
     // ── Category 5: Discord Capabilities Setup & Configuration ──────────
 
     #[test]

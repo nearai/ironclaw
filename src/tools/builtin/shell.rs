@@ -1065,7 +1065,8 @@ impl Tool for ShellTool {
                 },
                 "timeout": {
                     "type": "integer",
-                    "description": "Timeout in seconds (optional, default 120)"
+                    "description": "Timeout in seconds (optional, default 120)",
+                    "minimum": 1
                 }
             },
             "required": ["command"]
@@ -1079,8 +1080,41 @@ impl Tool for ShellTool {
     ) -> Result<ToolOutput, ToolError> {
         let command = require_str(&params, "command")?;
 
-        let workdir = params.get("workdir").and_then(|v| v.as_str());
-        let timeout = params.get("timeout").and_then(|v| v.as_u64());
+        let workdir = match params.get("workdir") {
+            None => None,
+            Some(v) if v.is_null() => None,
+            Some(v) => {
+                let s = v.as_str().ok_or_else(|| {
+                    ToolError::InvalidParameters("workdir must be a string".to_string())
+                })?;
+                let trimmed = s.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed)
+                }
+            }
+        };
+
+        let timeout = match params.get("timeout") {
+            None => None,
+            Some(v) if v.is_null() => None,
+            Some(v) => {
+                let n = v.as_u64().ok_or_else(|| {
+                    ToolError::InvalidParameters(
+                        "timeout must be a positive integer number of seconds".to_string(),
+                    )
+                })?;
+
+                if n == 0 {
+                    return Err(ToolError::InvalidParameters(
+                        "timeout must be greater than 0".to_string(),
+                    ));
+                }
+
+                Some(n)
+            }
+        };
 
         let start = std::time::Instant::now();
         let (output, exit_code) = self
@@ -1162,16 +1196,159 @@ fn truncate_for_error(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
+
+    async fn execute_shell(
+        tool: &ShellTool,
+        params: serde_json::Value,
+    ) -> Result<ToolOutput, ToolError> {
+        tool.execute(params, &JobContext::default()).await
+    }
+
+    fn assert_invalid_parameters(result: Result<ToolOutput, ToolError>, expected_message: &str) {
+        match result {
+            Err(ToolError::InvalidParameters(message)) => {
+                assert_eq!(message, expected_message);
+            }
+            Err(other) => panic!("expected InvalidParameters, got {other:?}"),
+            Ok(output) => panic!("expected InvalidParameters, got success: {output:?}"),
+        }
+    }
 
     #[tokio::test]
     async fn test_echo_command() {
         let tool = ShellTool::new();
-        let ctx = JobContext::default();
-
-        let result = tool
-            .execute(serde_json::json!({"command": "echo hello"}), &ctx)
+        let result = execute_shell(&tool, serde_json::json!({"command": "echo hello"}))
             .await
             .unwrap();
+
+        let output = result.result.get("output").unwrap().as_str().unwrap();
+        assert!(output.contains("hello"));
+        assert_eq!(result.result.get("exit_code").unwrap().as_i64().unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_execute_treats_blank_workdir_as_none() {
+        let temp_dir = TempDir::new().unwrap();
+        let tool = ShellTool::new().with_working_dir(temp_dir.path().to_path_buf());
+
+        for workdir in ["", "   "] {
+            let result = execute_shell(
+                &tool,
+                serde_json::json!({
+                    "command": "pwd",
+                    "workdir": workdir
+                }),
+            )
+            .await
+            .unwrap();
+
+            let output = result
+                .result
+                .get("output")
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .trim();
+            let output_path = PathBuf::from(output).canonicalize().unwrap();
+            let expected_path = temp_dir.path().canonicalize().unwrap();
+            assert_eq!(output_path, expected_path);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_execute_rejects_non_string_workdir() {
+        let tool = ShellTool::new();
+        let result = execute_shell(
+            &tool,
+            serde_json::json!({
+                "command": "pwd",
+                "workdir": 42
+            }),
+        )
+        .await;
+
+        assert_invalid_parameters(result, "workdir must be a string");
+    }
+
+    #[tokio::test]
+    async fn test_execute_treats_missing_or_null_timeout_as_none() {
+        let tool = ShellTool::new();
+
+        for params in [
+            serde_json::json!({"command": "echo hello"}),
+            serde_json::json!({"command": "echo hello", "timeout": null}),
+        ] {
+            let result = execute_shell(&tool, params).await.unwrap();
+            let output = result.result.get("output").unwrap().as_str().unwrap();
+            assert!(output.contains("hello"));
+            assert_eq!(result.result.get("exit_code").unwrap().as_i64().unwrap(), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_execute_rejects_non_numeric_timeout_string() {
+        let tool = ShellTool::new();
+        let result = execute_shell(
+            &tool,
+            serde_json::json!({
+                "command": "echo hello",
+                "timeout": "abc"
+            }),
+        )
+        .await;
+
+        assert_invalid_parameters(
+            result,
+            "timeout must be a positive integer number of seconds",
+        );
+    }
+
+    #[tokio::test]
+    async fn test_execute_rejects_zero_timeout() {
+        let tool = ShellTool::new();
+        let result = execute_shell(
+            &tool,
+            serde_json::json!({
+                "command": "echo hello",
+                "timeout": 0
+            }),
+        )
+        .await;
+
+        assert_invalid_parameters(result, "timeout must be greater than 0");
+    }
+
+    #[tokio::test]
+    async fn test_execute_rejects_float_timeout() {
+        let tool = ShellTool::new();
+        let result = execute_shell(
+            &tool,
+            serde_json::json!({
+                "command": "echo hello",
+                "timeout": 3.5
+            }),
+        )
+        .await;
+
+        assert_invalid_parameters(
+            result,
+            "timeout must be a positive integer number of seconds",
+        );
+    }
+
+    #[tokio::test]
+    async fn test_execute_accepts_valid_timeout() {
+        let tool = ShellTool::new();
+        let result = execute_shell(
+            &tool,
+            serde_json::json!({
+                "command": "echo hello",
+                "timeout": 30
+            }),
+        )
+        .await
+        .unwrap();
 
         let output = result.result.get("output").unwrap().as_str().unwrap();
         assert!(output.contains("hello"));
