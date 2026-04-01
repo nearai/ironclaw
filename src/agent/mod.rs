@@ -23,6 +23,8 @@ pub mod job_monitor;
 mod router;
 pub mod routine;
 pub mod routine_engine;
+#[cfg(test)]
+mod routine_integration_tests;
 pub(crate) mod scheduler;
 mod self_repair;
 pub mod session;
