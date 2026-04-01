@@ -25,7 +25,7 @@ use crate::tools::builtin::{
     ToolUpgradeTool, WriteFileTool,
 };
 use crate::tools::rate_limiter::RateLimiter;
-use crate::tools::tool::{ApprovalRequirement, Tool, ToolDomain};
+use crate::tools::tool::{ApprovalRequirement, Tool, ToolDiscoverySummary, ToolDomain};
 use crate::tools::wasm::{
     Capabilities, OAuthRefreshConfig, ResourceLimits, SharedCredentialRegistry, WasmError,
     WasmStorageError, WasmToolRuntime, WasmToolStore, WasmToolWrapper,
@@ -674,6 +674,9 @@ impl ToolRegistry {
         if let Some(s) = reg.schema {
             wrapper = wrapper.with_schema(s);
         }
+        if let Some(summary) = reg.discovery_summary {
+            wrapper = wrapper.with_discovery_summary(summary);
+        }
         if let Some(store) = reg.secrets_store {
             wrapper = wrapper.with_secrets_store(store);
         }
@@ -748,6 +751,7 @@ impl ToolRegistry {
             limits: None,
             description: Some(&tool_with_binary.tool.description),
             schema: Some(tool_with_binary.tool.parameters_schema.clone()),
+            discovery_summary: None,
             secrets_store: self.secrets_store.clone(),
             oauth_refresh: None,
         })
@@ -791,6 +795,8 @@ pub struct WasmToolRegistration<'a> {
     pub description: Option<&'a str>,
     /// Optional parameter schema override.
     pub schema: Option<serde_json::Value>,
+    /// Optional curated discovery guidance for `tool_info(detail: "summary")`.
+    pub discovery_summary: Option<ToolDiscoverySummary>,
     /// Secrets store for credential injection at request time.
     pub secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
     /// OAuth refresh configuration for auto-refreshing expired tokens.
