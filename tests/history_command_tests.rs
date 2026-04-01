@@ -132,6 +132,20 @@ fn test_history_messages_command() {
 }
 
 #[test]
+fn test_history_messages_subcommand_case_insensitive() {
+    let submission =
+        SubmissionParser::parse("/history MESSAGES 11111111-1111-1111-1111-111111111111");
+    assert!(matches!(
+        submission,
+        Submission::SystemCommand { ref command, ref args }
+            if command == "history"
+                && args.len() == 2
+                && args[0] == "messages"
+                && args[1] == "11111111-1111-1111-1111-111111111111"
+    ));
+}
+
+#[test]
 fn test_history_messages_with_uuid() {
     let uuid = "11111111-1111-1111-1111-111111111111";
     let submission = SubmissionParser::parse(&format!("/history messages {}", uuid));

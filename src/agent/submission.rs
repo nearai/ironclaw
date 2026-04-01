@@ -151,11 +151,21 @@ impl SubmissionParser {
 
         // /history [args] - list real session threads / conversations
         if lower == "/history" || lower.starts_with("/history ") {
-            let args: Vec<String> = trimmed
+            let mut args: Vec<String> = trimmed
                 .split_whitespace()
                 .skip(1)
                 .map(|s| s.to_string())
                 .collect();
+
+            // Normalize the messages subcommand so downstream routing stays
+            // case-insensitive even though we preserve positional arguments.
+            if args
+                .first()
+                .is_some_and(|subcommand| subcommand.eq_ignore_ascii_case("messages"))
+            {
+                args[0] = "messages".to_string();
+            }
+
             return Submission::SystemCommand {
                 command: "history".to_string(),
                 args,
