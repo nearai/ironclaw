@@ -480,11 +480,6 @@ impl Thread {
                         name: tc.name.clone(),
                         arguments: tc.parameters.clone(),
                         reasoning: None,
-                        // Known limitation: thought_signature is not persisted
-                        // in the DB, so Gemini signatures are lost on round-trip.
-                        // The ensure_thought_signatures() fallback in gemini_oauth.rs
-                        // synthesizes replacements at request time.
-                        thought_signature: None,
                     })
                     .collect();
 
@@ -1436,7 +1431,6 @@ mod tests {
             name: "search".to_string(),
             arguments: serde_json::json!({"q": "test"}),
             reasoning: None,
-            thought_signature: None,
         };
         let messages = vec![
             ChatMessage::user("Find test"),
@@ -1468,7 +1462,6 @@ mod tests {
             name: "http".to_string(),
             arguments: serde_json::json!({}),
             reasoning: None,
-            thought_signature: None,
         };
         let messages = vec![
             ChatMessage::user("Fetch URL"),
@@ -1535,14 +1528,12 @@ mod tests {
             name: "search".to_string(),
             arguments: serde_json::json!({"q": "data"}),
             reasoning: None,
-            thought_signature: None,
         };
         let tc2 = ToolCall {
             id: "call_b".to_string(),
             name: "write".to_string(),
             arguments: serde_json::json!({"path": "out.txt"}),
             reasoning: None,
-            thought_signature: None,
         };
         let messages = vec![
             ChatMessage::user("Find and save"),

@@ -665,7 +665,6 @@ fn parse_sse_response(body: &str) -> Result<ParsedResponse, LlmError> {
                                 name: state.name,
                                 arguments,
                                 reasoning: None,
-                                thought_signature: None,
                             });
                         } else {
                             // Fallback: extract directly from the item
@@ -692,7 +691,6 @@ fn parse_sse_response(body: &str) -> Result<ParsedResponse, LlmError> {
                                 name,
                                 arguments,
                                 reasoning: None,
-                                thought_signature: None,
                             });
                         }
                     }
@@ -771,7 +769,6 @@ fn parse_sse_response(body: &str) -> Result<ParsedResponse, LlmError> {
                 name: state.name,
                 arguments,
                 reasoning: None,
-                thought_signature: None,
             });
         }
     }
@@ -868,14 +865,12 @@ mod tests {
                 name: "search".to_string(),
                 arguments: serde_json::json!({"query": "test"}),
                 reasoning: None,
-                thought_signature: None,
             },
             ToolCall {
                 id: "call_2".to_string(),
                 name: "read".to_string(),
                 arguments: serde_json::json!({"path": "/tmp"}),
                 reasoning: None,
-                thought_signature: None,
             },
         ];
         let msg =
@@ -1171,7 +1166,6 @@ data: {"type":"response.completed","response":{"status":"completed","usage":{"in
             name: "mcp.server.search".to_string(),
             arguments: serde_json::json!({"q": "test"}),
             reasoning: None,
-            thought_signature: None,
         }];
         let msg = ChatMessage::assistant_with_tool_calls(None, tool_calls);
         let items = super::convert_message(&msg, 0);
@@ -1223,7 +1217,6 @@ data: {"type":"response.completed","response":{"status":"completed","usage":{"in
             name: "mcp_server_search".to_string(),
             arguments: serde_json::json!({}),
             reasoning: None,
-            thought_signature: None,
         };
         if let Some(original) = name_map.get(&tc.name) {
             tc.name = original.clone();

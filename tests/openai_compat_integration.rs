@@ -95,7 +95,6 @@ impl LlmProvider for MockLlmProvider {
                     name: tool.name.clone(),
                     arguments: serde_json::json!({"test": true}),
                     reasoning: None,
-                    thought_signature: None,
                 }],
                 input_tokens: 15,
                 output_tokens: 8,

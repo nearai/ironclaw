@@ -459,7 +459,6 @@ mod tests {
             name: "echo".to_string(),
             arguments: serde_json::json!({}),
             reasoning: None,
-            thought_signature: None,
         };
         let delegate = MockDelegate::new(vec![
             tool_calls_output(vec![tool_call]),
@@ -749,7 +748,6 @@ mod tests {
             name: "memory_write".to_string(),
             arguments: serde_json::json!({}), // empty — truncated
             reasoning: None,
-            thought_signature: None,
         };
         let truncated_output = RespondOutput {
             result: RespondResult::ToolCalls {
@@ -802,7 +800,6 @@ mod tests {
                     name: "memory_write".to_string(),
                     arguments: serde_json::json!({}),
                     reasoning: None,
-                    thought_signature: None,
                 }],
                 content: None,
             },

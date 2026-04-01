@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -921,7 +922,14 @@ pub struct GeminiOauthProvider {
     http_client: Client,
     /// Latest response metadata (updated after each request).
     last_response_meta: std::sync::Mutex<GeminiResponseMeta>,
+    /// Captured thought signatures keyed by tool-call ID. Gemini 3.x models
+    /// require these echoed back on `functionCall` parts when replaying history.
+    /// Populated from responses, consumed when building the next request.
+    thought_signatures: std::sync::Mutex<HashMap<String, String>>,
 }
+
+/// Parsed Gemini response: (completion, tool_calls, thought_signatures_by_call_id).
+type GeminiParsedResponse = (CompletionResponse, Vec<ToolCall>, HashMap<String, String>);
 
 impl GeminiOauthProvider {
     pub fn new(config: GeminiOauthConfig) -> Result<Self, LlmError> {
@@ -939,6 +947,7 @@ impl GeminiOauthProvider {
             cred_manager,
             http_client,
             last_response_meta: std::sync::Mutex::new(GeminiResponseMeta::default()),
+            thought_signatures: std::sync::Mutex::new(HashMap::new()),
         })
     }
 
@@ -1062,8 +1071,21 @@ impl GeminiOauthProvider {
 
     /// Count tokens for the given messages using the Gemini countTokens API.
     pub async fn count_tokens(&self, messages: &[ChatMessage]) -> Result<u32, LlmError> {
-        let req =
-            Self::to_gemini_request(messages, None, None, None, None, None, &self.config.model);
+        let sigs = self
+            .thought_signatures
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let req = Self::to_gemini_request(
+            messages,
+            None,
+            None,
+            None,
+            None,
+            None,
+            &self.config.model,
+            &sigs,
+        );
         let contents = req
             .get("contents")
             .cloned()
@@ -1589,6 +1611,7 @@ impl GeminiOauthProvider {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn to_gemini_request(
         messages: &[ChatMessage],
         tools: Option<&[ToolDefinition]>,
@@ -1597,6 +1620,7 @@ impl GeminiOauthProvider {
         stop_sequences: Option<&[String]>,
         tool_choice: Option<&str>,
         model: &str,
+        thought_sigs: &HashMap<String, String>,
     ) -> serde_json::Value {
         let mut contents = Vec::new();
 
@@ -1627,8 +1651,10 @@ impl GeminiOauthProvider {
                                     "args": call.arguments
                                 }
                             });
-                            // Echo back the original thoughtSignature if present.
-                            if let Some(ref sig) = call.thought_signature
+                            // Echo back the real thoughtSignature if captured from a
+                            // prior Gemini response. ensure_thought_signatures() will
+                            // fill in synthetic placeholders for any gaps.
+                            if let Some(sig) = thought_sigs.get(&call.id)
                                 && let Some(obj) = part.as_object_mut()
                             {
                                 obj.insert(
@@ -1865,9 +1891,10 @@ impl GeminiOauthProvider {
         req
     }
 
+    /// Parsed Gemini response: (completion, tool_calls, thought_signatures_by_call_id).
     fn from_gemini_response(
         body: serde_json::Value,
-    ) -> Result<(CompletionResponse, Vec<ToolCall>), LlmError> {
+    ) -> Result<GeminiParsedResponse, LlmError> {
         let candidate = body
             .get("candidates")
             .and_then(|c| c.as_array())
@@ -1884,6 +1911,7 @@ impl GeminiOauthProvider {
 
         let mut text_content = String::new();
         let mut tool_calls = Vec::new();
+        let mut thought_sigs = HashMap::new();
 
         if let Some(parts) = parts {
             for part in parts {
@@ -1904,17 +1932,15 @@ impl GeminiOauthProvider {
                         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
                     // Capture thoughtSignature (sibling of functionCall in the part)
                     // so it can be echoed back when replaying history.
-                    let thought_signature = part
-                        .get("thoughtSignature")
-                        .and_then(|s| s.as_str())
-                        .map(|s| s.to_string());
+                    if let Some(sig) = part.get("thoughtSignature").and_then(|s| s.as_str()) {
+                        thought_sigs.insert(id.clone(), sig.to_string());
+                    }
 
                     tool_calls.push(ToolCall {
                         id,
                         name,
                         arguments: args,
                         reasoning: None,
-                        thought_signature,
                     });
                 }
             }
@@ -2020,6 +2046,7 @@ impl GeminiOauthProvider {
                 cache_creation_input_tokens: 0,
             },
             tool_calls,
+            thought_sigs,
         ))
     }
 }
@@ -2058,6 +2085,11 @@ impl LlmProvider for GeminiOauthProvider {
     }
 
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+        let sigs = self
+            .thought_signatures
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         let req_json = Self::to_gemini_request(
             &request.messages,
             None,
@@ -2066,9 +2098,10 @@ impl LlmProvider for GeminiOauthProvider {
             request.stop_sequences.as_deref(),
             None,
             &self.config.model,
+            &sigs,
         );
         let resp_json = self.send_request(&req_json).await?;
-        let (response, _tool_calls) = Self::from_gemini_response(resp_json)?;
+        let (response, _tool_calls, _new_sigs) = Self::from_gemini_response(resp_json)?;
         Ok(response)
     }
 
@@ -2082,6 +2115,11 @@ impl LlmProvider for GeminiOauthProvider {
             Some(request.tools.as_slice())
         };
 
+        let sigs = self
+            .thought_signatures
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         let req_json = Self::to_gemini_request(
             &request.messages,
             tool_defs,
@@ -2090,9 +2128,15 @@ impl LlmProvider for GeminiOauthProvider {
             request.stop_sequences.as_deref(),
             request.tool_choice.as_deref(),
             &self.config.model,
+            &sigs,
         );
         let resp_json = self.send_request(&req_json).await?;
-        let (response, tool_calls) = Self::from_gemini_response(resp_json)?;
+        let (response, tool_calls, new_sigs) = Self::from_gemini_response(resp_json)?;
+        // Store captured thought signatures for future requests.
+        self.thought_signatures
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .extend(new_sigs);
 
         Ok(crate::llm::provider::ToolCompletionResponse {
             content: if response.content.is_empty() {
@@ -2235,6 +2279,7 @@ mod tests {
             None,
             None,
             "gemini-2.0-flash",
+            &HashMap::new(),
         );
 
         let decls = &req["tools"][0]["functionDeclarations"];
@@ -2257,6 +2302,7 @@ mod tests {
             None,
             None,
             "gemini-2.0-flash",
+            &HashMap::new(),
         );
 
         let contents = req["contents"].as_array().unwrap();
@@ -2282,7 +2328,7 @@ mod tests {
             }
         });
 
-        let (resp, tool_calls) = GeminiOauthProvider::from_gemini_response(body).unwrap();
+        let (resp, tool_calls, _sigs) = GeminiOauthProvider::from_gemini_response(body).unwrap();
 
         assert_eq!(resp.content, "Hello world");
         assert_eq!(resp.input_tokens, 10);
@@ -2310,7 +2356,7 @@ mod tests {
             }
         });
 
-        let (resp, tool_calls) = GeminiOauthProvider::from_gemini_response(body).unwrap();
+        let (resp, tool_calls, _sigs) = GeminiOauthProvider::from_gemini_response(body).unwrap();
 
         assert!(resp.content.is_empty());
         assert_eq!(tool_calls.len(), 1);
@@ -2330,6 +2376,7 @@ mod tests {
             None,
             None,
             "gemini-2.0-flash",
+            &HashMap::new(),
         );
 
         let gen_cfg = &req["generationConfig"];
@@ -2350,6 +2397,7 @@ mod tests {
             None,
             None,
             "gemini-3-flash-preview",
+            &HashMap::new(),
         );
 
         let thinking = &req["generationConfig"]["thinkingConfig"];
@@ -2370,6 +2418,7 @@ mod tests {
             None,
             None,
             "gemini-2.5-flash-thinking",
+            &HashMap::new(),
         );
 
         let thinking = &req["generationConfig"]["thinkingConfig"];
@@ -2393,6 +2442,7 @@ mod tests {
             Some(&stops),
             None,
             "gemini-2.5-flash",
+            &HashMap::new(),
         );
 
         let gen_cfg = &req["generationConfig"];
@@ -2420,6 +2470,7 @@ mod tests {
             None,
             Some("auto"),
             "gemini-2.0-flash",
+            &HashMap::new(),
         );
         assert_eq!(
             req_auto["toolConfig"]["functionCallingConfig"]["mode"],
@@ -2434,6 +2485,7 @@ mod tests {
             None,
             Some("required"),
             "gemini-2.0-flash",
+            &HashMap::new(),
         );
         assert_eq!(
             req_req["toolConfig"]["functionCallingConfig"]["mode"],
@@ -2448,6 +2500,7 @@ mod tests {
             None,
             Some("none"),
             "gemini-2.0-flash",
+            &HashMap::new(),
         );
         assert_eq!(
             req_none["toolConfig"]["functionCallingConfig"]["mode"],
@@ -2517,6 +2570,7 @@ mod tests {
             None,
             None,
             "gemini-1.5-flash",
+            &HashMap::new(),
         );
 
         let system_instruction = req
@@ -2653,10 +2707,10 @@ mod tests {
             }
         });
 
-        let (_resp, tool_calls) = GeminiOauthProvider::from_gemini_response(body).unwrap();
+        let (_resp, tool_calls, sigs) = GeminiOauthProvider::from_gemini_response(body).unwrap();
         assert_eq!(tool_calls.len(), 1);
         assert_eq!(
-            tool_calls[0].thought_signature.as_deref(),
+            sigs.get(&tool_calls[0].id).map(|s| s.as_str()),
             Some("abc123sig")
         );
     }
@@ -2681,9 +2735,9 @@ mod tests {
             }
         });
 
-        let (_resp, tool_calls) = GeminiOauthProvider::from_gemini_response(body).unwrap();
+        let (_resp, tool_calls, sigs) = GeminiOauthProvider::from_gemini_response(body).unwrap();
         assert_eq!(tool_calls.len(), 1);
-        assert!(tool_calls[0].thought_signature.is_none());
+        assert!(!sigs.contains_key(&tool_calls[0].id));
     }
 
     #[test]
@@ -2697,11 +2751,13 @@ mod tests {
                     name: "read_file".to_string(),
                     arguments: serde_json::json!({"path": "/tmp/x"}),
                     reasoning: None,
-                    thought_signature: Some("sig_from_gemini".to_string()),
                 }],
             ),
             ChatMessage::tool_result("call_1", "read_file", r#"{"output":"hello"}"#),
         ];
+
+        let mut sigs = HashMap::new();
+        sigs.insert("call_1".to_string(), "sig_from_gemini".to_string());
 
         let req = GeminiOauthProvider::to_gemini_request(
             &messages,
@@ -2711,6 +2767,7 @@ mod tests {
             None,
             None,
             "gemini-3-flash-preview",
+            &sigs,
         );
 
         let contents = req["contents"].as_array().unwrap();
@@ -2733,12 +2790,12 @@ mod tests {
                     name: "echo".to_string(),
                     arguments: serde_json::json!({}),
                     reasoning: None,
-                    thought_signature: None,
                 }],
             ),
             ChatMessage::tool_result("call_1", "echo", r#"{"output":"ok"}"#),
         ];
 
+        let empty_sigs = HashMap::new();
         let req = GeminiOauthProvider::to_gemini_request(
             &messages,
             None,
@@ -2747,6 +2804,7 @@ mod tests {
             None,
             None,
             "gemini-2.0-flash",
+            &empty_sigs,
         );
 
         let contents = req["contents"].as_array().unwrap();

@@ -1533,7 +1533,6 @@ fn recover_tool_calls_from_content(
                     name: name.to_string(),
                     arguments,
                     reasoning: None,
-                    thought_signature: None,
                 });
                 continue;
             }
@@ -1549,7 +1548,6 @@ fn recover_tool_calls_from_content(
                     name: name.to_string(),
                     arguments: serde_json::Value::Object(Default::default()),
                     reasoning: None,
-                    thought_signature: None,
                 });
             }
         }
@@ -1588,7 +1586,6 @@ fn recover_tool_calls_from_content(
                         name: name.to_string(),
                         arguments,
                         reasoning: None,
-                        thought_signature: None,
                     });
                     remaining = &args_start[bracket_end + 1..];
                     continue;
@@ -1601,7 +1598,6 @@ fn recover_tool_calls_from_content(
                 name: name.to_string(),
                 arguments: serde_json::Value::Object(Default::default()),
                 reasoning: None,
-                thought_signature: None,
             });
             remaining = after_name;
         }
@@ -3618,7 +3614,6 @@ That's my plan."#;
                     name: "memory_write".to_string(),
                     arguments: serde_json::json!({}),
                     reasoning: None,
-                    thought_signature: None,
                 }],
                 input_tokens: 5000,
                 output_tokens: 1024,
