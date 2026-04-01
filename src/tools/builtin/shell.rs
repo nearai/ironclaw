@@ -654,6 +654,17 @@ fn check_segment_file_commands(segment: &str) -> Option<String> {
 
     for token in tokens {
         if token.starts_with('-') {
+            // Check for --flag=value patterns where value may be a sensitive path
+            if let Some(eq_pos) = token.find('=') {
+                let value = &token[eq_pos + 1..];
+                let expanded = expand_tilde(strip_shell_quotes(value));
+                if is_sensitive_path(&expanded) {
+                    return Some(format!(
+                        "Access denied: flag value in '{}' targets a sensitive credential path",
+                        token
+                    ));
+                }
+            }
             continue;
         }
         // Strip surrounding quotes that pass through from shell syntax
@@ -685,12 +696,36 @@ fn strip_shell_quotes(token: &str) -> &str {
 /// Check for I/O redirection (`<`, `>`, `>>`) targeting a sensitive path.
 ///
 /// Scans for ALL occurrences of the operator in the segment, not just the first.
+/// Also detects process substitution `<(cmd)` and checks tokens inside for sensitive paths.
 fn check_redirect_target(segment: &str, operator: char, label: &str) -> Option<String> {
     let bytes = segment.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == operator as u8 {
             let mut after_start = i + 1;
+
+            // Detect process substitution: <(...)
+            if operator == '<' && after_start < bytes.len() && bytes[after_start] == b'(' {
+                // Find the matching closing paren
+                if let Some(close) = segment[after_start..].find(')') {
+                    let inner = &segment[after_start + 1..after_start + close];
+                    // Check each whitespace token inside the process substitution
+                    for token in inner.split_whitespace() {
+                        let unquoted = strip_shell_quotes(token);
+                        let expanded = expand_tilde(unquoted);
+                        if is_sensitive_path(&expanded) {
+                            return Some(format!(
+                                "Access denied: process substitution targets sensitive path '{}'",
+                                unquoted
+                            ));
+                        }
+                    }
+                }
+                i = after_start;
+                i += 1;
+                continue;
+            }
+
             // Skip a second `>` for append redirection (`>>`)
             if operator == '>' && after_start < bytes.len() && bytes[after_start] == b'>' {
                 after_start += 1;
@@ -1786,5 +1821,19 @@ mod tests {
         assert_eq!(segs.len(), 5);
         assert_eq!(segs[0].trim(), "echo a");
         assert!(segs[1].trim().starts_with("echo b"));
+    }
+
+    #[test]
+    fn sensitive_file_access_blocks_process_substitution() {
+        // <(cat ~/.ssh/id_rsa) should be caught even though it's not a plain redirect
+        assert!(
+            check_sensitive_file_access("diff <(cat /home/user/.ssh/id_rsa) /dev/null").is_some()
+        );
+    }
+
+    #[test]
+    fn sensitive_file_access_blocks_flag_equals_path() {
+        // --file=/home/user/.env should be caught even though the token starts with -
+        assert!(check_sensitive_file_access("grep --file=/home/user/.env pattern").is_some());
     }
 }

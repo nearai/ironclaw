@@ -31,6 +31,7 @@ const SENSITIVE_PATH_PATTERNS: &[&str] = &[
     "/.zsh_history",
     "/.histfile",
     // SSH key types (caught by /.ssh/ directory pattern, but also match standalone)
+    "/id_rsa",
     "/id_ed25519",
     "/id_ecdsa",
     "/id_dsa",
@@ -64,9 +65,8 @@ pub fn is_sensitive_path(path: &Path) -> bool {
     if let Some(filename) = resolved.file_name().and_then(|f| f.to_str()) {
         let filename_lower = filename.to_ascii_lowercase();
         if filename_lower == ".env" || filename_lower.starts_with(".env.") {
-            let is_safe = ENV_SAFE_SUFFIXES
-                .iter()
-                .any(|suffix| filename_lower.ends_with(suffix));
+            let remainder = filename_lower.strip_prefix(".env").unwrap_or("");
+            let is_safe = ENV_SAFE_SUFFIXES.contains(&remainder);
             if !is_safe {
                 return true;
             }
@@ -115,6 +115,13 @@ mod tests {
         assert!(!is_sensitive_path(Path::new("/home/user/.env.example")));
         assert!(!is_sensitive_path(Path::new("/home/user/.env.template")));
         assert!(!is_sensitive_path(Path::new("/home/user/.env.sample")));
+    }
+
+    #[test]
+    fn blocks_env_with_compound_suffix() {
+        // .env.production.dist must NOT be allowed: the remainder ".production.dist"
+        // is not an exact match for any safe suffix like ".dist".
+        assert!(is_sensitive_path(Path::new("/app/.env.production.dist")));
     }
 
     #[test]
@@ -184,6 +191,12 @@ mod tests {
             "/home/user/.ssh/authorized_keys"
         )));
         assert!(is_sensitive_path(Path::new("/home/user/.ssh/known_hosts")));
+    }
+
+    #[test]
+    fn blocks_standalone_id_rsa() {
+        // id_rsa outside of .ssh/ directory should still be caught
+        assert!(is_sensitive_path(Path::new("/tmp/backup/id_rsa")));
     }
 
     #[test]
