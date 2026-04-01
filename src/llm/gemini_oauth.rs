@@ -1892,9 +1892,7 @@ impl GeminiOauthProvider {
     }
 
     /// Parsed Gemini response: (completion, tool_calls, thought_signatures_by_call_id).
-    fn from_gemini_response(
-        body: serde_json::Value,
-    ) -> Result<GeminiParsedResponse, LlmError> {
+    fn from_gemini_response(body: serde_json::Value) -> Result<GeminiParsedResponse, LlmError> {
         let candidate = body
             .get("candidates")
             .and_then(|c| c.as_array())
@@ -2132,11 +2130,25 @@ impl LlmProvider for GeminiOauthProvider {
         );
         let resp_json = self.send_request(&req_json).await?;
         let (response, tool_calls, new_sigs) = Self::from_gemini_response(resp_json)?;
-        // Store captured thought signatures for future requests.
-        self.thought_signatures
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .extend(new_sigs);
+        // Store captured thought signatures, pruning stale entries to prevent
+        // unbounded growth over long-running processes. Only keep IDs that
+        // appear in the conversation history or the just-received response.
+        {
+            let mut sigs = self
+                .thought_signatures
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            sigs.extend(new_sigs);
+            let live_ids: std::collections::HashSet<&str> = request
+                .messages
+                .iter()
+                .filter_map(|m| m.tool_calls.as_ref())
+                .flatten()
+                .map(|tc| tc.id.as_str())
+                .chain(tool_calls.iter().map(|tc| tc.id.as_str()))
+                .collect();
+            sigs.retain(|id, _| live_ids.contains(id.as_str()));
+        }
 
         Ok(crate::llm::provider::ToolCompletionResponse {
             content: if response.content.is_empty() {
@@ -2811,7 +2823,7 @@ mod tests {
         let model_turn = &contents[1];
         let fc_part = &model_turn["parts"][0];
         assert!(fc_part.get("functionCall").is_some());
-        // No thoughtSignature should be present when the ToolCall had None.
+        // No thoughtSignature should be present when there is no captured signature for this call ID.
         assert!(fc_part.get("thoughtSignature").is_none());
     }
 }
