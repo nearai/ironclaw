@@ -931,66 +931,77 @@ impl WorkspaceStore for LibSqlBackend {
         let doc_id = document_id.to_string();
         let now = fmt_ts(&Utc::now());
 
-        // Use a transaction to prevent race conditions: the SELECT and INSERT
-        // must be atomic so concurrent writers don't allocate the same version.
-        let tx = conn
-            .transaction()
+        // BEGIN IMMEDIATE acquires a write lock upfront, serializing
+        // concurrent writers so two callers cannot both read the same
+        // MAX(version) before either inserts.
+        conn.execute("BEGIN IMMEDIATE", params![])
             .await
             .map_err(|e| WorkspaceError::SearchFailed {
                 reason: format!("Failed to start transaction: {e}"),
             })?;
 
-        // Get next version number (inside transaction — serializes writers)
-        let mut rows = tx
-            .query(
-                "SELECT COALESCE(MAX(version), 0) + 1 FROM memory_document_versions WHERE document_id = ?1",
-                params![doc_id.clone()],
-            )
-            .await
-            .map_err(|e| WorkspaceError::SearchFailed {
-                reason: format!("Failed to get next version number: {e}"),
-            })?;
+        let result: Result<i32, WorkspaceError> = async {
+            let mut rows = conn
+                .query(
+                    "SELECT COALESCE(MAX(version), 0) + 1 FROM memory_document_versions WHERE document_id = ?1",
+                    params![doc_id.clone()],
+                )
+                .await
+                .map_err(|e| WorkspaceError::SearchFailed {
+                    reason: format!("Failed to get next version number: {e}"),
+                })?;
 
-        let next_version = if let Some(row) =
-            rows.next()
+            let next_version = if let Some(row) = rows
+                .next()
                 .await
                 .map_err(|e| WorkspaceError::SearchFailed {
                     reason: format!("Failed to read version number: {e}"),
                 })? {
-            get_i64(&row, 0) as i32
-        } else {
-            1
-        };
-        drop(rows);
+                get_i64(&row, 0) as i32
+            } else {
+                1
+            };
+            drop(rows);
 
-        tx.execute(
-            r#"
-            INSERT INTO memory_document_versions
-                (id, document_id, version, content, content_hash, created_at, changed_by)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-            "#,
-            params![
-                id,
-                doc_id,
-                next_version as i64,
-                content,
-                content_hash,
-                now,
-                changed_by
-            ],
-        )
-        .await
-        .map_err(|e| WorkspaceError::SearchFailed {
-            reason: format!("Failed to save version: {e}"),
-        })?;
-
-        tx.commit()
+            conn.execute(
+                r#"
+                INSERT INTO memory_document_versions
+                    (id, document_id, version, content, content_hash, created_at, changed_by)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                "#,
+                params![
+                    id,
+                    doc_id,
+                    next_version as i64,
+                    content,
+                    content_hash,
+                    now,
+                    changed_by
+                ],
+            )
             .await
             .map_err(|e| WorkspaceError::SearchFailed {
-                reason: format!("Failed to commit version: {e}"),
+                reason: format!("Failed to save version: {e}"),
             })?;
 
-        Ok(next_version)
+            Ok(next_version)
+        }
+        .await;
+
+        match &result {
+            Ok(_) => {
+                conn.execute("COMMIT", params![]).await.map_err(|e| {
+                    WorkspaceError::SearchFailed {
+                        reason: format!("Failed to commit version: {e}"),
+                    }
+                })?;
+            }
+            Err(_) => {
+                let _ = conn.execute("ROLLBACK", params![]).await;
+            }
+        }
+
+        result
     }
 
     async fn get_version(
