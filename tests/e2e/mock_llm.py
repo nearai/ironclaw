@@ -118,10 +118,10 @@ def _new_oauth_state() -> dict:
 
 
 def _message_text(msg: dict) -> str:
-    content = msg.get("content", "")
+    content = msg.get("content") or ""
     if isinstance(content, list):
         content = " ".join(
-            p.get("text", "") for p in content if p.get("type") == "text"
+            p.get("text") or "" for p in content if p.get("type") == "text"
         )
     return content
 
