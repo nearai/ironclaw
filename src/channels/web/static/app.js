@@ -318,7 +318,7 @@ async function authenticateWithNear() {
 
     // 2. Load near-connect dynamically if not already loaded.
     if (!window._nearConnector) {
-      var mod = await import('https://esm.sh/@hot-labs/near-connect@1');
+      var mod = await import('https://esm.sh/@hot-labs/near-connect@0.11');
       var network = window._nearNetwork || 'mainnet';
       window._nearConnector = new mod.NearConnector({ network: network });
     }
