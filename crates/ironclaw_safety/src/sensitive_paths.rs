@@ -30,13 +30,6 @@ const SENSITIVE_PATH_PATTERNS: &[&str] = &[
     "/.bash_history",
     "/.zsh_history",
     "/.histfile",
-    // SSH key types (caught by /.ssh/ directory pattern, but also match standalone)
-    "/id_rsa",
-    "/id_ed25519",
-    "/id_ecdsa",
-    "/id_dsa",
-    "/authorized_keys",
-    "/known_hosts",
 ];
 
 /// Sensitive file extensions that indicate cryptographic key material.
@@ -48,11 +41,28 @@ const SAFE_SUFFIXES: &[&str] = &[".dist"];
 /// Safe `.env` file suffixes that should NOT be blocked.
 const ENV_SAFE_SUFFIXES: &[&str] = &[".example", ".template", ".sample", ".dist"];
 
+/// Sensitive filenames that indicate SSH key material or access control files.
+/// Checked via exact filename match (not substring) to avoid false positives
+/// on paths like `/project/grid_rsa_data`.
+const SENSITIVE_FILENAMES: &[&str] = &[
+    "id_rsa",
+    "id_ed25519",
+    "id_ecdsa",
+    "id_dsa",
+    "authorized_keys",
+    "known_hosts",
+];
+
 /// Check whether a filesystem path points to a sensitive credential file or directory.
 ///
 /// Operates on the string representation of the path after normalizing separators
 /// and lowercasing. Callers should pass canonicalized paths (after symlink resolution)
 /// to prevent symlink-based bypass.
+///
+/// Note: `canonicalize()` is a blocking syscall. On local filesystems this is
+/// sub-millisecond and acceptable in async context. On network filesystems
+/// (NFS, CIFS) it could block the tokio runtime. If this becomes a problem,
+/// make this function async and use `tokio::fs::canonicalize`.
 pub fn is_sensitive_path(path: &Path) -> bool {
     let resolved = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     let path_str = resolved
@@ -85,6 +95,14 @@ pub fn is_sensitive_path(path: &Path) -> bool {
             if has_sensitive_ext {
                 return true;
             }
+        }
+    }
+
+    // Check sensitive filenames by exact match (e.g. id_rsa, authorized_keys)
+    if let Some(filename) = resolved.file_name().and_then(|f| f.to_str()) {
+        let filename_lower = filename.to_ascii_lowercase();
+        if SENSITIVE_FILENAMES.iter().any(|&f| filename_lower == f) {
+            return true;
         }
     }
 
@@ -197,6 +215,20 @@ mod tests {
     fn blocks_standalone_id_rsa() {
         // id_rsa outside of .ssh/ directory should still be caught
         assert!(is_sensitive_path(Path::new("/tmp/backup/id_rsa")));
+    }
+
+    #[test]
+    fn blocks_sensitive_filename_in_test_fixtures() {
+        // Even inside test_fixtures, a file literally named id_rsa is sensitive
+        assert!(is_sensitive_path(Path::new(
+            "/project/test_fixtures/id_rsa"
+        )));
+    }
+
+    #[test]
+    fn allows_substring_of_sensitive_filename() {
+        // grid_rsa_data contains "id_rsa" as a substring but is NOT the filename
+        assert!(!is_sensitive_path(Path::new("/project/grid_rsa_data")));
     }
 
     #[test]
