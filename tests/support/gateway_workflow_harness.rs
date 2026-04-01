@@ -248,6 +248,7 @@ impl GatewayWorkflowHarness {
             oauth_allowed_domains: Vec::new(),
             near_nonce_store: None,
             near_rpc_url: None,
+            near_network: None,
         });
 
         let mut agent = Agent::new(

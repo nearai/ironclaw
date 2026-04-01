@@ -188,6 +188,14 @@ pub async fn verify_access_key(
         .await
         .map_err(|e| OAuthError::ProfileFetch(format!("NEAR RPC request failed: {e}")))?;
 
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(OAuthError::ProfileFetch(format!(
+            "NEAR RPC returned HTTP {status}: {body}"
+        )));
+    }
+
     let json: serde_json::Value = resp
         .json()
         .await

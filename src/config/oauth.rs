@@ -8,9 +8,10 @@ use crate::error::ConfigError;
 /// OAuth/social login configuration.
 ///
 /// Disabled by default. When enabled, the gateway exposes `/auth/*` routes
-/// for OAuth login flows. Each provider is independently configured via
-/// env vars — only providers with both `CLIENT_ID` and `CLIENT_SECRET` are
-/// activated.
+/// for login flows. Each provider is independently configured via env vars:
+/// Google/GitHub require `CLIENT_ID` + `CLIENT_SECRET`, Apple requires
+/// `CLIENT_ID` + `TEAM_ID` + `KEY_ID` + private key, NEAR requires
+/// `NEAR_AUTH_ENABLED=true`.
 #[derive(Debug, Clone, Default)]
 pub struct OAuthConfig {
     /// Whether OAuth social login is enabled.

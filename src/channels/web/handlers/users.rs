@@ -431,11 +431,13 @@ pub async fn profile_get_handler(
         .ok_or((StatusCode::NOT_FOUND, "User not found".to_string()))?;
 
     // Try to get avatar_url from linked OAuth identities.
-    let identities = store
-        .list_identities_for_user(&user.user_id)
-        .await
-        .ok()
-        .unwrap_or_default();
+    let identities = match store.list_identities_for_user(&user.user_id).await {
+        Ok(ids) => ids,
+        Err(e) => {
+            tracing::warn!(user_id = %user.user_id, error = %e, "Failed to fetch identities for avatar");
+            Vec::new()
+        }
+    };
     let avatar_url = identities.iter().find_map(|id| id.avatar_url.clone());
     tracing::debug!(
         user_id = %user.user_id,

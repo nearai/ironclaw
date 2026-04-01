@@ -260,7 +260,7 @@ impl OAuthProvider for GitHubProvider {
     async fn exchange_code(
         &self,
         code: &str,
-        _callback_url: &str,
+        callback_url: &str,
         _code_verifier: &str,
     ) -> Result<OAuthUserProfile, OAuthError> {
         // Exchange the code for an access token.
@@ -272,6 +272,7 @@ impl OAuthProvider for GitHubProvider {
                 ("client_id", self.client_id.as_str()),
                 ("client_secret", self.client_secret.expose_secret()),
                 ("code", code),
+                ("redirect_uri", callback_url),
             ])
             .send()
             .await

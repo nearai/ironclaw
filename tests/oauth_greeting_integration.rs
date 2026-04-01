@@ -1,10 +1,12 @@
-//! Integration tests for the OAuth login flow and bootstrap greeting behavior.
+//! Integration tests for the bootstrap greeting and cookie-based auth.
 //!
 //! Verifies:
 //! - Bootstrap greeting is inserted exactly once for new users
 //! - Subsequent calls to /api/chat/threads do NOT re-insert the greeting
+//! - Concurrent requests don't duplicate the greeting
 //! - Multiple users each get their own greeting
-//! - Cookie-based auth works for chat endpoints
+//! - Cookie-based session auth works for protected endpoints
+//! - Pre-existing conversations are not overwritten with the greeting
 
 #[cfg(feature = "libsql")]
 mod tests {
@@ -92,6 +94,7 @@ mod tests {
             oauth_allowed_domains: Vec::new(),
             near_nonce_store: None,
             near_rpc_url: None,
+            near_network: None,
         });
 
         let addr: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();

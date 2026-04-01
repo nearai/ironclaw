@@ -1,8 +1,8 @@
 //! OAuth/social login support for the web gateway.
 //!
-//! Provides direct OAuth authentication via Google and GitHub (with Apple,
-//! email/phone, and NEAR wallet planned as follow-ups). On successful OAuth,
-//! the system creates or links a user via the existing `UserStore`, issues an
+//! Provides direct authentication via Google, GitHub, Apple (OAuth/OIDC) and
+//! NEAR wallet (Ed25519 signature verification). On successful login, the
+//! system creates or links a user via the existing `UserStore`, issues an
 //! API token, and sets it as an HttpOnly cookie.
 
 pub mod near;

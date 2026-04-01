@@ -144,6 +144,7 @@ impl GatewayChannel {
             oauth_allowed_domains: Vec::new(),
             near_nonce_store: None,
             near_rpc_url: None,
+            near_network: None,
         });
 
         Self {
@@ -192,6 +193,7 @@ impl GatewayChannel {
             oauth_allowed_domains: self.state.oauth_allowed_domains.clone(),
             near_nonce_store: self.state.near_nonce_store.clone(),
             near_rpc_url: self.state.near_rpc_url.clone(),
+            near_network: self.state.near_network.clone(),
         };
         mutate(&mut new_state);
         self.state = Arc::new(new_state);
@@ -400,6 +402,7 @@ impl GatewayChannel {
             store
         });
         let near_rpc_url = config.near.as_ref().map(|n| n.rpc_url.clone());
+        let near_network = config.near.as_ref().map(|n| n.network.clone());
 
         let has_near = near_nonce_store.is_some();
 
@@ -409,6 +412,7 @@ impl GatewayChannel {
                 s.oauth_allowed_domains = allowed_domains;
                 s.near_nonce_store = near_nonce_store;
                 s.near_rpc_url = near_rpc_url;
+                s.near_network = near_network;
             });
             if has_near || !self.auth.oidc_allowed_domains.is_empty() {
                 return self;
@@ -444,6 +448,7 @@ impl GatewayChannel {
             s.oauth_allowed_domains = allowed_domains;
             s.near_nonce_store = near_nonce_store;
             s.near_rpc_url = near_rpc_url;
+            s.near_network = near_network;
         });
         self
     }

@@ -385,7 +385,6 @@ pub struct GatewayState {
     pub scheduler: Option<crate::tools::builtin::SchedulerSlot>,
     /// Per-user rate limiter for chat endpoints (30 messages per 60 seconds per user).
     pub chat_rate_limiter: PerUserRateLimiter,
-    /// Rate limiter for OAuth callback endpoints (10 requests per 60 seconds).
     /// Per-IP rate limiter for OAuth/auth endpoints (20 requests per 60 seconds per IP).
     pub oauth_rate_limiter: PerUserRateLimiter,
     /// Rate limiter for webhook trigger endpoints (10 requests per 60 seconds).
@@ -424,6 +423,8 @@ pub struct GatewayState {
     pub near_nonce_store: Option<Arc<crate::channels::web::oauth::near::NearNonceStore>>,
     /// NEAR RPC endpoint URL for access key verification.
     pub near_rpc_url: Option<String>,
+    /// NEAR network name (mainnet/testnet) for the frontend wallet connector.
+    pub near_network: Option<String>,
 }
 
 /// Start the gateway HTTP server.
@@ -3127,6 +3128,7 @@ mod tests {
             oauth_allowed_domains: Vec::new(),
             near_nonce_store: None,
             near_rpc_url: None,
+            near_network: None,
         })
     }
 

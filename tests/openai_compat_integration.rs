@@ -226,6 +226,7 @@ async fn start_test_server_with_provider(
         oauth_allowed_domains: Vec::new(),
         near_nonce_store: None,
         near_rpc_url: None,
+        near_network: None,
     });
 
     let auth = ironclaw::channels::web::auth::MultiAuthState::single(
@@ -732,6 +733,7 @@ async fn test_no_llm_provider_returns_503() {
         oauth_allowed_domains: Vec::new(),
         near_nonce_store: None,
         near_rpc_url: None,
+        near_network: None,
     });
 
     let auth = ironclaw::channels::web::auth::MultiAuthState::single(

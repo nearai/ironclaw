@@ -53,13 +53,7 @@ pub async fn providers_handler(State(state): State<Arc<GatewayState>>) -> Json<s
     }
     providers.sort_unstable();
     let mut resp = serde_json::json!({ "providers": providers });
-    // Surface NEAR network config so the frontend wallet connector uses the right network.
-    if let Some(ref rpc_url) = state.near_rpc_url {
-        let network = if rpc_url.contains("testnet") {
-            "testnet"
-        } else {
-            "mainnet"
-        };
+    if let Some(ref network) = state.near_network {
         resp["near_network"] = serde_json::json!(network);
     }
     Json(resp)
@@ -456,13 +450,17 @@ pub async fn near_verify_handler(
         return (StatusCode::UNAUTHORIZED, "Invalid signature").into_response();
     }
 
+    // Normalize the public key to NEAR's canonical format for the RPC call.
+    let canonical_pubkey = format!("ed25519:{}", bs58::encode(&pub_key_bytes).into_string());
+
     // Verify the public key is an active access key on the NEAR account.
-    let http = reqwest::Client::new();
+    static NEAR_HTTP: std::sync::LazyLock<reqwest::Client> =
+        std::sync::LazyLock::new(reqwest::Client::new);
     if let Err(e) = crate::channels::web::oauth::near::verify_access_key(
         near_rpc_url,
         &body.account_id,
-        &body.public_key,
-        &http,
+        &canonical_pubkey,
+        &NEAR_HTTP,
     )
     .await
     {
@@ -553,60 +551,80 @@ pub async fn near_verify_handler(
         db_auth.invalidate_user(&user_id).await;
     }
 
-    // Return the token as JSON (the frontend sets the cookie/session).
-    Json(serde_json::json!({
+    // Set session cookie (consistent with OAuth flow) and return user info.
+    let base_url = state
+        .oauth_base_url
+        .as_deref()
+        .unwrap_or("http://localhost");
+    let cookie_value = build_session_cookie(&plaintext_token, is_secure(base_url));
+    let mut response = Json(serde_json::json!({
         "token": plaintext_token,
         "user_id": user_id,
         "account_id": body.account_id,
         "is_new": is_new,
     }))
-    .into_response()
+    .into_response();
+    if let Ok(hv) = HeaderValue::from_str(&cookie_value) {
+        response.headers_mut().insert(header::SET_COOKIE, hv);
+    }
+    response
 }
 
-/// Decode bytes from base58, hex, or base64 (tries all formats).
-fn decode_multiformat(input: &str, expected_len: usize) -> Option<Vec<u8>> {
-    [
-        bs58::decode(input).into_vec().ok(),
-        hex::decode(input).ok(),
-        base64::engine::general_purpose::STANDARD.decode(input).ok(),
-        base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .decode(input)
-            .ok(),
-    ]
-    .into_iter()
-    .flatten()
-    .find(|bytes| bytes.len() == expected_len)
-}
-
-/// Decode a NEAR public key (format: "ed25519:base58encoded" or raw hex/base64).
-fn decode_near_public_key(key: &str) -> Result<[u8; 32], String> {
-    let raw = key.strip_prefix("ed25519:").unwrap_or(key);
-    match decode_multiformat(raw, 32) {
-        Some(bytes) => {
-            let mut arr = [0u8; 32];
-            arr.copy_from_slice(&bytes);
-            Ok(arr)
-        }
-        None => Err(format!(
-            "Invalid public key format (expected 32 bytes, got: {}...)",
-            &key[..key.len().min(20)]
-        )),
+/// Truncate a string safely for error messages (no byte-index panic on multibyte).
+fn safe_truncate(s: &str, max_chars: usize) -> &str {
+    match s.char_indices().nth(max_chars) {
+        Some((idx, _)) => &s[..idx],
+        None => s,
     }
 }
 
-/// Decode a NEAR signature (base58, hex, or base64, 64 bytes).
+/// Decode a NEAR public key. NEAR keys always use the `ed25519:` prefix with
+/// base58 encoding. We enforce this format to avoid ambiguity with base64.
+fn decode_near_public_key(key: &str) -> Result<[u8; 32], String> {
+    let raw = key.strip_prefix("ed25519:").ok_or_else(|| {
+        format!(
+            "Expected ed25519: prefix, got: {}...",
+            safe_truncate(key, 20)
+        )
+    })?;
+    let bytes = bs58::decode(raw)
+        .into_vec()
+        .map_err(|e| format!("Invalid base58 in public key: {e}"))?;
+    if bytes.len() != 32 {
+        return Err(format!(
+            "Public key decoded to {} bytes, expected 32",
+            bytes.len()
+        ));
+    }
+    let mut arr = [0u8; 32];
+    arr.copy_from_slice(&bytes);
+    Ok(arr)
+}
+
+/// Decode a NEAR signature. Wallets return signatures as base64 (HOT, Meteor)
+/// or base58 (MyNearWallet). We try base64 first (most common from near-connect),
+/// then base58.
 fn decode_near_signature(sig: &str) -> Result<[u8; 64], String> {
-    match decode_multiformat(sig, 64) {
-        Some(bytes) => {
+    // Try base64 standard first (most wallets via near-connect), then URL-safe,
+    // then base58 (MyNearWallet). Each must decode to exactly 64 bytes.
+    let candidates = [
+        base64::engine::general_purpose::STANDARD.decode(sig).ok(),
+        base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(sig)
+            .ok(),
+        bs58::decode(sig).into_vec().ok(),
+    ];
+    for bytes in candidates.into_iter().flatten() {
+        if bytes.len() == 64 {
             let mut arr = [0u8; 64];
             arr.copy_from_slice(&bytes);
-            Ok(arr)
+            return Ok(arr);
         }
-        None => Err(format!(
-            "Invalid signature format (expected 64 bytes, got: {}...)",
-            &sig[..sig.len().min(20)]
-        )),
     }
+    Err(format!(
+        "Invalid signature (expected 64 bytes base64/base58, got: {}...)",
+        safe_truncate(sig, 20)
+    ))
 }
 
 /// Extract the session cookie value from request headers.
