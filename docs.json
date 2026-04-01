@@ -98,7 +98,13 @@
                 "group": "Tutorials",
                 "icon": "graduation-cap",
                 "pages": [
-                  "extensions/building-a-tool"
+                  "extensions/building-a-tool",
+                  {
+                    "group": "Host IronClaw on...",
+                    "pages": [
+                      "infrastructure/droplet"
+                    ]
+                  }
                 ]
               }
             ]
