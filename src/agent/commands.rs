@@ -13,7 +13,7 @@ use crate::agent::submission::SubmissionResult;
 use crate::agent::{Agent, MessageIntent};
 use crate::channels::{IncomingMessage, StatusUpdate};
 use crate::context::JobState;
-use crate::error::Error;
+use crate::error::{ConfigError, Error};
 use crate::llm::{ChatMessage, Reasoning};
 
 /// Format a count with a suffix, using K/M abbreviations for large numbers.
@@ -353,10 +353,8 @@ impl Agent {
             output.push_str(&format!("Thread: {} (in-memory, {} turns)\n\n", thread_id, thread.turns.len()));
 
             for (i, turn) in thread.turns.iter().enumerate() {
-                if let Some(ref input) = turn.user_input {
-                    output.push_str(&format!("Turn {} - User: {}\n", i + 1, 
-                        input.chars().take(200).collect::<String>()));
-                }
+                output.push_str(&format!("Turn {} - User: {}\n", i + 1, 
+                    turn.user_input.chars().take(200).collect::<String>()));
                 if let Some(ref response) = turn.response {
                     output.push_str(&format!("         Assistant: {}\n", 
                         response.chars().take(200).collect::<String>()));
