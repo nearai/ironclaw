@@ -805,6 +805,7 @@ impl RoutineEngine {
             tools: self.tools.clone(),
             safety: self.safety.clone(),
             sandbox_readiness: self.sandbox_readiness,
+            event_cache: Arc::clone(&self.event_cache),
         };
 
         tokio::spawn(async move {
@@ -890,6 +891,7 @@ impl RoutineEngine {
             tools: self.tools.clone(),
             safety: self.safety.clone(),
             sandbox_readiness: self.sandbox_readiness,
+            event_cache: Arc::clone(&self.event_cache),
         };
 
         tokio::spawn(async move {
@@ -944,6 +946,7 @@ impl RoutineEngine {
             tools: self.tools.clone(),
             safety: self.safety.clone(),
             sandbox_readiness: self.sandbox_readiness,
+            event_cache: Arc::clone(&self.event_cache),
         };
 
         // Record the run in DB, then spawn execution
@@ -1082,6 +1085,7 @@ struct EngineContext {
     tools: Arc<ToolRegistry>,
     safety: Arc<SafetyLayer>,
     sandbox_readiness: SandboxReadiness,
+    event_cache: Arc<RwLock<Vec<EventMatcher>>>,
 }
 
 /// Execute a routine run. Handles both lightweight and full_job modes.
@@ -1176,6 +1180,15 @@ async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) 
         tracing::error!(routine = %routine.name, "Failed to update runtime state: {}", e);
     }
 
+    update_cached_event_runtime(
+        &ctx.event_cache,
+        routine.id,
+        now,
+        routine.run_count + 1,
+        new_failures,
+    )
+    .await;
+
     // Persist routine result to its dedicated conversation thread
     let thread_id = match ctx
         .store
@@ -1220,6 +1233,26 @@ async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) 
         thread_id.as_deref(),
     )
     .await;
+}
+
+async fn update_cached_event_runtime(
+    event_cache: &Arc<RwLock<Vec<EventMatcher>>>,
+    routine_id: Uuid,
+    last_run_at: chrono::DateTime<Utc>,
+    run_count: u64,
+    consecutive_failures: u32,
+) {
+    let mut cache = event_cache.write().await;
+    for matcher in cache.iter_mut() {
+        let routine = match matcher {
+            EventMatcher::Message { routine, .. } | EventMatcher::System { routine } => routine,
+        };
+        if routine.id == routine_id {
+            routine.last_run_at = Some(last_run_at);
+            routine.run_count = run_count;
+            routine.consecutive_failures = consecutive_failures;
+        }
+    }
 }
 
 /// Sanitize a routine name for use in workspace paths.
