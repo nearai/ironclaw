@@ -163,7 +163,7 @@ impl SubmissionParser {
         }
 
         // /thread [subcommand] - thread management
-        if let Some(rest) = trimmed.strip_prefix("/thread") {
+        if let Some(rest) = lower.strip_prefix("/thread") {
             let rest = rest.trim();
 
             // /thread (no args) - show current thread info

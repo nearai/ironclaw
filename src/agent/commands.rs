@@ -5,6 +5,7 @@
 
 use std::sync::Arc;
 
+use chrono::{DateTime, Utc};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
@@ -14,6 +15,7 @@ use crate::agent::{Agent, MessageIntent};
 use crate::channels::{IncomingMessage, StatusUpdate};
 use crate::context::JobState;
 use crate::error::{ConfigError, Error};
+use crate::history::ConversationMessage;
 use crate::llm::{ChatMessage, Reasoning};
 
 /// Format a count with a suffix, using K/M abbreviations for large numbers.
@@ -46,6 +48,48 @@ fn format_history_line(
         line.push_str(&format!(" — {}", title));
     }
     line
+}
+
+fn history_messages_page_window(
+    total_messages: usize,
+    limit: i64,
+    page: i64,
+) -> std::ops::Range<usize> {
+    let limit = limit.max(1) as usize;
+    let page = page.max(1) as usize;
+
+    let older_items = limit.saturating_mul(page.saturating_sub(1));
+    let current_window = limit.saturating_mul(page);
+    let start = total_messages.saturating_sub(current_window);
+    let end = total_messages.saturating_sub(older_items);
+    start..end
+}
+
+async fn load_history_messages_page(
+    store: &crate::tenant::TenantScope,
+    thread_id: Uuid,
+    limit: i64,
+    page: i64,
+) -> Result<(Vec<ConversationMessage>, bool), Error> {
+    let mut before: Option<DateTime<Utc>> = None;
+    let mut current_page = 1;
+
+    loop {
+        let (messages, has_more) = store
+            .list_conversation_messages_paginated(thread_id, before, limit)
+            .await?;
+
+        if current_page == page {
+            return Ok((messages, has_more));
+        }
+
+        if messages.is_empty() || !has_more {
+            return Ok((Vec::new(), false));
+        }
+
+        before = messages.first().map(|message| message.created_at);
+        current_page += 1;
+    }
 }
 
 impl Agent {
@@ -182,7 +226,10 @@ impl Agent {
         let mut seen_threads = std::collections::HashSet::new();
 
         if let Some(store) = tenant.store() {
-            match store.list_conversations_all_channels_paginated(limit, offset).await {
+            match store
+                .list_conversations_all_channels_paginated(limit, offset)
+                .await
+            {
                 Ok(mut summaries) if !summaries.is_empty() => {
                     summaries.sort_by_key(|s| std::cmp::Reverse(s.last_activity));
                     output.push_str("Persistent threads (use /thread <id> to hydrate):\n");
@@ -275,11 +322,10 @@ impl Agent {
         }
 
         let thread_id_str = &args[0];
-        let thread_id = Uuid::parse_str(thread_id_str)
-            .map_err(|e| ConfigError::InvalidValue { 
-                key: "thread_id".to_string(), 
-                message: format!("Invalid UUID '{}': {}", thread_id_str, e) 
-            })?;
+        let thread_id = Uuid::parse_str(thread_id_str).map_err(|e| ConfigError::InvalidValue {
+            key: "thread_id".to_string(),
+            message: format!("Invalid UUID '{}': {}", thread_id_str, e),
+        })?;
 
         // Parse pagination arguments
         let mut limit: i64 = 50;
@@ -311,55 +357,90 @@ impl Agent {
 
         // Try to get messages from database first (persistent threads)
         if let Some(store) = tenant.store() {
-            match store.list_conversation_messages_paginated(thread_id, None, limit).await {
-                Ok((messages, has_more)) => {
-                    if messages.is_empty() {
-                        return Ok(format!("Thread {} has no messages.", thread_id));
-                    }
+            let (messages, has_more) =
+                load_history_messages_page(store, thread_id, limit, page).await?;
 
-                    let mut output = String::new();
-                    output.push_str(&format!("Thread: {} (Page {} of ~{}, showing {} messages)\n", 
-                        thread_id, page, if has_more { "N+" } else { "1" }, messages.len()));
-                    output.push_str(&format!("Limit: {}\n\n", limit));
-
-                    for msg in messages {
-                        let timestamp = msg.created_at.format("%Y-%m-%d %H:%M:%S");
-                        output.push_str(&format!("[{}] {}: {}\n", 
-                            timestamp, 
-                            msg.role, 
-                            msg.content.lines().next().unwrap_or("").chars().take(200).collect::<String>()));
-                    }
-
-                    if has_more {
-                        output.push_str(&format!("\nUse --page {} to see more messages.", page + 1));
-                    }
-
-                    return Ok(output);
-                }
-                Err(_) => {
-                    // Fall through to in-memory check
-                }
+            if messages.is_empty() {
+                return Ok(if page > 1 {
+                    format!("Thread {} has no messages on page {}.", thread_id, page)
+                } else {
+                    format!("Thread {} has no messages.", thread_id)
+                });
             }
+
+            let mut output = String::new();
+            output.push_str(&format!(
+                "Thread: {} (page {}, showing {} messages)\n",
+                thread_id,
+                page,
+                messages.len()
+            ));
+            output.push_str(&format!("Limit: {}\n\n", limit));
+
+            for msg in messages {
+                let timestamp = msg.created_at.format("%Y-%m-%d %H:%M:%S");
+                output.push_str(&format!(
+                    "[{}] {}: {}\n",
+                    timestamp,
+                    msg.role,
+                    msg.content
+                        .lines()
+                        .next()
+                        .unwrap_or("")
+                        .chars()
+                        .take(200)
+                        .collect::<String>()
+                ));
+            }
+
+            if has_more {
+                output.push_str(&format!("\nUse --page {} to see older messages.", page + 1));
+            }
+
+            return Ok(output);
         }
 
         // Check in-memory session threads
         let sess = session.lock().await;
         if let Some(thread) = sess.threads.get(&thread_id) {
-            if thread.turns.is_empty() {
-                return Ok(format!("Thread {} has no turns in current session.", thread_id));
+            let message_window = history_messages_page_window(thread.turns.len(), limit, page);
+            let has_more = message_window.start > 0;
+            let page_turns = &thread.turns[message_window];
+
+            if page_turns.is_empty() {
+                return Ok(if page > 1 {
+                    format!("Thread {} has no messages on page {}.", thread_id, page)
+                } else {
+                    format!("Thread {} has no turns in current session.", thread_id)
+                });
             }
 
             let mut output = String::new();
-            output.push_str(&format!("Thread: {} (in-memory, {} turns)\n\n", thread_id, thread.turns.len()));
+            output.push_str(&format!(
+                "Thread: {} (page {}, showing {} turns)\n\n",
+                thread_id,
+                page,
+                page_turns.len()
+            ));
+            output.push_str(&format!("Limit: {} turns\n\n", limit));
 
-            for (i, turn) in thread.turns.iter().enumerate() {
-                output.push_str(&format!("Turn {} - User: {}\n", i + 1, 
-                    turn.user_input.chars().take(200).collect::<String>()));
+            for turn in page_turns {
+                output.push_str(&format!(
+                    "Turn {} - User: {}\n",
+                    turn.turn_number + 1,
+                    turn.user_input.chars().take(200).collect::<String>()
+                ));
                 if let Some(ref response) = turn.response {
-                    output.push_str(&format!("         Assistant: {}\n", 
-                        response.chars().take(200).collect::<String>()));
+                    output.push_str(&format!(
+                        "         Assistant: {}\n",
+                        response.chars().take(200).collect::<String>()
+                    ));
                 }
                 output.push('\n');
+            }
+
+            if has_more {
+                output.push_str(&format!("\nUse --page {} to see older messages.", page + 1));
             }
 
             return Ok(output.trim_end().to_string());
@@ -367,8 +448,12 @@ impl Agent {
 
         Err(ConfigError::InvalidValue {
             key: "thread_id".to_string(),
-            message: format!("Thread {} not found. Use /history to list available threads.", thread_id),
-        }.into())
+            message: format!(
+                "Thread {} not found. Use /history to list available threads.",
+                thread_id
+            ),
+        }
+        .into())
     }
 
     async fn handle_check_status(
@@ -957,7 +1042,9 @@ impl Agent {
             "history" => {
                 // Support subcommands: /history messages <thread-id> [--limit N] [--page N]
                 if args.first().map(|s| s.as_str()) == Some("messages") {
-                    let history = self.handle_history_messages_command(session, tenant, &args[1..]).await?;
+                    let history = self
+                        .handle_history_messages_command(session, tenant, &args[1..])
+                        .await?;
                     Ok(SubmissionResult::response(history))
                 } else {
                     let history = self.handle_history_command(session, tenant, args).await?;
@@ -1442,6 +1529,73 @@ mod tests {
         assert_eq!(format_count(5, "items"), "5 items");
         assert_eq!(format_count(1500, "messages"), "1.5K messages");
         assert_eq!(format_count(2500000, "tokens"), "2.5M tokens");
+    }
+
+    #[test]
+    fn test_history_messages_page_window_from_tail() {
+        assert_eq!(history_messages_page_window(0, 10, 1), 0..0);
+        assert_eq!(history_messages_page_window(5, 2, 1), 3..5);
+        assert_eq!(history_messages_page_window(5, 2, 2), 1..3);
+        assert_eq!(history_messages_page_window(5, 2, 3), 0..1);
+        assert_eq!(history_messages_page_window(5, 2, 4), 0..0);
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_load_history_messages_page_honors_requested_page() {
+        use std::time::Duration;
+
+        let (db, _tmp_dir) = crate::testing::test_db().await;
+        let store = crate::tenant::TenantScope::new("user-1", db);
+        let metadata = serde_json::json!({"title": "history page test"});
+        let thread_id = store
+            .create_conversation_with_metadata("gateway", &metadata)
+            .await
+            .expect("failed to create test conversation");
+
+        for content in ["msg-1", "msg-2", "msg-3", "msg-4", "msg-5"] {
+            store
+                .add_conversation_message(thread_id, "user", content)
+                .await
+                .expect("failed to seed message");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+
+        let (page_one, has_more_one) = load_history_messages_page(&store, thread_id, 2, 1)
+            .await
+            .expect("failed to load page 1");
+        assert_eq!(
+            page_one
+                .iter()
+                .map(|m| m.content.as_str())
+                .collect::<Vec<_>>(),
+            vec!["msg-4", "msg-5"]
+        );
+        assert!(has_more_one);
+
+        let (page_two, has_more_two) = load_history_messages_page(&store, thread_id, 2, 2)
+            .await
+            .expect("failed to load page 2");
+        assert_eq!(
+            page_two
+                .iter()
+                .map(|m| m.content.as_str())
+                .collect::<Vec<_>>(),
+            vec!["msg-2", "msg-3"]
+        );
+        assert!(has_more_two);
+
+        let (page_three, has_more_three) = load_history_messages_page(&store, thread_id, 2, 3)
+            .await
+            .expect("failed to load page 3");
+        assert_eq!(
+            page_three
+                .iter()
+                .map(|m| m.content.as_str())
+                .collect::<Vec<_>>(),
+            vec!["msg-1"]
+        );
+        assert!(!has_more_three);
     }
 
     #[test]
