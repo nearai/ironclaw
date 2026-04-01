@@ -14,6 +14,7 @@ import uuid
 from aiohttp import web
 
 CANNED_RESPONSES = [
+    (re.compile(r"empty routine response", re.IGNORECASE), ""),
     (re.compile(r"hello|hi|hey", re.IGNORECASE), "Hello! How can I help you today?"),
     (re.compile(r"2\s*\+\s*2|two plus two", re.IGNORECASE), "The answer is 4."),
     (re.compile(r"skill|install", re.IGNORECASE), "I can help you with skills management."),
@@ -25,6 +26,11 @@ DEFAULT_RESPONSE = "I understand your request."
 
 TOOL_CALL_PATTERNS = [
     (re.compile(r"echo (.+)", re.IGNORECASE), "echo", lambda m: {"message": m.group(1)}),
+    (
+        re.compile(r"loop until cap", re.IGNORECASE),
+        "echo",
+        lambda _: {"message": "loop-until-cap"},
+    ),
     (
         re.compile(r"make approval post (?P<label>[a-z0-9_-]+)", re.IGNORECASE),
         "http",
@@ -66,6 +72,21 @@ TOOL_CALL_PATTERNS = [
     ),
     (
         re.compile(
+            r"create failing lightweight owner routine (?P<name>[a-z0-9][a-z0-9_-]*)",
+            re.IGNORECASE,
+        ),
+        "routine_create",
+        lambda m: {
+            "name": m.group("name"),
+            "description": f"Failing lightweight routine {m.group('name')}",
+            "trigger_type": "manual",
+            "prompt": f"Empty routine response for {m.group('name')}.",
+            "action_type": "lightweight",
+            "use_tools": False,
+        },
+    ),
+    (
+        re.compile(
             r"create full[- ]job owner routine (?P<name>[a-z0-9][a-z0-9_-]*)",
             re.IGNORECASE,
         ),
@@ -80,8 +101,41 @@ TOOL_CALL_PATTERNS = [
     ),
     (
         re.compile(
+            r"create looping full[- ]job owner routine (?P<name>[a-z0-9][a-z0-9_-]*)",
+            re.IGNORECASE,
+        ),
+        "routine_create",
+        lambda m: {
+            "name": m.group("name"),
+            "description": f"Looping full-job routine {m.group('name')}",
+            "trigger_type": "manual",
+            "prompt": f"Loop until cap for {m.group('name')}.",
+            "action_type": "full_job",
+            "max_iterations": 1,
+        },
+    ),
+    (
+        re.compile(
+            r"create cron owner routine (?P<name>[a-z0-9][a-z0-9_-]*)",
+            re.IGNORECASE,
+        ),
+        "routine_create",
+        lambda m: {
+            "name": m.group("name"),
+            "description": f"Cron routine {m.group('name')}",
+            "trigger_type": "cron",
+            "schedule": "0 */5 * * * *",
+            "timezone": "UTC",
+            "prompt": f"Confirm that cron routine {m.group('name')} executed.",
+            "action_type": "lightweight",
+            "use_tools": False,
+        },
+    ),
+    (
+        re.compile(
             r"create event routine (?P<name>[a-z0-9][a-z0-9_-]*) "
-            r"channel (?P<channel>[a-z0-9_-]+) pattern (?P<pattern>[a-z0-9_|-]+)",
+            r"channel (?P<channel>[a-z0-9_-]+) pattern (?P<pattern>[a-z0-9_|-]+)"
+            r"(?: cooldown (?P<cooldown>\d+))?",
             re.IGNORECASE,
         ),
         "routine_create",
@@ -94,7 +148,7 @@ TOOL_CALL_PATTERNS = [
             "prompt": f"Acknowledge that {m.group('name')} fired.",
             "action_type": "lightweight",
             "use_tools": False,
-            "cooldown_secs": 0,
+            "cooldown_secs": int(m.group("cooldown") or 0),
         },
     ),
     (
@@ -126,6 +180,21 @@ def _last_user_content(messages: list[dict]) -> str:
     return ""
 
 
+def _job_contains_marker(messages: list[dict], marker: str) -> bool:
+    marker_lower = marker.lower()
+    for msg in messages:
+        if msg.get("role") != "user":
+            continue
+        content = msg.get("content", "")
+        if isinstance(content, list):
+            content = " ".join(
+                p.get("text", "") for p in content if p.get("type") == "text"
+            )
+        if marker_lower in str(content).lower():
+            return True
+    return False
+
+
 def _is_job_mode(messages: list[dict]) -> bool:
     """Detect if this conversation is a background job (not chat)."""
     for msg in messages:
@@ -152,6 +221,25 @@ def match_job_response(messages: list[dict], has_tools: bool) -> dict | None:
 
     last_user = _last_user_content(messages)
     tool_result_count = _count_tool_results(messages)
+    loop_until_cap = _job_contains_marker(messages, "loop until cap")
+
+    if loop_until_cap and "create a plan" in last_user.lower():
+        return {"text": json.dumps({
+            "goal": "Keep iterating until the worker hits the iteration cap",
+            "actions": [],
+            "estimated_cost": 0.001,
+            "estimated_time_secs": 5,
+            "confidence": 0.8,
+        })}
+
+    if loop_until_cap and "all planned actions have been executed" in last_user.lower():
+        return {"text": "loop until cap still requires more work"}
+
+    if loop_until_cap and has_tools:
+        return {"tool_call": {
+            "tool_name": "echo",
+            "arguments": {"message": "loop-until-cap"},
+        }}
 
     # Planning call (no tools available = complete() not complete_with_tools())
     if "create a plan" in last_user.lower():

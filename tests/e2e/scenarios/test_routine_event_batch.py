@@ -7,7 +7,7 @@ import uuid
 import httpx
 import pytest
 
-from helpers import AUTH_TOKEN, SEL, signed_http_webhook_headers
+from helpers import AUTH_TOKEN, SEL, api_post, signed_http_webhook_headers
 
 
 async def _send_chat_message(page, message: str) -> None:
@@ -39,11 +39,15 @@ async def _create_event_routine(
     name: str,
     pattern: str,
     channel: str = "http",
+    cooldown_secs: int | None = None,
 ) -> dict:
     """Create an event routine through chat and return its API record."""
+    message = f"create event routine {name} channel {channel} pattern {pattern}"
+    if cooldown_secs is not None:
+        message += f" cooldown {cooldown_secs}"
     await _send_chat_message(
         page,
-        f"create event routine {name} channel {channel} pattern {pattern}",
+        message,
     )
     return await _wait_for_routine(base_url, name)
 
@@ -54,13 +58,14 @@ async def _post_http_message(
     content: str,
     sender_id: str | None = None,
     thread_id: str | None = None,
+    wait_for_response: bool = True,
 ) -> dict:
     """Send a signed HTTP-channel message and return the JSON body."""
     payload = {
         "user_id": sender_id or f"sender-{uuid.uuid4().hex[:8]}",
         "thread_id": thread_id or f"thread-{uuid.uuid4().hex[:8]}",
         "content": content,
-        "wait_for_response": True,
+        "wait_for_response": wait_for_response,
     }
     body = json.dumps(payload).encode("utf-8")
 
@@ -75,7 +80,10 @@ async def _post_http_message(
     assert response.status_code == 200, (
         f"HTTP webhook failed: {response.status_code} {response.text[:400]}"
     )
-    return response.json()
+    data = response.json()
+    if wait_for_response:
+        assert data.get("response"), f"Expected synchronous response body, got: {data}"
+    return data
 
 
 async def _wait_for_routine(base_url: str, name: str, timeout: float = 20.0) -> dict:
@@ -138,6 +146,17 @@ async def _wait_for_completed_run(
             return runs[0]
         await asyncio.sleep(0.5)
     raise AssertionError(f"Routine '{routine_id}' did not complete within {timeout}s")
+
+
+async def _toggle_routine(base_url: str, routine_id: str, enabled: bool) -> dict:
+    """Toggle a routine through the routines API."""
+    response = await api_post(
+        base_url,
+        f"/api/routines/{routine_id}/toggle",
+        json={"enabled": enabled},
+    )
+    response.raise_for_status()
+    return response.json()
 
 
 @pytest.mark.asyncio
@@ -314,4 +333,85 @@ async def test_routine_execution_history_is_available(
 
     assert completed_run["id"]
     assert completed_run["started_at"]
+    assert completed_run["status"].lower() == "attention"
+
+
+@pytest.mark.asyncio
+async def test_event_trigger_respects_cooldown(
+    page,
+    ironclaw_server,
+    http_channel_server,
+):
+    """Rapid matching events should not re-fire a routine within cooldown."""
+    routine = await _create_event_routine(
+        page,
+        ironclaw_server,
+        name=f"evt-{uuid.uuid4().hex[:8]}",
+        pattern="alert",
+        cooldown_secs=30,
+    )
+
+    await _post_http_message(
+        http_channel_server,
+        content="alert: primary incident",
+        wait_for_response=False,
+    )
+    await _wait_for_run_count(
+        ironclaw_server,
+        routine["id"],
+        expected_at_least=1,
+    )
+    first_run = await _wait_for_completed_run(ironclaw_server, routine["id"])
+    assert first_run["status"].lower() == "attention"
+
+    await _post_http_message(
+        http_channel_server,
+        content="alert: follow-up incident",
+        wait_for_response=False,
+    )
+    await asyncio.sleep(2)
+
+    runs = await _get_routine_runs(ironclaw_server, routine["id"])
+    assert len(runs) == 1, f"Cooldown should suppress duplicate fire, got runs={runs}"
+
+
+@pytest.mark.asyncio
+async def test_event_routine_can_be_paused_and_resumed(
+    page,
+    ironclaw_server,
+    http_channel_server,
+):
+    """Disabled routines should not fire until they are re-enabled."""
+    routine = await _create_event_routine(
+        page,
+        ironclaw_server,
+        name=f"evt-{uuid.uuid4().hex[:8]}",
+        pattern="resume",
+    )
+
+    disabled = await _toggle_routine(ironclaw_server, routine["id"], False)
+    assert disabled["status"] == "disabled"
+
+    await _post_http_message(
+        http_channel_server,
+        content="resume this routine",
+        wait_for_response=False,
+    )
+    await asyncio.sleep(2)
+    assert await _get_routine_runs(ironclaw_server, routine["id"]) == []
+
+    enabled = await _toggle_routine(ironclaw_server, routine["id"], True)
+    assert enabled["status"] == "enabled"
+
+    await _post_http_message(
+        http_channel_server,
+        content="resume this routine",
+        wait_for_response=False,
+    )
+    await _wait_for_run_count(
+        ironclaw_server,
+        routine["id"],
+        expected_at_least=1,
+    )
+    completed_run = await _wait_for_completed_run(ironclaw_server, routine["id"])
     assert completed_run["status"].lower() == "attention"
