@@ -11,9 +11,7 @@ use async_trait::async_trait;
 use tokio::sync::{Mutex, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 
-use ironclaw_tui::{
-    SkillCategory, ToolCategory, TuiAppConfig, TuiEvent, TuiLayout, TuiUserMessage, start_tui,
-};
+use ironclaw_tui::{SkillCategory, ToolCategory, TuiAppConfig, TuiEvent, TuiLayout, start_tui};
 
 use crate::channels::web::log_layer::LogBroadcaster;
 use crate::channels::{
@@ -64,7 +62,10 @@ pub fn group_skills_by_tag(
 
     let mut groups: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for (name, tags) in skills {
-        let category = tags.first().cloned().unwrap_or_else(|| "general".to_string());
+        let category = tags
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "general".to_string());
         groups.entry(category).or_default().push(name.clone());
     }
 
@@ -307,12 +308,8 @@ impl Channel for TuiChannel {
             StatusUpdate::JobStarted { job_id, title, .. } => {
                 TuiEvent::JobStarted { job_id, title }
             }
-            StatusUpdate::JobStatus { job_id, status } => {
-                TuiEvent::JobStatus { job_id, status }
-            }
-            StatusUpdate::JobResult { job_id, status } => {
-                TuiEvent::JobResult { job_id, status }
-            }
+            StatusUpdate::JobStatus { job_id, status } => TuiEvent::JobStatus { job_id, status },
+            StatusUpdate::JobResult { job_id, status } => TuiEvent::JobResult { job_id, status },
             StatusUpdate::RoutineUpdate {
                 id,
                 name,
@@ -410,7 +407,9 @@ impl Channel for TuiChannel {
                 limit_reached,
             },
             StatusUpdate::Suggestions { suggestions } => TuiEvent::Suggestions { suggestions },
-            StatusUpdate::ImageGenerated { .. } => return Ok(()),
+            StatusUpdate::SkillActivated { .. } | StatusUpdate::ImageGenerated { .. } => {
+                return Ok(());
+            }
         };
 
         let _ = tx.send(event).await;

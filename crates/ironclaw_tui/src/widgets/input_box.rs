@@ -99,12 +99,10 @@ impl TuiWidget for InputBoxWidget {
                 .pending_attachments
                 .iter()
                 .flat_map(|a| {
-                    vec![
-                        Span::styled(
-                            format!(" [{}] ", a.label),
-                            self.theme.accent_style().add_modifier(Modifier::BOLD),
-                        ),
-                    ]
+                    vec![Span::styled(
+                        format!(" [{}] ", a.label),
+                        self.theme.accent_style().add_modifier(Modifier::BOLD),
+                    )]
                 })
                 .collect();
             let chip_line = Line::from(chips);

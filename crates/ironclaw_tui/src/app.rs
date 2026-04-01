@@ -30,9 +30,9 @@ use crate::input::{InputAction, map_key};
 use crate::layout::TuiLayout;
 use crate::widgets::approval::{ApprovalAction, ApprovalWidget};
 use crate::widgets::command_palette::CommandPaletteWidget;
+use crate::widgets::help_overlay::HelpOverlayWidget;
 use crate::widgets::logs::LogsWidget;
 use crate::widgets::registry::{BuiltinWidgets, create_default_widgets};
-use crate::widgets::help_overlay::HelpOverlayWidget;
 use crate::widgets::{
     ActiveTab, AppState, ChatMessage, ContextPressureInfo, CostGuardInfo, JobInfo, JobStatus,
     MessageRole, RoutineInfo, SandboxInfo, SecretsInfo, SkillCategory, ThreadInfo, ThreadStatus,
@@ -83,10 +83,16 @@ pub fn start_tui(config: TuiAppConfig) -> TuiAppHandle {
 
     let join_handle = std::thread::spawn(move || {
         // Build a single-threaded tokio runtime for the TUI thread
-        let rt = tokio::runtime::Builder::new_current_thread()
+        let rt = match tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .expect("failed to build tokio runtime for TUI");
+        {
+            Ok(rt) => rt,
+            Err(e) => {
+                tracing::error!("Failed to build tokio runtime for TUI: {e}");
+                return;
+            }
+        };
 
         rt.block_on(async move {
             if let Err(e) = run_tui(config, event_rx, input_event_tx, msg_tx).await {
@@ -268,7 +274,9 @@ async fn handle_event(
                 }
 
                 if !state.command_palette.visible {
-                    if let Some(cmd) = crate::input::parse_slash_command(&widgets.input_box.current_text()) {
+                    if let Some(cmd) =
+                        crate::input::parse_slash_command(&widgets.input_box.current_text())
+                    {
                         state.command_palette.open(cmd);
                     }
                 } else {
@@ -282,7 +290,8 @@ async fn handle_event(
 
                 if state.search.active {
                     state.search.query = widgets.input_box.current_text();
-                    state.search.match_count = count_search_matches(&state.messages, &state.search.query);
+                    state.search.match_count =
+                        count_search_matches(&state.messages, &state.search.query);
                     state.search.current_match = 0;
                 }
             }
@@ -523,10 +532,7 @@ async fn handle_event(
                     {
                         state.tool_detail_modal = Some(ToolDetailModal {
                             tool_name: tool.name.clone(),
-                            content: tool
-                                .result_preview
-                                .clone()
-                                .unwrap_or_default(),
+                            content: tool.result_preview.clone().unwrap_or_default(),
                             scroll: 0,
                         });
                     }
@@ -1149,9 +1155,7 @@ fn render_frame(
     // Help overlay (F1)
     if state.help_visible {
         let help_area = HelpOverlayWidget::modal_area(size);
-        widgets
-            .help
-            .render(help_area, frame.buffer_mut(), state);
+        widgets.help.render(help_area, frame.buffer_mut(), state);
     }
 
     // Notification toasts (bottom-right, above status bar)
@@ -1217,8 +1221,12 @@ fn render_tool_detail_modal(
     };
     let theme = layout.resolve_theme();
 
-    let width = (size.width * 3 / 4).max(40).min(size.width.saturating_sub(4));
-    let height = (size.height * 3 / 4).max(10).min(size.height.saturating_sub(4));
+    let width = (size.width * 3 / 4)
+        .max(40)
+        .min(size.width.saturating_sub(4));
+    let height = (size.height * 3 / 4)
+        .max(10)
+        .min(size.height.saturating_sub(4));
     let x = (size.width.saturating_sub(width)) / 2;
     let y = (size.height.saturating_sub(height)) / 2;
     let area = Rect::new(x, y, width, height);
@@ -1316,7 +1324,10 @@ fn render_toasts(
                 format!(" {icon} "),
                 border_style.add_modifier(Modifier::BOLD),
             ),
-            Span::styled(display_msg, ratatui::style::Style::default().fg(theme.fg.to_color())),
+            Span::styled(
+                display_msg,
+                ratatui::style::Style::default().fg(theme.fg.to_color()),
+            ),
         ]);
         let paragraph = Paragraph::new(line);
         paragraph.render(inner, frame.buffer_mut());
@@ -1369,7 +1380,9 @@ mod tests {
     #[test]
     fn encode_rgba_to_png_valid() {
         // 2x2 red image
-        let rgba = vec![255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255];
+        let rgba = vec![
+            255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
+        ];
         let png = encode_rgba_to_png(&rgba, 2, 2);
         assert!(png.is_some());
         let bytes = png.unwrap();

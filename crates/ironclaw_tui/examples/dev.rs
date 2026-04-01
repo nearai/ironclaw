@@ -11,15 +11,18 @@
 
 use std::time::Duration;
 
-use ironclaw_tui::{
-    SkillCategory, ToolCategory, TuiAppConfig, TuiEvent, TuiLayout, start_tui,
-};
+use ironclaw_tui::{SkillCategory, ToolCategory, TuiAppConfig, TuiEvent, TuiLayout, start_tui};
 
 fn mock_tool_categories() -> Vec<ToolCategory> {
     vec![
         ToolCategory {
             name: "browser".into(),
-            tools: vec!["back".into(), "click".into(), "navigate".into(), "screenshot".into()],
+            tools: vec![
+                "back".into(),
+                "click".into(),
+                "navigate".into(),
+                "screenshot".into(),
+            ],
         },
         ToolCategory {
             name: "file".into(),
@@ -38,11 +41,21 @@ fn mock_tool_categories() -> Vec<ToolCategory> {
         },
         ToolCategory {
             name: "memory".into(),
-            tools: vec!["read".into(), "search".into(), "tree".into(), "write".into()],
+            tools: vec![
+                "read".into(),
+                "search".into(),
+                "tree".into(),
+                "write".into(),
+            ],
         },
         ToolCategory {
             name: "routine".into(),
-            tools: vec!["create".into(), "delete".into(), "list".into(), "update".into()],
+            tools: vec![
+                "create".into(),
+                "delete".into(),
+                "list".into(),
+                "update".into(),
+            ],
         },
         ToolCategory {
             name: "secret".into(),
@@ -54,7 +67,12 @@ fn mock_tool_categories() -> Vec<ToolCategory> {
         },
         ToolCategory {
             name: "skill".into(),
-            tools: vec!["install".into(), "list".into(), "remove".into(), "search".into()],
+            tools: vec![
+                "install".into(),
+                "list".into(),
+                "remove".into(),
+                "search".into(),
+            ],
         },
         ToolCategory {
             name: "tool".into(),
@@ -80,11 +98,19 @@ fn mock_skill_categories() -> Vec<SkillCategory> {
     vec![
         SkillCategory {
             name: "apple".into(),
-            skills: vec!["apple-notes".into(), "apple-reminders".into(), "findmy".into()],
+            skills: vec![
+                "apple-notes".into(),
+                "apple-reminders".into(),
+                "findmy".into(),
+            ],
         },
         SkillCategory {
             name: "creative".into(),
-            skills: vec!["ascii-art".into(), "ascii-video".into(), "excalidraw".into()],
+            skills: vec![
+                "ascii-art".into(),
+                "ascii-video".into(),
+                "excalidraw".into(),
+            ],
         },
         SkillCategory {
             name: "data-science".into(),
@@ -92,7 +118,11 @@ fn mock_skill_categories() -> Vec<SkillCategory> {
         },
         SkillCategory {
             name: "github".into(),
-            skills: vec!["codebase-inspection".into(), "github-auth".into(), "github-code-r...".into()],
+            skills: vec![
+                "codebase-inspection".into(),
+                "github-auth".into(),
+                "github-code-r...".into(),
+            ],
         },
         SkillCategory {
             name: "media".into(),
@@ -100,7 +130,12 @@ fn mock_skill_categories() -> Vec<SkillCategory> {
         },
         SkillCategory {
             name: "productivity".into(),
-            skills: vec!["google-workspace".into(), "linear".into(), "notion".into(), "ocr".into()],
+            skills: vec![
+                "google-workspace".into(),
+                "linear".into(),
+                "notion".into(),
+                "ocr".into(),
+            ],
         },
         SkillCategory {
             name: "research".into(),
@@ -125,11 +160,7 @@ fn main() {
             .map(|p| p.display().to_string())
             .unwrap_or_else(|_| "~/projects/ironclaw".into()),
         memory_count: 42,
-        identity_files: vec![
-            "AGENTS.md".into(),
-            "SOUL.md".into(),
-            "USER.md".into(),
-        ],
+        identity_files: vec!["AGENTS.md".into(), "SOUL.md".into(), "USER.md".into()],
     };
 
     let handle = start_tui(config);
@@ -165,7 +196,9 @@ fn main() {
             while let Some(user_msg) = msg_rx.recv().await {
                 let msg = &user_msg.text;
                 // Simulate thinking
-                let _ = sim_tx.send(TuiEvent::Thinking("Processing...".into())).await;
+                let _ = sim_tx
+                    .send(TuiEvent::Thinking("Processing...".into()))
+                    .await;
                 tokio::time::sleep(Duration::from_millis(300)).await;
 
                 // Simulate tool call

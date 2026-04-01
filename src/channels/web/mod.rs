@@ -504,12 +504,10 @@ impl Channel for GatewayChannel {
                 cost_usd,
                 thread_id,
             },
-            StatusUpdate::JobStatus { job_id, status } => {
-                AppEvent::JobStatus {
-                    job_id,
-                    message: status,
-                }
-            }
+            StatusUpdate::JobStatus { job_id, status } => AppEvent::JobStatus {
+                job_id,
+                message: status,
+            },
             StatusUpdate::JobResult { job_id, status } => AppEvent::JobResult {
                 job_id,
                 status,
