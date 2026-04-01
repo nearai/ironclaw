@@ -137,6 +137,7 @@ CREATE TABLE IF NOT EXISTS dynamic_tools (
     failure_count INTEGER NOT NULL DEFAULT 0,
     last_error TEXT,
     status TEXT NOT NULL DEFAULT 'active',
+    scope TEXT NOT NULL DEFAULT 'user',
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
@@ -318,6 +319,7 @@ CREATE TABLE IF NOT EXISTS wasm_tools (
     source_url TEXT,
     trust_level TEXT NOT NULL DEFAULT 'user',
     status TEXT NOT NULL DEFAULT 'active',
+    scope TEXT NOT NULL DEFAULT 'user',
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     UNIQUE (user_id, name, version)
@@ -609,6 +611,34 @@ CREATE TABLE IF NOT EXISTS api_tokens (
 CREATE INDEX IF NOT EXISTS idx_api_tokens_user ON api_tokens(user_id);
 CREATE INDEX IF NOT EXISTS idx_api_tokens_hash ON api_tokens(token_hash);
 
+-- ==================== Channel Identities (V17) ====================
+
+CREATE TABLE IF NOT EXISTS channel_identities (
+    id          TEXT    NOT NULL PRIMARY KEY,
+    owner_id    TEXT    NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    channel     TEXT    NOT NULL,
+    external_id TEXT    NOT NULL,
+    created_at  TEXT    NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (channel, external_id)
+);
+CREATE INDEX IF NOT EXISTS idx_channel_identities_lookup
+    ON channel_identities (channel, external_id);
+
+-- ==================== Pairing Requests (V18) ====================
+
+CREATE TABLE IF NOT EXISTS pairing_requests (
+    id          TEXT    NOT NULL PRIMARY KEY,
+    channel     TEXT    NOT NULL,
+    external_id TEXT    NOT NULL,
+    code        TEXT    NOT NULL UNIQUE,
+    owner_id    TEXT    REFERENCES users(id) ON DELETE CASCADE,
+    created_at  TEXT    NOT NULL DEFAULT (datetime('now')),
+    expires_at  TEXT    NOT NULL,
+    approved_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_pairing_requests_code    ON pairing_requests (code);
+CREATE INDEX IF NOT EXISTS idx_pairing_requests_channel ON pairing_requests (channel, external_id);
+
 "#;
 
 /// Incremental migrations applied after the base schema.
@@ -798,13 +828,68 @@ CREATE INDEX IF NOT EXISTS idx_api_tokens_hash ON api_tokens(token_hash);
 ALTER TABLE conversations ADD COLUMN source_channel TEXT;
 "#,
     ),
+    (
+        17,
+        "tool_scope",
+        // Add scope column to wasm_tools and dynamic_tools for future admin-promoted
+        // global tools. All existing rows default to 'user'. Marked as idempotent
+        // (see IDEMPOTENT_ADD_COLUMN_MIGRATIONS) because the base SCHEMA now
+        // includes this column for fresh installs.
+        r#"
+ALTER TABLE wasm_tools    ADD COLUMN scope TEXT NOT NULL DEFAULT 'user';
+ALTER TABLE dynamic_tools ADD COLUMN scope TEXT NOT NULL DEFAULT 'user';
+"#,
+    ),
+    (
+        18,
+        "channel_identities",
+        // Create channel_identities table mapping external identities to owners.
+        // Uses IF NOT EXISTS because the base SCHEMA already includes this table
+        // for fresh installs.
+        r#"
+CREATE TABLE IF NOT EXISTS channel_identities (
+    id          TEXT    NOT NULL PRIMARY KEY,
+    owner_id    TEXT    NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    channel     TEXT    NOT NULL,
+    external_id TEXT    NOT NULL,
+    created_at  TEXT    NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (channel, external_id)
+);
+CREATE INDEX IF NOT EXISTS idx_channel_identities_lookup
+    ON channel_identities (channel, external_id);
+"#,
+    ),
+    (
+        19,
+        "pairing_requests",
+        // Create pairing_requests table replacing file-based pairing store.
+        // Uses IF NOT EXISTS because the base SCHEMA already includes this table
+        // for fresh installs.
+        r#"
+CREATE TABLE IF NOT EXISTS pairing_requests (
+    id          TEXT    NOT NULL PRIMARY KEY,
+    channel     TEXT    NOT NULL,
+    external_id TEXT    NOT NULL,
+    code        TEXT    NOT NULL UNIQUE,
+    owner_id    TEXT    REFERENCES users(id) ON DELETE CASCADE,
+    created_at  TEXT    NOT NULL DEFAULT (datetime('now')),
+    expires_at  TEXT    NOT NULL,
+    approved_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_pairing_requests_code    ON pairing_requests (code);
+CREATE INDEX IF NOT EXISTS idx_pairing_requests_channel ON pairing_requests (channel, external_id);
+"#,
+    ),
 ];
 
 /// Migrations whose ADD COLUMN should be skipped when the column already
 /// exists (e.g. because the base SCHEMA was updated to include it).
 /// Each entry is `(version, table_name, column_name)`.
-const IDEMPOTENT_ADD_COLUMN_MIGRATIONS: &[(i64, &str, &str)] =
-    &[(16, "conversations", "source_channel")];
+const IDEMPOTENT_ADD_COLUMN_MIGRATIONS: &[(i64, &str, &str)] = &[
+    (16, "conversations", "source_channel"),
+    (17, "wasm_tools", "scope"),
+    (17, "dynamic_tools", "scope"),
+];
 
 /// Check whether `table` already contains `column` via `pragma_table_info`.
 async fn column_exists(
@@ -851,16 +936,26 @@ pub async fn run_incremental(conn: &libsql::Connection) -> Result<(), crate::err
             continue; // Already applied
         }
 
-        // For ADD COLUMN migrations, skip the ALTER if the column already
-        // exists (e.g. because the base SCHEMA was updated to include it)
-        // and just record the migration as applied.
-        let skip_sql = if let Some(&(_, table, column)) = IDEMPOTENT_ADD_COLUMN_MIGRATIONS
+        // For ADD COLUMN migrations, skip the ALTER if ALL the tracked columns
+        // already exist (e.g. because the base SCHEMA was updated to include
+        // them). Each version may have multiple entries — all must be present
+        // to skip the SQL.
+        let idempotent_checks: Vec<(&str, &str)> = IDEMPOTENT_ADD_COLUMN_MIGRATIONS
             .iter()
-            .find(|(v, _, _)| *v == version)
-        {
-            column_exists(conn, table, column).await?
-        } else {
+            .filter(|(v, _, _)| *v == version)
+            .map(|(_, table, column)| (*table, *column))
+            .collect();
+        let skip_sql = if idempotent_checks.is_empty() {
             false
+        } else {
+            let mut all_exist = true;
+            for (table, column) in &idempotent_checks {
+                if !column_exists(conn, table, column).await? {
+                    all_exist = false;
+                    break;
+                }
+            }
+            all_exist
         };
 
         // Wrap migration + recording in a transaction for atomicity.

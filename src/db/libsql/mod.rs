@@ -615,4 +615,38 @@ mod tests {
             );
         }
     }
+
+    #[tokio::test]
+    async fn test_ownership_model_tables_created() {
+        // Use a file-backed DB so that multiple connections share state.
+        // In-memory databases do not share state between connections in libSQL.
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test_ownership_model.db");
+        let db = LibSqlBackend::new_local(&db_path).await.unwrap();
+        db.run_migrations().await.unwrap();
+
+        let conn = db.connect().await.unwrap();
+        // channel_identities exists with expected columns
+        conn.execute(
+            "SELECT id, owner_id, channel, external_id FROM channel_identities LIMIT 0",
+            (),
+        )
+        .await
+        .unwrap();
+        // pairing_requests exists with expected columns
+        conn.execute(
+            "SELECT id, channel, code, owner_id FROM pairing_requests LIMIT 0",
+            (),
+        )
+        .await
+        .unwrap();
+        // scope column exists on wasm_tools
+        conn.execute("SELECT scope FROM wasm_tools LIMIT 0", ())
+            .await
+            .unwrap();
+        // scope column exists on dynamic_tools
+        conn.execute("SELECT scope FROM dynamic_tools LIMIT 0", ())
+            .await
+            .unwrap();
+    }
 }
