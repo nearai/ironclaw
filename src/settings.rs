@@ -914,11 +914,13 @@ pub struct HygieneSettings {
     #[serde(default = "default_true")]
     pub enabled: bool,
 
-    /// Days before `daily/` documents are deleted.
+    /// Deprecated: retention is now per-folder via `.config` metadata.
+    /// Kept for backward compatibility with existing DB settings rows.
     #[serde(default = "default_hygiene_daily_retention")]
     pub daily_retention_days: u32,
 
-    /// Days before `conversations/` documents are deleted.
+    /// Deprecated: retention is now per-folder via `.config` metadata.
+    /// Kept for backward compatibility with existing DB settings rows.
     #[serde(default = "default_hygiene_conversation_retention")]
     pub conversation_retention_days: u32,
 

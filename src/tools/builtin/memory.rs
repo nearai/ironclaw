@@ -359,12 +359,14 @@ impl Tool for MemoryWriteTool {
         // Merge incoming metadata with existing to avoid silently dropping
         // previously-set keys (e.g. skip_versioning lost when hygiene is added).
         //
-        // Skip when a layer is specified: get_or_create operates on the primary
-        // scope and would create a ghost document there, while the actual content
-        // write targets the layer's scope.
+        // Skip when a layer is specified (targets wrong scope) or in patch mode
+        // (get_or_create would create a ghost empty doc if the document doesn't
+        // exist yet, changing a "not found" error into a "old_string not found").
         let metadata_param = params.get("metadata").filter(|m| m.is_object());
+        let is_patch_mode = params.get("old_string").and_then(|v| v.as_str()).is_some();
         if let Some(meta) = metadata_param
             && layer.is_none()
+            && !is_patch_mode
         {
             // get_or_create ensures the document exists; if it's new, content is "".
             let doc = workspace
@@ -631,6 +633,11 @@ impl Tool for MemoryReadTool {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
         let version = match params.get("version").and_then(|v| v.as_i64()) {
+            _ if list_versions && params.get("version").is_some() => {
+                return Err(ToolError::InvalidParameters(
+                    "list_versions and version are mutually exclusive".to_string(),
+                ));
+            }
             Some(v) if v < 1 || v > i64::from(i32::MAX) => {
                 return Err(ToolError::InvalidParameters(format!(
                     "version must be between 1 and {}, got {v}",

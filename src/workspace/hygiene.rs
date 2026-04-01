@@ -198,7 +198,10 @@ pub async fn run_if_due(workspace: &Workspace, config: &HygieneConfig) -> Hygien
                     };
                     if let Ok(doc) = workspace.read(&path).await {
                         match workspace
-                            .prune_versions(doc.id, config.version_keep_count as i32)
+                            .prune_versions(
+                                doc.id,
+                                config.version_keep_count.min(i32::MAX as u32) as i32,
+                            )
                             .await
                         {
                             Ok(pruned) => report.versions_pruned += pruned,
