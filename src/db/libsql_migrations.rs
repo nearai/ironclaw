@@ -788,6 +788,17 @@ CREATE INDEX IF NOT EXISTS idx_api_tokens_hash ON api_tokens(token_hash);
 "#,
     ),
     (
+        16,
+        "conversation_source_channel",
+        // Add source_channel to conversations for cross-channel approval authorization.
+        // Marked as idempotent (see IDEMPOTENT_ADD_COLUMN_MIGRATIONS below)
+        // because SQLite does not support IF NOT EXISTS for ADD COLUMN.
+        // The runner checks pragma_table_info before executing the ALTER.
+        r#"
+ALTER TABLE conversations ADD COLUMN source_channel TEXT;
+"#,
+    ),
+    (
         17,
         "document_versions",
         r#"
@@ -804,17 +815,6 @@ CREATE TABLE IF NOT EXISTS memory_document_versions (
 
 CREATE INDEX IF NOT EXISTS idx_doc_versions_lookup
     ON memory_document_versions(document_id, version DESC);
-"#,
-    ),
-    (
-        16,
-        "conversation_source_channel",
-        // Add source_channel to conversations for cross-channel approval authorization.
-        // Marked as idempotent (see IDEMPOTENT_ADD_COLUMN_MIGRATIONS below)
-        // because SQLite does not support IF NOT EXISTS for ADD COLUMN.
-        // The runner checks pragma_table_info before executing the ALTER.
-        r#"
-ALTER TABLE conversations ADD COLUMN source_channel TEXT;
 "#,
     ),
 ];

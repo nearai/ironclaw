@@ -359,25 +359,35 @@ impl Tool for MemoryWriteTool {
         // Merge incoming metadata with existing to avoid silently dropping
         // previously-set keys (e.g. skip_versioning lost when hygiene is added).
         //
-        // Skip when a layer is specified (targets wrong scope) or in patch mode
-        // (get_or_create would create a ghost empty doc if the document doesn't
-        // exist yet, changing a "not found" error into a "old_string not found").
+        // Skip when a layer is specified — get_or_create targets the primary
+        // scope, not the layer's scope.
+        //
+        // In patch mode, use read() instead of get_or_create() so we don't
+        // create a ghost empty document when the target doesn't exist.
         let metadata_param = params.get("metadata").filter(|m| m.is_object());
         let is_patch_mode = params.get("old_string").and_then(|v| v.as_str()).is_some();
         if let Some(meta) = metadata_param
             && layer.is_none()
-            && !is_patch_mode
         {
-            // get_or_create ensures the document exists; if it's new, content is "".
-            let doc = workspace
-                .get_or_create(&resolved_path)
-                .await
-                .map_err(map_write_err)?;
-            let merged = crate::workspace::DocumentMetadata::merge(&doc.metadata, meta);
-            workspace
-                .update_metadata(doc.id, &merged)
-                .await
-                .map_err(map_write_err)?;
+            let doc = if is_patch_mode {
+                // read() returns an error if the doc doesn't exist — that's fine,
+                // the patch call below will produce a clear "not found" error.
+                workspace.read(&resolved_path).await.ok()
+            } else {
+                Some(
+                    workspace
+                        .get_or_create(&resolved_path)
+                        .await
+                        .map_err(map_write_err)?,
+                )
+            };
+            if let Some(doc) = doc {
+                let merged = crate::workspace::DocumentMetadata::merge(&doc.metadata, meta);
+                workspace
+                    .update_metadata(doc.id, &merged)
+                    .await
+                    .map_err(map_write_err)?;
+            }
         }
 
         // Patch mode: if old_string is provided, do search-and-replace instead of write/append.
