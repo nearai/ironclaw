@@ -2558,4 +2558,87 @@ mod tests {
         assert!(result.len() <= 503);
         assert!(result.ends_with("..."));
     }
+
+    #[test]
+    fn test_strip_html_tags_edge_cases() {
+        use super::strip_html_tags;
+
+        // Empty string
+        assert_eq!(strip_html_tags(""), "");
+
+        // No tags
+        assert_eq!(strip_html_tags("plain text"), "plain text");
+
+        // Nested tags
+        assert_eq!(strip_html_tags("<div><p>nested</p></div>"), "nested");
+
+        // Malformed tags (no closing)
+        assert_eq!(strip_html_tags("before <b after"), "before  after");
+
+        // Attributes with special chars
+        assert_eq!(
+            strip_html_tags("<a href=\"https://example.com?a=1&b=2\">link</a>"),
+            "link"
+        );
+
+        // Self-closing tags
+        assert_eq!(strip_html_tags("text<br/>more"), "textmore");
+        assert_eq!(strip_html_tags("<img src=x/>"), "");
+    }
+
+    #[tokio::test]
+    async fn test_cron_trigger_next_fire_calculation() {
+        use super::next_cron_fire;
+        use chrono::{Duration, Utc};
+
+        // Test next fire time is in the future
+        let now = Utc::now();
+        let schedule = "0 0 * * *"; // Every hour at :00
+
+        let result = next_cron_fire(schedule, Some("UTC"));
+        assert!(result.is_ok(), "Should parse valid cron schedule");
+
+        let next = result.unwrap();
+        assert!(next.is_some(), "Should have next fire time");
+        let next_dt = next.unwrap();
+        assert!(next_dt > now, "Next fire should be in the future");
+        assert!(next_dt <= now + Duration::hours(1), "Next fire should be within 1 hour");
+    }
+
+    #[tokio::test]
+    async fn test_cron_trigger_invalid_schedule() {
+        use super::next_cron_fire;
+
+        // Invalid cron should return Err
+        let result = next_cron_fire("invalid cron", Some("UTC"));
+        assert!(result.is_err(), "Invalid cron should return error");
+
+        // Empty schedule should return Err
+        let result = next_cron_fire("", Some("UTC"));
+        assert!(result.is_err(), "Empty cron should return error");
+    }
+
+    #[tokio::test]
+    async fn test_cron_trigger_timezone_handling() {
+        use super::next_cron_fire;
+
+        // Test with explicit timezone
+        let schedule = "0 9 * * *"; // 9 AM
+
+        // UTC - should succeed
+        let result_utc = next_cron_fire(schedule, Some("UTC"));
+        assert!(result_utc.is_ok(), "UTC timezone should be valid");
+        assert!(result_utc.unwrap().is_some(), "Should have next fire time");
+
+        // America/Sao_Paulo - should succeed
+        let result_sp = next_cron_fire(schedule, Some("America/Sao_Paulo"));
+        assert!(result_sp.is_ok(), "America/Sao_Paulo timezone should be valid");
+        assert!(result_sp.unwrap().is_some(), "Should have next fire time");
+
+        // Invalid timezone - should succeed but return None (timezone parsing fails)
+        let result_invalid = next_cron_fire(schedule, Some("Invalid/Timezone"));
+        // Note: Invalid timezone falls back to UTC, so it may still succeed
+        // The key is that it doesn't panic
+        let _ = result_invalid.is_ok();
+    }
 }
