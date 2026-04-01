@@ -456,7 +456,10 @@ pub async fn jobs_restart_handler(
                     &task,
                     Some(project_dir),
                     mode,
-                    credential_grants,
+                    crate::orchestrator::job_manager::JobCreationParams {
+                        credential_grants,
+                        ..Default::default()
+                    },
                 )
                 .await
                 .map_err(|e| {
