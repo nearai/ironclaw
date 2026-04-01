@@ -760,8 +760,8 @@ pub async fn start_server(
                  script-src 'self' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://esm.sh; \
                  style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; \
                  font-src https://fonts.gstatic.com; \
-                 connect-src 'self' https://esm.sh https://*.near.org; \
-                 img-src 'self' data: blob: https://*.googleusercontent.com https://avatars.githubusercontent.com https://raw.githubusercontent.com https://*.jsdelivr.net https://*.near.org https://pages.near.org; \
+                 connect-src 'self' https://esm.sh https://*.near.org https://raw.githubusercontent.com https://*.jsdelivr.net https://*.cloudflare.com; \
+                 img-src 'self' data: blob: https://*.googleusercontent.com https://avatars.githubusercontent.com https://raw.githubusercontent.com https://*.jsdelivr.net https://*.near.org https://pages.near.org https://*.hot-labs.org; \
                  frame-src https://*.near.org https://*.hot-labs.org https://*.meteorwallet.app https://*.mynearwallet.com https://*.herewallet.app; \
                  object-src 'none'; \
                  frame-ancestors 'none'; \
