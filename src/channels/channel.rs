@@ -365,6 +365,10 @@ pub struct ChatApprovalPrompt {
     pub allow_always: bool,
 }
 
+const APPROVAL_PARAMETER_PREVIEW_BYTES: usize = 1200;
+const APPROVAL_PARAMETER_TRUNCATION_SUFFIX: &str = "\n... [parameters truncated]";
+const APPROVAL_SUMMARY_DESCRIPTION_BYTES: usize = 120;
+
 impl StatusUpdate {
     /// Build a `ToolCompleted` status with redacted parameters.
     ///
@@ -420,10 +424,25 @@ impl ChatApprovalPrompt {
         })
     }
 
-    /// Pretty-printed tool parameters for display.
-    pub fn parameters_json(&self) -> String {
-        serde_json::to_string_pretty(&self.parameters)
-            .unwrap_or_else(|_| self.parameters.to_string())
+    fn truncated_text(input: &str, max_bytes: usize, suffix: &str) -> String {
+        if input.len() <= max_bytes {
+            return input.to_string();
+        }
+
+        let budget = max_bytes.saturating_sub(suffix.len());
+        let end = crate::util::floor_char_boundary(input, budget);
+        format!("{}{}", &input[..end], suffix)
+    }
+
+    /// Pretty-printed tool parameters for display, bounded for chat channels.
+    pub fn parameters_preview(&self) -> String {
+        let rendered = serde_json::to_string_pretty(&self.parameters)
+            .unwrap_or_else(|_| self.parameters.to_string());
+        Self::truncated_text(
+            &rendered,
+            APPROVAL_PARAMETER_PREVIEW_BYTES,
+            APPROVAL_PARAMETER_TRUNCATION_SUFFIX,
+        )
     }
 
     /// Shared reply vocabulary summary for compact status surfaces.
@@ -435,6 +454,26 @@ impl ChatApprovalPrompt {
         }
     }
 
+    /// Compact approval summary for fallback/accessibility surfaces.
+    pub fn summary_text(&self) -> String {
+        let description = Self::truncated_text(
+            &self.description.replace('\n', " "),
+            APPROVAL_SUMMARY_DESCRIPTION_BYTES,
+            "...",
+        );
+        format!(
+            "Approval needed for {}: {} (Request ID: {}). Reply with {}.",
+            self.tool_name,
+            description,
+            self.request_id,
+            self.reply_summary()
+        )
+    }
+
+    fn markdown_parameters_preview(&self) -> String {
+        self.parameters_preview().replace('`', "\\`")
+    }
+
     /// Approval prompt formatted for plain-text chat channels.
     pub fn plain_text_message(&self) -> String {
         let mut lines = vec![
@@ -443,7 +482,7 @@ impl ChatApprovalPrompt {
             String::new(),
             format!("Request ID: {}", self.request_id),
             "Parameters:".to_string(),
-            self.parameters_json(),
+            self.parameters_preview(),
             String::new(),
             "Reply with:".to_string(),
             "- yes, y, approve, or /approve to approve this request".to_string(),
@@ -469,7 +508,7 @@ impl ChatApprovalPrompt {
             format!("*Tool:* {}", self.tool_name),
             format!("*Description:* {}", self.description),
             "*Parameters:*".to_string(),
-            format!("```json\n{}\n```", self.parameters_json()),
+            format!("```json\n{}\n```", self.markdown_parameters_preview()),
             String::new(),
             "Reply with:".to_string(),
             "• `yes`, `y`, `approve`, or `/approve` - Approve this request".to_string(),
@@ -790,5 +829,40 @@ mod tests {
         assert!(markdown.contains("`/approve`"));
         assert!(markdown.contains("`/deny`"));
         assert!(!markdown.contains("`/always`"));
+    }
+
+    #[test]
+    fn chat_approval_prompt_truncates_large_parameters() {
+        let prompt = ChatApprovalPrompt::from_status(&StatusUpdate::ApprovalNeeded {
+            request_id: "req-789".into(),
+            tool_name: "http".into(),
+            description: "Fetch large payload".into(),
+            parameters: serde_json::json!({
+                "body": "x".repeat(APPROVAL_PARAMETER_PREVIEW_BYTES + 200),
+            }),
+            allow_always: true,
+        })
+        .expect("approval prompt");
+
+        let preview = prompt.parameters_preview();
+        assert!(preview.contains("[parameters truncated]"));
+        assert!(preview.len() <= APPROVAL_PARAMETER_PREVIEW_BYTES);
+    }
+
+    #[test]
+    fn chat_approval_prompt_escapes_backticks_in_markdown_parameters() {
+        let prompt = ChatApprovalPrompt::from_status(&StatusUpdate::ApprovalNeeded {
+            request_id: "req-999".into(),
+            tool_name: "shell".into(),
+            description: "Run command".into(),
+            parameters: serde_json::json!({
+                "command": "printf '```danger```'"
+            }),
+            allow_always: true,
+        })
+        .expect("approval prompt");
+
+        let markdown = prompt.markdown_message();
+        assert!(markdown.contains("\\`\\`\\`danger\\`\\`\\`"));
     }
 }

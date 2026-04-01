@@ -172,7 +172,7 @@ impl RelayChannel {
 
         let mut body = serde_json::json!({
             "channel": channel_id,
-            "text": prompt.plain_text_message(),
+            "text": prompt.summary_text(),
             "blocks": blocks,
         });
         if let Some(tid) = thread_id {
@@ -512,8 +512,9 @@ mod tests {
         let text = body["text"].as_str().expect("plain text");
         let block_text = body["blocks"][0]["text"]["text"].as_str().expect("mrkdwn");
 
-        assert!(text.contains("approve, or /approve"));
-        assert!(text.contains("always, a, or /always"));
+        assert!(text.contains("Request ID: req-1"));
+        assert!(text.contains("Reply with yes (or /approve)"));
+        assert!(!text.contains("Parameters:"));
         assert!(block_text.contains("`/approve`"));
         assert!(block_text.contains("`/always`"));
         assert_eq!(body["thread_ts"], "1234567.890");
