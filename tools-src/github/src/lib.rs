@@ -65,10 +65,16 @@ fn url_encode_query(s: &str) -> String {
 /// Validate that a path segment doesn't contain dangerous characters.
 /// Returns true if the segment is safe to use.
 fn validate_path_segment(s: &str) -> bool {
-    !s.is_empty() && !s.contains('/') && !s.contains("..") && !s.contains('?') && !s.contains('#')
+    !s.is_empty()
+        && !s.contains('/')
+        && !s.contains("..")
+        && !s.contains('?')
+        && !s.contains('#')
+        && !s.chars().any(|c| c.is_control() || c.is_whitespace())
 }
 
 fn validate_repo_path(path: &str) -> Result<(), String> {
+    validate_input_length(path, "path")?;
     for segment in path.split('/') {
         if segment == ".." {
             return Err("Invalid path: path traversal not allowed".into());
@@ -116,8 +122,16 @@ fn validate_git_ref(ref_name: &str, field_name: &str) -> Result<(), String> {
 
 fn normalize_ref_lookup(ref_name: &str) -> Result<String, String> {
     validate_git_ref(ref_name, "from_ref")?;
-    if let Some(stripped) = ref_name.strip_prefix("refs/") {
-        return Ok(stripped.to_string());
+    if let Some(stripped) = ref_name.strip_prefix("refs/heads/") {
+        return Ok(format!("heads/{stripped}"));
+    }
+    if let Some(stripped) = ref_name.strip_prefix("refs/tags/") {
+        return Ok(format!("tags/{stripped}"));
+    }
+    if ref_name.starts_with("refs/") {
+        return Err(
+            "Unsupported from_ref: only refs/heads/* and refs/tags/* are supported".to_string(),
+        );
     }
     if ref_name.starts_with("heads/") || ref_name.starts_with("tags/") {
         return Ok(ref_name.to_string());
@@ -127,8 +141,16 @@ fn normalize_ref_lookup(ref_name: &str) -> Result<String, String> {
 
 fn normalize_branch_ref(branch: &str) -> Result<String, String> {
     validate_git_ref(branch, "branch")?;
-    let branch = branch.strip_prefix("refs/heads/").unwrap_or(branch);
+    if branch.starts_with("refs/heads/") {
+        return Ok(branch.to_string());
+    }
+    if branch.starts_with("refs/") {
+        return Err("Invalid branch ref: only refs/heads/* is allowed".to_string());
+    }
     let branch = branch.strip_prefix("heads/").unwrap_or(branch);
+    if branch.starts_with("tags/") {
+        return Err("Invalid branch ref: tags/* is not a branch".to_string());
+    }
     Ok(format!("refs/heads/{branch}"))
 }
 
@@ -160,6 +182,12 @@ fn append_search_params(
 struct GitCommitIdentity {
     name: String,
     email: String,
+}
+
+fn validate_commit_identity(identity: &GitCommitIdentity, field_name: &str) -> Result<(), String> {
+    validate_input_length(&identity.name, &format!("{field_name}.name"))?;
+    validate_input_length(&identity.email, &format!("{field_name}.email"))?;
+    Ok(())
 }
 
 struct GitHubTool;
@@ -1441,6 +1469,12 @@ fn create_or_update_file(
     if let Some(sha) = sha {
         validate_input_length(sha, "sha")?;
     }
+    if let Some(committer) = &committer {
+        validate_commit_identity(committer, "committer")?;
+    }
+    if let Some(author) = &author {
+        validate_commit_identity(author, "author")?;
+    }
 
     let encoded_owner = url_encode_path(owner);
     let encoded_repo = url_encode_path(repo);
@@ -1489,6 +1523,12 @@ fn delete_file(
     validate_input_length(sha, "sha")?;
     if let Some(branch) = branch {
         validate_git_ref(branch, "branch")?;
+    }
+    if let Some(committer) = &committer {
+        validate_commit_identity(committer, "committer")?;
+    }
+    if let Some(author) = &author {
+        validate_commit_identity(author, "author")?;
     }
 
     let encoded_owner = url_encode_path(owner);
@@ -2347,10 +2387,12 @@ mod tests {
     #[test]
     fn test_validate_path_segment() {
         assert!(validate_path_segment("foo"));
+        assert!(validate_path_segment("foo-bar_123.baz"));
         assert!(!validate_path_segment(""));
         assert!(!validate_path_segment("foo/bar"));
         assert!(!validate_path_segment(".."));
-        // Empty segments are handled in get_file_content logic, not here
+        assert!(!validate_path_segment("foo bar"));
+        assert!(!validate_path_segment("foo\nbar"));
     }
 
     #[test]
@@ -2526,6 +2568,35 @@ mod tests {
             normalize_branch_ref("feature/github-tool-audit").expect("branch ref should normalize"),
             "refs/heads/feature/github-tool-audit"
         );
+        assert_eq!(
+            normalize_branch_ref("refs/heads/main").expect("qualified branch ref should pass"),
+            "refs/heads/main"
+        );
+        assert!(normalize_ref_lookup("refs/pull/123/head").is_err());
+        assert!(normalize_branch_ref("refs/tags/v1.0.0").is_err());
+        assert!(normalize_branch_ref("tags/v1.0.0").is_err());
+    }
+
+    #[test]
+    fn test_validate_repo_path_enforces_length_limit() {
+        let long_path = format!("dir/{}", "a".repeat(MAX_TEXT_LENGTH));
+        assert!(validate_repo_path("docs/readme.md").is_ok());
+        assert!(validate_repo_path(&long_path).is_err());
+    }
+
+    #[test]
+    fn test_validate_commit_identity_enforces_length_limit() {
+        let identity = GitCommitIdentity {
+            name: "IronClaw Bot".to_string(),
+            email: "bot@example.com".to_string(),
+        };
+        assert!(validate_commit_identity(&identity, "committer").is_ok());
+
+        let too_long = GitCommitIdentity {
+            name: "a".repeat(MAX_TEXT_LENGTH + 1),
+            email: "bot@example.com".to_string(),
+        };
+        assert!(validate_commit_identity(&too_long, "committer").is_err());
     }
 
     #[test]
