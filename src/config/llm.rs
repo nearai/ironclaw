@@ -114,12 +114,9 @@ impl LlmConfig {
             && !is_bedrock
             && !is_gemini_oauth
             && !is_openai_codex
-<<<<<<< HEAD
             && backend_lower != "aliyun"
             && backend_lower != "coding_plan"
-=======
             && custom_provider.is_none()
->>>>>>> upstream/staging
             && registry.find(&backend_lower).is_none()
         {
             tracing::warn!(
