@@ -1,5 +1,6 @@
-use crate::config::helpers::{parse_bool_env, parse_optional_env};
+use crate::config::helpers::{db_first_bool, db_first_or_default};
 use crate::error::ConfigError;
+use crate::settings::Settings;
 
 /// Routines configuration.
 #[derive(Debug, Clone)]
@@ -35,15 +36,42 @@ impl Default for RoutineConfig {
 }
 
 impl RoutineConfig {
-    pub(crate) fn resolve() -> Result<Self, ConfigError> {
-        let max_iterations: u32 = parse_optional_env("ROUTINES_LIGHTWEIGHT_MAX_ITERATIONS", 3)?;
+    pub(crate) fn resolve(settings: &Settings) -> Result<Self, ConfigError> {
+        let defaults = crate::settings::RoutineSettings::default();
+        let rs = &settings.routines;
+
+        let max_iterations: u32 = db_first_or_default(
+            &rs.lightweight_max_iterations,
+            &defaults.lightweight_max_iterations,
+            "ROUTINES_LIGHTWEIGHT_MAX_ITERATIONS",
+        )?;
         Ok(Self {
-            enabled: parse_bool_env("ROUTINES_ENABLED", true)?,
-            cron_check_interval_secs: parse_optional_env("ROUTINES_CRON_INTERVAL", 15)?,
-            max_concurrent_routines: parse_optional_env("ROUTINES_MAX_CONCURRENT", 10)?,
-            default_cooldown_secs: parse_optional_env("ROUTINES_DEFAULT_COOLDOWN", 300)?,
-            max_lightweight_tokens: parse_optional_env("ROUTINES_MAX_TOKENS", 4096)?,
-            lightweight_tools_enabled: parse_bool_env("ROUTINES_LIGHTWEIGHT_TOOLS", true)?,
+            enabled: db_first_bool(rs.enabled, defaults.enabled, "ROUTINES_ENABLED")?,
+            cron_check_interval_secs: db_first_or_default(
+                &rs.cron_check_interval_secs,
+                &defaults.cron_check_interval_secs,
+                "ROUTINES_CRON_INTERVAL",
+            )?,
+            max_concurrent_routines: db_first_or_default(
+                &rs.max_concurrent_routines,
+                &defaults.max_concurrent_routines,
+                "ROUTINES_MAX_CONCURRENT",
+            )?,
+            default_cooldown_secs: db_first_or_default(
+                &rs.default_cooldown_secs,
+                &defaults.default_cooldown_secs,
+                "ROUTINES_DEFAULT_COOLDOWN",
+            )?,
+            max_lightweight_tokens: db_first_or_default(
+                &rs.max_lightweight_tokens,
+                &defaults.max_lightweight_tokens,
+                "ROUTINES_MAX_TOKENS",
+            )?,
+            lightweight_tools_enabled: db_first_bool(
+                rs.lightweight_tools_enabled,
+                defaults.lightweight_tools_enabled,
+                "ROUTINES_LIGHTWEIGHT_TOOLS",
+            )?,
             lightweight_max_iterations: max_iterations.min(5), // cap at 5
         })
     }

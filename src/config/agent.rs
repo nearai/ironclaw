@@ -1,6 +1,8 @@
 use std::time::Duration;
 
-use crate::config::helpers::{optional_env, parse_bool_env, parse_option_env, parse_optional_env};
+use crate::config::helpers::{
+    db_first_bool, db_first_or_default, parse_bool_env, parse_option_env,
+};
 use crate::error::ConfigError;
 use crate::settings::Settings;
 
@@ -31,10 +33,12 @@ pub struct AgentConfig {
     pub auto_approve_tools: bool,
     /// Default timezone for new sessions (IANA name, e.g. "America/New_York").
     pub default_timezone: String,
+    /// Maximum concurrent jobs per user. None = use global max_parallel_jobs.
+    pub max_jobs_per_user: Option<usize>,
     /// Maximum tokens per job (0 = unlimited).
     pub max_tokens_per_job: u64,
     /// Whether the deployment is multi-tenant (multiple users sharing one
-    /// instance). Auto-detected from GATEWAY_USER_TOKENS presence.
+    /// instance). Defaults to false; can be set via AGENT_MULTI_TENANT env var.
     pub multi_tenant: bool,
     /// Maximum concurrent LLM calls per user. None = use default (4).
     pub max_llm_concurrent_per_user: Option<usize>,
@@ -62,6 +66,7 @@ impl AgentConfig {
             max_tool_iterations: 10,
             auto_approve_tools: true,
             default_timezone: "UTC".to_string(),
+            max_jobs_per_user: None,
             max_tokens_per_job: 0,
             multi_tenant: false,
             max_llm_concurrent_per_user: None,
@@ -70,49 +75,65 @@ impl AgentConfig {
     }
 
     pub(crate) fn resolve(settings: &Settings) -> Result<Self, ConfigError> {
+        let defaults = crate::settings::AgentSettings::default();
+
         Ok(Self {
-            name: parse_optional_env("AGENT_NAME", settings.agent.name.clone())?,
-            max_parallel_jobs: parse_optional_env(
+            name: db_first_or_default(&settings.agent.name, &defaults.name, "AGENT_NAME")?,
+            // Settings stores u32, config uses usize — cast for comparison.
+            max_parallel_jobs: db_first_or_default(
+                &(settings.agent.max_parallel_jobs as usize),
+                &(defaults.max_parallel_jobs as usize),
                 "AGENT_MAX_PARALLEL_JOBS",
-                settings.agent.max_parallel_jobs as usize,
             )?,
-            job_timeout: Duration::from_secs(parse_optional_env(
+            job_timeout: Duration::from_secs(db_first_or_default(
+                &settings.agent.job_timeout_secs,
+                &defaults.job_timeout_secs,
                 "AGENT_JOB_TIMEOUT_SECS",
-                settings.agent.job_timeout_secs,
             )?),
-            stuck_threshold: Duration::from_secs(parse_optional_env(
+            stuck_threshold: Duration::from_secs(db_first_or_default(
+                &settings.agent.stuck_threshold_secs,
+                &defaults.stuck_threshold_secs,
                 "AGENT_STUCK_THRESHOLD_SECS",
-                settings.agent.stuck_threshold_secs,
             )?),
-            repair_check_interval: Duration::from_secs(parse_optional_env(
+            repair_check_interval: Duration::from_secs(db_first_or_default(
+                &settings.agent.repair_check_interval_secs,
+                &defaults.repair_check_interval_secs,
                 "SELF_REPAIR_CHECK_INTERVAL_SECS",
-                settings.agent.repair_check_interval_secs,
             )?),
-            max_repair_attempts: parse_optional_env(
+            max_repair_attempts: db_first_or_default(
+                &settings.agent.max_repair_attempts,
+                &defaults.max_repair_attempts,
                 "SELF_REPAIR_MAX_ATTEMPTS",
-                settings.agent.max_repair_attempts,
             )?,
-            use_planning: parse_bool_env("AGENT_USE_PLANNING", settings.agent.use_planning)?,
-            session_idle_timeout: Duration::from_secs(parse_optional_env(
+            use_planning: db_first_bool(
+                settings.agent.use_planning,
+                defaults.use_planning,
+                "AGENT_USE_PLANNING",
+            )?,
+            session_idle_timeout: Duration::from_secs(db_first_or_default(
+                &settings.agent.session_idle_timeout_secs,
+                &defaults.session_idle_timeout_secs,
                 "SESSION_IDLE_TIMEOUT_SECS",
-                settings.agent.session_idle_timeout_secs,
             )?),
             allow_local_tools: parse_bool_env("ALLOW_LOCAL_TOOLS", false)?,
             max_cost_per_day_cents: parse_option_env("MAX_COST_PER_DAY_CENTS")?,
             max_actions_per_hour: parse_option_env("MAX_ACTIONS_PER_HOUR")?,
             max_cost_per_user_per_day_cents: parse_option_env("MAX_COST_PER_USER_PER_DAY_CENTS")?,
-            max_tool_iterations: parse_optional_env(
+            max_tool_iterations: db_first_or_default(
+                &settings.agent.max_tool_iterations,
+                &defaults.max_tool_iterations,
                 "AGENT_MAX_TOOL_ITERATIONS",
-                settings.agent.max_tool_iterations,
             )?,
-            auto_approve_tools: parse_bool_env(
-                "AGENT_AUTO_APPROVE_TOOLS",
+            auto_approve_tools: db_first_bool(
                 settings.agent.auto_approve_tools,
+                defaults.auto_approve_tools,
+                "AGENT_AUTO_APPROVE_TOOLS",
             )?,
             default_timezone: {
-                let tz: String = parse_optional_env(
+                let tz: String = db_first_or_default(
+                    &settings.agent.default_timezone,
+                    &defaults.default_timezone,
                     "DEFAULT_TIMEZONE",
-                    settings.agent.default_timezone.clone(),
                 )?;
                 if crate::timezone::parse_timezone(&tz).is_none() {
                     return Err(ConfigError::InvalidValue {
@@ -122,13 +143,13 @@ impl AgentConfig {
                 }
                 tz
             },
-            max_tokens_per_job: parse_optional_env(
+            max_jobs_per_user: parse_option_env("MAX_JOBS_PER_USER")?,
+            max_tokens_per_job: db_first_or_default(
+                &settings.agent.max_tokens_per_job,
+                &defaults.max_tokens_per_job,
                 "AGENT_MAX_TOKENS_PER_JOB",
-                settings.agent.max_tokens_per_job,
             )?,
-            // Auto-detected from GATEWAY_USER_TOKENS presence. Not a separate
-            // knob — multi-tenant mode is always implied by configuring user tokens.
-            multi_tenant: optional_env("GATEWAY_USER_TOKENS")?.is_some(),
+            multi_tenant: parse_bool_env("AGENT_MULTI_TENANT", false)?,
             max_llm_concurrent_per_user: parse_option_env("TENANT_MAX_LLM_CONCURRENT")?,
             max_jobs_concurrent_per_user: parse_option_env("TENANT_MAX_JOBS_CONCURRENT")?,
         })

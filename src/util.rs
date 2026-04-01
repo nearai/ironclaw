@@ -225,4 +225,26 @@ mod tests {
             "The tool returned: TASK_COMPLETE signal"
         ));
     }
+
+    #[test]
+    fn signals_completion_after_suggestions_stripped() {
+        // Regression: after stripping <suggestions> tags, the completion
+        // signal should still be detected in the cleaned text.
+        assert!(llm_signals_completion(
+            "The job is complete. All requested work has been finished."
+        ));
+    }
+
+    #[test]
+    fn signals_completion_self_dialogue_pattern() {
+        // Regression: the "not complete" pattern that caused the self-dialogue
+        // loop when left in job context after plan completion.
+        assert!(!llm_signals_completion(
+            "No — the job is **not complete**.\n\n\
+             What still needs to be done:\n\
+             1. Fetch actual meeting note contents\n\
+             2. Create the Notion page\n\
+             3. Send the completion message"
+        ));
+    }
 }

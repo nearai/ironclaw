@@ -319,7 +319,7 @@ mod tests {
 
     #[test]
     fn test_format_turns() {
-        let mut thread = Thread::new(Uuid::new_v4());
+        let mut thread = Thread::new(Uuid::new_v4(), None);
         thread.start_turn("Hello");
         thread.complete_turn("Hi there");
         thread.start_turn("How are you?");
@@ -351,7 +351,7 @@ mod tests {
     /// Helper: build a thread with `n` completed turns.
     /// Turn `i` has user_input "msg-{i}" and response "resp-{i}".
     fn make_thread(n: usize) -> Thread {
-        let mut thread = Thread::new(Uuid::new_v4());
+        let mut thread = Thread::new(Uuid::new_v4(), None);
         for i in 0..n {
             thread.start_turn(format!("msg-{}", i));
             thread.complete_turn(format!("resp-{}", i));
@@ -457,7 +457,7 @@ mod tests {
     async fn test_compact_truncate_empty_turns() {
         let llm = Arc::new(StubLlm::new("unused"));
         let compactor = make_compactor(llm);
-        let mut thread = Thread::new(Uuid::new_v4());
+        let mut thread = Thread::new(Uuid::new_v4(), None);
         assert!(thread.turns.is_empty());
 
         let result = compactor
@@ -698,7 +698,7 @@ mod tests {
 
     #[test]
     fn test_format_turns_for_storage_with_tool_calls() {
-        let mut thread = Thread::new(Uuid::new_v4());
+        let mut thread = Thread::new(Uuid::new_v4(), None);
         thread.start_turn("Search for X");
         // Record a tool call on the current turn
         if let Some(turn) = thread.turns.last_mut() {
@@ -719,7 +719,7 @@ mod tests {
 
     #[test]
     fn test_format_turns_for_storage_incomplete_turn() {
-        let mut thread = Thread::new(Uuid::new_v4());
+        let mut thread = Thread::new(Uuid::new_v4(), None);
         thread.start_turn("In progress message");
         // Don't complete the turn
 

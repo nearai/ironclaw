@@ -62,9 +62,9 @@ pub use provider::{
     ToolDefinition, ToolResult, generate_tool_call_id,
 };
 pub use reasoning::{
-    ActionPlan, Reasoning, ReasoningContext, RespondOutput, RespondResult, SILENT_REPLY_TOKEN,
-    TOOL_INTENT_NUDGE, TRUNCATED_TOOL_CALL_NOTICE, TokenUsage, ToolSelection, is_silent_reply,
-    llm_signals_tool_intent,
+    ActionPlan, Reasoning, ReasoningContext, RespondOutput, RespondResult, ResponseAnomaly,
+    ResponseMetadata, SILENT_REPLY_TOKEN, TOOL_INTENT_NUDGE, TRUNCATED_TOOL_CALL_NOTICE,
+    TokenUsage, ToolSelection, is_silent_reply, llm_signals_tool_intent,
 };
 pub use recording::RecordingLlm;
 pub use registry::{ProviderDefinition, ProviderProtocol, ProviderRegistry};
@@ -92,6 +92,8 @@ pub async fn create_llm_provider(
     session: Arc<SessionManager>,
 ) -> Result<Arc<dyn LlmProvider>, LlmError> {
     let timeout = config.request_timeout_secs;
+
+    tracing::info!(backend = %config.backend, "Creating LLM provider");
 
     if config.backend == "nearai" || config.backend == "near_ai" || config.backend == "near" {
         return create_llm_provider_with_config(&config.nearai, session, timeout);
