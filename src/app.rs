@@ -923,6 +923,39 @@ impl AppBuilder {
             (None, None)
         };
 
+        // Initialize per-collection tools for all existing collections.
+        // This ensures that collections created in prior sessions have their
+        // CRUD tools available immediately after restart.
+        if let Some(ref db) = self.db {
+            // Collect all known user IDs. In the upstream multi-user model,
+            // we query the users table for all registered users.
+            let mut user_ids = vec![self.config.owner_id.clone()];
+            if let Ok(users) = db.list_users(None).await {
+                for u in users {
+                    if !user_ids.contains(&u.id) {
+                        user_ids.push(u.id.clone());
+                    }
+                }
+            }
+
+            let skills_dir = if self.config.skills.enabled {
+                Some(self.config.skills.local_dir.as_path())
+            } else {
+                None
+            };
+
+            crate::tools::builtin::collections::initialize_collection_tools_for_users(
+                &user_ids,
+                db,
+                &tools,
+                skills_dir,
+                skill_registry.as_ref(),
+                None, // collection_write_tx not yet available at this point
+                None, // workspace_resolver -- discovery docs will be written on first use
+            )
+            .await;
+        }
+
         let context_manager = Arc::new(ContextManager::new(self.config.agent.max_parallel_jobs));
         let cost_guard = Arc::new(crate::agent::cost_guard::CostGuard::new(
             crate::agent::cost_guard::CostGuardConfig {
