@@ -201,28 +201,26 @@ impl IncomingMessage {
 }
 
 /// Extract a channel-specific proactive routing target from message metadata.
+///
+/// Checked keys (first match wins):
+/// - `signal_target` — Signal phone number or group ID
+/// - `chat_id` — Telegram chat ID
+/// - `channel_id` — Slack channel/DM ID (used by channel-relay)
+/// - `target` — generic fallback
 pub fn routing_target_from_metadata(metadata: &serde_json::Value) -> Option<String> {
-    metadata
-        .get("signal_target")
-        .and_then(|value| match value {
+    // Helper to extract a string or numeric value from a JSON key.
+    let extract = |key: &str| -> Option<String> {
+        metadata.get(key).and_then(|value| match value {
             serde_json::Value::String(s) => Some(s.clone()),
             serde_json::Value::Number(n) => Some(n.to_string()),
             _ => None,
         })
-        .or_else(|| {
-            metadata.get("chat_id").and_then(|value| match value {
-                serde_json::Value::String(s) => Some(s.clone()),
-                serde_json::Value::Number(n) => Some(n.to_string()),
-                _ => None,
-            })
-        })
-        .or_else(|| {
-            metadata.get("target").and_then(|value| match value {
-                serde_json::Value::String(s) => Some(s.clone()),
-                serde_json::Value::Number(n) => Some(n.to_string()),
-                _ => None,
-            })
-        })
+    };
+
+    extract("signal_target")
+        .or_else(|| extract("chat_id"))
+        .or_else(|| extract("channel_id"))
+        .or_else(|| extract("target"))
 }
 
 /// Stream of incoming messages.
@@ -611,5 +609,51 @@ mod tests {
     fn test_incoming_message_with_timezone() {
         let msg = IncomingMessage::new("test", "user1", "hello").with_timezone("America/New_York");
         assert_eq!(msg.timezone.as_deref(), Some("America/New_York"));
+    }
+
+    #[test]
+    fn routing_target_extracts_slack_channel_id() {
+        // Slack relay messages carry channel_id in metadata — this must be
+        // picked up for proactive broadcasts to land in the correct channel
+        // instead of falling back to sender_id (which routes to DMs).
+        let metadata = serde_json::json!({
+            "team_id": "T05CUBCSQPL",
+            "channel_id": "C088K6C3SQZ",
+            "sender_id": "UCBGL1WNS",
+        });
+        assert_eq!(
+            routing_target_from_metadata(&metadata).as_deref(),
+            Some("C088K6C3SQZ"),
+        );
+    }
+
+    #[test]
+    fn routing_target_prefers_signal_over_channel_id() {
+        let metadata = serde_json::json!({
+            "signal_target": "+15551234567",
+            "channel_id": "C088K6C3SQZ",
+        });
+        assert_eq!(
+            routing_target_from_metadata(&metadata).as_deref(),
+            Some("+15551234567"),
+        );
+    }
+
+    #[test]
+    fn routing_target_prefers_chat_id_over_channel_id() {
+        let metadata = serde_json::json!({
+            "chat_id": "123456789",
+            "channel_id": "C088K6C3SQZ",
+        });
+        assert_eq!(
+            routing_target_from_metadata(&metadata).as_deref(),
+            Some("123456789"),
+        );
+    }
+
+    #[test]
+    fn routing_target_returns_none_for_empty_metadata() {
+        let metadata = serde_json::json!({});
+        assert!(routing_target_from_metadata(&metadata).is_none());
     }
 }

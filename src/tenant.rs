@@ -278,7 +278,7 @@ impl TenantScope {
         thread_id: Option<&str>,
     ) -> Result<bool, DatabaseError> {
         self.inner
-            .ensure_conversation(id, channel, &self.user_id, thread_id)
+            .ensure_conversation(id, channel, &self.user_id, thread_id, Some(channel))
             .await
     }
 

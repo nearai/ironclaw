@@ -10,7 +10,9 @@ use std::borrow::Cow;
 
 use crate::agent::session::PendingApproval;
 use crate::error::Error;
-use crate::llm::{ChatMessage, FinishReason, Reasoning, ReasoningContext, RespondResult};
+use crate::llm::{
+    ChatMessage, FinishReason, Reasoning, ReasoningContext, RespondResult, ResponseMetadata,
+};
 
 /// Signal from the delegate indicating how the loop should proceed.
 pub enum LoopSignal {
@@ -38,6 +40,8 @@ pub enum LoopOutcome {
     Stopped,
     /// Max iterations exceeded.
     MaxIterations,
+    /// Loop terminated early with a clear failure reason.
+    Failure(String),
     /// A tool requires user approval before continuing (chat delegate only).
     NeedApproval(Box<PendingApproval>),
 }
@@ -103,6 +107,7 @@ pub trait LoopDelegate: Send + Sync {
     async fn handle_text_response(
         &self,
         text: &str,
+        metadata: ResponseMetadata,
         reason_ctx: &mut ReasoningContext,
     ) -> TextAction;
 
@@ -209,7 +214,10 @@ pub async fn run_agentic_loop(
                     consecutive_tool_intent_nudges = 0;
                 }
 
-                match delegate.handle_text_response(&text, reason_ctx).await {
+                match delegate
+                    .handle_text_response(&text, output.metadata, reason_ctx)
+                    .await
+                {
                     TextAction::Return(outcome) => return Ok(outcome),
                     TextAction::Continue => {}
                 }
@@ -279,7 +287,7 @@ pub fn truncate_for_preview(s: &str, max: usize) -> Cow<'_, str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::llm::{RespondOutput, TokenUsage, ToolCall};
+    use crate::llm::{RespondOutput, ResponseAnomaly, ResponseMetadata, TokenUsage, ToolCall};
     use crate::testing::StubLlm;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -303,6 +311,7 @@ mod tests {
             result: RespondResult::Text(text.to_string()),
             usage: zero_usage(),
             finish_reason: FinishReason::Stop,
+            metadata: ResponseMetadata::default(),
         }
     }
 
@@ -314,6 +323,7 @@ mod tests {
             },
             usage: zero_usage(),
             finish_reason: FinishReason::ToolUse,
+            metadata: ResponseMetadata::default(),
         }
     }
 
@@ -391,6 +401,7 @@ mod tests {
         async fn handle_text_response(
             &self,
             text: &str,
+            _metadata: ResponseMetadata,
             _reason_ctx: &mut ReasoningContext,
         ) -> TextAction {
             TextAction::Return(LoopOutcome::Response(text.to_string()))
@@ -509,6 +520,79 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_text_response_metadata_can_fail_fast() {
+        struct FailOnMalformedResponse;
+
+        #[async_trait]
+        impl LoopDelegate for FailOnMalformedResponse {
+            async fn check_signals(&self) -> LoopSignal {
+                LoopSignal::Continue
+            }
+
+            async fn before_llm_call(
+                &self,
+                _: &mut ReasoningContext,
+                _: usize,
+            ) -> Option<LoopOutcome> {
+                None
+            }
+
+            async fn call_llm(
+                &self,
+                _: &Reasoning,
+                _: &mut ReasoningContext,
+                _: usize,
+            ) -> Result<crate::llm::RespondOutput, crate::error::Error> {
+                Ok(RespondOutput {
+                    result: RespondResult::Text("fallback".to_string()),
+                    usage: zero_usage(),
+                    finish_reason: FinishReason::Stop,
+                    metadata: ResponseMetadata {
+                        anomaly: Some(ResponseAnomaly::EmptyToolCompletion),
+                    },
+                })
+            }
+
+            async fn handle_text_response(
+                &self,
+                _: &str,
+                metadata: ResponseMetadata,
+                _: &mut ReasoningContext,
+            ) -> TextAction {
+                assert_eq!(metadata.anomaly, Some(ResponseAnomaly::EmptyToolCompletion));
+                TextAction::Return(LoopOutcome::Failure(
+                    "malformed tool completion".to_string(),
+                ))
+            }
+
+            async fn execute_tool_calls(
+                &self,
+                _: Vec<ToolCall>,
+                _: Option<String>,
+                _: &mut ReasoningContext,
+            ) -> Result<Option<LoopOutcome>, crate::error::Error> {
+                Ok(None)
+            }
+        }
+
+        let delegate = FailOnMalformedResponse;
+        let reasoning = stub_reasoning();
+        let mut ctx = ReasoningContext::new();
+        let outcome = run_agentic_loop(
+            &delegate,
+            &reasoning,
+            &mut ctx,
+            &AgenticLoopConfig::default(),
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            matches!(outcome, LoopOutcome::Failure(ref reason) if reason == "malformed tool completion")
+        );
+    }
+
+    #[tokio::test]
     async fn test_max_iterations_reached() {
         struct ContinueDelegate;
 
@@ -535,6 +619,7 @@ mod tests {
             async fn handle_text_response(
                 &self,
                 _: &str,
+                _: ResponseMetadata,
                 ctx: &mut ReasoningContext,
             ) -> TextAction {
                 ctx.messages.push(ChatMessage::assistant("still working"));
@@ -671,6 +756,7 @@ mod tests {
             },
             usage: zero_usage(),
             finish_reason: FinishReason::Length, // response was truncated
+            metadata: ResponseMetadata::default(),
         };
         let delegate = MockDelegate::new(vec![truncated_output, text_output("Summarized it.")]);
         let reasoning = stub_reasoning();
@@ -719,6 +805,7 @@ mod tests {
             },
             usage: zero_usage(),
             finish_reason: FinishReason::Length,
+            metadata: ResponseMetadata::default(),
         };
         // Three truncated responses, then a text response
         let delegate = MockDelegate::new(vec![

@@ -1,13 +1,71 @@
 //! User settings persistence.
 //!
-//! Stores user preferences in ~/.ironclaw/settings.json.
-//! Settings are loaded with env var > settings.json > default priority.
+//! Stores user preferences in `~/.ironclaw` (JSON/TOML) and, for some values,
+//! in the database. At runtime, precedence between database values,
+//! environment variables, on-disk config, and built-in defaults is determined
+//! on a per-setting basis by the corresponding resolver.
+//! LLM backend and related settings in particular may prefer DB values over
+//! environment variables, as documented on their respective types.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
 use crate::bootstrap::ironclaw_base_dir;
+
+/// A custom LLM provider defined by the user through the web UI.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CustomLlmProviderSettings {
+    /// Unique identifier (used as `llm_backend` value).
+    pub id: String,
+    /// Display name.
+    pub name: String,
+    /// Adapter protocol: "open_ai_completions", "anthropic", "ollama".
+    pub adapter: String,
+    /// Base URL for the API endpoint.
+    #[serde(default)]
+    pub base_url: Option<String>,
+    /// Default model identifier.
+    #[serde(default)]
+    pub default_model: Option<String>,
+    /// Optional API key stored inline.
+    #[serde(default)]
+    pub api_key: Option<String>,
+    /// Whether this is a built-in provider (should always be false for custom).
+    #[serde(default)]
+    pub builtin: bool,
+}
+
+/// Per-provider overrides for built-in LLM providers (API key and/or model).
+///
+/// Stored as `llm_builtin_overrides` in the settings store, keyed by provider ID
+/// (e.g. `"openai"`, `"gemini"`). Resolved at startup during `LlmConfig::resolve()`.
+///
+/// Note: The global `selected_model` (if set) takes precedence over these
+/// per-provider overrides, which in turn take precedence over environment variables.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LlmBuiltinOverride {
+    /// API key override. Takes precedence over environment variables.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+    /// Model override. Takes precedence over environment variables but not `selected_model`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Base URL override. Takes precedence over environment variables.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+}
+
+/// Canonical secret name for a built-in provider's API key.
+pub fn builtin_secret_name(provider_id: &str) -> String {
+    format!("llm_builtin_{provider_id}_api_key")
+}
+
+/// Canonical secret name for a custom provider's API key.
+pub fn custom_secret_name(provider_id: &str) -> String {
+    format!("llm_custom_{provider_id}_api_key")
+}
 
 /// User settings persisted to disk.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -58,6 +116,14 @@ pub struct Settings {
     /// LLM backend: "nearai", "anthropic", "openai", "github_copilot", "ollama", "openai_compatible", "tinfoil", "bedrock".
     #[serde(default)]
     pub llm_backend: Option<String>,
+
+    /// Custom LLM providers defined by the user through the web UI.
+    #[serde(default)]
+    pub llm_custom_providers: Vec<CustomLlmProviderSettings>,
+
+    /// Per-provider overrides for built-in providers (API key and/or model).
+    #[serde(default)]
+    pub llm_builtin_overrides: HashMap<String, LlmBuiltinOverride>,
 
     /// Ollama base URL (when llm_backend = "ollama").
     #[serde(default)]
@@ -134,6 +200,22 @@ pub struct Settings {
     /// Builder configuration.
     #[serde(default)]
     pub builder: BuilderSettings,
+
+    /// Routine scheduling and execution configuration.
+    #[serde(default)]
+    pub routines: RoutineSettings,
+
+    /// Skills system configuration.
+    #[serde(default)]
+    pub skills: SkillsSettings,
+
+    /// Memory hygiene configuration.
+    #[serde(default)]
+    pub hygiene: HygieneSettings,
+
+    /// Workspace search fusion configuration.
+    #[serde(default)]
+    pub search: SearchSettings,
 
     /// Transcription configuration.
     #[serde(default)]
@@ -725,6 +807,197 @@ impl Default for BuilderSettings {
     }
 }
 
+/// Routine scheduling and execution configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoutineSettings {
+    /// Whether the routines system is enabled.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// How often (seconds) to poll for cron routines that need firing.
+    #[serde(default = "default_routine_cron_interval")]
+    pub cron_check_interval_secs: u64,
+
+    /// Max routines executing concurrently.
+    #[serde(default = "default_routine_max_concurrent")]
+    pub max_concurrent_routines: usize,
+
+    /// Default cooldown between fires (seconds).
+    #[serde(default = "default_routine_cooldown")]
+    pub default_cooldown_secs: u64,
+
+    /// Max output tokens for lightweight routine LLM calls.
+    #[serde(default = "default_routine_max_tokens")]
+    pub max_lightweight_tokens: u32,
+
+    /// Enable tool execution in lightweight routines.
+    #[serde(default = "default_true")]
+    pub lightweight_tools_enabled: bool,
+
+    /// Max tool iterations for lightweight routines.
+    #[serde(default = "default_routine_max_iterations")]
+    pub lightweight_max_iterations: u32,
+}
+
+fn default_routine_cron_interval() -> u64 {
+    15
+}
+
+fn default_routine_max_concurrent() -> usize {
+    10
+}
+
+fn default_routine_cooldown() -> u64 {
+    300
+}
+
+fn default_routine_max_tokens() -> u32 {
+    4096
+}
+
+fn default_routine_max_iterations() -> u32 {
+    3
+}
+
+impl Default for RoutineSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            cron_check_interval_secs: default_routine_cron_interval(),
+            max_concurrent_routines: default_routine_max_concurrent(),
+            default_cooldown_secs: default_routine_cooldown(),
+            max_lightweight_tokens: default_routine_max_tokens(),
+            lightweight_tools_enabled: true,
+            lightweight_max_iterations: default_routine_max_iterations(),
+        }
+    }
+}
+
+/// Skills system configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillsSettings {
+    /// Whether the skills system is enabled.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// Maximum number of skills that can be active simultaneously.
+    #[serde(default = "default_skills_max_active")]
+    pub max_active_skills: usize,
+
+    /// Maximum total context tokens allocated to skill prompts.
+    #[serde(default = "default_skills_max_context_tokens")]
+    pub max_context_tokens: usize,
+}
+
+fn default_skills_max_active() -> usize {
+    3
+}
+
+fn default_skills_max_context_tokens() -> usize {
+    4000
+}
+
+impl Default for SkillsSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_active_skills: default_skills_max_active(),
+            max_context_tokens: default_skills_max_context_tokens(),
+        }
+    }
+}
+
+/// Memory hygiene configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HygieneSettings {
+    /// Whether hygiene is enabled.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// Days before `daily/` documents are deleted.
+    #[serde(default = "default_hygiene_daily_retention")]
+    pub daily_retention_days: u32,
+
+    /// Days before `conversations/` documents are deleted.
+    #[serde(default = "default_hygiene_conversation_retention")]
+    pub conversation_retention_days: u32,
+
+    /// Maximum versions to keep per document during hygiene passes.
+    #[serde(default = "default_hygiene_version_keep_count")]
+    pub version_keep_count: u32,
+
+    /// Minimum hours between hygiene passes.
+    #[serde(default = "default_hygiene_cadence_hours")]
+    pub cadence_hours: u32,
+}
+
+fn default_hygiene_daily_retention() -> u32 {
+    30
+}
+
+fn default_hygiene_conversation_retention() -> u32 {
+    7
+}
+
+fn default_hygiene_version_keep_count() -> u32 {
+    50
+}
+
+fn default_hygiene_cadence_hours() -> u32 {
+    12
+}
+
+impl Default for HygieneSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            daily_retention_days: default_hygiene_daily_retention(),
+            conversation_retention_days: default_hygiene_conversation_retention(),
+            version_keep_count: default_hygiene_version_keep_count(),
+            cadence_hours: default_hygiene_cadence_hours(),
+        }
+    }
+}
+
+/// Workspace search fusion configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SearchSettings {
+    /// Fusion strategy: "rrf" or "weighted".
+    #[serde(default = "default_search_fusion_strategy")]
+    pub fusion_strategy: String,
+
+    /// RRF constant k.
+    #[serde(default = "default_search_rrf_k")]
+    pub rrf_k: u32,
+
+    /// FTS weight for fusion. `None` = use per-strategy default.
+    #[serde(default)]
+    pub fts_weight: Option<f32>,
+
+    /// Vector weight for fusion. `None` = use per-strategy default.
+    #[serde(default)]
+    pub vector_weight: Option<f32>,
+}
+
+fn default_search_fusion_strategy() -> String {
+    "rrf".to_string()
+}
+
+fn default_search_rrf_k() -> u32 {
+    60
+}
+
+impl Default for SearchSettings {
+    fn default() -> Self {
+        Self {
+            fusion_strategy: default_search_fusion_strategy(),
+            rrf_k: default_search_rrf_k(),
+            fts_weight: None,
+            vector_weight: None,
+        }
+    }
+}
+
 /// Transcription pipeline settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TranscriptionSettings {
@@ -841,7 +1114,9 @@ impl Settings {
         let content = format!(
             "# IronClaw configuration file.\n\
              #\n\
-             # Priority: env var > this file > database settings > defaults.\n\
+             # Priority: DB settings > env vars > this file > defaults.\n\
+             # A DB value equal to the built-in default is treated as unset.\n\
+             # Exceptions: bootstrap and security-sensitive fields are env-only.\n\
              # Uncomment and edit values to override defaults.\n\
              # Run `ironclaw config init` to regenerate this file.\n\
              #\n\
@@ -1325,56 +1600,53 @@ mod tests {
         );
     }
 
-    /// Regression: TOML overlay must not clobber a DB-persisted selected_model
-    /// when the TOML file matches the DB. This is the normal case after /model
-    /// successfully writes to both DB and TOML.
+    /// TOML is loaded as a base, then DB is merged on top (DB wins).
+    /// When both agree, the result matches.
     #[test]
-    fn toml_overlay_preserves_matching_model() {
-        // DB settings with new model from /model command.
-        let mut db_settings = Settings {
+    fn toml_and_db_matching_model_preserved() {
+        // from_db_with_toml: TOML base, then DB merged on top.
+        let mut toml_base = Settings {
+            selected_model: Some("new-model".to_string()),
+            ..Default::default()
+        };
+
+        let db_overlay = Settings {
             llm_backend: Some("nearai".to_string()),
             selected_model: Some("new-model".to_string()),
             ..Default::default()
         };
 
-        // TOML also updated by /model command to the same value.
-        let toml_settings = Settings {
-            selected_model: Some("new-model".to_string()),
-            ..Default::default()
-        };
-
-        db_settings.merge_from(&toml_settings);
+        toml_base.merge_from(&db_overlay);
         assert_eq!(
-            db_settings.selected_model,
+            toml_base.selected_model,
             Some("new-model".to_string()),
-            "TOML overlay must not clobber matching model"
+            "matching values: result should be the shared value"
         );
     }
 
-    /// Regression: when /model updates DB but TOML write fails, a stale TOML
-    /// file would overwrite the DB value. This test documents the priority:
-    /// TOML > DB (by design). persist_selected_model MUST update the TOML.
+    /// Regression: when TOML has a stale model but DB has been updated via
+    /// /model command, DB must win. This matches from_db_with_toml where
+    /// TOML is loaded first as base, then DB is merged on top.
     #[test]
-    fn stale_toml_overwrites_db_model() {
-        // DB has the new model from /model.
-        let mut db_settings = Settings {
-            selected_model: Some("new-model".to_string()),
-            ..Default::default()
-        };
-
-        // TOML still has the old model (write failed or was not attempted).
-        let stale_toml = Settings {
+    fn db_model_wins_over_stale_toml() {
+        // TOML base with old model.
+        let mut toml_base = Settings {
             selected_model: Some("old-model".to_string()),
             ..Default::default()
         };
 
-        db_settings.merge_from(&stale_toml);
-        // This documents the current priority: TOML wins over DB.
-        // The fix in persist_selected_model ensures TOML is always updated.
+        // DB has the new model from /model command.
+        let db_overlay = Settings {
+            selected_model: Some("new-model".to_string()),
+            ..Default::default()
+        };
+
+        // from_db_with_toml: TOML first, then DB merged on top.
+        toml_base.merge_from(&db_overlay);
         assert_eq!(
-            db_settings.selected_model,
-            Some("old-model".to_string()),
-            "TOML overlay has higher priority than DB (by design)"
+            toml_base.selected_model,
+            Some("new-model".to_string()),
+            "DB selected_model must win over stale TOML value"
         );
     }
 
@@ -1403,24 +1675,20 @@ mod tests {
         assert_eq!(reloaded.selected_model, Some("new-model".to_string()));
     }
 
-    /// Regression: /model must create config.toml when it doesn't exist, so the
-    /// model survives restarts. Previously the Ok(None) case was a no-op.
+    /// save_toml / load_toml round-trip for selected_model.
     #[test]
-    fn toml_created_when_missing_for_model_persist() {
+    fn toml_save_and_load_round_trip() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
 
-        // No config.toml yet (fresh install, no wizard).
         assert!(Settings::load_toml(&path).unwrap().is_none());
 
-        // Simulate what persist_selected_model now does for the Ok(None) case.
         let settings = Settings {
             selected_model: Some("new-model".to_string()),
             ..Default::default()
         };
         settings.save_toml(&path).unwrap();
 
-        // Verify the model survived.
         let loaded = Settings::load_toml(&path).unwrap().unwrap();
         assert_eq!(loaded.selected_model, Some("new-model".to_string()));
     }
@@ -2377,5 +2645,66 @@ mod tests {
         assert!(current.embeddings.enabled);
         assert_eq!(current.embeddings.provider, "nearai");
         assert_eq!(current.embeddings.model, "text-embedding-3-large");
+    }
+
+    /// DB values must win over TOML values when both set the same field.
+    ///
+    /// This mirrors the merge order in `Config::from_db_with_toml`:
+    /// TOML is loaded as the base, then DB is merged on top.
+    #[test]
+    fn db_settings_win_over_toml_settings() {
+        // Simulate TOML base: has llm_backend and selected_model
+        let mut base = Settings {
+            llm_backend: Some("openai".to_string()),
+            selected_model: Some("toml-model".to_string()),
+            ..Default::default()
+        };
+
+        // Simulate DB overlay: has different llm_backend and selected_model
+        let db = Settings {
+            llm_backend: Some("anthropic".to_string()),
+            selected_model: Some("db-model".to_string()),
+            ..Default::default()
+        };
+
+        // Merge DB on top of TOML (same order as from_db_with_toml)
+        base.merge_from(&db);
+
+        assert_eq!(
+            base.llm_backend.as_deref(),
+            Some("anthropic"),
+            "DB llm_backend must win over TOML"
+        );
+        assert_eq!(
+            base.selected_model.as_deref(),
+            Some("db-model"),
+            "DB selected_model must win over TOML"
+        );
+    }
+
+    /// When DB has no value (default), TOML value should be preserved.
+    #[test]
+    fn toml_settings_used_when_db_has_no_value() {
+        let mut base = Settings {
+            llm_backend: Some("openai".to_string()),
+            selected_model: Some("toml-model".to_string()),
+            ..Default::default()
+        };
+
+        // DB has no llm_backend or selected_model (both default/None)
+        let db = Settings::default();
+
+        base.merge_from(&db);
+
+        assert_eq!(
+            base.llm_backend.as_deref(),
+            Some("openai"),
+            "TOML llm_backend should be preserved when DB has no value"
+        );
+        assert_eq!(
+            base.selected_model.as_deref(),
+            Some("toml-model"),
+            "TOML selected_model should be preserved when DB has no value"
+        );
     }
 }

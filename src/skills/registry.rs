@@ -1,12 +1,15 @@
 //! Skill registry for discovering, loading, and managing available skills.
 //!
-//! Skills are discovered from two filesystem locations:
+//! Skills are discovered from three filesystem locations:
 //! 1. Workspace skills directory (`<workspace>/skills/`) -- Trusted
 //! 2. User skills directory (`~/.ironclaw/skills/`) -- Trusted
+//! 3. Installed skills directory (`~/.ironclaw/installed_skills/`) -- Installed
 //!
 //! Both flat (`skills/SKILL.md`) and subdirectory (`skills/<name>/SKILL.md`)
-//! layouts are supported. Earlier locations win on name collision (workspace
-//! overrides user). Uses async I/O throughout to avoid blocking the tokio runtime.
+//! layouts are supported. Subdirectories without `SKILL.md` are treated as
+//! bundle directories and recursed into (up to `SKILLS_MAX_SCAN_DEPTH`,
+//! default 3). Earlier locations win on name collision (workspace overrides
+//! user). Uses async I/O throughout to avoid blocking the tokio runtime.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -20,9 +23,13 @@ use crate::skills::{
     normalize_line_endings,
 };
 
-/// Maximum number of skills that can be discovered from a single directory.
-/// Prevents resource exhaustion from a directory with thousands of entries.
+/// Maximum total number of skills that can be discovered across all sources.
+/// Shared across workspace, user, and installed directories.
+/// Prevents resource exhaustion from directories with thousands of entries.
 const MAX_DISCOVERED_SKILLS: usize = 100;
+
+/// Default recursion depth for bundle directory scanning.
+const DEFAULT_MAX_SCAN_DEPTH: usize = 3;
 
 fn to_lowercase_vec(items: &[String]) -> Vec<String> {
     items.iter().map(|s| s.to_lowercase()).collect()
@@ -78,6 +85,8 @@ pub struct SkillRegistry {
     installed_dir: Option<PathBuf>,
     /// Optional workspace skills directory.
     workspace_dir: Option<PathBuf>,
+    /// Maximum recursion depth for bundle directory scanning (default: 3).
+    max_scan_depth: usize,
 }
 
 impl SkillRegistry {
@@ -88,6 +97,7 @@ impl SkillRegistry {
             user_dir,
             installed_dir: None,
             workspace_dir: None,
+            max_scan_depth: DEFAULT_MAX_SCAN_DEPTH,
         }
     }
 
@@ -108,6 +118,12 @@ impl SkillRegistry {
         self
     }
 
+    /// Set the maximum recursion depth for bundle directory scanning.
+    pub fn with_max_scan_depth(mut self, depth: usize) -> Self {
+        self.max_scan_depth = depth;
+        self
+    }
+
     /// Discover and load skills from all configured directories.
     ///
     /// Discovery order (earlier wins on name collision):
@@ -120,91 +136,110 @@ impl SkillRegistry {
 
         // 1. Workspace skills (highest priority)
         if let Some(ws_dir) = self.workspace_dir.clone() {
-            let ws_skills = self
-                .discover_from_dir(&ws_dir, SkillTrust::Trusted, SkillSource::Workspace)
+            let cap = MAX_DISCOVERED_SKILLS.saturating_sub(loaded_names.len());
+            let skills = self
+                .discover_from_dir(
+                    &ws_dir,
+                    SkillTrust::Trusted,
+                    &SkillSource::Workspace,
+                    cap,
+                    0,
+                )
                 .await;
-            for (name, skill) in ws_skills {
-                if seen.contains(&name) {
-                    continue;
-                }
-                seen.insert(name.clone());
-                loaded_names.push(name);
-                self.skills.push(skill);
-            }
+            self.absorb(skills, &mut seen, &mut loaded_names, "workspace");
         }
 
         // 2. User skills
-        let user_dir = self.user_dir.clone();
-        let user_skills = self
-            .discover_from_dir(&user_dir, SkillTrust::Trusted, SkillSource::User)
-            .await;
-        for (name, skill) in user_skills {
+        if loaded_names.len() < MAX_DISCOVERED_SKILLS {
+            let cap = MAX_DISCOVERED_SKILLS.saturating_sub(loaded_names.len());
+            let user_dir = self.user_dir.clone();
+            let skills = self
+                .discover_from_dir(&user_dir, SkillTrust::Trusted, &SkillSource::User, cap, 0)
+                .await;
+            self.absorb(skills, &mut seen, &mut loaded_names, "user/workspace");
+        }
+
+        // 3. Installed skills (registry-installed, lowest priority)
+        if loaded_names.len() < MAX_DISCOVERED_SKILLS
+            && let Some(inst_dir) = self.installed_dir.clone()
+        {
+            let cap = MAX_DISCOVERED_SKILLS.saturating_sub(loaded_names.len());
+            let skills = self
+                .discover_from_dir(&inst_dir, SkillTrust::Installed, &SkillSource::User, cap, 0)
+                .await;
+            self.absorb(skills, &mut seen, &mut loaded_names, "user/workspace");
+        }
+
+        if loaded_names.len() >= MAX_DISCOVERED_SKILLS {
+            tracing::warn!(
+                "Global skill discovery cap reached ({} skills)",
+                MAX_DISCOVERED_SKILLS
+            );
+        }
+
+        loaded_names
+    }
+
+    /// Dedup and absorb discovered skills into the registry.
+    fn absorb(
+        &mut self,
+        skills: Vec<(String, LoadedSkill)>,
+        seen: &mut HashSet<String>,
+        loaded_names: &mut Vec<String>,
+        override_source: &str,
+    ) {
+        for (name, skill) in skills {
             if seen.contains(&name) {
-                tracing::debug!("Skipping user skill '{}' (overridden by workspace)", name);
+                tracing::debug!(
+                    "Skipping skill '{}' (overridden by {})",
+                    name,
+                    override_source
+                );
                 continue;
             }
             seen.insert(name.clone());
             loaded_names.push(name);
             self.skills.push(skill);
         }
-
-        // 3. Installed skills (registry-installed, lowest priority)
-        if let Some(inst_dir) = self.installed_dir.clone() {
-            let inst_skills = self
-                .discover_from_dir(&inst_dir, SkillTrust::Installed, SkillSource::User)
-                .await;
-            for (name, skill) in inst_skills {
-                if seen.contains(&name) {
-                    tracing::debug!(
-                        "Skipping installed skill '{}' (overridden by user/workspace)",
-                        name
-                    );
-                    continue;
-                }
-                seen.insert(name.clone());
-                loaded_names.push(name);
-                self.skills.push(skill);
-            }
-        }
-
-        loaded_names
     }
 
-    /// Discover skills from a single directory.
+    /// Discover skills from a single directory, recursing into bundle directories.
     ///
-    /// Supports both layouts:
+    /// Supports three layouts:
     /// - Flat: `dir/SKILL.md` (skill name derived from parent dir or file stem)
     /// - Subdirectory: `dir/<name>/SKILL.md`
+    /// - Bundle: `dir/<bundle>/<name>/SKILL.md` (bundle has no `SKILL.md`, recursed into)
     async fn discover_from_dir<F>(
         &self,
         dir: &Path,
         trust: SkillTrust,
-        make_source: F,
+        make_source: &F,
+        remaining_cap: usize,
+        current_depth: usize,
     ) -> Vec<(String, LoadedSkill)>
     where
-        F: Fn(PathBuf) -> SkillSource,
+        F: Fn(PathBuf) -> SkillSource + Send + Sync,
     {
         let mut results = Vec::new();
-
-        if !tokio::fs::try_exists(dir).await.unwrap_or(false) {
-            tracing::debug!("Skills directory does not exist: {:?}", dir);
-            return results;
-        }
 
         let mut entries = match tokio::fs::read_dir(dir).await {
             Ok(entries) => entries,
             Err(e) => {
-                tracing::warn!("Failed to read skills directory {:?}: {}", dir, e);
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    tracing::debug!("Skills directory does not exist: {:?}", dir);
+                } else {
+                    tracing::warn!("Failed to read skills directory {:?}: {}", dir, e);
+                }
                 return results;
             }
         };
 
         let mut count = 0usize;
         while let Ok(Some(entry)) = entries.next_entry().await {
-            if count >= MAX_DISCOVERED_SKILLS {
+            if count >= remaining_cap {
                 tracing::warn!(
-                    "Skill discovery cap reached ({} skills), skipping remaining",
-                    MAX_DISCOVERED_SKILLS
+                    "Skill discovery cap reached ({} skills in this scan), skipping remaining",
+                    count
                 );
                 break;
             }
@@ -218,7 +253,6 @@ impl SkillRegistry {
                 }
             };
 
-            // Reject symlinks
             if meta.is_symlink() {
                 tracing::warn!(
                     "Skipping symlink in skills directory: {:?}",
@@ -246,6 +280,22 @@ impl SkillRegistry {
                             );
                         }
                     }
+                } else if current_depth < self.max_scan_depth {
+                    tracing::debug!(
+                        "Recursing into bundle directory {:?} (depth {})",
+                        path.file_name().unwrap_or_default(),
+                        current_depth + 1
+                    );
+                    let nested = Box::pin(self.discover_from_dir(
+                        &path,
+                        trust,
+                        make_source,
+                        remaining_cap.saturating_sub(count),
+                        current_depth + 1,
+                    ))
+                    .await;
+                    count += nested.len();
+                    results.extend(nested);
                 }
                 continue;
             }
@@ -1090,5 +1140,238 @@ mod tests {
 
         let skill = registry.find_by_name("my-skill").unwrap();
         assert_eq!(skill.trust, SkillTrust::Trusted);
+    }
+
+    #[tokio::test]
+    async fn test_discover_nested_bundle_directory() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Bundle directory (no SKILL.md)
+        let bundle = dir.path().join("my-org");
+        fs::create_dir(&bundle).unwrap();
+
+        // Two skills inside the bundle
+        let skill_a = bundle.join("skill-a");
+        fs::create_dir(&skill_a).unwrap();
+        fs::write(
+            skill_a.join("SKILL.md"),
+            "---\nname: skill-a\n---\n\nSkill A prompt.\n",
+        )
+        .unwrap();
+
+        let skill_b = bundle.join("skill-b");
+        fs::create_dir(&skill_b).unwrap();
+        fs::write(
+            skill_b.join("SKILL.md"),
+            "---\nname: skill-b\n---\n\nSkill B prompt.\n",
+        )
+        .unwrap();
+
+        let mut registry = SkillRegistry::new(dir.path().to_path_buf());
+        let loaded = registry.discover_all().await;
+
+        assert_eq!(registry.count(), 2);
+        assert!(loaded.contains(&"skill-a".to_string()));
+        assert!(loaded.contains(&"skill-b".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_discover_respects_depth_limit() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Create skill nested 3 levels deep (a/b/c/deep-skill/SKILL.md)
+        let nested = dir.path().join("a").join("b").join("c").join("deep-skill");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(
+            nested.join("SKILL.md"),
+            "---\nname: deep-skill\n---\n\nDeep prompt.\n",
+        )
+        .unwrap();
+
+        // Depth 2 should NOT find it (3 intermediate dirs: a, b, c)
+        let mut registry = SkillRegistry::new(dir.path().to_path_buf()).with_max_scan_depth(2);
+        let loaded = registry.discover_all().await;
+        assert!(loaded.is_empty(), "depth=2 should not reach 3 levels deep");
+
+        // Depth 3 SHOULD find it
+        let mut registry = SkillRegistry::new(dir.path().to_path_buf()).with_max_scan_depth(3);
+        let loaded = registry.discover_all().await;
+        assert_eq!(loaded, vec!["deep-skill"]);
+    }
+
+    #[tokio::test]
+    async fn test_discover_cap_spans_recursive_levels() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Spread skills across two bundle directories so the cap must be
+        // shared across separate recursive calls (not just within one).
+        // Each bundle has 60 skills; with a global cap of 100, the second
+        // bundle should be cut short.
+        for bundle_name in &["bundle-a", "bundle-b"] {
+            let bundle = dir.path().join(bundle_name);
+            fs::create_dir(&bundle).unwrap();
+            for i in 0..60 {
+                let skill_dir = bundle.join(format!("{}-skill-{:02}", bundle_name, i));
+                fs::create_dir(&skill_dir).unwrap();
+                fs::write(
+                    skill_dir.join("SKILL.md"),
+                    format!(
+                        "---\nname: {}-skill-{:02}\n---\n\nPrompt.\n",
+                        bundle_name, i
+                    ),
+                )
+                .unwrap();
+            }
+        }
+
+        let mut registry = SkillRegistry::new(dir.path().to_path_buf());
+        registry.discover_all().await;
+
+        assert!(
+            registry.count() <= MAX_DISCOVERED_SKILLS,
+            "global cap should limit total to {} but got {}",
+            MAX_DISCOVERED_SKILLS,
+            registry.count()
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_symlink_rejected_in_nested_directory() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Real skill outside the bundle
+        let real_dir = dir.path().join("real-skill");
+        fs::create_dir(&real_dir).unwrap();
+        fs::write(
+            real_dir.join("SKILL.md"),
+            "---\nname: real-skill\n---\n\nReal prompt.\n",
+        )
+        .unwrap();
+
+        // Bundle directory with a symlink inside
+        let bundle = dir.path().join("bundle");
+        fs::create_dir(&bundle).unwrap();
+        std::os::unix::fs::symlink(&real_dir, bundle.join("linked-skill")).unwrap();
+
+        let mut registry = SkillRegistry::new(dir.path().to_path_buf());
+        let loaded = registry.discover_all().await;
+
+        // The real skill at top level is found, but the symlinked one inside bundle is rejected
+        assert_eq!(loaded, vec!["real-skill"]);
+        assert_eq!(registry.count(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_discover_nested_plus_direct() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Direct skill at depth 1
+        let direct = dir.path().join("direct-skill");
+        fs::create_dir(&direct).unwrap();
+        fs::write(
+            direct.join("SKILL.md"),
+            "---\nname: direct-skill\n---\n\nDirect prompt.\n",
+        )
+        .unwrap();
+
+        // Bundle with nested skill
+        let bundle = dir.path().join("bundle");
+        fs::create_dir(&bundle).unwrap();
+        let nested = bundle.join("nested-skill");
+        fs::create_dir(&nested).unwrap();
+        fs::write(
+            nested.join("SKILL.md"),
+            "---\nname: nested-skill\n---\n\nNested prompt.\n",
+        )
+        .unwrap();
+
+        let mut registry = SkillRegistry::new(dir.path().to_path_buf());
+        let loaded = registry.discover_all().await;
+
+        assert_eq!(registry.count(), 2);
+        assert!(loaded.contains(&"direct-skill".to_string()));
+        assert!(loaded.contains(&"nested-skill".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_discover_dedup_direct_vs_bundle_same_name() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Direct skill at depth 1
+        let direct = dir.path().join("my-skill");
+        fs::create_dir(&direct).unwrap();
+        fs::write(
+            direct.join("SKILL.md"),
+            "---\nname: my-skill\n---\n\nDirect version.\n",
+        )
+        .unwrap();
+
+        // Bundle directory containing a skill with the same name
+        let bundle = dir.path().join("org-bundle");
+        fs::create_dir(&bundle).unwrap();
+        let nested = bundle.join("my-skill");
+        fs::create_dir(&nested).unwrap();
+        fs::write(
+            nested.join("SKILL.md"),
+            "---\nname: my-skill\n---\n\nBundle version.\n",
+        )
+        .unwrap();
+
+        let mut registry = SkillRegistry::new(dir.path().to_path_buf());
+        let loaded = registry.discover_all().await;
+
+        // Only one instance should survive dedup
+        assert_eq!(registry.count(), 1);
+        assert_eq!(loaded, vec!["my-skill"]);
+    }
+
+    #[tokio::test]
+    async fn test_global_cap_shared_across_sources() {
+        // The global cap (MAX_DISCOVERED_SKILLS=100) is shared across all
+        // sources. Workspace skills are discovered first, consuming part of
+        // the budget, leaving less for user skills.
+        let user_dir = tempfile::tempdir().unwrap();
+        let ws_dir = tempfile::tempdir().unwrap();
+
+        // 10 workspace skills (discovered first, highest priority)
+        for i in 0..10 {
+            let skill_dir = ws_dir.path().join(format!("ws-skill-{:02}", i));
+            fs::create_dir(&skill_dir).unwrap();
+            fs::write(
+                skill_dir.join("SKILL.md"),
+                format!("---\nname: ws-skill-{:02}\n---\n\nPrompt.\n", i),
+            )
+            .unwrap();
+        }
+
+        // 120 user skills (more than the remaining budget of 90)
+        for i in 0..120 {
+            let skill_dir = user_dir.path().join(format!("user-skill-{:03}", i));
+            fs::create_dir(&skill_dir).unwrap();
+            fs::write(
+                skill_dir.join("SKILL.md"),
+                format!("---\nname: user-skill-{:03}\n---\n\nPrompt.\n", i),
+            )
+            .unwrap();
+        }
+
+        let mut registry = SkillRegistry::new(user_dir.path().to_path_buf())
+            .with_workspace_dir(ws_dir.path().to_path_buf());
+        registry.discover_all().await;
+
+        // Total capped at 100 globally
+        assert_eq!(registry.count(), MAX_DISCOVERED_SKILLS);
+
+        // All 10 workspace skills must be present (discovered first)
+        for i in 0..10 {
+            assert!(
+                registry
+                    .find_by_name(&format!("ws-skill-{:02}", i))
+                    .is_some(),
+                "workspace skill ws-skill-{:02} should be discoverable",
+                i
+            );
+        }
     }
 }

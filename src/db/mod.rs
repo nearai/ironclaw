@@ -373,6 +373,7 @@ pub trait ConversationStore: Send + Sync {
         channel: &str,
         user_id: &str,
         thread_id: Option<&str>,
+        source_channel: Option<&str>,
     ) -> Result<bool, DatabaseError>;
     async fn list_conversations_with_preview(
         &self,
@@ -391,6 +392,13 @@ pub trait ConversationStore: Send + Sync {
         routine_name: &str,
         user_id: &str,
     ) -> Result<Uuid, DatabaseError>;
+    /// Read-only lookup for an existing routine conversation. Returns `None`
+    /// if the routine has never executed (no conversation created yet).
+    async fn find_routine_conversation(
+        &self,
+        routine_id: Uuid,
+        user_id: &str,
+    ) -> Result<Option<Uuid>, DatabaseError>;
     async fn get_or_create_heartbeat_conversation(
         &self,
         user_id: &str,
@@ -431,6 +439,11 @@ pub trait ConversationStore: Send + Sync {
         conversation_id: Uuid,
         user_id: &str,
     ) -> Result<bool, DatabaseError>;
+    /// Get the source_channel for a conversation (the channel that created it).
+    async fn get_conversation_source_channel(
+        &self,
+        conversation_id: Uuid,
+    ) -> Result<Option<String>, DatabaseError>;
 }
 
 #[async_trait]
