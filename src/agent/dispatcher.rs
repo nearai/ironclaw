@@ -50,10 +50,7 @@ impl Agent {
         if let Some(ext_mgr) = self.deps.extension_manager.as_ref()
             && let Err(e) = ext_mgr.ensure_nearai_companion_active_if_ready().await
         {
-            tracing::debug!(
-                "Failed to auto-activate NEAR AI MCP before turn: {}",
-                e
-            );
+            tracing::debug!("Failed to auto-activate NEAR AI MCP before turn: {}", e);
         }
 
         // Detect group chat from channel metadata (needed before loading system prompt)
