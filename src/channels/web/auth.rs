@@ -932,11 +932,18 @@ fn allows_query_token_auth(request: &Request) -> bool {
 }
 
 /// Extract the `token` query parameter value, URL-decoded.
+/// Returns `None` for empty/whitespace-only tokens so they don't override
+/// a valid session cookie.
 fn query_token(request: &Request) -> Option<String> {
     let query = request.uri().query()?;
     url::form_urlencoded::parse(query.as_bytes()).find_map(|(k, v)| {
         if k == "token" {
-            Some(v.into_owned())
+            let trimmed = v.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
         } else {
             None
         }

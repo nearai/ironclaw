@@ -1105,8 +1105,14 @@ impl IdentityStore for PgBackend {
         .await?;
 
         // Atomically promote to admin if this is the only user in the table.
-        // This prevents the TOCTOU race where two concurrent first logins both
-        // see an empty users table and both get role=admin.
+        // Under READ COMMITTED, two concurrent transactions could both see
+        // COUNT(*)=1 (each sees its own uncommitted insert). Use an advisory
+        // lock to serialize the first-user election across transactions.
+        tx.execute(
+            "SELECT pg_advisory_xact_lock(hashtext('first_user_admin_election'))",
+            &[],
+        )
+        .await?;
         tx.execute(
             "UPDATE users SET role = 'admin' \
              WHERE id = $1 AND (SELECT COUNT(*) FROM users) = 1",
