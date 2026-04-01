@@ -204,7 +204,7 @@ impl SelfRepair for DefaultSelfRepair {
             // Transition to Failed so detect_stuck_jobs() stops finding this job.
             // Without this, the repair loop re-detects the job every cycle and
             // sends a ManualRequired notification each time (notification spam).
-            let _ = self
+            let transition_ok = self
                 .context_manager
                 .update_context(job.job_id, |ctx| {
                     ctx.transition_to(
@@ -215,12 +215,26 @@ impl SelfRepair for DefaultSelfRepair {
                         )),
                     )
                 })
-                .await;
+                .await
+                .is_ok();
+
+            if !transition_ok {
+                tracing::error!(
+                    job = %job.job_id,
+                    "Failed to transition job to Failed state after exceeding max repair attempts"
+                );
+            }
+
+            let status = if transition_ok {
+                "and has been marked failed"
+            } else {
+                "but could not be marked failed (will be suppressed by dedup)"
+            };
 
             return Ok(RepairResult::ManualRequired {
                 message: format!(
-                    "Job {} has exceeded maximum repair attempts ({}) and has been marked failed",
-                    job.job_id, self.max_repair_attempts
+                    "Job {} has exceeded maximum repair attempts ({}) {}",
+                    job.job_id, self.max_repair_attempts, status
                 ),
             });
         }
