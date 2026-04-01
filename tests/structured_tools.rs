@@ -463,3 +463,33 @@ async fn tools_respect_user_isolation() {
     let result = grace_query.execute(json!({}), &grace_ctx).await.unwrap();
     assert_eq!(result.result["count"], 1);
 }
+
+#[tokio::test]
+async fn tool_names_dont_collide_across_users() {
+    let (db, _dir) = setup().await;
+    let schema = grocery_schema();
+
+    db.register_collection("andrew", &schema).await.unwrap();
+    db.register_collection("grace", &schema).await.unwrap();
+
+    let andrew_tools = generate_collection_tools(&schema, Arc::clone(&db), None, "andrew");
+    let grace_tools = generate_collection_tools(&schema, db, None, "grace");
+
+    // Tool names must include owner prefix
+    let andrew_names: Vec<&str> = andrew_tools.iter().map(|t| t.name()).collect();
+    let grace_names: Vec<&str> = grace_tools.iter().map(|t| t.name()).collect();
+
+    // No overlap — different prefixes prevent registry collisions
+    for name in &andrew_names {
+        assert!(
+            !grace_names.contains(name),
+            "tool name {name} appears in both andrew and grace — registry collision"
+        );
+    }
+
+    // Verify prefixes are correct
+    assert!(andrew_names.iter().all(|n| n.starts_with("andrew_")),
+        "andrew tools should all start with andrew_: {andrew_names:?}");
+    assert!(grace_names.iter().all(|n| n.starts_with("grace_")),
+        "grace tools should all start with grace_: {grace_names:?}");
+}
