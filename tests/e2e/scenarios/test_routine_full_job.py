@@ -10,8 +10,6 @@ Requires Playwright (browser-based tests).
 import asyncio
 import uuid
 
-from playwright.async_api import TimeoutError as PlaywrightTimeoutError
-
 from helpers import SEL, api_get, api_post
 
 
@@ -31,18 +29,8 @@ async def _send_chat_message(page, message: str) -> None:
         "selector": SEL["message_assistant"],
         "expectedCount": before_count + 1,
     }
-    try:
-        await page.wait_for_function(
-            """({ selector, expectedCount }) => {
-                return document.querySelectorAll(selector).length >= expectedCount;
-            }""",
-            arg=wait_args,
-            timeout=5000,
-        )
-    except PlaywrightTimeoutError:
-        approval_card = page.locator(SEL["approval_card"]).last
-        await approval_card.wait_for(state="visible", timeout=10000)
-        await approval_card.locator("button.approve").click()
+
+    async def _wait_for_assistant() -> None:
         await page.wait_for_function(
             """({ selector, expectedCount }) => {
                 return document.querySelectorAll(selector).length >= expectedCount;
@@ -50,6 +38,39 @@ async def _send_chat_message(page, message: str) -> None:
             arg=wait_args,
             timeout=30000,
         )
+
+    async def _wait_for_approval():
+        approval_card = page.locator(SEL["approval_card"]).last
+        await approval_card.wait_for(
+            state="visible",
+            timeout=30000,
+        )
+        return approval_card
+
+    assistant_task = asyncio.create_task(_wait_for_assistant())
+    approval_task = asyncio.create_task(_wait_for_approval())
+
+    done, pending = await asyncio.wait(
+        {assistant_task, approval_task},
+        return_when=asyncio.FIRST_COMPLETED,
+    )
+
+    for task in pending:
+        task.cancel()
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
+
+    if assistant_task in done and assistant_task.exception() is None:
+        await assistant_task
+        return
+
+    if approval_task not in done or approval_task.exception() is not None:
+        await assistant_task
+        return
+
+    approval_card = await approval_task
+    await approval_card.locator("button.approve").click()
+    await _wait_for_assistant()
 
 
 async def _open_tab(page, tab: str) -> None:
