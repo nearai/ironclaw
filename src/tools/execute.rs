@@ -108,13 +108,34 @@ pub async fn execute_tool_with_safety(
             reason: e.to_string(),
         })?;
 
-    serde_json::to_string_pretty(&result.result).map_err(|e| {
+    let output = serde_json::to_string_pretty(&result.result).map_err(|e| {
         crate::error::ToolError::ExecutionFailed {
             name: tool_name.to_string(),
             reason: format!("Failed to serialize result: {}", e),
         }
-        .into()
-    })
+    })?;
+
+    // Apply truncation based on SafetyConfig max_output_length
+    // This ensures execute_tool_with_safety respects the safety layer's output limits
+    Ok(truncate_output_if_needed(output, safety.config().max_output_length))
+}
+
+/// Truncate output string if it exceeds max_length, preserving char boundaries.
+/// Returns the original string if within limits.
+fn truncate_output_if_needed(output: String, max_length: usize) -> String {
+    if output.len() <= max_length {
+        return output;
+    }
+    // Find safe char boundary
+    let mut cut = max_length;
+    while cut > 0 && !output.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    let truncated = &output[..cut];
+    format!(
+        "{}\n\n[... truncated: showing {}/{} bytes]",
+        truncated, cut, output.len()
+    )
 }
 
 /// Process a tool result into a `ChatMessage::tool_result` with safety sanitization.

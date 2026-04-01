@@ -1155,6 +1155,13 @@ fn compact_messages_for_retry(messages: &[ChatMessage]) -> Vec<ChatMessage> {
         }
     }
 
+    // Fallback: ensure at least a minimal System message exists for retry context
+    if compacted.is_empty() {
+        compacted.push(ChatMessage::system(
+            "[Retry context: Previous attempt failed. Please try again with adjusted parameters.]",
+        ));
+    }
+
     compacted
 }
 

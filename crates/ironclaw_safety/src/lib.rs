@@ -50,6 +50,11 @@ impl SafetyLayer {
         }
     }
 
+    /// Get the safety configuration.
+    pub fn config(&self) -> &SafetyConfig {
+        &self.config
+    }
+
     /// Sanitize tool output before it reaches the LLM.
     pub fn sanitize_tool_output(&self, tool_name: &str, output: &str) -> SanitizedOutput {
         // Check length limits — keep the beginning so the LLM has partial data
