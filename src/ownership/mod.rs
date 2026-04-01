@@ -76,6 +76,9 @@ pub fn can_act_on(actor: &Identity, resource_owner: &OwnerId) -> bool {
     actor.owner_id == *resource_owner
 }
 
+pub mod cache;
+pub use cache::OwnershipCache;
+
 #[cfg(test)]
 mod tests {
     use super::*;

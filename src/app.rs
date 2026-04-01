@@ -57,6 +57,10 @@ pub struct AppComponents {
     pub catalog_entries: Vec<crate::extensions::RegistryEntry>,
     pub dev_loaded_tool_names: Vec<String>,
     pub builder: Option<Arc<dyn crate::tools::SoftwareBuilder>>,
+    /// In-process write-through cache: `(channel, external_id)` → `Identity`.
+    /// Populated by the pairing flow (Task 8). Pre-allocated here so all
+    /// subsystems can hold an `Arc` to the same cache instance.
+    pub ownership_cache: Arc<crate::ownership::OwnershipCache>,
 }
 
 /// Options that control optional init phases.
@@ -933,6 +937,7 @@ impl AppBuilder {
             catalog_entries,
             dev_loaded_tool_names,
             builder,
+            ownership_cache: Arc::new(crate::ownership::OwnershipCache::new()),
         })
     }
 }
