@@ -93,13 +93,24 @@ fn redact_oauth_state_for_logs(state: &str) -> String {
 }
 
 pub(crate) fn rate_limit_key_from_headers(headers: &HeaderMap) -> String {
-    headers
+    // Try X-Forwarded-For first (reverse proxy), then X-Real-IP.
+    let xff = headers
         .get("x-forwarded-for")
         .and_then(|v| v.to_str().ok())
         .into_iter()
         .flat_map(|s| s.split(','))
         .map(str::trim)
         .find_map(|candidate| candidate.parse::<std::net::IpAddr>().ok())
+        .map(|ip| ip.to_string());
+
+    if let Some(ip) = xff {
+        return ip;
+    }
+
+    headers
+        .get("x-real-ip")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.trim().parse::<std::net::IpAddr>().ok())
         .map(|ip| ip.to_string())
         .unwrap_or_else(|| "unknown".to_string())
 }
@@ -761,11 +772,11 @@ pub async fn start_server(
             header::HeaderValue::from_static(
                 "default-src 'self'; \
                  script-src 'self' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://esm.sh; \
-                 style-src 'self' 'unsafe-inline' https:; \
-                 font-src data: https:; \
-                 connect-src 'self' https:; \
-                 img-src 'self' data: blob: https:; \
-                 frame-src https:; \
+                 style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; \
+                 font-src https://fonts.gstatic.com data:; \
+                 connect-src 'self' https://esm.sh https://rpc.mainnet.near.org https://rpc.testnet.near.org; \
+                 img-src 'self' data: blob: https://*.googleusercontent.com https://avatars.githubusercontent.com; \
+                 frame-src https://accounts.google.com https://appleid.apple.com; \
                  object-src 'none'; \
                  frame-ancestors 'none'; \
                  base-uri 'self'; \
@@ -2030,16 +2041,11 @@ async fn chat_threads_handler(
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
         // Seed the bootstrap greeting if this is a brand-new assistant thread.
-        if let Ok((messages, _)) = store
-            .list_conversation_messages_paginated(assistant_id, None, 1)
-            .await
-            && messages.is_empty()
-        {
-            static GREETING: &str = include_str!("../../workspace/seeds/GREETING.md");
-            let _ = store
-                .add_conversation_message(assistant_id, "assistant", GREETING)
-                .await;
-        }
+        // Use add_conversation_message_if_empty to avoid duplicates on concurrent requests.
+        static GREETING: &str = include_str!("../../workspace/seeds/GREETING.md");
+        let _ = store
+            .add_conversation_message_if_empty(assistant_id, "assistant", GREETING)
+            .await;
 
         match store
             .list_conversations_all_channels(&user.user_id, 50)

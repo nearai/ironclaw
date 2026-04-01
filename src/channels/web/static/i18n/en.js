@@ -12,6 +12,7 @@ I18n.register('en', {
   'auth.social.apple': 'Sign in with Apple',
   'auth.social.near': 'Sign in with NEAR',
   'auth.social.tokenDivider': 'or use a token',
+  'auth.signOut': 'Sign out',
   'auth.errorRequired': 'Token required',
   'auth.errorInvalid': 'Invalid token',
   // Chat

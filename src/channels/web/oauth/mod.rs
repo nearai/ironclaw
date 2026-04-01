@@ -35,6 +35,8 @@ pub enum OAuthError {
     CodeExchange(String),
     #[error("Failed to fetch user profile: {0}")]
     ProfileFetch(String),
+    #[error("Signature verification failed: {0}")]
+    SignatureVerification(String),
     #[error("Database error: {0}")]
     Database(String),
     #[error("Rate limited")]

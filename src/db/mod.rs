@@ -388,6 +388,14 @@ pub trait ConversationStore: Send + Sync {
         role: &str,
         content: &str,
     ) -> Result<Uuid, DatabaseError>;
+    /// Insert a message only if the conversation has zero messages.
+    /// Returns `Ok(true)` if the message was inserted, `Ok(false)` if skipped.
+    async fn add_conversation_message_if_empty(
+        &self,
+        conversation_id: Uuid,
+        role: &str,
+        content: &str,
+    ) -> Result<bool, DatabaseError>;
     async fn ensure_conversation(
         &self,
         id: Uuid,

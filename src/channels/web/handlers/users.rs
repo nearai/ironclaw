@@ -439,7 +439,7 @@ pub async fn profile_get_handler(
         }
     };
     let avatar_url = identities.iter().find_map(|id| id.avatar_url.clone());
-    tracing::debug!(
+    tracing::trace!(
         user_id = %user.user_id,
         identity_count = identities.len(),
         avatar_url = ?avatar_url,

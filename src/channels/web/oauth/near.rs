@@ -159,7 +159,9 @@ pub fn verify_near_signature(
         return Ok(());
     }
 
-    Err(OAuthError::ProfileFetch("Invalid signature".to_string()))
+    Err(OAuthError::SignatureVerification(
+        "No matching payload format verified".to_string(),
+    ))
 }
 
 /// Verify that a public key is an active access key on a NEAR account via RPC.

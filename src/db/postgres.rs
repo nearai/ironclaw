@@ -94,6 +94,27 @@ impl ConversationStore for PgBackend {
             .await
     }
 
+    async fn add_conversation_message_if_empty(
+        &self,
+        conversation_id: Uuid,
+        role: &str,
+        content: &str,
+    ) -> Result<bool, DatabaseError> {
+        let conn = self.store.pool().get().await?;
+        let id = Uuid::new_v4();
+        let result = conn
+            .execute(
+                "INSERT INTO conversation_messages (id, conversation_id, role, content) \
+                 SELECT $1, $2, $3, $4 \
+                 WHERE NOT EXISTS ( \
+                     SELECT 1 FROM conversation_messages WHERE conversation_id = $2 \
+                 )",
+                &[&id, &conversation_id, &role, &content],
+            )
+            .await?;
+        Ok(result > 0)
+    }
+
     async fn ensure_conversation(
         &self,
         id: Uuid,
@@ -1025,7 +1046,7 @@ impl IdentityStore for PgBackend {
             .query_opt(
                 "SELECT id, user_id, provider, provider_user_id, email, email_verified, \
                  display_name, avatar_url, raw_profile, created_at, updated_at \
-                 FROM user_identities WHERE email = $1 AND email_verified = true LIMIT 1",
+                 FROM user_identities WHERE LOWER(email) = LOWER($1) AND email_verified = true LIMIT 1",
                 &[&email],
             )
             .await?;

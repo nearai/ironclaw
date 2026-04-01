@@ -806,7 +806,7 @@ CREATE TABLE IF NOT EXISTS user_identities (
     UNIQUE (provider, provider_user_id)
 );
 CREATE INDEX IF NOT EXISTS idx_user_identities_user ON user_identities(user_id);
-CREATE INDEX IF NOT EXISTS idx_user_identities_email ON user_identities(email);
+CREATE INDEX IF NOT EXISTS idx_user_identities_email ON user_identities(email) WHERE email IS NOT NULL;
 "#,
     ),
     (

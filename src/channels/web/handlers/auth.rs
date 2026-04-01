@@ -309,10 +309,10 @@ pub async fn logout_handler(
         && let Some(ref store) = state.store
     {
         let token_hash = crate::channels::web::auth::hash_token(&token);
-        if let Ok(Some((record, _user))) = store.authenticate_token(&token_hash).await {
-            let _ = store.revoke_api_token(record.id, &_user.id).await;
+        if let Ok(Some((record, user))) = store.authenticate_token(&token_hash).await {
+            let _ = store.revoke_api_token(record.id, &user.id).await;
             if let Some(ref db_auth) = state.db_auth {
-                db_auth.invalidate_user(&_user.id).await;
+                db_auth.invalidate_user(&user.id).await;
             }
         }
     }
@@ -766,7 +766,7 @@ fn build_identity_record(
         user_id: user_id.to_string(),
         provider: provider.to_string(),
         provider_user_id: profile.provider_user_id.clone(),
-        email: profile.email.clone(),
+        email: profile.email.as_ref().map(|e| e.to_ascii_lowercase()),
         email_verified: profile.email_verified,
         display_name: profile.display_name.clone(),
         avatar_url: profile.avatar_url.clone(),

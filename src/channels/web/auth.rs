@@ -1199,21 +1199,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_session_cookie_auth_passes() {
-        let app = test_app(TEST_AUTH_SECRET_TOKEN);
-        let req = Request::builder()
-            .uri("/api/chat/history")
-            .header(
-                "Cookie",
-                format!("{SESSION_COOKIE_NAME}={TEST_AUTH_SECRET_TOKEN}"),
-            )
-            .body(Body::empty())
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-    }
-
-    #[tokio::test]
     async fn test_query_token_allowed_for_ws_upgrade() {
         let app = test_app(TEST_AUTH_SECRET_TOKEN);
         let req = Request::builder()

@@ -407,14 +407,12 @@ impl GatewayChannel {
         let has_near = near_nonce_store.is_some();
 
         if providers.is_empty() && !has_near {
-            // Still apply domain restrictions even without providers.
+            // No OAuth providers and no NEAR — still apply domain restrictions
+            // to OIDC if configured.
             self.rebuild_state(|s| {
                 s.oauth_allowed_domains = allowed_domains;
-                s.near_nonce_store = near_nonce_store;
-                s.near_rpc_url = near_rpc_url;
-                s.near_network = near_network;
             });
-            if has_near || !self.auth.oidc_allowed_domains.is_empty() {
+            if !self.auth.oidc_allowed_domains.is_empty() {
                 return self;
             }
             tracing::warn!("OAuth enabled but no providers configured");

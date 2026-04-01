@@ -12,6 +12,7 @@ I18n.register('zh-CN', {
   'auth.social.apple': '使用 Apple 登录',
   'auth.social.near': '使用 NEAR 登录',
   'auth.social.tokenDivider': '或使用令牌',
+  'auth.signOut': '退出登录',
   'auth.errorRequired': '请输入令牌',
   'auth.errorInvalid': '令牌无效',
   // 聊天
