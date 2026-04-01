@@ -758,8 +758,8 @@ pub async fn start_server(
             header::HeaderValue::from_static(
                 "default-src 'self'; \
                  script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://esm.sh; \
-                 style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; \
-                 font-src https://fonts.gstatic.com; \
+                 style-src 'self' 'unsafe-inline' https:; \
+                 font-src data: https:; \
                  connect-src 'self' https:; \
                  img-src 'self' data: blob: https:; \
                  frame-src https:; \
