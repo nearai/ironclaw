@@ -264,6 +264,94 @@ Each routine tracks:
 5. Wire up notification in `notify_user()`
 6. Add DB migration if schema changes (see `src/db/migrations/`)
 
+### Routine Examples
+
+**Example 1: Daily Standup Reminder (Cron + Lightweight)**
+
+```yaml
+name: daily-standup
+trigger:
+  cron: "0 9 * * MON-FRI"  # 9 AM on weekdays
+  timezone: "America/Sao_Paulo"
+action:
+  type: lightweight
+  prompt: "List all incomplete tasks from the last 24h and ask the user to prioritize"
+  context_paths:
+    - workspace/tasks/pending.md
+  max_tokens: 2048
+  use_tools: true
+  max_tool_rounds: 2
+guardrails:
+  max_daily_runs: 1
+  sandbox_required: false
+notify:
+  on_success: true
+```
+
+**Example 2: Urgent Message Alert (Event-triggered + Full Job)**
+
+```yaml
+name: urgent-alert
+trigger:
+  event:
+    channel: telegram
+    pattern: "(urgente|emergência|prioridade máxima)"
+action:
+  type: full_job
+  title: "Processar Mensagem Urgente"
+  description: "Analisar mensagem urgente, verificar contexto relevante e gerar plano de ação"
+  max_iterations: 30
+guardrails:
+  max_concurrent: 1
+  max_daily_runs: 10
+  sandbox_required: true
+notify:
+  always: true
+```
+
+**Example 3: Weekly Repository Audit (Cron + Full Job)**
+
+```yaml
+name: weekly-audit
+trigger:
+  cron: "0 10 * * MON"  # Monday 10 AM
+action:
+  type: full_job
+  title: "Auditoria Semanal do Repositório"
+  description: "Rodar testes, verificar coverage, analisar diffs da semana, gerar report"
+  max_iterations: 100
+guardrails:
+  max_daily_runs: 1
+  max_concurrent: 1
+  sandbox_required: true
+  allowed_tools:
+    - shell
+    - file_read
+    - file_write
+    - git_diff
+notify:
+  on_success: true
+  on_failure: true
+```
+
+**Example 4: Manual One-Off Routine (Manual Trigger)**
+
+```yaml
+name: adhoc-analysis
+trigger:
+  manual: true  # Only fires when explicitly invoked
+action:
+  type: lightweight
+  prompt: "Analyze the current workspace state and suggest improvements"
+  context_paths:
+    - workspace/notes/current-focus.md
+  max_tokens: 4096
+  use_tools: true
+  max_tool_rounds: 5
+guardrails:
+  sandbox_required: false
+```
+
 ### Key Invariants
 
 - Routines fire **independently** of user sessions — they don't hold session locks
