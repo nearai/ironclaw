@@ -520,6 +520,7 @@ fn create_cheap_provider_for_backend(
         let mut cheap_gemini_config = gemini_config.clone();
         cheap_gemini_config.model = cheap_model.to_string();
         let provider = GeminiOauthProvider::new(cheap_gemini_config)?;
+        return Ok(Some(Arc::new(provider)));
     }
 
     if config.backend == "aliyun" || config.backend == "coding_plan" {
@@ -532,10 +533,6 @@ fn create_cheap_provider_for_backend(
         let mut cheap_aliyun = aliyun_config.clone();
         cheap_aliyun.model = cheap_model.to_string();
         let provider = AliyunProvider::new(cheap_aliyun)?;
-        return Ok(Some(Arc::new(provider)));
-    }
-            return Ok(Some(Arc::new(provider)));
-        }
         return Ok(Some(Arc::new(provider)));
     }
 
