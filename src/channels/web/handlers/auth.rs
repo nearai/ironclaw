@@ -11,6 +11,7 @@ use axum::{
     http::{HeaderValue, StatusCode, header},
     response::{IntoResponse, Redirect, Response},
 };
+use base64::Engine;
 use rand::RngCore;
 use rand::rngs::OsRng;
 use uuid::Uuid;
@@ -407,8 +408,16 @@ pub async fn near_verify_handler(
         return (StatusCode::BAD_REQUEST, "Invalid input").into_response();
     }
 
-    // Decode the public key and signature from base58/hex.
-    // NEAR public keys are formatted as "ed25519:base58encoded".
+    tracing::debug!(
+        account_id = %body.account_id,
+        public_key = %body.public_key,
+        signature_len = body.signature.len(),
+        signature_prefix = &body.signature[..body.signature.len().min(20)],
+        "NEAR verify: decoding credentials"
+    );
+
+    // Decode the public key and signature.
+    // NEAR wallets may return base58, hex, or base64.
     let pub_key_bytes: [u8; 32] = match decode_near_public_key(&body.public_key) {
         Ok(b) => b,
         Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
@@ -552,44 +561,50 @@ pub async fn near_verify_handler(
     .into_response()
 }
 
-/// Decode a NEAR public key (format: "ed25519:base58encoded" or raw hex).
-fn decode_near_public_key(key: &str) -> Result<[u8; 32], String> {
-    let raw = key.strip_prefix("ed25519:").unwrap_or(key);
-    // Try base58 first (NEAR standard), then hex.
-    if let Ok(bytes) = bs58::decode(raw).into_vec()
-        && bytes.len() == 32
-    {
-        let mut arr = [0u8; 32];
-        arr.copy_from_slice(&bytes);
-        return Ok(arr);
-    }
-    if let Ok(bytes) = hex::decode(raw)
-        && bytes.len() == 32
-    {
-        let mut arr = [0u8; 32];
-        arr.copy_from_slice(&bytes);
-        return Ok(arr);
-    }
-    Err("Invalid public key format".to_string())
+/// Decode bytes from base58, hex, or base64 (tries all formats).
+fn decode_multiformat(input: &str, expected_len: usize) -> Option<Vec<u8>> {
+    [
+        bs58::decode(input).into_vec().ok(),
+        hex::decode(input).ok(),
+        base64::engine::general_purpose::STANDARD.decode(input).ok(),
+        base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(input)
+            .ok(),
+    ]
+    .into_iter()
+    .flatten()
+    .find(|bytes| bytes.len() == expected_len)
 }
 
-/// Decode a NEAR signature (base58 or hex, 64 bytes).
+/// Decode a NEAR public key (format: "ed25519:base58encoded" or raw hex/base64).
+fn decode_near_public_key(key: &str) -> Result<[u8; 32], String> {
+    let raw = key.strip_prefix("ed25519:").unwrap_or(key);
+    match decode_multiformat(raw, 32) {
+        Some(bytes) => {
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&bytes);
+            Ok(arr)
+        }
+        None => Err(format!(
+            "Invalid public key format (expected 32 bytes, got: {}...)",
+            &key[..key.len().min(20)]
+        )),
+    }
+}
+
+/// Decode a NEAR signature (base58, hex, or base64, 64 bytes).
 fn decode_near_signature(sig: &str) -> Result<[u8; 64], String> {
-    if let Ok(bytes) = bs58::decode(sig).into_vec()
-        && bytes.len() == 64
-    {
-        let mut arr = [0u8; 64];
-        arr.copy_from_slice(&bytes);
-        return Ok(arr);
+    match decode_multiformat(sig, 64) {
+        Some(bytes) => {
+            let mut arr = [0u8; 64];
+            arr.copy_from_slice(&bytes);
+            Ok(arr)
+        }
+        None => Err(format!(
+            "Invalid signature format (expected 64 bytes, got: {}...)",
+            &sig[..sig.len().min(20)]
+        )),
     }
-    if let Ok(bytes) = hex::decode(sig)
-        && bytes.len() == 64
-    {
-        let mut arr = [0u8; 64];
-        arr.copy_from_slice(&bytes);
-        return Ok(arr);
-    }
-    Err("Invalid signature format".to_string())
 }
 
 /// Extract the session cookie value from request headers.

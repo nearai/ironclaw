@@ -761,7 +761,8 @@ pub async fn start_server(
                  style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; \
                  font-src https://fonts.gstatic.com; \
                  connect-src 'self' https://esm.sh https://*.near.org; \
-                 img-src 'self' data: https://*.googleusercontent.com https://avatars.githubusercontent.com; \
+                 img-src 'self' data: blob: https://*.googleusercontent.com https://avatars.githubusercontent.com https://raw.githubusercontent.com https://*.jsdelivr.net https://*.near.org https://pages.near.org; \
+                 frame-src https://*.near.org https://*.hot-labs.org https://*.meteorwallet.app https://*.mynearwallet.com https://*.herewallet.app; \
                  object-src 'none'; \
                  frame-ancestors 'none'; \
                  base-uri 'self'; \
