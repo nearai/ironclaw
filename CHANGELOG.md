@@ -7,6 +7,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.24.0](https://github.com/nearai/ironclaw/compare/ironclaw-v0.23.0...ironclaw-v0.24.0) - 2026-03-31
+
+### Added
+
+- *(gateway)* OIDC JWT authentication for reverse-proxy deployments ([#1463](https://github.com/nearai/ironclaw/pull/1463))
+- support custom LLM provider configuration via web UI ([#1340](https://github.com/nearai/ironclaw/pull/1340))
+- *(skills)* recursive bundle directory scanning for skill discovery ([#1667](https://github.com/nearai/ironclaw/pull/1667))
+- *(discord)* add gateway channel flow in wasm ([#944](https://github.com/nearai/ironclaw/pull/944))
+- DB-backed user management, admin secrets provisioning, and multi-tenant isolation ([#1626](https://github.com/nearai/ironclaw/pull/1626))
+- *(gateway)* add OpenAI Responses API endpoints ([#1656](https://github.com/nearai/ironclaw/pull/1656))
+
+### Fixed
+
+- *(routines)* clone Arc before await in web handler event cache refresh ([#1756](https://github.com/nearai/ironclaw/pull/1756))
+- *(slack)* respond to thread replies without requiring @mention ([#1405](https://github.com/nearai/ironclaw/pull/1405))
+- resolve 11 test failures from multi-tenant bootstrap and sandbox gate regressions ([#1746](https://github.com/nearai/ironclaw/pull/1746))
+- *(auth)* make shared Google tool status scope-aware ([#1532](https://github.com/nearai/ironclaw/pull/1532))
+- *(wasm)* inject Content-Length: 0 for bodyless mutating HTTP requests ([#1529](https://github.com/nearai/ironclaw/pull/1529))
+- *(bedrock)* strip tool blocks from messages when toolConfig is absent ([#1630](https://github.com/nearai/ironclaw/pull/1630))
+- prevent UTF-8 panics in byte-index string truncation ([#1688](https://github.com/nearai/ironclaw/pull/1688))
+- *(gemini)* preserve thought signatures on all tool calls ([#1565](https://github.com/nearai/ironclaw/pull/1565))
+- pin staging ci jobs to a single tested sha ([#1628](https://github.com/nearai/ironclaw/pull/1628))
+- *(routines)* complete full_job execution reliability overhaul ([#1650](https://github.com/nearai/ironclaw/pull/1650))
+- *(worker)* treat empty LLM response after text output as completion ([#1677](https://github.com/nearai/ironclaw/pull/1677))
+- *(worker)* replace script -qfc with pty-process for injection-safe PTY ([#1678](https://github.com/nearai/ironclaw/pull/1678))
+- *(web)* redact database error details from API responses ([#1711](https://github.com/nearai/ironclaw/pull/1711))
+- *(oauth)* tighten legacy state validation and fallback handling ([#1701](https://github.com/nearai/ironclaw/pull/1701))
+- *(db)* add tracing warn for naive timestamp fallback and improve parse_timestamp tests ([#1700](https://github.com/nearai/ironclaw/pull/1700))
+- *(wasm)* use typed WASM schema as advertised schema when available ([#1699](https://github.com/nearai/ironclaw/pull/1699))
+- sanitize tool error results before llm injection ([#1639](https://github.com/nearai/ironclaw/pull/1639))
+- require Feishu webhook authentication ([#1638](https://github.com/nearai/ironclaw/pull/1638))
+- *(llm)* prevent UTF-8 panic in line_bounds() (fixes #1669) ([#1679](https://github.com/nearai/ironclaw/pull/1679))
+- downgrade excessive debug logging in hot path (closes #1686) ([#1694](https://github.com/nearai/ironclaw/pull/1694))
+
+### Other
+
+- Stabilize MCP refresh regression tests ([#1772](https://github.com/nearai/ironclaw/pull/1772))
+- Fix hosted MCP OAuth refresh flow ([#1767](https://github.com/nearai/ironclaw/pull/1767))
+- Track routine verification state across updates ([#1716](https://github.com/nearai/ironclaw/pull/1716))
+- *(e2e)* align WASM reinstall expectation with uninstall cleanup ([#1762](https://github.com/nearai/ironclaw/pull/1762))
+- Handle empty tool completions in autonomous jobs ([#1720](https://github.com/nearai/ironclaw/pull/1720))
+- Clarify message tool vs channel setup guidance ([#1715](https://github.com/nearai/ironclaw/pull/1715))
+- tighten contribution and PR guidance ([#1704](https://github.com/nearai/ironclaw/pull/1704))
+- Clean up extension credentials on uninstall ([#1718](https://github.com/nearai/ironclaw/pull/1718))
+
+## [0.23.0](https://github.com/nearai/ironclaw/compare/ironclaw-v0.22.0...ironclaw-v0.23.0) - 2026-03-27
+
+### Added
+
+- complete multi-tenant isolation — phases 2–4 ([#1614](https://github.com/nearai/ironclaw/pull/1614))
+
+### Fixed
+
+- *(routines)* recover delete name after failed update fallback ([#1108](https://github.com/nearai/ironclaw/pull/1108))
+- *(mcp)* handle 202 Accepted and wire session manager for Streamable HTTP ([#1437](https://github.com/nearai/ironclaw/pull/1437))
+- *(extensions)* channel-relay auth dead-end, observability, and URL override ([#1681](https://github.com/nearai/ironclaw/pull/1681))
+- *(agent)* discard truncated tool calls when finish_reason == Length ([#1631](https://github.com/nearai/ironclaw/pull/1631)) ([#1632](https://github.com/nearai/ironclaw/pull/1632))
+- *(llm)* filter XML tool-call recovery by context ([#1641](https://github.com/nearai/ironclaw/pull/1641))
+
+### Other
+
+- Support direct hosted OAuth callbacks with proxy auth token ([#1684](https://github.com/nearai/ironclaw/pull/1684))
+
 ## [0.22.0](https://github.com/nearai/ironclaw/compare/ironclaw-v0.21.0...ironclaw-v0.22.0) - 2026-03-25
 
 ### Added
