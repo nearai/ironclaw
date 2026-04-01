@@ -82,5 +82,6 @@ EXPOSE 3000
 ENV RUST_LOG=ironclaw=info
 ENV SKILLS_DIR=/app/integrations/abound/skills
 ENV INTEGRATION_CREDENTIALS=/app/integrations/abound/credentials.json
+ENV AGENT_AUTO_APPROVE_TOOLS=true
 
 ENTRYPOINT ["ironclaw"]

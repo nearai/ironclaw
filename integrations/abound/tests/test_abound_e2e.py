@@ -9,6 +9,7 @@ Usage:
 
 import atexit
 import os
+import time
 import uuid
 
 import requests
@@ -95,6 +96,32 @@ r = admin.put(
     json={"value": ABOUND_API_KEY, "provider": "abound"},
 )
 check("inject api key", r.status_code == 200, f"got {r.status_code}: {r.text[:200]}")
+
+# Wait for workspace bootstrap and auth cache to settle
+print("\n  Waiting 5s for workspace bootstrap...")
+time.sleep(5)
+print()
+
+# Verify the token works with a simple request first
+print("--- Verify: Simple hello ---")
+r = requests.post(
+    f"{BASE_URL}/v1/responses",
+    headers={"Authorization": f"Bearer {user_token}", "Content-Type": "application/json"},
+    json={"input": "Say hi in 3 words", "stream": False},
+    timeout=120,
+)
+print(f"  Status: {r.status_code}")
+if r.status_code == 200:
+    d = r.json()
+    print(f"  Response status: {d.get('status')}")
+    if d.get("output"):
+        for item in d["output"]:
+            if item.get("type") == "message":
+                for c in item.get("content", []):
+                    if c.get("type") == "output_text":
+                        print(f"  Agent: {c['text'][:100]}")
+else:
+    print(f"  Error: {r.text[:300]}")
 print()
 
 # OpenAI client for the test user
