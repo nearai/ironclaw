@@ -594,11 +594,16 @@ async def create_threads(
 
 async def iter_sse_events(response: aiohttp.ClientResponse):
     data_lines: list[str] = []
-    async for raw_line in response.content:
-        line = raw_line.decode("utf-8", errors="replace").strip()
+    while True:
+        raw_line = await response.content.readline()
+        if not raw_line:
+            break
+
+        line = raw_line.decode("utf-8", errors="replace").rstrip("\r\n")
         if not line:
             if not data_lines:
                 continue
+
             payload = "\n".join(data_lines)
             data_lines.clear()
             try:
@@ -607,8 +612,18 @@ async def iter_sse_events(response: aiohttp.ClientResponse):
                 continue
             continue
 
+        if line.startswith(":"):
+            continue
+
         if line.startswith("data:"):
             data_lines.append(line[5:].lstrip())
+
+    if data_lines:
+        payload = "\n".join(data_lines)
+        try:
+            yield json.loads(payload)
+        except json.JSONDecodeError:
+            return
 
 
 async def sse_listener(
@@ -616,26 +631,37 @@ async def sse_listener(
     base_url: str,
     user_state: UserState,
     connection_index: int,
-    ready_event: asyncio.Event,
+    startup_future: asyncio.Future[None],
     stop_event: asyncio.Event,
 ) -> None:
     timeout = aiohttp.ClientTimeout(total=None, sock_read=None, connect=30.0)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        async with session.get(
-            f"{base_url}/api/chat/events?token={user_state.token}",
-            headers={"Accept": "text/event-stream"},
-        ) as response:
-            if response.status != 200:
-                body = await response.text()
-                raise RuntimeError(
-                    f"SSE connection {connection_index} for user {user_state.user_id} "
-                    f"failed with {response.status}: {body}"
-                )
-            ready_event.set()
-            async for event in iter_sse_events(response):
-                if stop_event.is_set():
-                    break
-                await user_state.handle_event(connection_index, event, time.monotonic())
+    try:
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(
+                f"{base_url}/api/chat/events?token={user_state.token}",
+                headers={"Accept": "text/event-stream"},
+            ) as response:
+                if response.status != 200:
+                    body = await response.text()
+                    raise RuntimeError(
+                        f"SSE connection {connection_index} for user {user_state.user_id} "
+                        f"failed with {response.status}: {body}"
+                    )
+                if not startup_future.done():
+                    startup_future.set_result(None)
+                async for event in iter_sse_events(response):
+                    if stop_event.is_set():
+                        break
+                    await user_state.handle_event(connection_index, event, time.monotonic())
+    except asyncio.CancelledError:
+        if not startup_future.done():
+            startup_future.cancel()
+        raise
+    except Exception as exc:
+        if not startup_future.done():
+            startup_future.set_exception(exc)
+            return
+        raise
 
 
 async def run_user_workload(
@@ -961,25 +987,25 @@ async def async_main(args: argparse.Namespace) -> int:
                 client, base_url, users, threads_per_user=args.messages_per_user
             )
 
-            ready_events: list[asyncio.Event] = []
+            startup_futures: list[asyncio.Future[None]] = []
             for user_state in user_states:
                 for connection_index in range(args.sse_connections_per_user):
-                    ready_event = asyncio.Event()
-                    ready_events.append(ready_event)
+                    startup_future = asyncio.get_running_loop().create_future()
+                    startup_futures.append(startup_future)
                     sse_tasks.append(
                         asyncio.create_task(
                             sse_listener(
                                 base_url=base_url,
                                 user_state=user_state,
                                 connection_index=connection_index,
-                                ready_event=ready_event,
+                                startup_future=startup_future,
                                 stop_event=sse_stop_event,
                             )
                         )
                     )
 
             await asyncio.wait_for(
-                asyncio.gather(*(event.wait() for event in ready_events)),
+                asyncio.gather(*startup_futures),
                 timeout=args.startup_timeout,
             )
 
