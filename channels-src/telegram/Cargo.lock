@@ -212,7 +212,7 @@ dependencies = [
 
 [[package]]
 name = "telegram-channel"
-version = "0.2.1"
+version = "0.2.6"
 dependencies = [
  "serde",
  "serde_json",

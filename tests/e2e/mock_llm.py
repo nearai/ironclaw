@@ -14,6 +14,7 @@ import uuid
 from aiohttp import web
 
 CANNED_RESPONSES = [
+    (re.compile(r"empty routine response", re.IGNORECASE), ""),
     (re.compile(r"hello|hi|hey", re.IGNORECASE), "Hello! How can I help you today?"),
     (re.compile(r"2\s*\+\s*2|two plus two", re.IGNORECASE), "The answer is 4."),
     (re.compile(r"skill|install", re.IGNORECASE), "I can help you with skills management."),
@@ -34,6 +35,11 @@ LOOP_FOREVER_TRIGGER = re.compile(r"issue 1780 loop forever", re.IGNORECASE)
 TOOL_CALL_PATTERNS = [
     (re.compile(r"echo (.+)", re.IGNORECASE), "echo", lambda m: {"message": m.group(1)}),
     (
+        re.compile(r"loop until cap", re.IGNORECASE),
+        "echo",
+        lambda _: {"message": "loop-until-cap"},
+    ),
+    (
         re.compile(r"make approval post (?P<label>[a-z0-9_-]+)", re.IGNORECASE),
         "http",
         lambda m: {
@@ -51,6 +57,11 @@ TOOL_CALL_PATTERNS = [
             "max_results": 1,
         },
     ),
+    (
+        re.compile(r"check mock mcp|mock mcp search", re.IGNORECASE),
+        "mock-mcp_mock_search",
+        lambda _: {"query": "refresh-check"},
+    ),
     (re.compile(r"what time|current time", re.IGNORECASE), "time", lambda _: {"operation": "now"}),
     (
         re.compile(
@@ -63,6 +74,21 @@ TOOL_CALL_PATTERNS = [
             "description": f"Owner-scope routine {m.group('name')}",
             "trigger_type": "manual",
             "prompt": f"Confirm that {m.group('name')} executed.",
+            "action_type": "lightweight",
+            "use_tools": False,
+        },
+    ),
+    (
+        re.compile(
+            r"create failing lightweight owner routine (?P<name>[a-z0-9][a-z0-9_-]*)",
+            re.IGNORECASE,
+        ),
+        "routine_create",
+        lambda m: {
+            "name": m.group("name"),
+            "description": f"Failing lightweight routine {m.group('name')}",
+            "trigger_type": "manual",
+            "prompt": f"Empty routine response for {m.group('name')}.",
             "action_type": "lightweight",
             "use_tools": False,
         },
@@ -83,8 +109,41 @@ TOOL_CALL_PATTERNS = [
     ),
     (
         re.compile(
+            r"create looping full[- ]job owner routine (?P<name>[a-z0-9][a-z0-9_-]*)",
+            re.IGNORECASE,
+        ),
+        "routine_create",
+        lambda m: {
+            "name": m.group("name"),
+            "description": f"Looping full-job routine {m.group('name')}",
+            "trigger_type": "manual",
+            "prompt": f"Loop until cap for {m.group('name')}.",
+            "action_type": "full_job",
+            "max_iterations": 1,
+        },
+    ),
+    (
+        re.compile(
+            r"create cron owner routine (?P<name>[a-z0-9][a-z0-9_-]*)",
+            re.IGNORECASE,
+        ),
+        "routine_create",
+        lambda m: {
+            "name": m.group("name"),
+            "description": f"Cron routine {m.group('name')}",
+            "trigger_type": "cron",
+            "schedule": "0 */5 * * * *",
+            "timezone": "UTC",
+            "prompt": f"Confirm that cron routine {m.group('name')} executed.",
+            "action_type": "lightweight",
+            "use_tools": False,
+        },
+    ),
+    (
+        re.compile(
             r"create event routine (?P<name>[a-z0-9][a-z0-9_-]*) "
-            r"channel (?P<channel>[a-z0-9_-]+) pattern (?P<pattern>[a-z0-9_|-]+)",
+            r"channel (?P<channel>[a-z0-9_-]+) pattern (?P<pattern>[a-z0-9_|-]+)"
+            r"(?: cooldown (?P<cooldown>\d+))?",
             re.IGNORECASE,
         ),
         "routine_create",
@@ -97,7 +156,7 @@ TOOL_CALL_PATTERNS = [
             "prompt": f"Acknowledge that {m.group('name')} fired.",
             "action_type": "lightweight",
             "use_tools": False,
-            "cooldown_secs": 0,
+            "cooldown_secs": int(m.group("cooldown") or 0),
         },
     ),
     (
@@ -132,10 +191,19 @@ def _last_user_content(messages: list[dict]) -> str:
             return _message_text(msg)
     return ""
 
-
 def _conversation_has_user_trigger(messages: list[dict], pattern: re.Pattern[str]) -> bool:
     for msg in messages:
         if msg.get("role") == "user" and pattern.search(_message_text(msg)):
+            return True
+    return False
+
+
+def _job_contains_marker(messages: list[dict], marker: str) -> bool:
+    marker_lower = marker.lower()
+    for msg in messages:
+        if msg.get("role") != "user":
+            continue
+        if marker_lower in _message_text(msg).lower():
             return True
     return False
 
@@ -166,6 +234,25 @@ def match_job_response(messages: list[dict], has_tools: bool) -> dict | None:
 
     last_user = _last_user_content(messages)
     tool_result_count = _count_tool_results(messages)
+    loop_until_cap = _job_contains_marker(messages, "loop until cap")
+
+    if loop_until_cap and "create a plan" in last_user.lower():
+        return {"text": json.dumps({
+            "goal": "Keep iterating until the worker hits the iteration cap",
+            "actions": [],
+            "estimated_cost": 0.001,
+            "estimated_time_secs": 5,
+            "confidence": 0.8,
+        })}
+
+    if loop_until_cap and "all planned actions have been executed" in last_user.lower():
+        return {"text": "loop until cap still requires more work"}
+
+    if loop_until_cap and has_tools:
+        return {"tool_call": {
+            "tool_name": "echo",
+            "arguments": {"message": "loop-until-cap"},
+        }}
 
     # Planning call (no tools available = complete() not complete_with_tools())
     if "create a plan" in last_user.lower():
@@ -567,15 +654,29 @@ async def oauth_refresh(request: web.Request) -> web.Response:
 
     if request.headers.get("Authorization") != "Bearer e2e-test-token":
         return web.json_response({"error": "invalid_gateway_auth"}, status=401)
-    if data.get("client_id") != "hosted-google-client-id":
-        return web.json_response({"error": "invalid_client_id"}, status=400)
-    if "client_secret" in data:
-        return web.json_response({"error": "unexpected_client_secret"}, status=400)
+
+    provider = data.get("provider", "")
+    if provider.startswith("mcp:"):
+        if data.get("client_id") != "mock-mcp-client-id":
+            return web.json_response({"error": "invalid_mcp_client_id"}, status=400)
+        if data.get("client_secret") != "mock-mcp-client-secret":
+            return web.json_response({"error": "missing_mcp_client_secret"}, status=400)
+        if not data.get("token_url", "").endswith("/oauth/token"):
+            return web.json_response({"error": "invalid_mcp_token_url"}, status=400)
+        if data.get("resource") != f"http://127.0.0.1:{request.app['port']}/mcp":
+            return web.json_response({"error": "missing_mcp_resource"}, status=400)
+    else:
+        if data.get("client_id") != "hosted-google-client-id":
+            return web.json_response({"error": "invalid_client_id"}, status=400)
+        if "client_secret" in data:
+            return web.json_response({"error": "unexpected_client_secret"}, status=400)
 
     return web.json_response({
         "access_token": "mock-refreshed-access-token",
+        "token_type": "Bearer",
         "refresh_token": "mock-rotated-refresh-token",
         "expires_in": 3600,
+        "scope": "mock-scope",
     })
 
 
@@ -701,6 +802,7 @@ async def mcp_oauth_register(request: web.Request) -> web.Response:
     body = await request.json()
     return web.json_response({
         "client_id": "mock-mcp-client-id",
+        "client_secret": "mock-mcp-client-secret",
         "client_name": body.get("client_name", "IronClaw"),
         "redirect_uris": body.get("redirect_uris", []),
     })

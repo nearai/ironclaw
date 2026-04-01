@@ -488,6 +488,15 @@ impl GatewayWorkflowHarness {
             .expect("invalid routine runs response")
     }
 
+    pub async fn register_tool(&self, tool: Arc<dyn Tool>) {
+        let registry = self
+            .gateway_state
+            .tool_registry
+            .as_ref()
+            .expect("tool registry should be available");
+        registry.register(tool).await;
+    }
+
     pub async fn github_webhook(
         &self,
         event: &str,

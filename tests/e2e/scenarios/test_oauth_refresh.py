@@ -121,6 +121,37 @@ async def _wait_for_gmail_tool_call(base_url: str, thread_id: str, timeout: floa
     raise AssertionError(f"Timed out waiting for gmail tool call in thread {thread_id}")
 
 
+async def _wait_for_tool_call(
+    base_url: str,
+    thread_id: str,
+    tool_name: str,
+    timeout: float = 30.0,
+) -> dict:
+    approved_request_ids = set()
+    for _ in range(int(timeout * 2)):
+        response = await api_get(
+            base_url,
+            f"/api/chat/history?thread_id={thread_id}",
+            timeout=15,
+        )
+        response.raise_for_status()
+        history = response.json()
+
+        pending = history.get("pending_approval")
+        if pending and pending["request_id"] not in approved_request_ids:
+            await _approve_pending_request(base_url, thread_id, pending["request_id"])
+            approved_request_ids.add(pending["request_id"])
+
+        for turn in history.get("turns", []):
+            for tool_call in turn.get("tool_calls", []):
+                if tool_call.get("name") == tool_name:
+                    return history
+
+        await asyncio.sleep(0.5)
+
+    raise AssertionError(f"Timed out waiting for {tool_name} tool call in thread {thread_id}")
+
+
 async def _wait_for_refresh_request(mock_base_url: str, timeout: float = 20.0) -> dict:
     for _ in range(int(timeout * 2)):
         state = await _get_mock_oauth_state(mock_base_url)
@@ -225,3 +256,107 @@ async def test_hosted_gmail_oauth_refresh_uses_proxy(hosted_oauth_refresh_server
     assert updated_before_dt is not None
     assert expires_after_dt > datetime.now(timezone.utc)
     assert updated_after_dt > updated_before_dt
+
+
+async def test_hosted_mcp_oauth_refresh_uses_proxy(hosted_oauth_refresh_server):
+    server = hosted_oauth_refresh_server["base_url"]
+    db_path = hosted_oauth_refresh_server["db_path"]
+    mock_base_url = hosted_oauth_refresh_server["mock_llm_url"]
+    mcp_url = f"{mock_base_url}/mcp"
+
+    install_response = await api_post(
+        server,
+        "/api/extensions/install",
+        json={"name": "mock-mcp", "url": mcp_url, "kind": "mcp_server"},
+        timeout=30,
+    )
+    assert install_response.status_code == 200, install_response.text
+    assert install_response.json().get("success") is True, install_response.text
+
+    activate_response = await api_post(
+        server,
+        "/api/extensions/mock-mcp/activate",
+        timeout=30,
+    )
+    assert activate_response.status_code == 200, activate_response.text
+    auth_url = activate_response.json().get("auth_url")
+    assert auth_url, activate_response.json()
+
+    async with httpx.AsyncClient() as client:
+        callback_response = await client.get(
+            f"{server}/oauth/callback",
+            params={"code": "mock_mcp_code", "state": _extract_state(auth_url)},
+            timeout=30,
+            follow_redirects=True,
+        )
+
+    assert callback_response.status_code == 200, callback_response.text[:400]
+    callback_body = callback_response.text.lower()
+    assert "connected" in callback_body or "success" in callback_body
+
+    mock_mcp = await _get_extension(server, "mock-mcp")
+    assert mock_mcp is not None, "mock-mcp should be installed"
+    assert mock_mcp["authenticated"] is True, mock_mcp
+    assert "mock-mcp_mock_search" in mock_mcp.get("tools", []), mock_mcp
+
+    client_secret_user_id, _, _ = _find_secret_row(db_path, "mcp_mock-mcp_client_secret")
+    stored_user_id, expires_before, updated_before = _find_secret_row(
+        db_path, "mcp_mock-mcp_access_token"
+    )
+    assert client_secret_user_id == stored_user_id
+    assert _parse_timestamp(expires_before) is not None
+    assert _parse_timestamp(updated_before) is not None
+
+    await _reset_mock_oauth_state(mock_base_url)
+    await asyncio.sleep(0.1)
+    _expire_access_token(db_path, stored_user_id, "mcp_mock-mcp_access_token")
+
+    thread_response = await api_post(server, "/api/chat/thread/new", timeout=15)
+    assert thread_response.status_code == 200, thread_response.text
+    thread_id = thread_response.json()["id"]
+
+    send_response = await api_post(
+        server,
+        "/api/chat/send",
+        json={"content": "check mock mcp", "thread_id": thread_id},
+        timeout=30,
+    )
+    assert send_response.status_code == 202, send_response.text
+
+    history = await _wait_for_tool_call(server, thread_id, "mock-mcp_mock_search")
+    assert any(
+        tool_call.get("name") == "mock-mcp_mock_search"
+        for turn in history.get("turns", [])
+        for tool_call in turn.get("tool_calls", [])
+    ), history
+
+    oauth_state = await _wait_for_refresh_request(mock_base_url)
+    assert oauth_state["refresh_count"] == 1, oauth_state
+    last_refresh = oauth_state["last_refresh"]
+    assert last_refresh is not None, oauth_state
+    assert last_refresh["authorization"] == "Bearer e2e-test-token"
+    assert last_refresh["form"]["provider"] == "mcp:mock-mcp"
+    assert last_refresh["form"]["client_id"] == "mock-mcp-client-id"
+    assert last_refresh["form"]["client_secret"] == "mock-mcp-client-secret"
+    assert last_refresh["form"]["token_url"].endswith("/oauth/token")
+    assert last_refresh["form"]["resource"] == mcp_url
+
+    refreshed_user_id, expires_after, updated_after = _find_secret_row(
+        db_path, "mcp_mock-mcp_access_token"
+    )
+    refresh_user_id, _, refresh_updated_after = _find_secret_row(
+        db_path, "mcp_mock-mcp_access_token_refresh_token"
+    )
+    assert refreshed_user_id == stored_user_id
+    assert refresh_user_id == stored_user_id
+    expires_after_dt = _parse_timestamp(expires_after)
+    updated_after_dt = _parse_timestamp(updated_after)
+    updated_before_dt = _parse_timestamp(updated_before)
+    refresh_updated_after_dt = _parse_timestamp(refresh_updated_after)
+    assert expires_after_dt is not None
+    assert updated_after_dt is not None
+    assert updated_before_dt is not None
+    assert refresh_updated_after_dt is not None
+    assert expires_after_dt > datetime.now(timezone.utc)
+    assert updated_after_dt > updated_before_dt
+    assert refresh_updated_after_dt >= updated_after_dt

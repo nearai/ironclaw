@@ -33,7 +33,7 @@ ironclaw onboard
 When prompted, enable the Telegram channel and paste your bot token. The wizard will:
 
 - Validate the token
-- Optionally configure a webhook secret
+- Auto-generate a webhook secret for webhook mode
 - Set up tunnel (if you want webhook mode)
 
 ### 3. (Optional) Configure Tunnel for Webhooks
