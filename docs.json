@@ -150,7 +150,7 @@
             "tab": " ",
             "groups": [
               {
-                "group": "快速开始",
+                "group": " ",
                 "pages": [
                   "zh/index",
                   "zh/quickstart",
@@ -161,53 +161,85 @@
                 "group": "核心能力",
                 "icon": "cubes",
                 "pages": [
+                  "zh/capabilities/overview",
                   {
-                    "group": "记忆",
+                    "group": "核心能力",
                     "pages": [
-                      "zh/capabilities/memory/memory",
-                      "zh/capabilities/memory/identity"
+                      "zh/security",
+                      {
+                        "group": "记忆",
+                        "pages": [
+                          "zh/capabilities/memory/memory",
+                          "zh/capabilities/memory/identity"
+                        ]
+                      },
+                      {
+                        "group": "例程",
+                        "pages": [
+                          "zh/capabilities/routines/cron",
+                          "zh/capabilities/routines/heartbeat",
+                          "zh/capabilities/routines/reactive"
+                        ]
+                      },
+                      {
+                        "group": "任务",
+                        "pages": [
+                          "zh/capabilities/jobs/jobs",
+                          "zh/capabilities/jobs/self-repair"
+                        ]
+                      },
+                      "zh/capabilities/skills",
+                      "zh/capabilities/sandboxed-tools"
                     ]
-                  },
-                  {
-                    "group": "例程",
-                    "pages": [
-                      "zh/capabilities/routines/cron",
-                      "zh/capabilities/routines/heartbeat",
-                      "zh/capabilities/routines/reactive"
-                    ]
-                  },
-                  "zh/capabilities/jobs",
-                  "zh/capabilities/skills",
-                  "zh/capabilities/sandboxed-tools"
+                  }
                 ]
               },
               {
                 "group": "渠道",
                 "icon": "message",
                 "pages": [
-                  "zh/tunnel",
-                  "zh/channels/local",
-                  "zh/channels/signal",
-                  "zh/channels/telegram",
-                  "zh/channels/webhook"
+                  "zh/channels/overview",
+                  {
+                    "group": "内置渠道",
+                    "pages": [
+                      "zh/tunnel",
+                      "zh/channels/local",
+                      "zh/channels/signal",
+                      "zh/channels/telegram",
+                      "zh/channels/webhook"
+                    ]
+                  }
                 ]
               },
               {
                 "group": "扩展（工具）",
                 "icon": "hammer",
                 "pages": [
-                  "zh/extensions/web-search",
-                  "zh/extensions/github",
-                  "zh/extensions/file-tools",
-                  "zh/extensions/mcp",
-                  "zh/extensions/shell"
+                  "zh/extensions/overview",
+                  {
+                    "group": "内置扩展",
+                    "pages": [
+                      "zh/extensions/file-tools",
+                      "zh/extensions/github",
+                      "zh/extensions/google-calendar",
+                      "zh/extensions/mcp",
+                      "zh/extensions/web-search",
+                      "zh/extensions/shell"
+                    ]
+                  }
                 ]
               },
               {
                 "group": "教程",
                 "icon": "graduation-cap",
                 "pages": [
-                  "zh/extensions/building-a-tool"
+                  "zh/extensions/building-a-tool",
+                  {
+                    "group": "在以下平台托管 IronClaw",
+                    "pages": [
+                      "zh/infrastructure/droplet"
+                    ]
+                  }
                 ]
               }
             ]

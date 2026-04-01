@@ -4,55 +4,62 @@ description: "几分钟内创建您的智能体"
 icon: rocket
 ---
 
-前往 https://agent.near.ai/ 并使用您偏好的方式登录，然后开始创建 IronClaw 智能体。
+本指南将帮助您在 10 分钟内从零开始运行一个 IronClaw 实例。
 
-## 创建智能体
+---
+
+## 设置您的智能体
 
 <Steps>
 
-<Step title="创建智能体">
+<Step title="获取 IronClaw">
 
-创建和部署智能体非常简单，只需填写必要的计费信息、添加 SSH 密钥，然后点击"Activate Agent"按钮。智能体将自动创建并部署在私有实例中，您可以通过 SSH 连接到它。
+<Tabs>
+  <Tab title="Agent Hub">
+  前往 https://agent.near.ai/ 并使用您偏好的方式登录，然后在私有实例中创建一个 IronClaw 智能体。
 
-<Accordion title="SSH 密钥">
+  私有实例准备就绪后，您可以通过[智能体仪表盘](https://agent.near.ai/)提供的地址使用 `SSH` 连接到它：
 
-使用 IronClaw 需要提供 SSH 密钥。如果您还没有，可以在终端中使用以下命令生成：
+  ```bash
+  ssh -p <PORT> liquid-horse@agent2.near.ai
+  ```
 
-```bash
-ssh-keygen -t rsa -b 4096 -C "you@example.com"
-cat ~/.ssh/id_rsa.pub
-```
+  <Accordion title="SSH 密钥">
 
-</Accordion>
+  使用 IronClaw 需要提供 SSH 密钥。如果您还没有，可以在终端中使用以下命令生成：
 
-</Step>
-<Step title="连接到您的私有实例">
+  ```bash
+  ssh-keygen -t rsa -b 4096 -C "you@example.com"
+  cat ~/.ssh/id_rsa.pub
+  ```
 
-使用 [智能体仪表盘](https://agent.near.ai/) 中提供的地址，通过 `SSH` 连接到智能体的私有实例：
+  </Accordion>
 
-```bash
-> ssh -p <PORT> liquid-horse@agent2.near.ai
+  <Accordion title="连接遇到问题？">
+  连接前请确保已将 SSH 密钥添加到设备的 SSH 代理中：
 
-#Linux 522eab21e8e4 6.9.0-dstack #1 SMP PREEMPT_DYNAMIC Thu May 30 14:26:20 UTC 2024 x86_64
+  ```bash
+  ssh-add ~/.ssh/id_rsa
+  ```
 
-#Debian GNU/Linux comes with ABSOLUTELY NO WARRANTY, to the extent permitted by applicable law.
-agent@1v4d3v23e8f1:~$
-```
+  </Accordion>
+  </Tab>
 
-<Accordion title="连接遇到问题？">
-连接前请确保已将 SSH 密钥添加到设备的 SSH 代理中：
+  <Tab title="本地">
+    适合在自己的机器上个人使用。默认使用 libSQL（嵌入式 SQLite），无需单独的数据库服务器。
 
-```bash
-ssh-add ~/.ssh/id_rsa
-```
-
-</Accordion>
+    ```bash
+    # 安装 IronClaw
+    curl --proto '=https' --tlsv1.2 -LsSf https://github.com/nearai/ironclaw/releases/latest/download/ironclaw-installer.sh | sh
+    ```
+  </Tab>
+</Tabs>
 
 </Step>
 
 <Step title="启动智能体">
 
-成功连接到智能体的私有实例后，可以首次启动智能体：
+首次启动智能体：
 
 ```bash
 ironclaw
@@ -72,20 +79,20 @@ ironclaw
 
 </Accordion>
 
-由于这是首次启动智能体，它会要求您配置推理提供商和要使用的 LLM。
+由于这是首次启动智能体，它会要求您配置推理提供商以及要使用的 LLM。
 
 ![setup](/images/quickstart/setup-wizard.png)
 
 <Note>
-我们推荐使用 [NEAR AI](https://cloud.near.ai/) 作为推理提供商，以获得最高的隐私和安全性，并使用 `Qwen3-30B` 模型，性价比最优。
+我们推荐使用 [NEAR AI](https://cloud.near.ai/) 作为推理提供商，以获得更高的隐私与安全性，并使用 `Qwen3-30B` 模型来兼顾效果与成本。
 </Note>
 
 <Accordion title="⚠️ 错误：Webhook 服务器启动失败">
 
-如果遇到错误 `Error: Channel webhook_server failed to start: Failed to bind to 0.0.0.0:8080: Address already in use (os error 98)`，请尝试设置不同的 HTTP 端口：
+如果遇到错误 `Error: Channel webhook_server failed to start: Failed to bind to 0.0.0.0:8080: Address already in use (os error 98)`，请尝试设置一个不同的 HTTP 端口：
 
 ```
-# 将默认 HTTP 端口更改为 8081
+# 将默认 HTTP 端口改为 8081
 export HTTP_PORT=8081
 
 # 然后重新启动智能体
@@ -98,7 +105,7 @@ ironclaw
 
 <Step title="与智能体对话">
 
-智能体启动运行后，您可以通过终端开始与它交互，只需输入您的消息，智能体就会回复。
+当智能体启动后，您就可以通过终端与它交互。直接输入消息，智能体就会回复。
 
 ![hello-ai](/images/quickstart/hello-ai.png)
 
@@ -107,7 +114,7 @@ ironclaw
 
 <Step title="更新 IronClaw">
 
-最后，请定期更新 IronClaw 以获取最新功能和改进。您可以在终端中运行以下命令来更新：
+最后，请定期更新 IronClaw，以获得最新功能和改进。您可以在终端中运行以下命令进行更新：
 
 ```bash
 ironclaw-update
@@ -122,14 +129,14 @@ ironclaw-update
 
 ## 下一步
 
-现在您的智能体已经启动运行，是时候配置一个新的[频道](./channels/telegram)，从您喜欢的消息平台与智能体互动，并添加一些[工具](/extensions/web-search)来增强智能体的能力。
+现在您的智能体已经运行起来了，接下来可以配置新的[频道](./channels/telegram)以便通过您偏好的消息平台与它交互，并添加一些[工具](/extensions/web-search)来扩展能力。
 
 <CardGroup cols={2}>
   <Card title="频道" icon="plug" href="/channels/telegram">
     将智能体连接到您喜欢的消息平台。
   </Card>
 
-  <Card title="工具" icon="wrench" href="#">
-    让智能体访问外部 API 和服务。
+  <Card title="工具" icon="wrench" href="/extensions/web-search">
+    让智能体访问外部 API 与服务。
   </Card>
 </CardGroup>
