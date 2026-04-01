@@ -1252,7 +1252,7 @@ impl Agent {
 mod tests {
     use super::*;
     use crate::agent::session::{Session, Thread, ThreadState};
-    use crate::channels::ChannelMetadata;
+    use std::collections::{HashMap, HashSet, VecDeque};
     use std::sync::Arc;
     use tokio::sync::Mutex;
     use uuid::Uuid;
@@ -1261,16 +1261,17 @@ mod tests {
         let session = Session {
             id: Uuid::new_v4(),
             user_id: "test-user".to_string(),
-            channel: "test-channel".to_string(),
-            metadata: ChannelMetadata::default(),
-            threads: std::collections::HashMap::new(),
             active_thread: None,
-            pending_auth: None,
+            threads: HashMap::new(),
+            created_at: chrono::Utc::now(),
+            last_active_at: chrono::Utc::now(),
+            metadata: serde_json::Value::Null,
+            auto_approved_tools: HashSet::new(),
         };
         Arc::new(Mutex::new(session))
     }
 
-    fn add_test_thread(session: &Session) -> Uuid {
+    fn add_test_thread(session: &mut Session) -> Uuid {
         let thread_id = Uuid::new_v4();
         let thread = Thread {
             id: thread_id,
@@ -1279,7 +1280,10 @@ mod tests {
             turns: vec![],
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
-            metadata: std::collections::HashMap::new(),
+            metadata: serde_json::Value::Null,
+            pending_approval: None,
+            pending_auth: None,
+            pending_messages: VecDeque::new(),
         };
         session.threads.insert(thread_id, thread);
         thread_id
