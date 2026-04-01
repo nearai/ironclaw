@@ -470,7 +470,8 @@ impl Agent {
             thread.messages()
         };
 
-        // Persist user message to DB immediately so it survives crashes
+        // Persist the *original* user content to DB (without the <attachments> augmentation).
+        // The augmented form is only needed for the LLM context, not for storage/display.
         tracing::debug!(
             message_id = %message.id,
             thread_id = %thread_id,
@@ -480,7 +481,7 @@ impl Agent {
             thread_id,
             &message.channel,
             &message.user_id,
-            effective_content,
+            content,
         )
         .await;
 

@@ -24,6 +24,24 @@ fn parse_tool_call_infos(calls: &[serde_json::Value]) -> Vec<ToolCallInfo> {
         .collect()
 }
 
+/// Strip `<attachments>...</attachments>` blocks that were historically persisted
+/// alongside user messages. These are LLM-internal metadata and should not be shown
+/// in the chat UI.
+fn strip_attachment_block(content: &str) -> String {
+    if let Some(start) = content.find("\n\n<attachments>")
+        && let Some(end) = content.find("</attachments>")
+    {
+        let end = end + "</attachments>".len();
+        let mut result = String::with_capacity(content.len());
+        result.push_str(&content[..start]);
+        if end < content.len() {
+            result.push_str(&content[end..]);
+        }
+        return result;
+    }
+    content.to_string()
+}
+
 /// Build TurnInfo pairs from flat DB messages (user/tool_calls/assistant triples).
 ///
 /// Handles three message patterns:
@@ -41,7 +59,7 @@ pub fn build_turns_from_db_messages(
         if msg.role == "user" {
             let mut turn = TurnInfo {
                 turn_number,
-                user_input: msg.content.clone(),
+                user_input: strip_attachment_block(&msg.content),
                 response: None,
                 state: "Completed".to_string(),
                 started_at: msg.created_at.to_rfc3339(),
