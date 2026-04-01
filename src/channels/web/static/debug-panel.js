@@ -5,26 +5,26 @@
 
   // ── Constants ──
 
-  var MAX_ACTIVITY = 1000;
-  var STATS_POLL_INTERVAL = 30000;
-  var SESSION_TAB_KEY = 'ironclaw_debug_tab';
-  var SESSION_OPEN_KEY = 'ironclaw_debug_open';
+  const MAX_ACTIVITY = 1000;
+  const STATS_POLL_INTERVAL = 30000;
+  const SESSION_TAB_KEY = 'ironclaw_debug_tab';
+  const SESSION_OPEN_KEY = 'ironclaw_debug_open';
 
   // ── State ──
 
-  var debugActive = false;
-  var panelOpen = false;
-  var activeTab = 'activity';
-  var activityLog = [];
-  var pendingTools = {};
-  var overlay = null;
-  var panelEl = null;
-  var toolbarBtn = null;
-  var statsTimer = null;
-  var sseReconnects = 0;
-  var lastEventTime = null;
+  let debugActive = false;
+  let panelOpen = false;
+  let activeTab = 'activity';
+  let activityLog = [];
+  let pendingTools = {};
+  let overlay = null;
+  let panelEl = null;
+  let toolbarBtn = null;
+  let statsTimer = null;
+  let sseReconnects = 0;
+  let lastEventTime = null;
 
-  var sessionStats = {
+  let sessionStats = {
     turns: 0,
     inputTokens: 0,
     outputTokens: 0,
@@ -464,7 +464,7 @@
         details.appendChild(pl);
         var pp = document.createElement('pre');
         pp.className = 'debug-activity-pre';
-        pp.textContent = extra.params;
+        pp.textContent = typeof extra.params === 'string' ? extra.params : JSON.stringify(extra.params, null, 2);
         details.appendChild(pp);
       }
       if (extra.output) {
@@ -473,8 +473,8 @@
         ol.textContent = 'Output';
         details.appendChild(ol);
         var op = document.createElement('pre');
-        op.className = 'debug-activity-pre';
-        op.textContent = extra.output;
+        op.className = 'debug-activity-pre debug-activity-output-pre';
+        op.textContent = typeof extra.output === 'string' ? extra.output : JSON.stringify(extra.output, null, 2);
         details.appendChild(op);
       }
       el.appendChild(details);
@@ -489,7 +489,7 @@
     entry.output = (entry.output ? entry.output + '\n' : '') + text;
     var el = document.getElementById('debug-activity-' + id);
     if (!el) return;
-    var outPre = el.querySelector('.debug-activity-details .debug-activity-pre:last-child');
+    var outPre = el.querySelector('.debug-activity-details .debug-activity-output-pre');
     if (outPre) {
       outPre.textContent = entry.output;
     } else {
@@ -505,7 +505,7 @@
       ol.textContent = 'Output';
       details.appendChild(ol);
       var op = document.createElement('pre');
-      op.className = 'debug-activity-pre';
+      op.className = 'debug-activity-pre debug-activity-output-pre';
       op.textContent = text;
       details.appendChild(op);
     }
@@ -626,7 +626,7 @@
       outLabel.textContent = 'Output';
       details.appendChild(outLabel);
       var outPre = document.createElement('pre');
-      outPre.className = 'debug-activity-pre';
+      outPre.className = 'debug-activity-pre debug-activity-output-pre';
       outPre.textContent = entry.output;
       details.appendChild(outPre);
     }
@@ -910,7 +910,7 @@
       badge.textContent = formatNumber(comp.estimated_tokens) + ' tok';
 
       var source = document.createElement('span');
-      source.className = 'debug-activity-meta';
+      source.className = 'debug-prompt-source';
       source.textContent = comp.source;
 
       summary.appendChild(labelEl);
@@ -941,12 +941,14 @@
             if (!isNaN(c)) totalCost += c;
           });
           if (totalCost > 0) {
+            sessionStats.cost = totalCost;
             setStatText('debug-stat-cost', '$' + totalCost.toFixed(4));
           }
         }
         if (data.daily_cost) {
           var dc = parseFloat(data.daily_cost);
           if (!isNaN(dc) && dc > 0) {
+            sessionStats.cost = dc;
             setStatText('debug-stat-cost', '$' + dc.toFixed(4));
           }
         }

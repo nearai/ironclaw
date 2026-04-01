@@ -216,6 +216,12 @@
   font-variant-numeric: tabular-nums;
 }
 
+.debug-prompt-source {
+  font-size: 10px;
+  color: var(--text-secondary);
+  margin-left: 6px;
+}
+
 .debug-prompt-content {
   padding: 8px 10px;
   font-size: 11px;

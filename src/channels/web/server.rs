@@ -774,8 +774,6 @@ async fn js_handler() -> impl IntoResponse {
     )
 }
 
-
-
 async fn favicon_handler() -> impl IntoResponse {
     (
         [
@@ -2896,15 +2894,26 @@ struct DebugPromptComponent {
 
 fn estimate_tokens(text: &str) -> usize {
     let words = text.split_whitespace().count();
-    ((words as f64) * 1.3) as usize + 4
+    let chars = text.len();
+    // CJK and other non-space-separated languages produce very few whitespace
+    // splits, so fall back to a character-based heuristic when the average
+    // "word" is suspiciously long (>10 bytes per split token).
+    if words == 0 {
+        return 4;
+    }
+    if chars / words > 10 {
+        // Character-based: ~1.5 chars per token for CJK text
+        (chars as f64 / 1.5) as usize + 4
+    } else {
+        ((words as f64) * 1.3) as usize + 4
+    }
 }
 
 async fn debug_prompt_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
 ) -> Result<Json<DebugPromptResponse>, (StatusCode, String)> {
-    let workspace =
-        super::handlers::memory::resolve_workspace(&state, &user).await?;
+    let workspace = super::handlers::memory::resolve_workspace(&state, &user).await?;
 
     let files: &[(&str, &str)] = &[
         ("AGENTS.md", "Agent Instructions"),
@@ -2917,7 +2926,9 @@ async fn debug_prompt_handler(
 
     let mut components = Vec::new();
     for &(path, label) in files {
-        if let Ok(doc) = workspace.read(path).await && !doc.content.is_empty() {
+        if let Ok(doc) = workspace.read(path).await
+            && !doc.content.is_empty()
+        {
             let est = estimate_tokens(&doc.content);
             components.push(DebugPromptComponent {
                 source: path.to_string(),
