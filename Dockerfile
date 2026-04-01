@@ -3,7 +3,7 @@
 # Uses cargo-chef for dependency caching — only rebuilds deps when
 # Cargo.toml/Cargo.lock change, not on every source edit.
 #
-# Alpine-based build + runtime for minimal image size (~30 MB).
+# Alpine-based build + runtime for a minimal image size.
 # Statically links against musl; no glibc or libssl needed at runtime.
 #
 # Build:
@@ -41,6 +41,8 @@ RUN cargo chef prepare --recipe-path recipe.json
 # Stage 3: Build dependencies (cached unless Cargo.toml/lock change)
 FROM chef AS deps
 
+# Docker-only overrides for the dist profile (not in Cargo.toml because
+# cargo-dist uses dist for release binaries that need unwinding).
 ENV CARGO_PROFILE_DIST_PANIC=abort \
     CARGO_PROFILE_DIST_CODEGEN_UNITS=1
 

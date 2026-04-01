@@ -22,6 +22,7 @@ jobs:
     permissions:
       contents: read
       packages: read
+      actions: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -39,10 +40,9 @@ jobs:
         with:
           images: ${{ env.IMAGE_NAME }}
           tags: |
-            # On main branch: latest + version
+            # On default branch: latest
             type=raw,value=latest,enable={{is_default_branch}}
-            type=raw,value=${{ steps.version.outputs.version }},enable={{is_default_branch}}
-            # On version tags: extract semver
+            # On version tags: extract semver (immutable)
             type=match,pattern=(?:ironclaw-)?v(.*),group=1
             # Manual override
             type=raw,value=${{ inputs.tag }},enable=${{ inputs.tag != '' }}
