@@ -360,11 +360,11 @@ async function authenticateWithNear() {
       throw new Error(errText || 'Verification failed');
     }
 
-    var result = await verifyResp.json();
+    await verifyResp.json();
 
-    // 5. Use the returned token to authenticate.
-    token = result.token;
-    sessionStorage.setItem('ironclaw_token', token);
+    // 5. Rely on the HttpOnly session cookie created by the backend.
+    token = '';
+    sessionStorage.removeItem('ironclaw_token');
     initApp();
   } catch (err) {
     if (errEl) errEl.textContent = err.message || 'NEAR wallet login failed';

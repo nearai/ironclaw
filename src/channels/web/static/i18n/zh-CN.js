@@ -7,6 +7,11 @@ I18n.register('zh-CN', {
   'auth.tokenLabel': '网关令牌',
   'auth.tokenPlaceholder': '粘贴你的网关令牌',
   'auth.connect': '连接',
+  'auth.social.google': '使用 Google 登录',
+  'auth.social.github': '使用 GitHub 登录',
+  'auth.social.apple': '使用 Apple 登录',
+  'auth.social.near': '使用 NEAR 登录',
+  'auth.social.tokenDivider': '或使用令牌',
   'auth.errorRequired': '请输入令牌',
   'auth.errorInvalid': '令牌无效',
   // 聊天

@@ -7,6 +7,11 @@ I18n.register('en', {
   'auth.tokenLabel': 'Gateway Token',
   'auth.tokenPlaceholder': 'Paste your token',
   'auth.connect': 'Connect',
+  'auth.social.google': 'Sign in with Google',
+  'auth.social.github': 'Sign in with GitHub',
+  'auth.social.apple': 'Sign in with Apple',
+  'auth.social.near': 'Sign in with NEAR',
+  'auth.social.tokenDivider': 'or use a token',
   'auth.errorRequired': 'Token required',
   'auth.errorInvalid': 'Invalid token',
   // Chat

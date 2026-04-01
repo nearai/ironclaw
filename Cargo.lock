@@ -1514,6 +1514,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "cookie"
+version = "0.18.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4ddef33a339a91ea89fb53151bd0a4689cfce27055c291dfa69945475d22c747"
+dependencies = [
+ "time",
+ "version_check",
+]
+
+[[package]]
 name = "coolor"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3427,6 +3437,7 @@ dependencies = [
  "chrono-tz",
  "clap",
  "clap_complete",
+ "cookie",
  "criterion",
  "cron",
  "crossterm",

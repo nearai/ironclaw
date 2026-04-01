@@ -488,7 +488,11 @@ pub async fn near_verify_handler(
             account == d_lower || account.ends_with(&format!(".{d_lower}"))
         });
         if !allowed {
-            return error_page("Your NEAR account is not authorized. Contact your administrator.");
+            return (
+                StatusCode::FORBIDDEN,
+                "Your NEAR account is not authorized. Contact your administrator.",
+            )
+                .into_response();
         }
     }
 
@@ -558,7 +562,6 @@ pub async fn near_verify_handler(
         .unwrap_or("http://localhost");
     let cookie_value = build_session_cookie(&plaintext_token, is_secure(base_url));
     let mut response = Json(serde_json::json!({
-        "token": plaintext_token,
         "user_id": user_id,
         "account_id": body.account_id,
         "is_new": is_new,
@@ -629,17 +632,7 @@ fn decode_near_signature(sig: &str) -> Result<[u8; 64], String> {
 
 /// Extract the session cookie value from request headers.
 fn extract_session_cookie(headers: &axum::http::HeaderMap) -> Option<String> {
-    let cookie_header = headers.get("cookie")?.to_str().ok()?;
-    for pair in cookie_header.split(';') {
-        let pair = pair.trim();
-        if let Some(value) = pair.strip_prefix(&format!("{SESSION_COOKIE_NAME}=")) {
-            let value = value.trim();
-            if !value.is_empty() {
-                return Some(value.to_string());
-            }
-        }
-    }
-    None
+    crate::channels::web::auth::extract_cookie_value(headers, SESSION_COOKIE_NAME)
 }
 
 // ── User resolution ──────────────────────────────────────────────────────
@@ -803,12 +796,7 @@ fn is_secure(base_url: &str) -> bool {
 
 /// Extract a rate-limit key from request headers (X-Forwarded-For or fallback).
 fn rate_limit_key(headers: &axum::http::HeaderMap) -> String {
-    headers
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.split(',').next())
-        .map(|s| s.trim().to_string())
-        .unwrap_or_else(|| "unknown".to_string())
+    crate::channels::web::server::rate_limit_key_from_headers(headers)
 }
 
 /// Check that the email belongs to one of the allowed domains.
@@ -859,6 +847,7 @@ fn error_page(message: &str) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::http::HeaderValue;
 
     fn domains(ds: &[&str]) -> Vec<String> {
         ds.iter().map(|s| s.to_string()).collect()
@@ -894,5 +883,27 @@ mod tests {
     fn test_check_email_domain_rejects_malformed_email() {
         let allowed = domains(&["company.com"]);
         assert!(check_email_domain(Some("no-at-sign"), &allowed).is_err());
+    }
+
+    #[test]
+    fn test_extract_session_cookie_handles_quoted_neighbors() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            axum::http::header::COOKIE,
+            HeaderValue::from_static("other=\"quoted;value\"; ironclaw_session=abc123"),
+        );
+
+        assert_eq!(extract_session_cookie(&headers), Some("abc123".to_string()));
+    }
+
+    #[test]
+    fn test_rate_limit_key_ignores_invalid_forwarded_for_values() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            "x-forwarded-for",
+            HeaderValue::from_static("garbage, 203.0.113.9, more-garbage"),
+        );
+
+        assert_eq!(rate_limit_key(&headers), "203.0.113.9");
     }
 }

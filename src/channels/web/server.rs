@@ -92,6 +92,18 @@ fn redact_oauth_state_for_logs(state: &str) -> String {
     format!("sha256:{short_hash}:len={}", state.len())
 }
 
+pub(crate) fn rate_limit_key_from_headers(headers: &HeaderMap) -> String {
+    headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .into_iter()
+        .flat_map(|s| s.split(','))
+        .map(str::trim)
+        .find_map(|candidate| candidate.parse::<std::net::IpAddr>().ok())
+        .map(|ip| ip.to_string())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
 /// Simple sliding-window rate limiter.
 ///
 /// Tracks the number of requests in the current window. Resets when the window expires.
@@ -172,15 +184,21 @@ pub struct ActiveConfigSnapshot {
 ///
 /// Prevents one user from exhausting the rate limit for all users in multi-tenant mode.
 pub struct PerUserRateLimiter {
-    limiters: std::sync::RwLock<std::collections::HashMap<String, RateLimiter>>,
+    limiters: std::sync::Mutex<lru::LruCache<String, RateLimiter>>,
     max_requests: u64,
     window_secs: u64,
 }
 
 impl PerUserRateLimiter {
+    // SAFETY: 2048 is non-zero, so the unwrap in `new()` is infallible.
+    const MAX_KEYS: std::num::NonZeroUsize = match std::num::NonZeroUsize::new(2048) {
+        Some(v) => v,
+        None => unreachable!(),
+    };
+
     pub fn new(max_requests: u64, window_secs: u64) -> Self {
         Self {
-            limiters: std::sync::RwLock::new(std::collections::HashMap::new()),
+            limiters: std::sync::Mutex::new(lru::LruCache::new(Self::MAX_KEYS)),
             max_requests,
             window_secs,
         }
@@ -188,32 +206,16 @@ impl PerUserRateLimiter {
 
     /// Try to consume one request for the given user. Returns `true` if allowed.
     pub fn check(&self, user_id: &str) -> bool {
-        // Fast path: check existing limiter under read lock.
-        // On lock poisoning (another thread panicked while holding the lock),
-        // allow the request rather than crashing the server.
-        {
-            let map = match self.limiters.read() {
-                Ok(m) => m,
-                Err(e) => {
-                    tracing::warn!("PerUserRateLimiter read lock poisoned; recovering");
-                    e.into_inner()
-                }
-            };
-            if let Some(limiter) = map.get(user_id) {
-                return limiter.check();
-            }
-        }
-        // Slow path: create limiter under write lock.
-        let mut map = match self.limiters.write() {
+        let mut map = match self.limiters.lock() {
             Ok(m) => m,
             Err(e) => {
-                tracing::warn!("PerUserRateLimiter write lock poisoned; recovering");
+                tracing::warn!("PerUserRateLimiter lock poisoned; recovering");
                 e.into_inner()
             }
         };
-        let limiter = map
-            .entry(user_id.to_string())
-            .or_insert_with(|| RateLimiter::new(self.max_requests, self.window_secs));
+        let limiter = map.get_or_insert_mut(user_id.to_string(), || {
+            RateLimiter::new(self.max_requests, self.window_secs)
+        });
         limiter.check()
     }
 }
@@ -758,7 +760,7 @@ pub async fn start_server(
             header::HeaderName::from_static("content-security-policy"),
             header::HeaderValue::from_static(
                 "default-src 'self'; \
-                 script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://esm.sh; \
+                 script-src 'self' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://esm.sh; \
                  style-src 'self' 'unsafe-inline' https:; \
                  font-src data: https:; \
                  connect-src 'self' https:; \
@@ -1280,12 +1282,7 @@ async fn slack_relay_oauth_callback_handler(
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
     // Rate limit
-    let ip = headers
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.split(',').next())
-        .map(|s| s.trim().to_string())
-        .unwrap_or_else(|| "unknown".to_string());
+    let ip = rate_limit_key_from_headers(&headers);
     if !state.oauth_rate_limiter.check(&ip) {
         return axum::response::Html(
             "<html><body style='font-family: system-ui; text-align: center; padding: 60px;'>\
@@ -3515,9 +3512,9 @@ mod tests {
         );
         assert!(
             csp_str.contains(
-                "script-src 'self' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com"
+                "script-src 'self' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://esm.sh"
             ),
-            "CSP must allow both marked and DOMPurify script CDNs"
+            "CSP must allow the explicit script CDNs without unsafe-inline"
         );
         assert!(
             csp_str.contains("object-src 'none'"),

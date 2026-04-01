@@ -930,6 +930,21 @@ fn query_token(request: &Request) -> Option<String> {
     })
 }
 
+pub(crate) fn extract_cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
+    let cookie_header = headers.get(axum::http::header::COOKIE)?.to_str().ok()?;
+    cookie::Cookie::split_parse(cookie_header)
+        .filter_map(Result::ok)
+        .find(|cookie| cookie.name() == name)
+        .and_then(|cookie| {
+            let value = cookie.value_trimmed();
+            if value.is_empty() {
+                None
+            } else {
+                Some(value.to_string())
+            }
+        })
+}
+
 /// Extract a bearer token from the Authorization header or query parameter.
 fn extract_token(headers: &HeaderMap, request: &Request) -> Option<String> {
     // Try Authorization header first (RFC 6750).
@@ -950,22 +965,7 @@ fn extract_token(headers: &HeaderMap, request: &Request) -> Option<String> {
     }
 
     // Fall back to session cookie (for OAuth-authenticated browser sessions).
-    if let Some(cookie_header) = headers.get("cookie")
-        && let Ok(cookie_str) = cookie_header.to_str()
-    {
-        let prefix_match = format!("{SESSION_COOKIE_NAME}=");
-        for pair in cookie_str.split(';') {
-            let pair = pair.trim();
-            if let Some(value) = pair.strip_prefix(prefix_match.as_str()) {
-                let value = value.trim();
-                if !value.is_empty() {
-                    return Some(value.to_string());
-                }
-            }
-        }
-    }
-
-    None
+    extract_cookie_value(headers, SESSION_COOKIE_NAME)
 }
 
 // ── Middleware ────────────────────────────────────────────────────────────
@@ -1111,8 +1111,23 @@ mod tests {
         assert_eq!(identity.user_id, "user1");
     }
 
+    #[test]
+    fn test_extract_cookie_value_uses_cookie_parser() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::COOKIE,
+            HeaderValue::from_static("other=\"quoted;value\"; ironclaw_session=abc123"),
+        );
+
+        assert_eq!(
+            extract_cookie_value(&headers, SESSION_COOKIE_NAME),
+            Some("abc123".to_string())
+        );
+    }
+
     use axum::Router;
     use axum::body::Body;
+    use axum::http::HeaderValue;
     use axum::middleware;
     use axum::routing::{get, post};
     use tower::ServiceExt;
@@ -1177,6 +1192,21 @@ mod tests {
         let app = test_app(TEST_AUTH_SECRET_TOKEN);
         let req = Request::builder()
             .uri(format!("/api/logs/events?token={TEST_AUTH_SECRET_TOKEN}"))
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_session_cookie_auth_passes() {
+        let app = test_app(TEST_AUTH_SECRET_TOKEN);
+        let req = Request::builder()
+            .uri("/api/chat/history")
+            .header(
+                "Cookie",
+                format!("{SESSION_COOKIE_NAME}={TEST_AUTH_SECRET_TOKEN}"),
+            )
             .body(Body::empty())
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
