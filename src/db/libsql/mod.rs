@@ -12,6 +12,7 @@ mod jobs;
 mod routines;
 mod sandbox;
 mod settings;
+mod structured;
 mod tool_failures;
 mod users;
 mod workspace;
