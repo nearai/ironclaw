@@ -1072,8 +1072,19 @@ impl Agent {
             // Auto-approve + state transition under a single lock to prevent
             // TOCTOU: if the thread is pruned between two separate locks, the
             // tool would be permanently auto-approved without execution starting.
+            // We confirm the thread exists before auto-approving so there is no
+            // window where the tool is approved but the thread is gone.
             {
                 let mut sess = session.lock().await;
+                if !sess.threads.contains_key(&thread_id) {
+                    tracing::error!(
+                        %thread_id,
+                        "Thread disappeared while setting state to Processing during approval"
+                    );
+                    return Ok(SubmissionResult::error(
+                        "Internal error: thread no longer exists",
+                    ));
+                }
                 if always {
                     sess.auto_approve_tool(&pending.tool_name);
                     tracing::info!(
@@ -1082,24 +1093,9 @@ impl Agent {
                         sess.id
                     );
                 }
-
-                match sess.threads.get_mut(&thread_id) {
-                    Some(thread) => {
-                        thread.state = ThreadState::Processing;
-                    }
-                    None => {
-                        // Roll back auto-approve if the thread vanished
-                        if always {
-                            sess.auto_approved_tools.remove(&pending.tool_name);
-                        }
-                        tracing::error!(
-                            %thread_id,
-                            "Thread disappeared while setting state to Processing during approval"
-                        );
-                        return Ok(SubmissionResult::error(
-                            "Internal error: thread no longer exists",
-                        ));
-                    }
+                // Safe: we just confirmed the thread exists above under the same lock.
+                if let Some(thread) = sess.threads.get_mut(&thread_id) {
+                    thread.state = ThreadState::Processing;
                 }
             }
 
@@ -2580,43 +2576,37 @@ mod tests {
 
     /// Exercises the combined auto-approve + state-transition logic from
     /// `process_approval()`. This helper mirrors the single-lock pattern
-    /// at lines 1035-1064: auto-approve the tool, then attempt the state
-    /// transition, rolling back the auto-approve if the thread is gone.
+    /// Mirrors the single-lock pattern in `process_approval()`: confirm
+    /// the thread exists first, then auto-approve, then transition state.
+    /// No rollback needed because the tool is never auto-approved when the
+    /// thread is missing.
     ///
     /// Returns `true` if the transition succeeded, `false` if the thread
-    /// was missing and the auto-approve was rolled back.
+    /// was missing (auto-approve is never applied in that case).
     fn apply_auto_approve_and_transition(
         session: &mut crate::agent::session::Session,
         thread_id: uuid::Uuid,
         tool_name: &str,
         always: bool,
     ) -> bool {
-        // Mirror the production code: auto-approve first, then transition.
+        // Mirror the production code: check existence, then approve, then transition.
+        if !session.threads.contains_key(&thread_id) {
+            return false;
+        }
         if always {
             session.auto_approve_tool(tool_name);
         }
-
-        match session.threads.get_mut(&thread_id) {
-            Some(thread) => {
-                thread.state = ThreadState::Processing;
-                true
-            }
-            None => {
-                // Roll back auto-approve if the thread vanished
-                if always {
-                    session.auto_approved_tools.remove(tool_name);
-                }
-                false
-            }
+        if let Some(thread) = session.threads.get_mut(&thread_id) {
+            thread.state = ThreadState::Processing;
         }
+        true
     }
 
     #[test]
-    fn test_auto_approve_with_thread_disappearance_rolls_back() {
-        // Regression test: when always=true and the thread disappears between
-        // the auto-approve and the state transition, the auto-approve must be
-        // rolled back to prevent a dangling policy for a tool that never
-        // executed. This mirrors the single-lock pattern in process_approval().
+    fn test_auto_approve_with_thread_disappearance_never_approves() {
+        // Regression test: when always=true and the thread is missing, the tool
+        // must never be added to auto-approved in the first place. This mirrors
+        // the single-lock check-then-approve pattern in process_approval().
         use crate::agent::session::Session;
 
         let mut session = Session::new("test-user");
