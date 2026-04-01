@@ -101,19 +101,33 @@ impl DocumentMetadata {
     }
 }
 
+/// Minimum allowed `retention_days` to prevent accidental mass-deletion.
+const MIN_RETENTION_DAYS: u32 = 1;
+
 /// Hygiene (auto-cleanup) settings for a folder.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct HygieneMetadata {
     /// Whether this folder is a hygiene target.
     pub enabled: bool,
 
-    /// Delete documents older than this many days.
-    #[serde(default = "default_retention_days")]
+    /// Delete documents older than this many days (minimum: 1).
+    #[serde(
+        default = "default_retention_days",
+        deserialize_with = "deserialize_retention_days"
+    )]
     pub retention_days: u32,
 }
 
 fn default_retention_days() -> u32 {
     30
+}
+
+fn deserialize_retention_days<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = u32::deserialize(deserializer)?;
+    Ok(value.max(MIN_RETENTION_DAYS))
 }
 
 /// A historical version of a workspace document.
@@ -581,6 +595,21 @@ mod tests {
         let hygiene: HygieneMetadata = serde_json::from_value(value).unwrap();
         assert!(hygiene.enabled);
         assert_eq!(hygiene.retention_days, 30);
+    }
+
+    #[test]
+    fn test_hygiene_metadata_retention_days_clamped_to_minimum() {
+        // retention_days: 0 should be clamped to 1 to prevent mass-deletion.
+        let hygiene: HygieneMetadata =
+            serde_json::from_value(serde_json::json!({"enabled": true, "retention_days": 0}))
+                .unwrap();
+        assert_eq!(hygiene.retention_days, MIN_RETENTION_DAYS);
+
+        // retention_days: 1 is the minimum and should pass through unchanged.
+        let hygiene: HygieneMetadata =
+            serde_json::from_value(serde_json::json!({"enabled": true, "retention_days": 1}))
+                .unwrap();
+        assert_eq!(hygiene.retention_days, 1);
     }
 
     #[test]

@@ -355,6 +355,9 @@ impl Tool for MemoryWriteTool {
         // Apply metadata BEFORE the write/patch so that metadata-driven flags
         // (skip_indexing, skip_versioning) take effect for this operation,
         // not just subsequent ones. See review comments #10-11,15.
+        //
+        // Merge incoming metadata with existing to avoid silently dropping
+        // previously-set keys (e.g. skip_versioning lost when hygiene is added).
         let metadata_param = params.get("metadata").filter(|m| m.is_object());
         if let Some(meta) = metadata_param {
             // get_or_create ensures the document exists; if it's new, content is "".
@@ -362,8 +365,9 @@ impl Tool for MemoryWriteTool {
                 .get_or_create(&resolved_path)
                 .await
                 .map_err(map_write_err)?;
+            let merged = crate::workspace::DocumentMetadata::merge(&doc.metadata, meta);
             workspace
-                .update_metadata(doc.id, meta)
+                .update_metadata(doc.id, &merged)
                 .await
                 .map_err(map_write_err)?;
         }

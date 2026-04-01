@@ -18,7 +18,8 @@ See `src/db/CLAUDE.md` for full schema, dialect differences, and libSQL limitati
 4. Implement in `src/db/libsql/<module>.rs` (use `self.connect().await?` per operation)
 5. Add migration if needed:
    - PostgreSQL: new `migrations/VN__description.sql`
-   - libSQL: add `CREATE TABLE IF NOT EXISTS` to `libsql_migrations.rs`
+   - libSQL: add entry to `INCREMENTAL_MIGRATIONS` in `libsql_migrations.rs`
+   - **Version numbering**: always number after the highest version on `staging`/`main` — those migrations may already be in production. Check with `git ls-tree origin/staging migrations/` and staging's `INCREMENTAL_MIGRATIONS`. Never reuse or insert before an existing version.
 6. Test feature isolation:
    ```bash
    cargo check                                          # postgres (default)

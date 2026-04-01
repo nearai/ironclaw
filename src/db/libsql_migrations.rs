@@ -788,7 +788,7 @@ CREATE INDEX IF NOT EXISTS idx_api_tokens_hash ON api_tokens(token_hash);
 "#,
     ),
     (
-        15,
+        17,
         "document_versions",
         r#"
 CREATE TABLE IF NOT EXISTS memory_document_versions (

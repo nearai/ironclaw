@@ -1929,7 +1929,6 @@ impl Workspace {
     // ==================== Indexing ====================
 
     /// Re-index a document (chunk and generate embeddings).
-    /// Re-index a document (chunk and generate embeddings).
     ///
     /// Accepts optional pre-resolved metadata to skip a redundant `resolve_metadata`
     /// call when the caller already has it (e.g., the `write()` path).
