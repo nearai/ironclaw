@@ -112,10 +112,27 @@ fn generate_state_token() -> String {
 }
 
 /// Validate a redirect URL to prevent open redirect attacks.
-/// Only allows relative paths starting with `/` (and not `//` which browsers
-/// treat as protocol-relative URLs).
-fn sanitize_redirect(url: Option<String>) -> Option<String> {
-    url.filter(|u| u.starts_with('/') && !u.starts_with("//") && !u.starts_with("/\\"))
+///
+/// Only allows relative paths that:
+/// - Start with `/` (relative to origin)
+/// - Do not start with `//` or `/\` (protocol-relative)
+/// - Contain only URL-safe characters (blocks encoded separators like `/%09/`)
+///
+/// This is applied both at flow creation and re-validated before use.
+pub(crate) fn sanitize_redirect(url: Option<String>) -> Option<String> {
+    url.filter(|u| is_safe_redirect(u))
+}
+
+/// Check if a redirect path is safe for use.
+pub(crate) fn is_safe_redirect(url: &str) -> bool {
+    if !url.starts_with('/') || url.starts_with("//") || url.starts_with("/\\") {
+        return false;
+    }
+    // Only allow unreserved + sub-delimiters + pchar characters from RFC 3986.
+    // This blocks encoded control characters (e.g., %09) that browsers may
+    // interpret as scheme/authority separators.
+    url.bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b"/_-.~:@!$&'()*+,;=?#[]%".contains(&b))
 }
 
 /// Create a `PendingOAuthFlow` with a fresh code verifier.

@@ -249,6 +249,7 @@ impl GatewayWorkflowHarness {
             near_nonce_store: None,
             near_rpc_url: None,
             near_network: None,
+            oauth_sweep_shutdown: None,
         });
 
         let mut agent = Agent::new(

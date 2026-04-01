@@ -287,7 +287,13 @@ async fn handle_callback(
         db_auth.invalidate_user(&user_id).await;
     }
 
-    let redirect_to = flow.redirect_after.as_deref().unwrap_or("/");
+    // Re-validate redirect_after before use (defense in depth — sanitized at
+    // insertion time, but re-check in case the store is ever extended).
+    let redirect_to = flow
+        .redirect_after
+        .as_deref()
+        .filter(|u| crate::channels::web::oauth::state_store::is_safe_redirect(u))
+        .unwrap_or("/");
 
     // Build the response with a session cookie.
     // Use 303 See Other (not 307 Temporary) so POST callbacks (Apple form_post)
@@ -456,8 +462,12 @@ pub async fn near_verify_handler(
     let canonical_pubkey = format!("ed25519:{}", bs58::encode(&pub_key_bytes).into_string());
 
     // Verify the public key is an active access key on the NEAR account.
-    static NEAR_HTTP: std::sync::LazyLock<reqwest::Client> =
-        std::sync::LazyLock::new(reqwest::Client::new);
+    static NEAR_HTTP: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new())
+    });
     if let Err(e) = crate::channels::web::oauth::near::verify_access_key(
         near_rpc_url,
         &body.account_id,

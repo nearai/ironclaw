@@ -145,6 +145,7 @@ impl GatewayChannel {
             near_nonce_store: None,
             near_rpc_url: None,
             near_network: None,
+            oauth_sweep_shutdown: None,
         });
 
         Self {
@@ -194,6 +195,7 @@ impl GatewayChannel {
             near_nonce_store: self.state.near_nonce_store.clone(),
             near_rpc_url: self.state.near_rpc_url.clone(),
             near_network: self.state.near_network.clone(),
+            oauth_sweep_shutdown: None, // sweep tasks are managed by with_oauth
         };
         mutate(&mut new_state);
         self.state = Arc::new(new_state);
@@ -388,15 +390,22 @@ impl GatewayChannel {
             self.auth.oidc_allowed_domains = allowed_domains.clone();
         }
 
+        // Shutdown signal for background sweep tasks. When the sender is dropped
+        // (e.g., gateway rebuild or process shutdown), the sweep loops exit.
+        let (shutdown_tx, _) = tokio::sync::watch::channel(());
+
         // Set up NEAR wallet auth if configured (independent of OAuth providers).
         let near_nonce_store = config.near.as_ref().map(|_| {
             let store = Arc::new(crate::channels::web::oauth::near::NearNonceStore::new());
             let sweep = Arc::clone(&store);
+            let mut shutdown_rx = shutdown_tx.subscribe();
             tokio::spawn(async move {
                 let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
                 loop {
-                    interval.tick().await;
-                    sweep.sweep_expired().await;
+                    tokio::select! {
+                        _ = interval.tick() => sweep.sweep_expired().await,
+                        _ = shutdown_rx.changed() => break,
+                    }
                 }
             });
             store
@@ -431,11 +440,14 @@ impl GatewayChannel {
 
         // Spawn a background task to sweep expired OAuth states.
         let sweep_store = Arc::clone(&state_store);
+        let mut shutdown_rx2 = shutdown_tx.subscribe();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
             loop {
-                interval.tick().await;
-                sweep_store.sweep_expired().await;
+                tokio::select! {
+                    _ = interval.tick() => sweep_store.sweep_expired().await,
+                    _ = shutdown_rx2.changed() => break,
+                }
             }
         });
 
@@ -447,6 +459,7 @@ impl GatewayChannel {
             s.near_nonce_store = near_nonce_store;
             s.near_rpc_url = near_rpc_url;
             s.near_network = near_network;
+            s.oauth_sweep_shutdown = Some(shutdown_tx);
         });
         self
     }

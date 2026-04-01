@@ -438,6 +438,10 @@ pub struct GatewayState {
     pub near_rpc_url: Option<String>,
     /// NEAR network name (mainnet/testnet) for the frontend wallet connector.
     pub near_network: Option<String>,
+    /// Shutdown signal for OAuth/NEAR sweep background tasks.
+    /// When this sender is dropped, the sweep loops exit gracefully.
+    #[allow(dead_code)]
+    pub oauth_sweep_shutdown: Option<tokio::sync::watch::Sender<()>>,
 }
 
 /// Start the gateway HTTP server.
@@ -3139,6 +3143,7 @@ mod tests {
             near_nonce_store: None,
             near_rpc_url: None,
             near_network: None,
+            oauth_sweep_shutdown: None,
         })
     }
 
