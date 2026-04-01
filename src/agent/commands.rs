@@ -262,6 +262,117 @@ impl Agent {
         Ok(output.trim_end().to_string())
     }
 
+    /// Handle /history messages <thread-id> [--limit N] [--page N]
+    async fn handle_history_messages_command(
+        &self,
+        session: Arc<Mutex<Session>>,
+        tenant: &crate::tenant::TenantCtx,
+        args: &[String],
+    ) -> Result<String, Error> {
+        // Parse arguments: <thread-id> [--limit N] [--page N]
+        if args.is_empty() {
+            return Ok("Usage: /history messages <thread-id> [--limit N] [--page N]\n\nList messages from a specific thread with pagination.".to_string());
+        }
+
+        let thread_id_str = &args[0];
+        let thread_id = Uuid::parse_str(thread_id_str)
+            .map_err(|e| ConfigError::InvalidValue { 
+                key: "thread_id".to_string(), 
+                message: format!("Invalid UUID '{}': {}", thread_id_str, e) 
+            })?;
+
+        // Parse pagination arguments
+        let mut limit: i64 = 50;
+        let mut page: i64 = 1;
+        let mut i = 1;
+        while i < args.len() {
+            match args[i].as_str() {
+                "--limit" | "-l" => {
+                    if i + 1 < args.len() {
+                        limit = args[i + 1].parse().unwrap_or(50);
+                        limit = limit.clamp(1, 200);
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
+                "--page" | "-p" => {
+                    if i + 1 < args.len() {
+                        page = args[i + 1].parse().unwrap_or(1);
+                        page = page.clamp(1, 100);
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
+                _ => i += 1,
+            }
+        }
+
+        // Try to get messages from database first (persistent threads)
+        if let Some(store) = tenant.store() {
+            match store.list_conversation_messages_paginated(thread_id, None, limit).await {
+                Ok((messages, has_more)) => {
+                    if messages.is_empty() {
+                        return Ok(format!("Thread {} has no messages.", thread_id));
+                    }
+
+                    let mut output = String::new();
+                    output.push_str(&format!("Thread: {} (Page {} of ~{}, showing {} messages)\n", 
+                        thread_id, page, if has_more { "N+" } else { "1" }, messages.len()));
+                    output.push_str(&format!("Limit: {}\n\n", limit));
+
+                    for msg in messages {
+                        let timestamp = msg.created_at.format("%Y-%m-%d %H:%M:%S");
+                        output.push_str(&format!("[{}] {}: {}\n", 
+                            timestamp, 
+                            msg.role, 
+                            msg.content.lines().next().unwrap_or("").chars().take(200).collect::<String>()));
+                    }
+
+                    if has_more {
+                        output.push_str(&format!("\nUse --page {} to see more messages.", page + 1));
+                    }
+
+                    return Ok(output);
+                }
+                Err(_) => {
+                    // Fall through to in-memory check
+                }
+            }
+        }
+
+        // Check in-memory session threads
+        let sess = session.lock().await;
+        if let Some(thread) = sess.threads.get(&thread_id) {
+            if thread.turns.is_empty() {
+                return Ok(format!("Thread {} has no turns in current session.", thread_id));
+            }
+
+            let mut output = String::new();
+            output.push_str(&format!("Thread: {} (in-memory, {} turns)\n\n", thread_id, thread.turns.len()));
+
+            for (i, turn) in thread.turns.iter().enumerate() {
+                if let Some(ref input) = turn.user_input {
+                    output.push_str(&format!("Turn {} - User: {}\n", i + 1, 
+                        input.chars().take(200).collect::<String>()));
+                }
+                if let Some(ref response) = turn.response {
+                    output.push_str(&format!("         Assistant: {}\n", 
+                        response.chars().take(200).collect::<String>()));
+                }
+                output.push('\n');
+            }
+
+            return Ok(output.trim_end().to_string());
+        }
+
+        Err(ConfigError::InvalidValue {
+            key: "thread_id".to_string(),
+            message: format!("Thread {} not found. Use /history to list available threads.", thread_id),
+        }.into())
+    }
+
     async fn handle_check_status(
         &self,
         tenant: &crate::tenant::TenantCtx,
@@ -750,7 +861,8 @@ impl Agent {
                 "  /interrupt        Stop current operation\n",
                 "  /new | /thread new  Create new conversation thread\n",
                 "  /thread <id>      Switch to existing thread (UUID)\n",
-                "  /history          List all threads (persistent + session)\n",
+                "  /history          List all threads (persistent + session)\\n",
+                "  /history messages <id> [--limit N] [--page N]  List messages from a thread\\n",
                 "  /resume <id>      Resume from checkpoint\n",
                 "\n",
                 "Skills:\n",
@@ -845,8 +957,14 @@ impl Agent {
             }
 
             "history" => {
-                let history = self.handle_history_command(session, tenant, args).await?;
-                Ok(SubmissionResult::response(history))
+                // Support subcommands: /history messages <thread-id> [--limit N] [--page N]
+                if args.first().map(|s| s.as_str()) == Some("messages") {
+                    let history = self.handle_history_messages_command(session, tenant, &args[1..]).await?;
+                    Ok(SubmissionResult::response(history))
+                } else {
+                    let history = self.handle_history_command(session, tenant, args).await?;
+                    Ok(SubmissionResult::response(history))
+                }
             }
 
             "thread" => {

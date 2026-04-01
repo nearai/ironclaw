@@ -91,3 +91,27 @@ fn test_thread_list_alias_variations() {
         );
     }
 }
+
+#[test]
+fn test_history_messages_command() {
+    // Test basic /history messages command
+    let submission = SubmissionParser::parse("/history messages");
+    assert!(matches!(submission, Submission::SystemCommand { ref command, ref args } 
+        if command == "history" && args == &vec!["messages".to_string()]));
+}
+
+#[test]
+fn test_history_messages_with_uuid() {
+    let uuid = "11111111-1111-1111-1111-111111111111";
+    let submission = SubmissionParser::parse(&format!("/history messages {}", uuid));
+    assert!(matches!(submission, Submission::SystemCommand { ref command, ref args } 
+        if command == "history" && args.len() == 2 && args[0] == "messages" && args[1] == uuid));
+}
+
+#[test]
+fn test_history_messages_with_pagination() {
+    let uuid = "11111111-1111-1111-1111-111111111111";
+    let submission = SubmissionParser::parse(&format!("/history messages {} --limit 20 --page 2", uuid));
+    assert!(matches!(submission, Submission::SystemCommand { ref command, ref args } 
+        if command == "history" && args.len() == 5));
+}
