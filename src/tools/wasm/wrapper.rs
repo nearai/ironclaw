@@ -20,7 +20,7 @@ use crate::context::JobContext;
 use crate::llm::recording::{HttpExchangeRequest, HttpExchangeResponse, HttpInterceptor};
 use crate::safety::LeakDetector;
 use crate::secrets::{DecryptedSecret, SecretsStore};
-use crate::tools::tool::{Tool, ToolError, ToolOutput};
+use crate::tools::tool::{Tool, ToolDiscoverySummary, ToolError, ToolOutput};
 use crate::tools::wasm::capabilities::Capabilities;
 use crate::tools::wasm::credential_injector::{
     InjectedCredentials, host_matches_pattern, inject_credential,
@@ -585,6 +585,8 @@ pub struct WasmToolWrapper {
     description: String,
     /// Compact and discovery schemas for this tool.
     schemas: WasmToolSchemas,
+    /// Optional curated discovery guidance surfaced by `tool_info`.
+    discovery_summary: Option<ToolDiscoverySummary>,
     /// Injected credentials for HTTP requests (e.g., OAuth tokens).
     /// Keys are placeholder names like "GOOGLE_ACCESS_TOKEN".
     credentials: HashMap<String, String>,
@@ -836,6 +838,7 @@ impl WasmToolWrapper {
         Self {
             description: prepared.description.clone(),
             schemas: WasmToolSchemas::new(prepared.schema.clone()),
+            discovery_summary: None,
             runtime,
             prepared,
             capabilities,
@@ -879,6 +882,12 @@ impl WasmToolWrapper {
         } else {
             self.schemas = self.schemas.with_override(schema);
         }
+        self
+    }
+
+    /// Override the curated discovery summary.
+    pub fn with_discovery_summary(mut self, summary: ToolDiscoverySummary) -> Self {
+        self.discovery_summary = Some(summary);
         self
     }
 
@@ -1098,6 +1107,10 @@ impl Tool for WasmToolWrapper {
         self.schemas.discovery()
     }
 
+    fn discovery_summary(&self) -> Option<ToolDiscoverySummary> {
+        self.discovery_summary.clone()
+    }
+
     /// Compose the tool schema for LLM function calling.
     ///
     /// When the advertised schema is permissive (no typed properties), appends
@@ -1149,6 +1162,7 @@ impl Tool for WasmToolWrapper {
         let capabilities = self.capabilities.clone();
         let description = self.description.clone();
         let schemas = self.schemas.clone();
+        let discovery_summary = self.discovery_summary.clone();
         let credentials = self.credentials.clone();
 
         // Execute in blocking task with timeout
@@ -1159,6 +1173,7 @@ impl Tool for WasmToolWrapper {
                 capabilities,
                 description,
                 schemas,
+                discovery_summary,
                 credentials,
                 secrets_store: None, // Not needed in blocking task
                 oauth_refresh: None, // Already used above for pre-refresh
@@ -3047,6 +3062,27 @@ mod tests {
             })
         );
         assert_eq!(wrapper.discovery_schema(), typed_schema); // safety: test-only assertion
+    }
+
+    #[tokio::test]
+    async fn test_wrapper_returns_curated_discovery_summary() {
+        let runtime = Arc::new(WasmToolRuntime::new(WasmRuntimeConfig::for_testing()).unwrap()); // safety: test-only setup
+        let prepared = runtime
+            .prepare("github", b"\0asm\x0d\0\x01\0", None)
+            .await
+            .unwrap(); // safety: test-only setup
+
+        let summary = crate::tools::tool::ToolDiscoverySummary {
+            always_required: vec!["action".into()],
+            notes: vec!["Use tool_info for the full schema".into()],
+            ..crate::tools::tool::ToolDiscoverySummary::default()
+        };
+
+        let wrapper =
+            super::WasmToolWrapper::new(Arc::clone(&runtime), prepared, Capabilities::default())
+                .with_discovery_summary(summary.clone());
+
+        assert_eq!(wrapper.discovery_summary(), Some(summary));
     }
 
     #[test]

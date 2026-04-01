@@ -20,6 +20,8 @@ wit_bindgen::generate!({
 
 use std::collections::HashMap;
 
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 
 const MAX_TEXT_LENGTH: usize = 65536;
@@ -66,6 +68,100 @@ fn validate_path_segment(s: &str) -> bool {
     !s.is_empty() && !s.contains('/') && !s.contains("..") && !s.contains('?') && !s.contains('#')
 }
 
+fn validate_repo_path(path: &str) -> Result<(), String> {
+    for segment in path.split('/') {
+        if segment == ".." {
+            return Err("Invalid path: path traversal not allowed".into());
+        }
+        if segment.is_empty() {
+            return Err("Invalid path: empty segment not allowed".into());
+        }
+    }
+    Ok(())
+}
+
+fn encode_repo_path(path: &str) -> String {
+    path.split('/')
+        .map(url_encode_path)
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+fn validate_git_ref(ref_name: &str, field_name: &str) -> Result<(), String> {
+    if ref_name.is_empty() {
+        return Err(format!("Invalid {field_name}: cannot be empty"));
+    }
+    if ref_name.contains("..")
+        || ref_name.contains(':')
+        || ref_name.contains('?')
+        || ref_name.contains('[')
+        || ref_name.contains('\\')
+        || ref_name.contains('^')
+        || ref_name.contains('~')
+        || ref_name.contains("@{")
+        || ref_name.contains("//")
+        || ref_name.starts_with('/')
+        || ref_name.ends_with('/')
+        || ref_name.starts_with('.')
+        || ref_name.ends_with('.')
+        || ref_name.ends_with(".lock")
+        || ref_name.chars().any(|c| c.is_control() || c == ' ')
+    {
+        return Err(format!(
+            "Invalid {field_name}: must be a valid branch, tag, or ref name"
+        ));
+    }
+    Ok(())
+}
+
+fn normalize_ref_lookup(ref_name: &str) -> Result<String, String> {
+    validate_git_ref(ref_name, "from_ref")?;
+    if let Some(stripped) = ref_name.strip_prefix("refs/") {
+        return Ok(stripped.to_string());
+    }
+    if ref_name.starts_with("heads/") || ref_name.starts_with("tags/") {
+        return Ok(ref_name.to_string());
+    }
+    Ok(format!("heads/{ref_name}"))
+}
+
+fn normalize_branch_ref(branch: &str) -> Result<String, String> {
+    validate_git_ref(branch, "branch")?;
+    let branch = branch.strip_prefix("refs/heads/").unwrap_or(branch);
+    let branch = branch.strip_prefix("heads/").unwrap_or(branch);
+    Ok(format!("refs/heads/{branch}"))
+}
+
+fn append_search_params(
+    path: &mut String,
+    page: Option<u32>,
+    sort: Option<&str>,
+    order: Option<&str>,
+) -> Result<(), String> {
+    if let Some(p) = page {
+        path.push_str(&format!("&page={p}"));
+    }
+    if let Some(sort) = sort {
+        validate_input_length(sort, "sort")?;
+        path.push_str("&sort=");
+        path.push_str(&url_encode_query(sort));
+    }
+    if let Some(order) = order {
+        if !matches!(order, "asc" | "desc") {
+            return Err("Invalid order: must be 'asc' or 'desc'".into());
+        }
+        path.push_str("&order=");
+        path.push_str(order);
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct GitCommitIdentity {
+    name: String,
+    email: String,
+}
+
 struct GitHubTool;
 
 #[derive(Debug, Deserialize)]
@@ -73,6 +169,16 @@ struct GitHubTool;
 enum GitHubAction {
     #[serde(rename = "get_repo")]
     GetRepo { owner: String, repo: String },
+    #[serde(rename = "create_repo")]
+    CreateRepo {
+        name: String,
+        description: Option<String>,
+        private: Option<bool>,
+        auto_init: Option<bool>,
+        gitignore_template: Option<String>,
+        license_template: Option<String>,
+        org: Option<String>,
+    },
     #[serde(rename = "list_issues")]
     ListIssues {
         owner: String,
@@ -192,12 +298,93 @@ enum GitHubAction {
         page: Option<u32>,
         limit: Option<u32>,
     },
+    #[serde(rename = "search_repositories")]
+    SearchRepositories {
+        query: String,
+        page: Option<u32>,
+        limit: Option<u32>,
+        sort: Option<String>,
+        order: Option<String>,
+    },
+    #[serde(rename = "search_code")]
+    SearchCode {
+        query: String,
+        page: Option<u32>,
+        limit: Option<u32>,
+        sort: Option<String>,
+        order: Option<String>,
+    },
+    #[serde(rename = "search_issues_pull_requests")]
+    SearchIssuesPullRequests {
+        query: String,
+        page: Option<u32>,
+        limit: Option<u32>,
+        sort: Option<String>,
+        order: Option<String>,
+    },
+    #[serde(rename = "list_branches")]
+    ListBranches {
+        owner: String,
+        repo: String,
+        protected: Option<bool>,
+        page: Option<u32>,
+        limit: Option<u32>,
+    },
+    #[serde(rename = "create_branch")]
+    CreateBranch {
+        owner: String,
+        repo: String,
+        branch: String,
+        from_ref: String,
+    },
     #[serde(rename = "get_file_content")]
     GetFileContent {
         owner: String,
         repo: String,
         path: String,
         r#ref: Option<String>,
+    },
+    #[serde(rename = "create_or_update_file")]
+    CreateOrUpdateFile {
+        owner: String,
+        repo: String,
+        path: String,
+        message: String,
+        content: String,
+        sha: Option<String>,
+        branch: Option<String>,
+        committer: Option<GitCommitIdentity>,
+        author: Option<GitCommitIdentity>,
+    },
+    #[serde(rename = "delete_file")]
+    DeleteFile {
+        owner: String,
+        repo: String,
+        path: String,
+        message: String,
+        sha: String,
+        branch: Option<String>,
+        committer: Option<GitCommitIdentity>,
+        author: Option<GitCommitIdentity>,
+    },
+    #[serde(rename = "list_releases")]
+    ListReleases {
+        owner: String,
+        repo: String,
+        page: Option<u32>,
+        limit: Option<u32>,
+    },
+    #[serde(rename = "create_release")]
+    CreateRelease {
+        owner: String,
+        repo: String,
+        tag_name: String,
+        target_commitish: Option<String>,
+        name: Option<String>,
+        body: Option<String>,
+        draft: Option<bool>,
+        prerelease: Option<bool>,
+        generate_release_notes: Option<bool>,
     },
     #[serde(rename = "trigger_workflow")]
     TriggerWorkflow {
@@ -259,9 +446,8 @@ impl exports::near::agent::tool::Guest for GitHubTool {
     }
 
     fn description() -> String {
-        "GitHub integration for managing repositories, issues, pull requests, \
-         and workflows. Supports reading repo info, listing/creating issues, \
-         reviewing PRs, and triggering GitHub Actions. \
+        "GitHub integration for repositories, issues, pull requests, search, \
+         branches, file reads and writes, releases, and workflows. \
          Authentication is handled via the 'github_token' secret injected by the host."
             .to_string()
     }
@@ -277,6 +463,23 @@ fn execute_inner(params: &str) -> Result<String, String> {
 
     match action {
         GitHubAction::GetRepo { owner, repo } => get_repo(&owner, &repo),
+        GitHubAction::CreateRepo {
+            name,
+            description,
+            private,
+            auto_init,
+            gitignore_template,
+            license_template,
+            org,
+        } => create_repo(
+            &name,
+            description.as_deref(),
+            private.unwrap_or(false),
+            auto_init.unwrap_or(false),
+            gitignore_template.as_deref(),
+            license_template.as_deref(),
+            org.as_deref(),
+        ),
         GitHubAction::ListIssues {
             owner,
             repo,
@@ -393,12 +596,113 @@ fn execute_inner(params: &str) -> Result<String, String> {
             page,
             limit,
         } => list_repos(&username, page, limit),
+        GitHubAction::SearchRepositories {
+            query,
+            page,
+            limit,
+            sort,
+            order,
+        } => search_repositories(&query, page, limit, sort.as_deref(), order.as_deref()),
+        GitHubAction::SearchCode {
+            query,
+            page,
+            limit,
+            sort,
+            order,
+        } => search_code(&query, page, limit, sort.as_deref(), order.as_deref()),
+        GitHubAction::SearchIssuesPullRequests {
+            query,
+            page,
+            limit,
+            sort,
+            order,
+        } => search_issues_pull_requests(&query, page, limit, sort.as_deref(), order.as_deref()),
+        GitHubAction::ListBranches {
+            owner,
+            repo,
+            protected,
+            page,
+            limit,
+        } => list_branches(&owner, &repo, protected, page, limit),
+        GitHubAction::CreateBranch {
+            owner,
+            repo,
+            branch,
+            from_ref,
+        } => create_branch(&owner, &repo, &branch, &from_ref),
         GitHubAction::GetFileContent {
             owner,
             repo,
             path,
             r#ref,
         } => get_file_content(&owner, &repo, &path, r#ref.as_deref()),
+        GitHubAction::CreateOrUpdateFile {
+            owner,
+            repo,
+            path,
+            message,
+            content,
+            sha,
+            branch,
+            committer,
+            author,
+        } => create_or_update_file(
+            &owner,
+            &repo,
+            &path,
+            &message,
+            &content,
+            sha.as_deref(),
+            branch.as_deref(),
+            committer,
+            author,
+        ),
+        GitHubAction::DeleteFile {
+            owner,
+            repo,
+            path,
+            message,
+            sha,
+            branch,
+            committer,
+            author,
+        } => delete_file(
+            &owner,
+            &repo,
+            &path,
+            &message,
+            &sha,
+            branch.as_deref(),
+            committer,
+            author,
+        ),
+        GitHubAction::ListReleases {
+            owner,
+            repo,
+            page,
+            limit,
+        } => list_releases(&owner, &repo, page, limit),
+        GitHubAction::CreateRelease {
+            owner,
+            repo,
+            tag_name,
+            target_commitish,
+            name,
+            body,
+            draft,
+            prerelease,
+            generate_release_notes,
+        } => create_release(
+            &owner,
+            &repo,
+            &tag_name,
+            target_commitish.as_deref(),
+            name.as_deref(),
+            body.as_deref(),
+            draft.unwrap_or(false),
+            prerelease.unwrap_or(false),
+            generate_release_notes.unwrap_or(false),
+        ),
         GitHubAction::TriggerWorkflow {
             owner,
             repo,
@@ -435,7 +739,7 @@ fn github_request(method: &str, path: &str, body: Option<String>) -> Result<Stri
     // via the `http-wrapper` proxy based on the `github_token` secret.
     let headers = serde_json::json!({
         "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
+        "X-GitHub-Api-Version": "2026-03-10",
         "User-Agent": "IronClaw-GitHub-Tool"
     });
 
@@ -533,6 +837,58 @@ fn get_repo(owner: &str, repo: &str) -> Result<String, String> {
         &format!("/repos/{}/{}", encoded_owner, encoded_repo),
         None,
     )
+}
+
+fn create_repo(
+    name: &str,
+    description: Option<&str>,
+    private: bool,
+    auto_init: bool,
+    gitignore_template: Option<&str>,
+    license_template: Option<&str>,
+    org: Option<&str>,
+) -> Result<String, String> {
+    if !validate_path_segment(name) {
+        return Err("Invalid repository name".into());
+    }
+    validate_input_length(name, "name")?;
+    if let Some(description) = description {
+        validate_input_length(description, "description")?;
+    }
+    if let Some(template) = gitignore_template {
+        validate_input_length(template, "gitignore_template")?;
+    }
+    if let Some(template) = license_template {
+        validate_input_length(template, "license_template")?;
+    }
+    if let Some(org) = org {
+        if !validate_path_segment(org) {
+            return Err("Invalid org name".into());
+        }
+    }
+
+    let path = if let Some(org) = org {
+        format!("/orgs/{}/repos", url_encode_path(org))
+    } else {
+        "/user/repos".to_string()
+    };
+
+    let mut req_body = serde_json::json!({
+        "name": name,
+        "private": private,
+        "auto_init": auto_init,
+    });
+    if let Some(description) = description {
+        req_body["description"] = serde_json::json!(description);
+    }
+    if let Some(template) = gitignore_template {
+        req_body["gitignore_template"] = serde_json::json!(template);
+    }
+    if let Some(template) = license_template {
+        req_body["license_template"] = serde_json::json!(template);
+    }
+
+    github_request("POST", &path, Some(req_body.to_string()))
 }
 
 fn list_issues(
@@ -916,6 +1272,119 @@ fn list_repos(username: &str, page: Option<u32>, limit: Option<u32>) -> Result<S
     github_request("GET", &path, None)
 }
 
+fn search_repositories(
+    query: &str,
+    page: Option<u32>,
+    limit: Option<u32>,
+    sort: Option<&str>,
+    order: Option<&str>,
+) -> Result<String, String> {
+    validate_input_length(query, "query")?;
+    let limit = limit.unwrap_or(30).min(100);
+    let mut path = format!(
+        "/search/repositories?q={}&per_page={}",
+        url_encode_query(query),
+        limit
+    );
+    append_search_params(&mut path, page, sort, order)?;
+    github_request("GET", &path, None)
+}
+
+fn search_code(
+    query: &str,
+    page: Option<u32>,
+    limit: Option<u32>,
+    sort: Option<&str>,
+    order: Option<&str>,
+) -> Result<String, String> {
+    validate_input_length(query, "query")?;
+    let limit = limit.unwrap_or(30).min(100);
+    let mut path = format!(
+        "/search/code?q={}&per_page={}",
+        url_encode_query(query),
+        limit
+    );
+    append_search_params(&mut path, page, sort, order)?;
+    github_request("GET", &path, None)
+}
+
+fn search_issues_pull_requests(
+    query: &str,
+    page: Option<u32>,
+    limit: Option<u32>,
+    sort: Option<&str>,
+    order: Option<&str>,
+) -> Result<String, String> {
+    validate_input_length(query, "query")?;
+    let limit = limit.unwrap_or(30).min(100);
+    let mut path = format!(
+        "/search/issues?q={}&per_page={}",
+        url_encode_query(query),
+        limit
+    );
+    append_search_params(&mut path, page, sort, order)?;
+    github_request("GET", &path, None)
+}
+
+fn list_branches(
+    owner: &str,
+    repo: &str,
+    protected: Option<bool>,
+    page: Option<u32>,
+    limit: Option<u32>,
+) -> Result<String, String> {
+    if !validate_path_segment(owner) || !validate_path_segment(repo) {
+        return Err("Invalid owner or repo name".into());
+    }
+    let encoded_owner = url_encode_path(owner);
+    let encoded_repo = url_encode_path(repo);
+    let limit = limit.unwrap_or(30).min(100);
+    let mut path = format!(
+        "/repos/{}/{}/branches?per_page={}",
+        encoded_owner, encoded_repo, limit
+    );
+    if let Some(protected) = protected {
+        path.push_str("&protected=");
+        path.push_str(if protected { "true" } else { "false" });
+    }
+    if let Some(page) = page {
+        path.push_str(&format!("&page={page}"));
+    }
+    github_request("GET", &path, None)
+}
+
+fn create_branch(owner: &str, repo: &str, branch: &str, from_ref: &str) -> Result<String, String> {
+    if !validate_path_segment(owner) || !validate_path_segment(repo) {
+        return Err("Invalid owner or repo name".into());
+    }
+    validate_input_length(branch, "branch")?;
+    validate_input_length(from_ref, "from_ref")?;
+
+    let encoded_owner = url_encode_path(owner);
+    let encoded_repo = url_encode_path(repo);
+    let source_ref = normalize_ref_lookup(from_ref)?;
+    let source_path = format!(
+        "/repos/{}/{}/git/ref/{}",
+        encoded_owner,
+        encoded_repo,
+        encode_repo_path(&source_ref)
+    );
+    let source_ref_resp = github_request("GET", &source_path, None)?;
+    let source_ref_json: serde_json::Value = serde_json::from_str(&source_ref_resp)
+        .map_err(|e| format!("Invalid GitHub response for source ref: {e}"))?;
+    let sha = source_ref_json
+        .pointer("/object/sha")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "Source ref response missing object.sha".to_string())?;
+
+    let req_body = serde_json::json!({
+        "ref": normalize_branch_ref(branch)?,
+        "sha": sha,
+    });
+    let path = format!("/repos/{}/{}/git/refs", encoded_owner, encoded_repo);
+    github_request("POST", &path, Some(req_body.to_string()))
+}
+
 fn get_file_content(
     owner: &str,
     repo: &str,
@@ -925,29 +1394,14 @@ fn get_file_content(
     if !validate_path_segment(owner) || !validate_path_segment(repo) {
         return Err("Invalid owner or repo name".into());
     }
-    // Validate path segments - reject path traversal attempts and empty segments
-    for segment in path.split('/') {
-        if segment == ".." {
-            return Err("Invalid path: path traversal not allowed".into());
-        }
-        if segment.is_empty() {
-            return Err("Invalid path: empty segment not allowed".into());
-        }
-    }
+    validate_repo_path(path)?;
     // Validate ref if provided
     if let Some(r#ref) = r#ref {
-        if r#ref.contains("..") || r#ref.contains(':') {
-            return Err("Invalid ref: must be a valid branch, tag, or commit SHA".into());
-        }
+        validate_git_ref(r#ref, "ref")?;
     }
     let encoded_owner = url_encode_path(owner);
     let encoded_repo = url_encode_path(repo);
-    // Path can contain slashes, so we encode each segment separately
-    let encoded_path = path
-        .split('/')
-        .map(url_encode_path)
-        .collect::<Vec<_>>()
-        .join("/");
+    let encoded_path = encode_repo_path(path);
 
     let url_path = if let Some(r#ref) = r#ref {
         let encoded_ref = url_encode_query(r#ref);
@@ -962,6 +1416,174 @@ fn get_file_content(
         )
     };
     github_request("GET", &url_path, None)
+}
+
+fn create_or_update_file(
+    owner: &str,
+    repo: &str,
+    path: &str,
+    message: &str,
+    content: &str,
+    sha: Option<&str>,
+    branch: Option<&str>,
+    committer: Option<GitCommitIdentity>,
+    author: Option<GitCommitIdentity>,
+) -> Result<String, String> {
+    if !validate_path_segment(owner) || !validate_path_segment(repo) {
+        return Err("Invalid owner or repo name".into());
+    }
+    validate_repo_path(path)?;
+    validate_input_length(message, "message")?;
+    validate_input_length(content, "content")?;
+    if let Some(branch) = branch {
+        validate_git_ref(branch, "branch")?;
+    }
+    if let Some(sha) = sha {
+        validate_input_length(sha, "sha")?;
+    }
+
+    let encoded_owner = url_encode_path(owner);
+    let encoded_repo = url_encode_path(repo);
+    let encoded_path = encode_repo_path(path);
+    let mut req_body = serde_json::json!({
+        "message": message,
+        "content": BASE64_STANDARD.encode(content.as_bytes()),
+    });
+    if let Some(sha) = sha {
+        req_body["sha"] = serde_json::json!(sha);
+    }
+    if let Some(branch) = branch {
+        req_body["branch"] = serde_json::json!(branch);
+    }
+    if let Some(committer) = committer {
+        req_body["committer"] =
+            serde_json::to_value(committer).map_err(|e| format!("Invalid committer: {e}"))?;
+    }
+    if let Some(author) = author {
+        req_body["author"] =
+            serde_json::to_value(author).map_err(|e| format!("Invalid author: {e}"))?;
+    }
+
+    let path = format!(
+        "/repos/{}/{}/contents/{}",
+        encoded_owner, encoded_repo, encoded_path
+    );
+    github_request("PUT", &path, Some(req_body.to_string()))
+}
+
+fn delete_file(
+    owner: &str,
+    repo: &str,
+    path: &str,
+    message: &str,
+    sha: &str,
+    branch: Option<&str>,
+    committer: Option<GitCommitIdentity>,
+    author: Option<GitCommitIdentity>,
+) -> Result<String, String> {
+    if !validate_path_segment(owner) || !validate_path_segment(repo) {
+        return Err("Invalid owner or repo name".into());
+    }
+    validate_repo_path(path)?;
+    validate_input_length(message, "message")?;
+    validate_input_length(sha, "sha")?;
+    if let Some(branch) = branch {
+        validate_git_ref(branch, "branch")?;
+    }
+
+    let encoded_owner = url_encode_path(owner);
+    let encoded_repo = url_encode_path(repo);
+    let encoded_path = encode_repo_path(path);
+    let mut req_body = serde_json::json!({
+        "message": message,
+        "sha": sha,
+    });
+    if let Some(branch) = branch {
+        req_body["branch"] = serde_json::json!(branch);
+    }
+    if let Some(committer) = committer {
+        req_body["committer"] =
+            serde_json::to_value(committer).map_err(|e| format!("Invalid committer: {e}"))?;
+    }
+    if let Some(author) = author {
+        req_body["author"] =
+            serde_json::to_value(author).map_err(|e| format!("Invalid author: {e}"))?;
+    }
+
+    let path = format!(
+        "/repos/{}/{}/contents/{}",
+        encoded_owner, encoded_repo, encoded_path
+    );
+    github_request("DELETE", &path, Some(req_body.to_string()))
+}
+
+fn list_releases(
+    owner: &str,
+    repo: &str,
+    page: Option<u32>,
+    limit: Option<u32>,
+) -> Result<String, String> {
+    if !validate_path_segment(owner) || !validate_path_segment(repo) {
+        return Err("Invalid owner or repo name".into());
+    }
+    let encoded_owner = url_encode_path(owner);
+    let encoded_repo = url_encode_path(repo);
+    let limit = limit.unwrap_or(30).min(100);
+    let mut path = format!(
+        "/repos/{}/{}/releases?per_page={}",
+        encoded_owner, encoded_repo, limit
+    );
+    if let Some(page) = page {
+        path.push_str(&format!("&page={page}"));
+    }
+    github_request("GET", &path, None)
+}
+
+fn create_release(
+    owner: &str,
+    repo: &str,
+    tag_name: &str,
+    target_commitish: Option<&str>,
+    name: Option<&str>,
+    body: Option<&str>,
+    draft: bool,
+    prerelease: bool,
+    generate_release_notes: bool,
+) -> Result<String, String> {
+    if !validate_path_segment(owner) || !validate_path_segment(repo) {
+        return Err("Invalid owner or repo name".into());
+    }
+    validate_git_ref(tag_name, "tag_name")?;
+    if let Some(target_commitish) = target_commitish {
+        validate_git_ref(target_commitish, "target_commitish")?;
+    }
+    if let Some(name) = name {
+        validate_input_length(name, "name")?;
+    }
+    if let Some(body) = body {
+        validate_input_length(body, "body")?;
+    }
+
+    let encoded_owner = url_encode_path(owner);
+    let encoded_repo = url_encode_path(repo);
+    let path = format!("/repos/{}/{}/releases", encoded_owner, encoded_repo);
+    let mut req_body = serde_json::json!({
+        "tag_name": tag_name,
+        "draft": draft,
+        "prerelease": prerelease,
+        "generate_release_notes": generate_release_notes,
+    });
+    if let Some(target_commitish) = target_commitish {
+        req_body["target_commitish"] = serde_json::json!(target_commitish);
+    }
+    if let Some(name) = name {
+        req_body["name"] = serde_json::json!(name);
+    }
+    if let Some(body) = body {
+        req_body["body"] = serde_json::json!(body);
+    }
+
+    github_request("POST", &path, Some(req_body.to_string()))
 }
 
 fn trigger_workflow(
@@ -1288,6 +1910,19 @@ const SCHEMA: &str = r#"{
         },
         {
             "properties": {
+                "action": { "const": "create_repo" },
+                "name": { "type": "string", "description": "New repository name" },
+                "description": { "type": "string" },
+                "private": { "type": "boolean", "default": false },
+                "auto_init": { "type": "boolean", "default": false },
+                "gitignore_template": { "type": "string" },
+                "license_template": { "type": "string" },
+                "org": { "type": "string", "description": "Optional organization name; omit to create under the authenticated user" }
+            },
+            "required": ["action", "name"]
+        },
+        {
+            "properties": {
                 "action": { "const": "list_issues" },
                 "owner": { "type": "string" },
                 "repo": { "type": "string" },
@@ -1446,9 +2081,64 @@ const SCHEMA: &str = r#"{
             "properties": {
                 "action": { "const": "list_repos" },
                 "username": { "type": "string" },
+                "page": { "type": "integer" },
                 "limit": { "type": "integer", "default": 30 }
             },
             "required": ["action", "username"]
+        },
+        {
+            "properties": {
+                "action": { "const": "search_repositories" },
+                "query": { "type": "string", "description": "GitHub repository search query" },
+                "page": { "type": "integer" },
+                "limit": { "type": "integer", "default": 30 },
+                "sort": { "type": "string" },
+                "order": { "type": "string", "enum": ["asc", "desc"] }
+            },
+            "required": ["action", "query"]
+        },
+        {
+            "properties": {
+                "action": { "const": "search_code" },
+                "query": { "type": "string", "description": "GitHub code search query" },
+                "page": { "type": "integer" },
+                "limit": { "type": "integer", "default": 30 },
+                "sort": { "type": "string" },
+                "order": { "type": "string", "enum": ["asc", "desc"] }
+            },
+            "required": ["action", "query"]
+        },
+        {
+            "properties": {
+                "action": { "const": "search_issues_pull_requests" },
+                "query": { "type": "string", "description": "GitHub issue/PR search query" },
+                "page": { "type": "integer" },
+                "limit": { "type": "integer", "default": 30 },
+                "sort": { "type": "string" },
+                "order": { "type": "string", "enum": ["asc", "desc"] }
+            },
+            "required": ["action", "query"]
+        },
+        {
+            "properties": {
+                "action": { "const": "list_branches" },
+                "owner": { "type": "string" },
+                "repo": { "type": "string" },
+                "protected": { "type": "boolean" },
+                "page": { "type": "integer" },
+                "limit": { "type": "integer", "default": 30 }
+            },
+            "required": ["action", "owner", "repo"]
+        },
+        {
+            "properties": {
+                "action": { "const": "create_branch" },
+                "owner": { "type": "string" },
+                "repo": { "type": "string" },
+                "branch": { "type": "string", "description": "New branch name" },
+                "from_ref": { "type": "string", "description": "Source branch or tag to branch from" }
+            },
+            "required": ["action", "owner", "repo", "branch", "from_ref"]
         },
         {
             "properties": {
@@ -1459,6 +2149,88 @@ const SCHEMA: &str = r#"{
                 "ref": { "type": "string", "description": "Branch/commit (default: default branch)" }
             },
             "required": ["action", "owner", "repo", "path"]
+        },
+        {
+            "properties": {
+                "action": { "const": "create_or_update_file" },
+                "owner": { "type": "string" },
+                "repo": { "type": "string" },
+                "path": { "type": "string", "description": "File path in repo" },
+                "message": { "type": "string", "description": "Commit message" },
+                "content": { "type": "string", "description": "Raw UTF-8 file content; the tool base64-encodes it for GitHub" },
+                "sha": { "type": "string", "description": "Required when updating an existing file" },
+                "branch": { "type": "string" },
+                "committer": {
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string" },
+                        "email": { "type": "string" }
+                    },
+                    "required": ["name", "email"]
+                },
+                "author": {
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string" },
+                        "email": { "type": "string" }
+                    },
+                    "required": ["name", "email"]
+                }
+            },
+            "required": ["action", "owner", "repo", "path", "message", "content"]
+        },
+        {
+            "properties": {
+                "action": { "const": "delete_file" },
+                "owner": { "type": "string" },
+                "repo": { "type": "string" },
+                "path": { "type": "string", "description": "File path in repo" },
+                "message": { "type": "string", "description": "Commit message" },
+                "sha": { "type": "string", "description": "Blob SHA of the file to delete" },
+                "branch": { "type": "string" },
+                "committer": {
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string" },
+                        "email": { "type": "string" }
+                    },
+                    "required": ["name", "email"]
+                },
+                "author": {
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string" },
+                        "email": { "type": "string" }
+                    },
+                    "required": ["name", "email"]
+                }
+            },
+            "required": ["action", "owner", "repo", "path", "message", "sha"]
+        },
+        {
+            "properties": {
+                "action": { "const": "list_releases" },
+                "owner": { "type": "string" },
+                "repo": { "type": "string" },
+                "page": { "type": "integer" },
+                "limit": { "type": "integer", "default": 30 }
+            },
+            "required": ["action", "owner", "repo"]
+        },
+        {
+            "properties": {
+                "action": { "const": "create_release" },
+                "owner": { "type": "string" },
+                "repo": { "type": "string" },
+                "tag_name": { "type": "string" },
+                "target_commitish": { "type": "string" },
+                "name": { "type": "string" },
+                "body": { "type": "string" },
+                "draft": { "type": "boolean", "default": false },
+                "prerelease": { "type": "boolean", "default": false },
+                "generate_release_notes": { "type": "boolean", "default": false }
+            },
+            "required": ["action", "owner", "repo", "tag_name"]
         },
         {
             "properties": {
@@ -1480,6 +2252,26 @@ const SCHEMA: &str = r#"{
                 "limit": { "type": "integer", "default": 30 }
             },
             "required": ["action", "owner", "repo"]
+        },
+        {
+            "properties": {
+                "action": { "const": "handle_webhook" },
+                "webhook": {
+                    "type": "object",
+                    "properties": {
+                        "headers": {
+                            "type": "object",
+                            "additionalProperties": { "type": "string" }
+                        },
+                        "body_json": {
+                            "type": "object",
+                            "description": "Parsed GitHub webhook JSON payload"
+                        }
+                    },
+                    "required": ["headers", "body_json"]
+                }
+            },
+            "required": ["action", "webhook"]
         }
     ]
 }"#;
@@ -1489,6 +2281,61 @@ export!(GitHubTool);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn schema_actions() -> std::collections::HashSet<String> {
+        let schema: serde_json::Value =
+            serde_json::from_str(SCHEMA).expect("schema should be valid JSON");
+        schema["oneOf"]
+            .as_array()
+            .expect("schema.oneOf should be an array")
+            .iter()
+            .filter_map(|variant| {
+                variant
+                    .pointer("/properties/action/const")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+            })
+            .collect()
+    }
+
+    fn supported_actions() -> std::collections::HashSet<String> {
+        [
+            "get_repo",
+            "create_repo",
+            "list_issues",
+            "create_issue",
+            "get_issue",
+            "list_issue_comments",
+            "create_issue_comment",
+            "list_pull_requests",
+            "create_pull_request",
+            "get_pull_request",
+            "get_pull_request_files",
+            "create_pr_review",
+            "list_pull_request_comments",
+            "reply_pull_request_comment",
+            "get_pull_request_reviews",
+            "get_combined_status",
+            "merge_pull_request",
+            "list_repos",
+            "search_repositories",
+            "search_code",
+            "search_issues_pull_requests",
+            "list_branches",
+            "create_branch",
+            "get_file_content",
+            "create_or_update_file",
+            "delete_file",
+            "list_releases",
+            "create_release",
+            "trigger_workflow",
+            "get_workflow_runs",
+            "handle_webhook",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect()
+    }
 
     #[test]
     fn test_url_encode_path() {
@@ -1654,5 +2501,122 @@ mod tests {
                 .and_then(|v| v.as_i64()),
             Some(42)
         );
+    }
+
+    #[test]
+    fn test_validate_git_ref_rejects_bad_names() {
+        assert!(validate_git_ref("feature/test", "branch").is_ok());
+        assert!(validate_git_ref("release/v1.2.3", "branch").is_ok());
+        assert!(validate_git_ref("bad ref", "branch").is_err());
+        assert!(validate_git_ref("../main", "branch").is_err());
+        assert!(validate_git_ref("refs/heads/main.lock", "branch").is_err());
+    }
+
+    #[test]
+    fn test_normalize_ref_lookup_and_branch_ref() {
+        assert_eq!(
+            normalize_ref_lookup("main").expect("main should normalize"),
+            "heads/main"
+        );
+        assert_eq!(
+            normalize_ref_lookup("refs/tags/v1.0.0").expect("tag ref should normalize"),
+            "tags/v1.0.0"
+        );
+        assert_eq!(
+            normalize_branch_ref("feature/github-tool-audit").expect("branch ref should normalize"),
+            "refs/heads/feature/github-tool-audit"
+        );
+    }
+
+    #[test]
+    fn test_schema_includes_new_core_actions() {
+        let actions = schema_actions();
+        for action in [
+            "create_repo",
+            "search_repositories",
+            "search_code",
+            "search_issues_pull_requests",
+            "list_branches",
+            "create_branch",
+            "create_or_update_file",
+            "delete_file",
+            "list_releases",
+            "create_release",
+        ] {
+            assert!(
+                actions.contains(action),
+                "schema should include action {action}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_schema_matches_supported_action_set() {
+        assert_eq!(schema_actions(), supported_actions());
+    }
+
+    #[test]
+    fn test_readme_examples_only_reference_supported_actions() {
+        let actions = schema_actions();
+        let readme = include_str!("../README.md");
+        let mut referenced = Vec::new();
+
+        for line in readme.lines() {
+            let Some((_, rhs)) = line.split_once("\"action\":") else {
+                continue;
+            };
+            let rhs = rhs.trim();
+            let Some(rest) = rhs.strip_prefix('"') else {
+                continue;
+            };
+            let Some(action) = rest.split('"').next() else {
+                continue;
+            };
+            referenced.push(action.to_string());
+        }
+
+        assert!(
+            !referenced.is_empty(),
+            "README should contain action examples"
+        );
+        for action in referenced {
+            assert!(
+                actions.contains(&action),
+                "README references unsupported action {action}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_registry_description_claims_are_supported() {
+        let actions = schema_actions();
+        let manifest: serde_json::Value =
+            serde_json::from_str(include_str!("../../../registry/tools/github.json"))
+                .expect("registry manifest should parse");
+        let description = manifest["description"]
+            .as_str()
+            .expect("registry manifest should have a description")
+            .to_ascii_lowercase();
+
+        if description.contains("search") {
+            assert!(
+                actions.contains("search_repositories")
+                    && actions.contains("search_code")
+                    && actions.contains("search_issues_pull_requests"),
+                "registry search claim should map to implemented search actions"
+            );
+        }
+        if description.contains("releases") {
+            assert!(
+                actions.contains("list_releases") && actions.contains("create_release"),
+                "registry releases claim should map to implemented release actions"
+            );
+        }
+        if description.contains("file writes") {
+            assert!(
+                actions.contains("create_or_update_file") && actions.contains("delete_file"),
+                "registry file write claim should map to implemented content actions"
+            );
+        }
     }
 }
