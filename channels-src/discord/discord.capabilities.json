@@ -64,12 +64,13 @@
         "messages_per_hour": 5000
       },
       "webhook": {
-        "signature_key_secret_name": "discord_public_key"
+        "signature_key_secret_name": "discord_public_key",
+        "secret_name": "discord_public_key"
       }
     }
   },
   "config": {
-    "require_signature_verification": true,
+    "require_signature_verification": false,
     "webhook_secret": null,
     "polling_enabled": false,
     "poll_interval_ms": 30000,
