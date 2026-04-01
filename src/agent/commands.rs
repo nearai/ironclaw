@@ -1250,6 +1250,8 @@ impl Agent {
 
 #[cfg(test)]
 mod tests {
+    #![allow(dead_code)]
+
     use super::*;
     use crate::agent::session::{Session, Thread, ThreadState};
     use std::collections::{HashMap, HashSet, VecDeque};
