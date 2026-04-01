@@ -2030,22 +2030,16 @@ async fn chat_threads_handler(
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-        // Seed the bootstrap greeting if this is a fresh assistant thread.
-        if let Ok(preview) = store
-            .list_conversations_with_preview(&user.user_id, "gateway", 1)
+        // Seed the bootstrap greeting if this is a brand-new assistant thread.
+        if let Ok((messages, _)) = store
+            .list_conversation_messages_paginated(assistant_id, None, 1)
             .await
+            && messages.is_empty()
         {
-            let is_empty = preview
-                .iter()
-                .find(|c| c.id == assistant_id)
-                .map(|c| c.message_count == 0)
-                .unwrap_or(true);
-            if is_empty {
-                static GREETING: &str = include_str!("../../workspace/seeds/GREETING.md");
-                let _ = store
-                    .add_conversation_message(assistant_id, "assistant", GREETING)
-                    .await;
-            }
+            static GREETING: &str = include_str!("../../workspace/seeds/GREETING.md");
+            let _ = store
+                .add_conversation_message(assistant_id, "assistant", GREETING)
+                .await;
         }
 
         match store
