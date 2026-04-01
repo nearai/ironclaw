@@ -2887,19 +2887,24 @@ impl ExtensionManager {
         };
 
         // Try DCR if no client_id configured
-        let (client_id, client_secret) = if let Some(ref oauth) = server.oauth {
-            (oauth.client_id.clone(), None)
-        } else if let Some(ref reg_endpoint) = metadata.registration_endpoint {
-            let registration = register_client(reg_endpoint, &redirect_uri)
-                .await
-                .map_err(|e| ExtensionError::AuthFailed(e.to_string()))?;
+        let (client_id, client_secret, client_secret_expires_at) =
+            if let Some(ref oauth) = server.oauth {
+                (oauth.client_id.clone(), None, None)
+            } else if let Some(ref reg_endpoint) = metadata.registration_endpoint {
+                let registration = register_client(reg_endpoint, &redirect_uri)
+                    .await
+                    .map_err(|e| ExtensionError::AuthFailed(e.to_string()))?;
 
-            (registration.client_id, None)
-        } else {
-            return Err(ExtensionError::AuthNotSupported(
-                "Server doesn't support OAuth or Dynamic Client Registration".to_string(),
-            ));
-        };
+                (
+                    registration.client_id,
+                    registration.client_secret,
+                    registration.client_secret_expires_at,
+                )
+            } else {
+                return Err(ExtensionError::AuthNotSupported(
+                    "Server doesn't support OAuth or Dynamic Client Registration".to_string(),
+                ));
+            };
 
         // RFC 8707: resource parameter to scope the token to this MCP server
         let resource = canonical_resource_uri(&server.url);
@@ -2931,6 +2936,7 @@ impl ExtensionManager {
         let code_verifier = oauth_result.code_verifier;
 
         if is_gateway {
+            let persist_client_secret = server.oauth.is_none() && client_secret.is_some();
             let mut token_exchange_extra_params = HashMap::new();
             token_exchange_extra_params.insert("resource".to_string(), resource.clone());
 
@@ -2957,6 +2963,12 @@ impl ExtensionManager {
                 } else {
                     None
                 },
+                client_secret_secret_name: if persist_client_secret {
+                    Some(server.client_secret_secret_name())
+                } else {
+                    None
+                },
+                client_secret_expires_at,
                 created_at: std::time::Instant::now(),
             };
 
@@ -3214,6 +3226,7 @@ impl ExtensionManager {
                 let token_secret_name = server.token_secret_name();
                 plan.add_base_secret(&token_secret_name);
                 plan.add_base_secret(server.client_id_secret_name());
+                plan.add_base_secret(server.client_secret_secret_name());
                 // MCP OAuth can persist companion secrets through two paths:
                 // the MCP auth helper uses `mcp_<name>_refresh_token`, while the
                 // hosted gateway callback stores companions alongside the access
@@ -3722,6 +3735,8 @@ impl ExtensionManager {
                 gateway_token: self.oauth_proxy_auth_token.clone(),
                 token_exchange_extra_params: std::collections::HashMap::new(),
                 client_id_secret_name: None,
+                client_secret_secret_name: None,
+                client_secret_expires_at: None,
                 created_at: std::time::Instant::now(),
             };
 
@@ -8334,6 +8349,8 @@ mod tests {
                 gateway_token: None,
                 token_exchange_extra_params: std::collections::HashMap::new(),
                 client_id_secret_name: None,
+                client_secret_secret_name: None,
+                client_secret_expires_at: None,
                 created_at: std::time::Instant::now(),
             },
         );
@@ -8358,6 +8375,8 @@ mod tests {
                 gateway_token: None,
                 token_exchange_extra_params: std::collections::HashMap::new(),
                 client_id_secret_name: None,
+                client_secret_secret_name: None,
+                client_secret_expires_at: None,
                 created_at: std::time::Instant::now(),
             },
         );

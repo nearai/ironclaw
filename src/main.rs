@@ -449,6 +449,7 @@ async fn async_main() -> anyhow::Result<()> {
             &components.secrets_store,
             components.extension_manager.as_ref(),
             components.db.as_ref(),
+            &channel_names,
         )
         .await;
 

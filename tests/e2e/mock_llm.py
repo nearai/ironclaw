@@ -43,6 +43,11 @@ TOOL_CALL_PATTERNS = [
             "max_results": 1,
         },
     ),
+    (
+        re.compile(r"check mock mcp|mock mcp search", re.IGNORECASE),
+        "mock-mcp_mock_search",
+        lambda _: {"query": "refresh-check"},
+    ),
     (re.compile(r"what time|current time", re.IGNORECASE), "time", lambda _: {"operation": "now"}),
     (
         re.compile(
@@ -408,15 +413,29 @@ async def oauth_refresh(request: web.Request) -> web.Response:
 
     if request.headers.get("Authorization") != "Bearer e2e-test-token":
         return web.json_response({"error": "invalid_gateway_auth"}, status=401)
-    if data.get("client_id") != "hosted-google-client-id":
-        return web.json_response({"error": "invalid_client_id"}, status=400)
-    if "client_secret" in data:
-        return web.json_response({"error": "unexpected_client_secret"}, status=400)
+
+    provider = data.get("provider", "")
+    if provider.startswith("mcp:"):
+        if data.get("client_id") != "mock-mcp-client-id":
+            return web.json_response({"error": "invalid_mcp_client_id"}, status=400)
+        if data.get("client_secret") != "mock-mcp-client-secret":
+            return web.json_response({"error": "missing_mcp_client_secret"}, status=400)
+        if not data.get("token_url", "").endswith("/oauth/token"):
+            return web.json_response({"error": "invalid_mcp_token_url"}, status=400)
+        if data.get("resource") != f"http://127.0.0.1:{request.app['port']}/mcp":
+            return web.json_response({"error": "missing_mcp_resource"}, status=400)
+    else:
+        if data.get("client_id") != "hosted-google-client-id":
+            return web.json_response({"error": "invalid_client_id"}, status=400)
+        if "client_secret" in data:
+            return web.json_response({"error": "unexpected_client_secret"}, status=400)
 
     return web.json_response({
         "access_token": "mock-refreshed-access-token",
+        "token_type": "Bearer",
         "refresh_token": "mock-rotated-refresh-token",
         "expires_in": 3600,
+        "scope": "mock-scope",
     })
 
 
@@ -542,6 +561,7 @@ async def mcp_oauth_register(request: web.Request) -> web.Response:
     body = await request.json()
     return web.json_response({
         "client_id": "mock-mcp-client-id",
+        "client_secret": "mock-mcp-client-secret",
         "client_name": body.get("client_name", "IronClaw"),
         "redirect_uris": body.get("redirect_uris", []),
     })

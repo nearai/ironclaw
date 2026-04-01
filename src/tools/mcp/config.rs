@@ -311,6 +311,11 @@ impl McpServerConfig {
     pub fn client_id_secret_name(&self) -> String {
         format!("mcp_{}_client_id", self.name)
     }
+
+    /// Get the secret name used to store the DCR client secret.
+    pub fn client_secret_secret_name(&self) -> String {
+        format!("mcp_{}_client_secret", self.name)
+    }
 }
 
 /// Reserved name used for the companion MCP server derived from active NEAR AI config.
@@ -966,6 +971,11 @@ mod tests {
         assert_eq!(
             config.legacy_refresh_token_secret_name(),
             "mcp_notion_refresh_token"
+        );
+        assert_eq!(config.client_id_secret_name(), "mcp_notion_client_id");
+        assert_eq!(
+            config.client_secret_secret_name(),
+            "mcp_notion_client_secret"
         );
     }
 

@@ -30,7 +30,7 @@
     {
       "response": {
         "type": "text",
-        "content": "Created the telegram-bug-watcher routine for Telegram bug messages.",
+        "content": "Created the telegram-bug-watcher routine for Telegram bug messages, but it is not verified yet. I can test it the next time you want to fire it.",
         "input_tokens": 180,
         "output_tokens": 20
       }

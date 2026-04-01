@@ -52,7 +52,7 @@
     {
       "response": {
         "type": "text",
-        "content": "I created a daily-check routine that runs at 9 AM every day. The routine list shows it as active.",
+        "content": "I created the daily-check routine, but it is not verified yet. It is scheduled for 9 AM every day, and the routine list should show it as unverified until it has a successful run.",
         "input_tokens": 300,
         "output_tokens": 25
       }

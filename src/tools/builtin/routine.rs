@@ -20,7 +20,8 @@ use uuid::Uuid;
 
 use crate::agent::routine::{
     NotifyConfig, Routine, RoutineAction, RoutineGuardrails, Trigger, next_cron_fire,
-    normalize_cron_expression,
+    normalize_cron_expression, reset_routine_verification_state, routine_verification_fingerprint,
+    routine_verification_status,
 };
 use crate::agent::routine_engine::RoutineEngine;
 use crate::context::JobContext;
@@ -422,10 +423,27 @@ fn routine_create_tool_summary() -> ToolDiscoverySummary {
             "Set execution.use_tools=false to keep a new lightweight routine text-only.".into(),
             "Omitting delivery.user falls back to the owner's last-seen notification target.".into(),
             "advanced.cooldown_secs defaults to 300.".into(),
+            "Creating a routine only saves the configuration. It does not prove the routine can execute successfully.".into(),
+            "After routine_create, tell the user the routine is unverified and offer to test it now unless they asked not to.".into(),
             "Legacy flat aliases are still accepted for compatibility, but grouped fields are preferred.".into(),
         ],
         examples: routine_create_examples(),
     }
+}
+
+fn verification_result_payload(routine: &Routine, verification_reset: bool) -> Value {
+    let verification_status = routine_verification_status(routine);
+    serde_json::json!({
+        "verification_status": verification_status.as_str(),
+        "verification_reset": verification_reset,
+        "verification_hint": if verification_reset {
+            "The routine configuration changed and should be re-tested before being treated as reliable."
+        } else if verification_status == crate::agent::routine::RoutineVerificationStatus::Verified {
+            "The current routine configuration has already been verified with a successful run."
+        } else {
+            "The routine has been saved, but it has not been verified yet. Offer to test it now."
+        }
+    })
 }
 
 fn routine_create_schema(include_compatibility_aliases: bool) -> Value {
@@ -1099,7 +1117,8 @@ impl Tool for RoutineCreateTool {
     fn description(&self) -> &str {
         "Create a new routine (scheduled or event-driven task). \
          Supports cron schedules, event pattern matching, system events, and manual triggers. \
-         Use this when the user wants something to happen periodically or reactively."
+         Use this when the user wants something to happen periodically or reactively. \
+         Creation saves the routine, but does not verify that it will execute successfully."
     }
 
     fn requires_approval(&self, params: &serde_json::Value) -> ApprovalRequirement {
@@ -1145,7 +1164,7 @@ impl Tool for RoutineCreateTool {
             None
         };
 
-        let routine = Routine {
+        let mut routine = Routine {
             id: Uuid::new_v4(),
             name: normalized.name.clone(),
             description: normalized.description.clone(),
@@ -1159,8 +1178,22 @@ impl Tool for RoutineCreateTool {
                 dedup_window: None,
             },
             notify: NotifyConfig {
-                channel: normalized.delivery.channel.clone(),
-                user: normalized.delivery.user.clone(),
+                // Fall back to the current conversation's channel/target when
+                // the LLM omits delivery params, so routines created from
+                // e.g. a Slack channel know where to send results.
+                channel: normalized.delivery.channel.clone().or_else(|| {
+                    ctx.metadata
+                        .get("notify_channel")
+                        .and_then(|v| v.as_str())
+                        .map(ToOwned::to_owned)
+                }),
+                user: normalized.delivery.user.clone().or_else(|| {
+                    ctx.metadata
+                        .get("notify_user")
+                        .and_then(|v| v.as_str())
+                        .filter(|v| *v != "default")
+                        .map(ToOwned::to_owned)
+                }),
                 ..NotifyConfig::default()
             },
             last_run_at: None,
@@ -1171,6 +1204,10 @@ impl Tool for RoutineCreateTool {
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
+        routine.state = reset_routine_verification_state(
+            &routine.state,
+            routine_verification_fingerprint(&routine),
+        );
 
         self.store
             .create_routine(&routine)
@@ -1185,12 +1222,14 @@ impl Tool for RoutineCreateTool {
             self.engine.refresh_event_cache().await;
         }
 
+        let verification = verification_result_payload(&routine, false);
         let result = serde_json::json!({
             "id": routine.id.to_string(),
-            "name": routine.name,
+            "name": routine.name.clone(),
             "trigger_type": routine.trigger.type_tag(),
             "next_fire_at": routine.next_fire_at.map(|t| t.to_rfc3339()),
             "status": "created",
+            "verification": verification,
         });
 
         Ok(ToolOutput::success(result, start.elapsed()))
@@ -1243,10 +1282,24 @@ impl Tool for RoutineListTool {
             .list_routines(&ctx.user_id)
             .await
             .map_err(|e| ToolError::ExecutionFailed(format!("failed to list routines: {e}")))?;
+        let routine_ids: Vec<Uuid> = routines.iter().map(|routine| routine.id).collect();
+        let last_run_statuses = self
+            .store
+            .batch_get_last_run_status(&routine_ids)
+            .await
+            .map_err(|e| {
+                ToolError::ExecutionFailed(format!("failed to read routine statuses: {e}"))
+            })?;
 
         let list: Vec<serde_json::Value> = routines
             .iter()
             .map(|r| {
+                let verification_status = routine_verification_status(r);
+                let status = crate::agent::routine::routine_display_status_for_verification(
+                    r,
+                    verification_status,
+                    last_run_statuses.get(&r.id).copied(),
+                );
                 serde_json::json!({
                     "id": r.id.to_string(),
                     "name": r.name,
@@ -1258,6 +1311,8 @@ impl Tool for RoutineListTool {
                     "next_fire_at": r.next_fire_at.map(|t| t.to_rfc3339()),
                     "run_count": r.run_count,
                     "consecutive_failures": r.consecutive_failures,
+                    "status": status.as_str(),
+                    "verification_status": verification_status.as_str(),
                 })
             })
             .collect();
@@ -1296,7 +1351,8 @@ impl Tool for RoutineUpdateTool {
 
     fn description(&self) -> &str {
         "Update an existing routine. Can change prompt, description, enabled state, cron schedule/timezone, \
-         Pass the routine name and only the fields you want to change. This does not convert trigger types."
+         Pass the routine name and only the fields you want to change. This does not convert trigger types. \
+         Behavior-changing edits should leave the routine marked unverified until it is tested again."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -1320,6 +1376,9 @@ impl Tool for RoutineUpdateTool {
             .map_err(|e| ToolError::ExecutionFailed(format!("DB error: {e}")))?
             .ok_or_else(|| ToolError::ExecutionFailed(format!("routine '{}' not found", name)))?;
 
+        let original_fingerprint = routine_verification_fingerprint(&routine);
+        let mut verification_reset = false;
+
         // Apply updates
         if let Some(enabled) = params.get("enabled").and_then(|v| v.as_bool()) {
             routine.enabled = enabled;
@@ -1331,8 +1390,18 @@ impl Tool for RoutineUpdateTool {
 
         if let Some(prompt) = params.get("prompt").and_then(|v| v.as_str()) {
             match &mut routine.action {
-                RoutineAction::Lightweight { prompt: p, .. } => *p = prompt.to_string(),
-                RoutineAction::FullJob { description: d, .. } => *d = prompt.to_string(),
+                RoutineAction::Lightweight { prompt: p, .. } => {
+                    if p != prompt {
+                        verification_reset = true;
+                        *p = prompt.to_string();
+                    }
+                }
+                RoutineAction::FullJob { description: d, .. } => {
+                    if d != prompt {
+                        verification_reset = true;
+                        *d = prompt.to_string();
+                    }
+                }
             }
         }
 
@@ -1369,11 +1438,15 @@ impl Tool for RoutineUpdateTool {
 
             if let Some((old_schedule, old_tz)) = existing_cron {
                 let effective_schedule = new_schedule.as_deref().unwrap_or(&old_schedule);
-                let effective_tz = new_timezone.or(old_tz);
+                let effective_tz = new_timezone.clone().or(old_tz.clone());
                 // Validate
                 next_cron_fire(effective_schedule, effective_tz.as_deref()).map_err(|e| {
                     ToolError::InvalidParameters(format!("invalid cron schedule: {e}"))
                 })?;
+
+                if effective_schedule != old_schedule || effective_tz != old_tz {
+                    verification_reset = true;
+                }
 
                 routine.trigger = Trigger::Cron {
                     schedule: effective_schedule.to_string(),
@@ -1388,6 +1461,12 @@ impl Tool for RoutineUpdateTool {
             }
         }
 
+        let updated_fingerprint = routine_verification_fingerprint(&routine);
+        if updated_fingerprint != original_fingerprint {
+            verification_reset = true;
+            routine.state = reset_routine_verification_state(&routine.state, updated_fingerprint);
+        }
+
         self.store
             .update_routine(&routine)
             .await
@@ -1396,12 +1475,14 @@ impl Tool for RoutineUpdateTool {
         // Refresh event cache in case trigger changed
         self.engine.refresh_event_cache().await;
 
+        let verification = verification_result_payload(&routine, verification_reset);
         let result = serde_json::json!({
-            "name": routine.name,
+            "name": routine.name.clone(),
             "enabled": routine.enabled,
             "trigger_type": routine.trigger.type_tag(),
             "next_fire_at": routine.next_fire_at.map(|t| t.to_rfc3339()),
             "status": "updated",
+            "verification": verification,
         });
 
         Ok(ToolOutput::success(result, start.elapsed()))
@@ -2544,6 +2625,28 @@ mod tests {
         assert!(
             schema_property(&schema, "source").is_object(),
             "event_emit discovery schema should keep source alias",
+        );
+    }
+
+    /// Regression: routine_create must fall back to ctx.metadata for delivery
+    /// config when the LLM omits delivery.channel/user. This verifies the
+    /// parsing layer returns None so the execute path triggers the fallback.
+    #[test]
+    fn routine_create_omitted_delivery_enables_context_fallback() {
+        let params = serde_json::json!({
+            "name": "ping-every-5",
+            "prompt": "Send Ping in this channel.",
+            "request": { "kind": "cron", "schedule": "*/5 * * * *" }
+        });
+
+        let parsed = parse_routine_create_request(&params).expect("parse");
+        assert!(
+            parsed.delivery.channel.is_none(),
+            "omitted delivery.channel should be None so execute() falls back to ctx.metadata",
+        );
+        assert!(
+            parsed.delivery.user.is_none(),
+            "omitted delivery.user should be None so execute() falls back to ctx.metadata",
         );
     }
 
