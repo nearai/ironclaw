@@ -6,7 +6,6 @@
 #[cfg(test)]
 mod tests {
     use crate::agent::routine::{NotifyConfig, Routine, RoutineAction, RoutineGuardrails, Trigger};
-    use std::collections::HashMap;
     use std::time::Duration;
     use uuid::Uuid;
 
