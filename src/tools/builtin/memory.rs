@@ -354,12 +354,18 @@ impl Tool for MemoryWriteTool {
 
         // Apply metadata BEFORE the write/patch so that metadata-driven flags
         // (skip_indexing, skip_versioning) take effect for this operation,
-        // not just subsequent ones. See review comments #10-11,15.
+        // not just subsequent ones.
         //
         // Merge incoming metadata with existing to avoid silently dropping
         // previously-set keys (e.g. skip_versioning lost when hygiene is added).
+        //
+        // Skip when a layer is specified: get_or_create operates on the primary
+        // scope and would create a ghost document there, while the actual content
+        // write targets the layer's scope.
         let metadata_param = params.get("metadata").filter(|m| m.is_object());
-        if let Some(meta) = metadata_param {
+        if let Some(meta) = metadata_param
+            && layer.is_none()
+        {
             // get_or_create ensures the document exists; if it's new, content is "".
             let doc = workspace
                 .get_or_create(&resolved_path)
