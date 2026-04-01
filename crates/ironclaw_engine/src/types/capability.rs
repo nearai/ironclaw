@@ -97,7 +97,7 @@ pub struct PolicyRule {
 pub enum PolicyCondition {
     /// Always applies.
     Always,
-    /// Applies when the action name matches the pattern.
+    /// Applies when the action name exactly matches the pattern.
     ActionMatches { pattern: String },
     /// Applies when the action has a specific effect type.
     EffectTypeIs(EffectType),
@@ -133,6 +133,9 @@ pub struct CapabilityLease {
     pub uses_remaining: Option<u32>,
     /// Whether the lease has been explicitly revoked.
     pub revoked: bool,
+    /// Why the lease was revoked (for audit trail).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revoked_reason: Option<String>,
 }
 
 impl CapabilityLease {
@@ -186,6 +189,7 @@ mod tests {
             max_uses: None,
             uses_remaining: None,
             revoked: false,
+            revoked_reason: None,
         }
     }
 

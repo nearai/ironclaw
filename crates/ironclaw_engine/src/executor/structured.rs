@@ -69,7 +69,7 @@ pub async fn execute_action_calls(
     // the entire batch immediately. Denied/no-lease calls become error results.
 
     for (idx, call) in calls.iter().enumerate() {
-        // 1. Find the lease for this action
+        // 1. Find the lease for this action (read-only lookup for policy check)
         let lease = match leases
             .find_lease_for_action(thread.id, &call.action_name)
             .await
@@ -159,8 +159,12 @@ pub async fn execute_action_calls(
             }
         }
 
-        // 3. Consume a lease use
-        leases.consume_use(lease.id).await?;
+        // 3. Atomically find + consume a lease use under a single write lock.
+        // This avoids the TOCTOU race where a concurrent call could exhaust
+        // the lease between our read-only find (step 1) and this consume.
+        let lease = leases
+            .find_and_consume(thread.id, &call.action_name)
+            .await?;
 
         preflight_results.push(PreflightOutcome::Runnable { index: idx, lease });
     }

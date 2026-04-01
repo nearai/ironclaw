@@ -45,6 +45,7 @@ impl LeaseManager {
             max_uses,
             uses_remaining: max_uses,
             revoked: false,
+            revoked_reason: None,
         };
         self.active.write().await.insert(lease.id, lease.clone());
         lease
@@ -87,11 +88,18 @@ impl LeaseManager {
         Ok(())
     }
 
-    /// Revoke a lease by ID.
-    pub async fn revoke(&self, lease_id: LeaseId, _reason: &str) {
+    /// Revoke a lease by ID with a reason for audit trail.
+    pub async fn revoke(&self, lease_id: LeaseId, reason: &str) {
         let mut leases = self.active.write().await;
         if let Some(lease) = leases.get_mut(&lease_id) {
             lease.revoked = true;
+            lease.revoked_reason = Some(reason.to_string());
+            tracing::debug!(
+                lease_id = ?lease_id,
+                capability = %lease.capability_name,
+                reason,
+                "lease revoked"
+            );
         }
     }
 
@@ -186,6 +194,7 @@ impl LeaseManager {
                 max_uses: parent.uses_remaining, // budget from parent's remaining
                 uses_remaining: parent.uses_remaining,
                 revoked: false,
+                revoked_reason: None,
             });
         }
 
@@ -198,6 +207,33 @@ impl LeaseManager {
         }
 
         child_leases
+    }
+
+    /// Atomically find the lease for an action and consume one use.
+    ///
+    /// Avoids the TOCTOU race between `find_lease_for_action` (read lock) and
+    /// `consume_use` (write lock) — both happen under a single write lock.
+    /// Returns the lease snapshot (post-consume) if found and valid.
+    pub async fn find_and_consume(
+        &self,
+        thread_id: ThreadId,
+        action_name: &str,
+    ) -> Result<CapabilityLease, EngineError> {
+        let mut leases = self.active.write().await;
+        let lease = leases
+            .values_mut()
+            .find(|l| l.thread_id == thread_id && l.is_valid() && l.covers_action(action_name))
+            .ok_or_else(|| EngineError::LeaseNotFound {
+                lease_id: format!("no valid lease for action '{action_name}'"),
+            })?;
+
+        if !lease.consume_use() {
+            return Err(EngineError::LeaseExpired {
+                capability_name: lease.capability_name.clone(),
+            });
+        }
+
+        Ok(lease.clone())
     }
 }
 

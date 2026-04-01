@@ -78,12 +78,22 @@ const FAILURE_TRACKER_TITLE: &str = "orchestrator:failures";
 
 /// Load orchestrator code: runtime version from Store, or compiled-in default.
 ///
+/// When `allow_self_modify` is false, always uses the compiled-in default
+/// regardless of any runtime versions in the Store. This is the safe default
+/// for production — runtime orchestrator patching is opt-in.
+///
 /// Checks the failure tracker — if the latest version has >= 3 consecutive
 /// failures, falls back to the previous version (or compiled-in default).
 pub async fn load_orchestrator(
     store: Option<&Arc<dyn Store>>,
     project_id: ProjectId,
+    allow_self_modify: bool,
 ) -> (String, u64) {
+    if !allow_self_modify {
+        debug!("orchestrator self-modification disabled, using compiled-in default (v0)");
+        return (DEFAULT_ORCHESTRATOR.to_string(), 0);
+    }
+
     let Some(store) = store else {
         debug!("using compiled-in default orchestrator (v0, no store)");
         return (DEFAULT_ORCHESTRATOR.to_string(), 0);
@@ -97,14 +107,24 @@ pub async fn load_orchestrator(
         }
     };
 
-    load_orchestrator_from_docs(&docs)
+    load_orchestrator_from_docs(&docs, allow_self_modify)
 }
 
 /// Load orchestrator from pre-fetched system memory docs.
 ///
 /// When the caller already has the `list_memory_docs` result, use this to
 /// avoid a duplicate Store query. Returns `(code, version)`.
-pub fn load_orchestrator_from_docs(docs: &[crate::types::memory::MemoryDoc]) -> (String, u64) {
+///
+/// Respects `allow_self_modify` — when false, always returns the compiled-in
+/// default. The caller in `loop_engine.rs` passes this from engine config.
+pub fn load_orchestrator_from_docs(
+    docs: &[crate::types::memory::MemoryDoc],
+    allow_self_modify: bool,
+) -> (String, u64) {
+    if !allow_self_modify {
+        return (DEFAULT_ORCHESTRATOR.to_string(), 0);
+    }
+
     // Find all orchestrator versions, sorted by version number descending
     let mut versions: Vec<_> = docs
         .iter()
@@ -2185,7 +2205,7 @@ mod tests {
 
     #[tokio::test]
     async fn load_orchestrator_without_store_returns_default() {
-        let (code, version) = load_orchestrator(None, ProjectId::new()).await;
+        let (code, version) = load_orchestrator(None, ProjectId::new(), true).await;
         assert_eq!(version, 0);
         assert!(code.contains("run_loop"));
         assert!(code.contains("__llm_complete__"));
@@ -2205,7 +2225,8 @@ mod tests {
         doc.metadata = serde_json::json!({"version": 1});
 
         let store = Arc::new(crate::tests::InMemoryStore::with_docs(vec![doc]));
-        let (code, version) = load_orchestrator(Some(&(store as Arc<dyn Store>)), project_id).await;
+        let (code, version) =
+            load_orchestrator(Some(&(store as Arc<dyn Store>)), project_id, true).await;
         assert_eq!(version, 1);
         assert!(code.contains("custom_orchestrator_code"));
     }
@@ -2246,7 +2267,8 @@ mod tests {
         let store = Arc::new(crate::tests::InMemoryStore::with_docs(vec![
             doc_v1, doc_v3, doc_v2,
         ]));
-        let (code, version) = load_orchestrator(Some(&(store as Arc<dyn Store>)), project_id).await;
+        let (code, version) =
+            load_orchestrator(Some(&(store as Arc<dyn Store>)), project_id, true).await;
         assert_eq!(version, 3);
         assert!(code.contains("v3_code"));
     }
@@ -2290,7 +2312,8 @@ mod tests {
         let store = Arc::new(crate::tests::InMemoryStore::with_docs(vec![
             doc_v2, doc_v1, tracker,
         ]));
-        let (code, version) = load_orchestrator(Some(&(store as Arc<dyn Store>)), project_id).await;
+        let (code, version) =
+            load_orchestrator(Some(&(store as Arc<dyn Store>)), project_id, true).await;
 
         // Should skip v2 (too many failures) and load v1
         assert_eq!(version, 1);
@@ -2324,7 +2347,8 @@ mod tests {
         let store = Arc::new(crate::tests::InMemoryStore::with_docs(vec![
             doc_v1, tracker,
         ]));
-        let (code, version) = load_orchestrator(Some(&(store as Arc<dyn Store>)), project_id).await;
+        let (code, version) =
+            load_orchestrator(Some(&(store as Arc<dyn Store>)), project_id, true).await;
 
         // Should fall back to compiled-in default (v0)
         assert_eq!(version, 0);

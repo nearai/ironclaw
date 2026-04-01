@@ -83,17 +83,17 @@ pub fn compact_output_metadata(stdout: &str, return_value: &serde_json::Value) -
     let mut parts = Vec::new();
 
     if !stdout.is_empty() {
-        if stdout.chars().count() > OUTPUT_TRUNCATE_LEN {
+        let char_count = stdout.chars().count();
+        if char_count > OUTPUT_TRUNCATE_LEN {
             let truncated: String = stdout
                 .chars()
-                .skip(stdout.chars().count() - OUTPUT_TRUNCATE_LEN)
+                .skip(char_count - OUTPUT_TRUNCATE_LEN)
                 .collect();
             parts.push(format!(
-                "[TRUNCATED: last {OUTPUT_TRUNCATE_LEN} of {} chars shown]\n{truncated}",
-                stdout.len()
+                "[TRUNCATED: last {OUTPUT_TRUNCATE_LEN} of {char_count} chars shown]\n{truncated}",
             ));
         } else {
-            parts.push(format!("[FULL OUTPUT: {} chars]\n{stdout}", stdout.len()));
+            parts.push(format!("[FULL OUTPUT: {char_count} chars]\n{stdout}"));
         }
     }
 
@@ -1902,5 +1902,78 @@ FINAL(str(results[0]))
         assert!(!result.had_error, "stdout: {}", result.stdout);
         assert_eq!(result.final_answer.as_deref(), Some("gathered"));
         assert_eq!(result.action_results.len(), 1);
+    }
+
+    // ── Sandbox security negative tests ────────────────────────
+
+    /// OS-level operations must be denied or restricted by the Monty VM.
+    #[tokio::test]
+    async fn sandbox_denies_os_operations() {
+        let effects: Arc<dyn EffectExecutor> = Arc::new(MockEffects::new(vec![], vec![]));
+        let thread = make_test_thread();
+
+        // Try to import os and call os.system — should fail
+        let code = r#"
+try:
+    import os
+    os.system("echo pwned")
+    FINAL("ESCAPED: os.system ran")
+except Exception as e:
+    FINAL("blocked: " + type(e).__name__)
+"#;
+        let result = run_code(code, effects, &thread).await.unwrap();
+        let answer = result.final_answer.as_deref().unwrap_or("");
+        assert!(
+            !answer.starts_with("ESCAPED"),
+            "os.system should be blocked, got: {answer}",
+        );
+    }
+
+    /// Resource limits must be enforced — infinite loops should be terminated.
+    #[tokio::test]
+    async fn sandbox_enforces_resource_limits() {
+        let effects: Arc<dyn EffectExecutor> = Arc::new(MockEffects::new(vec![], vec![]));
+        let thread = make_test_thread();
+
+        // Infinite allocation loop — should hit allocation or memory limit
+        let code = r#"
+data = []
+while True:
+    data.append("x" * 10000)
+"#;
+        let result = run_code(code, effects, &thread).await;
+        // Either returns an error or the stdout contains an error message —
+        // the key assertion is that it DOES NOT run forever.
+        if let Ok(r) = result {
+            assert!(
+                r.had_error || r.stdout.contains("Error") || r.stdout.contains("limit"),
+                "resource limit should terminate infinite loop, got stdout: {}",
+                &r.stdout[..r.stdout.len().min(500)],
+            );
+        }
+        // Err(_) is also acceptable — means the VM was killed by resource limits
+    }
+
+    /// Python `import` of system modules must be restricted.
+    #[tokio::test]
+    async fn sandbox_restricts_imports() {
+        let effects: Arc<dyn EffectExecutor> = Arc::new(MockEffects::new(vec![], vec![]));
+        let thread = make_test_thread();
+
+        // Try to import subprocess — should fail
+        let code = r#"
+try:
+    import subprocess
+    result = subprocess.run(["echo", "escaped"], capture_output=True, text=True)
+    FINAL("ESCAPED: " + result.stdout)
+except Exception as e:
+    FINAL("blocked: " + type(e).__name__)
+"#;
+        let result = run_code(code, effects, &thread).await.unwrap();
+        let answer = result.final_answer.as_deref().unwrap_or("");
+        assert!(
+            !answer.starts_with("ESCAPED"),
+            "subprocess import should be blocked, got: {answer}",
+        );
     }
 }

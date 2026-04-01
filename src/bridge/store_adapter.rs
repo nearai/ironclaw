@@ -570,6 +570,11 @@ fn is_orchestrator_code_path(path: &str) -> bool {
     path.starts_with(ORCHESTRATOR_PREFIX) && path.ends_with(".py")
 }
 
+/// Check if a MemoryDoc is a protected orchestrator or prompt overlay document.
+fn is_protected_orchestrator_doc(doc: &MemoryDoc) -> bool {
+    doc.title.starts_with("orchestrator:") || doc.title.starts_with("prompt:")
+}
+
 fn project_dir(name: &str, project_id: ProjectId) -> String {
     let slug = slugify(name, &project_id.0.to_string());
     format!("{PROJECTS_PREFIX}/{slug}")
@@ -1006,6 +1011,33 @@ impl Store for HybridStore {
     }
 
     async fn save_memory_doc(&self, doc: &MemoryDoc) -> Result<(), EngineError> {
+        // Defense-in-depth: block orchestrator/prompt writes when self-modify is
+        // disabled, even if the caller bypassed tool-level checks.
+        if is_protected_orchestrator_doc(doc) {
+            let allow = std::env::var("ORCHESTRATOR_SELF_MODIFY")
+                .map(|v| v == "true" || v == "1")
+                .unwrap_or(false);
+            if !allow {
+                // Allow system-internal writes (v0 seeding, failure tracking) but
+                // block LLM-authored patches (version > 0, non-meta titles).
+                let is_system_internal = doc.title == "orchestrator:failures"
+                    || doc
+                        .metadata
+                        .get("source")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|s| s == "compiled_in");
+                if !is_system_internal {
+                    return Err(EngineError::AccessDenied {
+                        user_id: doc.user_id.clone(),
+                        entity: format!(
+                            "orchestrator doc '{}' (self-modification disabled)",
+                            doc.title
+                        ),
+                    });
+                }
+            }
+        }
+
         self.docs.write().await.insert(doc.id, doc.clone());
         self.persist_doc(doc).await;
         Ok(())

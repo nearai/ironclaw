@@ -980,6 +980,7 @@ mod tests {
             max_uses: None,
             uses_remaining: None,
             revoked: false,
+            revoked_reason: None,
         };
         let ctx = ironclaw_engine::ThreadExecutionContext {
             thread_id: ironclaw_engine::ThreadId::new(),

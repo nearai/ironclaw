@@ -1803,6 +1803,8 @@ async fn chat_auth_cancel_handler(
     Json(_req): Json<AuthCancelRequest>,
 ) -> Result<Json<ActionResponse>, (StatusCode, String)> {
     clear_auth_mode(&state, &user.user_id).await;
+    // Also clear engine v2 pending auth so the next message isn't consumed as a token.
+    crate::bridge::clear_engine_pending_auth(&user.user_id).await;
     Ok(Json(ActionResponse::ok("Auth cancelled")))
 }
 
@@ -1894,6 +1896,15 @@ struct HistoryQuery {
     before: Option<String>,
 }
 
+/// Check engine v2 pending auth state and return a PendingAuthInfo if active.
+async fn engine_pending_auth_info(user_id: &str) -> Option<PendingAuthInfo> {
+    let (cred_name, instructions) = crate::bridge::get_engine_pending_auth(user_id).await?;
+    Some(PendingAuthInfo {
+        extension_name: cred_name,
+        instructions,
+    })
+}
+
 async fn chat_history_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
@@ -1967,7 +1978,7 @@ async fn chat_history_handler(
             has_more,
             oldest_timestamp,
             pending_approval: None,
-            pending_auth: None,
+            pending_auth: engine_pending_auth_info(&user.user_id).await,
         }));
     }
 
@@ -2023,7 +2034,7 @@ async fn chat_history_handler(
             has_more: false,
             oldest_timestamp: None,
             pending_approval,
-            pending_auth: None,
+            pending_auth: engine_pending_auth_info(&user.user_id).await,
         }));
     }
 
@@ -2043,7 +2054,7 @@ async fn chat_history_handler(
                 has_more,
                 oldest_timestamp,
                 pending_approval: None,
-                pending_auth: None,
+                pending_auth: engine_pending_auth_info(&user.user_id).await,
             }));
         }
     }
@@ -2055,7 +2066,7 @@ async fn chat_history_handler(
         has_more: false,
         oldest_timestamp: None,
         pending_approval: None,
-        pending_auth: None,
+        pending_auth: engine_pending_auth_info(&user.user_id).await,
     }))
 }
 

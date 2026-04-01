@@ -197,10 +197,16 @@ impl ExecutionLoop {
         // Pre-fetch system memory docs once — used by both prompt overlay and
         // orchestrator loading, avoiding a duplicate Store query.
         let system_docs = if let Some(store) = self.store.as_ref() {
-            store
+            match store
                 .list_memory_docs(self.thread.project_id, "system")
                 .await
-                .unwrap_or_default()
+            {
+                Ok(docs) => docs,
+                Err(e) => {
+                    debug!("failed to load system docs for orchestrator: {e}");
+                    Vec::new()
+                }
+            }
         } else {
             Vec::new()
         };
@@ -238,9 +244,17 @@ impl ExecutionLoop {
         self.persist_runtime_state(None, &mut persisted_event_count)
             .await?;
 
-        // Load versioned Python orchestrator using pre-fetched docs
+        // Load versioned Python orchestrator using pre-fetched docs.
+        // Self-modification is disabled by default — only the compiled-in v0
+        // runs unless explicitly opted in via ORCHESTRATOR_SELF_MODIFY=true.
+        let allow_self_modify = std::env::var("ORCHESTRATOR_SELF_MODIFY")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false);
         let (orchestrator_code, orchestrator_version) =
-            crate::executor::orchestrator::load_orchestrator_from_docs(&system_docs);
+            crate::executor::orchestrator::load_orchestrator_from_docs(
+                &system_docs,
+                allow_self_modify,
+            );
 
         debug!(
             thread_id = %self.thread.id,

@@ -50,6 +50,16 @@ impl WorkspaceResolver for FixedWorkspaceResolver {
     }
 }
 
+/// Check if a path controls the execution loop or system prompt.
+/// Writes are blocked when `ORCHESTRATOR_SELF_MODIFY` is disabled.
+fn is_protected_orchestrator_path(path: &str) -> bool {
+    matches!(
+        path,
+        "orchestrator:main" | "prompt:codeact_preamble" | "orchestrator:failures"
+    ) || path.starts_with("orchestrator:")
+        || path.starts_with("prompt:")
+}
+
 /// Detect paths that are clearly local filesystem references, not workspace-memory docs.
 ///
 /// Examples:
@@ -272,6 +282,22 @@ impl Tool for MemoryWriteTool {
                  Use write_file for filesystem writes. For opening files in an editor, use shell with: open \"<absolute_path>\".",
                 target
             )));
+        }
+
+        // Block writes to orchestrator and prompt overlay paths when
+        // self-modification is disabled. These are security-sensitive docs
+        // that control the execution loop and system prompt.
+        if is_protected_orchestrator_path(target) {
+            let allow = std::env::var("ORCHESTRATOR_SELF_MODIFY")
+                .map(|v| v == "true" || v == "1")
+                .unwrap_or(false);
+            if !allow {
+                return Err(ToolError::NotAuthorized(format!(
+                    "Writing to '{}' is blocked — orchestrator self-modification is disabled. \
+                     Set ORCHESTRATOR_SELF_MODIFY=true to enable runtime patching.",
+                    target
+                )));
+            }
         }
 
         let workspace = self.resolver.resolve(&ctx.user_id).await;

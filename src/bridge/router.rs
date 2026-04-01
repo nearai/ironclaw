@@ -38,6 +38,45 @@ fn engine_err(context: &str, e: impl std::fmt::Display) -> Error {
     })
 }
 
+/// Resolve the default project for a user, creating one if needed.
+///
+/// In multi-user deployments each user gets their own project so threads,
+/// missions, and memory docs are isolated. The owner's project (passed as
+/// `fallback`) is used when the user IS the owner, avoiding an extra store
+/// lookup in the common single-user case.
+async fn resolve_user_project(
+    store: &Arc<dyn Store>,
+    user_id: &str,
+    fallback: ironclaw_engine::ProjectId,
+) -> Result<ironclaw_engine::ProjectId, Error> {
+    // Fast path: check if fallback project belongs to this user
+    if let Ok(Some(project)) = store.load_project(fallback).await
+        && project.user_id == user_id
+    {
+        return Ok(fallback);
+    }
+
+    // Look for an existing default project owned by this user
+    let projects = store
+        .list_projects(user_id)
+        .await
+        .map_err(|e| engine_err("project lookup", e))?;
+
+    if let Some(project) = projects.iter().find(|p| p.name == "default") {
+        return Ok(project.id);
+    }
+
+    // Create a new default project for this user
+    let project = ironclaw_engine::Project::new(user_id, "default", "Default project");
+    let pid = project.id;
+    store
+        .save_project(&project)
+        .await
+        .map_err(|e| engine_err("create project", e))?;
+    debug!(user_id, project_id = %pid, "created default project for user");
+    Ok(pid)
+}
+
 /// Pending approval info stored between the NeedApproval outcome and the user's response.
 #[derive(Clone)]
 struct PendingApproval {
@@ -1620,13 +1659,17 @@ async fn handle_with_engine_inner(
         .await
         .map_err(|e| engine_err("conversation error", e))?;
 
+    // Resolve per-user project (creates if needed).
+    let project_id =
+        resolve_user_project(&state.store, &message.user_id, state.default_project_id).await?;
+
     // Handle the message — spawns a new thread or injects into active one
     let thread_id = state
         .conversation_manager
         .handle_user_message(
             conv_id,
             content,
-            state.default_project_id,
+            project_id,
             &message.user_id,
             ThreadConfig::default(),
         )

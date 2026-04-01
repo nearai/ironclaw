@@ -1016,10 +1016,22 @@ async fn process_self_improvement_output(
 
     let project_id = mission.project_id;
 
+    // Check if self-modification is allowed before applying prompt/orchestrator changes
+    let allow_self_modify = std::env::var("ORCHESTRATOR_SELF_MODIFY")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false);
+
     // Process prompt additions
     if let Some(additions) = json_val.get("prompt_additions").and_then(|v| v.as_array())
         && !additions.is_empty()
     {
+        if !allow_self_modify {
+            debug!(
+                "self-improvement: skipping prompt additions — ORCHESTRATOR_SELF_MODIFY is disabled"
+            );
+            return Ok(());
+        }
+
         let new_rules: Vec<String> = additions
             .iter()
             .filter_map(|v| v.as_str().map(String::from))
@@ -1982,6 +1994,9 @@ mod tests {
         let id = mission.id;
         store.save_mission(&mission).await.unwrap();
 
+        // Enable self-modification for this test so prompt additions are applied
+        unsafe { std::env::set_var("ORCHESTRATOR_SELF_MODIFY", "true") };
+
         let response = r#"{"prompt_additions": ["9. Never call web_fetch — use http() instead."], "fix_patterns": [], "level": 1}"#;
         let outcome = ThreadOutcome::Completed {
             response: Some(response.into()),
@@ -1989,6 +2004,8 @@ mod tests {
         process_mission_outcome(&store, id, ThreadId::new(), &outcome)
             .await
             .unwrap();
+
+        unsafe { std::env::remove_var("ORCHESTRATOR_SELF_MODIFY") };
 
         // Verify prompt overlay was saved
         let docs = store.list_memory_docs(project_id, "system").await.unwrap();
