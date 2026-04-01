@@ -194,12 +194,18 @@ impl Channel for RelayChannel {
                         "sender_id": event.sender_id,
                         "sender_name": event.display_name(),
                         "event_type": event.event_type,
-                        "thread_id": event.thread_id,
+                        "thread_id": event.thread_id.as_deref().unwrap_or(&event.id),
                         "provider": event.provider,
                     }));
 
+                // Use the original thread_id if present (already in a thread),
+                // otherwise use the message timestamp (event.id) so that
+                // responses are threaded under the user's message in channels.
+                // Fall back to channel_id only if event.id is missing.
                 let msg = if let Some(ref thread_id) = event.thread_id {
                     msg.with_thread(thread_id)
+                } else if !event.id.is_empty() {
+                    msg.with_thread(&event.id)
                 } else {
                     msg.with_thread(&event.channel_id)
                 };
@@ -646,6 +652,53 @@ mod tests {
         assert!(
             err.contains("channel_id"),
             "expected channel_id error, got: {err}"
+        );
+    }
+
+    /// Regression: channel mentions must use the message timestamp (event.id)
+    /// as thread_id, not the channel_id. Slack requires thread_ts to be a
+    /// message timestamp for threading to work.
+    #[tokio::test]
+    async fn start_uses_message_ts_as_thread_id_for_mentions() {
+        let (tx, rx) = mpsc::channel(64);
+        let channel =
+            RelayChannel::new(test_client(), "T123".into(), "inst1".into(), tx.clone(), rx);
+
+        let mut stream = channel.start().await.unwrap();
+
+        // Simulate a channel mention (no thread_id, id = message ts)
+        tx.send(ChannelEvent {
+            id: "1609459200.000100".into(),
+            event_type: "mention".into(),
+            provider: "slack".into(),
+            provider_scope: "T123".into(),
+            channel_id: "C456".into(),
+            sender_id: "U789".into(),
+            sender_name: Some("alice".into()),
+            content: Some("hello bot".into()),
+            thread_id: None,
+            raw: serde_json::Value::Null,
+            timestamp: None,
+        })
+        .await
+        .unwrap();
+
+        use futures::StreamExt;
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(1), stream.next())
+            .await
+            .unwrap()
+            .unwrap();
+
+        // thread_id should be the message timestamp, NOT the channel_id
+        assert_eq!(
+            msg.thread_id.as_deref(),
+            Some("1609459200.000100"),
+            "thread_id should be the message ts for threading, not the channel_id"
+        );
+        // metadata should also have the correct thread_id
+        assert_eq!(
+            msg.metadata.get("thread_id").and_then(|v| v.as_str()),
+            Some("1609459200.000100"),
         );
     }
 
