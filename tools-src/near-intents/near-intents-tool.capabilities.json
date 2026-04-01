@@ -1,0 +1,102 @@
+{
+  "version": "0.1.0",
+  "wit_version": "0.3.0",
+  "description": "Read-only NEAR Intents / Defuse tool for token resolution, protocol metadata, balance queries, and dry swap quotes. No authentication required.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "action": {
+        "type": "string",
+        "enum": [
+          "resolve_token",
+          "reverse_resolve_token",
+          "get_balance",
+          "get_swap_quote",
+          "get_protocol_metadata"
+        ],
+        "description": "Which read-only action to perform."
+      },
+      "query": {
+        "type": "string",
+        "description": "Token reference to resolve. Examples: 'ethereum', 'USDC on arbitrum', 'wrapped near', 'bitcoin'."
+      },
+      "list_all": {
+        "type": "boolean",
+        "description": "Return all known Defuse tokens instead of resolving a specific query.",
+        "default": false
+      },
+      "asset_id": {
+        "type": "string",
+        "description": "Defuse asset ID to look up, for example 'nep141:wrap.near'."
+      },
+      "account_id": {
+        "type": "string",
+        "description": "NEAR account ID or 0x-prefixed wallet address used for balance and quote queries."
+      },
+      "token_ids": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "Specific Defuse asset IDs to query. If omitted, all known tokens are requested and zero balances are filtered out."
+      },
+      "from_token": {
+        "type": "string",
+        "description": "Source token symbol or Defuse asset ID for a dry quote."
+      },
+      "to_token": {
+        "type": "string",
+        "description": "Destination token symbol or Defuse asset ID for a dry quote."
+      },
+      "amount": {
+        "type": "string",
+        "description": "Human-readable amount to quote, for example '100.5'."
+      },
+      "slippage_bps": {
+        "type": "integer",
+        "description": "Slippage tolerance in basis points. Defaults to 100 (1%)."
+      },
+      "swap_type": {
+        "type": "string",
+        "description": "Swap type for the dry quote. Supported values: EXACT_INPUT or EXACT_OUTPUT."
+      }
+    },
+    "required": [
+      "action"
+    ]
+  },
+  "capabilities": {
+    "http": {
+      "allowlist": [
+        {
+          "host": "1click.chaindefuser.com",
+          "path_prefix": "/v0/tokens",
+          "methods": [
+            "GET"
+          ]
+        },
+        {
+          "host": "1click.chaindefuser.com",
+          "path_prefix": "/v0/quote",
+          "methods": [
+            "POST"
+          ]
+        },
+        {
+          "host": "rpc.mainnet.near.org",
+          "path_prefix": "/",
+          "methods": [
+            "POST"
+          ]
+        }
+      ],
+      "rate_limit": {
+        "requests_per_minute": 60,
+        "requests_per_hour": 1000
+      }
+    }
+  },
+  "auth": {
+    "method": "none"
+  }
+}

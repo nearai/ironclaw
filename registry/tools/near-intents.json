@@ -1,0 +1,34 @@
+{
+  "name": "near-intents",
+  "display_name": "NEAR Intents",
+  "kind": "tool",
+  "version": "0.1.0",
+  "wit_version": "0.3.0",
+  "description": "Read-only NEAR Intents / Defuse token resolution, balances, metadata, and dry quotes",
+  "keywords": [
+    "near",
+    "intents",
+    "defuse",
+    "defi",
+    "wallet",
+    "trading"
+  ],
+  "source": {
+    "dir": "tools-src/near-intents",
+    "capabilities": "near-intents-tool.capabilities.json",
+    "crate_name": "near-intents-tool"
+  },
+  "artifacts": {},
+  "auth_summary": {
+    "method": "none",
+    "provider": "NEAR Intents / Defuse",
+    "secrets": [],
+    "shared_auth": null,
+    "setup_url": null
+  },
+  "tags": [
+    "trading",
+    "near",
+    "read-only"
+  ]
+}
