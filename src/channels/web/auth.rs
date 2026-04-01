@@ -275,7 +275,7 @@ impl DbAuthenticator {
     }
 }
 
-// ── Combined auth state ─────────────────────────────────────────────────���
+// ── Combined auth state ────────────────────────────────────────────────────
 
 /// Combined auth state: tries env-var tokens first, then DB-backed tokens,
 /// then OIDC JWT (if configured).
