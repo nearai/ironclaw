@@ -75,23 +75,35 @@
                 "group": "Channels",
                 "icon": "message",
                 "pages": [
-                  "tunnel",
-                  "channels/local",
-                  "channels/signal",
-                  "channels/telegram",
-                  "channels/webhook"
+                  "channels/overview",
+                  {
+                    "group": "Built-in",
+                    "pages": [
+                      "tunnel",
+                      "channels/local",
+                      "channels/signal",
+                      "channels/telegram",
+                      "channels/webhook"
+                    ]
+                  }
                 ]
               },
               {
                 "group": "Extensions (Tools)",
                 "icon": "hammer",
                 "pages": [
-                  "extensions/file-tools",
-                  "extensions/github",
-                  "extensions/google-calendar",
-                  "extensions/mcp",
-                  "extensions/web-search",
-                  "extensions/shell"
+                  "extensions/overview",
+                  {
+                    "group": "Built-in",
+                    "pages": [
+                      "extensions/file-tools",
+                      "extensions/github",
+                      "extensions/google-calendar",
+                      "extensions/mcp",
+                      "extensions/web-search",
+                      "extensions/shell"
+                    ]
+                  }
                 ]
               },
               {
