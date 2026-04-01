@@ -168,6 +168,44 @@ All commands parsed by `SubmissionParser::parse()`:
 
 **`SystemCommand` vs control**: `SystemCommand` variants bypass thread-state checks entirely (no session lock, no turn creation). `Quit` returns `Ok(None)` from `handle_message` which breaks the main loop.
 
+### Thread/History Command Patterns
+
+**List all conversations:**
+```bash
+/history                    # List persistent (DB) + in-memory threads
+/thread list                # Alias for /history
+```
+
+**Output format:**
+```
+Session: <session-uuid>
+Active thread: <thread-uuid>
+
+Persistent threads (use /thread <id> to hydrate):
+* telegram/private messages=42 updated=2026-04-01T12:00:00Z — Previous Chat [DB]
+  web/browser messages=15 updated=2026-04-01T11:30:00Z — Web Session [DB]
+
+Current session threads:
+* Idle turns=3 updated=2026-04-01T12:05:00Z — Active Web Thread
+
+Use /thread <id> to switch threads.
+```
+
+**Switch to a thread:**
+```bash
+/thread 11111111-1111-1111-1111-111111111111   # Switch to existing thread
+/thread new                                     # Create new thread
+```
+
+**Key behaviors:**
+- `[DB]` indicator = thread exists in database but not yet hydrated in current session
+- `*` prefix = currently active thread
+- Persistent threads sorted by `last_activity` (most recent first)
+- In-memory threads filtered to exclude already-listed DB threads (no duplicates)
+- Use `/thread <uuid>` to hydrate a DB thread into the current session
+
+**Implementation:** `commands.rs::handle_history_command()` — lists from `tenant.store().list_conversations_all_channels(50)` then appends in-memory-only threads.
+
 ## Routines System
 
 Routines are named, persistent, user-owned automated tasks that fire independently when their trigger conditions are met. Each routine runs with only its own prompt and context — not the full session history.
