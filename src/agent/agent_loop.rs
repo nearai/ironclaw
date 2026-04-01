@@ -961,6 +961,7 @@ impl Agent {
                                 .metadata
                                 .get("notify_user")
                                 .and_then(|v| v.as_str())
+                                .filter(|s| !s.is_empty())
                                 .unwrap_or(&message.user_id);
 
                             let outgoing = OutgoingResponse {
@@ -981,8 +982,15 @@ impl Agent {
                                         error = %e,
                                         "Failed to send routine review response, falling back"
                                     );
-                                    let _ =
+                                    let results =
                                         self.channels.broadcast_all(target_user, outgoing).await;
+                                    if results.iter().all(|(_, r)| r.is_err())
+                                        && !results.is_empty()
+                                    {
+                                        tracing::warn!(
+                                            "Routine review response failed to deliver on all channels"
+                                        );
+                                    }
                                 }
                             } else {
                                 // notify_channel was absent or empty — log so
@@ -1001,7 +1009,13 @@ impl Agent {
                                         "notify_channel is empty, falling back to broadcast_all"
                                     );
                                 }
-                                let _ = self.channels.broadcast_all(target_user, outgoing).await;
+                                let results =
+                                    self.channels.broadcast_all(target_user, outgoing).await;
+                                if results.iter().all(|(_, r)| r.is_err()) && !results.is_empty() {
+                                    tracing::warn!(
+                                        "Routine review response failed to deliver on all channels"
+                                    );
+                                }
                             }
                         }
                     } else {

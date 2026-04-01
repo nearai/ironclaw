@@ -2167,8 +2167,11 @@ async fn inject_agent_review(
     }
 
     // Rate limit: tumbling hourly window (resets when wall-clock hour elapses).
-    // Note: the load/check/increment is not atomic — concurrent tokio tasks from
-    // full_job routines could both pass the check and overshoot the limit by 1-2.
+    // Note: the load/check/increment and window reset are not atomic. Concurrent
+    // tokio tasks can both see the window boundary, both reset the counter to 0,
+    // losing the entire hour's count. Worst case: limit + N reviews in a ~1-hour
+    // span (where N = number of concurrent racing tasks). Acceptable for a soft
+    // cost guard; use compare_exchange on window_start for stricter enforcement.
     // Acceptable for a soft rate limit with a default of 10/hour.
     let now_secs = Utc::now().timestamp();
     let window_start = ctx.agent_review_window_start.load(Ordering::Relaxed);
@@ -2346,11 +2349,14 @@ fn strip_html_tags(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+
     use chrono::Utc;
     use uuid::Uuid;
 
     use crate::agent::routine::{
-        NotifyConfig, Routine, RoutineAction, RoutineGuardrails, RunStatus, Trigger,
+        NotifyConfig, Routine, RoutineAction, RoutineGuardrails, RoutineRun, RunStatus, Trigger,
     };
     use crate::channels::IncomingMessage;
     use crate::config::RoutineConfig;
@@ -3009,62 +3015,6 @@ mod tests {
     /// Verify that agent review only triggers when the matching `agent_review_on_*`
     /// flag is set for the given status, and that `agent_review_enabled` gates it.
     #[test]
-    fn test_inject_agent_review_status_gating() {
-        // agent_review_on_success=true, others false
-        let notify = NotifyConfig {
-            agent_review_on_success: true,
-            agent_review_on_attention: false,
-            agent_review_on_failure: false,
-            ..Default::default()
-        };
-
-        let should_review = |status: RunStatus| -> bool {
-            match status {
-                RunStatus::Ok => notify.agent_review_on_success,
-                RunStatus::Attention => notify.agent_review_on_attention,
-                RunStatus::Failed => notify.agent_review_on_failure,
-                RunStatus::Running => false,
-            }
-        };
-
-        assert!(should_review(RunStatus::Ok));
-        assert!(!should_review(RunStatus::Attention));
-        assert!(!should_review(RunStatus::Failed));
-        assert!(!should_review(RunStatus::Running));
-    }
-
-    /// Verify that `agent_review_enabled = false` prevents review even when the
-    /// per-status flag is on.
-    #[test]
-    fn test_inject_agent_review_respects_enabled_flag() {
-        let config = RoutineConfig {
-            agent_review_enabled: false,
-            ..RoutineConfig::default()
-        };
-
-        let notify = NotifyConfig {
-            agent_review_on_success: true,
-            agent_review_on_attention: true,
-            agent_review_on_failure: true,
-            ..Default::default()
-        };
-
-        // Even though all per-status flags are true, config disables it.
-        let should_inject = |status: RunStatus| -> bool {
-            let should_review = match status {
-                RunStatus::Ok => notify.agent_review_on_success,
-                RunStatus::Attention => notify.agent_review_on_attention,
-                RunStatus::Failed => notify.agent_review_on_failure,
-                RunStatus::Running => false,
-            };
-            should_review && config.agent_review_enabled
-        };
-
-        assert!(!should_inject(RunStatus::Ok));
-        assert!(!should_inject(RunStatus::Attention));
-        assert!(!should_inject(RunStatus::Failed));
-    }
-
     /// Verify that the default config has `agent_review_enabled = false`.
     #[test]
     fn test_agent_review_disabled_by_default() {
@@ -3082,46 +3032,10 @@ mod tests {
         assert_eq!(config.max_agent_reviews_per_hour, 10);
     }
 
-    /// Rate limit counter logic: once count reaches the limit, further reviews
-    /// should be skipped.
-    #[test]
-    fn test_agent_review_rate_limit_blocks_when_exceeded() {
-        use std::sync::atomic::Ordering;
-
-        let limit: u32 = 3;
-        let counter = std::sync::atomic::AtomicU32::new(0);
-
-        // First 3 should pass
-        for _ in 0..limit {
-            let current = counter.load(Ordering::Relaxed);
-            assert!(current < limit);
-            counter.fetch_add(1, Ordering::Relaxed);
-        }
-
-        // 4th should be blocked
-        let current = counter.load(Ordering::Relaxed);
-        assert!(current >= limit, "Counter should have reached the limit");
-    }
-
-    /// Circuit breaker logic: after 3 consecutive failures, reviews are disabled.
-    #[test]
-    fn test_agent_review_circuit_breaker() {
-        use std::sync::atomic::Ordering;
-
-        let failures = std::sync::atomic::AtomicU32::new(0);
-
-        // Below threshold — should allow
-        failures.store(2, Ordering::Relaxed);
-        assert!(failures.load(Ordering::Relaxed) < 3);
-
-        // At threshold — should block
-        failures.store(3, Ordering::Relaxed);
-        assert!(failures.load(Ordering::Relaxed) >= 3);
-
-        // Reset on success
-        failures.store(0, Ordering::Relaxed);
-        assert!(failures.load(Ordering::Relaxed) < 3);
-    }
+    // Note: status gating, enabled-flag gating, rate limiting, and circuit
+    // breaker behavior are tested through the real inject_agent_review function
+    // in test_inject_agent_review_sends_message_on_failure and
+    // test_inject_agent_review_rate_limit_integration below.
 
     #[test]
     fn test_sanitize_summary_strips_html() {
@@ -3161,6 +3075,9 @@ mod tests {
             on_attention: true,
             on_failure: true,
             on_success: false,
+            agent_review_on_success: false,
+            agent_review_on_attention: false,
+            agent_review_on_failure: false,
         };
 
         let prompt =
