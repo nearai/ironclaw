@@ -32,7 +32,7 @@ use tokio::sync::mpsc;
 
 use crate::channels::OutgoingResponse;
 use crate::llm::{ChatMessage, CompletionRequest, LlmProvider, Reasoning};
-use crate::tenant::AdminScope;
+use crate::tenant::SystemScope;
 use crate::workspace::Workspace;
 use crate::workspace::hygiene::HygieneConfig;
 
@@ -182,7 +182,7 @@ pub struct HeartbeatRunner {
     workspace: Arc<Workspace>,
     llm: Arc<dyn LlmProvider>,
     response_tx: Option<mpsc::Sender<OutgoingResponse>>,
-    store: Option<AdminScope>,
+    store: Option<SystemScope>,
     consecutive_failures: u32,
 }
 
@@ -211,8 +211,8 @@ impl HeartbeatRunner {
         self
     }
 
-    /// Set the admin-scoped database store for persistent heartbeat conversations.
-    pub fn with_store(mut self, store: AdminScope) -> Self {
+    /// Set the system-scoped database store for persistent heartbeat conversations.
+    pub fn with_store(mut self, store: SystemScope) -> Self {
         self.store = Some(store);
         self
     }
@@ -497,7 +497,7 @@ pub fn spawn_heartbeat(
     workspace: Arc<Workspace>,
     llm: Arc<dyn LlmProvider>,
     response_tx: Option<mpsc::Sender<OutgoingResponse>>,
-    store: Option<AdminScope>,
+    store: Option<SystemScope>,
 ) -> tokio::task::JoinHandle<()> {
     let mut runner = HeartbeatRunner::new(config, hygiene_config, workspace, llm);
     if let Some(tx) = response_tx {
@@ -521,7 +521,7 @@ pub fn spawn_multi_user_heartbeat(
     hygiene_config: HygieneConfig,
     llm: Arc<dyn LlmProvider>,
     response_tx: Option<mpsc::Sender<OutgoingResponse>>,
-    store: AdminScope,
+    store: SystemScope,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         if !config.enabled {
@@ -588,7 +588,7 @@ pub fn spawn_multi_user_heartbeat(
                     continue;
                 }
 
-                let workspace = Arc::new(Workspace::new_with_db(user_id, Arc::clone(store.db())));
+                let workspace = Arc::new(store.workspace_for_user(user_id.as_str()));
 
                 // Drain completed tasks to stay within the concurrency cap.
                 while join_set.len() >= MAX_CONCURRENT_HEARTBEATS {
@@ -905,7 +905,7 @@ mod tests {
             Arc<crate::workspace::Workspace>,
             Arc<dyn crate::llm::LlmProvider>,
             Option<tokio::sync::mpsc::Sender<crate::channels::OutgoingResponse>>,
-            Option<AdminScope>,
+            Option<SystemScope>,
         ) -> tokio::task::JoinHandle<()> = spawn_heartbeat;
         let _ = _fn_ptr;
     }

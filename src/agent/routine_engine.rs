@@ -34,7 +34,7 @@ use crate::extensions::ExtensionManager;
 use crate::llm::{
     ChatMessage, CompletionRequest, FinishReason, LlmProvider, ToolCall, ToolCompletionRequest,
 };
-use crate::tenant::AdminScope;
+use crate::tenant::SystemScope;
 use crate::tools::{
     ToolError, ToolRegistry, autonomous_allowed_tool_names, autonomous_unavailable_message,
     prepare_tool_params,
@@ -100,7 +100,7 @@ pub(crate) fn routine_matches_message(routine: &Routine, message: &IncomingMessa
 /// The routine execution engine.
 pub struct RoutineEngine {
     config: RoutineConfig,
-    store: AdminScope,
+    store: SystemScope,
     llm: Arc<dyn LlmProvider>,
     workspace: Arc<Workspace>,
     /// Sender for notifications (routed to channel manager).
@@ -129,7 +129,7 @@ impl RoutineEngine {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         config: RoutineConfig,
-        store: AdminScope,
+        store: SystemScope,
         llm: Arc<dyn LlmProvider>,
         workspace: Arc<Workspace>,
         notify_tx: mpsc::Sender<OutgoingResponse>,
@@ -793,10 +793,7 @@ impl RoutineEngine {
         let routine_workspace = if routine.user_id == self.workspace.user_id() {
             self.workspace.clone()
         } else {
-            Arc::new(Workspace::new_with_db(
-                &routine.user_id,
-                Arc::clone(self.store.db()),
-            ))
+            Arc::new(self.store.workspace_for_user(&routine.user_id))
         };
 
         // Execute inline for manual triggers (caller wants to wait)
@@ -933,10 +930,7 @@ impl RoutineEngine {
         let routine_workspace = if routine.user_id == self.workspace.user_id() {
             self.workspace.clone()
         } else {
-            Arc::new(Workspace::new_with_db(
-                &routine.user_id,
-                Arc::clone(self.store.db()),
-            ))
+            Arc::new(self.store.workspace_for_user(&routine.user_id))
         };
 
         let engine = EngineContext {
@@ -996,7 +990,7 @@ impl RoutineEngine {
 /// an active state (Pending/InProgress/Stuck). Maps the final `JobState` to
 /// a `RunStatus` for the routine run.
 struct FullJobWatcher {
-    store: AdminScope,
+    store: SystemScope,
     job_id: Uuid,
     routine_name: String,
 }
@@ -1007,7 +1001,7 @@ impl FullJobWatcher {
     /// Safety ceiling: 24 hours, derived from POLL_INTERVAL.
     const MAX_POLLS: u32 = (24 * 60 * 60) / Self::POLL_INTERVAL.as_secs() as u32;
 
-    fn new(store: AdminScope, job_id: Uuid, routine_name: String) -> Self {
+    fn new(store: SystemScope, job_id: Uuid, routine_name: String) -> Self {
         Self {
             store,
             job_id,
@@ -1079,7 +1073,7 @@ impl FullJobWatcher {
 /// Shared context passed to the execution function.
 struct EngineContext {
     config: RoutineConfig,
-    store: AdminScope,
+    store: SystemScope,
     llm: Arc<dyn LlmProvider>,
     workspace: Arc<Workspace>,
     notify_tx: mpsc::Sender<OutgoingResponse>,

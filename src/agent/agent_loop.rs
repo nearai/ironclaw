@@ -249,7 +249,7 @@ impl Agent {
                 store: deps
                     .store
                     .as_ref()
-                    .map(|db| crate::tenant::AdminScope::new(Arc::clone(db))),
+                    .map(|db| crate::tenant::SystemScope::new(Arc::clone(db))),
                 hooks: deps.hooks.clone(),
             },
         );
@@ -375,15 +375,15 @@ impl Agent {
         )
     }
 
-    /// Get an admin-scoped database accessor for cross-tenant operations.
+    /// Get a system-scoped database accessor for cross-tenant operations.
     ///
     /// Only for system-level components (heartbeat, routine engine, self-repair,
     /// scheduler). Handler code should use [`tenant_ctx()`](Self::tenant_ctx) instead.
-    pub(super) fn admin_store(&self) -> Option<crate::tenant::AdminScope> {
+    pub(super) fn system_store(&self) -> Option<crate::tenant::SystemScope> {
         self.deps
             .store
             .as_ref()
-            .map(|db| crate::tenant::AdminScope::new(Arc::clone(db)))
+            .map(|db| crate::tenant::SystemScope::new(Arc::clone(db)))
     }
 
     pub(super) fn skill_registry(&self) -> Option<&Arc<std::sync::RwLock<SkillRegistry>>> {
@@ -471,8 +471,8 @@ impl Agent {
             self.config.stuck_threshold,
             self.config.max_repair_attempts,
         );
-        if let Some(admin) = self.admin_store() {
-            self_repair = self_repair.with_store(admin);
+        if let Some(system) = self.system_store() {
+            self_repair = self_repair.with_store(system);
         }
         if let Some(ref builder) = self.deps.builder {
             self_repair = self_repair.with_builder(Arc::clone(builder), Arc::clone(self.tools()));
@@ -668,13 +668,13 @@ impl Agent {
                         .unwrap_or_default();
 
                     if config.multi_tenant {
-                        if let Some(admin) = self.admin_store() {
+                        if let Some(system) = self.system_store() {
                             Some(spawn_multi_user_heartbeat(
                                 config,
                                 hygiene,
                                 self.cheap_llm().clone(),
                                 Some(notify_tx),
-                                admin,
+                                system,
                             ))
                         } else {
                             tracing::warn!("Multi-tenant heartbeat requires a database store");
@@ -687,7 +687,7 @@ impl Agent {
                             workspace.clone(),
                             self.cheap_llm().clone(),
                             Some(notify_tx),
-                            self.admin_store(),
+                            self.system_store(),
                         ))
                     }
                 } else {
@@ -711,7 +711,7 @@ impl Agent {
 
                     let engine = Arc::new(RoutineEngine::new(
                         rt_config.clone(),
-                        crate::tenant::AdminScope::new(Arc::clone(store)),
+                        crate::tenant::SystemScope::new(Arc::clone(store)),
                         self.llm().clone(),
                         Arc::clone(workspace),
                         notify_tx,

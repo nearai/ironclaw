@@ -1,14 +1,18 @@
 //! Compile-time tenant isolation.
 //!
-//! Provides two database access tiers:
+//! Provides three database access tiers:
 //!
 //! - **[`TenantScope`]** (default): All operations are bound to a single user.
 //!   ID-based lookups return `None` if the resource doesn't belong to this user.
 //!   This is the only way handler code should access the database.
 //!
-//! - **[`AdminScope`]**: Cross-tenant access for system-level operations
+//! - **[`SystemScope`]**: Cross-tenant access for system-level operations
 //!   (heartbeat, routine engine, self-repair). Must be obtained explicitly via
-//!   [`AgentDeps::admin_store()`](crate::agent::AgentDeps::admin_store).
+//!   [`AgentDeps::system_store()`](crate::agent::AgentDeps::system_store).
+//!   Not for human actors.
+//!
+//! - **[`AdminScope`]**: Human admin operations (user management). Requires
+//!   `UserRole::Admin`. Constructable only via [`AdminScope::new`].
 //!
 //! [`TenantCtx`] bundles a `TenantScope` with workspace, cost guard, and
 //! per-tenant rate limiting. Constructed once per request at the entry point
@@ -442,32 +446,32 @@ impl TenantScope {
 }
 
 // ---------------------------------------------------------------------------
-// AdminScope — explicit cross-tenant access
+// SystemScope — cross-tenant access for system processes only
 // ---------------------------------------------------------------------------
 
-/// Cross-tenant database access for system-level operations.
+/// Cross-tenant database access for system-level operations (not human actors).
 ///
 /// **Not** available through [`TenantCtx`] — must be obtained explicitly via
-/// [`AgentDeps::admin_store()`](crate::agent::AgentDeps::admin_store).
+/// [`AgentDeps::system_store()`](crate::agent::AgentDeps::system_store).
 ///
 /// Used by: heartbeat enumeration, routine engine scheduling, self-repair,
 /// scheduler job persistence, worker status updates.
 #[derive(Clone)]
-pub struct AdminScope {
+pub struct SystemScope {
     inner: Arc<dyn Database>,
 }
 
-impl AdminScope {
+impl SystemScope {
     pub fn new(db: Arc<dyn Database>) -> Self {
         Self { inner: db }
     }
 
-    /// Access the raw Database trait object.
+    /// Construct a per-user workspace for system-process operations.
     ///
-    /// Prefer using the typed methods on AdminScope instead. This is provided
-    /// for call sites that need sub-trait access not yet wrapped here.
-    pub fn db(&self) -> &Arc<dyn Database> {
-        &self.inner
+    /// Used by the heartbeat and routine engine to get a workspace scoped to
+    /// a specific user without exposing the raw database handle.
+    pub fn workspace_for_user(&self, user_id: impl Into<String>) -> Workspace {
+        Workspace::new_with_db(user_id, Arc::clone(&self.inner))
     }
 
     // === Routine engine ===
@@ -734,7 +738,7 @@ impl AdminScope {
             .await
     }
 
-    // === Conversations (admin context) ===
+    // === Conversations (system context) ===
 
     pub async fn add_conversation_message(
         &self,
@@ -765,6 +769,58 @@ impl AdminScope {
         self.inner
             .get_or_create_heartbeat_conversation(user_id)
             .await
+    }
+}
+
+// ---------------------------------------------------------------------------
+// AdminScope — human admin operations, requires UserRole::Admin
+// ---------------------------------------------------------------------------
+
+/// Database access for human admin operations.
+///
+/// Constructable only with `UserRole::Admin`. Returns `None` if the identity
+/// is not an admin. Currently exposes user management only.
+#[derive(Clone)]
+pub struct AdminScope {
+    inner: Arc<dyn Database>,
+    #[allow(dead_code)]
+    identity: crate::ownership::Identity,
+}
+
+impl AdminScope {
+    /// Construct an `AdminScope`. Returns `None` if the identity is not `Admin`.
+    pub fn new(identity: crate::ownership::Identity, db: Arc<dyn Database>) -> Option<Self> {
+        if identity.role != crate::ownership::UserRole::Admin {
+            return None;
+        }
+        Some(Self { inner: db, identity })
+    }
+
+    // === User management ===
+
+    pub async fn list_users(
+        &self,
+        status: Option<&str>,
+    ) -> Result<Vec<crate::db::UserRecord>, crate::error::DatabaseError> {
+        self.inner.list_users(status).await
+    }
+
+    pub async fn get_user(
+        &self,
+        id: &str,
+    ) -> Result<Option<crate::db::UserRecord>, crate::error::DatabaseError> {
+        self.inner.get_user(id).await
+    }
+
+    pub async fn create_user(
+        &self,
+        user: &crate::db::UserRecord,
+    ) -> Result<(), crate::error::DatabaseError> {
+        self.inner.create_user(user).await
+    }
+
+    pub async fn deactivate_user(&self, id: &str) -> Result<(), crate::error::DatabaseError> {
+        self.inner.update_user_status(id, "deactivated").await
     }
 }
 
