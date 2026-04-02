@@ -1055,6 +1055,8 @@ impl Settings {
         let mut map = std::collections::HashMap::new();
         collect_settings_json(&json, String::new(), &mut map);
         map.remove("owner_id");
+        // Env-only for security; never persist in DB settings.
+        map.remove("channels.gateway_auth_token");
         map
     }
 
@@ -1099,7 +1101,11 @@ impl Settings {
 
     /// Write a well-commented TOML config file with current settings.
     pub fn save_toml(&self, path: &std::path::Path) -> Result<(), String> {
-        let raw = toml::to_string_pretty(self)
+        let mut sanitized = self.clone();
+        // Env-only for security; never persist in TOML.
+        sanitized.channels.gateway_auth_token = None;
+
+        let raw = toml::to_string_pretty(&sanitized)
             .map_err(|e| format!("failed to serialize settings: {}", e))?;
 
         let content = format!(
@@ -1556,6 +1562,38 @@ mod tests {
         assert_eq!(loaded.agent.name, "toml-bot");
         assert!(loaded.heartbeat.enabled);
         assert_eq!(loaded.heartbeat.interval_secs, 900);
+    }
+
+    #[test]
+    fn db_map_excludes_gateway_auth_token() {
+        let mut settings = Settings::default();
+        settings.channels.gateway_auth_token = Some("super-secret-token".to_string());
+
+        let map = settings.to_db_map();
+        assert!(
+            !map.contains_key("channels.gateway_auth_token"),
+            "gateway auth token must never be persisted to DB map"
+        );
+    }
+
+    #[test]
+    fn save_toml_excludes_gateway_auth_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+
+        let mut settings = Settings::default();
+        settings.channels.gateway_auth_token = Some("super-secret-token".to_string());
+
+        settings.save_toml(&path).unwrap();
+
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !raw.contains("gateway_auth_token"),
+            "gateway auth token key must never be written to TOML"
+        );
+
+        let loaded = Settings::load_toml(&path).unwrap().unwrap();
+        assert!(loaded.channels.gateway_auth_token.is_none());
     }
 
     /// Regression: /model writes a single key ("selected_model") to the DB via

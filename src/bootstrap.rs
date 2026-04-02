@@ -106,6 +106,30 @@ pub fn load_ironclaw_env() {
         let _ = dotenvy::from_path(&path);
     }
 
+    // Backward compatibility: older setups may have used lowercase
+    // `gateway_auth_token` in ~/.ironclaw/.env. Migrate at runtime to the
+    // env-only uppercase key and persist it for future runs.
+    if std::env::var("GATEWAY_AUTH_TOKEN").is_err()
+        && let Ok(legacy_token) = std::env::var("gateway_auth_token")
+        && !legacy_token.trim().is_empty()
+    {
+        if tokio::runtime::Handle::try_current().is_ok() {
+            crate::config::set_runtime_env("GATEWAY_AUTH_TOKEN", &legacy_token);
+        } else {
+            // SAFETY: No Tokio runtime = no other threads = safe to call set_var.
+            unsafe { std::env::set_var("GATEWAY_AUTH_TOKEN", &legacy_token) };
+        }
+
+        if let Err(e) = upsert_bootstrap_var("GATEWAY_AUTH_TOKEN", &legacy_token) {
+            tracing::debug!(
+                "Failed to persist migrated GATEWAY_AUTH_TOKEN to ~/.ironclaw/.env: {}",
+                e
+            );
+        } else {
+            tracing::info!("Migrated legacy gateway_auth_token env key to GATEWAY_AUTH_TOKEN");
+        }
+    }
+
     // Auto-detect libsql: if DATABASE_BACKEND is still unset after loading
     // all env files, and the local SQLite DB exists, default to libsql.
     // This avoids the chicken-and-egg problem on cloud instances where no

@@ -7098,6 +7098,7 @@ mod tests {
                 None,
             ),
             capabilities_file: None,
+            install_source: None,
         }
     }
 

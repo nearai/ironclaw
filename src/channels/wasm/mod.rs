@@ -105,8 +105,12 @@ pub use loader::{
 pub use router::{RegisteredEndpoint, WasmChannelRouter, create_wasm_channel_router};
 pub use runtime::{PreparedChannelModule, WasmChannelRuntime, WasmChannelRuntimeConfig};
 pub use schema::{
-    ChannelCapabilitiesFile, ChannelConfig, SecretSetupSchema, SetupSchema, WebhookSchema,
+    ChannelCapabilitiesFile, ChannelConfig, ChannelInstallSource, SecretSetupSchema, SetupSchema,
+    WebhookSchema,
 };
-pub use setup::{WasmChannelSetup, inject_channel_credentials, setup_wasm_channels};
+pub use setup::{
+    WasmChannelSetup, inject_channel_credentials, is_reserved_wasm_channel_name,
+    should_reject_wasm_channel_name, setup_wasm_channels,
+};
 pub(crate) use telegram_host_config::{TELEGRAM_CHANNEL_NAME, bot_username_setting_key};
 pub use wrapper::{HttpResponse, SharedWasmChannel, WasmChannel};
