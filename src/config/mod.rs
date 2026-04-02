@@ -18,6 +18,7 @@
 //! `DATABASE_URL` lives in `~/.ironclaw/.env` (loaded via dotenvy early
 //! in startup).
 
+pub mod acp;
 mod agent;
 mod builder;
 mod channels;
@@ -61,7 +62,7 @@ pub use self::relay::RelayConfig;
 pub use self::routines::RoutineConfig;
 pub use self::safety::SafetyConfig;
 use self::safety::resolve_safety_config;
-pub use self::sandbox::{ClaudeCodeConfig, SandboxModeConfig};
+pub use self::sandbox::{AcpModeConfig, ClaudeCodeConfig, SandboxModeConfig};
 pub use self::search::WorkspaceSearchConfig;
 pub use self::secrets::SecretsConfig;
 pub use self::skills::SkillsConfig;
@@ -111,6 +112,7 @@ pub struct Config {
     pub routines: RoutineConfig,
     pub sandbox: SandboxModeConfig,
     pub claude_code: ClaudeCodeConfig,
+    pub acp: AcpModeConfig,
     pub skills: SkillsConfig,
     pub transcription: TranscriptionConfig,
     pub search: WorkspaceSearchConfig,
@@ -184,6 +186,7 @@ impl Config {
                 ..SandboxModeConfig::default()
             },
             claude_code: ClaudeCodeConfig::default(),
+            acp: AcpModeConfig::default(),
             skills: SkillsConfig {
                 enabled: true,
                 local_dir: skills_dir,
@@ -378,6 +381,7 @@ impl Config {
             routines: RoutineConfig::resolve(settings)?,
             sandbox: SandboxModeConfig::resolve(settings)?,
             claude_code: ClaudeCodeConfig::resolve(settings)?,
+            acp: AcpModeConfig::resolve(settings)?,
             skills: SkillsConfig::resolve(settings)?,
             transcription: TranscriptionConfig::resolve(settings)?,
             search: WorkspaceSearchConfig::resolve(settings)?,
