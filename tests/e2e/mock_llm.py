@@ -14,6 +14,7 @@ import uuid
 from aiohttp import web
 
 CANNED_RESPONSES = [
+    (re.compile(r"empty routine response", re.IGNORECASE), ""),
     (re.compile(r"hello|hi|hey", re.IGNORECASE), "Hello! How can I help you today?"),
     (re.compile(r"2\s*\+\s*2|two plus two", re.IGNORECASE), "The answer is 4."),
     (re.compile(r"skill|install", re.IGNORECASE), "I can help you with skills management."),
@@ -23,8 +24,21 @@ CANNED_RESPONSES = [
 ]
 DEFAULT_RESPONSE = "I understand your request."
 
+TOOL_FAILURE_TRIGGER = re.compile(r"issue 1780 tool failure", re.IGNORECASE)
+TRUNCATED_TOOL_CALL_TRIGGER = re.compile(
+    r"issue 1780 truncated tool call",
+    re.IGNORECASE,
+)
+EMPTY_REPLY_TRIGGER = re.compile(r"issue 1780 empty reply", re.IGNORECASE)
+LOOP_FOREVER_TRIGGER = re.compile(r"issue 1780 loop forever", re.IGNORECASE)
+
 TOOL_CALL_PATTERNS = [
     (re.compile(r"echo (.+)", re.IGNORECASE), "echo", lambda m: {"message": m.group(1)}),
+    (
+        re.compile(r"loop until cap", re.IGNORECASE),
+        "echo",
+        lambda _: {"message": "loop-until-cap"},
+    ),
     (
         re.compile(r"make approval post (?P<label>[a-z0-9_-]+)", re.IGNORECASE),
         "http",
@@ -66,6 +80,21 @@ TOOL_CALL_PATTERNS = [
     ),
     (
         re.compile(
+            r"create failing lightweight owner routine (?P<name>[a-z0-9][a-z0-9_-]*)",
+            re.IGNORECASE,
+        ),
+        "routine_create",
+        lambda m: {
+            "name": m.group("name"),
+            "description": f"Failing lightweight routine {m.group('name')}",
+            "trigger_type": "manual",
+            "prompt": f"Empty routine response for {m.group('name')}.",
+            "action_type": "lightweight",
+            "use_tools": False,
+        },
+    ),
+    (
+        re.compile(
             r"create full[- ]job owner routine (?P<name>[a-z0-9][a-z0-9_-]*)",
             re.IGNORECASE,
         ),
@@ -80,8 +109,41 @@ TOOL_CALL_PATTERNS = [
     ),
     (
         re.compile(
+            r"create looping full[- ]job owner routine (?P<name>[a-z0-9][a-z0-9_-]*)",
+            re.IGNORECASE,
+        ),
+        "routine_create",
+        lambda m: {
+            "name": m.group("name"),
+            "description": f"Looping full-job routine {m.group('name')}",
+            "trigger_type": "manual",
+            "prompt": f"Loop until cap for {m.group('name')}.",
+            "action_type": "full_job",
+            "max_iterations": 1,
+        },
+    ),
+    (
+        re.compile(
+            r"create cron owner routine (?P<name>[a-z0-9][a-z0-9_-]*)",
+            re.IGNORECASE,
+        ),
+        "routine_create",
+        lambda m: {
+            "name": m.group("name"),
+            "description": f"Cron routine {m.group('name')}",
+            "trigger_type": "cron",
+            "schedule": "0 */5 * * * *",
+            "timezone": "UTC",
+            "prompt": f"Confirm that cron routine {m.group('name')} executed.",
+            "action_type": "lightweight",
+            "use_tools": False,
+        },
+    ),
+    (
+        re.compile(
             r"create event routine (?P<name>[a-z0-9][a-z0-9_-]*) "
-            r"channel (?P<channel>[a-z0-9_-]+) pattern (?P<pattern>[a-z0-9_|-]+)",
+            r"channel (?P<channel>[a-z0-9_-]+) pattern (?P<pattern>[a-z0-9_|-]+)"
+            r"(?: cooldown (?P<cooldown>\d+))?",
             re.IGNORECASE,
         ),
         "routine_create",
@@ -94,7 +156,7 @@ TOOL_CALL_PATTERNS = [
             "prompt": f"Acknowledge that {m.group('name')} fired.",
             "action_type": "lightweight",
             "use_tools": False,
-            "cooldown_secs": 0,
+            "cooldown_secs": int(m.group("cooldown") or 0),
         },
     ),
     (
@@ -114,16 +176,36 @@ def _new_oauth_state() -> dict:
     }
 
 
+def _message_text(msg: dict) -> str:
+    content = msg.get("content") or ""
+    if isinstance(content, list):
+        content = " ".join(
+            p.get("text") or "" for p in content if p.get("type") == "text"
+        )
+    return content
+
+
 def _last_user_content(messages: list[dict]) -> str:
     for msg in reversed(messages):
         if msg.get("role") == "user":
-            content = msg.get("content", "")
-            if isinstance(content, list):
-                content = " ".join(
-                    p.get("text", "") for p in content if p.get("type") == "text"
-                )
-            return content
+            return _message_text(msg)
     return ""
+
+def _conversation_has_user_trigger(messages: list[dict], pattern: re.Pattern[str]) -> bool:
+    for msg in messages:
+        if msg.get("role") == "user" and pattern.search(_message_text(msg)):
+            return True
+    return False
+
+
+def _job_contains_marker(messages: list[dict], marker: str) -> bool:
+    marker_lower = marker.lower()
+    for msg in messages:
+        if msg.get("role") != "user":
+            continue
+        if marker_lower in _message_text(msg).lower():
+            return True
+    return False
 
 
 def _is_job_mode(messages: list[dict]) -> bool:
@@ -152,6 +234,25 @@ def match_job_response(messages: list[dict], has_tools: bool) -> dict | None:
 
     last_user = _last_user_content(messages)
     tool_result_count = _count_tool_results(messages)
+    loop_until_cap = _job_contains_marker(messages, "loop until cap")
+
+    if loop_until_cap and "create a plan" in last_user.lower():
+        return {"text": json.dumps({
+            "goal": "Keep iterating until the worker hits the iteration cap",
+            "actions": [],
+            "estimated_cost": 0.001,
+            "estimated_time_secs": 5,
+            "confidence": 0.8,
+        })}
+
+    if loop_until_cap and "all planned actions have been executed" in last_user.lower():
+        return {"text": "loop until cap still requires more work"}
+
+    if loop_until_cap and has_tools:
+        return {"tool_call": {
+            "tool_name": "echo",
+            "arguments": {"message": "loop-until-cap"},
+        }}
 
     # Planning call (no tools available = complete() not complete_with_tools())
     if "create a plan" in last_user.lower():
@@ -259,6 +360,82 @@ async def _send_sse(resp: web.StreamResponse, data: dict):
     await resp.write(f"data: {json.dumps(data)}\n\n".encode())
 
 
+def match_special_response(messages: list[dict], has_tools: bool) -> dict | None:
+    """Deterministic issue-specific responses for agent-loop recovery tests."""
+    last_user = _last_user_content(messages)
+
+    if _conversation_has_user_trigger(messages, LOOP_FOREVER_TRIGGER):
+        if has_tools:
+            return {
+                "type": "tool_call",
+                "tool_call": {
+                    "tool_name": "echo",
+                    "arguments": {"message": "loop-iteration"},
+                },
+            }
+        return {
+            "type": "text",
+            "text": "Recovered after hitting the tool iteration limit.",
+        }
+
+    if _conversation_has_user_trigger(messages, TRUNCATED_TOOL_CALL_TRIGGER):
+        if TRUNCATED_TOOL_CALL_TRIGGER.search(last_user) and has_tools:
+            return {
+                "type": "truncated_tool_call",
+                "tool_call": {
+                    "tool_name": "time",
+                    "arguments": {},
+                },
+                "content": "Attempting a tool call but the response was truncated.",
+            }
+        return {
+            "type": "text",
+            "text": "Recovered after discarding a truncated tool call.",
+        }
+
+    if TOOL_FAILURE_TRIGGER.search(last_user) and has_tools:
+        return {
+            "type": "tool_call",
+            "tool_call": {
+                "tool_name": "time",
+                "arguments": {"operation": "broken-operation"},
+            },
+        }
+
+    if EMPTY_REPLY_TRIGGER.search(last_user):
+        return {"type": "empty_text"}
+
+    return None
+
+
+async def _dispatch_special_response(
+    request: web.Request,
+    cid: str,
+    stream: bool,
+    special: dict,
+) -> web.StreamResponse | web.Response:
+    if special["type"] == "tool_call":
+        tc = special["tool_call"]
+        if not stream:
+            return _tool_call_response(cid, tc)
+        return await _stream_tool_call(request, cid, tc)
+    if special["type"] == "truncated_tool_call":
+        tc = special["tool_call"]
+        content = special["content"]
+        if not stream:
+            return _truncated_tool_call_response(cid, tc, content)
+        return await _stream_truncated_tool_call(request, cid, tc, content)
+    if special["type"] == "empty_text":
+        if not stream:
+            return _text_response(cid, "")
+        return await _stream_text(request, cid, "")
+
+    text = special["text"]
+    if not stream:
+        return _text_response(cid, text)
+    return await _stream_text(request, cid, text)
+
+
 async def chat_completions(request: web.Request) -> web.StreamResponse:
     """Handle POST /v1/chat/completions and /chat/completions."""
     body = await request.json()
@@ -280,6 +457,12 @@ async def chat_completions(request: web.Request) -> web.StreamResponse:
             return _text_response(cid, text)
         return await _stream_text(request, cid, text)
 
+    # Special chat-loop recovery cases that intentionally override the normal
+    # tool-result summary path (for example, the looping case).
+    special = match_special_response(messages, has_tools)
+    if special and _conversation_has_user_trigger(messages, LOOP_FOREVER_TRIGGER):
+        return await _dispatch_special_response(request, cid, stream, special)
+
     # Tool result in messages -> text summary
     tr = _find_tool_result(messages)
     if tr:
@@ -287,6 +470,9 @@ async def chat_completions(request: web.Request) -> web.StreamResponse:
         if not stream:
             return _text_response(cid, text)
         return await _stream_text(request, cid, text)
+
+    if special:
+        return await _dispatch_special_response(request, cid, stream, special)
 
     # Tool-call pattern match
     tc = match_tool_call(messages, has_tools)
@@ -322,6 +508,28 @@ def _tool_call_response(cid: str, tc: dict) -> web.Response:
                             "function": {"name": tc["tool_name"],
                                          "arguments": json.dumps(tc["arguments"])}}],
         }, "finish_reason": "tool_calls"}],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+    })
+
+
+def _truncated_tool_call_response(cid: str, tc: dict, content: str) -> web.Response:
+    tool_tag = json.dumps({
+        "name": tc["tool_name"],
+        "arguments": tc["arguments"],
+    })
+    return web.json_response({
+        "id": cid,
+        "object": "chat.completion",
+        "created": int(time.time()),
+        "model": "mock-model",
+        "choices": [{
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": f"{content}\n<tool_call>{tool_tag}</tool_call>",
+            },
+            "finish_reason": "length",
+        }],
         "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
     })
 
@@ -364,6 +572,39 @@ async def _stream_tool_call(request: web.Request, cid: str, tc: dict) -> web.Str
     # Final chunk: finish reason
     chunk["choices"][0]["delta"] = {}
     chunk["choices"][0]["finish_reason"] = "tool_calls"
+    await _send_sse(resp, chunk)
+    await resp.write(b"data: [DONE]\n\n")
+    return resp
+
+
+async def _stream_truncated_tool_call(
+    request: web.Request,
+    cid: str,
+    tc: dict,
+    content: str,
+) -> web.StreamResponse:
+    resp = web.StreamResponse(status=200, headers={
+        "Content-Type": "text/event-stream", "Cache-Control": "no-cache"})
+    await resp.prepare(request)
+    base = _make_base(cid)
+    tool_tag = json.dumps({
+        "name": tc["tool_name"],
+        "arguments": tc["arguments"],
+    })
+
+    chunk = {**base, "choices": [{"index": 0, "delta": {
+        "role": "assistant",
+        "content": content,
+    }, "finish_reason": None}]}
+    await _send_sse(resp, chunk)
+
+    chunk["choices"][0]["delta"] = {
+        "content": f"\n<tool_call>{tool_tag}</tool_call>",
+    }
+    await _send_sse(resp, chunk)
+
+    chunk["choices"][0]["delta"] = {}
+    chunk["choices"][0]["finish_reason"] = "length"
     await _send_sse(resp, chunk)
     await resp.write(b"data: [DONE]\n\n")
     return resp

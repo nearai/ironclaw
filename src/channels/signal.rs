@@ -910,34 +910,10 @@ impl Channel for SignalChannel {
         }
 
         // Send approval prompt to user
-        if let StatusUpdate::ApprovalNeeded {
-            request_id,
-            tool_name,
-            description: _,
-            parameters,
-            allow_always,
-        } = &status
+        if let Some(prompt) = crate::channels::ChatApprovalPrompt::from_status(&status)
             && let Some(target_str) = metadata.get("signal_target").and_then(|v| v.as_str())
         {
-            let params_json = serde_json::to_string_pretty(parameters).unwrap_or_default();
-            let always_line = if *allow_always {
-                format!(
-                    "\n• `always` or `a` - Approve and auto-approve future {} requests",
-                    tool_name
-                )
-            } else {
-                String::new()
-            };
-            let message = format!(
-                "⚠️ *Approval Required*\n\n\
-                 *Request ID:* `{}`\n\
-                 *Tool:* {}\n\
-                 *Parameters:*\n```\n{}\n```\n\n\
-                 Reply with:\n\
-                 • `yes` or `y` - Approve this request{}\n\
-                 • `no` or `n` - Deny",
-                request_id, tool_name, params_json, always_line
-            );
+            let message = prompt.markdown_message();
             self.send_status_message(target_str, &message).await;
         }
 
