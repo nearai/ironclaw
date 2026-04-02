@@ -208,6 +208,94 @@ fn build_filters(
     Ok((clauses, params))
 }
 
+// ==================== Rust-side aggregation for SUM/AVG ====================
+//
+// libSQL SDK has a bug where `row.get::<f64>()` on a CAST result returns 0
+// for integer JSON values.  We work around this by fetching raw records and
+// computing SUM/AVG in Rust.
+
+async fn aggregate_in_rust(
+    backend: &LibSqlBackend,
+    user_id: &str,
+    collection: &str,
+    aggregation: &Aggregation,
+) -> Result<serde_json::Value, DatabaseError> {
+    let field = aggregation
+        .field
+        .as_deref()
+        .ok_or_else(|| DatabaseError::Query("SUM/AVG requires a field".to_string()))?;
+
+    // Fetch all matching records (applying filters).
+    let records = backend
+        .query_records(user_id, collection, &aggregation.filters, None, usize::MAX)
+        .await?;
+
+    let group_by = aggregation.group_by.as_deref();
+
+    if let Some(group_field) = group_by {
+        // Grouped aggregation: { "group_key": value, ... }
+        let mut groups: std::collections::BTreeMap<String, (f64, usize)> =
+            std::collections::BTreeMap::new();
+        for record in &records {
+            let group_key = record
+                .data
+                .get(group_field)
+                .and_then(|v| match v {
+                    serde_json::Value::String(s) => Some(s.clone()),
+                    other => Some(other.to_string()),
+                })
+                .unwrap_or_default();
+            if let Some(val) = record.data.get(field).and_then(json_to_f64) {
+                let entry = groups.entry(group_key).or_insert((0.0, 0));
+                entry.0 += val;
+                entry.1 += 1;
+            }
+        }
+        let mut result = serde_json::Map::new();
+        for (key, (sum, count)) in &groups {
+            let value = match aggregation.operation {
+                structured::AggOp::Sum => *sum,
+                structured::AggOp::Avg => {
+                    if *count > 0 {
+                        sum / *count as f64
+                    } else {
+                        0.0
+                    }
+                }
+                _ => unreachable!(),
+            };
+            result.insert(key.clone(), serde_json::json!(value));
+        }
+        Ok(serde_json::Value::Object(result))
+    } else {
+        // Non-grouped: return bare value (matching SQL-path format).
+        let mut sum = 0.0;
+        let mut count = 0usize;
+        for record in &records {
+            if let Some(val) = record.data.get(field).and_then(json_to_f64) {
+                sum += val;
+                count += 1;
+            }
+        }
+        match aggregation.operation {
+            structured::AggOp::Sum => Ok(serde_json::json!(sum)),
+            structured::AggOp::Avg => {
+                if count > 0 {
+                    Ok(serde_json::json!(sum / count as f64))
+                } else {
+                    Ok(serde_json::Value::Null)
+                }
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
+/// Extract a numeric value from a JSON value.
+fn json_to_f64(v: &serde_json::Value) -> Option<f64> {
+    v.as_f64().or_else(|| v.as_i64().map(|i| i as f64))
+}
+
 // ==================== StructuredStore Implementation ====================
 
 #[async_trait]
@@ -607,24 +695,20 @@ impl StructuredStore for LibSqlBackend {
                 .map_err(|e| DatabaseError::Query(e.to_string()))?;
         }
 
-        // Build the aggregation expression.
-        // SQLite: use CAST(... AS REAL) instead of ::numeric.
+        // SUM and AVG are computed in Rust to work around a libSQL SDK bug
+        // where CAST(json_extract(integer) AS REAL) returns 0 through the
+        // row.get::<f64>() API.  We fetch the raw JSON values and aggregate
+        // in application code.  COUNT/MIN/MAX are still done in SQL.
+        if matches!(
+            aggregation.operation,
+            structured::AggOp::Sum | structured::AggOp::Avg
+        ) {
+            return aggregate_in_rust(self, user_id, collection, aggregation).await;
+        }
+
+        // Build the aggregation expression for COUNT/MIN/MAX.
         let agg_expr = match aggregation.operation {
             structured::AggOp::Count => "COUNT(*)".to_string(),
-            structured::AggOp::Sum => {
-                let field = aggregation
-                    .field
-                    .as_deref()
-                    .ok_or_else(|| DatabaseError::Query("Sum requires a field".to_string()))?;
-                format!("SUM(CAST(json_extract(data, '$.{field}') AS REAL))")
-            }
-            structured::AggOp::Avg => {
-                let field = aggregation
-                    .field
-                    .as_deref()
-                    .ok_or_else(|| DatabaseError::Query("Avg requires a field".to_string()))?;
-                format!("AVG(CAST(json_extract(data, '$.{field}') AS REAL))")
-            }
             structured::AggOp::Min => {
                 let field = aggregation
                     .field
@@ -639,6 +723,8 @@ impl StructuredStore for LibSqlBackend {
                     .ok_or_else(|| DatabaseError::Query("Max requires a field".to_string()))?;
                 format!("MAX(json_extract(data, '$.{field}'))")
             }
+            // SUM/AVG handled above.
+            _ => unreachable!(),
         };
 
         // Start building query. ?1 = user_id, ?2 = collection.
@@ -657,16 +743,6 @@ impl StructuredStore for LibSqlBackend {
         let mut params: Vec<libsql::Value> = Vec::new();
         params.push(libsql::Value::Text(user_id.to_string()));
         params.push(libsql::Value::Text(collection.to_string()));
-
-        // For SUM/AVG, exclude records where the field is missing (NULL in JSON).
-        // Without this, CAST(NULL AS REAL) returns 0, inflating sums and skewing averages.
-        if matches!(aggregation.operation, structured::AggOp::Sum | structured::AggOp::Avg) {
-            if let Some(ref field) = aggregation.field {
-                sql.push_str(&format!(
-                    " AND json_extract(data, '$.{field}') IS NOT NULL"
-                ));
-            }
-        }
 
         // Apply filters.
         let (filter_clauses, filter_params) = build_filters(&aggregation.filters, 3)?;
