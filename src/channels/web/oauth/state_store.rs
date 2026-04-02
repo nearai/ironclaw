@@ -124,13 +124,27 @@ pub(crate) fn sanitize_redirect(url: Option<String>) -> Option<String> {
 }
 
 /// Check if a redirect path is safe for use.
+///
+/// Validates both the raw URL and its percent-decoded form to prevent
+/// smuggling attacks (e.g., `%2f%2f` decoding to `//`).
 pub(crate) fn is_safe_redirect(url: &str) -> bool {
+    if !check_redirect_chars(url) {
+        return false;
+    }
+    // Percent-decode and re-validate to catch smuggled sequences like
+    // %2f%2f (→ //) or %5c (→ \) that bypass the raw-string guards.
+    let decoded = match urlencoding::decode(url) {
+        Ok(d) => d,
+        Err(_) => return false, // invalid percent-encoding → reject
+    };
+    check_redirect_chars(&decoded)
+}
+
+fn check_redirect_chars(url: &str) -> bool {
     if !url.starts_with('/') || url.starts_with("//") || url.starts_with("/\\") {
         return false;
     }
     // Only allow unreserved + sub-delimiters + pchar characters from RFC 3986.
-    // This blocks encoded control characters (e.g., %09) that browsers may
-    // interpret as scheme/authority separators.
     url.bytes()
         .all(|b| b.is_ascii_alphanumeric() || b"/_-.~:@!$&'()*+,;=?#[]%".contains(&b))
 }
@@ -224,5 +238,47 @@ mod tests {
         let states = store.states.read().await;
         assert_eq!(states.len(), 1);
         assert!(states.contains_key("fresh-state"));
+    }
+
+    #[test]
+    fn test_is_safe_redirect_allows_normal_paths() {
+        assert!(is_safe_redirect("/"));
+        assert!(is_safe_redirect("/dashboard"));
+        assert!(is_safe_redirect("/settings/profile"));
+        assert!(is_safe_redirect("/path?query=1#hash"));
+    }
+
+    #[test]
+    fn test_is_safe_redirect_blocks_protocol_relative() {
+        assert!(!is_safe_redirect("//evil.com"));
+        assert!(!is_safe_redirect("/\\evil.com"));
+    }
+
+    #[test]
+    fn test_is_safe_redirect_blocks_absolute_urls() {
+        assert!(!is_safe_redirect("https://evil.com"));
+        assert!(!is_safe_redirect("javascript:alert(1)"));
+    }
+
+    #[test]
+    fn test_is_safe_redirect_blocks_encoded_smuggling() {
+        // %2f%2f decodes to // (protocol-relative)
+        assert!(!is_safe_redirect("/%2f%2fevil.com"));
+        assert!(!is_safe_redirect("/%2F%2Fevil.com"));
+        // %5c decodes to \ (backslash smuggling)
+        assert!(!is_safe_redirect("/%5cevil.com"));
+        // %09 (tab) can be used as a separator in some browsers
+        assert!(!is_safe_redirect("/%09/evil.com"));
+    }
+
+    #[test]
+    fn test_sanitize_redirect_filters_unsafe() {
+        assert_eq!(
+            sanitize_redirect(Some("/safe".to_string())),
+            Some("/safe".to_string())
+        );
+        assert_eq!(sanitize_redirect(Some("//evil.com".to_string())), None);
+        assert_eq!(sanitize_redirect(Some("/%2f%2fevil.com".to_string())), None);
+        assert_eq!(sanitize_redirect(None), None);
     }
 }
