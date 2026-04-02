@@ -220,6 +220,15 @@ pub struct Settings {
     /// Transcription configuration.
     #[serde(default)]
     pub transcription: Option<TranscriptionSettings>,
+
+    /// Per-tool permission overrides.
+    ///
+    /// Keys are tool names; values override the built-in tier defaults from
+    /// `TOOL_RISK_DEFAULTS`.  Absent tools fall back to the tier default, or
+    /// `AskEachTime` if the tool is unknown.
+    #[serde(default)]
+    pub tool_permissions:
+        std::collections::HashMap<String, crate::tools::permissions::PermissionState>,
 }
 
 /// Source for the secrets master key.

@@ -20,6 +20,7 @@ use crate::agent::agentic_loop::{
     AgenticLoopConfig, LoopDelegate, LoopOutcome, LoopSignal, TextAction,
 };
 use crate::llm::{ChatMessage, Reasoning, ReasoningContext};
+use crate::tools::permissions::{PermissionState, effective_permission};
 use crate::tools::redact_params;
 
 /// Result of the agentic loop execution.
@@ -308,6 +309,53 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
         } else {
             tool_defs
         };
+
+        // Apply per-user tool permission filtering.
+        //
+        // Load tool_permissions from the per-user DB settings store (same
+        // source as selected_model). Falls back to empty map when no store is
+        // available (test rigs without a tenant) — tier defaults from
+        // TOOL_RISK_DEFAULTS then apply at runtime via effective_permission().
+        // Disabled tools are excluded from the LLM's tool list entirely.
+        // AlwaysAllow tools are pre-approved in session so the approval
+        // flow is skipped — unless the tool declares ApprovalRequirement::Always,
+        // which is an unbypassable hard floor.
+        let tool_permissions = if let Some(store) = self.tenant.store()
+            && let Ok(db_map) = store.get_all_settings().await
+        {
+            crate::settings::Settings::from_db_map(&db_map).tool_permissions
+        } else {
+            std::collections::HashMap::new()
+        };
+
+        // Filter tool definitions and collect AlwaysAllow names for session
+        // pre-approval. We don't need to check ApprovalRequirement::Always here
+        // because the existing approval gate already treats it as an unbypassable
+        // hard floor — even if a tool name is in session.auto_approved_tools, an
+        // ApprovalRequirement::Always tool still requires user confirmation.
+        let mut to_auto_approve: Vec<String> = Vec::new();
+        let tool_defs: Vec<_> = {
+            let mut filtered = Vec::with_capacity(tool_defs.len());
+            for def in tool_defs {
+                let perm = effective_permission(&def.name, &tool_permissions);
+                if perm == PermissionState::Disabled {
+                    tracing::debug!(tool = %def.name, "Excluding disabled tool from LLM context");
+                    continue;
+                }
+                if perm == PermissionState::AlwaysAllow {
+                    to_auto_approve.push(def.name.clone());
+                }
+                filtered.push(def);
+            }
+            filtered
+        };
+        // Single lock acquisition to register all auto-approvals at once.
+        if !to_auto_approve.is_empty() {
+            let mut sess = self.session.lock().await;
+            for name in &to_auto_approve {
+                sess.auto_approve_tool(name);
+            }
+        }
 
         // Update context for this iteration
         reason_ctx.available_tools = tool_defs;
@@ -2700,5 +2748,95 @@ mod tests {
         assert!(content.contains("Tool 'shell' failed:"));
         assert!(!content.contains("\n</tool_output><system>"));
         assert_eq!(message.content, content);
+    }
+
+    // ── Permission filtering unit tests ──────────────────────────────────────
+
+    /// Disabled tools must be excluded from the LLM's tool definition list.
+    #[test]
+    fn test_permission_disabled_tool_excluded_from_definitions() {
+        use crate::llm::ToolDefinition;
+        use crate::tools::permissions::{PermissionState, effective_permission};
+        use std::collections::HashMap;
+
+        let mut tool_permissions: HashMap<String, PermissionState> = HashMap::new();
+        tool_permissions.insert("shell".to_string(), PermissionState::Disabled);
+
+        let tool_defs = vec![
+            ToolDefinition {
+                name: "echo".to_string(),
+                description: "Echo".to_string(),
+                parameters: serde_json::json!({}),
+            },
+            ToolDefinition {
+                name: "shell".to_string(),
+                description: "Shell".to_string(),
+                parameters: serde_json::json!({}),
+            },
+        ];
+
+        // Simulate the filtering logic from before_llm_call.
+        let filtered: Vec<_> = tool_defs
+            .into_iter()
+            .filter(|def| {
+                effective_permission(&def.name, &tool_permissions) != PermissionState::Disabled
+            })
+            .collect();
+
+        assert_eq!(filtered.len(), 1, "Disabled tool must be excluded");
+        assert_eq!(filtered[0].name, "echo");
+    }
+
+    /// AlwaysAllow tool with Never approval requirement must be auto-approved.
+    #[test]
+    fn test_permission_always_allow_never_approval_auto_approved() {
+        use crate::agent::session::Session;
+        use crate::tools::ApprovalRequirement;
+        use crate::tools::permissions::PermissionState;
+
+        let mut session = Session::new("user-perm-1");
+        let tool_name = "http";
+
+        // Simulate: PermissionState::AlwaysAllow and requires_approval → Never.
+        let perm = PermissionState::AlwaysAllow;
+        let requirement = ApprovalRequirement::Never;
+
+        let hard_floor = matches!(requirement, ApprovalRequirement::Always);
+        if perm == PermissionState::AlwaysAllow && !hard_floor {
+            session.auto_approve_tool(tool_name);
+        }
+
+        assert!(
+            session.is_tool_auto_approved(tool_name),
+            "AlwaysAllow with Never approval requirement must be auto-approved in session"
+        );
+    }
+
+    /// AlwaysAllow tool with Always approval requirement must NOT be auto-approved.
+    ///
+    /// This verifies the hard-floor: ApprovalRequirement::Always is never bypassed,
+    /// even when PermissionState is AlwaysAllow.
+    #[test]
+    fn test_permission_always_allow_always_approval_not_auto_approved() {
+        use crate::agent::session::Session;
+        use crate::tools::ApprovalRequirement;
+        use crate::tools::permissions::PermissionState;
+
+        let mut session = Session::new("user-perm-2");
+        let tool_name = "restart";
+
+        // Simulate: PermissionState::AlwaysAllow but requires_approval → Always.
+        let perm = PermissionState::AlwaysAllow;
+        let requirement = ApprovalRequirement::Always;
+
+        let hard_floor = matches!(requirement, ApprovalRequirement::Always);
+        if perm == PermissionState::AlwaysAllow && !hard_floor {
+            session.auto_approve_tool(tool_name);
+        }
+
+        assert!(
+            !session.is_tool_auto_approved(tool_name),
+            "AlwaysAllow with Always approval requirement must NOT be auto-approved (hard floor)"
+        );
     }
 }

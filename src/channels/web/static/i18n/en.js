@@ -341,6 +341,16 @@ I18n.register('en', {
   'tool.running': 'Running',
   'tool.used': '{count} tool(s) used',
   'tool.requiresApproval': 'Tool requires approval',
+
+  // Tool Permissions Tab
+  'settings.tools': 'Tools',
+  'tools.alwaysAllow': 'Always Allow',
+  'tools.askEachTime': 'Ask Each Time',
+  'tools.disabled': 'Disabled',
+  'tools.lockedTooltip': 'Always requires approval',
+  'tools.defaultBadge': 'Default',
+  'tools.noTools': 'No tools registered',
+  'tools.saveFailed': 'Failed to save: {message}',
   
   
   // TEE
