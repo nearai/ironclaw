@@ -58,6 +58,10 @@ pub struct McpServerConfig {
     /// Optional description for the server.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+
+    /// Internal marker for env-derived servers injected at runtime.
+    #[serde(default, skip_serializing, skip_deserializing)]
+    pub env_managed: bool,
 }
 
 fn default_true() -> bool {
@@ -81,6 +85,7 @@ impl McpServerConfig {
             oauth: None,
             enabled: true,
             description: None,
+            env_managed: false,
         }
     }
 
@@ -103,6 +108,7 @@ impl McpServerConfig {
             oauth: None,
             enabled: true,
             description: None,
+            env_managed: false,
         }
     }
 
@@ -118,6 +124,7 @@ impl McpServerConfig {
             oauth: None,
             enabled: true,
             description: None,
+            env_managed: false,
         }
     }
 
@@ -427,8 +434,7 @@ fn env_value(key: &str) -> Option<String> {
 }
 
 pub fn is_derived_nearai_mcp_server(server: &McpServerConfig) -> bool {
-    server.name == NEARAI_MCP_SERVER_NAME
-        && server.description.as_deref() == Some(NEARAI_MCP_DESCRIPTION)
+    server.env_managed && server.name == NEARAI_MCP_SERVER_NAME
 }
 
 pub fn derived_server_display_name(server: &McpServerConfig) -> Option<&'static str> {
@@ -461,9 +467,10 @@ pub fn derive_nearai_mcp_server_from_env() -> Option<McpServerConfig> {
         format!("Bearer {}", api_key.trim()),
     )]);
 
-    let server = McpServerConfig::new(NEARAI_MCP_SERVER_NAME, url)
+    let mut server = McpServerConfig::new(NEARAI_MCP_SERVER_NAME, url)
         .with_headers(headers)
         .with_description(NEARAI_MCP_DESCRIPTION);
+    server.env_managed = true;
 
     match server.validate() {
         Ok(()) => Some(server),
@@ -476,6 +483,15 @@ pub fn derive_nearai_mcp_server_from_env() -> Option<McpServerConfig> {
 
 fn inject_env_derived_servers(mut config: McpServersFile) -> McpServersFile {
     if let Some(server) = derive_nearai_mcp_server_from_env() {
+        if let Some(existing) = config.get(&server.name)
+            && !is_derived_nearai_mcp_server(existing)
+        {
+            tracing::warn!(
+                "Skipping env-derived NEAR AI server because a user-managed MCP server named '{}' already exists",
+                server.name
+            );
+            return config;
+        }
         config.upsert(server);
     }
     config
@@ -1319,6 +1335,48 @@ mod tests {
             .expect("derived NEAR AI server");
         assert!(is_derived_nearai_mcp_server(server));
         assert_eq!(server.url, "https://mcp.near.ai");
+
+        // SAFETY: Under ENV_MUTEX, no concurrent env access.
+        unsafe {
+            std::env::remove_var(NEARAI_MCP_URL_ENV);
+            std::env::remove_var(NEARAI_MCP_API_KEY_ENV);
+        }
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn test_load_does_not_override_user_managed_server_named_nearai_mcp() {
+        let _guard = crate::config::helpers::lock_env();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mcp-servers.json");
+
+        let manual = McpServerConfig::new(NEARAI_MCP_SERVER_NAME, "https://manual.example.com/mcp")
+            .with_description("Manually configured server");
+        let mut existing = McpServersFile::default();
+        existing.upsert(manual);
+        fs::write(&path, serde_json::to_string_pretty(&existing).unwrap())
+            .await
+            .expect("write config");
+
+        // SAFETY: Under ENV_MUTEX, no concurrent env access.
+        unsafe {
+            std::env::set_var(NEARAI_MCP_URL_ENV, "https://mcp.near.ai");
+            std::env::set_var(NEARAI_MCP_API_KEY_ENV, "test-nearai-key");
+        }
+
+        let loaded = load_mcp_servers_from(&path).await.expect("load config");
+        let server = loaded
+            .get(NEARAI_MCP_SERVER_NAME)
+            .expect("manual server should remain");
+        assert_eq!(server.url, "https://manual.example.com/mcp");
+        assert!(!is_derived_nearai_mcp_server(server));
+
+        save_mcp_servers_to(&loaded, &path)
+            .await
+            .expect("save config");
+        let raw = fs::read_to_string(&path).await.expect("read config");
+        assert!(raw.contains("https://manual.example.com/mcp"));
+        assert!(raw.contains(NEARAI_MCP_SERVER_NAME));
 
         // SAFETY: Under ENV_MUTEX, no concurrent env access.
         unsafe {

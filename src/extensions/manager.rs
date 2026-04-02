@@ -1399,16 +1399,12 @@ impl ExtensionManager {
 
                         // Get tool names if active
                         let tools = if active {
-                            if crate::tools::mcp::config::is_derived_nearai_mcp_server(server) {
-                                Vec::new()
-                            } else {
-                                self.tool_registry
-                                    .list()
-                                    .await
-                                    .into_iter()
-                                    .filter(|t| t.starts_with(&format!("{}_", server.name)))
-                                    .collect()
-                            }
+                            self.tool_registry
+                                .list()
+                                .await
+                                .into_iter()
+                                .filter(|t| t.starts_with(&format!("{}_", server.name)))
+                                .collect()
                         } else {
                             Vec::new()
                         };
@@ -6409,6 +6405,7 @@ mod tests {
     use crate::channels::{
         Channel, ChannelManager, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate,
     };
+    use crate::context::JobContext;
     use crate::extensions::ExtensionManager;
     use crate::extensions::manager::{
         ChannelRuntimeState, FallbackDecision, TelegramBindingData, TelegramBindingResult,
@@ -6423,7 +6420,8 @@ mod tests {
     };
     use crate::pairing::PairingStore;
     use crate::secrets::CreateSecretParams;
-    use crate::tools::mcp::McpServerConfig;
+    use crate::tools::mcp::{McpClient, McpServerConfig};
+    use crate::tools::{Tool, ToolError, ToolOutput};
 
     fn require(condition: bool, message: impl Into<String>) -> Result<(), String> {
         if condition {
@@ -6726,6 +6724,40 @@ mod tests {
         tools_dir: std::path::PathBuf,
     ) -> crate::extensions::manager::ExtensionManager {
         make_test_manager_with_dirs(wasm_runtime, tools_dir.clone(), tools_dir, None)
+    }
+
+    struct NamedTestTool {
+        name: &'static str,
+    }
+
+    #[async_trait]
+    impl Tool for NamedTestTool {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn description(&self) -> &str {
+            "test tool"
+        }
+
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({
+                "type": "object",
+                "properties": {}
+            })
+        }
+
+        async fn execute(
+            &self,
+            _params: serde_json::Value,
+            _ctx: &JobContext,
+        ) -> Result<ToolOutput, ToolError> {
+            Ok(ToolOutput::text("ok", std::time::Duration::default()))
+        }
+
+        fn requires_sanitization(&self) -> bool {
+            false
+        }
     }
 
     fn write_test_tool(
@@ -8387,6 +8419,50 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains(crate::tools::mcp::config::NEARAI_MCP_URL_ENV));
         assert!(msg.contains(crate::tools::mcp::config::NEARAI_MCP_API_KEY_ENV));
+
+        // SAFETY: Under ENV_MUTEX, no concurrent env access.
+        unsafe {
+            std::env::remove_var(crate::tools::mcp::config::NEARAI_MCP_URL_ENV);
+            std::env::remove_var(crate::tools::mcp::config::NEARAI_MCP_API_KEY_ENV);
+        }
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn test_active_tool_names_include_env_derived_nearai_mcp_tools() {
+        let _guard = crate::config::helpers::lock_env();
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mgr = make_test_manager_with_dirs(
+            None,
+            dir.path().join("tools"),
+            dir.path().join("channels"),
+            None,
+        );
+
+        // SAFETY: Under ENV_MUTEX, no concurrent env access.
+        unsafe {
+            std::env::set_var(
+                crate::tools::mcp::config::NEARAI_MCP_URL_ENV,
+                "https://mcp.near.ai",
+            );
+            std::env::set_var(
+                crate::tools::mcp::config::NEARAI_MCP_API_KEY_ENV,
+                "test-nearai-key",
+            );
+        }
+
+        mgr.tool_registry
+            .register(Arc::new(NamedTestTool {
+                name: "nearai-mcp_web_search",
+            }))
+            .await;
+        mgr.mcp_clients.write().await.insert(
+            crate::tools::mcp::config::NEARAI_MCP_SERVER_NAME.to_string(),
+            Arc::new(McpClient::new("http://localhost:8080")),
+        );
+
+        let active = mgr.active_tool_names().await;
+        assert!(active.contains("nearai-mcp_web_search"));
 
         // SAFETY: Under ENV_MUTEX, no concurrent env access.
         unsafe {
