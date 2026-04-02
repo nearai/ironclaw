@@ -658,6 +658,16 @@ impl StructuredStore for LibSqlBackend {
         params.push(libsql::Value::Text(user_id.to_string()));
         params.push(libsql::Value::Text(collection.to_string()));
 
+        // For SUM/AVG, exclude records where the field is missing (NULL in JSON).
+        // Without this, CAST(NULL AS REAL) returns 0, inflating sums and skewing averages.
+        if matches!(aggregation.operation, structured::AggOp::Sum | structured::AggOp::Avg) {
+            if let Some(ref field) = aggregation.field {
+                sql.push_str(&format!(
+                    " AND json_extract(data, '$.{field}') IS NOT NULL"
+                ));
+            }
+        }
+
         // Apply filters.
         let (filter_clauses, filter_params) = build_filters(&aggregation.filters, 3)?;
         for clause in &filter_clauses {
@@ -725,13 +735,15 @@ fn extract_agg_value(
             Ok(serde_json::json!(count))
         }
         structured::AggOp::Sum | structured::AggOp::Avg => {
-            // SUM/AVG returns a REAL in SQLite (or NULL if no rows).
-            match row.get::<f64>(result_idx) {
-                Ok(f) => Ok(serde_json::json!(f)),
-                Err(_) => {
-                    // Could be NULL (no matching rows for SUM/AVG).
-                    Ok(serde_json::Value::Null)
-                }
+            // SUM/AVG returns REAL in standard SQLite, but libSQL may return
+            // integer when all aggregated values are integers.  Try f64 first,
+            // then i64, then treat as NULL.
+            if let Ok(f) = row.get::<f64>(result_idx) {
+                Ok(serde_json::json!(f))
+            } else if let Ok(i) = row.get::<i64>(result_idx) {
+                Ok(serde_json::json!(i as f64))
+            } else {
+                Ok(serde_json::Value::Null)
             }
         }
         structured::AggOp::Min | structured::AggOp::Max => {
