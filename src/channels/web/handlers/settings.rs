@@ -308,9 +308,17 @@ pub async fn settings_import_handler(
         tracing::warn!(
             "Dropped deprecated env-only setting channels.gateway_auth_token during settings import"
         );
-        let _ = store
+        if let Err(e) = store
             .delete_setting(&user.user_id, "channels.gateway_auth_token")
-            .await;
+            .await
+        {
+            tracing::error!(
+                "Failed to delete deprecated setting channels.gateway_auth_token for user {}: {}",
+                user.user_id,
+                e
+            );
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
     }
 
     if let Some(v) = sanitized.get("llm_builtin_overrides").cloned() {
