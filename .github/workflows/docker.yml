@@ -1,9 +1,15 @@
 name: Docker Image
 
 on:
-  push:
-    branches: [main]
-    tags: ["ironclaw-v*", "v*"]
+  # Called by release.yml or other workflows
+  workflow_call:
+    inputs:
+      tag:
+        description: "Image tag override (leave empty for auto-detect)"
+        required: false
+        type: string
+        default: ""
+  # On-demand builds
   workflow_dispatch:
     inputs:
       tag:
@@ -34,20 +40,17 @@ jobs:
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "Detected version: ${VERSION}"
 
-      - name: Docker meta
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.IMAGE_NAME }}
-          tags: |
-            # On default branch: latest
-            type=raw,value=latest,enable={{is_default_branch}}
-            # On version tags: extract semver (immutable)
-            type=match,pattern=(?:ironclaw-)?v(.*),group=1
-            # Manual override
-            type=raw,value=${{ inputs.tag }},enable=${{ inputs.tag != '' }}
-            # Short SHA for all builds
-            type=sha,prefix=
+      - name: Determine tags
+        id: tags
+        run: |
+          TAGS="${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}"
+          TAGS="${TAGS},${{ env.IMAGE_NAME }}:latest"
+          TAGS="${TAGS},${{ env.IMAGE_NAME }}:sha-${GITHUB_SHA::7}"
+          # Manual override adds an extra tag
+          if [[ -n "${{ inputs.tag }}" ]]; then
+            TAGS="${TAGS},${{ env.IMAGE_NAME }}:${{ inputs.tag }}"
+          fi
+          echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -63,8 +66,7 @@ jobs:
         with:
           context: .
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          tags: ${{ steps.tags.outputs.tags }}
           platforms: linux/amd64
           cache-from: type=gha
           cache-to: type=gha,mode=max
@@ -76,9 +78,9 @@ jobs:
             echo ""
             echo "**Tags pushed:**"
             echo '```'
-            echo "${{ steps.meta.outputs.tags }}"
+            echo "${{ steps.tags.outputs.tags }}" | tr ',' '\n'
             echo '```'
             echo ""
             echo "- version: \`${{ steps.version.outputs.version }}\`"
-            echo "- sha: \`${{ github.sha }}\`"
+            echo "- sha: \`${GITHUB_SHA::7}\`"
           } >> "$GITHUB_STEP_SUMMARY"
