@@ -135,7 +135,7 @@ pub async fn collections_list_handler(
 
     // Collect user IDs to query: own + scopes.
     let mut user_ids = vec![user.user_id.clone()];
-    user_ids.extend(Vec::<String>::new().iter().cloned());
+    user_ids.extend(user.workspace_read_scopes.iter().cloned());
 
     for uid in &user_ids {
         match db.list_collections(uid).await {
@@ -190,7 +190,7 @@ pub async fn collections_query_handler(
     let owner = match resolve_collection_owner(
         db.as_ref(),
         &user.user_id,
-        &Vec::<String>::new(),
+        &user.workspace_read_scopes,
         &name,
     )
     .await
@@ -278,7 +278,7 @@ pub async fn collections_insert_handler(
     let owner = match resolve_collection_owner(
         db.as_ref(),
         &user.user_id,
-        &Vec::<String>::new(),
+        &user.workspace_read_scopes,
         &name,
     )
     .await
@@ -380,7 +380,7 @@ pub async fn collections_update_handler(
     let owner = match resolve_collection_owner(
         db.as_ref(),
         &user.user_id,
-        &Vec::<String>::new(),
+        &user.workspace_read_scopes,
         &name,
     )
     .await
@@ -475,7 +475,7 @@ pub async fn collections_delete_handler(
     let owner = match resolve_collection_owner(
         db.as_ref(),
         &user.user_id,
-        &Vec::<String>::new(),
+        &user.workspace_read_scopes,
         &name,
     )
     .await

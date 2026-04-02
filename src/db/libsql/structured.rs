@@ -490,7 +490,7 @@ impl StructuredStore for LibSqlBackend {
     ) -> Result<(), DatabaseError> {
         let conn = self.connect().await?;
 
-        conn.execute("BEGIN", ())
+        conn.execute("BEGIN IMMEDIATE", ())
             .await
             .map_err(|e| DatabaseError::Query(format!("update_record BEGIN: {e}")))?;
 
@@ -623,7 +623,13 @@ impl StructuredStore for LibSqlBackend {
         order_by: Option<&str>,
         limit: usize,
     ) -> Result<Vec<Record>, DatabaseError> {
-        let capped_limit = limit.min(1000) as i64;
+        // Cap at 1000 for normal queries, but allow uncapped for internal
+        // callers (e.g., aggregate_in_rust) that pass usize::MAX.
+        let capped_limit = if limit == usize::MAX {
+            i64::MAX
+        } else {
+            limit.min(1000) as i64
+        };
 
         // Start building the query. Params ?1 = user_id, ?2 = collection.
         let mut sql = String::from(
@@ -647,7 +653,12 @@ impl StructuredStore for LibSqlBackend {
             Some(field) => {
                 structured::validate_field_name(field)
                     .map_err(|e| DatabaseError::Query(e.to_string()))?;
-                sql.push_str(&format!(" ORDER BY json_extract(data, '$.{field}')"));
+                // Top-level columns are used directly, not extracted from JSON.
+                if field == "created_at" || field == "updated_at" {
+                    sql.push_str(&format!(" ORDER BY {field}"));
+                } else {
+                    sql.push_str(&format!(" ORDER BY json_extract(data, '$.{field}')"));
+                }
             }
             None => {
                 sql.push_str(" ORDER BY created_at DESC");
@@ -774,9 +785,7 @@ impl StructuredStore for LibSqlBackend {
                 .await
                 .map_err(|e| DatabaseError::Query(format!("aggregate next: {e}")))?
             {
-                let key = row
-                    .get::<String>(0)
-                    .unwrap_or_else(|_| "null".to_string());
+                let key = get_text(&row, 0);
                 let value = extract_agg_value(&row, 1, &aggregation.operation)?;
                 result_map.insert(key, value);
             }

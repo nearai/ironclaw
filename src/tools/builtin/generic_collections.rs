@@ -218,6 +218,17 @@ impl UnifiedCollectionTool {
             .await
             .map_err(|e| ToolError::ExecutionFailed(format!("Failed to update record: {e}")))?;
 
+        // Fire collection write triggers.
+        if let Some(tx) = &self.collection_write_tx {
+            let _ = tx.send(CollectionWriteEvent {
+                user_id: self.owner_scope(ctx).to_string(),
+                collection: self.schema.collection.clone(),
+                record_id,
+                operation: "update".to_string(),
+                data: changed_fields,
+            });
+        }
+
         Ok(ToolOutput::success(
             json!({
                 "status": "updated",
@@ -243,6 +254,17 @@ impl UnifiedCollectionTool {
             .delete_record(self.owner_scope(ctx), record_id)
             .await
             .map_err(|e| ToolError::ExecutionFailed(format!("Failed to delete record: {e}")))?;
+
+        // Fire collection write triggers.
+        if let Some(tx) = &self.collection_write_tx {
+            let _ = tx.send(CollectionWriteEvent {
+                user_id: self.owner_scope(ctx).to_string(),
+                collection: self.schema.collection.clone(),
+                record_id,
+                operation: "delete".to_string(),
+                data: serde_json::Value::Null,
+            });
+        }
 
         Ok(ToolOutput::success(
             json!({

@@ -581,7 +581,7 @@ impl CollectionSchema {
 /// "tomorrow", "this week", or day names instead of YYYY-MM-DD. This handles
 /// the most common cases so the tool call doesn't fail validation.
 fn try_parse_natural_date(s: &str) -> Option<NaiveDate> {
-    let today = chrono::Local::now().date_naive();
+    let today = chrono::Utc::now().date_naive();
     let lower = s.trim().to_lowercase();
 
     match lower.as_str() {

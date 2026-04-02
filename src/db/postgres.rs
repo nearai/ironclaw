@@ -1620,7 +1620,13 @@ impl StructuredStore for PgBackend {
         order_by: Option<&str>,
         limit: usize,
     ) -> Result<Vec<Record>, DatabaseError> {
-        let capped_limit = limit.min(1000) as i64;
+        // Cap at 1000 for normal queries, but allow uncapped for internal
+        // callers that pass usize::MAX (e.g., aggregation fallbacks).
+        let capped_limit = if limit == usize::MAX {
+            i64::MAX
+        } else {
+            limit.min(1000) as i64
+        };
 
         // Start building the query. Params $1 = user_id, $2 = collection.
         let mut sql = String::from(
@@ -1644,7 +1650,12 @@ impl StructuredStore for PgBackend {
             Some(field) => {
                 structured::validate_field_name(field)
                     .map_err(|e| DatabaseError::Query(e.to_string()))?;
-                sql.push_str(&format!(" ORDER BY data->>'{field}'"));
+                // Top-level columns are used directly, not extracted from JSON.
+                if field == "created_at" || field == "updated_at" {
+                    sql.push_str(&format!(" ORDER BY {field}"));
+                } else {
+                    sql.push_str(&format!(" ORDER BY data->>'{field}'"));
+                }
             }
             None => {
                 sql.push_str(" ORDER BY created_at DESC");
