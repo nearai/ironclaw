@@ -6,6 +6,7 @@
 use tokio::sync::RwLock;
 
 use crate::extensions::{
+    naming::canonicalize_extension_name,
     AuthHint, ExtensionKind, ExtensionSource, RegistryEntry, ResultSource, SearchResult,
 };
 
@@ -21,7 +22,7 @@ impl ExtensionRegistry {
     /// Create a new registry populated with known extensions.
     pub fn new() -> Self {
         Self {
-            entries: builtin_entries(),
+            entries: canonicalize_entries(builtin_entries()),
             discovery_cache: RwLock::new(Vec::new()),
         }
     }
@@ -31,8 +32,8 @@ impl ExtensionRegistry {
     /// Deduplicates by `(name, kind)` pair -- a builtin MCP "slack" and a registry
     /// WASM "slack" can coexist since they're different kinds.
     pub fn new_with_catalog(catalog_entries: Vec<RegistryEntry>) -> Self {
-        let mut entries = builtin_entries();
-        for entry in catalog_entries {
+        let mut entries = canonicalize_entries(builtin_entries());
+        for entry in canonicalize_entries(catalog_entries) {
             if !entries
                 .iter()
                 .any(|e| e.name == entry.name && e.kind == entry.kind)
@@ -112,6 +113,7 @@ impl ExtensionRegistry {
     /// NOTE: Prefer [`get_with_kind`] when a kind hint is available, to avoid
     /// returning the wrong entry when two entries share a name but differ in kind.
     pub async fn get(&self, name: &str) -> Option<RegistryEntry> {
+        let name = canonicalize_extension_name(name).ok()?;
         if let Some(entry) = self.entries.iter().find(|e| e.name == name) {
             return Some(entry.clone());
         }
@@ -129,6 +131,7 @@ impl ExtensionRegistry {
         name: &str,
         kind: Option<ExtensionKind>,
     ) -> Option<RegistryEntry> {
+        let name = canonicalize_extension_name(name).ok()?;
         if let Some(kind) = kind {
             if let Some(entry) = self
                 .entries
@@ -145,7 +148,7 @@ impl ExtensionRegistry {
             // different kind, as that would silently misroute the install.
             return None;
         }
-        self.get(name).await
+        self.get(&name).await
     }
 
     /// Return all registry entries (builtins + cached discoveries).
@@ -166,7 +169,7 @@ impl ExtensionRegistry {
     /// Add discovered entries to the cache.
     pub async fn cache_discovered(&self, entries: Vec<RegistryEntry>) {
         let mut cache = self.discovery_cache.write().await;
-        for entry in entries {
+        for entry in canonicalize_entries(entries) {
             // Deduplicate by (name, kind) — same pair as new_with_catalog()
             if !cache
                 .iter()
@@ -182,6 +185,18 @@ impl Default for ExtensionRegistry {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn canonicalize_entries(entries: Vec<RegistryEntry>) -> Vec<RegistryEntry> {
+    entries
+        .into_iter()
+        .map(|mut entry| {
+            if let Ok(name) = canonicalize_extension_name(&entry.name) {
+                entry.name = name;
+            }
+            entry
+        })
+        .collect()
 }
 
 /// Score an entry against search tokens. Higher = better match.

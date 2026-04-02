@@ -635,6 +635,16 @@ function connectSSE() {
     handleAuthCompleted(data);
   });
 
+  eventSource.addEventListener('gate_required', (e) => {
+    const data = JSON.parse(e.data);
+    handleGateRequired(data);
+  });
+
+  eventSource.addEventListener('gate_resolved', (e) => {
+    const data = JSON.parse(e.data);
+    handleGateResolved(data);
+  });
+
   eventSource.addEventListener('extension_status', (e) => {
     if (currentTab === 'settings') refreshCurrentSettingsTab();
   });
@@ -1020,9 +1030,14 @@ function filterSlashCommands(value) {
 }
 
 function sendApprovalAction(requestId, action) {
-  apiFetch('/api/chat/approval', {
+  apiFetch('/api/chat/gate/resolve', {
     method: 'POST',
-    body: { request_id: requestId, action: action, thread_id: currentThreadId },
+    body: {
+      request_id: requestId,
+      thread_id: currentThreadId,
+      resolution: action === 'deny' ? 'denied' : 'approved',
+      always: action === 'always',
+    },
   }).catch((err) => {
     addMessage('system', 'Failed to send approval: ' + err.message);
   });
@@ -1653,6 +1668,56 @@ function handleAuthRequired(data) {
   }
 }
 
+function parseGateResumeKind(resumeKind) {
+  if (!resumeKind || typeof resumeKind !== 'object') return null;
+  if (resumeKind.Approval) return { type: 'approval', ...resumeKind.Approval };
+  if (resumeKind.Authentication) return { type: 'authentication', ...resumeKind.Authentication };
+  if (resumeKind.External) return { type: 'external', ...resumeKind.External };
+  return null;
+}
+
+function handleGateRequired(data) {
+  const hasThread = !!data.thread_id;
+  const forCurrentThread = !hasThread || isCurrentThread(data.thread_id);
+  const resume = parseGateResumeKind(data.resume_kind);
+  if (!forCurrentThread) {
+    unreadThreads.set(data.thread_id, (unreadThreads.get(data.thread_id) || 0) + 1);
+    debouncedLoadThreads();
+    return;
+  }
+  if (resume && resume.type === 'authentication') {
+    handleAuthRequired({
+      extension_name: resume.credential_name,
+      instructions: resume.instructions,
+      auth_url: resume.auth_url || null,
+      request_id: data.request_id,
+      thread_id: data.thread_id || currentThreadId,
+    });
+    return;
+  }
+  showApproval({
+    request_id: data.request_id,
+    tool_name: data.tool_name,
+    description: data.description,
+    parameters: data.parameters,
+    allow_always: !(resume && resume.type === 'approval' && resume.allow_always === false),
+    thread_id: data.thread_id || currentThreadId,
+  });
+}
+
+function handleGateResolved(data) {
+  const hasThread = !!data.thread_id;
+  if (hasThread && !isCurrentThread(data.thread_id)) {
+    debouncedLoadThreads();
+    return;
+  }
+  document.querySelectorAll('.approval-card[data-request-id="' + CSS.escape(data.request_id) + '"]').forEach((el) => el.remove());
+  if (data.resolution === 'credential_provided' || data.resolution === 'cancelled') {
+    removeAuthCard(data.tool_name);
+    enableChatInput();
+  }
+}
+
 function handleAuthCompleted(data) {
   if (data.thread_id && !isCurrentThread(data.thread_id)) {
     debouncedLoadThreads();
@@ -1833,15 +1898,27 @@ function submitAuthToken(extensionName, tokenValue) {
     btns.forEach((b) => { b.disabled = true; });
   }
 
-  apiFetch('/api/chat/auth-token', {
+  const isGateResolution = !!(card && card.getAttribute('data-request-id'));
+  const requestId = card ? card.getAttribute('data-request-id') : null;
+  const request = isGateResolution ? apiFetch('/api/chat/gate/resolve', {
+    method: 'POST',
+    body: {
+      request_id: requestId,
+      thread_id: threadId || currentThreadId || undefined,
+      resolution: 'credential_provided',
+      token: tokenValue.trim(),
+    },
+  }) : apiFetch('/api/chat/auth-token', {
     method: 'POST',
     body: {
       extension_name: extensionName,
       token: tokenValue.trim(),
-      request_id: card ? card.getAttribute('data-request-id') : null,
+      request_id: requestId,
       thread_id: threadId || currentThreadId || undefined,
     },
-  }).then((result) => {
+  });
+
+  request.then((result) => {
     if (result.success) {
       // Close immediately for responsiveness; the authoritative success UX
       // (toast + extensions refresh) still comes from auth_completed SSE.
@@ -1858,14 +1935,23 @@ function submitAuthToken(extensionName, tokenValue) {
 function cancelAuth(extensionName) {
   const card = getAuthCard(extensionName);
   const threadId = card ? card.getAttribute('data-thread-id') : null;
-  apiFetch('/api/chat/auth-cancel', {
+  const requestId = card ? card.getAttribute('data-request-id') : null;
+  const request = requestId ? apiFetch('/api/chat/gate/resolve', {
+    method: 'POST',
+    body: {
+      request_id: requestId,
+      thread_id: threadId || currentThreadId || undefined,
+      resolution: 'cancelled',
+    },
+  }) : apiFetch('/api/chat/auth-cancel', {
     method: 'POST',
     body: {
       extension_name: extensionName,
-      request_id: card ? card.getAttribute('data-request-id') : null,
+      request_id: requestId,
       thread_id: threadId || currentThreadId || undefined,
     },
-  }).catch(() => {});
+  });
+  request.catch(() => {});
   removeAuthCard(extensionName);
   setAuthFlowPending(false);
   enableChatInput();
@@ -1947,23 +2033,21 @@ function loadHistory(before) {
       if (lastTurn && !lastTurn.response && lastTurn.state === 'Processing') {
         showActivityThinking('Processing...');
       }
-      // Re-render pending approval card if the thread is awaiting approval
-      if (data.pending_approval) {
-        showApproval(data.pending_approval);
-      }
-      // Re-show auth card if auth flow is pending (survives SSE reconnect)
-      if (data.pending_auth) {
-        handleAuthRequired({
-          extension_name: data.pending_auth.extension_name,
-          instructions: data.pending_auth.instructions,
-          auth_url: null,
-          thread_id: currentThreadId,
+      if (data.pending_gate) {
+        handleGateRequired({
+          ...data.pending_gate,
+          thread_id: data.pending_gate.thread_id || currentThreadId,
         });
       } else {
-        // No pending auth — ensure stale auth UI is cleaned up
+        // No pending gate for this history view. Keep a global auth overlay if
+        // it belongs to a different thread; another tab/thread may still be
+        // waiting on it.
         const overlay = getAuthOverlay();
-        if (overlay && overlay.getAttribute('data-thread-id') && overlay.getAttribute('data-thread-id') !== currentThreadId) {
-          overlay.remove();
+        if (overlay) {
+          const overlayThreadId = overlay.getAttribute('data-thread-id');
+          if (overlayThreadId && overlayThreadId !== currentThreadId) {
+            return;
+          }
         }
         removeAuthCard();
         setAuthFlowPending(false);
@@ -4669,12 +4753,19 @@ function renderMissionDetail(m) {
       + '<div class="job-description-body">' + renderMarkdown(m.success_criteria) + '</div></div>';
   }
 
+  if (m.notify_channels && m.notify_channels.length > 0) {
+    html += '<div class="job-description"><h3>Notify Channels</h3>'
+      + '<div class="job-description-body">' + m.notify_channels.map(escapeHtml).join(', ') + '</div></div>';
+  }
+
   if (m.approach_history && m.approach_history.length > 0) {
-    html += '<div class="job-description"><h3>Approach History</h3><ul>';
-    m.approach_history.forEach((a) => {
-      html += '<li>' + escapeHtml(a) + '</li>';
+    html += '<div class="job-description"><h3>Approach History</h3>';
+    m.approach_history.forEach((a, i) => {
+      html += '<div class="job-description-body" style="margin-bottom:8px">'
+        + '<strong>Run ' + (i + 1) + '</strong><br>'
+        + renderMarkdown(a) + '</div>';
     });
-    html += '</ul></div>';
+    html += '</div>';
   }
 
   if (m.threads && m.threads.length > 0) {

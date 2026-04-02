@@ -128,6 +128,27 @@ pub enum AppEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         thread_id: Option<String>,
     },
+    #[serde(rename = "gate_required")]
+    GateRequired {
+        request_id: String,
+        gate_name: String,
+        tool_name: String,
+        description: String,
+        parameters: String,
+        resume_kind: serde_json::Value,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
+    },
+    #[serde(rename = "gate_resolved")]
+    GateResolved {
+        request_id: String,
+        gate_name: String,
+        tool_name: String,
+        resolution: String,
+        message: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
+    },
     #[serde(rename = "error")]
     Error {
         message: String,
@@ -295,6 +316,8 @@ impl AppEvent {
             Self::ApprovalNeeded { .. } => "approval_needed",
             Self::AuthRequired { .. } => "auth_required",
             Self::AuthCompleted { .. } => "auth_completed",
+            Self::GateRequired { .. } => "gate_required",
+            Self::GateResolved { .. } => "gate_resolved",
             Self::Error { .. } => "error",
             Self::Heartbeat => "heartbeat",
             Self::JobMessage { .. } => "job_message",

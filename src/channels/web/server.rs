@@ -456,6 +456,7 @@ pub async fn start_server(
     let protected = Router::new()
         // Chat
         .route("/api/chat/send", post(chat_send_handler))
+        .route("/api/chat/gate/resolve", post(chat_gate_resolve_handler))
         .route("/api/chat/approval", post(chat_approval_handler))
         .route("/api/chat/auth-token", post(chat_auth_token_handler))
         .route("/api/chat/auth-cancel", post(chat_auth_cancel_handler))
@@ -1138,7 +1139,7 @@ async fn oauth_callback_handler(
     // from "Installed (Authenticate)" → "Active" without a second click.
     // OAuth success is independent of activation — tokens are already stored.
     // Report auth as successful and attempt activation as a bonus step.
-    let final_message = if success {
+    let final_message = if success && flow.auto_activate_extension {
         match ext_mgr.activate(&flow.extension_name, &flow.user_id).await {
             Ok(result) => result.message,
             Err(e) => {
@@ -1153,11 +1154,14 @@ async fn oauth_callback_handler(
                 )
             }
         }
+    } else if success {
+        format!("{} authenticated successfully", flow.display_name)
     } else {
         message
     };
 
     // Broadcast event to notify the web UI
+    let extension_name = flow.extension_name.clone();
     if let Some(ref sse) = flow.sse_manager {
         sse.broadcast_for_user(
             &flow.user_id,
@@ -1167,6 +1171,18 @@ async fn oauth_callback_handler(
                 message: final_message.clone(),
                 thread_id: None,
             },
+        );
+    }
+
+    if success
+        && let Err(e) =
+            crate::bridge::resolve_engine_auth_callback(&flow.user_id, &extension_name).await
+    {
+        tracing::warn!(
+            extension = %extension_name,
+            user_id = %flow.user_id,
+            error = %e,
+            "Failed to resume pending engine auth gate after OAuth callback"
         );
     }
 
@@ -1662,6 +1678,59 @@ async fn chat_approval_handler(
     ))
 }
 
+async fn chat_gate_resolve_handler(
+    State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
+    Json(req): Json<GateResolveRequest>,
+) -> Result<Json<ActionResponse>, (StatusCode, String)> {
+    match req.resolution {
+        GateResolutionPayload::Approved { always } => {
+            let action = if always { "always" } else { "approve" }.to_string();
+            let _ = chat_approval_handler(
+                State(state),
+                AuthenticatedUser(user),
+                Json(ApprovalRequest {
+                    request_id: req.request_id,
+                    action,
+                    thread_id: req.thread_id,
+                }),
+            )
+            .await?;
+            Ok(Json(ActionResponse::ok("Gate resolution accepted.")))
+        }
+        GateResolutionPayload::Denied => {
+            let _ = chat_approval_handler(
+                State(state),
+                AuthenticatedUser(user),
+                Json(ApprovalRequest {
+                    request_id: req.request_id,
+                    action: "deny".into(),
+                    thread_id: req.thread_id,
+                }),
+            )
+            .await?;
+            Ok(Json(ActionResponse::ok("Gate resolution accepted.")))
+        }
+        GateResolutionPayload::CredentialProvided { token } => {
+            let thread_id = req.thread_id.ok_or((
+                StatusCode::BAD_REQUEST,
+                "thread_id is required for credential resolution".to_string(),
+            ))?;
+            dispatch_engine_auth_resolution(&state, &user.user_id, &thread_id, token).await?;
+            Ok(Json(ActionResponse::ok("Credential submitted.")))
+        }
+        GateResolutionPayload::Cancelled => {
+            let thread_id = req.thread_id.ok_or((
+                StatusCode::BAD_REQUEST,
+                "thread_id is required for cancellation".to_string(),
+            ))?;
+            dispatch_engine_auth_resolution(&state, &user.user_id, &thread_id, "cancel".into())
+                .await?;
+            Ok(Json(ActionResponse::ok("Gate cancelled.")))
+        }
+    }
+}
+
 /// Submit an auth token directly to the extension manager, bypassing the message pipeline.
 ///
 /// The token never touches the LLM, chat history, or SSE stream.
@@ -1923,33 +1992,30 @@ struct HistoryQuery {
     before: Option<String>,
 }
 
-/// Check engine v2 pending auth state and return a PendingAuthInfo if active.
-async fn engine_pending_auth_info(
+async fn engine_pending_gate_info(
     user_id: &str,
     thread_id: Option<&str>,
-) -> Option<PendingAuthInfo> {
-    let (request_id, cred_name, instructions) =
-        crate::bridge::get_engine_pending_auth(user_id, thread_id).await?;
-    Some(PendingAuthInfo {
-        request_id,
-        extension_name: cred_name,
-        instructions,
-    })
-}
-
-async fn engine_pending_approval_info(
-    user_id: &str,
-    thread_id: Option<&str>,
-) -> Option<PendingApprovalInfo> {
-    let pending = crate::bridge::pending_approval_for_user_thread(user_id, thread_id)
+) -> Option<PendingGateInfo> {
+    let pending = crate::bridge::get_engine_pending_gate(user_id, thread_id)
         .await
         .ok()??;
-    Some(PendingApprovalInfo {
+    Some(PendingGateInfo {
         request_id: pending.request_id,
+        thread_id: pending.thread_id.to_string(),
+        gate_name: pending.gate_name,
         tool_name: pending.tool_name,
         description: pending.description,
         parameters: pending.parameters,
+        resume_kind: serde_json::to_value(pending.resume_kind).unwrap_or_default(),
     })
+}
+
+async fn history_pending_gate_info(user_id: &str, thread_id: Option<&str>) -> Option<PendingGateInfo> {
+    let scoped = engine_pending_gate_info(user_id, thread_id).await;
+    if scoped.is_some() || thread_id.is_none() {
+        return scoped;
+    }
+    engine_pending_gate_info(user_id, None).await
 }
 
 async fn dispatch_engine_auth_resolution(
@@ -2055,8 +2121,7 @@ async fn chat_history_handler(
             turns,
             has_more,
             oldest_timestamp,
-            pending_approval: engine_pending_approval_info(&user.user_id, thread_scope).await,
-            pending_auth: engine_pending_auth_info(&user.user_id, thread_scope).await,
+            pending_gate: history_pending_gate_info(&user.user_id, thread_scope).await,
         }));
     }
 
@@ -2096,19 +2161,18 @@ async fn chat_history_handler(
             })
             .collect();
 
-        let pending_approval = engine_pending_approval_info(&user.user_id, thread_scope)
+        let pending_gate = history_pending_gate_info(&user.user_id, thread_scope)
             .await
             .or_else(|| {
-                thread
-                    .pending_approval
-                    .as_ref()
-                    .map(|pa| PendingApprovalInfo {
-                        request_id: pa.request_id.to_string(),
-                        tool_name: pa.tool_name.clone(),
-                        description: pa.description.clone(),
-                        parameters: serde_json::to_string_pretty(&pa.parameters)
-                            .unwrap_or_default(),
-                    })
+                thread.pending_approval.as_ref().map(|pa| PendingGateInfo {
+                    request_id: pa.request_id.to_string(),
+                    thread_id: thread_id.to_string(),
+                    gate_name: "approval".into(),
+                    tool_name: pa.tool_name.clone(),
+                    description: pa.description.clone(),
+                    parameters: serde_json::to_string_pretty(&pa.parameters).unwrap_or_default(),
+                    resume_kind: serde_json::json!({"Approval":{"allow_always":true}}),
+                })
             });
 
         return Ok(Json(HistoryResponse {
@@ -2116,8 +2180,7 @@ async fn chat_history_handler(
             turns,
             has_more: false,
             oldest_timestamp: None,
-            pending_approval,
-            pending_auth: engine_pending_auth_info(&user.user_id, thread_scope).await,
+            pending_gate,
         }));
     }
 
@@ -2136,8 +2199,7 @@ async fn chat_history_handler(
                 turns,
                 has_more,
                 oldest_timestamp,
-                pending_approval: engine_pending_approval_info(&user.user_id, thread_scope).await,
-                pending_auth: engine_pending_auth_info(&user.user_id, thread_scope).await,
+                pending_gate: history_pending_gate_info(&user.user_id, thread_scope).await,
             }));
         }
     }
@@ -2148,8 +2210,7 @@ async fn chat_history_handler(
         turns: Vec::new(),
         has_more: false,
         oldest_timestamp: None,
-        pending_approval: engine_pending_approval_info(&user.user_id, thread_scope).await,
-        pending_auth: engine_pending_auth_info(&user.user_id, thread_scope).await,
+        pending_gate: history_pending_gate_info(&user.user_id, thread_scope).await,
     }))
 }
 
@@ -3415,6 +3476,7 @@ mod tests {
             client_secret_secret_name: None,
             client_secret_expires_at: None,
             created_at: std::time::Instant::now(),
+            auto_activate_extension: true,
         }
     }
 
@@ -3782,6 +3844,7 @@ mod tests {
             client_secret_secret_name: None,
             client_secret_expires_at: None,
             created_at,
+            auto_activate_extension: true,
         };
 
         ext_mgr
@@ -3853,6 +3916,7 @@ mod tests {
             client_secret_secret_name: None,
             client_secret_expires_at: None,
             created_at,
+            auto_activate_extension: true,
         };
 
         ext_mgr
@@ -3960,6 +4024,7 @@ mod tests {
             client_secret_expires_at: None,
             // Expired — handler will reject after lookup (no network I/O)
             created_at,
+            auto_activate_extension: true,
         };
 
         ext_mgr
@@ -4048,6 +4113,7 @@ mod tests {
             client_secret_secret_name: None,
             client_secret_expires_at: None,
             created_at,
+            auto_activate_extension: true,
         };
 
         ext_mgr
@@ -4131,6 +4197,7 @@ mod tests {
             client_secret_secret_name: None,
             client_secret_expires_at: None,
             created_at,
+            auto_activate_extension: true,
         };
 
         ext_mgr
@@ -4367,6 +4434,132 @@ mod tests {
         }
 
         proxy.shutdown().await;
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn test_oauth_callback_happy_path_without_auto_activation() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let proxy = MockOauthProxyServer::start().await;
+        let _env_guard = crate::config::helpers::lock_env();
+        let _exchange_url_guard =
+            set_env_var("IRONCLAW_OAUTH_EXCHANGE_URL", Some(&proxy.base_url()));
+        let _proxy_auth_guard = set_env_var("IRONCLAW_OAUTH_PROXY_AUTH_TOKEN", None);
+        let _gateway_token_guard = set_env_var("GATEWAY_AUTH_TOKEN", Some("gateway-test-token"));
+
+        let secrets = test_secrets_store();
+        let (ext_mgr, _wasm_tools_dir, _wasm_channels_dir) = test_ext_mgr(Arc::clone(&secrets));
+        let sse_mgr = Arc::new(SseManager::new());
+        let mut receiver = sse_mgr.sender().subscribe();
+        let mut flow = fresh_pending_oauth_flow(
+            Arc::clone(&secrets),
+            Some(Arc::clone(&sse_mgr)),
+            crate::cli::oauth_defaults::oauth_proxy_auth_token(),
+        );
+        flow.auto_activate_extension = false;
+
+        ext_mgr
+            .pending_oauth_flows()
+            .write()
+            .await
+            .insert("test_nonce".to_string(), flow);
+
+        let state = test_gateway_state(Some(ext_mgr.clone()));
+        let app = test_oauth_router(state);
+        let versioned_state =
+            crate::cli::oauth_defaults::encode_hosted_oauth_state("test_nonce", Some("myinstance"));
+
+        let req = axum::http::Request::builder()
+            .uri(format!(
+                "/oauth/callback?code=fake_code&state={}",
+                urlencoding::encode(&versioned_state)
+            ))
+            .body(Body::empty())
+            .expect("request");
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        match receiver.recv().await.expect("auth_completed event").event {
+            crate::channels::web::types::AppEvent::AuthCompleted {
+                extension_name,
+                success,
+                message,
+                ..
+            } => {
+                assert_eq!(extension_name, "test_tool");
+                assert!(success, "OAuth callback should broadcast success");
+                assert_eq!(message, "Test Tool authenticated successfully");
+            }
+            event => panic!("expected AuthCompleted event, got {event:?}"),
+        }
+
+        proxy.shutdown().await;
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn test_oauth_callback_exchange_failure_broadcasts_auth_completed_failure() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let _env_guard = crate::config::helpers::lock_env();
+        let _exchange_url_guard =
+            set_env_var("IRONCLAW_OAUTH_EXCHANGE_URL", Some("http://127.0.0.1:1"));
+        let _proxy_auth_guard = set_env_var("IRONCLAW_OAUTH_PROXY_AUTH_TOKEN", None);
+        let _gateway_token_guard = set_env_var("GATEWAY_AUTH_TOKEN", Some("gateway-test-token"));
+
+        let secrets = test_secrets_store();
+        let (ext_mgr, _wasm_tools_dir, _wasm_channels_dir) = test_ext_mgr(Arc::clone(&secrets));
+        let sse_mgr = Arc::new(SseManager::new());
+        let mut receiver = sse_mgr.sender().subscribe();
+        let flow = fresh_pending_oauth_flow(
+            Arc::clone(&secrets),
+            Some(Arc::clone(&sse_mgr)),
+            crate::cli::oauth_defaults::oauth_proxy_auth_token(),
+        );
+
+        ext_mgr
+            .pending_oauth_flows()
+            .write()
+            .await
+            .insert("test_nonce".to_string(), flow);
+
+        let state = test_gateway_state(Some(ext_mgr.clone()));
+        let app = test_oauth_router(state);
+        let versioned_state =
+            crate::cli::oauth_defaults::encode_hosted_oauth_state("test_nonce", Some("myinstance"));
+
+        let req = axum::http::Request::builder()
+            .uri(format!(
+                "/oauth/callback?code=fake_code&state={}",
+                urlencoding::encode(&versioned_state)
+            ))
+            .body(Body::empty())
+            .expect("request");
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        match receiver.recv().await.expect("auth_completed event").event {
+            crate::channels::web::types::AppEvent::AuthCompleted {
+                extension_name,
+                success,
+                message,
+                ..
+            } => {
+                assert_eq!(extension_name, "test_tool");
+                assert!(!success, "OAuth callback failure should broadcast failure");
+                assert!(message.contains("authentication failed"));
+            }
+            event => panic!("expected AuthCompleted event, got {event:?}"),
+        }
     }
 
     // --- Slack relay OAuth CSRF tests ---

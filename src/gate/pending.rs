@@ -83,6 +83,7 @@ impl PendingGate {
 #[derive(Debug, Clone, Serialize)]
 pub struct PendingGateView {
     pub request_id: String,
+    pub thread_id: String,
     pub gate_name: String,
     pub tool_name: String,
     pub description: String,
@@ -94,6 +95,7 @@ impl From<&PendingGate> for PendingGateView {
     fn from(gate: &PendingGate) -> Self {
         Self {
             request_id: gate.request_id.to_string(),
+            thread_id: gate.thread_id.to_string(),
             gate_name: gate.gate_name.clone(),
             tool_name: gate.action_name.clone(),
             description: gate.description.clone(),

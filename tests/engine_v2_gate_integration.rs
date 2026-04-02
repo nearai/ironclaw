@@ -195,6 +195,7 @@ impl EffectExecutor for GateMockEffects {
                     call_id: "call_gate_1".into(),
                     parameters: Box::new(parameters),
                     resume_kind: Box::new(ResumeKind::Approval { allow_always: true }),
+                    resume_output: None,
                 });
             }
 
@@ -209,6 +210,7 @@ impl EffectExecutor for GateMockEffects {
                         instructions: "Authenticate your Notion workspace".into(),
                         auth_url: None,
                     }),
+                    resume_output: None,
                 });
             }
         }
@@ -221,6 +223,7 @@ impl EffectExecutor for GateMockEffects {
                 call_id: "call_gate_1".into(),
                 parameters: Box::new(parameters),
                 resume_kind: Box::new(ResumeKind::Approval { allow_always: true }),
+                resume_output: None,
             });
         }
 
@@ -236,6 +239,7 @@ impl EffectExecutor for GateMockEffects {
                     instructions: "Provide your API key".into(),
                     auth_url: None,
                 }),
+                resume_output: None,
             });
         }
 
@@ -810,16 +814,21 @@ async fn approval_resolution_executes_pending_call_directly() {
 
     let first = mgr.join_thread(tid).await.expect("first join");
     match first {
-        ThreadOutcome::NeedApproval {
+        ThreadOutcome::GatePaused {
+            gate_name,
             action_name,
             call_id,
             parameters,
+            resume_kind,
+            ..
         } => {
+            assert_eq!(gate_name, "approval");
             assert_eq!(action_name, "approval_test");
             assert_eq!(call_id, "call_approval_1");
             assert_eq!(parameters["value"], "hello");
+            assert!(matches!(resume_kind, ResumeKind::Approval { .. }));
         }
-        other => panic!("expected NeedApproval, got {other:?}"),
+        other => panic!("expected GatePaused approval, got {other:?}"),
     }
     assert_eq!(
         store.load_thread(tid).await.unwrap().unwrap().state,
@@ -839,6 +848,7 @@ async fn approval_resolution_executes_pending_call_directly() {
         user_id: "test-user".into(),
         step_id: ironclaw_engine::StepId::new(),
         current_call_id: Some("call_approval_1".into()),
+        source_channel: None,
     };
 
     let tool_result = effects
@@ -971,6 +981,7 @@ async fn auth_resolution_retries_same_pending_action_without_second_pause() {
         user_id: "test-user".into(),
         step_id: ironclaw_engine::StepId::new(),
         current_call_id: Some("call_auth_1".into()),
+        source_channel: None,
     };
 
     effects.mark_authenticated("http").await;
@@ -1075,6 +1086,7 @@ async fn approval_chains_directly_into_auth_for_install_flow() {
         user_id: "test-user".into(),
         step_id: ironclaw_engine::StepId::new(),
         current_call_id: Some("call_install_1".into()),
+        source_channel: None,
     };
 
     effects.mark_approved("tool_install").await;

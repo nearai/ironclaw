@@ -164,8 +164,7 @@ pub async fn chat_history_handler(
             turns,
             has_more,
             oldest_timestamp,
-            pending_approval: None,
-            pending_auth: None,
+            pending_gate: None,
         }));
     }
 
@@ -208,23 +207,22 @@ pub async fn chat_history_handler(
                 })
                 .collect();
 
-            let pending_approval = thread
-                .pending_approval
-                .as_ref()
-                .map(|pa| PendingApprovalInfo {
-                    request_id: pa.request_id.to_string(),
-                    tool_name: pa.tool_name.clone(),
-                    description: pa.description.clone(),
-                    parameters: serde_json::to_string_pretty(&pa.parameters).unwrap_or_default(),
-                });
+            let pending_gate = thread.pending_approval.as_ref().map(|pa| PendingGateInfo {
+                request_id: pa.request_id.to_string(),
+                thread_id: thread_id.to_string(),
+                gate_name: "approval".into(),
+                tool_name: pa.tool_name.clone(),
+                description: pa.description.clone(),
+                parameters: serde_json::to_string_pretty(&pa.parameters).unwrap_or_default(),
+                resume_kind: serde_json::json!({"Approval":{"allow_always":true}}),
+            });
 
             return Ok(Json(HistoryResponse {
                 thread_id,
                 turns,
                 has_more: false,
                 oldest_timestamp: None,
-                pending_approval,
-                pending_auth: None,
+                pending_gate,
             }));
         }
     }
@@ -244,8 +242,7 @@ pub async fn chat_history_handler(
                 turns,
                 has_more,
                 oldest_timestamp,
-                pending_approval: None,
-                pending_auth: None,
+                pending_gate: None,
             }));
         }
     }
@@ -256,8 +253,7 @@ pub async fn chat_history_handler(
         turns: Vec::new(),
         has_more: false,
         oldest_timestamp: None,
-        pending_approval: None,
-        pending_auth: None,
+        pending_gate: None,
     }))
 }
 

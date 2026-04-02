@@ -145,7 +145,7 @@ mod tests {
                     "test-user",
                     DocType::Lesson,
                     "web tool alias",
-                    "Use web-search not web_search",
+                    "Use web_search",
                 ),
             ]));
         let retrieval = RetrievalEngine::new(store);
@@ -174,7 +174,7 @@ mod tests {
         assert!(ctx_msgs[0].content.contains("You are an assistant."));
         assert!(ctx_msgs[0].content.contains("Prior Knowledge"));
         assert!(ctx_msgs[0].content.contains("LESSON"));
-        assert!(ctx_msgs[0].content.contains("web-search"));
+        assert!(ctx_msgs[0].content.contains("web_search"));
         assert_eq!(ctx_msgs[1].role, crate::types::message::MessageRole::User);
     }
 

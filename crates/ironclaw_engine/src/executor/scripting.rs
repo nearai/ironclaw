@@ -619,7 +619,7 @@ pub async fn execute_code_with_skills(
                             }
                         }
                     }
-                    PreflightResult::NeedApproval(outcome) => {
+                    PreflightResult::GatePaused(outcome) => {
                         return Ok(CodeExecutionResult {
                             return_value: serde_json::Value::Null,
                             stdout,
@@ -816,8 +816,8 @@ enum PreflightResult {
     Approved(crate::types::capability::CapabilityLease),
     /// Tool denied — return this error to Monty.
     Denied(ExtFunctionResult),
-    /// Tool needs approval — interrupt the batch.
-    NeedApproval(crate::runtime::messaging::ThreadOutcome),
+    /// Tool is paused by a gate — interrupt the batch.
+    GatePaused(crate::runtime::messaging::ThreadOutcome),
 }
 
 /// Run preflight checks for a tool call: find lease, check policy, consume use.
@@ -882,11 +882,14 @@ async fn preflight_action(
                     gate_name: None,
                     params_summary: crate::types::event::summarize_params(action_name, params),
                 });
-                return PreflightResult::NeedApproval(
-                    crate::runtime::messaging::ThreadOutcome::NeedApproval {
+                return PreflightResult::GatePaused(
+                    crate::runtime::messaging::ThreadOutcome::GatePaused {
+                        gate_name: "approval".into(),
                         action_name: action_name.into(),
                         call_id: call_id.into(),
                         parameters: params.clone(),
+                        resume_kind: crate::gate::ResumeKind::Approval { allow_always: true },
+                        resume_output: None,
                     },
                 );
             }
@@ -1268,52 +1271,11 @@ async fn resolve_tool_future(
             action_results.push(result);
             ExtFunctionResult::Return(monty_val)
         }
-        Ok(Err(EngineError::NeedAuthentication {
-            credential_name,
-            action_name,
-            call_id,
-            completed_output: _,
-            ..
-        })) => {
-            let _ = leases.refund_use(lease_id).await;
-            events.push(EventKind::ActionFailed {
-                step_id: context.step_id,
-                action_name: action_name.clone(),
-                call_id: call_id.clone(),
-                error: format!("authentication required for credential '{credential_name}'"),
-                params_summary,
-            });
-            ExtFunctionResult::Error(MontyException::new(
-                ExcType::RuntimeError,
-                Some(format!(
-                    "authentication required for credential '{credential_name}'"
-                )),
-            ))
-        }
-        Ok(Err(EngineError::NeedApproval {
-            action_name,
-            call_id,
-            ..
-        })) => {
-            let _ = leases.refund_use(lease_id).await;
-            events.push(EventKind::ApprovalRequested {
-                action_name,
-                call_id,
-                parameters: Some(parameters),
-                description: None,
-                allow_always: None,
-                gate_name: None,
-                params_summary,
-            });
-            ExtFunctionResult::Error(MontyException::new(
-                ExcType::RuntimeError,
-                Some("action requires approval".into()),
-            ))
-        }
         Ok(Err(EngineError::GatePaused {
             gate_name,
             action_name,
             call_id,
+            resume_kind,
             ..
         })) => {
             let _ = leases.refund_use(lease_id).await;
@@ -1322,7 +1284,10 @@ async fn resolve_tool_future(
                 call_id,
                 parameters: Some(parameters),
                 description: None,
-                allow_always: None,
+                allow_always: match *resume_kind {
+                    crate::gate::ResumeKind::Approval { allow_always } => Some(allow_always),
+                    _ => None,
+                },
                 gate_name: Some(gate_name.clone()),
                 params_summary,
             });
@@ -1580,6 +1545,7 @@ mod tests {
             user_id: "test".into(),
             step_id: StepId::new(),
             current_call_id: None,
+            source_channel: None,
         }
     }
 

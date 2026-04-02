@@ -360,23 +360,17 @@ Engine broadcasts `ThreadEvent`s via `tokio::broadcast`. Router subscribes and f
 
 ### 6.7 Remaining work
 
-#### Approval flow (NOT YET IMPLEMENTED)
+#### Unified gate flow — IMPLEMENTED
 
-**Current state:** When `PolicyEngine` returns `RequireApproval`, the engine produces `ThreadOutcome::NeedApproval { action_name, call_id, parameters }`. The bridge router converts this to a plain text message: "Action 'X' requires approval (not yet supported)". No actual pause/resume.
+Engine v2 now uses a single pause model:
 
-**What's needed:**
+- `EngineError::GatePaused` is the only execution interrupt
+- `ThreadOutcome::GatePaused` is the only pause outcome
+- pending state is stored in the unified pending-gate store
+- the web gateway rehydrates `HistoryResponse.pending_gate`
+- the primary web resolver is `POST /api/chat/gate/resolve`
 
-1. **Send approval request to channel** — Convert `NeedApproval` to `StatusUpdate::ApprovalNeeded` and send via `channels.send_status()`. This shows the approval UI in CLI/web.
-
-2. **Pause the thread** — Thread transitions to `Waiting` state (already happens). The `ConversationManager` needs to track that the thread is waiting for approval, not for a new user message.
-
-3. **Route approval response** — When user sends `yes`/`no`/`always`, the `SubmissionParser` in `handle_message()` produces `Submission::ApprovalResponse`. The bridge needs to intercept this and route it to the waiting thread instead of spawning a new one.
-
-4. **Resume execution** — On approval: re-execute the denied tool call with policy bypassed (or add it to an auto-approve set on the lease). On denial: inject an error message into the thread and resume the loop so the LLM can try a different approach.
-
-5. **`always` handling** — Add the tool to the thread's auto-approved set (on the capability lease or a separate allowlist). Future calls to the same tool skip approval.
-
-**v1 reference:** `ChatDelegate.execute_tool_calls()` returns `LoopOutcome::NeedApproval(PendingApproval)`. Stored in session thread state. Web gateway sends `approval_needed` SSE event. User response parsed by `SubmissionParser`. `thread_ops.rs` resumes loop with deferred tool calls.
+Approval, authentication, and post-action auth chaining all use the same pause/resume path. Legacy `/api/chat/approval`, `/api/chat/auth-token`, and `/api/chat/auth-cancel` endpoints remain as shims over the unified gate resolver.
 
 #### Database persistence (PARTIAL)
 - `HybridStore`: ephemeral data (threads, steps, events) in-memory; MemoryDocs (reflection output) persisted to workspace at `engine/docs/{type}/{id}.json`

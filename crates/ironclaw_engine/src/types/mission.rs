@@ -99,6 +99,12 @@ pub struct Mission {
     /// Optional criteria for declaring the mission complete.
     pub success_criteria: Option<String>,
 
+    // ── Notification ──
+    /// Channels to notify when a mission thread completes (e.g. "gateway", "repl").
+    /// Empty means no proactive notification (results only in approach_history).
+    #[serde(default)]
+    pub notify_channels: Vec<String>,
+
     // ── Budget ──
     /// Maximum threads per day (0 = unlimited).
     pub max_threads_per_day: u32,
@@ -138,6 +144,7 @@ impl Mission {
             approach_history: Vec::new(),
             thread_history: Vec::new(),
             success_criteria: None,
+            notify_channels: Vec::new(),
             max_threads_per_day: 10,
             threads_today: 0,
             last_trigger_payload: None,

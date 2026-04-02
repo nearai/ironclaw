@@ -19,6 +19,7 @@
 
 pub mod discovery;
 pub mod manager;
+pub mod naming;
 pub mod registry;
 
 pub use discovery::OnlineDiscovery;

@@ -140,10 +140,18 @@ impl LeaseManager {
         thread_id: ThreadId,
         action_name: &str,
     ) -> Option<CapabilityLease> {
+        let hyphenated = action_name.replace('_', "-");
+        let underscored = action_name.replace('-', "_");
         let leases = self.active.read().await;
         leases
             .values()
-            .find(|l| l.thread_id == thread_id && l.is_valid() && l.covers_action(action_name))
+            .find(|l| {
+                l.thread_id == thread_id
+                    && l.is_valid()
+                    && (l.covers_action(action_name)
+                        || l.covers_action(&hyphenated)
+                        || l.covers_action(&underscored))
+            })
             .cloned()
     }
 

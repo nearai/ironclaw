@@ -22,6 +22,9 @@ pub struct ThreadExecutionContext {
     pub user_id: String,
     pub step_id: StepId,
     pub current_call_id: Option<String>,
+    /// The channel this thread's conversation originated from (e.g. "gateway", "repl").
+    /// Used by mission_create to default `notify_channels` to the current channel.
+    pub source_channel: Option<String>,
 }
 
 /// Abstraction over capability action execution.

@@ -18,6 +18,7 @@ use crate::channels::{ChannelManager, OutgoingResponse};
 use crate::extensions::discovery::OnlineDiscovery;
 use crate::extensions::registry::ExtensionRegistry;
 use crate::extensions::{
+    naming::{canonicalize_extension_name, legacy_extension_alias},
     ActivateResult, AuthResult, ConfigureResult, ExtensionError, ExtensionKind, ExtensionSource,
     InstallResult, InstalledExtension, RegistryEntry, ResultSource, SearchResult, ToolAuthState,
     UpgradeOutcome, UpgradeResult, VerificationChallenge,
@@ -1156,6 +1157,10 @@ impl ExtensionManager {
         &self.pending_oauth_flows
     }
 
+    pub async fn sse_sender(&self) -> Option<Arc<crate::channels::web::sse::SseManager>> {
+        self.sse_manager.read().await.clone()
+    }
+
     async fn clear_pending_extension_auth(&self, name: &str) {
         {
             let mut pending = self.pending_auth.write().await;
@@ -1297,12 +1302,12 @@ impl ExtensionManager {
         kind_hint: Option<ExtensionKind>,
         user_id: &str,
     ) -> Result<InstallResult, ExtensionError> {
+        let name = canonicalize_extension_name(name)?;
         let sanitized_url = url.map(sanitize_url_for_logging);
         tracing::info!(extension = %name, url = ?sanitized_url, kind = ?kind_hint, "Installing extension");
-        Self::validate_extension_name(name)?;
 
         // If we have a registry entry, use it (prefer kind_hint to resolve collisions)
-        if let Some(entry) = self.registry.get_with_kind(name, kind_hint).await {
+        if let Some(entry) = self.registry.get_with_kind(&name, kind_hint).await {
             return self.install_from_entry(&entry, user_id).await.map_err(|e| {
                 tracing::error!(extension = %name, error = %e, "Extension install failed");
                 e
@@ -1313,10 +1318,10 @@ impl ExtensionManager {
         if let Some(url) = url {
             let kind = kind_hint.unwrap_or_else(|| infer_kind_from_url(url));
             return match kind {
-                ExtensionKind::McpServer => self.install_mcp_from_url(name, url, user_id).await,
-                ExtensionKind::WasmTool => self.install_wasm_tool_from_url(name, url).await,
+                ExtensionKind::McpServer => self.install_mcp_from_url(&name, url, user_id).await,
+                ExtensionKind::WasmTool => self.install_wasm_tool_from_url(&name, url).await,
                 ExtensionKind::WasmChannel => {
-                    self.install_wasm_channel_from_url(name, url, None).await
+                    self.install_wasm_channel_from_url(&name, url, None).await
                 }
                 ExtensionKind::ChannelRelay => {
                     // ChannelRelay extensions are installed from registry, not by URL
@@ -1345,17 +1350,18 @@ impl ExtensionManager {
     /// Read-only for WASM extensions; may initiate OAuth for MCP servers.
     /// To provide secrets, use [`configure()`] instead.
     pub async fn auth(&self, name: &str, user_id: &str) -> Result<AuthResult, ExtensionError> {
+        let name = canonicalize_extension_name(name)?;
         // Clean up expired pending auths
         self.cleanup_expired_auths().await;
 
         // Determine what kind of extension this is
-        let kind = self.determine_installed_kind(name, user_id).await?;
+        let kind = self.determine_installed_kind(&name, user_id).await?;
 
         match kind {
-            ExtensionKind::McpServer => self.auth_mcp(name, user_id).await,
-            ExtensionKind::WasmTool => self.auth_wasm_tool(name, user_id).await,
-            ExtensionKind::WasmChannel => self.auth_wasm_channel_status(name, user_id).await,
-            ExtensionKind::ChannelRelay => self.auth_channel_relay(name, user_id).await,
+            ExtensionKind::McpServer => self.auth_mcp(&name, user_id).await,
+            ExtensionKind::WasmTool => self.auth_wasm_tool(&name, user_id).await,
+            ExtensionKind::WasmChannel => self.auth_wasm_channel_status(&name, user_id).await,
+            ExtensionKind::ChannelRelay => self.auth_channel_relay(&name, user_id).await,
         }
     }
 
@@ -1365,14 +1371,14 @@ impl ExtensionManager {
         name: &str,
         user_id: &str,
     ) -> Result<ActivateResult, ExtensionError> {
-        Self::validate_extension_name(name)?;
-        let kind = self.determine_installed_kind(name, user_id).await?;
+        let name = canonicalize_extension_name(name)?;
+        let kind = self.determine_installed_kind(&name, user_id).await?;
 
         match kind {
-            ExtensionKind::McpServer => self.activate_mcp(name, user_id).await,
-            ExtensionKind::WasmTool => self.activate_wasm_tool(name, user_id).await,
-            ExtensionKind::WasmChannel => self.activate_wasm_channel(name, user_id).await,
-            ExtensionKind::ChannelRelay => self.activate_channel_relay(name, user_id).await,
+            ExtensionKind::McpServer => self.activate_mcp(&name, user_id).await,
+            ExtensionKind::WasmTool => self.activate_wasm_tool(&name, user_id).await,
+            ExtensionKind::WasmChannel => self.activate_wasm_channel(&name, user_id).await,
+            ExtensionKind::ChannelRelay => self.activate_channel_relay(&name, user_id).await,
         }
     }
 
@@ -1616,13 +1622,13 @@ impl ExtensionManager {
 
     /// Remove an installed extension.
     pub async fn remove(&self, name: &str, user_id: &str) -> Result<String, ExtensionError> {
-        Self::validate_extension_name(name)?;
-        let kind = self.determine_installed_kind(name, user_id).await?;
+        let name = canonicalize_extension_name(name)?;
+        let kind = self.determine_installed_kind(&name, user_id).await?;
 
         // Clean up any in-progress OAuth flows for this extension.
         // TCP mode: abort the listener task so port 9876 is freed immediately.
         // Gateway mode: remove stale pending flow entries.
-        if let Some(pending) = self.pending_auth.write().await.remove(name)
+        if let Some(pending) = self.pending_auth.write().await.remove(&name)
             && let Some(handle) = pending.task_handle
         {
             handle.abort();
@@ -1635,7 +1641,7 @@ impl ExtensionManager {
         match kind {
             ExtensionKind::McpServer => {
                 let cleanup_plan = self
-                    .collect_secret_cleanup_plan(name, kind, user_id)
+                    .collect_secret_cleanup_plan(&name, kind, user_id)
                     .await?;
 
                 // Unregister tools with this server's prefix
@@ -1652,10 +1658,10 @@ impl ExtensionManager {
                 }
 
                 // Remove MCP client
-                self.mcp_clients.write().await.remove(name);
+                self.mcp_clients.write().await.remove(&name);
 
                 // Remove from config
-                self.remove_mcp_server(name, user_id)
+                self.remove_mcp_server(&name, user_id)
                     .await
                     .map_err(|e| ExtensionError::Config(e.to_string()))?;
 
@@ -1670,19 +1676,19 @@ impl ExtensionManager {
             }
             ExtensionKind::WasmTool => {
                 let cleanup_plan = self
-                    .collect_secret_cleanup_plan(name, kind, user_id)
+                    .collect_secret_cleanup_plan(&name, kind, user_id)
                     .await?;
 
                 // Unregister from tool registry
-                self.tool_registry.unregister(name).await;
+                self.tool_registry.unregister(&name).await;
 
                 // Evict compiled module from runtime cache so reinstall uses fresh binary
                 if let Some(ref rt) = self.wasm_tool_runtime {
-                    rt.remove(name).await;
+                    rt.remove(&name).await;
                 }
 
                 // Clear stale activation errors so reinstall starts clean
-                self.activation_errors.write().await.remove(name);
+                self.activation_errors.write().await.remove(&name);
 
                 // Revoke credential mappings from the shared registry
                 let cap_path = self
@@ -1695,8 +1701,8 @@ impl ExtensionManager {
                     .unregister_hook_prefix(&format!("plugin.tool:{}::", name))
                     .await
                     + self
-                        .unregister_hook_prefix(&format!("plugin.dev_tool:{}::", name))
-                        .await;
+                    .unregister_hook_prefix(&format!("plugin.dev_tool:{}::", name))
+                    .await;
                 if removed_hooks > 0 {
                     tracing::info!(
                         extension = name,
@@ -1724,15 +1730,15 @@ impl ExtensionManager {
             }
             ExtensionKind::WasmChannel => {
                 let cleanup_plan = self
-                    .collect_secret_cleanup_plan(name, kind, user_id)
+                    .collect_secret_cleanup_plan(&name, kind, user_id)
                     .await?;
 
                 // Remove from active set and persist
-                self.active_channel_names.write().await.remove(name);
+                self.active_channel_names.write().await.remove(&name);
                 self.persist_active_channels(user_id).await;
 
                 // Clear stale activation errors so reinstall starts clean
-                self.activation_errors.write().await.remove(name);
+                self.activation_errors.write().await.remove(&name);
 
                 // Delete channel files
                 let wasm_path = self.wasm_channels_dir.join(format!("{}.wasm", name));
@@ -1762,12 +1768,12 @@ impl ExtensionManager {
             }
             ExtensionKind::ChannelRelay => {
                 // Remove from installed set
-                self.installed_relay_extensions.write().await.remove(name);
+                self.installed_relay_extensions.write().await.remove(&name);
 
                 // Remove from active channels
-                self.active_channel_names.write().await.remove(name);
+                self.active_channel_names.write().await.remove(&name);
                 self.persist_active_channels(user_id).await;
-                self.activation_errors.write().await.remove(name);
+                self.activation_errors.write().await.remove(&name);
 
                 // Remove stored team_id setting and clean up secrets
                 if let Some(ref store) = self.store
@@ -1797,18 +1803,18 @@ impl ExtensionManager {
                 // WASM+relay and relay-only modes).
                 let mut shut_down = false;
                 if let Some(ref rt) = *self.channel_runtime.read().await
-                    && let Some(channel) = rt.channel_manager.get_channel(name).await
+                    && let Some(channel) = rt.channel_manager.get_channel(&name).await
                 {
                     let _ = channel.shutdown().await;
-                    rt.channel_manager.remove(name).await;
+                    rt.channel_manager.remove(&name).await;
                     shut_down = true;
                 }
                 if !shut_down
                     && let Some(ref cm) = *self.relay_channel_manager.read().await
-                    && let Some(channel) = cm.get_channel(name).await
+                    && let Some(channel) = cm.get_channel(&name).await
                 {
                     let _ = channel.shutdown().await;
-                    cm.remove(name).await;
+                    cm.remove(&name).await;
                 }
 
                 Ok(format!("Removed channel relay '{}'", name))
@@ -2862,6 +2868,7 @@ impl ExtensionManager {
                 },
                 client_secret_expires_at,
                 created_at: std::time::Instant::now(),
+                auto_activate_extension: true,
             };
 
             Ok(self
@@ -3630,6 +3637,7 @@ impl ExtensionManager {
                 client_secret_secret_name: None,
                 client_secret_expires_at: None,
                 created_at: std::time::Instant::now(),
+                auto_activate_extension: true,
             };
 
             Ok(self
@@ -3812,6 +3820,59 @@ impl ExtensionManager {
     /// extension is not found or has no capabilities file.
     pub async fn check_tool_auth_status_pub(&self, name: &str, user_id: &str) -> ToolAuthState {
         self.check_tool_auth_status(name, user_id).await
+    }
+
+    /// Return the concrete secret name that would satisfy the current auth
+    /// requirement for an installed extension, when one exists.
+    pub async fn first_missing_auth_secret_pub(&self, name: &str, user_id: &str) -> Option<String> {
+        let kind = self.determine_installed_kind(name, user_id).await.ok()?;
+        match kind {
+            ExtensionKind::McpServer => {
+                let server = self.get_mcp_server(name, user_id).await.ok()?;
+                if crate::tools::mcp::auth::is_authenticated(&server, &self.secrets, user_id).await
+                {
+                    None
+                } else {
+                    Some(server.token_secret_name())
+                }
+            }
+            ExtensionKind::WasmTool => {
+                let cap = self.load_tool_capabilities(name).await?;
+                let auth = cap.auth?;
+                let token_is_managed = self
+                    .secrets
+                    .exists(user_id, &auth.secret_name)
+                    .await
+                    .unwrap_or(false);
+                let has_env_token = auth
+                    .env_var
+                    .as_ref()
+                    .is_some_and(|v| std::env::var(v).is_ok());
+                if token_is_managed || has_env_token {
+                    None
+                } else {
+                    Some(auth.secret_name)
+                }
+            }
+            ExtensionKind::WasmChannel => {
+                let cap = self.load_channel_capabilities(name).await?;
+                for secret in &cap.setup.required_secrets {
+                    if secret.optional {
+                        continue;
+                    }
+                    if !self
+                        .secrets
+                        .exists(user_id, &secret.name)
+                        .await
+                        .unwrap_or(false)
+                    {
+                        return Some(secret.name.clone());
+                    }
+                }
+                None
+            }
+            ExtensionKind::ChannelRelay => None,
+        }
     }
 
     /// Determine the auth readiness of a WASM tool.
@@ -4967,8 +5028,16 @@ impl ExtensionManager {
         name: &str,
         user_id: &str,
     ) -> Result<ExtensionKind, ExtensionError> {
+        let name = canonicalize_extension_name(name)?;
+        let legacy_name = legacy_extension_alias(&name);
+
         // Check MCP servers first
-        if self.get_mcp_server(name, user_id).await.is_ok() {
+        if self.get_mcp_server(&name, user_id).await.is_ok() {
+            return Ok(ExtensionKind::McpServer);
+        }
+        if let Some(ref legacy_name) = legacy_name
+            && self.get_mcp_server(legacy_name, user_id).await.is_ok()
+        {
             return Ok(ExtensionKind::McpServer);
         }
 
@@ -4977,19 +5046,45 @@ impl ExtensionManager {
         if wasm_path.exists() {
             return Ok(ExtensionKind::WasmTool);
         }
+        if let Some(ref legacy_name) = legacy_name
+            && self
+                .wasm_tools_dir
+                .join(format!("{}.wasm", legacy_name))
+                .exists()
+        {
+            return Ok(ExtensionKind::WasmTool);
+        }
 
         // Check WASM channels
         let channel_path = self.wasm_channels_dir.join(format!("{}.wasm", name));
         if channel_path.exists() {
             return Ok(ExtensionKind::WasmChannel);
         }
+        if let Some(ref legacy_name) = legacy_name
+            && self
+                .wasm_channels_dir
+                .join(format!("{}.wasm", legacy_name))
+                .exists()
+        {
+            return Ok(ExtensionKind::WasmChannel);
+        }
 
         // Check channel-relay extensions (installed in memory or has stored team_id)
-        if self.installed_relay_extensions.read().await.contains(name) {
+        if self.installed_relay_extensions.read().await.contains(&name) {
+            return Ok(ExtensionKind::ChannelRelay);
+        }
+        if let Some(ref legacy_name) = legacy_name
+            && self.installed_relay_extensions.read().await.contains(legacy_name)
+        {
             return Ok(ExtensionKind::ChannelRelay);
         }
         // Also check if there's a stored team_id setting (persisted across restarts)
-        if self.is_relay_channel(name, user_id).await {
+        if self.is_relay_channel(&name, user_id).await {
+            return Ok(ExtensionKind::ChannelRelay);
+        }
+        if let Some(ref legacy_name) = legacy_name
+            && self.is_relay_channel(legacy_name, user_id).await
+        {
             return Ok(ExtensionKind::ChannelRelay);
         }
 
@@ -4999,15 +5094,8 @@ impl ExtensionManager {
         )))
     }
 
-    /// Reject names containing path separators or traversal sequences.
     fn validate_extension_name(name: &str) -> Result<(), ExtensionError> {
-        if name.contains('/') || name.contains('\\') || name.contains("..") || name.contains('\0') {
-            return Err(ExtensionError::InstallFailed(format!(
-                "Invalid extension name '{}': contains path separator or traversal characters",
-                name
-            )));
-        }
-        Ok(())
+        canonicalize_extension_name(name).map(|_| ())
     }
 
     fn setup_fields_setting_key(name: &str) -> String {
@@ -7950,6 +8038,7 @@ mod tests {
                 client_secret_secret_name: None,
                 client_secret_expires_at: None,
                 created_at: std::time::Instant::now(),
+                auto_activate_extension: true,
             },
         );
         mgr.pending_oauth_flows().write().await.insert(
@@ -7976,6 +8065,7 @@ mod tests {
                 client_secret_secret_name: None,
                 client_secret_expires_at: None,
                 created_at: std::time::Instant::now(),
+                auto_activate_extension: true,
             },
         );
 

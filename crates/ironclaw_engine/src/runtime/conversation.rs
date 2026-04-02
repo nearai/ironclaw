@@ -198,6 +198,19 @@ impl ConversationManager {
                     )
                     .await?;
 
+                // Store the base channel name in thread metadata so the
+                // orchestrator can populate `source_channel` in the execution
+                // context (used by mission_create to default notify_channels).
+                let base_channel = conv
+                    .channel
+                    .split(':')
+                    .next()
+                    .unwrap_or(&conv.channel)
+                    .to_string();
+                self.thread_manager
+                    .set_thread_metadata(thread_id, "source_channel", &base_channel)
+                    .await;
+
                 conv.track_thread(thread_id);
                 conv.add_entry(ConversationEntry::system_for_thread(
                     thread_id,
@@ -251,29 +264,6 @@ impl ConversationManager {
                         format!("Thread failed: {error}"),
                     ));
                     conv.untrack_thread(thread_id);
-                }
-                ThreadOutcome::NeedApproval {
-                    action_name,
-                    call_id: _,
-                    parameters: _,
-                } => {
-                    conv.add_entry(ConversationEntry::system_for_thread(
-                        thread_id,
-                        format!("Approval needed for action: {action_name}"),
-                    ));
-                    // Thread stays active — waiting for approval
-                }
-                ThreadOutcome::NeedAuthentication {
-                    credential_name,
-                    action_name: _,
-                    call_id: _,
-                    parameters: _,
-                } => {
-                    conv.add_entry(ConversationEntry::system_for_thread(
-                        thread_id,
-                        format!("Authentication required for credential: {credential_name}"),
-                    ));
-                    // Thread stays active — waiting for OAuth completion
                 }
                 ThreadOutcome::GatePaused {
                     gate_name,

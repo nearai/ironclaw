@@ -199,7 +199,7 @@ mod tests {
                 "test-user",
                 DocType::Lesson,
                 "web_search tool alias",
-                "Use web-search not web_search",
+                "Use web_search",
             ),
             MemoryDoc::new(
                 project,
@@ -329,7 +329,7 @@ mod tests {
                 "test-user",
                 DocType::Spec,
                 "Missing search tool",
-                "ALIAS: web_search -> web-search",
+                "Use web_search for the search tool",
             ),
         ]);
         let engine = RetrievalEngine::new(store);

@@ -63,17 +63,20 @@ pub struct OrchestratorResult {
     pub tokens_used: TokenUsage,
 }
 
+/// Extract source_channel from thread metadata (set by ConversationManager).
+fn thread_source_channel(thread: &Thread) -> Option<String> {
+    thread
+        .metadata
+        .get("source_channel")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+}
+
 fn normalize_pause_outcome(
     thread: &mut Thread,
     outcome: &ThreadOutcome,
 ) -> Result<(), EngineError> {
-    if matches!(
-        outcome,
-        ThreadOutcome::NeedApproval { .. }
-            | ThreadOutcome::NeedAuthentication { .. }
-            | ThreadOutcome::GatePaused { .. }
-    ) && thread.state != ThreadState::Waiting
-    {
+    if matches!(outcome, ThreadOutcome::GatePaused { .. }) && thread.state != ThreadState::Waiting {
         thread.transition_to(
             ThreadState::Waiting,
             Some("waiting on external gate resolution".into()),
@@ -644,6 +647,7 @@ async fn handle_execute_code_step(
         user_id: thread.user_id.clone(),
         step_id: StepId::new(),
         current_call_id: None,
+        source_channel: thread_source_channel(thread),
     };
 
     // Run user code in a nested Monty VM (same pattern as rlm_query)
@@ -692,24 +696,17 @@ async fn handle_execute_code_step(
                 "action_results": action_results,
                 "final_answer": result.final_answer,
                 "had_error": result.had_error,
-                "need_approval": result.need_approval.as_ref().map(|na| {
+                "pending_gate": result.need_approval.as_ref().map(|na| {
                     match na {
-                        ThreadOutcome::NeedApproval { action_name, call_id, parameters } => {
-                            serde_json::json!({
-                                "action_name": action_name,
-                                "call_id": call_id,
-                                "parameters": parameters,
-                            })
-                        }
-                        ThreadOutcome::NeedAuthentication { credential_name, action_name, call_id, parameters } => {
-                            serde_json::json!({
-                                "need_authentication": true,
-                                "credential_name": credential_name,
-                                "action_name": action_name,
-                                "call_id": call_id,
-                                "parameters": parameters,
-                            })
-                        }
+                        ThreadOutcome::GatePaused { gate_name, action_name, call_id, parameters, resume_kind, resume_output } => serde_json::json!({
+                            "gate_paused": true,
+                            "gate_name": gate_name,
+                            "action_name": action_name,
+                            "call_id": call_id,
+                            "parameters": parameters,
+                            "resume_kind": serde_json::to_value(resume_kind).unwrap_or_default(),
+                            "resume_output": resume_output,
+                        }),
                         _ => serde_json::Value::Null,
                     }
                 }),
@@ -734,7 +731,7 @@ async fn handle_execute_code_step(
 /// 5. Event emission (ActionExecuted/ActionFailed)
 /// 6. Message addition (ActionResult with correct call_id)
 ///
-/// Python only needs to check the returned `need_approval` flag.
+/// Python only needs to check the returned gate pause payload.
 async fn handle_execute_action(
     args: &[MontyObject],
     kwargs: &[(MontyObject, MontyObject)],
@@ -768,6 +765,7 @@ async fn handle_execute_action(
         user_id: thread.user_id.clone(),
         step_id: StepId::new(),
         current_call_id: Some(call_id.clone()),
+        source_channel: thread_source_channel(thread),
     };
 
     // Helper: emit event and add ActionResult message to thread
@@ -850,7 +848,7 @@ async fn handle_execute_action(
                 return ExtFunctionResult::Return(json_to_monty(&result));
             }
             crate::capability::policy::PolicyDecision::RequireApproval { .. } => {
-                let output = serde_json::json!({"status": "awaiting_approval"});
+                let output = serde_json::json!({"status": "gate_paused", "gate_name": "approval"});
                 emit_and_record(
                     thread,
                     event_tx,
@@ -868,10 +866,15 @@ async fn handle_execute_action(
                     &output,
                 );
                 let result = serde_json::json!({
-                    "need_approval": true,
+                    "gate_paused": true,
+                    "gate_name": "approval",
                     "action_name": name,
                     "call_id": call_id,
                     "parameters": params,
+                    "resume_kind": serde_json::to_value(crate::gate::ResumeKind::Approval {
+                        allow_always: true,
+                    })
+                    .unwrap_or_default(),
                 });
                 return ExtFunctionResult::Return(json_to_monty(&result));
             }
@@ -886,7 +889,6 @@ async fn handle_execute_action(
 
     // 4. Execute
     let ps = summarize_params(&name, &params);
-    let params_for_trace = params.clone();
     match effects
         .execute_action(&name, params, &lease, &exec_ctx)
         .await
@@ -914,39 +916,13 @@ async fn handle_execute_action(
             });
             ExtFunctionResult::Return(json_to_monty(&result))
         }
-        Err(EngineError::NeedApproval { .. }) => {
-            let _ = leases.refund_use(lease.id).await;
-            let output = serde_json::json!({"status": "awaiting_approval"});
-            emit_and_record(
-                thread,
-                event_tx,
-                EventKind::ApprovalRequested {
-                    action_name: name.clone(),
-                    call_id: call_id.clone(),
-                    parameters: Some(params_for_trace.clone()),
-                    description: None,
-                    allow_always: None,
-                    gate_name: None,
-                    params_summary: ps.clone(),
-                },
-                &call_id,
-                &name,
-                &output,
-            );
-            let result = serde_json::json!({
-                "need_approval": true,
-                "action_name": name,
-                "call_id": call_id,
-                "parameters": params_for_trace,
-            });
-            ExtFunctionResult::Return(json_to_monty(&result))
-        }
         Err(EngineError::GatePaused {
             gate_name,
             action_name: _,
             call_id: _,
             parameters,
             resume_kind,
+            resume_output,
         }) => {
             let _ = leases.refund_use(lease.id).await;
             let output = serde_json::json!({"status": "gate_paused", "gate_name": gate_name});
@@ -976,32 +952,7 @@ async fn handle_execute_action(
                 "call_id": call_id,
                 "parameters": parameters,
                 "resume_kind": serde_json::to_value(&*resume_kind).unwrap_or_default(),
-            });
-            ExtFunctionResult::Return(json_to_monty(&result))
-        }
-        Err(EngineError::NeedAuthentication {
-            credential_name, ..
-        }) => {
-            let _ = leases.refund_use(lease.id).await;
-            let output = serde_json::json!({"status": "authentication_required", "credential_name": credential_name});
-            emit_and_record(
-                thread,
-                event_tx,
-                EventKind::ActionFailed {
-                    step_id: exec_ctx.step_id,
-                    action_name: name.clone(),
-                    call_id: call_id.clone(),
-                    error: format!("authentication required for credential '{credential_name}'"),
-                    params_summary: ps,
-                },
-                &call_id,
-                &name,
-                &output,
-            );
-            let result = serde_json::json!({
-                "need_authentication": true,
-                "credential_name": credential_name,
-                "action_name": name,
+                "resume_output": resume_output,
             });
             ExtFunctionResult::Return(json_to_monty(&result))
         }
@@ -1036,8 +987,7 @@ async fn handle_execute_action(
 /// concurrently. Each call is a dict with `name`, `params`, and optionally `call_id`.
 ///
 /// Returns a list of result dicts (one per call, in order). Each result has the
-/// same shape as `__execute_action__` output, plus an optional `need_approval` or
-/// `need_authentication` flag.
+/// same shape as `__execute_action__` output, plus an optional gate pause payload.
 ///
 /// Events are emitted and ActionResult messages are added to the thread in
 /// original call order after all parallel executions complete.
@@ -1218,10 +1168,15 @@ async fn handle_execute_actions_parallel(
                     ));
 
                     results_json.push(serde_json::json!({
-                        "need_approval": true,
+                        "gate_paused": true,
+                        "gate_name": "approval",
                         "action_name": &pc.name,
                         "call_id": &pc.call_id,
                         "parameters": &pc.params,
+                        "resume_kind": serde_json::to_value(crate::gate::ResumeKind::Approval {
+                            allow_always: true,
+                        })
+                        .unwrap_or_default(),
                     }));
                     return ExtFunctionResult::Return(json_to_monty(&serde_json::json!(
                         results_json
@@ -1277,6 +1232,7 @@ async fn handle_execute_actions_parallel(
             user_id: thread.user_id.clone(),
             step_id,
             current_call_id: Some(pc.call_id.clone()),
+            source_channel: None,
         };
         let ps = summarize_params(&pc.name, &pc.params);
         let (result_json, event, output) = execute_single_action(
@@ -1313,6 +1269,7 @@ async fn handle_execute_actions_parallel(
                 user_id: thread.user_id.clone(),
                 step_id,
                 current_call_id: Some(pc_call_id.clone()),
+                source_channel: None,
             };
             let ps = summarize_params(&pc_name, &pc_params);
 
@@ -1391,7 +1348,6 @@ async fn execute_single_action(
     exec_ctx: &ThreadExecutionContext,
     params_summary: Option<String>,
 ) -> (serde_json::Value, EventKind, serde_json::Value) {
-    let params_backup = params.clone();
     match effects.execute_action(name, params, lease, exec_ctx).await {
         Ok(r) => {
             let event = EventKind::ActionExecuted {
@@ -1409,31 +1365,13 @@ async fn execute_single_action(
             });
             (result_json, event, r.output)
         }
-        Err(EngineError::NeedApproval { .. }) => {
-            let output = serde_json::json!({"status": "awaiting_approval"});
-            let event = EventKind::ApprovalRequested {
-                action_name: name.to_string(),
-                call_id: call_id.to_string(),
-                parameters: Some(params_backup.clone()),
-                description: None,
-                allow_always: None,
-                gate_name: None,
-                params_summary: summarize_params(name, &params_backup),
-            };
-            let result_json = serde_json::json!({
-                "need_approval": true,
-                "action_name": name,
-                "call_id": call_id,
-                "parameters": params_backup,
-            });
-            (result_json, event, output)
-        }
         Err(EngineError::GatePaused {
             gate_name,
             action_name: _,
             call_id: _,
             parameters,
             resume_kind,
+            resume_output,
         }) => {
             let output = serde_json::json!({"status": "gate_paused", "gate_name": &gate_name});
             let event = EventKind::ApprovalRequested {
@@ -1455,25 +1393,7 @@ async fn execute_single_action(
                 "call_id": call_id,
                 "parameters": parameters,
                 "resume_kind": serde_json::to_value(&*resume_kind).unwrap_or_default(),
-            });
-            (result_json, event, output)
-        }
-        Err(EngineError::NeedAuthentication {
-            credential_name, ..
-        }) => {
-            let output = serde_json::json!({"status": "authentication_required", "credential_name": &credential_name});
-            let error_msg = format!("authentication required for credential '{credential_name}'");
-            let event = EventKind::ActionFailed {
-                step_id: exec_ctx.step_id,
-                action_name: name.to_string(),
-                call_id: call_id.to_string(),
-                error: error_msg,
-                params_summary,
-            };
-            let result_json = serde_json::json!({
-                "need_authentication": true,
-                "credential_name": credential_name,
-                "action_name": name,
+                "resume_output": resume_output,
             });
             (result_json, event, output)
         }
@@ -1496,9 +1416,7 @@ async fn execute_single_action(
 }
 
 fn interrupted_result_needs_refund(result: &serde_json::Value) -> bool {
-    result.get("need_approval").and_then(|v| v.as_bool()) == Some(true)
-        || result.get("need_authentication").and_then(|v| v.as_bool()) == Some(true)
-        || result.get("gate_paused").and_then(|v| v.as_bool()) == Some(true)
+    result.get("gate_paused").and_then(|v| v.as_bool()) == Some(true)
 }
 
 /// Handle `__check_signals__()`.
@@ -1956,43 +1874,6 @@ fn parse_outcome(result: &serde_json::Value) -> ThreadOutcome {
                 .unwrap_or("unknown error")
                 .to_string(),
         },
-        "need_approval" => ThreadOutcome::NeedApproval {
-            action_name: result
-                .get("action_name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
-            call_id: result
-                .get("call_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
-            parameters: result
-                .get("parameters")
-                .cloned()
-                .unwrap_or(serde_json::json!({})),
-        },
-        "need_authentication" => ThreadOutcome::NeedAuthentication {
-            credential_name: result
-                .get("credential_name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
-            action_name: result
-                .get("action_name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
-            call_id: result
-                .get("call_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
-            parameters: result
-                .get("parameters")
-                .cloned()
-                .unwrap_or(serde_json::json!({})),
-        },
         "gate_paused" => {
             let resume_kind_value = result
                 .get("resume_kind")
@@ -2024,6 +1905,7 @@ fn parse_outcome(result: &serde_json::Value) -> ThreadOutcome {
                     .cloned()
                     .unwrap_or(serde_json::json!({})),
                 resume_kind,
+                resume_output: result.get("resume_output").cloned(),
             }
         }
         _ => ThreadOutcome::Completed { response: None },
@@ -2495,10 +2377,13 @@ mod tests {
         );
         thread.transition_to(ThreadState::Running, None).unwrap();
 
-        let outcome = ThreadOutcome::NeedApproval {
+        let outcome = ThreadOutcome::GatePaused {
+            gate_name: "approval".into(),
             action_name: "shell".into(),
             call_id: "call-1".into(),
             parameters: serde_json::json!({"cmd":"ls"}),
+            resume_kind: crate::gate::ResumeKind::Approval { allow_always: true },
+            resume_output: None,
         };
         normalize_pause_outcome(&mut thread, &outcome).unwrap();
         assert_eq!(thread.state, ThreadState::Waiting);
@@ -2519,16 +2404,18 @@ mod tests {
     }
 
     #[test]
-    fn parse_outcome_need_approval() {
+    fn parse_outcome_gate_paused() {
         let result = serde_json::json!({
-            "outcome": "need_approval",
+            "outcome": "gate_paused",
+            "gate_name": "approval",
             "action_name": "shell",
             "call_id": "abc",
-            "parameters": {"cmd": "rm -rf /"}
+            "parameters": {"cmd": "rm -rf /"},
+            "resume_kind": {"Approval": {"allow_always": true}}
         });
         let outcome = parse_outcome(&result);
         assert!(
-            matches!(outcome, ThreadOutcome::NeedApproval { action_name, .. } if action_name == "shell")
+            matches!(outcome, ThreadOutcome::GatePaused { action_name, .. } if action_name == "shell")
         );
     }
 

@@ -182,6 +182,25 @@ impl ToolRegistry {
         tools.get(name).map(Arc::clone)
     }
 
+    /// Resolve a caller-provided action/tool name to the registered tool id.
+    ///
+    /// The runtime is converging on `snake_case` names. Hyphenated names remain
+    /// accepted here only as a compatibility alias for older installed tools.
+    pub async fn resolve_name(&self, name: &str) -> Option<String> {
+        let tools = self.tools.read().await;
+        if tools.contains_key(name) {
+            return Some(name.to_string());
+        }
+        crate::extensions::naming::legacy_extension_alias(name)
+            .filter(|alias| tools.contains_key(alias))
+    }
+
+    pub async fn get_resolved(&self, name: &str) -> Option<(String, Arc<dyn Tool>)> {
+        let resolved = self.resolve_name(name).await?;
+        let tool = self.get(&resolved).await?;
+        Some((resolved, tool))
+    }
+
     /// Check if a tool exists.
     pub async fn has(&self, name: &str) -> bool {
         self.tools.read().await.contains_key(name)
@@ -864,6 +883,42 @@ mod tests {
         let defs = registry.tool_definitions().await;
         assert_eq!(defs.len(), 1);
         assert_eq!(defs[0].name, "echo");
+    }
+
+    #[tokio::test]
+    async fn resolve_name_accepts_legacy_hyphen_alias() {
+        struct LegacyTool;
+
+        #[async_trait::async_trait]
+        impl Tool for LegacyTool {
+            fn name(&self) -> &str {
+                "web-search"
+            }
+
+            fn description(&self) -> &str {
+                "legacy"
+            }
+
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({})
+            }
+
+            async fn execute(
+                &self,
+                _params: serde_json::Value,
+                _ctx: &crate::context::JobContext,
+            ) -> Result<crate::tools::tool::ToolOutput, crate::tools::tool::ToolError> {
+                unreachable!()
+            }
+        }
+
+        let registry = ToolRegistry::new();
+        registry.register(Arc::new(LegacyTool)).await;
+
+        assert_eq!(
+            registry.resolve_name("web_search").await.as_deref(),
+            Some("web-search")
+        );
     }
 
     #[tokio::test]

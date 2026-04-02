@@ -332,7 +332,9 @@ fn event_matches_thread(event: &AppEvent, target: &str) -> bool {
         | AppEvent::Suggestions { thread_id, .. }
         | AppEvent::ReasoningUpdate { thread_id, .. }
         | AppEvent::Status { thread_id, .. }
-        | AppEvent::ApprovalNeeded { thread_id, .. } => thread_id.as_deref() == Some(target),
+        | AppEvent::ApprovalNeeded { thread_id, .. }
+        | AppEvent::GateRequired { thread_id, .. }
+        | AppEvent::GateResolved { thread_id, .. } => thread_id.as_deref() == Some(target),
         // Global or job-scoped events are never matched.
         _ => false,
     }

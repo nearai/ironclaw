@@ -92,37 +92,21 @@ pub struct HistoryResponse {
     /// Cursor for the next page (ISO8601 timestamp of the oldest message returned).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub oldest_timestamp: Option<String>,
-    /// Pending tool approval that needs user action (re-rendered on thread switch).
-    ///
-    /// Populated from live session state and, when engine v2 is active,
-    /// durable engine metadata so approval cards survive thread switches and restarts.
+    /// Unified pending gate state for engine v2.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub pending_approval: Option<PendingApprovalInfo>,
-    /// Pending auth flow that needs user action (re-rendered on SSE reconnect).
-    ///
-    /// When present, the frontend should show the auth card so the user can
-    /// submit credentials. Without this, SSE disconnects lose the auth card
-    /// and the user is stuck with a blocked chat input.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub pending_auth: Option<PendingAuthInfo>,
+    pub pending_gate: Option<PendingGateInfo>,
 }
 
-/// Lightweight DTO for pending auth state (credential name + instructions).
+/// Lightweight DTO for unified pending gate state.
 #[derive(Debug, Serialize)]
-pub struct PendingAuthInfo {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub request_id: Option<String>,
-    pub extension_name: String,
-    pub instructions: Option<String>,
-}
-
-/// Lightweight DTO for a pending tool approval (excludes context_messages).
-#[derive(Debug, Serialize)]
-pub struct PendingApprovalInfo {
+pub struct PendingGateInfo {
     pub request_id: String,
+    pub thread_id: String,
+    pub gate_name: String,
     pub tool_name: String,
     pub description: String,
     pub parameters: String,
+    pub resume_kind: serde_json::Value,
 }
 
 // --- Approval ---
@@ -134,6 +118,28 @@ pub struct ApprovalRequest {
     pub action: String,
     /// Thread that owns the pending approval (so the agent loop finds the right session).
     pub thread_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "resolution", rename_all = "snake_case")]
+pub enum GateResolutionPayload {
+    Approved {
+        #[serde(default)]
+        always: bool,
+    },
+    Denied,
+    CredentialProvided {
+        token: String,
+    },
+    Cancelled,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GateResolveRequest {
+    pub request_id: String,
+    pub thread_id: Option<String>,
+    #[serde(flatten)]
+    pub resolution: GateResolutionPayload,
 }
 
 // --- App Event (re-exported from ironclaw_common) ---

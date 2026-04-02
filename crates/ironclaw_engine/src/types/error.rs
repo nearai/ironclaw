@@ -62,22 +62,6 @@ pub enum EngineError {
     #[error("skill error: {reason}")]
     Skill { reason: String },
 
-    #[error("authentication required for credential '{credential_name}'")]
-    NeedAuthentication {
-        credential_name: String,
-        action_name: String,
-        call_id: String,
-        parameters: serde_json::Value,
-        completed_output: Option<serde_json::Value>,
-    },
-
-    #[error("approval required for action '{action_name}'")]
-    NeedApproval {
-        action_name: String,
-        call_id: String,
-        parameters: serde_json::Value,
-    },
-
     #[error("access denied: user '{user_id}' cannot access {entity}")]
     AccessDenied { user_id: String, entity: String },
 
@@ -88,6 +72,7 @@ pub enum EngineError {
         call_id: String,
         parameters: Box<serde_json::Value>,
         resume_kind: Box<crate::gate::ResumeKind>,
+        resume_output: Option<Box<serde_json::Value>>,
     },
 }
 

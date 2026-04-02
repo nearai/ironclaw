@@ -26,11 +26,6 @@ use crate::tools::rate_limiter::RateLimiter;
 use crate::tools::{ApprovalRequirement, ToolRegistry};
 use ironclaw_safety::SafetyLayer;
 
-/// Callback invoked when a credential is missing and the user needs to authenticate.
-/// Parameters: (credential_name, action_name).
-/// The router sets this to emit SSE events; mission threads may have a no-op.
-pub type AuthRequiredCallback = Box<dyn Fn(&str, &str) + Send + Sync>;
-
 /// Wraps the existing tool pipeline to implement the engine's `EffectExecutor`.
 ///
 /// Enforces all v1 security controls at the adapter boundary:
@@ -47,8 +42,6 @@ pub struct EffectBridgeAdapter {
     rate_limiter: RateLimiter,
     /// Mission manager for handling mission_* function calls.
     mission_manager: RwLock<Option<Arc<ironclaw_engine::MissionManager>>>,
-    /// Optional callback for when a credential is missing (emits AuthRequired SSE).
-    auth_required_callback: RwLock<Option<Arc<AuthRequiredCallback>>>,
     /// Centralized auth manager for pre-flight credential checks.
     auth_manager: RwLock<Option<Arc<AuthManager>>>,
 }
@@ -67,20 +60,7 @@ impl EffectBridgeAdapter {
             call_count: std::sync::atomic::AtomicU32::new(0),
             rate_limiter: RateLimiter::new(),
             mission_manager: RwLock::new(None),
-            auth_required_callback: RwLock::new(None),
             auth_manager: RwLock::new(None),
-        }
-    }
-
-    /// Set the callback invoked when a credential is missing.
-    pub async fn set_auth_required_callback(&self, cb: Arc<AuthRequiredCallback>) {
-        *self.auth_required_callback.write().await = Some(cb);
-    }
-
-    /// Emit an auth_required signal (best-effort, non-blocking).
-    async fn emit_auth_required(&self, credential_name: &str, action_name: &str) {
-        if let Some(cb) = self.auth_required_callback.read().await.as_ref() {
-            cb(credential_name, action_name);
         }
     }
 
@@ -117,6 +97,57 @@ impl EffectBridgeAdapter {
         self.mission_manager.read().await.clone()
     }
 
+    fn gate_paused(
+        gate_name: &str,
+        action_name: &str,
+        call_id: Option<&str>,
+        parameters: serde_json::Value,
+        resume_kind: ironclaw_engine::ResumeKind,
+        resume_output: Option<serde_json::Value>,
+    ) -> EngineError {
+        EngineError::GatePaused {
+            gate_name: gate_name.to_string(),
+            action_name: action_name.to_string(),
+            call_id: call_id.unwrap_or_default().to_string(),
+            parameters: Box::new(parameters),
+            resume_kind: Box::new(resume_kind),
+            resume_output: resume_output.map(Box::new),
+        }
+    }
+
+    fn auth_gate_from_extension_result(
+        action_name: &str,
+        parameters: serde_json::Value,
+        context: &ThreadExecutionContext,
+        output_value: &serde_json::Value,
+    ) -> Option<EngineError> {
+        let status = output_value.get("status").and_then(|v| v.as_str())?;
+        let name = output_value.get("name").and_then(|v| v.as_str())?;
+
+        match status {
+            "awaiting_authorization" | "awaiting_token" => Some(Self::gate_paused(
+                "authentication",
+                action_name,
+                context.current_call_id.as_deref(),
+                parameters,
+                ironclaw_engine::ResumeKind::Authentication {
+                    credential_name: name.to_string(),
+                    instructions: output_value
+                        .get("instructions")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("Complete authentication to continue.")
+                        .to_string(),
+                    auth_url: output_value
+                        .get("auth_url")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
+                },
+                None,
+            )),
+            _ => None,
+        }
+    }
+
     /// Handle mission_* function calls. Returns None if not a mission call.
     async fn handle_mission_call(
         &self,
@@ -144,6 +175,17 @@ impl EffectBridgeAdapter {
                     .or_else(|| params.get("_args").and_then(|a| a.get(2)))
                     .and_then(|v| v.as_str())
                     .unwrap_or("manual");
+                // notify_channels: explicit array, or default to current channel
+                let notify_channels =
+                    if let Some(arr) = params.get("notify_channels").and_then(|v| v.as_array()) {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(String::from))
+                            .collect()
+                    } else if let Some(ch) = &context.source_channel {
+                        vec![ch.clone()]
+                    } else {
+                        vec![]
+                    };
                 match mgr
                     .create_mission(
                         context.project_id,
@@ -151,6 +193,7 @@ impl EffectBridgeAdapter {
                         name,
                         goal,
                         parse_cadence(cadence_str),
+                        notify_channels,
                     )
                     .await
                 {
@@ -175,6 +218,7 @@ impl EffectBridgeAdapter {
                                 "status": format!("{:?}", m.status),
                                 "threads": m.thread_history.len(),
                                 "current_focus": m.current_focus,
+                                "notify_channels": m.notify_channels,
                             })
                         })
                         .collect();
@@ -252,6 +296,55 @@ impl EffectBridgeAdapter {
                     Err(e) => Err(e),
                 }
             }
+            "mission_update" => {
+                let id_str = params
+                    .get("id")
+                    .or_else(|| params.get("_args").and_then(|a| a.get(0)))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let id = uuid::Uuid::parse_str(id_str)
+                    .map(ironclaw_engine::MissionId)
+                    .map_err(|e| EngineError::Effect {
+                        reason: format!("invalid mission id: {e}"),
+                    });
+                match id {
+                    Ok(id) => {
+                        let mut updates = ironclaw_engine::MissionUpdate::default();
+                        if let Some(name) = params.get("name").and_then(|v| v.as_str()) {
+                            updates.name = Some(name.to_string());
+                        }
+                        if let Some(goal) = params.get("goal").and_then(|v| v.as_str()) {
+                            updates.goal = Some(goal.to_string());
+                        }
+                        if let Some(cadence) = params.get("cadence").and_then(|v| v.as_str()) {
+                            updates.cadence = Some(parse_cadence(cadence));
+                        }
+                        if let Some(arr) = params.get("notify_channels").and_then(|v| v.as_array())
+                        {
+                            updates.notify_channels = Some(
+                                arr.iter()
+                                    .filter_map(|v| v.as_str().map(String::from))
+                                    .collect(),
+                            );
+                        }
+                        if let Some(max) =
+                            params.get("max_threads_per_day").and_then(|v| v.as_u64())
+                        {
+                            updates.max_threads_per_day = Some(max as u32);
+                        }
+                        if let Some(criteria) =
+                            params.get("success_criteria").and_then(|v| v.as_str())
+                        {
+                            updates.success_criteria = Some(criteria.to_string());
+                        }
+                        match mgr.update_mission(id, &context.user_id, updates).await {
+                            Ok(()) => Ok(serde_json::json!({"status": "updated"})),
+                            Err(e) => Err(e),
+                        }
+                    }
+                    Err(e) => Err(e),
+                }
+            }
             _ => return None, // Not a mission/routine call
         };
 
@@ -307,13 +400,8 @@ impl EffectBridgeAdapter {
     ) -> Result<ActionResult, EngineError> {
         let start = Instant::now();
 
-        // Resolve tool name (underscore → hyphen fallback)
-        let hyphenated = action_name.replace('_', "-");
-        let lookup_name = if self.tools.get(action_name).await.is_some() {
-            action_name
-        } else {
-            &hyphenated
-        };
+        let resolved_name = self.tools.resolve_name(action_name).await;
+        let lookup_name = resolved_name.as_deref().unwrap_or(action_name);
 
         // ── Per-step call limit (prevent amplification loops) ──
         const MAX_CALLS_PER_STEP: u32 = 50;
@@ -359,7 +447,7 @@ impl EffectBridgeAdapter {
             });
         }
 
-        if let Some(tool) = self.tools.get(lookup_name).await {
+        if let Some((_, tool)) = self.tools.get_resolved(action_name).await {
             let requirement = tool.requires_approval(&parameters);
             match requirement {
                 ApprovalRequirement::Always => {
@@ -381,11 +469,14 @@ impl EffectBridgeAdapter {
                             });
 
                         if !has_credential_backing {
-                            return Err(EngineError::NeedApproval {
-                                action_name: action_name.to_string(),
-                                call_id: context.current_call_id.clone().unwrap_or_default(),
+                            return Err(Self::gate_paused(
+                                "approval",
+                                action_name,
+                                context.current_call_id.as_deref(),
                                 parameters,
-                            });
+                                ironclaw_engine::ResumeKind::Approval { allow_always: true },
+                                None,
+                            ));
                         }
                     }
                 }
@@ -439,15 +530,20 @@ impl EffectBridgeAdapter {
                         user = %context.user_id,
                         "Pre-flight auth: credential missing — blocking tool call"
                     );
-                    self.emit_auth_required(&cred.credential_name, action_name)
-                        .await;
-                    return Err(EngineError::NeedAuthentication {
-                        credential_name: cred.credential_name.clone(),
-                        action_name: action_name.to_string(),
-                        call_id: String::new(),
+                    return Err(Self::gate_paused(
+                        "authentication",
+                        action_name,
+                        context.current_call_id.as_deref(),
                         parameters,
-                        completed_output: None,
-                    });
+                        ironclaw_engine::ResumeKind::Authentication {
+                            credential_name: cred.credential_name.clone(),
+                            instructions: cred.setup_instructions.clone().unwrap_or_else(|| {
+                                format!("Provide your {} token", cred.credential_name)
+                            }),
+                            auth_url: cred.auth_url.clone(),
+                        },
+                        None,
+                    ));
                 }
                 AuthCheckResult::Ready => {
                     debug!(tool = %lookup_name, "Pre-flight auth: credentials present");
@@ -510,6 +606,17 @@ impl EffectBridgeAdapter {
                 let output_value = serde_json::from_str::<serde_json::Value>(&output)
                     .unwrap_or(serde_json::Value::String(wrapped));
 
+                if (lookup_name == "tool_activate" || lookup_name == "tool_auth")
+                    && let Some(err) = Self::auth_gate_from_extension_result(
+                        action_name,
+                        parameters.clone(),
+                        context,
+                        &output_value,
+                    )
+                {
+                    return Err(err);
+                }
+
                 if (lookup_name == "tool_install" || lookup_name == "tool-install")
                     && let Some(auth_mgr) = self.auth_manager.read().await.as_ref()
                     && let Some(ext_name) = output_value.get("name").and_then(|v| v.as_str())
@@ -520,21 +627,29 @@ impl EffectBridgeAdapter {
                         .await
                     {
                         ToolReadiness::NeedsAuth {
-                            credential_name, ..
+                            auth_url,
+                            instructions,
+                            credential_name,
                         } => {
                             debug!(
                                 extension = %ext_name,
                                 credential = %credential_name,
                                 "Post-install: extension needs auth — entering auth flow"
                             );
-                            self.emit_auth_required(&credential_name, ext_name).await;
-                            return Err(EngineError::NeedAuthentication {
-                                credential_name,
-                                action_name: action_name.to_string(),
-                                call_id: String::new(),
+                            return Err(Self::gate_paused(
+                                "authentication",
+                                action_name,
+                                context.current_call_id.as_deref(),
                                 parameters,
-                                completed_output: Some(output_value),
-                            });
+                                ironclaw_engine::ResumeKind::Authentication {
+                                    credential_name: credential_name.clone(),
+                                    instructions: instructions.unwrap_or_else(|| {
+                                        auth_mgr.get_setup_instructions_or_default(&credential_name)
+                                    }),
+                                    auth_url,
+                                },
+                                Some(output_value),
+                            ));
                         }
                         ToolReadiness::NeedsSetup { ref message } => {
                             debug!(
@@ -586,16 +701,20 @@ impl EffectBridgeAdapter {
                         credential = %cred_name,
                         tool = %lookup_name,
                         user = %context.user_id,
-                        "Credential missing — returning NeedAuthentication"
+                        "Credential missing — returning GatePaused(authentication)"
                     );
-                    self.emit_auth_required(&cred_name, action_name).await;
-                    return Err(EngineError::NeedAuthentication {
-                        credential_name: cred_name,
-                        action_name: action_name.to_string(),
-                        call_id: String::new(),
+                    return Err(Self::gate_paused(
+                        "authentication",
+                        action_name,
+                        context.current_call_id.as_deref(),
                         parameters,
-                        completed_output: None,
-                    });
+                        ironclaw_engine::ResumeKind::Authentication {
+                            credential_name: cred_name.clone(),
+                            instructions: format!("Provide your {} token", cred_name),
+                            auth_url: None,
+                        },
+                        None,
+                    ));
                 }
 
                 let sanitized = self.safety.sanitize_tool_output(lookup_name, &error_msg);
@@ -739,10 +858,7 @@ fn is_v1_only_tool(name: &str) -> bool {
 /// Auth management tools from v1 that are now kernel-internal in v2.
 /// The LLM should not see or call these — auth is handled automatically.
 fn is_v1_auth_tool(name: &str) -> bool {
-    matches!(
-        name,
-        "tool_auth" | "tool-auth" | "tool_activate" | "tool-activate"
-    )
+    matches!(name, "tool_auth" | "tool-auth")
 }
 
 #[cfg(test)]
@@ -867,6 +983,7 @@ mod tests {
             user_id: "test_user".to_string(),
             step_id: ironclaw_engine::StepId::new(),
             current_call_id: call_id.map(str::to_string),
+            source_channel: None,
         }
     }
 
@@ -897,10 +1014,13 @@ mod tests {
             .await;
 
         match result {
-            Err(EngineError::NeedApproval { call_id, .. }) => {
+            Err(EngineError::GatePaused {
+                call_id, gate_name, ..
+            }) => {
                 assert_eq!(call_id, "call_approve_1");
+                assert_eq!(gate_name, "approval");
             }
-            other => panic!("expected NeedApproval, got {other:?}"),
+            other => panic!("expected GatePaused, got {other:?}"),
         }
     }
 
@@ -929,7 +1049,7 @@ mod tests {
                 &exec_ctx(thread_id, Some("call_once_1")),
             )
             .await;
-        assert!(matches!(first, Err(EngineError::NeedApproval { .. })));
+        assert!(matches!(first, Err(EngineError::GatePaused { .. })));
 
         let second = adapter
             .execute_resolved_pending_action(
@@ -951,7 +1071,7 @@ mod tests {
                 &exec_ctx(thread_id, Some("call_once_2")),
             )
             .await;
-        assert!(matches!(third, Err(EngineError::NeedApproval { .. })));
+        assert!(matches!(third, Err(EngineError::GatePaused { .. })));
     }
 
     // ── extract_credential_name tests ──────────────────────────
@@ -986,39 +1106,6 @@ mod tests {
         assert_eq!(extract_credential_name(msg), None);
     }
 
-    // ── auth_required_callback tests ───────────────────────────
-
-    #[tokio::test]
-    async fn auth_callback_fires_on_missing_credential() {
-        let adapter = make_adapter();
-
-        let fired = Arc::new(std::sync::Mutex::new(Vec::<(String, String)>::new()));
-        let fired_clone = Arc::clone(&fired);
-
-        adapter
-            .set_auth_required_callback(Arc::new(Box::new(move |cred, action| {
-                fired_clone
-                    .lock()
-                    .unwrap()
-                    .push((cred.to_string(), action.to_string()));
-            })))
-            .await;
-
-        adapter.emit_auth_required("github_token", "http").await;
-
-        let calls = fired.lock().unwrap();
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].0, "github_token");
-        assert_eq!(calls[0].1, "http");
-    }
-
-    #[tokio::test]
-    async fn auth_callback_not_set_is_noop() {
-        let adapter = make_adapter();
-        // No callback set — should not panic
-        adapter.emit_auth_required("some_token", "http").await;
-    }
-
     // ── is_v1_only_tool tests ──────────────────────────────────
 
     #[test]
@@ -1047,8 +1134,8 @@ mod tests {
     fn auth_tools_are_v1_auth() {
         assert!(is_v1_auth_tool("tool_auth"));
         assert!(is_v1_auth_tool("tool-auth"));
-        assert!(is_v1_auth_tool("tool_activate"));
-        assert!(is_v1_auth_tool("tool-activate"));
+        assert!(!is_v1_auth_tool("tool_activate"));
+        assert!(!is_v1_auth_tool("tool-activate"));
     }
 
     #[test]
@@ -1128,20 +1215,131 @@ mod tests {
             user_id: "test_user".to_string(),
             step_id: ironclaw_engine::StepId::new(),
             current_call_id: None,
+            source_channel: None,
         };
 
         let result = adapter.execute_action("http", params, &lease, &ctx).await;
 
-        // Should return NeedAuthentication, NOT execute the tool
+        // Should return GatePaused(Authentication), NOT execute the tool
         match result {
-            Err(EngineError::NeedAuthentication {
-                credential_name, ..
-            }) => {
-                assert_eq!(credential_name, "github_token");
-            }
+            Err(EngineError::GatePaused { resume_kind, .. }) => match *resume_kind {
+                ironclaw_engine::ResumeKind::Authentication {
+                    credential_name, ..
+                } => {
+                    assert_eq!(credential_name, "github_token");
+                }
+                other => panic!("Expected Authentication gate, got: {other:?}"),
+            },
             other => {
-                panic!("Expected NeedAuthentication for missing github_token, got: {other:?}");
+                panic!("Expected GatePaused for missing github_token, got: {other:?}");
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn tool_activate_awaiting_authorization_becomes_auth_gate() {
+        struct ActivateTool;
+
+        #[async_trait]
+        impl Tool for ActivateTool {
+            fn name(&self) -> &str {
+                "tool_activate"
+            }
+
+            fn description(&self) -> &str {
+                "activate"
+            }
+
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"}
+                    }
+                })
+            }
+
+            async fn execute(
+                &self,
+                _params: serde_json::Value,
+                _ctx: &crate::context::JobContext,
+            ) -> Result<ToolOutput, ToolError> {
+                Ok(ToolOutput::success(
+                    serde_json::json!({
+                        "name": "notion",
+                        "status": "awaiting_authorization",
+                        "auth_url": "https://example.com/oauth",
+                    }),
+                    std::time::Duration::from_millis(1),
+                ))
+            }
+        }
+
+        let tools = Arc::new(ToolRegistry::new());
+        tools.register(Arc::new(ActivateTool)).await;
+
+        let adapter = EffectBridgeAdapter::new(
+            tools,
+            Arc::new(SafetyLayer::new(&ironclaw_safety::SafetyConfig {
+                max_output_length: 10_000,
+                injection_check_enabled: false,
+            })),
+            Arc::new(HookRegistry::default()),
+        );
+
+        let lease = ironclaw_engine::CapabilityLease {
+            id: ironclaw_engine::types::capability::LeaseId::new(),
+            thread_id: ironclaw_engine::ThreadId::new(),
+            capability_name: "tools".into(),
+            granted_actions: vec![],
+            granted_at: chrono::Utc::now(),
+            expires_at: None,
+            max_uses: None,
+            uses_remaining: None,
+            revoked: false,
+            revoked_reason: None,
+        };
+        let ctx = ironclaw_engine::ThreadExecutionContext {
+            thread_id: ironclaw_engine::ThreadId::new(),
+            thread_type: ironclaw_engine::types::thread::ThreadType::Foreground,
+            project_id: ironclaw_engine::ProjectId::new(),
+            user_id: "test_user".to_string(),
+            step_id: ironclaw_engine::StepId::new(),
+            current_call_id: Some("call_123".to_string()),
+            source_channel: None,
+        };
+
+        let result = adapter
+            .execute_action(
+                "tool_activate",
+                serde_json::json!({"name": "notion"}),
+                &lease,
+                &ctx,
+            )
+            .await;
+
+        match result {
+            Err(EngineError::GatePaused {
+                gate_name,
+                action_name,
+                resume_kind,
+                ..
+            }) => {
+                assert_eq!(gate_name, "authentication");
+                assert_eq!(action_name, "tool_activate");
+                match *resume_kind {
+                    ironclaw_engine::ResumeKind::Authentication {
+                        credential_name,
+                        auth_url,
+                        ..
+                    } => {
+                        assert_eq!(credential_name, "notion");
+                        assert_eq!(auth_url.as_deref(), Some("https://example.com/oauth"));
+                    }
+                    other => panic!("expected authentication resume kind, got {other:?}"),
+                }
+            }
+            other => panic!("expected auth gate pause, got {other:?}"),
         }
     }
 }

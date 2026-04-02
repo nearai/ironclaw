@@ -156,10 +156,13 @@ pub async fn execute_action_calls(
                     return Ok(ActionBatchResult {
                         results: early_results,
                         events: early_events,
-                        need_approval: Some(ThreadOutcome::NeedApproval {
+                        need_approval: Some(ThreadOutcome::GatePaused {
+                            gate_name: "approval".into(),
                             action_name: call.action_name.clone(),
                             call_id: call.id.clone(),
                             parameters: call.parameters.clone(),
+                            resume_kind: crate::gate::ResumeKind::Approval { allow_always: true },
+                            resume_output: None,
                         }),
                     });
                 }
@@ -263,25 +266,10 @@ pub async fn execute_action_calls(
 
     for (idx, slot) in slot_results.into_iter().enumerate() {
         if let Some((result, event)) = slot {
-            // Check for NeedAuthentication or GatePaused — record the first
-            // one as the batch interrupt but still collect all other results.
+            // Record the first gate pause as the batch interrupt but still
+            // collect all other results.
             if first_interrupt.is_none() {
-                if let EventKind::ActionFailed { ref error, .. } = event
-                    && error.starts_with("authentication required")
-                {
-                    let call = &calls[idx];
-                    let credential_name = error
-                        .strip_prefix("authentication required for credential '")
-                        .and_then(|s| s.strip_suffix('\''))
-                        .unwrap_or("")
-                        .to_string();
-                    first_interrupt = Some(ThreadOutcome::NeedAuthentication {
-                        credential_name,
-                        action_name: call.action_name.clone(),
-                        call_id: call.id.clone(),
-                        parameters: call.parameters.clone(),
-                    });
-                } else if let EventKind::ApprovalRequested {
+                if let EventKind::ApprovalRequested {
                     ref action_name,
                     ref call_id,
                     ..
@@ -300,9 +288,15 @@ pub async fn execute_action_calls(
                         action_name: action_name.clone(),
                         call_id: call_id.clone(),
                         parameters: call.parameters.clone(),
-                        resume_kind: crate::gate::ResumeKind::Approval {
+                        resume_kind: serde_json::from_value(
+                            result.output.get("resume_kind").cloned().unwrap_or_else(
+                                || serde_json::json!({"Approval":{"allow_always":false}}),
+                            ),
+                        )
+                        .unwrap_or(crate::gate::ResumeKind::Approval {
                             allow_always: false,
-                        },
+                        }),
+                        resume_output: result.output.get("resume_output").cloned(),
                     });
                 }
             }
@@ -339,41 +333,24 @@ fn classify_exec_result(
             };
             (action_result, event)
         }
-        Err(EngineError::NeedAuthentication {
-            credential_name,
-            action_name,
-            call_id,
-            ..
-        }) => {
-            let error_msg = format!("authentication required for credential '{credential_name}'");
-            let error_result = ActionResult {
-                call_id: call.id.clone(),
-                action_name: call.action_name.clone(),
-                output: serde_json::json!({"error": &error_msg}),
-                is_error: true,
-                duration: std::time::Duration::ZERO,
-            };
-            let event = EventKind::ActionFailed {
-                step_id: context.step_id,
-                action_name,
-                call_id,
-                error: error_msg,
-                params_summary: None,
-            };
-            (error_result, event)
-        }
         Err(EngineError::GatePaused {
             gate_name,
             action_name,
             call_id,
             parameters,
             resume_kind,
+            resume_output,
         }) => {
             let _error_msg = format!("gate paused: {gate_name}");
             let error_result = ActionResult {
                 call_id: call.id.clone(),
                 action_name: call.action_name.clone(),
-                output: serde_json::json!({"status": "gate_paused", "gate": gate_name}),
+                output: serde_json::json!({
+                    "status": "gate_paused",
+                    "gate": gate_name,
+                    "resume_kind": serde_json::to_value(&*resume_kind).unwrap_or_default(),
+                    "resume_output": resume_output.as_deref().cloned(),
+                }),
                 is_error: true,
                 duration: std::time::Duration::ZERO,
             };
@@ -415,12 +392,7 @@ fn classify_exec_result(
 }
 
 fn interrupted_call_needs_refund(result: &Result<ActionResult, EngineError>) -> bool {
-    matches!(
-        result,
-        Err(EngineError::NeedApproval { .. }
-            | EngineError::NeedAuthentication { .. }
-            | EngineError::GatePaused { .. })
-    )
+    matches!(result, Err(EngineError::GatePaused { .. }))
 }
 
 #[cfg(test)]
@@ -498,6 +470,7 @@ mod tests {
             user_id: "test".into(),
             step_id: StepId::new(),
             current_call_id: None,
+            source_channel: None,
         }
     }
 
@@ -699,10 +672,10 @@ mod tests {
         assert_eq!(result.results[1].call_id, "id_bbbb");
     }
 
-    // ── NeedAuthentication tests ─────────────────────────────
+    // ── GatePaused(Authentication) tests ─────────────────────
 
     #[tokio::test]
-    async fn need_authentication_interrupts_batch() {
+    async fn authentication_gate_interrupts_batch() {
         let thread = Thread::new(
             "test",
             ThreadType::Foreground,
@@ -712,12 +685,17 @@ mod tests {
         );
         let effects: Arc<dyn EffectExecutor> = Arc::new(MockEffects::new(
             vec![test_action("http")],
-            vec![Err(EngineError::NeedAuthentication {
-                credential_name: "github_token".into(),
+            vec![Err(EngineError::GatePaused {
+                gate_name: "authentication".into(),
                 action_name: "http".into(),
                 call_id: "call_auth_1".into(),
-                parameters: serde_json::json!({"url": "https://api.github.com/repos"}),
-                completed_output: None,
+                parameters: Box::new(serde_json::json!({"url": "https://api.github.com/repos"})),
+                resume_kind: Box::new(crate::gate::ResumeKind::Authentication {
+                    credential_name: "github_token".into(),
+                    instructions: "Provide your github_token token".into(),
+                    auth_url: None,
+                }),
+                resume_output: None,
             })],
         ));
         let leases = Arc::new(LeaseManager::new());
@@ -736,38 +714,47 @@ mod tests {
             .await
             .unwrap();
 
-        // Batch should be interrupted with NeedAuthentication outcome
+        // Batch should be interrupted with GatePaused(Authentication)
         assert!(
             result.need_approval.is_some(),
-            "NeedAuthentication should interrupt the batch"
+            "GatePaused(Authentication) should interrupt the batch"
         );
         match result.need_approval.unwrap() {
-            ThreadOutcome::NeedAuthentication {
-                credential_name,
+            ThreadOutcome::GatePaused {
+                gate_name,
                 action_name,
+                resume_kind,
                 ..
             } => {
-                assert_eq!(credential_name, "github_token");
+                assert_eq!(gate_name, "authentication");
                 assert_eq!(action_name, "http");
+                match resume_kind {
+                    crate::gate::ResumeKind::Authentication {
+                        credential_name, ..
+                    } => {
+                        assert_eq!(credential_name, "github_token");
+                    }
+                    other => panic!("expected auth resume kind, got {:?}", other),
+                }
             }
-            other => panic!("expected NeedAuthentication, got {:?}", other),
+            other => panic!("expected GatePaused, got {:?}", other),
         }
 
-        // ActionFailed event should be emitted
+        // Gate pause event should be emitted
         assert!(
             result
                 .events
                 .iter()
-                .any(|e| matches!(e, EventKind::ActionFailed { .. })),
-            "should emit ActionFailed event"
+                .any(|e| matches!(e, EventKind::ApprovalRequested { gate_name: Some(name), .. } if name == "authentication")),
+            "should emit gate pause event"
         );
     }
 
     #[tokio::test]
-    async fn need_authentication_flags_batch_with_parallel_results() {
+    async fn authentication_gate_flags_batch_with_parallel_results() {
         // Two calls: first needs auth, second succeeds.
         // With parallel execution, both run concurrently — the batch is flagged
-        // with NeedAuthentication but results from all calls are available.
+        // with GatePaused(Authentication) but results from all calls are available.
         let thread = Thread::new(
             "test",
             ThreadType::Foreground,
@@ -778,12 +765,17 @@ mod tests {
         let effects: Arc<dyn EffectExecutor> = Arc::new(MockEffects::new(
             vec![test_action("http"), test_action("echo")],
             vec![
-                Err(EngineError::NeedAuthentication {
-                    credential_name: "api_key".into(),
+                Err(EngineError::GatePaused {
+                    gate_name: "authentication".into(),
                     action_name: "http".into(),
                     call_id: "call_1".into(),
-                    parameters: serde_json::json!({}),
-                    completed_output: None,
+                    parameters: Box::new(serde_json::json!({})),
+                    resume_kind: Box::new(crate::gate::ResumeKind::Authentication {
+                        credential_name: "api_key".into(),
+                        instructions: "Provide your api_key token".into(),
+                        auth_url: None,
+                    }),
+                    resume_output: None,
                 }),
                 Ok(ActionResult {
                     call_id: String::new(),
@@ -825,17 +817,29 @@ mod tests {
         // Second call succeeded
         assert_eq!(result.results[1].call_id, "call_2");
         assert!(!result.results[1].is_error);
-        // Batch is still flagged with NeedAuthentication
+        // Batch is still flagged with GatePaused(Authentication)
         assert!(result.need_approval.is_some());
         match result.need_approval.unwrap() {
-            ThreadOutcome::NeedAuthentication {
-                credential_name, ..
-            } => assert_eq!(credential_name, "api_key"),
-            other => panic!("expected NeedAuthentication, got {:?}", other),
+            ThreadOutcome::GatePaused {
+                gate_name,
+                resume_kind,
+                ..
+            } => {
+                assert_eq!(gate_name, "authentication");
+                match resume_kind {
+                    crate::gate::ResumeKind::Authentication {
+                        credential_name, ..
+                    } => {
+                        assert_eq!(credential_name, "api_key");
+                    }
+                    other => panic!("expected auth resume kind, got {:?}", other),
+                }
+            }
+            other => panic!("expected GatePaused, got {:?}", other),
         }
     }
 
-    /// Regular EngineError::Effect (not NeedAuthentication) should NOT interrupt —
+    /// Regular EngineError::Effect (not GatePaused) should NOT interrupt —
     /// it becomes a normal error result and execution continues.
     #[tokio::test]
     async fn regular_effect_error_does_not_interrupt() {

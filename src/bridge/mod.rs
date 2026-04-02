@@ -25,6 +25,7 @@ pub use router::{
     fire_engine_mission,
     get_engine_mission,
     get_engine_pending_auth,
+    get_engine_pending_gate,
     get_engine_project,
     get_engine_thread,
     // Action handlers
@@ -45,7 +46,7 @@ pub use router::{
     list_engine_thread_steps,
     list_engine_threads,
     pause_engine_mission,
-    pending_approval_for_user_thread,
+    resolve_engine_auth_callback,
     resolve_gate,
     resume_engine_mission,
 };

@@ -414,6 +414,19 @@ impl ThreadManager {
         }
     }
 
+    /// Set a metadata key on a thread (best-effort, for tagging).
+    pub async fn set_thread_metadata(&self, thread_id: ThreadId, key: &str, value: &str) {
+        if let Ok(Some(mut thread)) = self.store.load_thread(thread_id).await {
+            if let Some(obj) = thread.metadata.as_object_mut() {
+                obj.insert(
+                    key.to_string(),
+                    serde_json::Value::String(value.to_string()),
+                );
+            }
+            let _ = self.store.save_thread(&thread).await;
+        }
+    }
+
     /// Check if a thread is still running.
     pub async fn is_running(&self, thread_id: ThreadId) -> bool {
         let running = self.running.read().await;

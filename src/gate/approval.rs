@@ -37,16 +37,9 @@ impl ExecutionGate for ApprovalGate {
     }
 
     async fn evaluate(&self, ctx: &GateContext<'_>) -> GateDecision {
-        let tool = match self.tools.get(ctx.action_name).await {
-            Some(t) => t,
-            None => {
-                // Underscore → hyphen fallback
-                let hyphenated = ctx.action_name.replace('_', "-");
-                match self.tools.get(&hyphenated).await {
-                    Some(t) => t,
-                    None => return GateDecision::Allow, // unknown tool — let execution handle it
-                }
-            }
+        let tool = match self.tools.get_resolved(ctx.action_name).await {
+            Some((_, t)) => t,
+            None => return GateDecision::Allow, // unknown tool — let execution handle it
         };
 
         // Use original parameters for approval check (the adapter normalizes
