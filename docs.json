@@ -88,9 +88,10 @@
                     "pages": [
                       "tunnel",
                       "channels/local",
-                      "channels/signal",
+                      "channels/discord",
                       "channels/telegram",
-                      "channels/webhook"
+                      "channels/webhook",
+                      "channels/signal"
                     ]
                   }
                 ]
