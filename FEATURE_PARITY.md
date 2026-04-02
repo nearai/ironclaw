@@ -135,7 +135,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Feature | OpenClaw | IronClaw | Notes |
 |---------|----------|----------|-------|
 | DM pairing codes | ✅ | ✅ | `ironclaw pairing list/approve`, host APIs |
-| Allowlist/blocklist | ✅ | 🚧 | `allow_from` + pairing store + hardened command/group allowlists |
+| Allowlist/blocklist | ✅ | 🚧 | `allow_from` + pairing store + hardened command/group allowlists; sandbox extra domain allowlist also bypasses HTTP approval prompts for exact/wildcard domains |
 | Self-message bypass | ✅ | ❌ | Own messages skip pairing |
 | Mention-based activation | ✅ | ✅ | bot_username + respond_to_all_group_messages |
 | Per-group tool policies | ✅ | ❌ | Allow/deny specific tools |
