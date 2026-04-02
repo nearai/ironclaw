@@ -95,50 +95,71 @@ impl Tool for GlobTool {
 
         let start = std::time::Instant::now();
 
+        // Reject absolute patterns and patterns with `..` that could escape the search root
+        if std::path::Path::new(pattern).is_absolute() {
+            return Err(ToolError::InvalidParameters(
+                "Absolute glob patterns are not allowed. Use the 'path' parameter to set the search root.".to_string(),
+            ));
+        }
+        if pattern.contains("..") {
+            return Err(ToolError::InvalidParameters(
+                "Glob patterns containing '..' are not allowed.".to_string(),
+            ));
+        }
+
         // Validate search root
         let search_root = validate_path(path_str, self.base_dir.as_deref())?;
 
         // Construct full glob pattern
         let full_pattern = search_root.join(pattern);
-        let full_pattern_str = full_pattern.to_string_lossy();
+        let full_pattern_str = full_pattern.to_string_lossy().to_string();
 
-        let options = MatchOptions {
-            case_sensitive: true,
-            require_literal_separator: false,
-            require_literal_leading_dot: false,
-        };
-
-        let entries = glob_with(&full_pattern_str, options).map_err(|e| {
-            ToolError::InvalidParameters(format!("Invalid glob pattern '{}': {}", pattern, e))
-        })?;
-
-        // Collect matching files with mtime
-        let mut files: Vec<(PathBuf, SystemTime)> = Vec::new();
-        for entry in entries {
-            let path = match entry {
-                Ok(p) => p,
-                Err(_) => continue, // Skip entries we can't access
+        // Run glob + metadata collection in spawn_blocking to avoid blocking the tokio executor
+        let search_root_clone = search_root.clone();
+        let files = tokio::task::spawn_blocking(move || {
+            let options = MatchOptions {
+                case_sensitive: true,
+                require_literal_separator: false,
+                require_literal_leading_dot: false,
             };
 
-            // Skip directories — only return files
-            if path.is_dir() {
-                continue;
+            let entries = glob_with(&full_pattern_str, options).map_err(|e| {
+                ToolError::InvalidParameters(format!("Invalid glob pattern: {}", e))
+            })?;
+
+            let mut files: Vec<(PathBuf, SystemTime)> = Vec::new();
+            for entry in entries {
+                let path = match entry {
+                    Ok(p) => p,
+                    Err(_) => continue,
+                };
+
+                if path.is_dir() {
+                    continue;
+                }
+
+                // Defense-in-depth: ensure path is within search root
+                let Ok(relative) = path.strip_prefix(&search_root_clone) else {
+                    continue;
+                };
+                if is_excluded_path(relative) {
+                    continue;
+                }
+
+                let mtime = std::fs::metadata(&path)
+                    .and_then(|m| m.modified())
+                    .unwrap_or(UNIX_EPOCH);
+
+                files.push((path, mtime));
             }
 
-            // Skip excluded directories
-            let relative = path.strip_prefix(&search_root).unwrap_or(&path);
-            if is_excluded_path(relative) {
-                continue;
-            }
-
-            let mtime = std::fs::metadata(&path)
-                .and_then(|m| m.modified())
-                .unwrap_or(UNIX_EPOCH);
-
-            files.push((path, mtime));
-        }
+            Ok::<_, ToolError>(files)
+        })
+        .await
+        .map_err(|e| ToolError::ExecutionFailed(format!("Glob task failed: {}", e)))??;
 
         // Sort by mtime descending (newest first)
+        let mut files = files;
         files.sort_by(|a, b| b.1.cmp(&a.1));
 
         // Truncate

@@ -59,6 +59,8 @@ const BLOCKED_DEVICE_PATHS: &[&str] = &[
     "/dev/zero",
     "/dev/urandom",
     "/dev/random",
+    "/proc/kcore",
+    "/proc/kmem",
     "/dev/null",
     "/dev/stdin",
     "/dev/stdout",
@@ -132,16 +134,6 @@ impl Tool for ReadFileTool {
     ) -> Result<ToolOutput, ToolError> {
         let path_str = require_str(&params, "path")?;
 
-        // Block device paths that would hang or produce infinite output
-        if BLOCKED_DEVICE_PATHS.iter().any(|p| path_str.starts_with(p))
-            || (path_str.starts_with("/proc/") && path_str.contains("/fd/"))
-        {
-            return Err(ToolError::InvalidParameters(format!(
-                "Reading device/proc paths is not allowed: {}",
-                path_str
-            )));
-        }
-
         let offset = params.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
         let limit = params.get("limit").and_then(|v| v.as_u64());
         let has_explicit_range = offset > 0 || limit.is_some();
@@ -149,6 +141,20 @@ impl Tool for ReadFileTool {
         let start = std::time::Instant::now();
 
         let path = validate_path(path_str, self.base_dir.as_deref())?;
+
+        // Block device paths that would hang or produce infinite output.
+        // Check the resolved path to prevent bypasses via relative paths or symlinks.
+        let resolved_str = path.to_string_lossy();
+        if BLOCKED_DEVICE_PATHS
+            .iter()
+            .any(|p| resolved_str.starts_with(p))
+            || (resolved_str.starts_with("/proc/") && resolved_str.contains("/fd/"))
+        {
+            return Err(ToolError::InvalidParameters(format!(
+                "Reading device/proc paths is not allowed: {}",
+                path.display()
+            )));
+        }
 
         // Check file size
         let metadata = fs::metadata(&path)
@@ -325,7 +331,9 @@ impl Tool for WriteFileTool {
         // Snapshot existing file before overwriting (for file_undo)
         if let Some(ref history) = self.file_history {
             let mut h = history.write().await;
-            let _ = h.snapshot(&path, "write_file", 0).await;
+            if let Err(e) = h.snapshot(&path, "write_file", 0).await {
+                tracing::debug!("file_history snapshot failed before write_file: {}", e);
+            }
         }
 
         // Create parent directories
@@ -685,7 +693,9 @@ impl Tool for ApplyPatchTool {
         // Snapshot before modification (for file_undo)
         if let Some(ref history) = self.file_history {
             let mut h = history.write().await;
-            let _ = h.snapshot(&path, "apply_patch", 0).await;
+            if let Err(e) = h.snapshot(&path, "apply_patch", 0).await {
+                tracing::debug!("file_history snapshot failed before apply_patch: {}", e);
+            }
         }
 
         // Apply replacement

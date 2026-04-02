@@ -29,8 +29,8 @@ pub struct FileSnapshot {
     pub id: Uuid,
     /// Absolute path to the file.
     pub path: PathBuf,
-    /// File content before the modification.
-    pub content_before: String,
+    /// File content before the modification (raw bytes for binary support).
+    pub content_before: Vec<u8>,
     /// When the snapshot was taken.
     pub timestamp: DateTime<Utc>,
     /// Which tool made the change (e.g., "apply_patch", "write_file").
@@ -79,8 +79,9 @@ impl FileHistory {
         tool_name: &str,
         turn_number: usize,
     ) -> Result<Option<Uuid>, ToolError> {
-        // Only snapshot existing files — new file creation has nothing to undo
-        let content = match tokio::fs::read_to_string(path).await {
+        // Only snapshot existing files — new file creation has nothing to undo.
+        // Read as raw bytes to support binary files.
+        let content = match tokio::fs::read(path).await {
             Ok(c) => c,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(e) => {
