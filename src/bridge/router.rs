@@ -976,12 +976,8 @@ pub async fn handle_approval(
     // Don't pass the v1 thread_id as a hint — the v1 session uses different
     // UUIDs from the engine.  The user_id alone is sufficient for single-user
     // deployments; ambiguity resolution kicks in for multi-user.
-    let pending = match resolve_pending_gate_for_user(
-        &state.pending_gates,
-        &message.user_id,
-        message.conversation_scope(),
-    )
-    .await
+    let pending = match resolve_pending_gate_for_user(&state.pending_gates, &message.user_id, None)
+        .await
     {
         PendingGateResolution::Resolved(p) => p,
         PendingGateResolution::None => {
@@ -1782,7 +1778,7 @@ pub async fn get_engine_pending_auth(
 /// Called from the gateway's `/api/chat/auth-token` and `/api/chat/auth-cancel`
 /// endpoints to ensure pending authentication gates are cleared when the
 /// frontend handles auth directly (not through the chat message path).
-pub async fn clear_engine_pending_auth(user_id: &str) {
+pub async fn clear_engine_pending_auth(user_id: &str, thread_id: Option<&str>) {
     let Some(lock) = ENGINE_STATE.get() else {
         return;
     };
@@ -1790,6 +1786,24 @@ pub async fn clear_engine_pending_auth(user_id: &str) {
     let Some(state) = guard.as_ref() else {
         return;
     };
+
+    if let Some(thread_id) = thread_id {
+        match resolve_pending_gate_for_user(&state.pending_gates, user_id, Some(thread_id)).await {
+            PendingGateResolution::Resolved(gate)
+                if matches!(
+                    gate.resume_kind,
+                    ironclaw_engine::ResumeKind::Authentication { .. }
+                ) =>
+            {
+                let _ = state.pending_gates.discard(&gate.key()).await;
+            }
+            PendingGateResolution::Resolved(_)
+            | PendingGateResolution::None
+            | PendingGateResolution::Ambiguous => {}
+        }
+        return;
+    }
+
     for gate in state.pending_gates.list_for_user(user_id).await {
         if matches!(
             gate.resume_kind,
@@ -3252,7 +3266,11 @@ async fn migrate_legacy_user_ids(store: &Arc<dyn ironclaw_engine::Store>, owner_
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::LazyLock;
+    use tokio::sync::Mutex as TokioMutex;
     use tokio::sync::RwLock as TokioRwLock;
+
+    static ENGINE_STATE_TEST_LOCK: LazyLock<TokioMutex<()>> = LazyLock::new(|| TokioMutex::new(()));
 
     struct TestStore {
         conversations: TokioRwLock<Vec<ironclaw_engine::ConversationSurface>>,
@@ -3553,6 +3571,104 @@ mod tests {
             gate.resume_kind,
             ironclaw_engine::ResumeKind::Authentication { .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn clear_engine_pending_auth_scopes_to_thread_when_hint_provided() {
+        let _guard = ENGINE_STATE_TEST_LOCK.lock().await;
+        let store = Arc::new(TestStore::new());
+        let state = make_expected_test_state(store);
+        let thread_a = ironclaw_engine::ThreadId::new();
+        let thread_b = ironclaw_engine::ThreadId::new();
+
+        state
+            .pending_gates
+            .insert(sample_pending_gate(
+                "alice",
+                thread_a,
+                ironclaw_engine::ResumeKind::Authentication {
+                    credential_name: "github_token".into(),
+                    instructions: "paste token".into(),
+                    auth_url: None,
+                },
+            ))
+            .await
+            .unwrap();
+        state
+            .pending_gates
+            .insert(sample_pending_gate(
+                "alice",
+                thread_b,
+                ironclaw_engine::ResumeKind::Authentication {
+                    credential_name: "linear_token".into(),
+                    instructions: "paste token".into(),
+                    auth_url: None,
+                },
+            ))
+            .await
+            .unwrap();
+
+        let lock = ENGINE_STATE.get_or_init(|| RwLock::new(None));
+        *lock.write().await = None;
+        *lock.write().await = Some(state);
+
+        clear_engine_pending_auth("alice", Some(&thread_a.to_string())).await;
+
+        let guard = lock.read().await;
+        let state = guard.as_ref().unwrap();
+        let remaining = state.pending_gates.list_for_user("alice").await;
+        assert_eq!(remaining.len(), 1);
+        assert!(remaining.iter().any(|gate| gate.thread_id == thread_b));
+        drop(guard);
+        *lock.write().await = None;
+    }
+
+    #[tokio::test]
+    async fn clear_engine_pending_auth_without_hint_clears_all_auth_gates() {
+        let _guard = ENGINE_STATE_TEST_LOCK.lock().await;
+        let store = Arc::new(TestStore::new());
+        let state = make_expected_test_state(store);
+        let thread_a = ironclaw_engine::ThreadId::new();
+        let thread_b = ironclaw_engine::ThreadId::new();
+
+        state
+            .pending_gates
+            .insert(sample_pending_gate(
+                "alice",
+                thread_a,
+                ironclaw_engine::ResumeKind::Authentication {
+                    credential_name: "github_token".into(),
+                    instructions: "paste token".into(),
+                    auth_url: None,
+                },
+            ))
+            .await
+            .unwrap();
+        state
+            .pending_gates
+            .insert(sample_pending_gate(
+                "alice",
+                thread_b,
+                ironclaw_engine::ResumeKind::Authentication {
+                    credential_name: "linear_token".into(),
+                    instructions: "paste token".into(),
+                    auth_url: None,
+                },
+            ))
+            .await
+            .unwrap();
+
+        let lock = ENGINE_STATE.get_or_init(|| RwLock::new(None));
+        *lock.write().await = None;
+        *lock.write().await = Some(state);
+
+        clear_engine_pending_auth("alice", None).await;
+
+        let guard = lock.read().await;
+        let state = guard.as_ref().unwrap();
+        assert!(state.pending_gates.list_for_user("alice").await.is_empty());
+        drop(guard);
+        *lock.write().await = None;
     }
 
     // ── /expected command tests ─────────────────────────────────
