@@ -646,10 +646,10 @@ pub async fn start_server(
             post(engine_mission_resume_handler),
         )
         // Collections
-        .route("/api/collections", get(collections_list_handler))
+        .route("/api/collections", get(collections_list_handler).post(collections_register_handler))
         .route("/api/collections/register", post(collections_register_handler))
-        .route("/api/collections/{collection}/records", get(collections_query_handler))
-        .route("/api/collections/{collection}/records", post(collections_insert_handler))
+        .route("/api/collections/{collection}", post(collections_insert_handler))
+        .route("/api/collections/{collection}/records", get(collections_query_handler).post(collections_insert_handler))
         .route("/api/collections/{collection}/records/{record_id}", axum::routing::put(collections_update_handler))
         .route("/api/collections/{collection}/records/{record_id}", axum::routing::delete(collections_delete_handler))
         // Skills
