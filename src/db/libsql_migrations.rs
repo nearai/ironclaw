@@ -920,16 +920,21 @@ async fn repair_misnumbered_v15(
         .await
         .map_err(|e| DatabaseError::Migration(format!("V15 repair check failed: {e}")))?;
 
-    if let Some(row) = rows.next().await.ok().flatten() {
+    let maybe_row = rows
+        .next()
+        .await
+        .map_err(|e| DatabaseError::Migration(format!("V15 repair: failed to fetch row: {e}")))?;
+    if let Some(row) = maybe_row {
         let name: String = row.get(0).map_err(|e| {
             DatabaseError::Migration(format!("V15 repair: failed to read name: {e}"))
         })?;
-        if name != "user_identities" {
-            // V15 was recorded with wrong name — table was never created.
+        if name == "document_versions" {
+            // V15 was recorded with the wrong name due to a merge-conflict
+            // misnumbering — the user_identities CREATE TABLE never ran.
             // Delete the stale record so the migration loop will reapply it.
             tracing::warn!(
                 recorded_name = %name,
-                "libSQL: V15 was mis-recorded; deleting stale _migrations row to reapply"
+                "libSQL: V15 was mis-recorded as document_versions; deleting stale _migrations row to reapply"
             );
             conn.execute(
                 "DELETE FROM _migrations WHERE version = 15",
