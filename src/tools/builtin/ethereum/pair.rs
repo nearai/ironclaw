@@ -82,9 +82,7 @@ impl Tool for WalletPairTool {
         let uri = self.session.initiate_pairing(chain_id).await?;
 
         Ok(ToolOutput::text(
-            format!(
-                "Pairing initiated. Present this WalletConnect URI to the user:\n{uri}"
-            ),
+            format!("Pairing initiated. Present this WalletConnect URI to the user:\n{uri}"),
             start.elapsed(),
         ))
     }
