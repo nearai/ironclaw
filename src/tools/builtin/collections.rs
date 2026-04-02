@@ -880,15 +880,21 @@ pub(crate) async fn refresh_collection_tools(
         }
 
         // Hot-reload skills into the registry so they're available immediately
-        // (not just on next restart).
+        // (not just on next restart).  Use spawn_blocking to avoid blocking
+        // the tokio runtime — std::sync::RwLock can't be held across .await.
         if let Some(sr) = skill_registry {
-            if let Ok(mut registry) = sr.write() {
-                let loaded = futures::executor::block_on(registry.reload());
-                tracing::info!(
-                    "Reloaded skills after collection registration ({})",
-                    loaded.len()
-                );
-            }
+            let sr = Arc::clone(sr);
+            let _ = tokio::task::spawn_blocking(move || {
+                if let Ok(mut registry) = sr.write() {
+                    let rt = tokio::runtime::Handle::current();
+                    let loaded = rt.block_on(registry.reload());
+                    tracing::info!(
+                        "Reloaded skills after collection registration ({})",
+                        loaded.len()
+                    );
+                }
+            })
+            .await;
         } else {
             tracing::info!(
                 "Generated per-collection skill: {}/SKILL.md (no registry to hot-reload)",
