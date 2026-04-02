@@ -2812,6 +2812,15 @@ impl WasmChannel {
                 .await;
             }
 
+            if emitted.content.trim().is_empty() && emitted.attachments.is_empty() {
+                tracing::debug!(
+                    channel = %dispatch.channel_name,
+                    user_id = %emitted.user_id,
+                    "Skipping empty emitted message"
+                );
+                continue;
+            }
+
             // Send to stream — no locks held across this await
             tracing::info!(
                 channel = %dispatch.channel_name,
@@ -4602,6 +4611,50 @@ mod tests {
         assert_eq!(msg2.content, "Another message"); // safety: test-only assertion
 
         // No more messages
+        assert!(rx.try_recv().is_err()); // safety: test-only assertion
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_emitted_messages_skips_empty_messages_without_attachments() {
+        use crate::channels::wasm::host::EmittedMessage;
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(10);
+        let message_tx = Arc::new(tokio::sync::RwLock::new(Some(tx)));
+
+        let rate_limiter = Arc::new(tokio::sync::RwLock::new(
+            crate::channels::wasm::host::ChannelEmitRateLimiter::new(
+                crate::channels::wasm::capabilities::EmitRateLimitConfig::default(),
+            ),
+        ));
+
+        let messages = vec![
+            EmittedMessage::new("user1", ""),
+            EmittedMessage::new("user2", "   "),
+            EmittedMessage::new("user3", "real message"),
+        ];
+
+        let last_broadcast_metadata = Arc::new(tokio::sync::RwLock::new(None));
+        let result = WasmChannel::dispatch_emitted_messages(
+            EmitDispatchContext {
+                channel_name: "test-channel",
+                owner_scope_id: "default",
+                owner_actor_id: None,
+                message_tx: &message_tx,
+                rate_limiter: &rate_limiter,
+                last_broadcast_metadata: &last_broadcast_metadata,
+                settings_store: None,
+            },
+            messages,
+        )
+        .await;
+
+        assert!(result.is_ok()); // safety: test-only assertion
+
+        let msg = rx
+            .try_recv()
+            .expect("Should receive only the non-empty message");
+        assert_eq!(msg.user_id, "user3"); // safety: test-only assertion
+        assert_eq!(msg.content, "real message"); // safety: test-only assertion
         assert!(rx.try_recv().is_err()); // safety: test-only assertion
     }
 
