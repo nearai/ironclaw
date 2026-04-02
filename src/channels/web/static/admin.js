@@ -17,9 +17,12 @@
 
   function escapeHtml(str) {
     if (!str) return '';
-    var d = document.createElement('div');
-    d.appendChild(document.createTextNode(str));
-    return d.innerHTML;
+    return String(str)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
   }
 
   function formatNumber(n) {
@@ -138,6 +141,7 @@
     return apiFetch('/api/profile').then(function (profile) {
       currentProfile = profile;
       if (profile.role !== 'admin') {
+        token = '';
         showAccessDenied();
         return false;
       }
@@ -145,6 +149,9 @@
       showApp();
       route();
       return true;
+    }).catch(function (err) {
+      token = '';
+      throw err;
     });
   }
 
@@ -180,6 +187,9 @@
             showApp();
             route();
           }
+        }).catch(function () {
+          oidcProxyAuth = false;
+          showAuth();
         });
       }
       showAuth();

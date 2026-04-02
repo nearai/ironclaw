@@ -1,6 +1,7 @@
 /* IronClaw Admin Panel */
 
 /* === Theme Variables (dark - default) === */
+/* NOTE: Variables copied from style.css — keep in sync when the main theme changes */
 :root {
   --bg: #09090b;
   --bg-secondary: #0f0f11;
