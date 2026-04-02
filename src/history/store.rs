@@ -2368,7 +2368,7 @@ impl Store {
     ) -> Result<Option<UserRecord>, DatabaseError> {
         let conn = self.conn().await?;
         let row = conn
-            .query_opt("SELECT id, email, display_name, status, role, created_at, updated_at, last_login_at, created_by, metadata FROM users WHERE email = $1", &[&email])
+            .query_opt("SELECT id, email, display_name, status, role, created_at, updated_at, last_login_at, created_by, metadata FROM users WHERE LOWER(email) = LOWER($1)", &[&email])
             .await?;
         Ok(row.map(|r| row_to_user(&r)))
     }
