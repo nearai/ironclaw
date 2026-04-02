@@ -11,6 +11,8 @@ Agents need structured data operations (grocery lists, task trackers, shift logs
 | Qwen 3.5-35B (local) | **65%** | 37% | **+28** |
 | Claude Haiku 4.5 | **70%** | 26% | **+44** |
 
+A unified tool mode (1 tool per collection instead of 5) with auto-generated skill injection scores **73%** — the best configuration tested.
+
 This also provides the storage layer needed for #1474 (auto-extract structured memories from conversations).
 
 ## The problem
@@ -69,13 +71,29 @@ Schema alteration supports adding/removing fields and enum values. Existing reco
 
 ### Per-collection tools
 
-5 typed tools generated per collection:
+Two modes, controlled by `COLLECTION_TOOL_MODE`:
+
+**Per-operation mode** (default): 5 typed tools per collection.
 
 - `{user}_{collection}_add` — Insert with typed parameters from field definitions
 - `{user}_{collection}_query` — Filter by any field (eq, neq, gt, gte, lt, lte, between, in, is_null, is_not_null), sort, limit
 - `{user}_{collection}_update` — Partial update by record ID
 - `{user}_{collection}_delete` — Delete by record ID
 - `{user}_{collection}_summary` — Aggregations: sum, count, avg, min, max with optional group_by and filters
+
+**Unified mode** (`COLLECTION_TOOL_MODE=unified`): 1 tool per collection with an `operation` parameter.
+
+- `{user}_{collection}(operation: "query|add|update|delete|summary", data?, record_id?, filters?, field?, group_by?)`
+
+Unified mode reduces tool count from 5N to N. With 10 collections, that's 10 tools instead of 50. Benchmarks show unified mode with skill injection scores 73% vs 65% for per-operation mode — fewer tools means less prompt noise and better tool selection.
+
+| Mode | Tools (4 collections) | Score | Skill impact |
+|------|:---------------------:|:-----:|:------------:|
+| Per-operation + skills | 20 | 65% | +0 (skills don't help) |
+| Unified, no skills | 4 | 68% | — |
+| Unified + skills | 4 | **73%** | **+5** (skills teach operations) |
+
+Skills help unified tools because the model needs guidance on which operation to use ("mark as done" → `operation: "update"`, `data: {status: "done"}`). With per-operation tools, the tool name IS the guidance (`_update` is self-explanatory), so skills add noise.
 
 Tool names include the owner user_id prefix to prevent collisions in multi-tenant deployments. The `Tool` trait gains an `owner_user_id()` method, and the dispatcher filters tool definitions per-user so each tenant only sees their own collection tools.
 
@@ -139,15 +157,21 @@ For cross-user read access (e.g. a shared household list), `source_scope` allows
 
 ## Tool scaling
 
-Each collection adds 5 tools. At 10 collections that's 50 extra tools. Mitigations:
+In per-operation mode, each collection adds 5 tools. In unified mode, each adds 1. This is the primary scaling mitigation.
 
-- **Compressed descriptions** (~15 tokens per tool): at 80 tools, ~1,200 extra tokens.
-- **Per-user filtering**: each user only sees their own collection tools, not every tenant's.
-- **Skill-based discovery**: auto-generated SKILL.md files with keyword matching inject relevant collection context without showing all tools.
+| Collections | Per-operation tools | Unified tools |
+|:-----------:|:-------------------:|:-------------:|
+| 5 | 25 | 5 |
+| 10 | 50 | 10 |
+| 20 | 100 | 20 |
 
-Small models (Qwen 3.5) actually perform better with compressed descriptions (65%) than full JSON schemas (41%). The deferred-schema architecture (compressed by default, full schema fetched on tool call) handles this automatically.
+Additional mitigations:
 
-Long-term, RAG-based tool injection with better embeddings is the likely answer, but the current mitigations work for practical collection counts (<20 per user).
+- **Compressed descriptions** (~15 tokens per tool): small models perform better with compressed (65%) than full JSON schemas (41%).
+- **Per-user filtering**: each user only sees their own collection tools.
+- **Skill-based discovery**: auto-generated SKILL.md files with keyword matching inject relevant collection context. Particularly effective with unified tools (+5% accuracy).
+
+Unified mode is the recommended default for deployments with more than a few collections.
 
 ## Test coverage
 
