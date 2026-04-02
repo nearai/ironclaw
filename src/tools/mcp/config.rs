@@ -1300,6 +1300,7 @@ mod tests {
         }
     }
 
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn test_load_mcp_servers_from_injects_derived_nearai_server() {
         let _guard = crate::config::helpers::lock_env();
@@ -1326,6 +1327,7 @@ mod tests {
         }
     }
 
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn test_save_mcp_servers_to_strips_derived_nearai_server() {
         let _guard = crate::config::helpers::lock_env();

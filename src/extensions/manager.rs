@@ -8355,6 +8355,7 @@ mod tests {
         }
     }
 
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn test_remove_env_derived_mcp_server_requires_unsetting_env() {
         let _guard = crate::config::helpers::lock_env();
