@@ -228,7 +228,21 @@ impl Config {
 
         // Overlay DB settings on top so DB values win over TOML.
         match store.get_all_settings(user_id).await {
-            Ok(map) => {
+            Ok(mut map) => {
+                if map.remove("channels.gateway_auth_token").is_some() {
+                    tracing::warn!(
+                        "Ignoring deprecated DB setting channels.gateway_auth_token; use GATEWAY_AUTH_TOKEN env var instead"
+                    );
+                    if let Err(e) = store
+                        .delete_setting(user_id, "channels.gateway_auth_token")
+                        .await
+                    {
+                        tracing::debug!(
+                            "Failed to remove deprecated DB setting channels.gateway_auth_token: {}",
+                            e
+                        );
+                    }
+                }
                 let db_settings = Settings::from_db_map(&map);
                 settings.merge_from(&db_settings);
             }
@@ -274,7 +288,13 @@ impl Config {
             .unwrap_or_else(Settings::default_toml_path);
 
         match Settings::load_toml(&path) {
-            Ok(Some(toml_settings)) => {
+            Ok(Some(mut toml_settings)) => {
+                if toml_settings.channels.gateway_auth_token.is_some() {
+                    tracing::warn!(
+                        "Ignoring deprecated TOML setting channels.gateway_auth_token; use GATEWAY_AUTH_TOKEN env var instead"
+                    );
+                    toml_settings.channels.gateway_auth_token = None;
+                }
                 settings.merge_from(&toml_settings);
                 tracing::debug!("Loaded TOML config from {}", path.display());
             }
@@ -328,7 +348,21 @@ impl Config {
             // TOML as base, then DB on top (DB wins).
             let mut s = Settings::default();
             Self::apply_toml_overlay(&mut s, toml_path)?;
-            if let Ok(map) = store.get_all_settings(user_id).await {
+            if let Ok(mut map) = store.get_all_settings(user_id).await {
+                if map.remove("channels.gateway_auth_token").is_some() {
+                    tracing::warn!(
+                        "Ignoring deprecated DB setting channels.gateway_auth_token; use GATEWAY_AUTH_TOKEN env var instead"
+                    );
+                    if let Err(e) = store
+                        .delete_setting(user_id, "channels.gateway_auth_token")
+                        .await
+                    {
+                        tracing::debug!(
+                            "Failed to remove deprecated DB setting channels.gateway_auth_token: {}",
+                            e
+                        );
+                    }
+                }
                 let db_settings = Settings::from_db_map(&map);
                 s.merge_from(&db_settings);
             }

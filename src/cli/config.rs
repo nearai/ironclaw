@@ -160,6 +160,12 @@ async fn set_setting(
     path: &str,
     value: &str,
 ) -> anyhow::Result<()> {
+    if path == "channels.gateway_auth_token" {
+        anyhow::bail!(
+            "'channels.gateway_auth_token' is env-only. Set GATEWAY_AUTH_TOKEN in your environment or ~/.ironclaw/.env instead."
+        );
+    }
+
     let mut settings = load_settings(store).await;
 
     settings

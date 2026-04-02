@@ -108,6 +108,13 @@ pub async fn settings_set_handler(
     Path(key): Path<String>,
     Json(body): Json<SettingWriteRequest>,
 ) -> Result<StatusCode, StatusCode> {
+    if key == "channels.gateway_auth_token" {
+        tracing::warn!(
+            "Rejected write to deprecated env-only setting channels.gateway_auth_token"
+        );
+        return Err(StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
     let store = state
         .store
         .as_ref()
@@ -297,6 +304,15 @@ pub async fn settings_import_handler(
     // Vault any API keys present in the imported settings, same as the
     // individual SET handler does, so plaintext keys never reach the DB.
     let mut sanitized = body.settings.clone();
+    if sanitized.remove("channels.gateway_auth_token").is_some() {
+        tracing::warn!(
+            "Dropped deprecated env-only setting channels.gateway_auth_token during settings import"
+        );
+        let _ = store
+            .delete_setting(&user.user_id, "channels.gateway_auth_token")
+            .await;
+    }
+
     if let Some(v) = sanitized.get("llm_builtin_overrides").cloned() {
         let clean = extract_builtin_override_keys(&state, &user.user_id, &v).await?;
         sanitized.insert("llm_builtin_overrides".to_string(), clean);
