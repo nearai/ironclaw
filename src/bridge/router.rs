@@ -234,15 +234,12 @@ async fn execute_pending_gate_action(
             resume_kind,
             resume_output,
         }) => {
-            let display_parameters =
-                if let Some(tool) = state.effect_adapter.tools().get(&action_name).await {
-                    Some(crate::tools::redact_params(
-                        &parameters,
-                        tool.sensitive_params(),
-                    ))
-                } else {
-                    None
-                };
+            let display_parameters = state
+                .effect_adapter
+                .tools()
+                .get(&action_name)
+                .await
+                .map(|tool| crate::tools::redact_params(&parameters, tool.sensitive_params()));
             let pending_gate = PendingGate {
                 request_id: uuid::Uuid::new_v4(),
                 gate_name,
@@ -334,7 +331,7 @@ static ENGINE_STATE: OnceLock<RwLock<Option<EngineState>>> = OnceLock::new();
 
 enum PendingGateResolution {
     None,
-    Resolved(PendingGate),
+    Resolved(Box<PendingGate>),
     Ambiguous,
 }
 
@@ -838,13 +835,15 @@ async fn resolve_pending_gate_for_user(
 
     match candidates.len() {
         0 => PendingGateResolution::None,
-        1 => PendingGateResolution::Resolved(candidates.into_iter().next().unwrap()),
-        _ if hinted_uuid.is_some() => PendingGateResolution::Resolved(
+        1 => PendingGateResolution::Resolved(Box::new(
+            candidates.into_iter().next().unwrap(), // safety: len==1 guarantees Some
+        )),
+        _ if hinted_uuid.is_some() => PendingGateResolution::Resolved(Box::new(
             candidates
                 .into_iter()
                 .max_by_key(|gate| gate.created_at)
-                .unwrap(),
-        ),
+                .unwrap(), // safety: len>=2 guarantees Some
+        )),
         _ => PendingGateResolution::Ambiguous,
     }
 }
@@ -862,9 +861,9 @@ pub async fn get_engine_pending_gate(
     };
 
     match resolve_pending_gate_for_user(&state.pending_gates, user_id, thread_id).await {
-        PendingGateResolution::Resolved(gate) => {
-            Ok(Some(crate::gate::pending::PendingGateView::from(&gate)))
-        }
+        PendingGateResolution::Resolved(gate) => Ok(Some(
+            crate::gate::pending::PendingGateView::from(gate.as_ref()),
+        )),
         PendingGateResolution::None | PendingGateResolution::Ambiguous => Ok(None),
     }
 }
@@ -902,7 +901,7 @@ pub async fn resolve_engine_auth_callback(
     }
 
     matching.sort_by_key(|gate| gate.created_at);
-    let pending = matching.pop().unwrap();
+    let pending = matching.pop().unwrap(); // safety: is_empty() checked above
     if pending.resume_output.is_none() {
         tracing::warn!(
             user_id = %user_id,

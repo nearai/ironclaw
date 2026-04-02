@@ -600,6 +600,7 @@ Test skill
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // env guard must span the entire test
     async fn check_http_missing_credential_starts_skill_oauth_flow() {
         let _env_guard = crate::config::helpers::lock_env();
         let _callback_guard = set_test_env_var(
@@ -659,6 +660,7 @@ Test skill
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // env guard must span the entire test
     async fn check_wasm_channel_readiness_uses_secret_oauth_metadata() {
         let _env_guard = crate::config::helpers::lock_env();
         let _callback_guard = set_test_env_var(
