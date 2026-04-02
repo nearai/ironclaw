@@ -1,7 +1,7 @@
 # IronClaw Engine v2: Unified Thread-Capability-CodeAct Architecture
 
 **Date:** 2026-03-20
-**Updated:** 2026-03-23
+**Updated:** 2026-04-01
 **Status:** In Progress (Phases 1-6 complete, engine running end-to-end)
 **Goal:** Replace IronClaw's ~10 fragmented abstractions with a unified execution model built on 5 primitives: Thread, Step, Capability, MemoryDoc, Project. Developed as a standalone crate (`ironclaw_engine`) that can be swapped in when it passes all acceptance tests.
 
@@ -105,10 +105,7 @@ crates/ironclaw_engine/
     memory/                   # Memory document system
       mod.rs
       store.rs                # MemoryStore (project-scoped doc CRUD)
-      retrieval.rs            # RetrievalEngine (stub, Phase 4)
-
-    reflection/               # Post-thread reflection (stub, Phase 4)
-      mod.rs
+      retrieval.rs            # RetrievalEngine
 ```
 
 Dependencies:
@@ -144,7 +141,7 @@ Working execution loop equivalent to `run_agentic_loop()`. 74 tests.
 - **ExecutionLoop** — signals → context → LLM call → handle Text/ActionCalls → record step + events → repeat (6 tests)
 - **execute_action_calls()** — lease lookup → policy → consume → EffectExecutor
 - **signals_tool_intent()** — nudge detection (6 tests)
-- **MemoryStore** + **RetrievalEngine** — stubs for Phase 4
+- **MemoryStore** — basic CRUD, expanded in Phase 4
 
 ---
 
@@ -185,14 +182,14 @@ LLMs write Python code that composes tools, queries thread context as data, and 
 
 | Gap | Where it fits | Source |
 |---|---|---|
-| `rlm_query()` (child gets own REPL + full RLM loop) | Phase 4 — needs ThreadManager in CodeAct runtime | Official RLM |
-| Dual model routing (cheaper model for sub-calls) | Phase 4 — LlmBackend needs `complete_with_model(model, ...)` | fast-rlm, Official RLM |
-| Compaction at 85% context limit | Phase 4 — summarize history, reset messages | Official RLM |
+| `rlm_query()` (child gets own REPL + full RLM loop) | Implemented in Phase 4 | Official RLM |
+| Dual model routing (cheaper model for sub-calls) | Implemented in bridge via `cheap_llm`; future work is richer per-call model selection | fast-rlm, Official RLM |
+| Compaction at 85% context limit | Phase 4 follow-up — move trigger/policy fully into Python orchestrator loop | Official RLM |
 | Persistent REPL state across code steps | Monty limitation (fresh MontyRun per step) — monitor Monty roadmap | Official RLM LocalREPL |
 | Scaffold restoration (prevent code overwriting context/llm_query) | Not needed — Monty creates fresh execution per step | Official RLM |
 | `SHOW_VARS()` listing | Monty limitation — no namespace access from host | Official RLM |
-| Consecutive error counting + threshold | Phase 4 — add `max_consecutive_errors` to ThreadConfig | Official RLM |
-| USD budget tracking | Phase 4 — needs cost data from LlmBackend | Official RLM, fast-rlm |
+| Consecutive error counting + threshold | Implemented in Phase 4 | Official RLM |
+| USD budget tracking | Partial — engine tracks fields, bridge still needs provider cost data | Official RLM, fast-rlm |
 | answer dictionary pattern (`{"content":"","ready":True}`) | Alternative to FINAL() — lower priority, FINAL() works | Prime Intellect |
 | Tools restricted to sub-LLMs only | Design decision for Phase 4 — evaluate tradeoffs | Prime Intellect |
 | Lazy Path objects (data on disk until accessed) | Phase 4 retrieval — avoid loading full context upfront | Google ADK |
@@ -206,27 +203,30 @@ LLMs write Python code that composes tools, queries thread context as data, and 
 **Goal:** The agent learns from its work. Completed threads produce structured knowledge. Context building uses project-scoped retrieval, not raw history replay.
 
 ### 4.1 Project-scoped retrieval
-- `RetrievalEngine::retrieve_context(project_id, query, max_docs)` — keyword + semantic search over project's memory docs
-- Context builder: thread state + project docs (summaries, lessons, playbooks) + capability descriptions
-- **Lazy loading** (Google ADK pattern): data stays in storage until code explicitly accesses it via variables
-- **Pass-by-reference** (rlm-rs pattern): sub-agents receive chunk IDs, fetch content on demand
+- `RetrievalEngine::retrieve_context(project_id, query, max_docs)` — project-scoped retrieval over workspace-backed memory docs
+- Context builder: thread state + project docs (summaries, lessons, skills, issues, specs) + capability descriptions
+- Current implementation is keyword + doc-type weighting; future improvements are semantic ranking, code-aware chunking, and lighter-weight pass-by-reference retrieval
+- Workspace is the durable store for engine knowledge and runtime artifacts; future work here is indexing and startup/read-path optimization, not new SQL tables
 
 ### 4.2 Reflection pipeline
-After thread completes (state → Completed), optionally spawns a Reflection-type thread:
+After thread completes, the engine records traces, analyzes issues, and emits learning-oriented artifacts and missions:
 1. **Summarize** → `DocType::Summary`
 2. **Extract lessons** → `DocType::Lesson` (from failures, workarounds, discoveries)
 3. **Detect issues** → `DocType::Issue` (unresolved problems)
 4. **Detect missing capabilities** → `DocType::Spec` ("no tool available" patterns)
-5. **Promote playbooks** → `DocType::Playbook` (successful multi-step procedures)
+5. **Extract reusable skills / playbooks** → `DocType::Skill` and related knowledge artifacts
 
-Reflection is itself a thread running CodeAct — it's recursive.
+Learning is driven by trace analysis plus learning missions (`self-improvement`, `skill-extraction`, `conversation-insights`) rather than a separate `reflection/` module.
 
 ### 4.3 Compaction (from RLM)
-When message history tokens reach **85% of model context limit** (per official RLM):
-1. Ask LLM to "summarize progress so far" with instructions to preserve intermediate results
-2. Replace message history with `[system, summary, "continue..."]`
-3. Append full trajectory to a `history` variable accessible from code
-- Requires token counting — add `count_tokens(messages, model)` utility (tiktoken or char-estimate fallback, per official RLM `token_utils.py`)
+Compaction should be orchestrator-owned, not Rust-loop-owned.
+When context pressure reaches the configured threshold, the Python orchestrator loop should:
+1. Call its own LLM primitive to summarize progress so far
+2. Replace active chat history with a compact continuation scaffold
+3. Preserve full prior trajectory in searchable/project-scoped history accessible to code
+4. Continue to rely on retrieval/search over workspace-backed artifacts rather than replaying raw history into the attention window
+
+Rust should provide token estimates, retrieval helpers, and message mutation hooks. The compaction policy, timing, and prompt should live in the Python RLM loop.
 
 ### 4.4 `rlm_query()` — full recursive sub-agent
 Unlike `llm_query()` (single-shot text completion), `rlm_query(prompt)` spawns a **child thread with its own CodeAct executor**:
@@ -236,14 +236,14 @@ Unlike `llm_query()` (single-shot text completion), `rlm_query(prompt)` spawns a
 - Returns child's `FINAL()` answer as a string variable
 
 ### 4.5 Dual model routing
-`LlmBackend` gains optional depth-based model selection:
+Depth-based model selection is part of the bridge layer:
 - depth=0 (root): use primary model (e.g., GPT-5, Claude Opus)
 - depth=1+ (sub-calls): use cheaper model (e.g., GPT-5-mini, Claude Haiku)
-- Configurable via `ThreadConfig` or `LlmCallConfig`
+- Current implementation uses `cheap_llm` for depth > 0; future work is richer per-call/per-depth routing if needed
 
 ### 4.6 Budget controls (from RLM cross-reference)
 Add to `ThreadConfig`:
-- `max_budget_usd: Option<f64>` — cumulative USD cost limit (needs cost data from LlmBackend)
+- `max_budget_usd: Option<f64>` — cumulative USD cost limit (remaining gap: bridge must populate provider cost data)
 - `max_timeout: Option<Duration>` — wall-clock timeout for entire thread
 - `max_tokens_total: Option<u64>` — cumulative input+output token limit
 - `max_consecutive_errors: Option<u32>` — consecutive steps with errors before termination
@@ -269,15 +269,15 @@ pub struct Mission {
 ```
 
 ### 4.9 Tool reliability learning
-Track per-action EMA metrics (success rate, latency, failure patterns). Feed into context builder.
+Track per-action EMA metrics (success rate, latency, failure patterns). Current remaining question: whether to inject them into context by default or only surface them through targeted retrieval/debugging.
 
 ### 4.10 Tests
-- Reflection produces correct doc types from a completed thread with failures
+- Learning missions produce the correct knowledge artifacts from completed threads
 - Retrieval returns project-scoped docs, not cross-project
-- Compaction triggers at 85% context, preserves intermediate results
+- Orchestrator-driven compaction triggers at threshold and preserves intermediate results/searchability
 - `rlm_query()` spawns child thread, returns answer, respects budget inheritance
 - Dual model routing: root uses primary, sub-calls use cheaper
-- Budget exceeded → `BudgetExceededError` with partial answer
+- Budget enforcement works for tokens/time; USD budget requires bridge cost data
 - Consecutive errors threshold → termination
 - Provenance taint blocks financial effects from LLM-generated data
 - Mission spawns thread on cadence, tracks history
@@ -333,7 +333,7 @@ The existing `Channel` trait stays. A bridge adapter translates:
 ### 6.1 Bridge adapters — DONE (`src/bridge/`)
 - `LlmBridgeAdapter` — wraps `Arc<dyn LlmProvider>`, converts `ThreadMessage` ↔ `ChatMessage`, `ActionDef` ↔ `ToolDefinition`. Depth-based routing (depth=0 → primary, depth>0 → `cheap_llm`). Code block detection for CodeAct (`extract_code_block` handles ```repl, ```python, ```py, bare ```). Defaults: max_tokens=4096, temperature=0.7, tool_choice="auto". No-tools path uses plain `complete()`.
 - `EffectBridgeAdapter` — wraps `ToolRegistry` + `SafetyLayer`. Underscore↔hyphen name conversion (Python `web_search` ↔ registry `web-search`). JSON output parsing to prevent double-serialization. Routes through `execute_tool_with_safety`.
-- `InMemoryStore` — HashMap-backed Store impl. No DB tables yet. State persists within agent process lifetime.
+- `HybridStore` — workspace-backed engine store. Runtime state is cached in memory and persisted under `engine/.runtime/`; durable knowledge is persisted under `engine/knowledge/`.
 - `EngineRouter` — `is_engine_v2_enabled()` checks `ENGINE_V2` env var. `handle_with_engine()` builds engine from Agent deps, manages persistent `EngineState` (OnceLock), routes through ConversationManager.
 
 ### 6.2 Integration touchpoint — DONE
@@ -372,21 +372,26 @@ Engine v2 now uses a single pause model:
 
 Approval, authentication, and post-action auth chaining all use the same pause/resume path. Legacy `/api/chat/approval`, `/api/chat/auth-token`, and `/api/chat/auth-cancel` endpoints remain as shims over the unified gate resolver.
 
-#### Database persistence (PARTIAL)
-- `HybridStore`: ephemeral data (threads, steps, events) in-memory; MemoryDocs (reflection output) persisted to workspace at `engine/docs/{type}/{id}.json`
-- Loaded on startup via `load_docs_from_workspace()`
-- Full DB persistence (engine_* tables) deferred — workspace persistence is sufficient for learning across sessions
+#### Workspace persistence — INTENTIONAL
+- `HybridStore` persists engine state to the workspace under `engine/knowledge/`, `engine/projects/`, `engine/missions/`, and `engine/.runtime/`
+- Loaded on startup via `load_state_from_workspace()`
+- We are explicitly not planning `engine_*` SQL tables. The workspace is the durable store for engine v2
+- Future persistence work is performance-oriented:
+  - per-project and per-type indexes/manifests
+  - faster retrieval/read-paths over `engine/knowledge/`
+  - lazy startup hydration for large projects
+  - archival/summary indexes for historical threads and events
 
 #### Web gateway integration — DONE
 - SSE streaming via AppEvent: `ThreadEvent` → `AppEvent` conversion + `SseManager.broadcast()`
 - V1 conversation DB persistence: user messages + agent responses written via `add_conversation_message()`
 - Depends on `ironclaw_common` crate with `AppEvent` type (PR #1615, merged into branch)
 
-#### Routines / Jobs — BLOCKED (gracefully)
+#### Routines / Jobs — PARTIAL
 - V1-only tools (`routine_create`, `create_job`, `build_software`, etc.) are blocked in engine v2 with a helpful error: "use the slash command instead"
 - Filtered out of `available_actions()` so the system prompt doesn't list them
 - Routines still work via `/routine` slash commands (fall through to v1)
-- Long term: replace with engine v2 Mission system
+- Engine v2 Mission APIs exist and are wired through the bridge; remaining work is migration/UX convergence rather than greenfield implementation
 
 #### Rate limiting — DONE
 - Per-user per-tool sliding window via `RateLimiter` in `EffectBridgeAdapter`
@@ -397,16 +402,24 @@ Approval, authentication, and post-action auth chaining all use the same pause/r
 - Max 50 tool calls per code step (prevents amplification loops in CodeAct)
 - Atomic counter in `EffectBridgeAdapter`, error on exceed
 
-#### Acceptance testing (NOT YET IMPLEMENTED)
-- Drive engine via TestRig + TraceLlm fixtures
-- Compare output with `verify_trace_expects()`
-- All existing fixture tests must pass through engine path
+#### Acceptance testing — IN PROGRESS
+- Engine v2 already has dedicated TestRig + TraceLlm replay coverage
+- Continue expanding fixture parity through `with_engine_v2()` rather than introducing a separate harness
+- Remaining work is coverage expansion:
+  - gate pause/resume
+  - auth flows
+  - mission execution
+  - retrieval/learning flows
+  - orchestrator-driven compaction
+  - broader replay parity with existing recorded traces
 
 #### Two-phase commit (NOT YET IMPLEMENTED)
 For `WriteExternal` + `Financial` effects:
 1. Simulate → preview
 2. Approve → user/policy
 3. Execute → actual effect
+
+This should remain an adapter-boundary feature in `EffectBridgeAdapter`, reusing the unified gate flow rather than introducing a separate approval pipeline.
 
 ---
 
@@ -504,14 +517,15 @@ Once boundaries stabilize, split if beneficial:
 | **1** | Types + traits + state machine | **DONE** | 32 | `8be19a4` |
 | **2** | Tier 0 executor + capability + runtime | **DONE** | 74 | `bf7dfb8` |
 | **3** | CodeAct (Monty + RLM pattern) | **DONE** | 74 | `b59a0b9`, `9538332` |
-| **4** | Budget controls + compaction + reflection | **DONE** | 78 | `4bc7ffd` |
+| **4** | Retrieval, learning missions, budget controls, compaction hooks | **PARTIAL** | 78 | `4bc7ffd` |
 | **5** | Conversation surface | **DONE** | 85 | `0827235` |
-| **6** | Main crate bridge (Strategy C) | **DONE** | 151 | `ac4ced0`→`ccec1917` |
+| **6** | Main crate bridge (Strategy C) | **PARTIAL** | 151 | `ac4ced0`→`ccec1917` |
 | **7** | Cleanup + migration | Planned | — | — |
 | **8** | WASM tools + Docker isolation | Planned | — | — |
 
-**Phase 6 remaining:** acceptance tests (TestRig fixtures), two-phase commit.
-Phase 7 depends on Phase 6 approval + DB being complete. Phase 8 is infrastructure integration.
+**Phase 4 remaining:** orchestrator-owned compaction policy, real USD cost tracking, and any decision to surface reliability metrics in context.
+**Phase 6 remaining:** broader acceptance coverage and two-phase commit at the adapter boundary.
+Phase 7 no longer depends on adding SQL persistence; it depends on engine stabilization and migration confidence. Phase 8 remains infrastructure integration.
 
 ---
 
