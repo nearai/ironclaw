@@ -2778,12 +2778,16 @@ impl SetupWizard {
                         owner_id: self.settings.channels.matrix_owner_id.as_deref(),
                         display_name: self.settings.channels.matrix_display_name.as_deref(),
                     },
-                ).await?;
+                )
+                .await?;
                 if result.enabled {
                     self.settings.channels.matrix_homeserver = Some(result.homeserver);
                     self.settings.channels.matrix_username = Some(result.username);
-                    self.settings.channels.matrix_allow_from =
-                        if result.allow_from.is_empty() { None } else { Some(result.allow_from) };
+                    self.settings.channels.matrix_allow_from = if result.allow_from.is_empty() {
+                        None
+                    } else {
+                        Some(result.allow_from)
+                    };
                     self.settings.channels.matrix_dm_policy = Some(result.dm_policy);
                     self.settings.channels.matrix_owner_id = result.owner_id;
                     self.settings.channels.matrix_poll_interval_secs = result.poll_interval_secs;
@@ -3871,9 +3875,7 @@ fn build_channel_options(discovered: &[(String, ChannelCapabilitiesFile)]) -> Ve
 
     // Add bundled channels
     for bundled in available_channel_names().iter().copied() {
-        if !names.iter().any(|name| name == bundled)
-            && !NATIVE_CHANNEL_NAMES.contains(&bundled)
-        {
+        if !names.iter().any(|name| name == bundled) && !NATIVE_CHANNEL_NAMES.contains(&bundled) {
             names.push(bundled.to_string());
         }
     }

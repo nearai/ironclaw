@@ -371,6 +371,12 @@ mod tests {
         ) -> Result<Option<String>, crate::error::DatabaseError> {
             unimplemented!()
         }
+
+        async fn list_external_thread_mappings(
+            &self,
+        ) -> Result<Vec<(Uuid, String, String, String)>, crate::error::DatabaseError> {
+            Ok(Vec::new())
+        }
     }
 
     // ── Mock LlmProvider ────────────────────────────────────────────

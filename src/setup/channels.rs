@@ -585,7 +585,11 @@ pub async fn setup_matrix(
 
     let password = if existing.homeserver.is_some() {
         let raw = secret_input("Matrix password (Enter to keep existing session)")?;
-        if raw.expose_secret().trim().is_empty() { None } else { Some(raw) }
+        if raw.expose_secret().trim().is_empty() {
+            None
+        } else {
+            Some(raw)
+        }
     } else {
         Some(secret_input("Matrix password")?)
     };
@@ -616,22 +620,33 @@ pub async fn setup_matrix(
 
         let login_url = format!("{}/_matrix/client/v3/login", homeserver);
 
-        let resp = http.post(&login_url).json(&login_body).send().await
+        let resp = http
+            .post(&login_url)
+            .json(&login_body)
+            .send()
+            .await
             .map_err(|e| ChannelSetupError::Network(format!("Login request failed: {}", e)))?;
 
         let status = resp.status();
         if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
             let body = resp.text().await.unwrap_or_default();
             print_error(&format!("Login failed: {}", body));
-            return Err(ChannelSetupError::Validation(format!("Login failed: {}", body)));
+            return Err(ChannelSetupError::Validation(format!(
+                "Login failed: {}",
+                body
+            )));
         }
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
-            return Err(ChannelSetupError::Network(format!("Login returned {}: {}", status, body)));
+            return Err(ChannelSetupError::Network(format!(
+                "Login returned {}: {}",
+                status, body
+            )));
         }
 
-        let login_resp: serde_json::Value = resp.json().await
-            .map_err(|e| ChannelSetupError::Network(format!("Failed to parse login response: {}", e)))?;
+        let login_resp: serde_json::Value = resp.json().await.map_err(|e| {
+            ChannelSetupError::Network(format!("Failed to parse login response: {}", e))
+        })?;
 
         // Login succeeded — now wipe the SDK store so the new device starts
         // with clean crypto state. Deferred to after login so that a failed
@@ -675,11 +690,15 @@ pub async fn setup_matrix(
         print_success(&format!("Logged in as {} (device: {})", uid, device_id));
 
         let token_secret = SecretString::from(token.to_string());
-        secrets.save_secret("matrix_access_token", &token_secret).await?;
+        secrets
+            .save_secret("matrix_access_token", &token_secret)
+            .await?;
 
         // Persist device_id so start() reuses this session on restart.
         let device_secret = SecretString::from(device_id.to_string());
-        secrets.save_secret("matrix_device_id", &device_secret).await?;
+        secrets
+            .save_secret("matrix_device_id", &device_secret)
+            .await?;
 
         print_success("Credentials saved to encrypted secrets database.");
         uid.to_string()
@@ -693,11 +712,10 @@ pub async fn setup_matrix(
     println!();
 
     let allow_from = match existing.allow_from {
-        Some(current) if !current.is_empty() =>
-            prompt_with_default(
-                "Allow from (comma-separated Matrix user IDs, '*' for anyone, empty for pairing)",
-                current,
-            )?,
+        Some(current) if !current.is_empty() => prompt_with_default(
+            "Allow from (comma-separated Matrix user IDs, '*' for anyone, empty for pairing)",
+            current,
+        )?,
         _ => optional_input(
             "Allow from (comma-separated Matrix user IDs, '*' for anyone, empty for pairing mode)",
             Some("default: (pairing mode — unknown users get a pairing code)"),
@@ -720,11 +738,9 @@ pub async fn setup_matrix(
     )?
     .filter(|s| !s.is_empty());
 
-    let display_name = prompt_optional_with_default(
-        "Bot display name in Matrix",
-        existing.display_name,
-    )?
-    .filter(|s| !s.is_empty());
+    let display_name =
+        prompt_optional_with_default("Bot display name in Matrix", existing.display_name)?
+            .filter(|s| !s.is_empty());
 
     // ── Summary ───────────────────────────────────────────────────────────────
 

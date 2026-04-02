@@ -686,6 +686,38 @@ impl ConversationStore for LibSqlBackend {
             None => Ok(None),
         }
     }
+
+    async fn list_external_thread_mappings(
+        &self,
+    ) -> Result<Vec<(Uuid, String, String, String)>, DatabaseError> {
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                "SELECT id, channel, user_id, thread_id FROM conversations WHERE thread_id IS NOT NULL",
+                libsql::params![],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        let mut results = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        {
+            let id_str: String = row
+                .get(0)
+                .map_err(|e| DatabaseError::Query(format!("id: {e}")))?;
+            let id = id_str
+                .parse()
+                .map_err(|_| DatabaseError::Serialization("Invalid UUID".to_string()))?;
+            let channel = get_text(&row, 1);
+            let user_id = get_text(&row, 2);
+            let thread_id = get_text(&row, 3);
+            results.push((id, channel, user_id, thread_id));
+        }
+        Ok(results)
+    }
 }
 
 #[cfg(test)]
