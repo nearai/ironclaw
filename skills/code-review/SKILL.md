@@ -1,5 +1,5 @@
 ---
-name: review
+name: code-review
 version: "1.0.0"
 description: Review code changes for bugs, style, and security issues
 activation:
