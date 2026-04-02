@@ -13,6 +13,7 @@ I18n.register('en', {
   'auth.social.near': 'Sign in with NEAR',
   'auth.social.tokenDivider': 'or use a token',
   'auth.signOut': 'Sign out',
+  'auth.accountMenu': 'Account menu',
   'auth.errorRequired': 'Token required',
   'auth.errorInvalid': 'Invalid token',
   // Chat

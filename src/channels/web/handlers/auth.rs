@@ -743,7 +743,7 @@ async fn resolve_user(
 
     let user = UserRecord {
         id: user_id.clone(),
-        email: profile.email.clone(),
+        email: profile.email.as_ref().map(|e| e.to_ascii_lowercase()),
         display_name,
         status: "active".to_string(),
         role: role.to_string(),
