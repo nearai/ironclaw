@@ -90,61 +90,27 @@ One tool per collection with an `operation` parameter is the best design. Fewer 
 
 ## How it works
 
-```
-POST /api/collections (schema JSON)
-  → db.register_collection() persists schema
-  → generate tool with typed parameter schema
-  → register in tool registry (scoped to owner)
-  → generate SKILL.md with activation keywords
-  → write discovery doc to workspace memory
-  → model calls grocery_items(operation: "add", data: {...})
-  → validates against schema, inserts record
-```
+### Storage
 
-### Schema and validation
+`StructuredStore` trait (10 async methods), fully implemented for both PostgreSQL (JSONB operators) and libSQL (`json_extract`). Records stored as JSONB in a shared `structured_records` table, discriminated by `(user_id, collection)`. 7 field types: `Text`, `Number`, `Date`, `Time`, `DateTime`, `Bool`, `Enum{values}`.
 
-`StructuredStore` trait (10 async methods) with full implementations for both PostgreSQL (JSONB operators) and libSQL (`json_extract`). 7 field types: `Text`, `Number`, `Date`, `Time`, `DateTime`, `Bool`, `Enum{values}`.
+Validation coerces LLM quirks: "12" → 12, "true" → true, "tomorrow" → 2026-04-03. Schema alteration supports adding/removing fields and enum values without migrating existing records.
 
-Validation includes LLM-friendly coercion: "12" becomes 12 (number), "true" becomes true (bool), "tomorrow" becomes 2026-04-03 (date). Schema alteration supports adding/removing fields and enum values. Existing records are preserved (not migrated, not deleted).
+### Tools
 
-Records are stored as JSONB in a shared `structured_records` table, discriminated by `(user_id, collection)`. One table, one index strategy, standard vacuum behavior.
+Each collection gets one tool named `{user}_{collection}` with an `operation` enum (query, add, update, delete, summary) plus typed parameters for data, filters, and aggregations. Tool names include the owner prefix; the dispatcher filters per-user via `tool_definitions_for_user()`.
 
-### Per-collection tools
+When a collection is registered, a SKILL.md is auto-generated with activation keywords from the schema (name, description, field names, enum values). Keyword/regex matching injects the skill into the system prompt when relevant — no LLM call. Skills teach the model which operation to use: "mark done" → `operation: "update"`.
 
-Each collection gets one tool named `{user}_{collection}` (e.g., `default_grocery_items`) with parameters:
-
-- `operation` (required enum: "query", "add", "update", "delete", "summary")
-- `data` (object — for add/update, validated against the collection's field schema)
-- `record_id` (string — for update/delete)
-- `filters` (object — for query/summary, supports eq/neq/gt/gte/lt/lte/is_null/is_not_null)
-- `field`, `agg_operation`, `group_by` (for summary aggregations)
-
-Tool names include the owner user_id prefix to prevent collisions in multi-tenant deployments. The `Tool` trait has an `owner_user_id()` method (default `None` for built-ins) and the dispatcher calls `tool_definitions_for_user()` to filter — each tenant only sees their own collection tools.
-
-### Auto-generated skills
-
-When a collection is registered, a SKILL.md file is generated with activation keywords extracted from the schema (collection name words, description, field names, enum values — capped at 25 keywords) and regex patterns for intent detection. When a user message matches, the skill content is injected into the system prompt for that turn.
-
-This is deterministic keyword/regex scoring (`prefilter_skills()`) — no LLM call. Skills help the model understand which operation to use: "mark the plumber task as done" activates the `todo_list` skill, which tells the model to call `todo_list(operation: "update", data: {status: "done"})`.
-
-Skills improve accuracy by +8% on unified tools. On per-operation tools (where `_update` is self-explanatory), skills have no effect.
-
-A router skill is also generated listing all collections, catching broad queries like "what data do I have?"
-
-### Startup initialization
-
-On restart, existing schemas are loaded from the database and tools are registered before the first conversation. Without this, collections from prior sessions would have no tools.
+On restart, existing schemas are loaded and tools registered before the first conversation.
 
 ### REST API
 
-6 endpoints for external integration (webhooks, cron jobs, scripts). Inherits existing gateway auth (`Authorization: Bearer` token).
+6 endpoints for external integration (webhooks, cron, scripts). Inherits gateway auth.
 
-- `GET /api/collections` — List schemas
-- `POST /api/collections` — Register schema
-- `GET /api/collections/{name}/records` — Query with filters
-- `POST /api/collections/{name}/records` — Insert record
-- `PUT /api/collections/{name}/records/{id}` — Update record
-- `DELETE /api/collections/{name}/records/{id}` — Delete record
+- `GET/POST /api/collections` — List / register schemas
+- `GET/POST /api/collections/{name}/records` — Query / insert records
+- `PUT/DELETE /api/collections/{name}/records/{id}` — Update / delete records
 
 ## Multi-tenant scoping
 
