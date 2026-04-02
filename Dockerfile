@@ -17,7 +17,7 @@ FROM rust:1.92-alpine AS chef
 
 RUN apk add --no-cache musl-dev pkgconfig cmake gcc g++ make perl \
     && rustup target add wasm32-wasip2 \
-    && cargo install cargo-chef wasm-tools
+    && cargo install cargo-chef@0.1.77 wasm-tools@1.246.1
 
 WORKDIR /app
 
