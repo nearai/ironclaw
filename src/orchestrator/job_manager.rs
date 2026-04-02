@@ -646,19 +646,19 @@ impl ContainerJobManager {
 
     /// Remove a completed job handle from memory (called after result is read).
     pub async fn cleanup_job(&self, job_id: Uuid) {
-        // Clean up per-job MCP config temp file if one was written.
-        // Use remove_file directly — avoids TOCTOU race with exists() check.
-        let tmp_path = std::env::temp_dir()
+        // Clean up per-job MCP config directory if one was written.
+        // Use remove_dir_all directly — avoids TOCTOU race with exists() check.
+        let tmp_dir = std::env::temp_dir()
             .join("ironclaw-mcp-configs")
-            .join(format!("{}.json", job_id));
-        match std::fs::remove_file(&tmp_path) {
+            .join(job_id.to_string());
+        match std::fs::remove_dir_all(&tmp_dir) {
             Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {} // No temp file — normal
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {} // No temp dir — normal
             Err(e) => {
                 tracing::warn!(
                     job_id = %job_id,
                     error = %e,
-                    "Failed to remove per-job MCP config temp file"
+                    "Failed to remove per-job MCP config temp directory"
                 );
             }
         }
@@ -701,8 +701,8 @@ impl ContainerJobManager {
 /// - `Some([])` → no MCP config (no mount)
 /// - `Some(["serpstat"])` → filtered config with only matching servers
 ///
-/// Temp files are written to `<temp_dir>/ironclaw-mcp-configs/` and cleaned up
-/// in `cleanup_job`.
+/// Temp files are written to `<temp_dir>/ironclaw-mcp-configs/<job_id>/` and
+/// cleaned up in `cleanup_job`.
 async fn generate_worker_mcp_config(
     master_path: &std::path::Path,
     server_names: Option<&[String]>,
@@ -784,7 +784,11 @@ async fn generate_worker_mcp_config(
                 "schema_version": schema_version
             });
 
-            let tmp_dir = std::env::temp_dir().join("ironclaw-mcp-configs");
+            // Use a per-job subdirectory to avoid collisions in multi-user
+            // environments and simplify cleanup.
+            let tmp_dir = std::env::temp_dir()
+                .join("ironclaw-mcp-configs")
+                .join(job_id.to_string());
             tokio::fs::create_dir_all(&tmp_dir).await.map_err(|e| {
                 OrchestratorError::ContainerCreationFailed {
                     job_id,
@@ -802,19 +806,29 @@ async fn generate_worker_mcp_config(
                         .await;
             }
 
-            let tmp_path = tmp_dir.join(format!("{}.json", job_id));
+            let tmp_path = tmp_dir.join("mcp-config.json");
             let config_json = serde_json::to_string_pretty(&filtered).map_err(|e| {
                 OrchestratorError::ContainerCreationFailed {
                     job_id,
                     reason: format!("failed to serialize filtered MCP config: {e}"),
                 }
             })?;
-            tokio::fs::write(&tmp_path, config_json)
+            tokio::fs::write(&tmp_path, &config_json)
                 .await
                 .map_err(|e| OrchestratorError::ContainerCreationFailed {
                     job_id,
                     reason: format!("failed to write per-job MCP config: {e}"),
                 })?;
+
+            // Restrict file permissions to owner-only (0o600) since MCP
+            // configs can contain sensitive server credentials.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ =
+                    tokio::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o600))
+                        .await;
+            }
 
             Ok(Some(tmp_path))
         }
@@ -1167,15 +1181,17 @@ mod tests {
             "temp config file should exist after creation"
         );
 
-        // Simulate what cleanup_job does
+        // Simulate what cleanup_job does — it removes the per-job directory
         let expected_path = std::env::temp_dir()
             .join("ironclaw-mcp-configs")
-            .join(format!("{}.json", job_id));
+            .join(job_id.to_string())
+            .join("mcp-config.json");
         assert_eq!(
             out_path, expected_path,
             "temp path must match cleanup expectation"
         );
-        std::fs::remove_file(&out_path).unwrap();
+        let job_dir = out_path.parent().unwrap();
+        std::fs::remove_dir_all(job_dir).unwrap();
         assert!(!out_path.exists(), "temp file should be gone after cleanup");
     }
 
@@ -1210,13 +1226,20 @@ mod tests {
         let out_path = result.unwrap().expect("should produce a filtered config");
 
         let dir_path = out_path.parent().unwrap();
-        let mode = std::fs::metadata(dir_path).unwrap().permissions().mode() & 0o777;
+        let dir_mode = std::fs::metadata(dir_path).unwrap().permissions().mode() & 0o777;
         assert_eq!(
-            mode, 0o700,
+            dir_mode, 0o700,
             "ironclaw-mcp-configs dir must be 0700, got {:o}",
-            mode
+            dir_mode
         );
 
-        let _ = std::fs::remove_file(&out_path);
+        let file_mode = std::fs::metadata(&out_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            file_mode, 0o600,
+            "per-job MCP config file must be 0600, got {:o}",
+            file_mode
+        );
+
+        let _ = std::fs::remove_dir_all(out_path.parent().unwrap());
     }
 }

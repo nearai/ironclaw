@@ -1163,7 +1163,7 @@ impl Agent {
                         "Blocked approval for thread with no pending approval"
                     );
                     drop(sess);
-                    return Ok(Some("Error: no pending approval on this thread".into()));
+                    return Ok(Some("No pending approval on this thread".into()));
                 }
 
                 let authorized = crate::agent::session::is_approval_authorized(
@@ -1178,9 +1178,7 @@ impl Agent {
                         "Blocked cross-channel approval attempt"
                     );
                     drop(sess);
-                    return Ok(Some(
-                        "Error: approval not authorized for this channel".into(),
-                    ));
+                    return Ok(Some("Approval not authorized for this channel".into()));
                 }
                 sess.active_thread = Some(target_thread_id);
                 sess.last_active_at = chrono::Utc::now();
