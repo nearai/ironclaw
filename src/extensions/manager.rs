@@ -1406,7 +1406,7 @@ impl ExtensionManager {
                                     .list()
                                     .await
                                     .into_iter()
-                                    .filter(|t| t.starts_with(&format!("{}:", server.name)))
+                                    .filter(|t| t.starts_with(&format!("{}_", server.name)))
                                     .collect()
                             }
                         } else {
@@ -1672,7 +1672,7 @@ impl ExtensionManager {
                     .list()
                     .await
                     .into_iter()
-                    .filter(|t| t.starts_with(&format!("{}:", name)))
+                    .filter(|t| t.starts_with(&format!("{}_", name)))
                     .collect();
 
                 for tool_name in &tool_names {
@@ -4029,7 +4029,7 @@ impl ExtensionManager {
                     .list()
                     .await
                     .into_iter()
-                    .filter(|t| t.starts_with(&format!("{}:", name)))
+                    .filter(|t| t.starts_with(&format!("{}_", name)))
                     .collect();
 
                 return Ok(ActivateResult {
@@ -4096,7 +4096,7 @@ impl ExtensionManager {
 
         let tool_names: Vec<String> = mcp_tools
             .iter()
-            .map(|t| format!("{}:{}", name, t.name))
+            .map(|t| format!("{}_{}", name, t.name))
             .collect();
 
         for tool in tool_impls {
