@@ -1265,10 +1265,10 @@ mod tests {
         let client = Arc::new(McpClient::new("http://localhost:8080"));
         let wrapper = McpToolWrapper {
             tool: make_test_mcp_tool(false),
-            prefixed_name: "myserver_do_thing".to_string(),
+            prefixed_name: "mcp__myserver__do_thing".to_string(),
             client,
         };
-        assert_eq!(wrapper.name(), "myserver_do_thing");
+        assert_eq!(wrapper.name(), "mcp__myserver__do_thing");
     }
 
     #[test]
@@ -1276,7 +1276,7 @@ mod tests {
         let client = Arc::new(McpClient::new("http://localhost:8080"));
         let wrapper = McpToolWrapper {
             tool: make_test_mcp_tool(false),
-            prefixed_name: "s_do_thing".to_string(),
+            prefixed_name: "mcp__s__do_thing".to_string(),
             client,
         };
         assert_eq!(wrapper.description(), "Does a thing");
@@ -1287,7 +1287,7 @@ mod tests {
         let client = Arc::new(McpClient::new("http://localhost:8080"));
         let wrapper = McpToolWrapper {
             tool: make_test_mcp_tool(false),
-            prefixed_name: "s_do_thing".to_string(),
+            prefixed_name: "mcp__s__do_thing".to_string(),
             client,
         };
         let schema = wrapper.parameters_schema();
@@ -1300,7 +1300,7 @@ mod tests {
         let client = Arc::new(McpClient::new("http://localhost:8080"));
         let wrapper = McpToolWrapper {
             tool: make_test_mcp_tool(false),
-            prefixed_name: "s_do_thing".to_string(),
+            prefixed_name: "mcp__s__do_thing".to_string(),
             client,
         };
         assert!(
@@ -1314,7 +1314,7 @@ mod tests {
         let client = Arc::new(McpClient::new("http://localhost:8080"));
         let wrapper = McpToolWrapper {
             tool: make_test_mcp_tool(true),
-            prefixed_name: "s_do_thing".to_string(),
+            prefixed_name: "mcp__s__do_thing".to_string(),
             client,
         };
         let approval = wrapper.requires_approval(&serde_json::json!({}));
@@ -1326,7 +1326,7 @@ mod tests {
         let client = Arc::new(McpClient::new("http://localhost:8080"));
         let wrapper = McpToolWrapper {
             tool: make_test_mcp_tool(false),
-            prefixed_name: "s_do_thing".to_string(),
+            prefixed_name: "mcp__s__do_thing".to_string(),
             client,
         };
         let approval = wrapper.requires_approval(&serde_json::json!({}));
