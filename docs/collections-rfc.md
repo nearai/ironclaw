@@ -2,7 +2,7 @@
 
 ## Summary
 
-"Add milk to the grocery list." This is the simplest thing a user expects a personal assistant to do, and IronClaw can't do it. The agent either creates a new document every time (fragmenting the list) or tries to edit an existing markdown file and corrupts it. Across 28 test scenarios and 2 models, modifying structured data stored in memory documents fails **every time**.
+"Add milk to the grocery list." Most deployments can't do this out of the box. The agent either creates a new document every time (fragmenting the list) or tries to edit an existing markdown file and corrupts it. Across 28 test scenarios and 2 models, modifying structured data stored in memory documents fails **every time**.
 
 This PR adds schema-defined collections with auto-generated typed CRUD tools. Register a collection with a schema, get a tool that handles inserts, queries, updates, deletes, and aggregations with validation.
 
