@@ -931,11 +931,14 @@ async fn repair_misnumbered_v15(
                 recorded_name = %name,
                 "libSQL: V15 was mis-recorded; deleting stale _migrations row to reapply"
             );
-            conn.execute("DELETE FROM _migrations WHERE version = 15", libsql::params![])
-                .await
-                .map_err(|e| {
-                    DatabaseError::Migration(format!("V15 repair: failed to delete stale row: {e}"))
-                })?;
+            conn.execute(
+                "DELETE FROM _migrations WHERE version = 15",
+                libsql::params![],
+            )
+            .await
+            .map_err(|e| {
+                DatabaseError::Migration(format!("V15 repair: failed to delete stale row: {e}"))
+            })?;
         }
     }
     Ok(())
