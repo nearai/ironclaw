@@ -365,7 +365,6 @@ impl Tool for MemoryWriteTool {
         // In patch mode, use read() instead of get_or_create() so we don't
         // create a ghost empty document when the target doesn't exist.
         let metadata_param = params.get("metadata").filter(|m| m.is_object());
-        let is_patch_mode = params.get("old_string").and_then(|v| v.as_str()).is_some();
         if let Some(meta) = metadata_param
             && layer.is_none()
         {

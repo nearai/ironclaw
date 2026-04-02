@@ -182,6 +182,9 @@ pub async fn run_if_due(workspace: &Workspace, config: &HygieneConfig) -> Hygien
     }
 
     // Prune old document versions if configured.
+    // NOTE: O(n) reads — does workspace.read() per document to get doc.id for
+    // prune_versions. A bulk prune query would be more efficient but is fine
+    // for typical directory sizes.
     if config.version_keep_count > 0 {
         // Prune versions for documents in directories that were just cleaned.
         // This avoids iterating ALL documents — we only prune where hygiene ran.
@@ -279,6 +282,11 @@ async fn cleanup_directory(
     retention_days: u32,
 ) -> Result<u32, anyhow::Error> {
     let cutoff = Utc::now() - chrono::Duration::days(i64::from(retention_days));
+    // NOTE: workspace.list() merges entries from secondary read scopes in
+    // multi-scope mode, but workspace.delete() only targets the primary scope.
+    // Entries from secondary scopes will fail silently at the delete call
+    // (caught by the `if let Err` below). This is harmless but may produce
+    // unexpected log noise. A list_primary_only() variant could avoid this.
     let entries = workspace.list(directory).await?;
     let mut deleted = 0u32;
     for entry in entries {

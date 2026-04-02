@@ -283,6 +283,9 @@ pub enum WorkspaceError {
     #[error("Document not found: {doc_type} for user {user_id}")]
     DocumentNotFound { doc_type: String, user_id: String },
 
+    // TODO: SearchFailed is used as a catch-all for metadata, versioning, and
+    // connection errors across both backends. A cleanup pass should introduce
+    // more specific variants (e.g. MetadataError, VersioningError).
     #[error("Search failed: {reason}")]
     SearchFailed { reason: String },
 
