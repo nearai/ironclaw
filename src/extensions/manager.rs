@@ -4734,11 +4734,16 @@ impl ExtensionManager {
         config_updates.extend(self.load_channel_runtime_config_overrides(name).await);
         let mut should_rerun_on_start = false;
 
-        // Refresh webhook secret
-        if let Ok(secret) = self
-            .secrets
-            .get_decrypted(user_id, &webhook_secret_name)
-            .await
+        // Refresh webhook secret (only if managed by host)
+        let managed_by_host = capabilities_file
+            .as_ref()
+            .map(|f| f.webhook_secret_managed_by_host())
+            .unwrap_or(true);
+        if managed_by_host
+            && let Ok(secret) = self
+                .secrets
+                .get_decrypted(user_id, &webhook_secret_name)
+                .await
         {
             router
                 .update_secret(name, secret.expose().to_string())
