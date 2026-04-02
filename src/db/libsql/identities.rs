@@ -418,7 +418,7 @@ mod tests {
 
     /// Regression: an earlier release recorded V15 as "document_versions"
     /// due to a merge-conflict misnumbering. Verify that `run_migrations`
-    /// repairs V15 and creates the user_identities table (now V16).
+    /// repairs V15 and creates the user_identities table (now V17).
     #[tokio::test]
     async fn test_v15_misnumbered_repair() {
         let dir = tempfile::tempdir().unwrap();
@@ -426,14 +426,14 @@ mod tests {
         let backend = LibSqlBackend::new_local(&db_path).await.unwrap();
         backend.run_migrations().await.unwrap();
 
-        // Simulate the bug: drop user_identities, delete V16 record,
+        // Simulate the bug: drop user_identities, delete V17 record,
         // and re-record V15 with the wrong name ("document_versions").
         let conn = backend.connect().await.unwrap();
         conn.execute_batch("DROP TABLE IF EXISTS user_identities")
             .await
             .unwrap();
         conn.execute(
-            "DELETE FROM _migrations WHERE version = 16",
+            "DELETE FROM _migrations WHERE version = 17",
             libsql::params![],
         )
         .await
@@ -451,7 +451,7 @@ mod tests {
             .await;
         assert!(err.is_err(), "user_identities should not exist yet");
 
-        // Re-run migrations — the repair should fix V15, then V16 creates user_identities
+        // Re-run migrations — the repair should fix V15, then V17 creates user_identities
         drop(conn);
         backend.run_migrations().await.unwrap();
 
@@ -476,10 +476,10 @@ mod tests {
         let name: String = row.get(0).unwrap();
         assert_eq!(name, "conversation_source_channel");
 
-        // Verify V16 is recorded as user_identities
+        // Verify V17 is recorded as user_identities
         let mut rows = conn
             .query(
-                "SELECT name FROM _migrations WHERE version = 16",
+                "SELECT name FROM _migrations WHERE version = 17",
                 libsql::params![],
             )
             .await
