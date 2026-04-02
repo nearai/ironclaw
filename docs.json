@@ -105,7 +105,18 @@
                     "pages": [
                       "extensions/file-tools",
                       "extensions/github",
-                      "extensions/google-calendar",
+                      {
+                        "group": "Google",
+                        "pages": [
+                          "extensions/google/oauth-setup",
+                          "extensions/google/gmail",
+                          "extensions/google/calendar",
+                          "extensions/google/docs",
+                          "extensions/google/drive",
+                          "extensions/google/sheets",
+                          "extensions/google/slides"
+                        ]
+                      },
                       "extensions/mcp",
                       "extensions/web-search",
                       "extensions/shell"
@@ -221,7 +232,18 @@
                     "pages": [
                       "zh/extensions/file-tools",
                       "zh/extensions/github",
-                      "zh/extensions/google-calendar",
+                      {
+                        "group": "Google",
+                        "pages": [
+                          "zh/extensions/google/oauth-setup",
+                          "zh/extensions/google/gmail",
+                          "zh/extensions/google/calendar",
+                          "zh/extensions/google/docs",
+                          "zh/extensions/google/drive",
+                          "zh/extensions/google/sheets",
+                          "zh/extensions/google/slides"
+                        ]
+                      },
                       "zh/extensions/mcp",
                       "zh/extensions/web-search",
                       "zh/extensions/shell"
