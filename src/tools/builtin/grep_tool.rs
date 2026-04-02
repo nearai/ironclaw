@@ -170,10 +170,18 @@ impl Tool for GrepTool {
             cmd.env(&key, &val);
         }
 
+        // Re-inject explicitly approved environment from the job context,
+        // mirroring ShellTool's behavior so tools can access required credentials.
+        for (key, val) in _ctx.extra_env.as_ref() {
+            cmd.env(key, val);
+        }
+
         // Always-on flags
         cmd.arg("--color").arg("never");
         cmd.arg("--no-heading");
         cmd.arg("--glob").arg("!.git");
+        cmd.arg("--glob").arg("!node_modules");
+        cmd.arg("--glob").arg("!target");
 
         // Output mode
         match output_mode {
@@ -289,27 +297,39 @@ impl Tool for GrepTool {
         // Build output based on mode
         let result = match output_mode {
             "files_with_matches" => {
-                // Sort files by mtime
-                let mut file_entries: Vec<(String, SystemTime)> = paginated
-                    .iter()
-                    .map(|line| {
-                        let path = line.trim();
-                        let mtime = std::fs::metadata(path)
-                            .and_then(|m| m.modified())
-                            .unwrap_or(UNIX_EPOCH);
-                        // Convert to relative path
-                        let relative = std::path::Path::new(path)
-                            .strip_prefix(&search_path)
-                            .map(|p| p.to_string_lossy().into_owned())
-                            .unwrap_or_else(|_| path.to_string());
-                        (relative, mtime)
-                    })
-                    .collect();
+                // Collect all file entries with mtime, sort globally, then paginate
+                let all_lines = &lines;
+                let mut file_entries: Vec<(String, SystemTime)> =
+                    Vec::with_capacity(all_lines.len());
+                for line in all_lines {
+                    let path = line.trim();
+                    if path.is_empty() {
+                        continue;
+                    }
+                    let mtime = tokio::fs::metadata(path)
+                        .await
+                        .and_then(|m| m.modified())
+                        .unwrap_or(UNIX_EPOCH);
+                    let relative = std::path::Path::new(path)
+                        .strip_prefix(&search_path)
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .unwrap_or_else(|_| path.to_string());
+                    file_entries.push((relative, mtime));
+                }
 
                 file_entries.sort_by(|a, b| b.1.cmp(&a.1));
 
-                let files: Vec<String> = file_entries.into_iter().map(|(path, _)| path).collect();
+                // Apply pagination after sorting
+                let total_count = file_entries.len();
+                let files: Vec<String> = file_entries
+                    .into_iter()
+                    .skip(offset)
+                    .take(effective_limit)
+                    .map(|(path, _)| path)
+                    .collect();
                 let count = files.len();
+                let was_truncated =
+                    raw_output.len() > MAX_OUTPUT_SIZE || total_count > offset + effective_limit;
 
                 serde_json::json!({
                     "files": files,
@@ -343,11 +363,14 @@ impl Tool for GrepTool {
                 })
             }
             _ => {
-                // "content" mode
-                let content = paginated.join("\n");
-                // Relativize paths in content lines (path:line:content format)
+                // "content" mode — relativize paths per-line using strip_prefix
+                // to avoid false positives from substring replacement in file content
                 let search_prefix = format!("{}/", search_path.display());
-                let content = content.replace(&search_prefix, "");
+                let content: String = paginated
+                    .iter()
+                    .map(|line| line.strip_prefix(search_prefix.as_str()).unwrap_or(line))
+                    .collect::<Vec<_>>()
+                    .join("\n");
 
                 serde_json::json!({
                     "content": content,
