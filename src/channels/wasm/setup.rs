@@ -78,17 +78,17 @@ pub fn reserved_wasm_channel_name_policy(name: &str) -> ReservedWasmChannelNameP
 /// Return true if a WASM channel should be rejected by name and install source.
 pub fn should_reject_wasm_channel_name(
     name: &str,
-    install_source: Option<ChannelInstallSource>,
+    _install_source: Option<ChannelInstallSource>,
 ) -> bool {
     match reserved_wasm_channel_name_policy(name) {
         ReservedWasmChannelNamePolicy::AlwaysReserved => true,
         ReservedWasmChannelNamePolicy::ReservedUnlessTrustedInstall => {
-            // Compatibility: existing installs may not have provenance stamped.
-            // Treat unknown source as trusted for now to avoid breaking upgrades.
-            !matches!(
-                install_source,
-                Some(ChannelInstallSource::Bundled) | Some(ChannelInstallSource::Registry) | None
-            )
+            // IMPORTANT: `install_source` is currently derived from channel capabilities
+            // JSON, which may be attacker-controlled for locally dropped/edited modules.
+            // Until a trustworthy, host-controlled provenance mechanism exists, do not
+            // treat it as a trust signal. Names with this policy are effectively
+            // always reserved for dynamically loaded WASM channels.
+            true
         }
         ReservedWasmChannelNamePolicy::NotReserved => false,
     }
