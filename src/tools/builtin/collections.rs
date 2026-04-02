@@ -79,7 +79,7 @@ fn scoped_description(schema: &CollectionSchema, base: &str, owner_user_id: &str
 /// Used by read-only collection tools (query, summary). Write tools (add,
 /// update, delete) intentionally skip this and always operate on the caller's
 /// own scope.
-async fn resolve_collection_scope(
+pub(crate) async fn resolve_collection_scope(
     db: &dyn Database,
     caller_user_id: &str,
     _scopes: &[String],
@@ -99,7 +99,7 @@ async fn resolve_collection_scope(
 // ==================== Schema → JSON Schema conversion ====================
 
 /// Convert a `FieldType` to its JSON Schema representation.
-fn field_type_to_json_schema(field_type: &FieldType) -> serde_json::Value {
+pub(crate) fn field_type_to_json_schema(field_type: &FieldType) -> serde_json::Value {
     match field_type {
         FieldType::Text => json!({ "type": "string" }),
         FieldType::Number => json!({ "type": "number" }),
@@ -849,15 +849,30 @@ pub(crate) async fn refresh_collection_tools(
     collection_write_tx: Option<&broadcast::Sender<CollectionWriteEvent>>,
     workspace_resolver: Option<&Arc<dyn WorkspaceResolver>>,
 ) -> Vec<String> {
-    // Unregister old per-collection tools (if they exist)
+    let unified = super::generic_collections::is_unified_mode();
+
+    // Unregister old tools (if they exist) — both modes, to handle mode switches.
     let suffixes = ["add", "update", "delete", "query", "summary"];
     for suffix in &suffixes {
         let name = tool_name_for(schema, suffix, user_id);
         registry.unregister(&name).await;
     }
+    // Also unregister the unified tool name.
+    let scope = schema.source_scope.as_deref().unwrap_or(user_id);
+    let unified_name = format!("{}_{}", scope, schema.collection);
+    registry.unregister(&unified_name).await;
 
-    // Generate and register new per-collection tools
-    let tools = generate_collection_tools(schema, Arc::clone(db), collection_write_tx.cloned(), user_id);
+    // Generate and register tools based on mode.
+    let tools = if unified {
+        super::generic_collections::generate_unified_collection_tool(
+            schema,
+            Arc::clone(db),
+            collection_write_tx.cloned(),
+            user_id,
+        )
+    } else {
+        generate_collection_tools(schema, Arc::clone(db), collection_write_tx.cloned(), user_id)
+    };
     let tool_names: Vec<String> = tools.iter().map(|t| t.name().to_string()).collect();
     for tool in tools {
         registry.register(tool).await;
