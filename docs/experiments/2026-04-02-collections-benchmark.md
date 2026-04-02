@@ -1,8 +1,8 @@
 # Structured Collections Benchmark Results
 
 **Date:** 2026-04-02
-**Branch:** `fix/collection-scoping-and-startup` (11 commits on `upstream/staging`)
-**Build:** IronClaw v0.22.0 with full dual-backend collections support
+**Branch:** `fix/collection-scoping-and-startup` (15 commits on `upstream/staging`)
+**Build:** IronClaw v0.22.0 with full dual-backend collections support, per-user tool filtering, skill injection, and hardening fixes
 
 ## Hypothesis
 
