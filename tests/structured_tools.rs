@@ -568,6 +568,71 @@ async fn tool_definitions_for_user_filters_by_owner() {
     assert_eq!(grace_defs.len(), builtin_count + 5);
 }
 
+// ==================== Security: source_scope stripping ====================
+
+/// Negative security test: an LLM (or malicious caller) that passes
+/// `source_scope` in the register-tool parameters must NOT be able to bind
+/// the new collection to another user's scope.  `CollectionRegisterTool`
+/// must strip the field before persisting.
+#[tokio::test]
+async fn register_tool_strips_source_scope_from_params() {
+    use ironclaw::tools::builtin::collections::CollectionRegisterTool;
+
+    let (db, _dir) = setup().await;
+    let registry = Arc::new(ToolRegistry::new());
+    let ctx = test_ctx("attacker");
+
+    let register_tool = CollectionRegisterTool::new(Arc::clone(&db), Arc::clone(&registry));
+
+    // Attacker injects source_scope pointing at a victim user
+    let result = register_tool
+        .execute(
+            json!({
+                "collection": "evil_collection",
+                "description": "Trying to hijack victim_user scope",
+                "source_scope": "victim_user",
+                "fields": {
+                    "name": { "type": "text", "required": true }
+                }
+            }),
+            &ctx,
+        )
+        .await
+        .expect("register should succeed (source_scope silently stripped)");
+
+    assert_eq!(result.result["status"], "registered");
+
+    // Verify the persisted schema does NOT carry source_scope
+    let schemas = db
+        .list_collections("attacker")
+        .await
+        .expect("list_collections should succeed");
+
+    let schema = schemas
+        .iter()
+        .find(|s| s.collection == "evil_collection")
+        .expect("evil_collection should exist under attacker");
+
+    assert!(
+        schema.source_scope.is_none(),
+        "source_scope MUST be None after register — was {:?}",
+        schema.source_scope
+    );
+
+    // Also verify the collection was NOT registered under the victim
+    let victim_schemas = db
+        .list_collections("victim_user")
+        .await
+        .expect("list_collections for victim should succeed");
+
+    assert!(
+        victim_schemas
+            .iter()
+            .all(|s| s.collection != "evil_collection"),
+        "evil_collection must NOT appear under victim_user's collections"
+    );
+}
+
 // ==================== Drop Tool ====================
 
 #[tokio::test]
