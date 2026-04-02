@@ -22,6 +22,17 @@ fn is_valid_role(role: &str) -> bool {
     role == ROLE_ADMIN || role == ROLE_MEMBER
 }
 
+async fn validated_created_by(store: &dyn Database, user_id: &str) -> Option<String> {
+    match store.get_user(user_id).await {
+        Ok(Some(_)) => Some(user_id.to_string()),
+        Ok(None) => None,
+        Err(e) => {
+            tracing::warn!(user_id, error = %e, "Failed to validate created_by user");
+            None
+        }
+    }
+}
+
 /// Check whether `user_id` is the sole active admin. Returns true if demoting,
 /// suspending, or deleting this user would leave zero admins.
 async fn is_last_admin(store: &dyn Database, user_id: &str) -> Result<bool, String> {
@@ -85,10 +96,7 @@ pub async fn users_create_handler(
         created_at: now,
         updated_at: now,
         last_login_at: None,
-        created_by: match store.get_user(&user.user_id).await {
-            Ok(Some(_)) => Some(user.user_id.clone()),
-            _ => None,
-        },
+        created_by: validated_created_by(store.as_ref(), &user.user_id).await,
         metadata: serde_json::json!({}),
     };
 

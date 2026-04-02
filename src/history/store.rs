@@ -2437,8 +2437,9 @@ impl Store {
         key: &str,
         value: &serde_json::Value,
     ) -> Result<(), DatabaseError> {
-        let conn = self.conn().await?;
-        conn.execute(
+        let mut conn = self.conn().await?;
+        let tx = conn.transaction().await?;
+        tx.execute(
             r#"
             INSERT INTO settings (user_id, workspace_id, key, value, updated_at)
             VALUES ($1, NULL, $2, $3, NOW())
@@ -2447,7 +2448,7 @@ impl Store {
             &[&user_id, &key, value],
         )
         .await?;
-        conn.execute(
+        tx.execute(
             r#"
             UPDATE settings SET
                 value = $3,
@@ -2457,6 +2458,7 @@ impl Store {
             &[&user_id, &key, value],
         )
         .await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -2466,9 +2468,10 @@ impl Store {
         key: &str,
         value: &serde_json::Value,
     ) -> Result<(), DatabaseError> {
-        let conn = self.conn().await?;
-        let workspace_user_id = format!("workspace:{workspace_id}");
-        conn.execute(
+        let mut conn = self.conn().await?;
+        let tx = conn.transaction().await?;
+        let workspace_user_id = crate::db::WORKSPACE_SETTINGS_SENTINEL_USER_ID;
+        tx.execute(
             r#"
             INSERT INTO settings (user_id, workspace_id, key, value, updated_at)
             VALUES ($1, $2, $3, $4, NOW())
@@ -2477,7 +2480,7 @@ impl Store {
             &[&workspace_user_id, &workspace_id, &key, value],
         )
         .await?;
-        conn.execute(
+        tx.execute(
             r#"
             UPDATE settings SET value = $3, updated_at = NOW()
             WHERE workspace_id = $1 AND key = $2
@@ -2485,6 +2488,7 @@ impl Store {
             &[&workspace_id, &key, value],
         )
         .await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -2642,7 +2646,7 @@ impl Store {
     ) -> Result<(), DatabaseError> {
         let mut conn = self.conn().await?;
         let tx = conn.transaction().await?;
-        let workspace_user_id = format!("workspace:{workspace_id}");
+        let workspace_user_id = crate::db::WORKSPACE_SETTINGS_SENTINEL_USER_ID;
 
         for (key, value) in settings {
             tx.execute(

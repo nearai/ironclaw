@@ -4489,19 +4489,64 @@ function changeUserRole(userId, newRole) {
     .catch(function(e) { alert(I18n.t('users.failedRoleChange') + ': ' + e.message); });
 }
 
-function createTokenForUser(userId, displayName) {
-  var tokenName = prompt('Token name for ' + displayName + ':', 'api-token');
-  if (!tokenName) return;
+var pendingTokenTarget = null;
+
+function cancelPendingTokenCreation() {
+  pendingTokenTarget = null;
+  var banner = document.getElementById('users-token-result');
+  if (!banner) return;
+  banner.style.display = 'none';
+  banner.innerHTML = '';
+}
+
+function submitPendingTokenCreation() {
+  if (!pendingTokenTarget) return;
+  var input = document.getElementById('user-token-name');
+  var tokenName = input ? input.value.trim() : '';
+  if (!tokenName) {
+    alert(I18n.t('users.tokenNameRequired'));
+    if (input) input.focus();
+    return;
+  }
   apiFetch('/api/tokens', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name: tokenName, user_id: userId }),
+    body: JSON.stringify({ name: tokenName, user_id: pendingTokenTarget.userId }),
   }).then(function(data) {
     showTokenBanner(data.token, I18n.t('users.tokenCreated'));
-  }).catch(function(e) { alert(I18n.t('users.failedCreate') + ': ' + e.message); });
+  }).catch(function(e) {
+    alert(I18n.t('users.failedTokenCreate') + ': ' + e.message);
+  });
+}
+
+function createTokenForUser(userId, displayName) {
+  pendingTokenTarget = { userId: userId, displayName: displayName };
+  var banner = document.getElementById('users-token-result');
+  if (!banner) return;
+  banner.style.display = 'block';
+  banner.innerHTML = '<strong>' + escapeHtml(I18n.t('users.tokenPromptTitle')) + '</strong> '
+    + escapeHtml(displayName || userId)
+    + '<div class="users-form" style="display:flex;margin-top:0.75rem;">'
+    + '<input type="text" id="user-token-name" placeholder="' + escapeHtml(I18n.t('users.tokenNamePlaceholder')) + '" value="api-token" autocomplete="off" />'
+    + '<button class="btn-primary" id="user-token-submit">' + escapeHtml(I18n.t('users.create')) + '</button>'
+    + '<button class="btn-secondary" id="user-token-cancel">' + escapeHtml(I18n.t('users.cancel')) + '</button>'
+    + '</div>';
+
+  var input = document.getElementById('user-token-name');
+  if (input) {
+    input.focus();
+    input.select();
+    input.addEventListener('keydown', function(e) {
+      if (e.key === 'Enter') submitPendingTokenCreation();
+      if (e.key === 'Escape') cancelPendingTokenCreation();
+    });
+  }
+  document.getElementById('user-token-submit')?.addEventListener('click', submitPendingTokenCreation);
+  document.getElementById('user-token-cancel')?.addEventListener('click', cancelPendingTokenCreation);
 }
 
 function showTokenBanner(tokenValue, title) {
+  pendingTokenTarget = null;
   var banner = document.getElementById('users-token-result');
   if (!banner) return;
   var heading = title || I18n.t('users.tokenCreated');

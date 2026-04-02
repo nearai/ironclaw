@@ -1172,6 +1172,7 @@ impl WorkspaceMgmtStore for PgBackend {
                 FROM workspace_members wm
                 JOIN workspaces w ON w.id = wm.workspace_id
                 WHERE wm.user_id = $1
+                  AND w.status != 'archived'
                 ORDER BY w.created_at DESC
                 "#,
                 &[&user_id],
@@ -1343,6 +1344,33 @@ impl WorkspaceMgmtStore for PgBackend {
             )
             .await?;
         Ok(row.map(|row| row.get("role")))
+    }
+
+    async fn is_last_workspace_owner(
+        &self,
+        workspace_id: Uuid,
+        user_id: &str,
+    ) -> Result<bool, DatabaseError> {
+        let client = self
+            .pool()
+            .get()
+            .await
+            .map_err(|e| DatabaseError::Pool(format!("Failed to get client: {e}")))?;
+        let row = client
+            .query_one(
+                r#"
+                SELECT
+                    COALESCE(SUM(CASE WHEN user_id = $2 AND role = 'owner' THEN 1 ELSE 0 END), 0) AS target_is_owner,
+                    COALESCE(SUM(CASE WHEN role = 'owner' THEN 1 ELSE 0 END), 0) AS owner_count
+                FROM workspace_members
+                WHERE workspace_id = $1
+                "#,
+                &[&workspace_id, &user_id],
+            )
+            .await?;
+        let target_is_owner: i64 = row.get("target_is_owner");
+        let owner_count: i64 = row.get("owner_count");
+        Ok(target_is_owner > 0 && owner_count <= 1)
     }
 
     async fn update_member_role(

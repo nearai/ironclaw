@@ -6,15 +6,11 @@ use async_trait::async_trait;
 use libsql::params;
 
 use super::{LibSqlBackend, fmt_ts, get_i64, get_json, get_text, get_ts};
-use crate::db::SettingsStore;
+use crate::db::{SettingsStore, WORKSPACE_SETTINGS_SENTINEL_USER_ID};
 use crate::error::DatabaseError;
 use crate::history::SettingRow;
 
 use chrono::Utc;
-
-fn workspace_settings_user_id(workspace_id: uuid::Uuid) -> String {
-    format!("workspace:{workspace_id}")
-}
 
 #[async_trait]
 impl SettingsStore for LibSqlBackend {
@@ -155,7 +151,6 @@ impl SettingsStore for LibSqlBackend {
     ) -> Result<(), DatabaseError> {
         let conn = self.connect().await?;
         let now = fmt_ts(&Utc::now());
-        let workspace_user_id = workspace_settings_user_id(workspace_id);
         conn.execute(
             r#"
                 INSERT INTO settings (user_id, workspace_id, key, value, updated_at)
@@ -165,7 +160,7 @@ impl SettingsStore for LibSqlBackend {
                     updated_at = ?5
                 "#,
             params![
-                workspace_user_id,
+                WORKSPACE_SETTINGS_SENTINEL_USER_ID,
                 workspace_id.to_string(),
                 key,
                 value.to_string(),
@@ -351,7 +346,6 @@ impl SettingsStore for LibSqlBackend {
     ) -> Result<(), DatabaseError> {
         let conn = self.connect().await?;
         let now = fmt_ts(&Utc::now());
-        let workspace_user_id = workspace_settings_user_id(workspace_id);
         conn.execute("BEGIN", ())
             .await
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
@@ -367,7 +361,7 @@ impl SettingsStore for LibSqlBackend {
                         updated_at = ?5
                     "#,
                     params![
-                        workspace_user_id.as_str(),
+                        WORKSPACE_SETTINGS_SENTINEL_USER_ID,
                         workspace_id.to_string(),
                         key.as_str(),
                         value.to_string(),

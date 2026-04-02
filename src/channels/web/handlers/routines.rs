@@ -266,7 +266,7 @@ pub async fn routines_trigger_handler(
     let _routine = load_visible_routine(store, &user, &workspace_query, routine_id).await?;
 
     let run_id = engine
-        .fire_manual(routine_id, None)
+        .fire_manual(routine_id, Some(&user.user_id))
         .await
         .map_err(|e| (routine_error_status(&e), e.to_string()))?;
 

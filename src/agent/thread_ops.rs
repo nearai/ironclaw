@@ -25,8 +25,8 @@ use ironclaw_common::truncate_preview;
 
 const FORGED_THREAD_ID_ERROR: &str = "Invalid or unauthorized thread ID.";
 
-fn parsed_workspace_id(workspace_id: Option<&str>) -> Option<Uuid> {
-    workspace_id.and_then(|id| Uuid::parse_str(id).ok())
+fn parsed_workspace_id(workspace_id: Option<&str>) -> Result<Option<Uuid>, uuid::Error> {
+    workspace_id.map(Uuid::parse_str).transpose()
 }
 
 fn requires_preexisting_uuid_thread(channel: &str) -> bool {
@@ -75,12 +75,21 @@ impl Agent {
         if let Some(store) = self.store() {
             // Never hydrate history from a conversation UUID that isn't owned
             // by the current authenticated user.
+            let workspace_id = match parsed_workspace_id(message.workspace_id.as_deref()) {
+                Ok(workspace_id) => workspace_id,
+                Err(e) => {
+                    tracing::warn!(
+                        user = %message.user_id,
+                        thread_id = %thread_uuid,
+                        raw_workspace_id = ?message.workspace_id,
+                        error = %e,
+                        "Rejected message with malformed workspace scope"
+                    );
+                    return Some(FORGED_THREAD_ID_ERROR.to_string());
+                }
+            };
             let owned = match store
-                .conversation_belongs_to_user(
-                    thread_uuid,
-                    &message.user_id,
-                    parsed_workspace_id(message.workspace_id.as_deref()),
-                )
+                .conversation_belongs_to_user(thread_uuid, &message.user_id, workspace_id)
                 .await
             {
                 Ok(v) => v,

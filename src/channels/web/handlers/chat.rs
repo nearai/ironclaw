@@ -13,31 +13,12 @@ use uuid::Uuid;
 
 use crate::channels::IncomingMessage;
 use crate::channels::web::auth::AuthenticatedUser;
-use crate::channels::web::handlers::workspaces::{WorkspaceQuery, resolve_workspace_scope};
+use crate::channels::web::handlers::workspaces::{WorkspaceQuery, resolve_requested_workspace_id};
 use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::*;
 use crate::channels::web::util::{
     build_turns_from_db_messages, tool_error_for_display, truncate_preview,
 };
-
-async fn resolve_chat_workspace_id(
-    state: &GatewayState,
-    user: &crate::channels::web::auth::UserIdentity,
-    workspace_slug: Option<&str>,
-) -> Result<Option<Uuid>, (StatusCode, String)> {
-    let Some(store) = state.store.as_ref() else {
-        if workspace_slug.is_some() {
-            return Err((
-                StatusCode::SERVICE_UNAVAILABLE,
-                "Database not available".to_string(),
-            ));
-        }
-        return Ok(None);
-    };
-    Ok(resolve_workspace_scope(store, user, workspace_slug)
-        .await?
-        .map(|scope| scope.workspace.id))
-}
 
 pub async fn chat_send_handler(
     State(state): State<Arc<GatewayState>>,
@@ -53,7 +34,7 @@ pub async fn chat_send_handler(
     }
 
     let workspace_id =
-        resolve_chat_workspace_id(&state, &identity, workspace_query.workspace.as_deref())
+        resolve_requested_workspace_id(&state, &identity, workspace_query.workspace.as_deref())
             .await?
             .map(|id| id.to_string());
     let mut msg = IncomingMessage::new("gateway", &identity.user_id, &req.content);
@@ -306,7 +287,7 @@ pub async fn chat_events_handler(
     Query(workspace_query): Query<WorkspaceQuery>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     let workspace_scope =
-        resolve_chat_workspace_id(&state, &user, workspace_query.workspace.as_deref())
+        resolve_requested_workspace_id(&state, &user, workspace_query.workspace.as_deref())
             .await?
             .map(|id| id.to_string());
     state
@@ -350,7 +331,7 @@ pub async fn chat_ws_handler(
         ));
     }
     let workspace_id =
-        resolve_chat_workspace_id(&state, &identity, workspace_query.workspace.as_deref())
+        resolve_requested_workspace_id(&state, &identity, workspace_query.workspace.as_deref())
             .await?
             .map(|id| id.to_string());
     Ok(ws.on_upgrade(move |socket| {
@@ -408,7 +389,7 @@ pub async fn chat_history_handler(
 
     // Verify the thread belongs to the authenticated user before returning any data.
     let workspace_id =
-        resolve_chat_workspace_id(&state, &identity, query.workspace.as_deref()).await?;
+        resolve_requested_workspace_id(&state, &identity, query.workspace.as_deref()).await?;
     if query.thread_id.is_some()
         && let Some(ref store) = state.store
     {
@@ -550,7 +531,7 @@ pub async fn chat_threads_handler(
     // Try DB first for persistent thread list
     if let Some(ref store) = state.store {
         let workspace_id =
-            resolve_chat_workspace_id(&state, &identity, workspace_query.workspace.as_deref())
+            resolve_requested_workspace_id(&state, &identity, workspace_query.workspace.as_deref())
                 .await?;
         // Auto-create assistant thread if it doesn't exist
         let assistant_id = store
@@ -674,7 +655,7 @@ pub async fn chat_new_thread_handler(
     // so that the subsequent loadThreads() call from the frontend sees it.
     if let Some(ref store) = state.store {
         let workspace_id =
-            resolve_chat_workspace_id(&state, &identity, workspace_query.workspace.as_deref())
+            resolve_requested_workspace_id(&state, &identity, workspace_query.workspace.as_deref())
                 .await?;
         match store
             .ensure_conversation(

@@ -379,6 +379,12 @@ pub struct WorkspaceMembership {
     pub role: String,
 }
 
+/// Sentinel `settings.user_id` value for workspace-scoped settings rows.
+///
+/// Workspace settings are always queried by `workspace_id`, so this value is
+/// intentionally fixed instead of coupling it to a synthetic user namespace.
+pub const WORKSPACE_SETTINGS_SENTINEL_USER_ID: &str = "__workspace_settings__";
+
 // ==================== Sub-traits ====================
 //
 // Each sub-trait groups related persistence methods. The `Database` supertrait
@@ -1047,6 +1053,11 @@ pub trait WorkspaceMgmtStore: Send + Sync {
         workspace_id: Uuid,
         user_id: &str,
     ) -> Result<Option<String>, DatabaseError>;
+    async fn is_last_workspace_owner(
+        &self,
+        workspace_id: Uuid,
+        user_id: &str,
+    ) -> Result<bool, DatabaseError>;
     async fn update_member_role(
         &self,
         workspace_id: Uuid,

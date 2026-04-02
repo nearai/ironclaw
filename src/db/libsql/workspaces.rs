@@ -11,9 +11,15 @@ use crate::db::{
     WorkspaceRecord,
 };
 
-fn row_to_workspace(row: &libsql::Row) -> WorkspaceRecord {
-    WorkspaceRecord {
-        id: get_text(row, 0).parse().unwrap_or_default(),
+fn parse_uuid_field(value: &str, field: &str) -> Result<Uuid, DatabaseError> {
+    value.parse().map_err(|e| {
+        DatabaseError::Serialization(format!("Failed to parse {field} UUID '{value}': {e}"))
+    })
+}
+
+fn row_to_workspace(row: &libsql::Row) -> Result<WorkspaceRecord, DatabaseError> {
+    Ok(WorkspaceRecord {
+        id: parse_uuid_field(&get_text(row, 0), "workspaces.id")?,
         name: get_text(row, 1),
         slug: get_text(row, 2),
         description: get_text(row, 3),
@@ -22,7 +28,7 @@ fn row_to_workspace(row: &libsql::Row) -> WorkspaceRecord {
         updated_at: get_ts(row, 6),
         created_by: get_text(row, 7),
         settings: get_json(row, 8),
-    }
+    })
 }
 
 fn row_to_user(row: &libsql::Row, offset: i32) -> Result<UserRecord, DatabaseError> {
@@ -136,7 +142,7 @@ impl WorkspaceMgmtStore for LibSqlBackend {
             .await
             .map_err(|e| DatabaseError::Query(e.to_string()))?
         {
-            Some(row) => Ok(Some(row_to_workspace(&row))),
+            Some(row) => Ok(Some(row_to_workspace(&row)?)),
             None => Ok(None),
         }
     }
@@ -162,7 +168,7 @@ impl WorkspaceMgmtStore for LibSqlBackend {
             .await
             .map_err(|e| DatabaseError::Query(e.to_string()))?
         {
-            Some(row) => Ok(Some(row_to_workspace(&row))),
+            Some(row) => Ok(Some(row_to_workspace(&row)?)),
             None => Ok(None),
         }
     }
@@ -181,6 +187,7 @@ impl WorkspaceMgmtStore for LibSqlBackend {
                 FROM workspace_members wm
                 JOIN workspaces w ON w.id = wm.workspace_id
                 WHERE wm.user_id = ?1
+                  AND w.status != 'archived'
                 ORDER BY w.created_at DESC
                 "#,
                 params![user_id],
@@ -195,7 +202,7 @@ impl WorkspaceMgmtStore for LibSqlBackend {
             .map_err(|e| DatabaseError::Query(e.to_string()))?
         {
             memberships.push(WorkspaceMembership {
-                workspace: row_to_workspace(&row),
+                workspace: row_to_workspace(&row)?,
                 role: get_text(&row, 9),
             });
         }
@@ -315,7 +322,10 @@ impl WorkspaceMgmtStore for LibSqlBackend {
         {
             let user = row_to_user(&row, 0)?;
             let membership = WorkspaceMemberRecord {
-                workspace_id: get_text(&row, 10).parse().unwrap_or_default(),
+                workspace_id: parse_uuid_field(
+                    &get_text(&row, 10),
+                    "workspace_members.workspace_id",
+                )?,
                 user_id: get_text(&row, 11),
                 role: get_text(&row, 12),
                 joined_at: get_ts(&row, 13),
@@ -346,6 +356,39 @@ impl WorkspaceMgmtStore for LibSqlBackend {
         {
             Some(row) => Ok(Some(get_text(&row, 0))),
             None => Ok(None),
+        }
+    }
+
+    async fn is_last_workspace_owner(
+        &self,
+        workspace_id: Uuid,
+        user_id: &str,
+    ) -> Result<bool, DatabaseError> {
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                r#"
+                SELECT
+                    SUM(CASE WHEN user_id = ?2 AND role = 'owner' THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN role = 'owner' THEN 1 ELSE 0 END)
+                FROM workspace_members
+                WHERE workspace_id = ?1
+                "#,
+                params![workspace_id.to_string(), user_id],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        match rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        {
+            Some(row) => {
+                let target_is_owner = row.get::<i64>(0).unwrap_or(0) > 0;
+                let owner_count = row.get::<i64>(1).unwrap_or(0);
+                Ok(target_is_owner && owner_count <= 1)
+            }
+            None => Ok(false),
         }
     }
 

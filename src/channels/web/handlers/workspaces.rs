@@ -16,6 +16,10 @@ use crate::channels::web::types::*;
 use crate::db::{Database, WorkspaceMembership, WorkspaceRecord};
 
 pub const WORKSPACE_SCOPE_PREFIX: &str = "workspace:";
+const WORKSPACE_ROLE_OWNER: &str = "owner";
+const WORKSPACE_ROLE_ADMIN: &str = "admin";
+const WORKSPACE_ROLE_MEMBER: &str = "member";
+const WORKSPACE_ROLE_VIEWER: &str = "viewer";
 
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct WorkspaceQuery {
@@ -26,6 +30,66 @@ pub struct WorkspaceQuery {
 pub struct ResolvedWorkspace {
     pub workspace: WorkspaceRecord,
     pub role: String,
+}
+
+fn workspace_role_error() -> String {
+    format!(
+        "role must be one of '{WORKSPACE_ROLE_OWNER}', '{WORKSPACE_ROLE_ADMIN}', '{WORKSPACE_ROLE_MEMBER}', or '{WORKSPACE_ROLE_VIEWER}'"
+    )
+}
+
+fn is_valid_workspace_role(role: &str) -> bool {
+    matches!(
+        role,
+        WORKSPACE_ROLE_OWNER | WORKSPACE_ROLE_ADMIN | WORKSPACE_ROLE_MEMBER | WORKSPACE_ROLE_VIEWER
+    )
+}
+
+fn workspace_role_is_owner(role: &str) -> bool {
+    role == WORKSPACE_ROLE_OWNER
+}
+
+fn workspace_role_is_manager(role: &str) -> bool {
+    matches!(role, WORKSPACE_ROLE_OWNER | WORKSPACE_ROLE_ADMIN)
+}
+
+fn validate_workspace_name(name: &str) -> Result<(), (StatusCode, String)> {
+    if name.is_empty() {
+        Err((
+            StatusCode::BAD_REQUEST,
+            "Workspace name is required".to_string(),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_workspace_slug(slug: &str) -> Result<(), (StatusCode, String)> {
+    let bytes = slug.as_bytes();
+    if !(3..=64).contains(&bytes.len())
+        || !bytes[0].is_ascii_lowercase() && !bytes[0].is_ascii_digit()
+        || !bytes[bytes.len() - 1].is_ascii_lowercase() && !bytes[bytes.len() - 1].is_ascii_digit()
+        || !bytes
+            .iter()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-')
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Workspace slug must match ^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_workspace_settings(settings: &serde_json::Value) -> Result<(), (StatusCode, String)> {
+    if settings.is_object() {
+        Ok(())
+    } else {
+        Err((
+            StatusCode::BAD_REQUEST,
+            "Workspace settings must be a JSON object".to_string(),
+        ))
+    }
 }
 
 pub fn workspace_scope_user_id(workspace_id: Uuid) -> String {
@@ -61,7 +125,7 @@ pub async fn resolve_workspace_scope(
 }
 
 pub fn require_workspace_manager(role: &str) -> Result<(), (StatusCode, String)> {
-    if matches!(role, "owner" | "admin") {
+    if workspace_role_is_manager(role) {
         Ok(())
     } else {
         Err((
@@ -69,6 +133,36 @@ pub fn require_workspace_manager(role: &str) -> Result<(), (StatusCode, String)>
             "Workspace admin or owner role required".to_string(),
         ))
     }
+}
+
+pub fn require_workspace_owner(role: &str) -> Result<(), (StatusCode, String)> {
+    if workspace_role_is_owner(role) {
+        Ok(())
+    } else {
+        Err((
+            StatusCode::FORBIDDEN,
+            "Workspace owner role required".to_string(),
+        ))
+    }
+}
+
+pub async fn resolve_requested_workspace_id(
+    state: &GatewayState,
+    user: &UserIdentity,
+    workspace_slug: Option<&str>,
+) -> Result<Option<Uuid>, (StatusCode, String)> {
+    let Some(store) = state.store.as_ref() else {
+        if workspace_slug.is_some() {
+            return Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Database not available".to_string(),
+            ));
+        }
+        return Ok(None);
+    };
+    Ok(resolve_workspace_scope(store, user, workspace_slug)
+        .await?
+        .map(|scope| scope.workspace.id))
 }
 
 fn workspace_info_from_membership(membership: WorkspaceMembership) -> WorkspaceInfo {
@@ -139,18 +233,21 @@ pub async fn workspaces_create_handler(
         "Database not available".to_string(),
     ))?;
 
+    let name = body.name.trim();
+    let slug = body.slug.trim();
+    validate_workspace_name(name)?;
+    validate_workspace_slug(slug)?;
+    validate_workspace_settings(&body.settings)?;
+
     let workspace = store
-        .create_workspace(
-            &body.name,
-            &body.slug,
-            &body.description,
-            &user.user_id,
-            &body.settings,
-        )
+        .create_workspace(name, slug, &body.description, &user.user_id, &body.settings)
         .await
         .map_err(internal_db_error)?;
 
-    Ok(Json(workspace_info(workspace, "owner".to_string())))
+    Ok(Json(workspace_info(
+        workspace,
+        WORKSPACE_ROLE_OWNER.to_string(),
+    )))
 }
 
 pub async fn workspaces_detail_handler(
@@ -180,11 +277,13 @@ pub async fn workspaces_update_handler(
     let resolved = resolve_workspace_scope(store, &user, Some(&slug)).await?;
     let resolved = resolved.ok_or((StatusCode::NOT_FOUND, "Workspace not found".to_string()))?;
     require_workspace_manager(&resolved.role)?;
+    validate_workspace_name(body.name.trim())?;
+    validate_workspace_settings(&body.settings)?;
 
     let updated = store
         .update_workspace(
             resolved.workspace.id,
-            &body.name,
+            body.name.trim(),
             &body.description,
             &body.settings,
         )
@@ -263,12 +362,52 @@ pub async fn workspace_members_upsert_handler(
     let resolved = resolve_workspace_scope(store, &user, Some(&slug)).await?;
     let resolved = resolved.ok_or((StatusCode::NOT_FOUND, "Workspace not found".to_string()))?;
     require_workspace_manager(&resolved.role)?;
+    let role = body.role.trim();
+    if !is_valid_workspace_role(role) {
+        return Err((StatusCode::BAD_REQUEST, workspace_role_error()));
+    }
+
+    let existing_role = store
+        .get_member_role(resolved.workspace.id, &member_user_id)
+        .await
+        .map_err(internal_db_error)?;
+    if workspace_role_is_owner(role)
+        || existing_role
+            .as_deref()
+            .is_some_and(workspace_role_is_owner)
+    {
+        require_workspace_owner(&resolved.role)?;
+    }
+
+    if existing_role
+        .as_deref()
+        .is_some_and(workspace_role_is_owner)
+        && !workspace_role_is_owner(role)
+        && store
+            .is_last_workspace_owner(resolved.workspace.id, &member_user_id)
+            .await
+            .map_err(internal_db_error)?
+    {
+        return Err((
+            StatusCode::CONFLICT,
+            "Cannot remove the last workspace owner".to_string(),
+        ));
+    }
+
+    let target_user_exists = store
+        .get_user(&member_user_id)
+        .await
+        .map_err(internal_db_error)?
+        .is_some();
+    if !target_user_exists {
+        return Err((StatusCode::NOT_FOUND, "User not found".to_string()));
+    }
 
     store
         .add_workspace_member(
             resolved.workspace.id,
             &member_user_id,
-            &body.role,
+            role,
             Some(&user.user_id),
         )
         .await
@@ -289,6 +428,28 @@ pub async fn workspace_members_delete_handler(
     let resolved = resolve_workspace_scope(store, &user, Some(&slug)).await?;
     let resolved = resolved.ok_or((StatusCode::NOT_FOUND, "Workspace not found".to_string()))?;
     require_workspace_manager(&resolved.role)?;
+
+    let member_role = store
+        .get_member_role(resolved.workspace.id, &member_user_id)
+        .await
+        .map_err(internal_db_error)?
+        .ok_or((
+            StatusCode::NOT_FOUND,
+            "Workspace member not found".to_string(),
+        ))?;
+    if workspace_role_is_owner(&member_role) {
+        require_workspace_owner(&resolved.role)?;
+        if store
+            .is_last_workspace_owner(resolved.workspace.id, &member_user_id)
+            .await
+            .map_err(internal_db_error)?
+        {
+            return Err((
+                StatusCode::CONFLICT,
+                "Cannot remove the last workspace owner".to_string(),
+            ));
+        }
+    }
 
     let deleted = store
         .remove_workspace_member(resolved.workspace.id, &member_user_id)

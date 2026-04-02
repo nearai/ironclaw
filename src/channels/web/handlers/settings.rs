@@ -11,7 +11,9 @@ use secrecy::SecretString;
 use uuid::Uuid;
 
 use crate::channels::web::auth::AuthenticatedUser;
-use crate::channels::web::handlers::workspaces::{WorkspaceQuery, resolve_workspace_scope};
+use crate::channels::web::handlers::workspaces::{
+    WorkspaceQuery, resolve_workspace_scope, workspace_scope_user_id,
+};
 use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::*;
 use crate::secrets::{CreateSecretParams, SecretsStore};
@@ -58,13 +60,16 @@ pub async fn settings_list_handler(
 
     // Build a map of sensitive keys so we can annotate and mask them.
     let sensitive_keys = ["llm_builtin_overrides", "llm_custom_providers"];
+    let settings_secret_scope = scope
+        .map(workspace_scope_user_id)
+        .unwrap_or_else(|| user.user_id.clone());
     let mut sensitive_map: std::collections::HashMap<String, serde_json::Value> = rows
         .iter()
         .filter(|r| sensitive_keys.contains(&r.key.as_str()))
         .map(|r| (r.key.clone(), r.value.clone()))
         .collect();
     if !sensitive_map.is_empty() {
-        annotate_secret_key_presence(&state, &user.user_id, &mut sensitive_map).await;
+        annotate_secret_key_presence(&state, &settings_secret_scope, &mut sensitive_map).await;
         mask_settings_api_keys(&mut sensitive_map);
     }
 
@@ -116,12 +121,15 @@ pub async fn settings_get_handler(
     .ok_or(StatusCode::NOT_FOUND)?;
 
     // Mask any plaintext API keys that may exist from legacy data.
+    let settings_secret_scope = scope
+        .map(workspace_scope_user_id)
+        .unwrap_or_else(|| user.user_id.clone());
     let value = if matches!(
         key.as_str(),
         "llm_builtin_overrides" | "llm_custom_providers"
     ) {
         let mut map = std::collections::HashMap::from([(key.clone(), row.value.clone())]);
-        annotate_secret_key_presence(&state, &user.user_id, &mut map).await;
+        annotate_secret_key_presence(&state, &settings_secret_scope, &mut map).await;
         mask_settings_api_keys(&mut map);
         map.remove(&key).unwrap_or(row.value)
     } else {
@@ -158,20 +166,15 @@ pub async fn settings_set_handler(
 
     // Extract API keys from LLM settings and vault them in the secrets store.
     // The sanitized value has api_key fields removed (stored encrypted instead).
+    let settings_secret_scope = scope
+        .map(workspace_scope_user_id)
+        .unwrap_or_else(|| user.user_id.clone());
     let sanitized_value = match key.as_str() {
         "llm_builtin_overrides" => {
-            if scope.is_some() {
-                body.value.clone()
-            } else {
-                extract_builtin_override_keys(&state, &user.user_id, &body.value).await?
-            }
+            extract_builtin_override_keys(&state, &settings_secret_scope, &body.value).await?
         }
         "llm_custom_providers" => {
-            if scope.is_some() {
-                body.value.clone()
-            } else {
-                extract_custom_provider_keys(&state, &user.user_id, &body.value).await?
-            }
+            extract_custom_provider_keys(&state, &settings_secret_scope, &body.value).await?
         }
         _ => body.value.clone(),
     };
@@ -657,6 +660,7 @@ async fn annotate_secret_key_presence(
 mod tests {
     use super::*;
     use std::collections::HashMap;
+    use uuid::Uuid;
 
     #[test]
     fn test_mask_settings_api_keys_builtin_overrides() {
@@ -792,6 +796,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_extract_builtin_keys_can_store_under_workspace_scope() {
+        let secrets = test_secrets_store();
+        let state = test_gateway_state(Arc::clone(&secrets));
+        let workspace_scope = workspace_scope_user_id(Uuid::new_v4());
+
+        let input = serde_json::json!({
+            "openai": { "api_key": "sk-workspace-key", "model": "gpt-4" }
+        });
+
+        let result = extract_builtin_override_keys(&state, &workspace_scope, &input)
+            .await
+            .unwrap();
+
+        assert!(result["openai"].get("api_key").is_none());
+        let decrypted = secrets
+            .get_decrypted(&workspace_scope, "llm_builtin_openai_api_key")
+            .await
+            .unwrap();
+        assert_eq!(decrypted.expose(), "sk-workspace-key");
+        assert!(
+            secrets
+                .get_decrypted("test", "llm_builtin_openai_api_key")
+                .await
+                .is_err(),
+            "workspace-scoped secrets should not be written to the caller scope"
+        );
+    }
+
+    #[tokio::test]
     async fn test_extract_custom_keys_vaults_and_strips() {
         let secrets = test_secrets_store();
         let state = test_gateway_state(Arc::clone(&secrets));
@@ -818,6 +851,35 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(decrypted.expose(), "gsk-custom-key");
+    }
+
+    #[tokio::test]
+    async fn test_extract_custom_keys_can_store_under_workspace_scope() {
+        let secrets = test_secrets_store();
+        let state = test_gateway_state(Arc::clone(&secrets));
+        let workspace_scope = workspace_scope_user_id(Uuid::new_v4());
+
+        let input = serde_json::json!([
+            { "id": "workspace-llm", "api_key": "gsk-workspace-key", "adapter": "open_ai_completions" }
+        ]);
+
+        let result = extract_custom_provider_keys(&state, &workspace_scope, &input)
+            .await
+            .unwrap();
+
+        assert!(result[0].get("api_key").is_none());
+        let decrypted = secrets
+            .get_decrypted(&workspace_scope, "llm_custom_workspace-llm_api_key")
+            .await
+            .unwrap();
+        assert_eq!(decrypted.expose(), "gsk-workspace-key");
+        assert!(
+            secrets
+                .get_decrypted("test", "llm_custom_workspace-llm_api_key")
+                .await
+                .is_err(),
+            "workspace-scoped secrets should not be written to the caller scope"
+        );
     }
 
     #[tokio::test]

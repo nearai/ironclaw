@@ -868,9 +868,10 @@ mod auth_enforcement {
 mod admin_role_enforcement {
     use super::*;
     use crate::channels::web::handlers::users::{
-        users_activate_handler, users_detail_handler, users_list_handler, users_suspend_handler,
-        users_update_handler,
+        users_activate_handler, users_create_handler, users_detail_handler, users_list_handler,
+        users_suspend_handler, users_update_handler,
     };
+    use crate::db::UserRecord;
     use axum::routing::patch;
 
     /// Build a router with admin user endpoints behind multi-user auth.
@@ -955,6 +956,99 @@ mod admin_role_enforcement {
             StatusCode::FORBIDDEN,
             "admin should not get 403"
         );
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_user_creation_omits_created_by_when_creator_is_missing_from_db() {
+        let (db, _dir) = test_db().await;
+
+        let mut tokens = HashMap::new();
+        tokens.insert(
+            "tok-admin".to_string(),
+            UserIdentity {
+                user_id: "admin-user".to_string(),
+                role: "admin".to_string(),
+                workspace_read_scopes: vec![],
+            },
+        );
+        let app = Router::new()
+            .route("/api/admin/users", post(users_create_handler))
+            .layer(middleware::from_fn_with_state(
+                crate::channels::web::auth::CombinedAuthState::from(MultiAuthState::multi(tokens)),
+                auth_middleware,
+            ))
+            .with_state(build_state(Some(db), None));
+
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/api/admin/users")
+            .header("Authorization", "Bearer tok-admin")
+            .header("Content-Type", "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&serde_json::json!({ "display_name": "Created User" })).unwrap(),
+            ))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: serde_json::Value =
+            serde_json::from_slice(&axum::body::to_bytes(resp.into_body(), 16384).await.unwrap())
+                .unwrap();
+        assert!(body["created_by"].is_null());
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_user_creation_sets_created_by_when_creator_exists_in_db() {
+        let (db, _dir) = test_db().await;
+        let now = chrono::Utc::now();
+        db.create_user(&UserRecord {
+            id: "admin-user".to_string(),
+            email: Some("admin@example.com".to_string()),
+            display_name: "Admin".to_string(),
+            status: "active".to_string(),
+            role: "admin".to_string(),
+            created_at: now,
+            updated_at: now,
+            last_login_at: None,
+            created_by: None,
+            metadata: serde_json::json!({}),
+        })
+        .await
+        .unwrap();
+
+        let mut tokens = HashMap::new();
+        tokens.insert(
+            "tok-admin".to_string(),
+            UserIdentity {
+                user_id: "admin-user".to_string(),
+                role: "admin".to_string(),
+                workspace_read_scopes: vec![],
+            },
+        );
+        let app = Router::new()
+            .route("/api/admin/users", post(users_create_handler))
+            .layer(middleware::from_fn_with_state(
+                crate::channels::web::auth::CombinedAuthState::from(MultiAuthState::multi(tokens)),
+                auth_middleware,
+            ))
+            .with_state(build_state(Some(db), None));
+
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/api/admin/users")
+            .header("Authorization", "Bearer tok-admin")
+            .header("Content-Type", "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&serde_json::json!({ "display_name": "Created User" })).unwrap(),
+            ))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: serde_json::Value =
+            serde_json::from_slice(&axum::body::to_bytes(resp.into_body(), 16384).await.unwrap())
+                .unwrap();
+        assert_eq!(body["created_by"], "admin-user");
     }
 }
 

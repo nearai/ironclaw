@@ -169,6 +169,142 @@ async fn workspace_membership_endpoints_enforce_membership_and_admin_updates() {
 }
 
 #[tokio::test]
+async fn workspace_creation_rejects_invalid_slug() {
+    let store = setup_store().await;
+    let addr = start_workspace_server(store, None).await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .post(format!("http://{addr}/api/workspaces"))
+        .header("Authorization", format!("Bearer {ALICE_TOKEN}"))
+        .json(&json!({
+            "name": "Bad Slug",
+            "slug": "-bad-slug",
+            "description": "",
+            "settings": {}
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 400);
+    assert!(
+        resp.text()
+            .await
+            .unwrap()
+            .contains("Workspace slug must match"),
+        "expected slug validation error"
+    );
+}
+
+#[tokio::test]
+async fn workspace_member_updates_validate_roles_and_owner_permissions() {
+    let store = setup_store().await;
+    let addr = start_workspace_server(store, None).await;
+    let client = reqwest::Client::new();
+
+    let create_resp = client
+        .post(format!("http://{addr}/api/workspaces"))
+        .header("Authorization", format!("Bearer {ALICE_TOKEN}"))
+        .json(&json!({
+            "name": "Owner Rules",
+            "slug": "owner-rules",
+            "description": "",
+            "settings": {}
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(create_resp.status(), 200);
+
+    let invalid_role = client
+        .put(format!(
+            "http://{addr}/api/workspaces/owner-rules/members/{CHARLIE_USER_ID}"
+        ))
+        .header("Authorization", format!("Bearer {ALICE_TOKEN}"))
+        .json(&json!({ "role": "superadmin" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(invalid_role.status(), 400);
+
+    let add_admin = client
+        .put(format!(
+            "http://{addr}/api/workspaces/owner-rules/members/{BOB_USER_ID}"
+        ))
+        .header("Authorization", format!("Bearer {ALICE_TOKEN}"))
+        .json(&json!({ "role": "admin" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(add_admin.status(), 204);
+
+    let bob_self_promote = client
+        .put(format!(
+            "http://{addr}/api/workspaces/owner-rules/members/{BOB_USER_ID}"
+        ))
+        .header("Authorization", format!("Bearer {BOB_TOKEN}"))
+        .json(&json!({ "role": "owner" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bob_self_promote.status(), 403);
+
+    let bob_promote_other = client
+        .put(format!(
+            "http://{addr}/api/workspaces/owner-rules/members/{CHARLIE_USER_ID}"
+        ))
+        .header("Authorization", format!("Bearer {BOB_TOKEN}"))
+        .json(&json!({ "role": "owner" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bob_promote_other.status(), 403);
+}
+
+#[tokio::test]
+async fn workspace_cannot_remove_or_demote_last_owner() {
+    let store = setup_store().await;
+    let addr = start_workspace_server(store, None).await;
+    let client = reqwest::Client::new();
+
+    let create_resp = client
+        .post(format!("http://{addr}/api/workspaces"))
+        .header("Authorization", format!("Bearer {ALICE_TOKEN}"))
+        .json(&json!({
+            "name": "Single Owner",
+            "slug": "single-owner",
+            "description": "",
+            "settings": {}
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(create_resp.status(), 200);
+
+    let demote_resp = client
+        .put(format!(
+            "http://{addr}/api/workspaces/single-owner/members/{ALICE_USER_ID}"
+        ))
+        .header("Authorization", format!("Bearer {ALICE_TOKEN}"))
+        .json(&json!({ "role": "admin" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(demote_resp.status(), 409);
+
+    let delete_resp = client
+        .delete(format!(
+            "http://{addr}/api/workspaces/single-owner/members/{ALICE_USER_ID}"
+        ))
+        .header("Authorization", format!("Bearer {ALICE_TOKEN}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(delete_resp.status(), 409);
+}
+
+#[tokio::test]
 async fn archived_workspace_returns_gone_for_scoped_endpoints() {
     let store = setup_store().await;
     let addr = start_workspace_server(store, None).await;
@@ -221,6 +357,53 @@ async fn archived_workspace_returns_gone_for_scoped_endpoints() {
         .await
         .unwrap();
     assert_eq!(chat_resp.status(), 410);
+}
+
+#[tokio::test]
+async fn archived_workspaces_are_hidden_from_workspace_lists() {
+    let store = setup_store().await;
+    let addr = start_workspace_server(store, None).await;
+    let client = reqwest::Client::new();
+
+    let create_resp = client
+        .post(format!("http://{addr}/api/workspaces"))
+        .header("Authorization", format!("Bearer {ALICE_TOKEN}"))
+        .json(&json!({
+            "name": "Archive Hidden",
+            "slug": "archive-hidden",
+            "description": "",
+            "settings": {}
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(create_resp.status(), 200);
+
+    let archive_resp = client
+        .post(format!(
+            "http://{addr}/api/workspaces/archive-hidden/archive"
+        ))
+        .header("Authorization", format!("Bearer {ALICE_TOKEN}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(archive_resp.status(), 204);
+
+    let list_resp = client
+        .get(format!("http://{addr}/api/workspaces"))
+        .header("Authorization", format!("Bearer {ALICE_TOKEN}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(list_resp.status(), 200);
+    let list_json: serde_json::Value = list_resp.json().await.unwrap();
+    let workspaces = list_json["workspaces"].as_array().unwrap();
+    assert!(
+        !workspaces
+            .iter()
+            .any(|workspace| workspace["slug"] == "archive-hidden"),
+        "archived workspaces should not be listed"
+    );
 }
 
 #[tokio::test]

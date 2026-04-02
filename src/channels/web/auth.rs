@@ -1003,6 +1003,23 @@ mod tests {
     use crate::testing::credentials::TEST_AUTH_SECRET_TOKEN;
 
     #[test]
+    fn test_token_prefix_truncates_to_eight_ascii_chars() {
+        assert_eq!(token_prefix("1234567890abcdef"), "12345678");
+    }
+
+    #[test]
+    fn test_token_prefix_preserves_short_tokens() {
+        assert_eq!(token_prefix("short"), "short");
+        assert_eq!(token_prefix(""), "");
+    }
+
+    #[test]
+    fn test_token_prefix_counts_unicode_scalars_not_bytes() {
+        assert_eq!(token_prefix("🙂🙂🙂🙂🙂🙂🙂🙂🙂"), "🙂🙂🙂🙂🙂🙂🙂🙂");
+        assert_eq!(token_prefix("ééééééééé"), "éééééééé");
+    }
+
+    #[test]
     fn test_multi_auth_state_single() {
         let state = MultiAuthState::single("tok-123".to_string(), "alice".to_string());
         let identity = state.authenticate("tok-123");

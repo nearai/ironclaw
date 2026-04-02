@@ -56,7 +56,7 @@ fn validate_webhook_secret(
 /// by the per-routine webhook secret sent via the `X-Webhook-Secret` header.
 ///
 /// **Single-user/backward-compatible**: looks up routines by path across all
-/// users. For multi-tenant isolation, use the user-scoped endpoint at
+/// users. Disabled in multi-tenant mode; use the user-scoped endpoint at
 /// `/api/webhooks/u/{user_id}/{path}` instead.
 pub async fn webhook_trigger_handler(
     State(state): State<Arc<GatewayState>>,
@@ -86,6 +86,14 @@ async fn fire_webhook_inner(
     user_id: Option<&str>,
     headers: &HeaderMap,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    if user_id.is_none() && state.workspace_pool.is_some() {
+        return Err((
+            StatusCode::GONE,
+            "Unscoped webhooks are disabled in multi-tenant mode. Use /api/webhooks/u/{user_id}/{path}."
+                .to_string(),
+        ));
+    }
+
     // Rate limit check
     if !state.webhook_rate_limiter.check() {
         return Err((
@@ -148,6 +156,14 @@ async fn fire_webhook_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    use crate::channels::web::server::{
+        ActiveConfigSnapshot, GatewayState, PerUserRateLimiter, RateLimiter, WorkspacePool,
+    };
+    use crate::channels::web::sse::SseManager;
+    use crate::config::{WorkspaceConfig, WorkspaceSearchConfig};
+    use crate::workspace::EmbeddingCacheConfig;
 
     /// Routines with `secret: None` must be rejected with 403.
     #[test]
@@ -220,5 +236,62 @@ mod tests {
         let result = validate_webhook_secret(&trigger, "a-much-longer-secret-value");
         let (status, _) = result.unwrap_err();
         assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_unscoped_webhooks_are_disabled_in_multi_tenant_mode() {
+        use crate::db::Database;
+
+        let backend = crate::db::libsql::LibSqlBackend::new_memory()
+            .await
+            .unwrap();
+        backend.run_migrations().await.unwrap();
+        let store: Arc<dyn Database> = Arc::new(backend);
+        let workspace_pool = Arc::new(WorkspacePool::new(
+            Arc::clone(&store),
+            None,
+            EmbeddingCacheConfig::default(),
+            WorkspaceSearchConfig::default(),
+            WorkspaceConfig::default(),
+        ));
+
+        let state = Arc::new(GatewayState {
+            msg_tx: tokio::sync::RwLock::new(None),
+            sse: Arc::new(SseManager::new()),
+            workspace: None,
+            workspace_pool: Some(workspace_pool),
+            session_manager: None,
+            log_broadcaster: None,
+            log_level_handle: None,
+            extension_manager: None,
+            tool_registry: None,
+            store: Some(store),
+            job_manager: None,
+            prompt_queue: None,
+            owner_id: "test".to_string(),
+            shutdown_tx: tokio::sync::RwLock::new(None),
+            ws_tracker: None,
+            llm_provider: None,
+            skill_registry: None,
+            skill_catalog: None,
+            scheduler: None,
+            chat_rate_limiter: PerUserRateLimiter::new(30, 60),
+            oauth_rate_limiter: RateLimiter::new(10, 60),
+            webhook_rate_limiter: RateLimiter::new(10, 60),
+            registry_entries: Vec::new(),
+            cost_guard: None,
+            routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
+            startup_time: std::time::Instant::now(),
+            active_config: ActiveConfigSnapshot::default(),
+            secrets_store: None,
+            db_auth: None,
+        });
+
+        let err = fire_webhook_inner(state, "my-hook", None, &HeaderMap::new())
+            .await
+            .unwrap_err();
+        assert_eq!(err.0, StatusCode::GONE);
+        assert!(err.1.contains("/api/webhooks/u/{user_id}/{path}"));
     }
 }
