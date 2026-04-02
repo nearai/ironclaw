@@ -48,6 +48,19 @@ use crate::channels::wasm::capabilities::{
 };
 use crate::tools::wasm::{CapabilitiesFile as ToolCapabilitiesFile, RateLimitSchema};
 
+/// Declared install source for a channel capabilities file.
+///
+/// This metadata is stamped by host installers and can be used for
+/// policy decisions (for example, allowing reserved aliases only from
+/// trusted installation paths).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChannelInstallSource {
+    Bundled,
+    Registry,
+    Local,
+}
+
 /// Root schema for a channel capabilities JSON file.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ChannelCapabilitiesFile {
@@ -81,6 +94,10 @@ pub struct ChannelCapabilitiesFile {
     /// Channel-specific configuration passed to on_start.
     #[serde(default)]
     pub config: HashMap<String, serde_json::Value>,
+
+    /// Optional provenance metadata written by the host installer.
+    #[serde(default)]
+    pub install_source: Option<ChannelInstallSource>,
 }
 
 fn default_type() -> String {
@@ -469,7 +486,7 @@ pub struct PollConfigSchema {
 
 #[cfg(test)]
 mod tests {
-    use crate::channels::wasm::schema::ChannelCapabilitiesFile;
+    use crate::channels::wasm::schema::{ChannelCapabilitiesFile, ChannelInstallSource};
 
     #[test]
     fn test_parse_minimal() {
@@ -479,6 +496,28 @@ mod tests {
         let file = ChannelCapabilitiesFile::from_json(json).unwrap();
         assert_eq!(file.name, "test");
         assert_eq!(file.r#type, "channel");
+        assert_eq!(file.install_source, None);
+    }
+
+    #[test]
+    fn test_parse_install_source() {
+        let json = r#"{
+            "name": "telegram",
+            "install_source": "bundled"
+        }"#;
+        let file = ChannelCapabilitiesFile::from_json(json).unwrap();
+        assert_eq!(file.install_source, Some(ChannelInstallSource::Bundled));
+    }
+
+    #[test]
+    fn test_serialize_install_source() {
+        let file = ChannelCapabilitiesFile {
+            name: "telegram".to_string(),
+            install_source: Some(ChannelInstallSource::Registry),
+            ..Default::default()
+        };
+        let raw = serde_json::to_string(&file).unwrap();
+        assert!(raw.contains("\"install_source\":\"registry\""));
     }
 
     #[test]

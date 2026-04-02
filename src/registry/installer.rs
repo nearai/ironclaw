@@ -6,6 +6,7 @@ use std::path::{Component, Path, PathBuf};
 use tokio::fs;
 
 use crate::bootstrap::ironclaw_base_dir;
+use crate::channels::wasm::{ChannelCapabilitiesFile, ChannelInstallSource};
 use crate::registry::catalog::RegistryError;
 use crate::registry::manifest::{BundleDefinition, ExtensionManifest, ManifestKind, SourceSpec};
 
@@ -304,6 +305,9 @@ impl RegistryInstaller {
             fs::copy(&caps_source, &target_caps)
                 .await
                 .map_err(RegistryError::Io)?;
+            if manifest.kind == ManifestKind::Channel {
+                stamp_channel_install_source(&target_caps, ChannelInstallSource::Registry).await?;
+            }
             true
         } else {
             false
@@ -531,6 +535,10 @@ impl RegistryInstaller {
             }
         };
 
+        if manifest.kind == ManifestKind::Channel && has_capabilities {
+            stamp_channel_install_source(&target_caps, ChannelInstallSource::Registry).await?;
+        }
+
         println!("  Installed to {}", target_wasm.display());
 
         let mut warnings = Vec::new();
@@ -631,6 +639,58 @@ impl RegistryInstaller {
 
         (outcomes, auth_hints)
     }
+}
+
+async fn stamp_channel_install_source(
+    path: &Path,
+    source: ChannelInstallSource,
+) -> Result<(), RegistryError> {
+    // Read existing capabilities JSON
+    let raw = fs::read(path).await.map_err(RegistryError::Io)?;
+
+    // Parse as generic JSON to preserve unknown fields
+    let mut value: serde_json::Value = serde_json::from_slice(&raw).map_err(|e| {
+        RegistryError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("invalid channel capabilities JSON: {}", e),
+        ))
+    })?;
+
+    // Ensure the root is an object so we can set install_source
+    let obj = value.as_object_mut().ok_or_else(|| {
+        RegistryError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "channel capabilities JSON must be a JSON object",
+        ))
+    })?;
+
+    // Serialize the new install_source value and update only that field
+    let install_source_value =
+        serde_json::to_value(&source).map_err(|e| {
+            RegistryError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("failed to serialize install_source: {}", e),
+            ))
+        })?;
+    obj.insert("install_source".to_string(), install_source_value);
+
+    // Serialize the updated JSON
+    let rewritten = serde_json::to_vec_pretty(&value).map_err(|e| {
+        RegistryError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("failed to serialize channel capabilities JSON: {}", e),
+        ))
+    })?;
+
+    // Write to a temporary file first, then atomically rename
+    let tmp_path = path.with_extension("tmp");
+    fs::write(&tmp_path, rewritten)
+        .await
+        .map_err(RegistryError::Io)?;
+    fs::rename(&tmp_path, path)
+        .await
+        .map_err(RegistryError::Io)?;
+    Ok(())
 }
 
 /// Download an artifact from a URL.
