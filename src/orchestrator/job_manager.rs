@@ -365,6 +365,7 @@ impl ContainerJobManager {
     }
 
     /// Inner implementation of container creation (separated for cleanup).
+    #[allow(clippy::too_many_arguments)]
     async fn create_job_inner(
         &self,
         job_id: Uuid,
@@ -994,8 +995,10 @@ mod tests {
 
     #[test]
     fn test_extend_acp_env_includes_timeout_and_agent_details() {
-        let mut config = ContainerJobConfig::default();
-        config.acp_timeout_secs = 45;
+        let config = ContainerJobConfig {
+            acp_timeout_secs: 45,
+            ..Default::default()
+        };
         let manager = ContainerJobManager::new(config, TokenStore::new());
 
         let agent = crate::config::acp::AcpAgentConfig::new(
