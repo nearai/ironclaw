@@ -16,7 +16,7 @@ use crate::channels::web::types::AppEvent;
 
 /// Maximum number of concurrent SSE/WebSocket connections.
 /// Prevents resource exhaustion from connection flooding.
-const MAX_CONNECTIONS: u64 = 100;
+pub const DEFAULT_MAX_CONNECTIONS: u64 = 100;
 
 /// Envelope for broadcast events: carries an optional user scope.
 ///
@@ -47,7 +47,7 @@ pub struct SseManager {
 impl SseManager {
     /// Create a new SSE manager.
     pub fn new() -> Self {
-        Self::with_max_connections(MAX_CONNECTIONS)
+        Self::with_max_connections(DEFAULT_MAX_CONNECTIONS)
     }
 
     /// Create a new SSE manager with a custom connection limit.
@@ -294,7 +294,7 @@ mod tests {
     fn test_sse_manager_creation() {
         let manager = SseManager::new();
         assert_eq!(manager.connection_count(), 0);
-        assert_eq!(manager.max_connections(), MAX_CONNECTIONS);
+        assert_eq!(manager.max_connections(), DEFAULT_MAX_CONNECTIONS);
     }
 
     #[test]

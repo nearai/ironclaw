@@ -38,8 +38,11 @@ async def _wait_for_connected(page, *, timeout: int = 10000) -> None:
 
 async def _wait_for_last_event_id(page, *, timeout: int = 15000) -> str:
     """Wait until the browser has recorded at least one SSE event ID."""
-    await page.wait_for_function("() => !!window.__e2eLastSseEventId", timeout=timeout)
-    return await page.evaluate("() => window.__e2eLastSseEventId")
+    await page.wait_for_function(
+        "() => !!(window.__e2e && window.__e2e.lastSseEventId)",
+        timeout=timeout,
+    )
+    return await page.evaluate("() => window.__e2e.lastSseEventId")
 
 
 async def _wait_for_turn_in_history(base_url: str, thread_id: str, expected_response: str) -> None:

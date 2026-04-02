@@ -389,7 +389,8 @@ function updateRestartButtonVisibility() {
 function rememberSseEventId(event) {
   if (!event || !event.lastEventId) return;
   _lastSseEventId = event.lastEventId;
-  window.__e2eLastSseEventId = event.lastEventId;
+  window.__e2e = window.__e2e || {};
+  window.__e2e.lastSseEventId = event.lastEventId;
 }
 
 function connectSSE(lastEventIdOverride) {
@@ -405,7 +406,6 @@ function connectSSE(lastEventIdOverride) {
       + 'last_event_id=' + encodeURIComponent(lastEventId);
   }
   eventSource = new EventSource(chatSseUrl);
-  window.__e2eCurrentSseUrl = chatSseUrl;
 
   const addTrackedEventListener = (eventType, handler) => {
     eventSource.addEventListener(eventType, (event) => {

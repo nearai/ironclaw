@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crate::bootstrap::ironclaw_base_dir;
+use crate::channels::web::sse::DEFAULT_MAX_CONNECTIONS;
 use crate::config::helpers::{
     db_first_bool, db_first_optional_string, db_first_or_default, optional_env, parse_bool_env,
     parse_optional_env,
@@ -273,7 +274,8 @@ impl ChannelsConfig {
                     optional_env("GATEWAY_AUTH_TOKEN")?
                 },
                 max_connections: {
-                    let max = parse_optional_env("GATEWAY_MAX_CONNECTIONS", 100_u64)?;
+                    let max =
+                        parse_optional_env("GATEWAY_MAX_CONNECTIONS", DEFAULT_MAX_CONNECTIONS)?;
                     if max == 0 {
                         return Err(ConfigError::InvalidValue {
                             key: "GATEWAY_MAX_CONNECTIONS".to_string(),

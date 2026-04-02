@@ -33,6 +33,7 @@ use crate::channels::relay::DEFAULT_RELAY_NAME;
 use crate::channels::web::auth::{
     AuthenticatedUser, CombinedAuthState, UserIdentity, auth_middleware,
 };
+use crate::channels::web::handlers::chat::{ChatEventsQuery, extract_last_event_id};
 use crate::channels::web::handlers::jobs::{
     job_files_list_handler, job_files_read_handler, jobs_cancel_handler, jobs_detail_handler,
     jobs_events_handler, jobs_list_handler, jobs_prompt_handler, jobs_restart_handler,
@@ -1724,15 +1725,9 @@ async fn chat_events_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let last_event_id = params.last_event_id.or_else(|| {
-        headers
-            .get("last-event-id")
-            .and_then(|value| value.to_str().ok())
-            .map(ToOwned::to_owned)
-    });
     let sse = state
         .sse
-        .subscribe(Some(user.user_id), last_event_id)
+        .subscribe(Some(user.user_id), extract_last_event_id(&params, &headers))
         .ok_or((
             StatusCode::SERVICE_UNAVAILABLE,
             "Too many connections".to_string(),
@@ -1741,11 +1736,6 @@ async fn chat_events_handler(
         [("X-Accel-Buffering", "no"), ("Cache-Control", "no-cache")],
         sse,
     ))
-}
-
-#[derive(Debug, Deserialize, Default)]
-struct ChatEventsQuery {
-    last_event_id: Option<String>,
 }
 
 /// Check whether an Origin header value points to a local address.

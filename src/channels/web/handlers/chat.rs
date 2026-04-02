@@ -5,7 +5,7 @@ use std::sync::Arc;
 use axum::{
     Json,
     extract::{Query, State, WebSocketUpgrade},
-    http::StatusCode,
+    http::{HeaderMap, HeaderName, StatusCode},
     response::IntoResponse,
 };
 use serde::Deserialize;
@@ -242,28 +242,38 @@ pub async fn clear_auth_mode(state: &GatewayState, user_id: &str) {
 
 pub async fn chat_events_handler(
     Query(params): Query<ChatEventsQuery>,
-    headers: axum::http::HeaderMap,
+    headers: HeaderMap,
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let last_event_id = params.last_event_id.or_else(|| {
-        headers
-            .get("last-event-id")
-            .and_then(|value| value.to_str().ok())
-            .map(ToOwned::to_owned)
-    });
-    state
+    let sse = state
         .sse
-        .subscribe(Some(user.user_id), last_event_id)
+        .subscribe(Some(user.user_id), extract_last_event_id(&params, &headers))
         .ok_or((
             StatusCode::SERVICE_UNAVAILABLE,
             "Too many connections".to_string(),
-        ))
+        ))?;
+    Ok((
+        [("X-Accel-Buffering", "no"), ("Cache-Control", "no-cache")],
+        sse,
+    ))
 }
 
 #[derive(Debug, Deserialize, Default)]
 pub struct ChatEventsQuery {
     pub last_event_id: Option<String>,
+}
+
+pub(crate) fn extract_last_event_id(
+    params: &ChatEventsQuery,
+    headers: &HeaderMap,
+) -> Option<String> {
+    params.last_event_id.clone().or_else(|| {
+        headers
+            .get(HeaderName::from_static("last-event-id"))
+            .and_then(|value| value.to_str().ok())
+            .map(ToOwned::to_owned)
+    })
 }
 
 pub async fn chat_ws_handler(
