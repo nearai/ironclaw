@@ -70,6 +70,10 @@ mod tests {
                         "event_source": "github",
                         "event_type": "issue.opened",
                         "event_filters": {"repository": "nearai/ironclaw"},
+                        // This test fires the same routine via event_emit and then the
+                        // webhook endpoint back-to-back, so cooldown must not suppress
+                        // the second path.
+                        "cooldown_secs": 0,
                         "action_type": "lightweight",
                         "prompt": "Summarize webhook and report issue number"
                     }),

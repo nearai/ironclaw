@@ -11,7 +11,9 @@ use async_trait::async_trait;
 use tokio::sync::mpsc;
 
 use crate::channels::relay::client::{ChannelEvent, RelayClient};
-use crate::channels::{Channel, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate};
+use crate::channels::{
+    Channel, ChatApprovalPrompt, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate,
+};
 use crate::error::ChannelError;
 
 /// Default channel name for the Slack relay integration.
@@ -125,6 +127,58 @@ impl RelayChannel {
         self.client
             .proxy_provider(self.provider.as_str(), team_id, method, body)
             .await
+    }
+
+    fn build_approval_body(
+        &self,
+        channel_id: &str,
+        thread_id: Option<&str>,
+        prompt: &ChatApprovalPrompt,
+        approval_token: &str,
+    ) -> serde_json::Value {
+        let value_payload = serde_json::json!({
+            "approval_token": approval_token,
+        });
+        let value_str = value_payload.to_string();
+
+        let blocks = serde_json::json!([
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": prompt.markdown_message(),
+                }
+            },
+            {
+                "type": "actions",
+                "elements": [
+                    {
+                        "type": "button",
+                        "text": { "type": "plain_text", "text": "Approve" },
+                        "style": "primary",
+                        "action_id": "approve_tool",
+                        "value": value_str,
+                    },
+                    {
+                        "type": "button",
+                        "text": { "type": "plain_text", "text": "Deny" },
+                        "style": "danger",
+                        "action_id": "deny_tool",
+                        "value": value_str,
+                    }
+                ]
+            }
+        ]);
+
+        let mut body = serde_json::json!({
+            "channel": channel_id,
+            "text": prompt.summary_text(),
+            "blocks": blocks,
+        });
+        if let Some(tid) = thread_id {
+            body["thread_ts"] = serde_json::Value::String(tid.to_string());
+        }
+        body
     }
 }
 
@@ -266,14 +320,7 @@ impl Channel for RelayChannel {
         metadata: &serde_json::Value,
     ) -> Result<(), ChannelError> {
         // Only handle ApprovalNeeded — all other variants are no-ops
-        let StatusUpdate::ApprovalNeeded {
-            request_id,
-            tool_name,
-            description,
-            parameters,
-            allow_always: _,
-        } = status
-        else {
+        let Some(prompt) = ChatApprovalPrompt::from_status(&status) else {
             return Ok(());
         };
 
@@ -284,7 +331,7 @@ impl Channel for RelayChannel {
             .unwrap_or("");
         if event_type != "direct_message" {
             tracing::warn!(
-                tool = %tool_name,
+                tool = %prompt.tool_name,
                 event_type,
                 "Approval requested in non-DM, skipping buttons"
             );
@@ -309,60 +356,13 @@ impl Channel for RelayChannel {
         // The button value contains ONLY the token — no routing fields.
         let approval_token = self
             .client
-            .create_approval(team_id, channel_id, thread_id, &request_id)
+            .create_approval(team_id, channel_id, thread_id, &prompt.request_id)
             .await
             .map_err(|e| ChannelError::SendFailed {
                 name: self.name().to_string(),
                 reason: format!("Failed to register approval: {e}"),
             })?;
-        let value_payload = serde_json::json!({
-            "approval_token": approval_token,
-        });
-        let value_str = value_payload.to_string();
-
-        // Parameters are already redacted via redact_params() in dispatcher.rs
-        let params_display =
-            serde_json::to_string_pretty(&parameters).unwrap_or_else(|_| parameters.to_string());
-
-        let blocks = serde_json::json!([
-            {
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": format!(
-                        "*Tool approval required*\n`{tool_name}`: {description}\n```{params_display}```"
-                    )
-                }
-            },
-            {
-                "type": "actions",
-                "elements": [
-                    {
-                        "type": "button",
-                        "text": { "type": "plain_text", "text": "Approve" },
-                        "style": "primary",
-                        "action_id": "approve_tool",
-                        "value": value_str,
-                    },
-                    {
-                        "type": "button",
-                        "text": { "type": "plain_text", "text": "Deny" },
-                        "style": "danger",
-                        "action_id": "deny_tool",
-                        "value": value_str,
-                    }
-                ]
-            }
-        ]);
-
-        let mut body = serde_json::json!({
-            "channel": channel_id,
-            "text": format!("Tool approval required: {tool_name} - {description}"),
-            "blocks": blocks,
-        });
-        if let Some(tid) = thread_id {
-            body["thread_ts"] = serde_json::Value::String(tid.to_string());
-        }
+        let body = self.build_approval_body(channel_id, thread_id, &prompt, &approval_token);
 
         self.proxy_send(team_id, "chat.postMessage", body)
             .await
@@ -503,6 +503,29 @@ mod tests {
         assert_eq!(body["thread_ts"], "1234567.890");
     }
 
+    #[test]
+    fn build_approval_body_includes_chat_reply_instructions() {
+        let channel = make_channel();
+        let prompt = ChatApprovalPrompt {
+            request_id: "req-1".into(),
+            tool_name: "http".into(),
+            description: "HTTP requests to external APIs".into(),
+            parameters: serde_json::json!({"method": "POST", "url": "https://example.com"}),
+            allow_always: true,
+        };
+
+        let body = channel.build_approval_body("C456", Some("1234567.890"), &prompt, "token-123");
+        let text = body["text"].as_str().expect("plain text");
+        let block_text = body["blocks"][0]["text"]["text"].as_str().expect("mrkdwn");
+
+        assert!(text.contains("Request ID: req-1"));
+        assert!(text.contains("Reply with yes (or /approve)"));
+        assert!(!text.contains("Parameters:"));
+        assert!(block_text.contains("`/approve`"));
+        assert!(block_text.contains("`/always`"));
+        assert_eq!(body["thread_ts"], "1234567.890");
+    }
+
     #[tokio::test]
     async fn start_processes_events() {
         let (tx, rx) = mpsc::channel(64);
@@ -536,6 +559,41 @@ mod tests {
 
         assert_eq!(msg.content, "hello");
         assert_eq!(msg.user_id, "U789");
+    }
+
+    #[tokio::test]
+    async fn start_threaded_message_preserves_thread_scope() {
+        let (tx, rx) = mpsc::channel(64);
+        let channel =
+            RelayChannel::new(test_client(), "T123".into(), "inst1".into(), tx.clone(), rx);
+
+        let mut stream = channel.start().await.unwrap();
+
+        tx.send(ChannelEvent {
+            id: "threaded-1".into(),
+            event_type: "direct_message".into(),
+            provider: "slack".into(),
+            provider_scope: "T123".into(),
+            channel_id: "D456".into(),
+            sender_id: "U789".into(),
+            sender_name: Some("alice".into()),
+            content: Some("approve".into()),
+            thread_id: Some("1712345678.123".into()),
+            raw: serde_json::Value::Null,
+            timestamp: None,
+        })
+        .await
+        .unwrap();
+
+        use futures::StreamExt;
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(1), stream.next())
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(msg.content, "approve");
+        assert_eq!(msg.thread_id.as_deref(), Some("1712345678.123"));
+        assert_eq!(msg.conversation_scope(), Some("1712345678.123"));
     }
 
     #[tokio::test]
