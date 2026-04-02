@@ -1018,7 +1018,7 @@ impl ChannelPairingStore for PgBackend {
         Ok(row.map(|r| {
             let owner_id: String = r.get(0);
             let role_str: String = r.get(1);
-            let role = if role_str == "admin" {
+            let role = if role_str.eq_ignore_ascii_case("admin") {
                 UserRole::Admin
             } else {
                 UserRole::Member
@@ -1031,16 +1031,20 @@ impl ChannelPairingStore for PgBackend {
         &self,
         channel: &str,
         external_id: &str,
-        _meta: Option<serde_json::Value>,
+        meta: Option<serde_json::Value>,
     ) -> Result<PairingRequestRecord, DatabaseError> {
-        let client = self
+        let mut client = self
             .pool()
             .get()
             .await
             .map_err(|e| DatabaseError::Pool(e.to_string()))?;
+        let tx = client
+            .transaction()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
         // Return existing valid pending request if present
-        let existing = client
+        let existing = tx
             .query_opt(
                 "SELECT id, channel, external_id, code, created_at, expires_at
                  FROM pairing_requests
@@ -1053,6 +1057,9 @@ impl ChannelPairingStore for PgBackend {
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
         if let Some(row) = existing {
+            tx.commit()
+                .await
+                .map_err(|e| DatabaseError::Query(e.to_string()))?;
             return Ok(PairingRequestRecord {
                 id: row.get(0),
                 channel: row.get(1),
@@ -1065,20 +1072,24 @@ impl ChannelPairingStore for PgBackend {
         }
 
         let expires_at = chrono::Utc::now() + chrono::Duration::minutes(15);
+        let meta_json: Option<serde_json::Value> = meta;
 
         // Retry loop: regenerate code on UNIQUE violation (code collision)
         for attempt in 0..3 {
             let code = crate::db::generate_pairing_code();
-            match client
+            match tx
                 .query_one(
-                    "INSERT INTO pairing_requests (id, channel, external_id, code, expires_at)
-                     VALUES (gen_random_uuid(), $1, $2, $3, $4)
+                    "INSERT INTO pairing_requests (id, channel, external_id, code, meta, expires_at)
+                     VALUES (gen_random_uuid(), $1, $2, $3, $4, $5)
                      RETURNING id, channel, external_id, code, created_at, expires_at",
-                    &[&channel, &external_id, &code, &expires_at],
+                    &[&channel, &external_id, &code, &meta_json, &expires_at],
                 )
                 .await
             {
                 Ok(row) => {
+                    tx.commit()
+                        .await
+                        .map_err(|e| DatabaseError::Query(e.to_string()))?;
                     return Ok(PairingRequestRecord {
                         id: row.get(0),
                         channel: row.get(1),
@@ -1126,7 +1137,7 @@ impl ChannelPairingStore for PgBackend {
             .query_opt(
                 "SELECT id, channel, external_id FROM pairing_requests
                  WHERE UPPER(code) = UPPER($1)
-                   AND channel = $2
+                   AND LOWER(channel) = LOWER($2)
                    AND approved_at IS NULL
                    AND expires_at > NOW()
                  FOR UPDATE",

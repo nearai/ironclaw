@@ -631,6 +631,7 @@ CREATE TABLE IF NOT EXISTS pairing_requests (
     external_id TEXT    NOT NULL,
     code        TEXT    NOT NULL UNIQUE,
     owner_id    TEXT    REFERENCES users(id) ON DELETE CASCADE,
+    meta        TEXT,
     created_at  TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     expires_at  TEXT    NOT NULL,
     approved_at TEXT
@@ -873,6 +874,7 @@ CREATE TABLE IF NOT EXISTS pairing_requests (
     external_id TEXT    NOT NULL,
     code        TEXT    NOT NULL UNIQUE,
     owner_id    TEXT    REFERENCES users(id) ON DELETE CASCADE,
+    meta        TEXT,
     created_at  TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     expires_at  TEXT    NOT NULL,
     approved_at TEXT

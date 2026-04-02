@@ -40,7 +40,7 @@ impl ChannelPairingStore for LibSqlBackend {
                 let role_str: String = row
                     .get(1)
                     .map_err(|e| DatabaseError::Query(e.to_string()))?;
-                let role = if role_str == "admin" {
+                let role = if role_str.eq_ignore_ascii_case("admin") {
                     UserRole::Admin
                 } else {
                     UserRole::Member
@@ -55,99 +55,123 @@ impl ChannelPairingStore for LibSqlBackend {
         &self,
         channel: &str,
         external_id: &str,
-        _meta: Option<serde_json::Value>,
+        meta: Option<serde_json::Value>,
     ) -> Result<PairingRequestRecord, DatabaseError> {
         let conn = self.connect().await?;
 
-        // Return existing valid pending request
-        let mut rows = conn
-            .query(
-                "SELECT id, channel, external_id, code, created_at, expires_at
-                 FROM pairing_requests
-                 WHERE channel = ?1 AND external_id = ?2
-                   AND approved_at IS NULL
-                   AND expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-                 ORDER BY created_at DESC LIMIT 1",
-                params![channel, external_id],
-            )
+        // BEGIN IMMEDIATE acquires a write lock upfront, preventing concurrent upserts
+        conn.execute("BEGIN IMMEDIATE", ())
             .await
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
-        if let Some(row) = rows
-            .next()
-            .await
-            .map_err(|e| DatabaseError::Query(e.to_string()))?
-        {
-            let id_str: String = row
-                .get(0)
-                .map_err(|e| DatabaseError::Query(e.to_string()))?;
-            return Ok(PairingRequestRecord {
-                id: uuid::Uuid::parse_str(&id_str)
-                    .map_err(|e| DatabaseError::Query(e.to_string()))?,
-                channel: row
-                    .get(1)
-                    .map_err(|e| DatabaseError::Query(e.to_string()))?,
-                external_id: row
-                    .get(2)
-                    .map_err(|e| DatabaseError::Query(e.to_string()))?,
-                code: row
-                    .get(3)
-                    .map_err(|e| DatabaseError::Query(e.to_string()))?,
-                created: false,
-                created_at: get_ts(&row, 4),
-                expires_at: get_ts(&row, 5),
-            });
-        }
-
-        let now = chrono::Utc::now();
-        let expires_at = now + chrono::Duration::minutes(15);
-        let now_str = fmt_ts(&now);
-        let expires_str = fmt_ts(&expires_at);
-
-        // Retry loop: regenerate code on UNIQUE constraint violation (code collision)
-        for attempt in 0..3 {
-            let id = uuid::Uuid::new_v4().to_string();
-            let code = crate::db::generate_pairing_code();
-            match conn
-                .execute(
-                    "INSERT INTO pairing_requests (id, channel, external_id, code, created_at, expires_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                    params![
-                        id.as_str(),
-                        channel,
-                        external_id,
-                        code.as_str(),
-                        now_str.as_str(),
-                        expires_str.as_str()
-                    ],
+        let result = async {
+            // Return existing valid pending request
+            let mut rows = conn
+                .query(
+                    "SELECT id, channel, external_id, code, created_at, expires_at
+                     FROM pairing_requests
+                     WHERE channel = ?1 AND external_id = ?2
+                       AND approved_at IS NULL
+                       AND expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                     ORDER BY created_at DESC LIMIT 1",
+                    params![channel, external_id],
                 )
                 .await
+                .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+            if let Some(row) = rows
+                .next()
+                .await
+                .map_err(|e| DatabaseError::Query(e.to_string()))?
             {
-                Ok(_) => {
-                    return Ok(PairingRequestRecord {
-                        id: uuid::Uuid::parse_str(&id)
-                            .map_err(|e| DatabaseError::Query(e.to_string()))?,
-                        channel: channel.to_string(),
-                        external_id: external_id.to_string(),
-                        code,
-                        created: true,
-                        created_at: now,
-                        expires_at,
-                    });
-                }
-                Err(e) => {
-                    let msg = e.to_string();
-                    if attempt < 2 && msg.contains("UNIQUE constraint failed") {
-                        continue;
+                let id_str: String = row
+                    .get(0)
+                    .map_err(|e| DatabaseError::Query(e.to_string()))?;
+                return Ok(PairingRequestRecord {
+                    id: uuid::Uuid::parse_str(&id_str)
+                        .map_err(|e| DatabaseError::Query(e.to_string()))?,
+                    channel: row
+                        .get(1)
+                        .map_err(|e| DatabaseError::Query(e.to_string()))?,
+                    external_id: row
+                        .get(2)
+                        .map_err(|e| DatabaseError::Query(e.to_string()))?,
+                    code: row
+                        .get(3)
+                        .map_err(|e| DatabaseError::Query(e.to_string()))?,
+                    created: false,
+                    created_at: get_ts(&row, 4),
+                    expires_at: get_ts(&row, 5),
+                });
+            }
+
+            let now = chrono::Utc::now();
+            let expires_at = now + chrono::Duration::minutes(15);
+            let now_str = fmt_ts(&now);
+            let expires_str = fmt_ts(&expires_at);
+            let meta_str = meta.map(|v| v.to_string());
+
+            // Retry loop: regenerate code on UNIQUE constraint violation (code collision)
+            for attempt in 0..3 {
+                let id = uuid::Uuid::new_v4().to_string();
+                let code = crate::db::generate_pairing_code();
+                match conn
+                    .execute(
+                        "INSERT INTO pairing_requests (id, channel, external_id, code, meta, created_at, expires_at)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                        params![
+                            id.as_str(),
+                            channel,
+                            external_id,
+                            code.as_str(),
+                            meta_str.as_deref().unwrap_or_default(),
+                            now_str.as_str(),
+                            expires_str.as_str()
+                        ],
+                    )
+                    .await
+                {
+                    Ok(_) => {
+                        return Ok(PairingRequestRecord {
+                            id: uuid::Uuid::parse_str(&id)
+                                .map_err(|e| DatabaseError::Query(e.to_string()))?,
+                            channel: channel.to_string(),
+                            external_id: external_id.to_string(),
+                            code,
+                            created: true,
+                            created_at: now,
+                            expires_at,
+                        });
                     }
-                    return Err(DatabaseError::Query(msg));
+                    Err(e) => {
+                        let msg = e.to_string();
+                        if attempt < 2 && msg.contains("UNIQUE constraint failed") {
+                            continue;
+                        }
+                        return Err(DatabaseError::Query(msg));
+                    }
                 }
             }
-        }
 
-        Err(DatabaseError::Query(
-            "failed to generate unique pairing code after 3 attempts".to_string(),
-        ))
+            Err(DatabaseError::Query(
+                "failed to generate unique pairing code after 3 attempts".to_string(),
+            ))
+        }
+        .await;
+
+        match result {
+            Ok(record) => {
+                conn.execute("COMMIT", ())
+                    .await
+                    .map_err(|e| DatabaseError::Query(e.to_string()))?;
+                Ok(record)
+            }
+            Err(e) => {
+                // Best-effort rollback — if rollback fails, log but return original error
+                let _ = conn.execute("ROLLBACK", ()).await;
+                Err(e)
+            }
+        }
     }
 
     async fn approve_pairing(
@@ -169,7 +193,7 @@ impl ChannelPairingStore for LibSqlBackend {
                 .query(
                     "SELECT id, channel, external_id FROM pairing_requests
                      WHERE UPPER(code) = UPPER(?1)
-                       AND channel = ?2
+                       AND LOWER(channel) = LOWER(?2)
                        AND approved_at IS NULL
                        AND expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
                      LIMIT 1",
@@ -190,7 +214,7 @@ impl ChannelPairingStore for LibSqlBackend {
             let req_id: String = row
                 .get(0)
                 .map_err(|e| DatabaseError::Query(e.to_string()))?;
-            let channel: String = row
+            let req_channel: String = row
                 .get(1)
                 .map_err(|e| DatabaseError::Query(e.to_string()))?;
             let external_id: String = row
@@ -213,7 +237,7 @@ impl ChannelPairingStore for LibSqlBackend {
                 libsql::params![
                     identity_id.as_str(),
                     owner_id,
-                    channel.as_str(),
+                    req_channel.as_str(),
                     external_id.as_str()
                 ],
             )

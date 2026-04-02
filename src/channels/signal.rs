@@ -213,7 +213,10 @@ impl SignalChannel {
         match result {
             Ok(Some(identity)) => Ok(Some(identity.owner_id.to_string())),
             Ok(None) => Err(()),
-            Err(_) => Err(()),
+            Err(e) => {
+                tracing::error!(sender = %sender, error = %e, "Signal: DB error resolving sender identity");
+                Err(())
+            }
         }
     }
 

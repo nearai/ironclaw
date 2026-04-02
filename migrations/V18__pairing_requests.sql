@@ -6,6 +6,7 @@ CREATE TABLE pairing_requests (
     external_id TEXT        NOT NULL,
     code        TEXT        NOT NULL UNIQUE,
     owner_id    TEXT        REFERENCES users(id) ON DELETE CASCADE,
+    meta        JSONB,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     expires_at  TIMESTAMPTZ NOT NULL,
     approved_at TIMESTAMPTZ
