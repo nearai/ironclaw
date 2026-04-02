@@ -836,6 +836,25 @@ ALTER TABLE conversations ADD COLUMN source_channel TEXT;
     ),
     (
         16,
+        "document_versions",
+        r#"
+CREATE TABLE IF NOT EXISTS memory_document_versions (
+    id TEXT PRIMARY KEY,
+    document_id TEXT NOT NULL REFERENCES memory_documents(id) ON DELETE CASCADE,
+    version INTEGER NOT NULL,
+    content TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    changed_by TEXT,
+    UNIQUE(document_id, version)
+);
+
+CREATE INDEX IF NOT EXISTS idx_doc_versions_lookup
+    ON memory_document_versions(document_id, version DESC);
+"#,
+    ),
+    (
+        17,
         "user_identities",
         r#"
 CREATE TABLE IF NOT EXISTS user_identities (
@@ -854,25 +873,6 @@ CREATE TABLE IF NOT EXISTS user_identities (
 );
 CREATE INDEX IF NOT EXISTS idx_user_identities_user ON user_identities(user_id);
 CREATE INDEX IF NOT EXISTS idx_user_identities_email ON user_identities(email) WHERE email IS NOT NULL;
-"#,
-    ),
-    (
-        17,
-        "document_versions",
-        r#"
-CREATE TABLE IF NOT EXISTS memory_document_versions (
-    id TEXT PRIMARY KEY,
-    document_id TEXT NOT NULL REFERENCES memory_documents(id) ON DELETE CASCADE,
-    version INTEGER NOT NULL,
-    content TEXT NOT NULL,
-    content_hash TEXT NOT NULL,
-    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-    changed_by TEXT,
-    UNIQUE(document_id, version)
-);
-
-CREATE INDEX IF NOT EXISTS idx_doc_versions_lookup
-    ON memory_document_versions(document_id, version DESC);
 "#,
     ),
 ];
