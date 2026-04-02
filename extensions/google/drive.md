@@ -1,5 +1,5 @@
 ---
-title: "Google Drive"
+title: "Drive"
 description: "Let your agent manage files and folders in Google Drive"
 ---
 

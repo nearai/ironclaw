@@ -1,5 +1,5 @@
 ---
-title: "Google Slides"
+title: "Slides"
 description: "Let your agent create and edit Google Presentations"
 ---
 

@@ -1,5 +1,5 @@
 ---
-title: "Google Docs"
+title: "Docs"
 description: "Let your agent create and edit Google Documents"
 ---
 

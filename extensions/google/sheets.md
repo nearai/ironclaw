@@ -1,5 +1,5 @@
 ---
-title: "Google Sheets"
+title: "Sheets"
 description: "Let your agent read and write Google Spreadsheets"
 ---
 

@@ -1,5 +1,5 @@
 ---
-title: "Google Calendar"
+title: "Calendar"
 description: "Let your agent manage your Google Calendar"
 ---
 

@@ -1,5 +1,5 @@
 ---
-title: "Google OAuth Setup"
+title: "OAuth Setup"
 description: "One-time setup for any Google extension in IronClaw"
 ---
 
