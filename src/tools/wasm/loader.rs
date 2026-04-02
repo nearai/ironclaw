@@ -128,48 +128,50 @@ impl WasmToolLoader {
         // capabilities file — it is auto-derived from the WASM module's
         // schema() export at prepare time (see WasmToolSchemas::compact_schema),
         // so no schema override is needed here.
-        let (capabilities, oauth_refresh, description) = if let Some(cap_path) = capabilities_path {
-            if cap_path.exists() {
-                let cap_bytes = fs::read(cap_path).await?;
-                let cap_file = CapabilitiesFile::from_bytes(&cap_bytes)
-                    .map_err(|e| WasmLoadError::InvalidCapabilities(e.to_string()))?;
-                cap_file.validate(name);
+        let (capabilities, oauth_refresh, description, discovery_summary) =
+            if let Some(cap_path) = capabilities_path {
+                if cap_path.exists() {
+                    let cap_bytes = fs::read(cap_path).await?;
+                    let cap_file = CapabilitiesFile::from_bytes(&cap_bytes)
+                        .map_err(|e| WasmLoadError::InvalidCapabilities(e.to_string()))?;
+                    cap_file.validate(name);
 
-                // Check WIT version compatibility
-                check_wit_version_compat(
-                    name,
-                    cap_file.wit_version.as_deref(),
-                    crate::tools::wasm::WIT_TOOL_VERSION,
-                )?;
+                    // Check WIT version compatibility
+                    check_wit_version_compat(
+                        name,
+                        cap_file.wit_version.as_deref(),
+                        crate::tools::wasm::WIT_TOOL_VERSION,
+                    )?;
 
-                let caps = cap_file.to_capabilities();
-                let oauth = resolve_oauth_refresh_config(&cap_file);
-                let desc = cap_file.description.clone();
-                if desc.is_none() {
+                    let caps = cap_file.to_capabilities();
+                    let oauth = resolve_oauth_refresh_config(&cap_file);
+                    let desc = cap_file.description.clone();
+                    let summary = cap_file.discovery_summary.clone();
+                    if desc.is_none() {
+                        tracing::warn!(
+                            tool = name,
+                            path = %cap_path.display(),
+                            "Capabilities file missing \"description\" field; \
+                             tool will use generic fallback description"
+                        );
+                    }
+                    (caps, oauth, desc, summary)
+                } else {
                     tracing::warn!(
                         tool = name,
                         path = %cap_path.display(),
-                        "Capabilities file missing \"description\" field; \
-                         tool will use generic fallback description"
+                        "Capabilities file not found, using default (no permissions)"
                     );
+                    (Capabilities::default(), None, None, None)
                 }
-                (caps, oauth, desc)
             } else {
                 tracing::warn!(
                     tool = name,
-                    path = %cap_path.display(),
-                    "Capabilities file not found, using default (no permissions)"
-                );
-                (Capabilities::default(), None, None)
-            }
-        } else {
-            tracing::warn!(
-                tool = name,
-                "No capabilities file for WASM tool; \
+                    "No capabilities file for WASM tool; \
                      tool will use generic fallback description"
-            );
-            (Capabilities::default(), None, None)
-        };
+                );
+                (Capabilities::default(), None, None, None)
+            };
 
         // Register the tool
         self.registry
@@ -181,6 +183,7 @@ impl WasmToolLoader {
                 limits: None,
                 description: description.as_deref(),
                 schema: None,
+                discovery_summary,
                 secrets_store: self.secrets_store.clone(),
                 oauth_refresh,
             })

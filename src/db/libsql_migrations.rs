@@ -822,6 +822,28 @@ CREATE INDEX IF NOT EXISTS idx_api_tokens_hash ON api_tokens(token_hash);
 "#,
     ),
     (
+        15,
+        "user_identities",
+        r#"
+CREATE TABLE IF NOT EXISTS user_identities (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    provider TEXT NOT NULL,
+    provider_user_id TEXT NOT NULL,
+    email TEXT,
+    email_verified INTEGER NOT NULL DEFAULT 0,
+    display_name TEXT,
+    avatar_url TEXT,
+    raw_profile TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    UNIQUE (provider, provider_user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_user_identities_user ON user_identities(user_id);
+CREATE INDEX IF NOT EXISTS idx_user_identities_email ON user_identities(email) WHERE email IS NOT NULL;
+"#,
+    ),
+    (
         16,
         "conversation_source_channel",
         // Add source_channel to conversations for cross-channel approval authorization.
@@ -834,6 +856,25 @@ ALTER TABLE conversations ADD COLUMN source_channel TEXT;
     ),
     (
         17,
+        "document_versions",
+        r#"
+CREATE TABLE IF NOT EXISTS memory_document_versions (
+    id TEXT PRIMARY KEY,
+    document_id TEXT NOT NULL REFERENCES memory_documents(id) ON DELETE CASCADE,
+    version INTEGER NOT NULL,
+    content TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    changed_by TEXT,
+    UNIQUE(document_id, version)
+);
+
+CREATE INDEX IF NOT EXISTS idx_doc_versions_lookup
+    ON memory_document_versions(document_id, version DESC);
+"#,
+    ),
+    (
+        18,
         "tool_scope",
         // Add scope column to wasm_tools and dynamic_tools for future admin-promoted
         // global tools. All existing rows default to 'user'. Marked as idempotent
@@ -845,7 +886,7 @@ ALTER TABLE dynamic_tools ADD COLUMN scope TEXT NOT NULL DEFAULT 'user';
 "#,
     ),
     (
-        18,
+        19,
         "channel_identities",
         // Create channel_identities table mapping external identities to owners.
         // Uses IF NOT EXISTS because the base SCHEMA already includes this table
@@ -862,7 +903,7 @@ CREATE TABLE IF NOT EXISTS channel_identities (
 "#,
     ),
     (
-        19,
+        20,
         "pairing_requests",
         // Create pairing_requests table replacing file-based pairing store.
         // Uses IF NOT EXISTS because the base SCHEMA already includes this table
@@ -889,8 +930,8 @@ CREATE INDEX IF NOT EXISTS idx_pairing_requests_channel ON pairing_requests (cha
 /// Each entry is `(version, table_name, column_name)`.
 const IDEMPOTENT_ADD_COLUMN_MIGRATIONS: &[(i64, &str, &str)] = &[
     (16, "conversations", "source_channel"),
-    (17, "wasm_tools", "scope"),
-    (17, "dynamic_tools", "scope"),
+    (18, "wasm_tools", "scope"),
+    (18, "dynamic_tools", "scope"),
 ];
 
 /// Check whether `table` already contains `column` via `pragma_table_info`.

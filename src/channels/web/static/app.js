@@ -171,12 +171,37 @@ function initApp() {
   connectSSE();
   connectLogSSE();
   startGatewayStatusPolling();
-  // Hide the Users settings tab for non-admin users.
+  // Fetch user profile and render avatar + account menu.
   apiFetch('/api/profile').then(function(profile) {
-    if (profile && profile.role !== 'admin') {
+    if (!profile) return;
+    window._currentUser = profile;
+    // Hide admin tabs for non-admin users.
+    if (profile.role !== 'admin') {
       var usersTab = document.querySelector('[data-settings-subtab="users"]');
       if (usersTab) usersTab.style.display = 'none';
     }
+    // Render avatar.
+    var avatarImg = document.getElementById('user-avatar-img');
+    var avatarInitials = document.getElementById('user-avatar-initials');
+    var displayName = profile.display_name || profile.email || profile.id || '?';
+    if (avatarInitials) {
+      avatarInitials.textContent = displayName.charAt(0).toUpperCase();
+    }
+    if (profile.avatar_url && avatarImg) {
+      avatarImg.referrerPolicy = 'no-referrer';
+      avatarImg.onload = function() {
+        if (avatarInitials) avatarInitials.style.display = 'none';
+      };
+      avatarImg.src = profile.avatar_url;
+      avatarImg.removeAttribute('hidden');
+    }
+    // Populate dropdown.
+    var nameEl = document.getElementById('user-dropdown-name');
+    var emailEl = document.getElementById('user-dropdown-email');
+    var roleEl = document.getElementById('user-dropdown-role');
+    if (nameEl) nameEl.textContent = profile.display_name || profile.id;
+    if (emailEl) emailEl.textContent = profile.email || '';
+    if (roleEl) roleEl.textContent = profile.role;
   }).catch(function() {});
   checkTeeStatus();
   loadThreads();
@@ -227,6 +252,125 @@ function authenticate() {
 document.getElementById('token-input').addEventListener('keydown', (e) => {
   if (e.key === 'Enter') authenticate();
 });
+
+// --- Social login (OAuth + NEAR wallet) ---
+
+// Show the token form (used as fallback when no OAuth providers are available).
+function showTokenForm() {
+  var tokenForm = document.getElementById('auth-token-form');
+  if (tokenForm) {
+    tokenForm.style.display = '';
+    var input = document.getElementById('token-input');
+    if (input) input.focus();
+  }
+}
+
+// Discover enabled providers and show corresponding buttons.
+fetch('/auth/providers', { credentials: 'include' })
+  .then(function(r) { return r.ok ? r.json() : { providers: [] }; })
+  .then(function(data) {
+    var providers = data.providers || [];
+    if (providers.length === 0) { showTokenForm(); return; }
+    // Store NEAR network for the wallet connector.
+    if (data.near_network) window._nearNetwork = data.near_network;
+    var social = document.getElementById('auth-social');
+    if (social) social.style.display = '';
+    providers.forEach(function(p) {
+      var btn = document.getElementById('auth-' + p + '-btn');
+      if (!btn) return;
+      btn.style.display = '';
+      if (p === 'near') {
+        btn.addEventListener('click', authenticateWithNear);
+      } else {
+        btn.addEventListener('click', function() { window.location = '/auth/login/' + p; });
+      }
+    });
+    // When social providers are available, collapse the token form
+    // and show the "or use a token" divider instead.
+    var tokenForm = document.getElementById('auth-token-form');
+    var tokenDivider = document.getElementById('auth-token-divider');
+    if (tokenForm && tokenDivider) {
+      tokenForm.style.display = 'none';
+      tokenDivider.style.display = '';
+      tokenDivider.style.cursor = 'pointer';
+      tokenDivider.addEventListener('click', function() {
+        tokenForm.style.display = '';
+        tokenDivider.style.display = 'none';
+        var input = document.getElementById('token-input');
+        if (input) input.focus();
+      });
+    }
+  })
+  .catch(function() { showTokenForm(); });
+
+// NEAR wallet authentication via near-connect.
+async function authenticateWithNear() {
+  var nearBtn = document.getElementById('auth-near-btn');
+  var errEl = document.getElementById('auth-error');
+  if (nearBtn) { nearBtn.disabled = true; nearBtn.textContent = 'Connecting wallet...'; }
+  if (errEl) errEl.textContent = '';
+
+  try {
+    // 1. Get challenge nonce from the server.
+    var challengeResp = await fetch('/auth/near/challenge', { credentials: 'include' });
+    if (!challengeResp.ok) throw new Error('Failed to get challenge');
+    var challenge = await challengeResp.json();
+
+    // 2. Load near-connect dynamically if not already loaded.
+    if (!window._nearConnector) {
+      var mod = await import('https://esm.sh/@hot-labs/near-connect@0.11');
+      var network = window._nearNetwork || 'mainnet';
+      window._nearConnector = new mod.NearConnector({ network: network });
+    }
+    var connector = window._nearConnector;
+
+    // 3. Connect wallet and request signature.
+    if (nearBtn) nearBtn.textContent = 'Sign with wallet...';
+    var wallet = await connector.connect();
+    var accounts = await wallet.getAccounts();
+    if (!accounts || accounts.length === 0) throw new Error('No NEAR account found');
+
+    var accountId = accounts[0].accountId;
+
+    // Convert hex nonce to Uint8Array for signMessage.
+    var nonceBytes = new Uint8Array(challenge.nonce.match(/.{2}/g).map(function(b) { return parseInt(b, 16); }));
+
+    var signed = await wallet.signMessage({
+      message: challenge.message,
+      recipient: challenge.recipient || 'ironclaw',
+      nonce: nonceBytes,
+    });
+
+    // 4. Send signature to server for verification.
+    if (nearBtn) nearBtn.textContent = 'Verifying...';
+    var verifyResp = await fetch('/auth/near/verify', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({
+        account_id: accountId,
+        public_key: signed.publicKey,
+        signature: signed.signature,
+        nonce: challenge.nonce,
+      }),
+    });
+
+    if (!verifyResp.ok) {
+      var errText = await verifyResp.text();
+      throw new Error(errText || 'Verification failed');
+    }
+
+    await verifyResp.json();
+
+    // 5. Rely on the HttpOnly session cookie created by the backend.
+    token = '';
+    sessionStorage.removeItem('ironclaw_token');
+    initApp();
+  } catch (err) {
+    if (errEl) errEl.textContent = err.message || 'NEAR wallet login failed';
+    if (nearBtn) { nearBtn.disabled = false; nearBtn.textContent = 'Sign in with NEAR'; }
+  }
+}
 
 // Note: main event listener registration is at the bottom of this file (search
 // "Event Listener Registration"). Do NOT add duplicate listeners here.
@@ -396,7 +540,8 @@ function connectSSE() {
 
   eventSource.onopen = () => {
     document.getElementById('sse-dot').classList.remove('disconnected');
-    document.getElementById('sse-status').textContent = I18n.t('status.connected');
+    var statusEl = document.getElementById('sse-status');
+    if (statusEl) statusEl.textContent = I18n.t('status.connected');
     _reconnectAttempts = 0;
 
     // Dismiss connection-lost banner and show reconnected flash
@@ -438,7 +583,8 @@ function connectSSE() {
   eventSource.onerror = () => {
     _reconnectAttempts++;
     document.getElementById('sse-dot').classList.add('disconnected');
-    document.getElementById('sse-status').textContent = I18n.t('status.reconnecting');
+    var statusEl2 = document.getElementById('sse-status');
+    if (statusEl2) statusEl2.textContent = I18n.t('status.reconnecting');
 
     // Update existing banner with attempt count
     const existingBanner = document.getElementById('connection-banner');
@@ -4653,13 +4799,8 @@ function fetchGatewayStatus() {
   }).catch(function() {});
 }
 
-// Show/hide popover on hover
-document.getElementById('gateway-status-trigger').addEventListener('mouseenter', () => {
-  document.getElementById('gateway-popover').classList.add('visible');
-});
-document.getElementById('gateway-status-trigger').addEventListener('mouseleave', () => {
-  document.getElementById('gateway-popover').classList.remove('visible');
-});
+// Gateway popover is now inline in the user dropdown — no hover toggle needed.
+// The popover content is updated by startGatewayStatusPolling() into #gateway-popover.
 
 // --- TEE attestation ---
 
@@ -6176,6 +6317,30 @@ function formatDate(isoString) {
 // --- Event Listener Registration (CSP-safe, no inline handlers) ---
 
 document.getElementById('auth-connect-btn').addEventListener('click', () => authenticate());
+
+// User avatar dropdown toggle.
+document.getElementById('user-avatar-btn').addEventListener('click', function(e) {
+  e.stopPropagation();
+  var dd = document.getElementById('user-dropdown');
+  if (dd) dd.style.display = dd.style.display === 'none' ? '' : 'none';
+});
+// Close dropdown on click outside.
+document.addEventListener('click', function(e) {
+  var dd = document.getElementById('user-dropdown');
+  var account = document.getElementById('user-account');
+  if (dd && account && !account.contains(e.target)) {
+    dd.style.display = 'none';
+  }
+});
+// Logout handler.
+document.getElementById('user-logout-btn').addEventListener('click', function() {
+  fetch('/auth/logout', { method: 'POST', credentials: 'include' })
+    .finally(function() {
+      sessionStorage.removeItem('ironclaw_token');
+      sessionStorage.removeItem('ironclaw_oidc');
+      window.location.reload();
+    });
+});
 document.getElementById('restart-overlay').addEventListener('click', () => cancelRestart());
 document.getElementById('restart-close-btn').addEventListener('click', () => cancelRestart());
 document.getElementById('restart-cancel-btn').addEventListener('click', () => cancelRestart());

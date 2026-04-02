@@ -201,19 +201,18 @@ impl SignalChannel {
         }
         let store = Arc::clone(&self.pairing_store);
         let sender_owned = sender.to_string();
+        // SAFETY: block_in_place requires a multi-thread Tokio runtime.
+        // Signal channel message processing runs on a multi-thread runtime worker thread.
+        // Do NOT use this pattern in #[tokio::test] (which uses current_thread by default).
+        debug_assert!(
+            tokio::runtime::Handle::current().runtime_flavor()
+                == tokio::runtime::RuntimeFlavor::MultiThread,
+            "Signal channel requires a multi-thread Tokio runtime"
+        );
         let result: Result<Option<crate::ownership::Identity>, crate::error::DatabaseError> =
-            // SAFETY: block_in_place requires a multi-thread Tokio runtime.
-            // Signal channel message processing runs on a multi-thread runtime worker thread.
-            // Do NOT use this pattern in #[tokio::test] (which uses current_thread by default).
-            debug_assert!(
-                tokio::runtime::Handle::current().runtime_flavor()
-                    == tokio::runtime::RuntimeFlavor::MultiThread,
-                "Signal channel requires a multi-thread Tokio runtime"
-            );
             tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(async move {
-                    store.resolve_identity("signal", &sender_owned).await
-                })
+                tokio::runtime::Handle::current()
+                    .block_on(async move { store.resolve_identity("signal", &sender_owned).await })
             });
         match result {
             Ok(Some(identity)) => Ok(Some(identity.owner_id.to_string())),
@@ -237,18 +236,20 @@ impl SignalChannel {
         let sender_owned = sender.to_string();
         let meta_clone = meta.clone();
 
+        // SAFETY: block_in_place requires a multi-thread Tokio runtime.
+        // Signal channel message processing runs on a multi-thread runtime worker thread.
+        // Do NOT use this pattern in #[tokio::test] (which uses current_thread by default).
+        debug_assert!(
+            tokio::runtime::Handle::current().runtime_flavor()
+                == tokio::runtime::RuntimeFlavor::MultiThread,
+            "Signal channel requires a multi-thread Tokio runtime"
+        );
         let result: Result<crate::db::PairingRequestRecord, crate::error::DatabaseError> =
-            // SAFETY: block_in_place requires a multi-thread Tokio runtime.
-            // Signal channel message processing runs on a multi-thread runtime worker thread.
-            // Do NOT use this pattern in #[tokio::test] (which uses current_thread by default).
-            debug_assert!(
-                tokio::runtime::Handle::current().runtime_flavor()
-                    == tokio::runtime::RuntimeFlavor::MultiThread,
-                "Signal channel requires a multi-thread Tokio runtime"
-            );
             tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::current().block_on(async move {
-                    store.upsert_request("signal", &sender_owned, Some(meta_clone)).await
+                    store
+                        .upsert_request("signal", &sender_owned, Some(meta_clone))
+                        .await
                 })
             });
 
@@ -991,34 +992,10 @@ impl Channel for SignalChannel {
         }
 
         // Send approval prompt to user
-        if let StatusUpdate::ApprovalNeeded {
-            request_id,
-            tool_name,
-            description: _,
-            parameters,
-            allow_always,
-        } = &status
+        if let Some(prompt) = crate::channels::ChatApprovalPrompt::from_status(&status)
             && let Some(target_str) = metadata.get("signal_target").and_then(|v| v.as_str())
         {
-            let params_json = serde_json::to_string_pretty(parameters).unwrap_or_default();
-            let always_line = if *allow_always {
-                format!(
-                    "\n• `always` or `a` - Approve and auto-approve future {} requests",
-                    tool_name
-                )
-            } else {
-                String::new()
-            };
-            let message = format!(
-                "⚠️ *Approval Required*\n\n\
-                 *Request ID:* `{}`\n\
-                 *Tool:* {}\n\
-                 *Parameters:*\n```\n{}\n```\n\n\
-                 Reply with:\n\
-                 • `yes` or `y` - Approve this request{}\n\
-                 • `no` or `n` - Deny",
-                request_id, tool_name, params_json, always_line
-            );
+            let message = prompt.markdown_message();
             self.send_status_message(target_str, &message).await;
         }
 

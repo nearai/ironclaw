@@ -816,33 +816,57 @@ mod advanced {
     }
 
     // -----------------------------------------------------------------------
-    // 10. Bootstrap greeting fires on fresh workspace
+    // 10. Bootstrap greeting is seeded into assistant conversation
     // -----------------------------------------------------------------------
 
-    /// Verifies that a fresh workspace triggers a static bootstrap greeting
-    /// before the user sends any message (no LLM call needed).
+    /// Verifies that the bootstrap greeting is seeded into the assistant
+    /// conversation in the DB when the thread is first created (via
+    /// `add_conversation_message_if_empty`). The greeting is no longer
+    /// broadcast via SSE — it is inserted on the first `/api/chat/threads`
+    /// call.
     #[tokio::test]
     async fn bootstrap_greeting_fires() {
         let rig = TestRigBuilder::new().with_bootstrap().build().await;
 
-        // The static bootstrap greeting should arrive without us sending any
-        // message and without an LLM call.
-        let responses = rig.wait_for_responses(1, TIMEOUT).await;
-        assert!(
-            !responses.is_empty(),
-            "bootstrap greeting should produce a response"
+        // Simulate what chat_threads_handler does: get-or-create the
+        // assistant conversation and seed the greeting if empty.
+        let db = rig.database();
+        let conv_id = db
+            .get_or_create_assistant_conversation("default", "gateway")
+            .await
+            .expect("create assistant conversation");
+
+        static GREETING: &str = include_str!("../src/workspace/seeds/GREETING.md");
+        let inserted = db
+            .add_conversation_message_if_empty(conv_id, "assistant", GREETING)
+            .await
+            .expect("seed greeting");
+        assert!(inserted, "greeting should be inserted into empty thread");
+
+        // Verify the greeting is in the DB.
+        let (messages, _) = db
+            .list_conversation_messages_paginated(conv_id, None, 10)
+            .await
+            .expect("list messages");
+        assert_eq!(
+            messages.len(),
+            1,
+            "should have exactly one greeting message"
         );
-        let greeting = &responses[0].content;
         assert!(
-            greeting.contains("chief of staff"),
-            "bootstrap greeting should contain the static text, got: {greeting}"
+            messages[0].content.contains("chief of staff"),
+            "bootstrap greeting should contain the static text, got: {}",
+            messages[0].content
         );
 
-        // The bootstrap greeting must carry a thread_id so the gateway can
-        // route it to the correct assistant conversation.
+        // Second call should not duplicate.
+        let inserted2 = db
+            .add_conversation_message_if_empty(conv_id, "assistant", GREETING)
+            .await
+            .expect("seed greeting again");
         assert!(
-            responses[0].thread_id.is_some(),
-            "bootstrap greeting response should have a thread_id set"
+            !inserted2,
+            "second call should not insert a duplicate greeting"
         );
 
         rig.shutdown();
@@ -852,8 +876,8 @@ mod advanced {
     // 11. Bootstrap onboarding completes and clears BOOTSTRAP.md
     // -----------------------------------------------------------------------
 
-    /// Exercises the full onboarding flow: bootstrap greeting fires, user
-    /// converses for 3 turns, agent writes profile + memory + identity,
+    /// Exercises the full onboarding flow: bootstrap greeting is seeded in DB,
+    /// user converses for 3 turns, agent writes profile + memory + identity,
     /// clears BOOTSTRAP.md, and the workspace reflects all writes.
     #[tokio::test]
     async fn bootstrap_onboarding_clears_bootstrap() {
@@ -866,17 +890,18 @@ mod advanced {
             .build()
             .await;
 
-        // 1. Wait for the static bootstrap greeting (no user message needed).
-        let greeting_responses = rig.wait_for_responses(1, TIMEOUT).await;
-        assert!(
-            !greeting_responses.is_empty(),
-            "bootstrap greeting should arrive"
-        );
-        assert!(
-            greeting_responses[0].content.contains("chief of staff"),
-            "expected bootstrap greeting, got: {}",
-            greeting_responses[0].content
-        );
+        // 1. Seed the greeting via the DB (simulates chat_threads_handler).
+        let db = rig.database();
+        let conv_id = db
+            .get_or_create_assistant_conversation("default", "gateway")
+            .await
+            .expect("create assistant conversation");
+        static GREETING: &str = include_str!("../src/workspace/seeds/GREETING.md");
+        let inserted = db
+            .add_conversation_message_if_empty(conv_id, "assistant", GREETING)
+            .await
+            .expect("seed greeting");
+        assert!(inserted, "bootstrap greeting should be inserted");
 
         // 2. BOOTSTRAP.md should exist (non-empty) before onboarding completes.
         let ws = rig.workspace().expect("workspace should exist");
@@ -888,7 +913,7 @@ mod advanced {
 
         // 3. Run the 3-turn conversation. The trace has the agent write
         //    profile, memory, identity, and then clear bootstrap.
-        let mut total = 1; // already have the greeting
+        let mut total = 0;
         for turn in &trace.turns {
             rig.send_message(&turn.user_input).await;
             total += 1;

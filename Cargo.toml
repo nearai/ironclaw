@@ -20,7 +20,7 @@ exclude = [
 
 [package]
 name = "ironclaw"
-version = "0.22.0"
+version = "0.24.0"
 edition = "2024"
 rust-version = "1.92"
 description = "Secure personal AI assistant that protects your data and expands its capabilities on the fly"
@@ -39,9 +39,13 @@ eula = false
 # Async runtime
 tokio = { version = "1", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
+tokio-util = { version = "0.7", features = ["compat"] }
 futures = "0.3"
 tokio-tungstenite = { version = "0.26", features = ["rustls-tls-native-roots"] }
 eventsource-stream = "0.2"
+
+# Agent Client Protocol (ACP) — standard communication with coding agents
+agent-client-protocol = "0.10"
 
 # HTTP client
 reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls-native-roots", "stream"] }
@@ -173,6 +177,7 @@ hyper-util = { version = "0.1", features = ["server", "tokio", "http1", "http2"]
 http-body-util = "0.1"
 bytes = "1"
 base64 = "0.22.1"
+cookie = "0.18"
 jsonwebtoken = "9"
 mime_guess = "2.0.5"
 clap_complete = "4.5.0"
@@ -182,6 +187,7 @@ lru = "0.16.3"
 html-to-markdown-rs = { version = "2.3", optional = true }
 readabilityrs = { version = "0.1.2", optional = true }
 ed25519-dalek = { version = "2.2.0", features = ["std"] }
+bs58 = "0.5"
 hex = "0.4.3"
 
 # OpenClaw import (feature gated)

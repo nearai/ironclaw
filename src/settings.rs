@@ -700,6 +700,10 @@ pub struct SandboxSettings {
     /// Whether Claude Code sandbox mode is enabled.
     #[serde(default)]
     pub claude_code_enabled: bool,
+
+    /// Whether ACP (Agent Client Protocol) agent mode is enabled.
+    #[serde(default)]
+    pub acp_enabled: bool,
 }
 
 fn default_sandbox_policy() -> String {
@@ -734,6 +738,7 @@ impl Default for SandboxSettings {
             auto_pull_image: true,
             extra_allowed_domains: Vec::new(),
             claude_code_enabled: false,
+            acp_enabled: false,
         }
     }
 }
@@ -914,13 +919,19 @@ pub struct HygieneSettings {
     #[serde(default = "default_true")]
     pub enabled: bool,
 
-    /// Days before `daily/` documents are deleted.
+    /// Deprecated: retention is now per-folder via `.config` metadata.
+    /// Kept for backward compatibility with existing DB settings rows.
     #[serde(default = "default_hygiene_daily_retention")]
     pub daily_retention_days: u32,
 
-    /// Days before `conversations/` documents are deleted.
+    /// Deprecated: retention is now per-folder via `.config` metadata.
+    /// Kept for backward compatibility with existing DB settings rows.
     #[serde(default = "default_hygiene_conversation_retention")]
     pub conversation_retention_days: u32,
+
+    /// Maximum versions to keep per document during hygiene passes.
+    #[serde(default = "default_hygiene_version_keep_count")]
+    pub version_keep_count: u32,
 
     /// Minimum hours between hygiene passes.
     #[serde(default = "default_hygiene_cadence_hours")]
@@ -935,6 +946,10 @@ fn default_hygiene_conversation_retention() -> u32 {
     7
 }
 
+fn default_hygiene_version_keep_count() -> u32 {
+    50
+}
+
 fn default_hygiene_cadence_hours() -> u32 {
     12
 }
@@ -945,6 +960,7 @@ impl Default for HygieneSettings {
             enabled: true,
             daily_retention_days: default_hygiene_daily_retention(),
             conversation_retention_days: default_hygiene_conversation_retention(),
+            version_keep_count: default_hygiene_version_keep_count(),
             cadence_hours: default_hygiene_cadence_hours(),
         }
     }

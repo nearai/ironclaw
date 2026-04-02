@@ -7,6 +7,7 @@
 //! - In-memory (for testing)
 
 mod conversations;
+mod identities;
 mod jobs;
 mod pairing;
 mod routines;

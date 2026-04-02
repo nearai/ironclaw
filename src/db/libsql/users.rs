@@ -133,7 +133,7 @@ impl UserStore for LibSqlBackend {
                 r#"
                 SELECT id, email, display_name, status, role, created_at, updated_at,
                        last_login_at, created_by, metadata
-                FROM users WHERE email = ?1
+                FROM users WHERE LOWER(email) = LOWER(?1)
                 "#,
                 params![email],
             )

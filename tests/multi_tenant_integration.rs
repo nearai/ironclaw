@@ -553,7 +553,7 @@ fn gateway_state_has_multi_tenant_fields() {
         skill_registry: None,
         skill_catalog: None,
         chat_rate_limiter: PerUserRateLimiter::new(30, 60), // Multi-tenant: per-user
-        oauth_rate_limiter: RateLimiter::new(10, 60),
+        oauth_rate_limiter: PerUserRateLimiter::new(20, 60),
         registry_entries: Vec::new(),
         cost_guard: None,
         routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
@@ -563,6 +563,14 @@ fn gateway_state_has_multi_tenant_fields() {
         secrets_store: None,
         db_auth: None,
         pairing_store: None,
+        oauth_providers: None,
+        oauth_state_store: None,
+        oauth_base_url: None,
+        oauth_allowed_domains: Vec::new(),
+        near_nonce_store: None,
+        near_rpc_url: None,
+        near_network: None,
+        oauth_sweep_shutdown: None,
     };
 
     assert_eq!(state.owner_id, "fallback");
@@ -630,7 +638,7 @@ async fn start_owner_scoped_sender_server() -> (
         skill_registry: None,
         skill_catalog: None,
         chat_rate_limiter: PerUserRateLimiter::new(30, 60),
-        oauth_rate_limiter: RateLimiter::new(10, 60),
+        oauth_rate_limiter: PerUserRateLimiter::new(20, 60),
         webhook_rate_limiter: RateLimiter::new(10, 60),
         registry_entries: Vec::new(),
         cost_guard: None,
@@ -640,6 +648,14 @@ async fn start_owner_scoped_sender_server() -> (
         secrets_store: None,
         db_auth: None,
         pairing_store: None,
+        oauth_providers: None,
+        oauth_state_store: None,
+        oauth_base_url: None,
+        oauth_allowed_domains: Vec::new(),
+        near_nonce_store: None,
+        near_rpc_url: None,
+        near_network: None,
+        oauth_sweep_shutdown: None,
     });
 
     let auth = MultiAuthState::multi(tokens).into();
@@ -1017,7 +1033,7 @@ async fn start_multi_user_server_with_db() -> (
         skill_registry: None,
         skill_catalog: None,
         chat_rate_limiter: PerUserRateLimiter::new(30, 60),
-        oauth_rate_limiter: RateLimiter::new(10, 60),
+        oauth_rate_limiter: PerUserRateLimiter::new(20, 60),
         registry_entries: Vec::new(),
         cost_guard: None,
         routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
@@ -1027,6 +1043,14 @@ async fn start_multi_user_server_with_db() -> (
         secrets_store: None,
         db_auth: None,
         pairing_store: None,
+        oauth_providers: None,
+        oauth_state_store: None,
+        oauth_base_url: None,
+        oauth_allowed_domains: Vec::new(),
+        near_nonce_store: None,
+        near_rpc_url: None,
+        near_network: None,
+        oauth_sweep_shutdown: None,
     });
 
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
