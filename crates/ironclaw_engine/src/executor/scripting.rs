@@ -99,11 +99,11 @@ pub fn compact_output_metadata(stdout: &str, return_value: &serde_json::Value) -
 
     if *return_value != serde_json::Value::Null {
         let val_str = serde_json::to_string_pretty(return_value).unwrap_or_default();
-        if val_str.len() > OUTPUT_PREVIEW_LEN {
+        let val_char_count = val_str.chars().count();
+        if val_char_count > OUTPUT_PREVIEW_LEN {
             let preview: String = val_str.chars().take(OUTPUT_PREVIEW_LEN).collect();
             parts.push(format!(
-                "Return value ({} chars): {preview}...",
-                val_str.len()
+                "Return value ({val_char_count} chars): {preview}...",
             ));
         } else {
             parts.push(format!("Return value: {val_str}"));
@@ -1155,7 +1155,7 @@ async fn handle_rlm_query(
             .expires_at
             .and_then(|exp| (exp - now).to_std().ok())
             .map(|d| chrono::Duration::from_std(d).unwrap_or(chrono::Duration::hours(1)));
-        let lease = child_leases
+        let lease = match child_leases
             .grant(
                 child_thread.id,
                 &parent_lease.capability_name,
@@ -1163,7 +1163,14 @@ async fn handle_rlm_query(
                 remaining_duration,
                 parent_lease.max_uses,
             )
-            .await;
+            .await
+        {
+            Ok(l) => l,
+            Err(e) => {
+                debug!(error = %e, "rlm_query: skipping invalid lease for child thread");
+                continue;
+            }
+        };
         child_thread.capability_leases.push(lease.id);
     }
     let mut child_policy_engine = PolicyEngine::new();
@@ -1246,6 +1253,7 @@ async fn handle_llm_query_batched_standalone(
 // ── Future resolution helpers ───────────────────────────────
 
 /// Resolve a pending tool execution future.
+#[allow(clippy::too_many_arguments)]
 async fn resolve_tool_future(
     handle: tokio::task::JoinHandle<Result<ActionResult, EngineError>>,
     action_name: &str,
@@ -1466,7 +1474,7 @@ mod tests {
     use crate::capability::lease::LeaseManager;
     use crate::capability::policy::PolicyEngine;
     use crate::traits::effect::ThreadExecutionContext;
-    use crate::types::capability::{ActionDef, CapabilityLease, EffectType};
+    use crate::types::capability::{ActionDef, CapabilityLease, EffectType, GrantedActions};
     use crate::types::project::ProjectId;
     use crate::types::step::{ActionResult, StepId};
     use crate::types::thread::{Thread, ThreadConfig, ThreadType};
@@ -1582,7 +1590,10 @@ mod tests {
         let ctx = make_exec_context(thread);
 
         // Grant a wildcard lease
-        leases.grant(thread.id, "tools", vec![], None, None).await;
+        leases
+            .grant(thread.id, "tools", GrantedActions::All, None, None)
+            .await
+            .unwrap();
 
         execute_code(
             code,
@@ -1988,6 +1999,159 @@ except Exception as e:
         assert!(
             !answer.starts_with("ESCAPED"),
             "subprocess import should be blocked, got: {answer}",
+        );
+    }
+
+    /// File system access via open() must be blocked.
+    #[tokio::test]
+    async fn sandbox_denies_file_access() {
+        let effects: Arc<dyn EffectExecutor> = Arc::new(MockEffects::new(vec![], vec![]));
+        let thread = make_test_thread();
+
+        let code = r#"
+try:
+    f = open("/etc/passwd", "r")
+    content = f.read()
+    f.close()
+    FINAL("ESCAPED: " + content[:50])
+except Exception as e:
+    FINAL("blocked: " + type(e).__name__)
+"#;
+        let result = run_code(code, effects, &thread).await.unwrap();
+        let answer = result.final_answer.as_deref().unwrap_or("");
+        assert!(
+            !answer.starts_with("ESCAPED"),
+            "open() should be blocked, got: {answer}",
+        );
+    }
+
+    /// Network access via socket must be blocked.
+    #[tokio::test]
+    async fn sandbox_denies_socket_access() {
+        let effects: Arc<dyn EffectExecutor> = Arc::new(MockEffects::new(vec![], vec![]));
+        let thread = make_test_thread();
+
+        let code = r#"
+try:
+    import socket
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.connect(("127.0.0.1", 80))
+    FINAL("ESCAPED: connected")
+except Exception as e:
+    FINAL("blocked: " + type(e).__name__)
+"#;
+        let result = run_code(code, effects, &thread).await.unwrap();
+        let answer = result.final_answer.as_deref().unwrap_or("");
+        assert!(
+            !answer.starts_with("ESCAPED"),
+            "socket access should be blocked, got: {answer}",
+        );
+    }
+
+    /// Calls to tools not covered by the lease must be denied.
+    #[tokio::test]
+    async fn sandbox_unlicensed_tool_denied() {
+        let effects: Arc<dyn EffectExecutor> =
+            Arc::new(MockEffects::new(vec![test_action("allowed_tool")], vec![]));
+        let thread = make_test_thread();
+        let leases = LeaseManager::new();
+        let policy = PolicyEngine::new();
+        let ctx = make_exec_context(&thread);
+
+        // Grant a restricted lease — only "allowed_tool" is permitted.
+        leases
+            .grant(
+                thread.id,
+                "tools",
+                GrantedActions::Specific(vec!["allowed_tool".into()]),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let code = r#"
+try:
+    result = await secret_admin_tool(data="pwn")
+    FINAL("ESCAPED: " + str(result))
+except Exception as e:
+    FINAL("blocked: " + type(e).__name__)
+"#;
+        let result = execute_code(
+            code,
+            &thread,
+            &(Arc::new(StubLlm) as Arc<dyn crate::traits::llm::LlmBackend>),
+            &effects,
+            &leases,
+            &policy,
+            &ctx,
+            &[],
+            &serde_json::json!({}),
+        )
+        .await
+        .unwrap();
+        let answer = result.final_answer.as_deref().unwrap_or("");
+        assert!(
+            !answer.starts_with("ESCAPED"),
+            "unlicensed tool should be denied by preflight, got: {answer}",
+        );
+    }
+
+    /// CPU-bound infinite loops must be terminated by allocation/duration limits.
+    #[tokio::test]
+    async fn sandbox_enforces_cpu_limits() {
+        let effects: Arc<dyn EffectExecutor> = Arc::new(MockEffects::new(vec![], vec![]));
+        let thread = make_test_thread();
+
+        // Tight CPU-bound loop (no allocations to trip allocation limit)
+        let code = r#"
+x = 0
+while True:
+    x += 1
+"#;
+        let result = run_code(code, effects, &thread).await;
+        // Must terminate — either via error or resource limit
+        if let Ok(r) = result {
+            assert!(
+                r.had_error || r.stdout.contains("Error") || r.stdout.contains("limit"),
+                "cpu-bound loop should be terminated, stdout: {}",
+                &r.stdout[..r.stdout.len().min(500)],
+            );
+        }
+        // Err(_) is also acceptable — means the VM was killed by resource limits
+    }
+
+    /// FINAL() must capture the answer from the code.
+    #[tokio::test]
+    async fn sandbox_final_captures_answer() {
+        let effects: Arc<dyn EffectExecutor> = Arc::new(MockEffects::new(vec![], vec![]));
+        let thread = make_test_thread();
+
+        let code = r#"
+x = 2 + 3
+FINAL(str(x))
+"#;
+        let result = run_code(code, effects, &thread).await.unwrap();
+        assert_eq!(
+            result.final_answer.as_deref(),
+            Some("5"),
+            "FINAL should capture the computed answer"
+        );
+    }
+
+    /// Syntax errors flow back as errors, not panics.
+    #[tokio::test]
+    async fn sandbox_handles_syntax_error() {
+        let effects: Arc<dyn EffectExecutor> = Arc::new(MockEffects::new(vec![], vec![]));
+        let thread = make_test_thread();
+
+        let code = "def broken(\nFINAL('nope')";
+        let result = run_code(code, effects, &thread).await.unwrap();
+        assert!(result.had_error, "syntax error should set had_error");
+        assert!(
+            result.stdout.contains("SyntaxError") || result.stdout.contains("Error"),
+            "should contain SyntaxError, got: {}",
+            result.stdout,
         );
     }
 }

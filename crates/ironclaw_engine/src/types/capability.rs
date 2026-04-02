@@ -5,10 +5,76 @@
 //! granted to threads via leases.
 
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use uuid::Uuid;
 
 use crate::types::thread::ThreadId;
+
+// ── Granted actions ────────────────────────────────────────
+
+/// Which actions a lease grants access to.
+///
+/// `All` means the lease covers every action in the capability (wildcard).
+/// `Specific` restricts the lease to the listed action names.
+///
+/// Serializes as a JSON array for backward compatibility: `[]` = All,
+/// `["a","b"]` = Specific.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GrantedActions {
+    /// Wildcard — covers all actions in the capability.
+    All,
+    /// Restricted to specific action names.
+    Specific(Vec<String>),
+}
+
+impl GrantedActions {
+    /// Check whether a specific action is covered.
+    pub fn covers(&self, action_name: &str) -> bool {
+        match self {
+            GrantedActions::All => true,
+            GrantedActions::Specific(actions) => actions.iter().any(|a| a == action_name),
+        }
+    }
+
+    /// Returns true if this is a wildcard grant.
+    pub fn is_all(&self) -> bool {
+        matches!(self, GrantedActions::All)
+    }
+
+    /// Returns the specific actions, or an empty slice for wildcard.
+    pub fn actions(&self) -> &[String] {
+        match self {
+            GrantedActions::All => &[],
+            GrantedActions::Specific(actions) => actions,
+        }
+    }
+}
+
+impl Serialize for GrantedActions {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            GrantedActions::All => Vec::<String>::new().serialize(serializer),
+            GrantedActions::Specific(v) => v.serialize(serializer),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for GrantedActions {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let v = Vec::<String>::deserialize(deserializer)?;
+        if v.is_empty() {
+            Ok(GrantedActions::All)
+        } else {
+            Ok(GrantedActions::Specific(v))
+        }
+    }
+}
 
 /// Strongly-typed lease identifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -121,8 +187,8 @@ pub struct CapabilityLease {
     pub thread_id: ThreadId,
     /// Which capability this lease covers.
     pub capability_name: String,
-    /// Which actions from the capability are granted (empty = all).
-    pub granted_actions: Vec<String>,
+    /// Which actions from the capability are granted.
+    pub granted_actions: GrantedActions,
     /// When the lease was granted.
     pub granted_at: DateTime<Utc>,
     /// When the lease expires (None = no expiry).
@@ -159,7 +225,7 @@ impl CapabilityLease {
 
     /// Check whether a specific action is covered by this lease.
     pub fn covers_action(&self, action_name: &str) -> bool {
-        self.granted_actions.is_empty() || self.granted_actions.iter().any(|a| a == action_name)
+        self.granted_actions.covers(action_name)
     }
 
     /// Consume one use of this lease. Returns false if no uses remain.
@@ -193,7 +259,7 @@ mod tests {
             id: LeaseId::new(),
             thread_id: ThreadId::new(),
             capability_name: "test".into(),
-            granted_actions: vec![],
+            granted_actions: GrantedActions::All,
             granted_at: Utc::now(),
             expires_at: None,
             max_uses: None,
@@ -273,7 +339,8 @@ mod tests {
     #[test]
     fn covers_action_with_specific_grants() {
         let mut lease = make_lease();
-        lease.granted_actions = vec!["create_issue".into(), "list_prs".into()];
+        lease.granted_actions =
+            GrantedActions::Specific(vec!["create_issue".into(), "list_prs".into()]);
         assert!(lease.covers_action("create_issue"));
         assert!(lease.covers_action("list_prs"));
         assert!(!lease.covers_action("delete_repo"));

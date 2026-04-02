@@ -6,13 +6,14 @@
 
 use crate::capability::registry::CapabilityRegistry;
 use crate::gate::tool_tier::{ToolTier, classify_tool_tier, is_autonomous_denylisted};
+use crate::types::capability::GrantedActions;
 use crate::types::thread::ThreadType;
 
 /// Explicit grant plan for a single capability.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapabilityGrantPlan {
     pub capability_name: String,
-    pub granted_actions: Vec<String>,
+    pub granted_actions: GrantedActions,
 }
 
 /// Plans explicit capability leases for new threads.
@@ -53,7 +54,7 @@ impl LeasePlanner {
                 } else {
                     Some(CapabilityGrantPlan {
                         capability_name: cap.name.clone(),
-                        granted_actions,
+                        granted_actions: GrantedActions::Specific(granted_actions),
                     })
                 }
             })
@@ -87,7 +88,7 @@ impl LeasePlanner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::capability::{ActionDef, Capability, EffectType};
+    use crate::types::capability::{ActionDef, Capability, EffectType, GrantedActions};
 
     fn action(name: &str, effects: Vec<EffectType>, requires_approval: bool) -> ActionDef {
         ActionDef {
@@ -137,7 +138,10 @@ mod tests {
         let plans = planner.plan_for_thread(ThreadType::Foreground, &simple_registry());
         assert_eq!(plans.len(), 1);
         assert_eq!(plans[0].capability_name, "tools");
-        assert_eq!(plans[0].granted_actions, vec!["read_file"]);
+        assert_eq!(
+            plans[0].granted_actions,
+            GrantedActions::Specific(vec!["read_file".into()])
+        );
     }
 
     #[test]
@@ -145,10 +149,10 @@ mod tests {
         let planner = LeasePlanner::new();
         let plans = planner.plan_for_thread(ThreadType::Foreground, &mixed_registry());
         assert_eq!(plans.len(), 1);
-        let actions = &plans[0].granted_actions;
+        let actions = plans[0].granted_actions.actions();
         assert_eq!(actions.len(), 7, "Foreground should get all 7 actions");
-        assert!(actions.contains(&"routine_create".into()));
-        assert!(actions.contains(&"shell".into()));
+        assert!(plans[0].granted_actions.covers("routine_create"));
+        assert!(plans[0].granted_actions.covers("shell"));
     }
 
     #[test]
@@ -156,7 +160,7 @@ mod tests {
         let planner = LeasePlanner::new();
         let plans = planner.plan_for_thread(ThreadType::Research, &mixed_registry());
         assert_eq!(plans.len(), 1);
-        let actions = &plans[0].granted_actions;
+        let actions = plans[0].granted_actions.actions();
         // ReadOnly: echo, read_file. Stateful: file_write.
         assert_eq!(
             actions.len(),
@@ -164,11 +168,11 @@ mod tests {
             "Research should get 3 actions: {:?}",
             actions
         );
-        assert!(actions.contains(&"echo".into()));
-        assert!(actions.contains(&"read_file".into()));
-        assert!(actions.contains(&"file_write".into()));
-        assert!(!actions.contains(&"shell".into()));
-        assert!(!actions.contains(&"routine_create".into()));
+        assert!(plans[0].granted_actions.covers("echo"));
+        assert!(plans[0].granted_actions.covers("read_file"));
+        assert!(plans[0].granted_actions.covers("file_write"));
+        assert!(!plans[0].granted_actions.covers("shell"));
+        assert!(!plans[0].granted_actions.covers("routine_create"));
     }
 
     #[test]
@@ -176,23 +180,23 @@ mod tests {
         let planner = LeasePlanner::new();
         let plans = planner.plan_for_thread(ThreadType::Mission, &mixed_registry());
         assert_eq!(plans.len(), 1);
-        let actions = &plans[0].granted_actions;
+        let ga = &plans[0].granted_actions;
         // Includes ReadOnly, Stateful, and non-denylisted Privileged (shell, http).
         // Excludes Administrative (routine_create, tool_install).
-        assert!(actions.contains(&"echo".into()));
-        assert!(actions.contains(&"shell".into()));
-        assert!(actions.contains(&"http".into()));
-        assert!(!actions.contains(&"routine_create".into()));
-        assert!(!actions.contains(&"tool_install".into()));
+        assert!(ga.covers("echo"));
+        assert!(ga.covers("shell"));
+        assert!(ga.covers("http"));
+        assert!(!ga.covers("routine_create"));
+        assert!(!ga.covers("tool_install"));
     }
 
     #[test]
     fn test_mission_excludes_denylisted_privileged() {
         let planner = LeasePlanner::new();
         let plans = planner.plan_for_thread(ThreadType::Mission, &mixed_registry());
-        let actions = &plans[0].granted_actions;
+        let ga = &plans[0].granted_actions;
         // routine_create and tool_install are in the denylist
-        assert!(!actions.contains(&"routine_create".into()));
-        assert!(!actions.contains(&"tool_install".into()));
+        assert!(!ga.covers("routine_create"));
+        assert!(!ga.covers("tool_install"));
     }
 }

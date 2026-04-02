@@ -204,7 +204,7 @@ fn merge_decision(current: PolicyDecision, effect: PolicyEffect, source: &str) -
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::capability::LeaseId;
+    use crate::types::capability::{GrantedActions, LeaseId};
     use crate::types::thread::ThreadId;
     use chrono::Utc;
 
@@ -223,7 +223,7 @@ mod tests {
             id: LeaseId::new(),
             thread_id: ThreadId::new(),
             capability_name: "test".into(),
-            granted_actions: vec![],
+            granted_actions: GrantedActions::All,
             granted_at: Utc::now(),
             expires_at: None,
             max_uses: None,
@@ -313,7 +313,7 @@ mod tests {
         let engine = PolicyEngine::new();
         let action = make_action("delete_repo", vec![EffectType::WriteExternal], false);
         let mut lease = make_lease();
-        lease.granted_actions = vec!["create_issue".into()];
+        lease.granted_actions = GrantedActions::Specific(vec!["create_issue".into()]);
         assert!(matches!(
             engine.evaluate(&action, &lease, &[]),
             PolicyDecision::Deny { .. }

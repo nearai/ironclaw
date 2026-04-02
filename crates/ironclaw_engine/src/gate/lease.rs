@@ -77,7 +77,7 @@ impl ExecutionGate for LeaseGate {
 mod tests {
     use super::*;
     use crate::gate::ExecutionMode;
-    use crate::types::capability::{ActionDef, EffectType};
+    use crate::types::capability::{ActionDef, EffectType, GrantedActions};
     use crate::types::thread::ThreadId;
     use std::collections::HashSet;
 
@@ -114,8 +114,15 @@ mod tests {
     async fn test_valid_lease_allows() {
         let mgr = Arc::new(LeaseManager::new());
         let tid = ThreadId::new();
-        mgr.grant(tid, "tools", vec!["read_file".into()], None, None)
-            .await;
+        mgr.grant(
+            tid,
+            "tools",
+            GrantedActions::Specific(vec!["read_file".into()]),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
 
         let gate = LeaseGate::new(Arc::clone(&mgr));
         let ad = action_def("read_file");
@@ -143,14 +150,18 @@ mod tests {
     async fn test_expired_lease_denies() {
         let mgr = Arc::new(LeaseManager::new());
         let tid = ThreadId::new();
-        mgr.grant(
-            tid,
-            "tools",
-            vec!["read_file".into()],
-            Some(chrono::Duration::seconds(-10)), // already expired
-            None,
-        )
-        .await;
+        let lease = mgr
+            .grant(
+                tid,
+                "tools",
+                GrantedActions::Specific(vec!["read_file".into()]),
+                None,
+                Some(1),
+            )
+            .await
+            .unwrap();
+        // Exhaust the lease so it becomes invalid
+        mgr.consume_use(lease.id).await.unwrap();
 
         let gate = LeaseGate::new(Arc::clone(&mgr));
         let ad = action_def("read_file");
@@ -165,8 +176,15 @@ mod tests {
         let mgr = Arc::new(LeaseManager::new());
         let tid = ThreadId::new();
         let lease = mgr
-            .grant(tid, "tools", vec!["read_file".into()], None, None)
-            .await;
+            .grant(
+                tid,
+                "tools",
+                GrantedActions::Specific(vec!["read_file".into()]),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
         mgr.revoke(lease.id, "test").await;
 
         let gate = LeaseGate::new(Arc::clone(&mgr));

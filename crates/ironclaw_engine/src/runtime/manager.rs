@@ -143,7 +143,7 @@ impl ThreadManager {
                     None,
                     None,
                 )
-                .await;
+                .await?;
             self.store.save_lease(&lease).await?;
             thread.capability_leases.push(lease.id);
         }

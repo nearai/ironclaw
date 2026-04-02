@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use chrono::Utc;
 use tokio::sync::RwLock;
 
-use crate::types::capability::{CapabilityLease, LeaseId};
+use crate::types::capability::{CapabilityLease, GrantedActions, LeaseId};
 use crate::types::error::EngineError;
 use crate::types::thread::ThreadId;
 
@@ -26,14 +26,31 @@ impl LeaseManager {
     }
 
     /// Grant a new lease to a thread.
+    ///
+    /// Returns `EngineError::Effect` if `duration` is non-positive or
+    /// `max_uses` is zero — these would create immediately-expired or
+    /// unusable leases.
     pub async fn grant(
         &self,
         thread_id: ThreadId,
         capability_name: impl Into<String>,
-        granted_actions: Vec<String>,
+        granted_actions: GrantedActions,
         duration: Option<chrono::Duration>,
         max_uses: Option<u32>,
-    ) -> CapabilityLease {
+    ) -> Result<CapabilityLease, EngineError> {
+        if let Some(d) = duration
+            && d <= chrono::Duration::zero()
+        {
+            return Err(EngineError::Effect {
+                reason: format!("lease duration must be positive, got {}s", d.num_seconds()),
+            });
+        }
+        if let Some(0) = max_uses {
+            return Err(EngineError::Effect {
+                reason: "lease max_uses must be > 0".into(),
+            });
+        }
+
         let now = Utc::now();
         let lease = CapabilityLease {
             id: LeaseId::new(),
@@ -48,7 +65,7 @@ impl LeaseManager {
             revoked_reason: None,
         };
         self.active.write().await.insert(lease.id, lease.clone());
-        lease
+        Ok(lease)
     }
 
     /// Check whether a lease is still valid. Returns the lease if valid.
@@ -181,27 +198,33 @@ impl LeaseManager {
                 continue;
             }
 
-            let child_actions: Vec<String> = match requested_actions {
+            let child_grants = match requested_actions {
                 Some(req) => {
-                    if parent.granted_actions.is_empty() {
-                        // Parent is wildcard (empty = all actions). Child gets
-                        // only the requested subset, NOT a wildcard.
-                        req.iter().cloned().collect()
-                    } else {
-                        // Intersection: only actions in both parent and request.
-                        parent
-                            .granted_actions
-                            .iter()
-                            .filter(|a| req.contains(*a))
-                            .cloned()
-                            .collect()
+                    match &parent.granted_actions {
+                        GrantedActions::All => {
+                            // Parent is wildcard. Child gets only the
+                            // requested subset, NOT a wildcard.
+                            GrantedActions::Specific(req.iter().cloned().collect())
+                        }
+                        GrantedActions::Specific(parent_actions) => {
+                            // Intersection: only actions in both parent and request.
+                            let intersection: Vec<String> = parent_actions
+                                .iter()
+                                .filter(|a| req.contains(*a))
+                                .cloned()
+                                .collect();
+                            GrantedActions::Specific(intersection)
+                        }
                     }
                 }
                 None => parent.granted_actions.clone(),
             };
 
             // Skip if intersection is empty (no matching actions)
-            if child_actions.is_empty() && requested_actions.is_some() {
+            if let GrantedActions::Specific(ref actions) = child_grants
+                && actions.is_empty()
+                && requested_actions.is_some()
+            {
                 continue;
             }
 
@@ -209,7 +232,7 @@ impl LeaseManager {
                 id: LeaseId::new(),
                 thread_id: child_thread_id,
                 capability_name: parent.capability_name.clone(),
-                granted_actions: child_actions,
+                granted_actions: child_grants,
                 granted_at: Utc::now(),
                 expires_at: parent.expires_at,   // never outlive parent
                 max_uses: parent.uses_remaining, // budget from parent's remaining
@@ -267,13 +290,17 @@ impl Default for LeaseManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::capability::GrantedActions;
     use crate::types::thread::ThreadId;
 
     #[tokio::test]
     async fn grant_and_check() {
         let mgr = LeaseManager::new();
         let tid = ThreadId::new();
-        let lease = mgr.grant(tid, "github", vec![], None, None).await;
+        let lease = mgr
+            .grant(tid, "github", GrantedActions::All, None, None)
+            .await
+            .unwrap();
         assert!(mgr.check(lease.id).await.is_ok());
     }
 
@@ -287,7 +314,10 @@ mod tests {
     async fn consume_use_works() {
         let mgr = LeaseManager::new();
         let tid = ThreadId::new();
-        let lease = mgr.grant(tid, "github", vec![], None, Some(2)).await;
+        let lease = mgr
+            .grant(tid, "github", GrantedActions::All, None, Some(2))
+            .await
+            .unwrap();
         assert!(mgr.consume_use(lease.id).await.is_ok());
         assert!(mgr.consume_use(lease.id).await.is_ok());
         assert!(mgr.consume_use(lease.id).await.is_err());
@@ -297,7 +327,10 @@ mod tests {
     async fn refund_use_restores_consumed_budget() {
         let mgr = LeaseManager::new();
         let tid = ThreadId::new();
-        let lease = mgr.grant(tid, "github", vec![], None, Some(2)).await;
+        let lease = mgr
+            .grant(tid, "github", GrantedActions::All, None, Some(2))
+            .await
+            .unwrap();
         mgr.consume_use(lease.id).await.unwrap();
         let consumed = mgr.check(lease.id).await.unwrap();
         assert_eq!(consumed.uses_remaining, Some(1));
@@ -310,7 +343,10 @@ mod tests {
     async fn revoke_invalidates() {
         let mgr = LeaseManager::new();
         let tid = ThreadId::new();
-        let lease = mgr.grant(tid, "github", vec![], None, None).await;
+        let lease = mgr
+            .grant(tid, "github", GrantedActions::All, None, None)
+            .await
+            .unwrap();
         mgr.revoke(lease.id, "test").await;
         assert!(mgr.check(lease.id).await.is_err());
     }
@@ -319,7 +355,10 @@ mod tests {
     async fn expire_stale_removes_revoked() {
         let mgr = LeaseManager::new();
         let tid = ThreadId::new();
-        let lease = mgr.grant(tid, "github", vec![], None, None).await;
+        let lease = mgr
+            .grant(tid, "github", GrantedActions::All, None, None)
+            .await
+            .unwrap();
         mgr.revoke(lease.id, "done").await;
         let removed = mgr.expire_stale().await;
         assert_eq!(removed, 1);
@@ -331,9 +370,15 @@ mod tests {
         let mgr = LeaseManager::new();
         let t1 = ThreadId::new();
         let t2 = ThreadId::new();
-        mgr.grant(t1, "github", vec![], None, None).await;
-        mgr.grant(t1, "memory", vec![], None, None).await;
-        mgr.grant(t2, "slack", vec![], None, None).await;
+        mgr.grant(t1, "github", GrantedActions::All, None, None)
+            .await
+            .unwrap();
+        mgr.grant(t1, "memory", GrantedActions::All, None, None)
+            .await
+            .unwrap();
+        mgr.grant(t2, "slack", GrantedActions::All, None, None)
+            .await
+            .unwrap();
         assert_eq!(mgr.active_for_thread(t1).await.len(), 2);
         assert_eq!(mgr.active_for_thread(t2).await.len(), 1);
     }
@@ -345,11 +390,12 @@ mod tests {
         mgr.grant(
             tid,
             "github",
-            vec!["create_issue".into(), "list_prs".into()],
+            GrantedActions::Specific(vec!["create_issue".into(), "list_prs".into()]),
             None,
             None,
         )
-        .await;
+        .await
+        .unwrap();
         assert!(
             mgr.find_lease_for_action(tid, "create_issue")
                 .await
@@ -363,20 +409,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn expired_lease_not_active() {
+    async fn negative_duration_rejected() {
         let mgr = LeaseManager::new();
         let tid = ThreadId::new();
-        let lease = mgr
+        let result = mgr
             .grant(
                 tid,
                 "github",
-                vec![],
+                GrantedActions::All,
                 Some(chrono::Duration::seconds(-10)),
                 None,
             )
             .await;
-        assert!(mgr.check(lease.id).await.is_err());
-        assert!(mgr.active_for_thread(tid).await.is_empty());
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn zero_max_uses_rejected() {
+        let mgr = LeaseManager::new();
+        let tid = ThreadId::new();
+        let result = mgr
+            .grant(tid, "github", GrantedActions::All, None, Some(0))
+            .await;
+        assert!(result.is_err());
     }
 
     // ── derive_child_leases ──────────────────────────────────
@@ -390,11 +445,12 @@ mod tests {
         mgr.grant(
             parent,
             "tools",
-            vec!["A".into(), "B".into(), "C".into()],
+            GrantedActions::Specific(vec!["A".into(), "B".into(), "C".into()]),
             None,
             None,
         )
-        .await;
+        .await
+        .unwrap();
 
         let mut requested = std::collections::HashSet::new();
         requested.insert("B".into());
@@ -405,10 +461,9 @@ mod tests {
             .derive_child_leases(parent, child, Some(&requested))
             .await;
         assert_eq!(child_leases.len(), 1);
-        let actions = &child_leases[0].granted_actions;
-        assert!(actions.contains(&"B".to_string()));
-        assert!(actions.contains(&"C".to_string()));
-        assert!(!actions.contains(&"D".to_string()));
+        assert!(child_leases[0].granted_actions.covers("B"));
+        assert!(child_leases[0].granted_actions.covers("C"));
+        assert!(!child_leases[0].granted_actions.covers("D"));
     }
 
     #[tokio::test]
@@ -421,11 +476,12 @@ mod tests {
             .grant(
                 parent,
                 "tools",
-                vec!["read".into()],
+                GrantedActions::Specific(vec!["read".into()]),
                 Some(chrono::Duration::hours(1)),
                 None,
             )
-            .await;
+            .await
+            .unwrap();
 
         let child_leases = mgr.derive_child_leases(parent, child, None).await;
         assert_eq!(child_leases.len(), 1);
@@ -438,14 +494,24 @@ mod tests {
         let parent = ThreadId::new();
         let child = ThreadId::new();
 
-        mgr.grant(
-            parent,
-            "tools",
-            vec!["read".into()],
-            Some(chrono::Duration::seconds(-10)), // already expired
-            None,
-        )
-        .await;
+        // Manually insert an already-expired lease (bypassing grant validation)
+        let now = Utc::now();
+        let expired_lease = CapabilityLease {
+            id: LeaseId::new(),
+            thread_id: parent,
+            capability_name: "tools".into(),
+            granted_actions: GrantedActions::Specific(vec!["read".into()]),
+            granted_at: now,
+            expires_at: Some(now - chrono::Duration::seconds(10)),
+            max_uses: None,
+            uses_remaining: None,
+            revoked: false,
+            revoked_reason: None,
+        };
+        mgr.active
+            .write()
+            .await
+            .insert(expired_lease.id, expired_lease);
 
         let child_leases = mgr.derive_child_leases(parent, child, None).await;
         assert!(child_leases.is_empty());
@@ -458,8 +524,15 @@ mod tests {
         let child = ThreadId::new();
 
         let parent_lease = mgr
-            .grant(parent, "tools", vec!["read".into()], None, Some(10))
-            .await;
+            .grant(
+                parent,
+                "tools",
+                GrantedActions::Specific(vec!["read".into()]),
+                None,
+                Some(10),
+            )
+            .await
+            .unwrap();
 
         // Consume 3 uses from parent
         mgr.consume_use(parent_lease.id).await.unwrap();
@@ -481,14 +554,15 @@ mod tests {
         mgr.grant(
             parent,
             "tools",
-            vec!["read".into(), "write".into()],
+            GrantedActions::Specific(vec!["read".into(), "write".into()]),
             None,
             None,
         )
-        .await;
+        .await
+        .unwrap();
 
         let child_leases = mgr.derive_child_leases(parent, child, None).await;
         assert_eq!(child_leases.len(), 1);
-        assert_eq!(child_leases[0].granted_actions.len(), 2);
+        assert_eq!(child_leases[0].granted_actions.actions().len(), 2);
     }
 }

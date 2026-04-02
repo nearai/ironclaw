@@ -462,22 +462,17 @@ impl EffectBridgeAdapter {
                 ApprovalRequirement::UnlessAutoApproved => {
                     let is_approved = self.auto_approved.read().await.contains(lookup_name);
                     if !is_approved && !approval_already_granted {
-                        let has_credential_backing = lookup_name == "http"
-                            && self.tools.credential_registry().is_some_and(|reg| {
-                                crate::tools::builtin::extract_host_from_params(&parameters)
-                                    .is_some_and(|host| reg.has_credentials_for_host(&host))
-                            });
-
-                        if !has_credential_backing {
-                            return Err(Self::gate_paused(
-                                "approval",
-                                action_name,
-                                context.current_call_id.as_deref(),
-                                parameters,
-                                ironclaw_engine::ResumeKind::Approval { allow_always: true },
-                                None,
-                            ));
-                        }
+                        // Credential presence alone does NOT bypass approval.
+                        // Credentials indicate the call *can* be authenticated,
+                        // not that the user has authorized this specific request.
+                        return Err(Self::gate_paused(
+                            "approval",
+                            action_name,
+                            context.current_call_id.as_deref(),
+                            parameters,
+                            ironclaw_engine::ResumeKind::Approval { allow_always: true },
+                            None,
+                        ));
                     }
                 }
                 ApprovalRequirement::Never => {}
@@ -962,7 +957,7 @@ mod tests {
             id: ironclaw_engine::types::capability::LeaseId::new(),
             thread_id: ironclaw_engine::ThreadId::new(),
             capability_name: "tools".into(),
-            granted_actions: vec![],
+            granted_actions: ironclaw_engine::GrantedActions::All,
             granted_at: chrono::Utc::now(),
             expires_at: None,
             max_uses: None,
@@ -1200,7 +1195,7 @@ mod tests {
             id: ironclaw_engine::types::capability::LeaseId::new(),
             thread_id: ironclaw_engine::ThreadId::new(),
             capability_name: "tools".into(),
-            granted_actions: vec![],
+            granted_actions: ironclaw_engine::GrantedActions::All,
             granted_at: chrono::Utc::now(),
             expires_at: None,
             max_uses: None,
@@ -1291,7 +1286,7 @@ mod tests {
             id: ironclaw_engine::types::capability::LeaseId::new(),
             thread_id: ironclaw_engine::ThreadId::new(),
             capability_name: "tools".into(),
-            granted_actions: vec![],
+            granted_actions: ironclaw_engine::GrantedActions::All,
             granted_at: chrono::Utc::now(),
             expires_at: None,
             max_uses: None,

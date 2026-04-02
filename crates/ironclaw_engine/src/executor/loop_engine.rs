@@ -411,7 +411,7 @@ mod tests {
     use crate::runtime::messaging::ThreadSignal;
     use crate::traits::effect::ThreadExecutionContext;
     use crate::traits::llm::{LlmCallConfig, LlmOutput};
-    use crate::types::capability::{ActionDef, CapabilityLease, EffectType};
+    use crate::types::capability::{ActionDef, CapabilityLease, EffectType, GrantedActions};
     use crate::types::project::ProjectId;
     use crate::types::step::LlmResponse;
     use crate::types::step::{ActionResult, TokenUsage};
@@ -567,7 +567,10 @@ mod tests {
         let policy = Arc::new(PolicyEngine::new());
 
         // Grant a default lease
-        leases.grant(tid, "test_cap", vec![], None, None).await;
+        leases
+            .grant(tid, "test_cap", GrantedActions::All, None, None)
+            .await
+            .unwrap();
 
         let (tx, rx) = crate::runtime::messaging::signal_channel(16);
 
@@ -1221,7 +1224,10 @@ mod tests {
         let policy = Arc::new(PolicyEngine::new());
 
         // Grant a lease that does NOT cover "restricted_tool"
-        leases.grant(tid, "basic_cap", vec![], None, None).await;
+        leases
+            .grant(tid, "basic_cap", GrantedActions::All, None, None)
+            .await
+            .unwrap();
 
         let (_tx, rx) = crate::runtime::messaging::signal_channel(16);
         let mut exec =

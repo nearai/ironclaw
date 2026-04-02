@@ -21,10 +21,10 @@ use tokio::sync::RwLock;
 use ironclaw_engine::types::capability::{EffectType, LeaseId};
 use ironclaw_engine::{
     ActionDef, ActionResult, Capability, CapabilityLease, CapabilityRegistry, DocId,
-    EffectExecutor, EngineError, LeaseManager, LlmBackend, LlmCallConfig, LlmOutput, LlmResponse,
-    MemoryDoc, Mission, MissionId, MissionStatus, PolicyEngine, Project, ProjectId, ResumeKind,
-    Step, Store, Thread, ThreadConfig, ThreadEvent, ThreadId, ThreadManager, ThreadMessage,
-    ThreadOutcome, ThreadState, ThreadType, TokenUsage,
+    EffectExecutor, EngineError, GrantedActions, LeaseManager, LlmBackend, LlmCallConfig,
+    LlmOutput, LlmResponse, MemoryDoc, Mission, MissionId, MissionStatus, PolicyEngine, Project,
+    ProjectId, ResumeKind, Step, Store, Thread, ThreadConfig, ThreadEvent, ThreadId, ThreadManager,
+    ThreadMessage, ThreadOutcome, ThreadState, ThreadType, TokenUsage,
 };
 
 use ironclaw::bridge::EffectBridgeAdapter;
@@ -1419,7 +1419,7 @@ async fn lease_planner_research_excludes_privileged() {
     let plans = planner.plan_for_thread(ThreadType::Research, &caps);
     let all_actions: Vec<String> = plans
         .iter()
-        .flat_map(|p| p.granted_actions.clone())
+        .flat_map(|p| p.granted_actions.actions().to_vec())
         .collect();
 
     assert!(
@@ -1465,7 +1465,7 @@ async fn lease_planner_mission_excludes_denylisted() {
     let plans = planner.plan_for_thread(ThreadType::Mission, &caps);
     let all_actions: Vec<String> = plans
         .iter()
-        .flat_map(|p| p.granted_actions.clone())
+        .flat_map(|p| p.granted_actions.actions().to_vec())
         .collect();
 
     assert!(all_actions.contains(&"echo".into()));
@@ -1487,11 +1487,12 @@ async fn child_lease_inherits_subset_of_parent() {
     mgr.grant(
         parent,
         "tools",
-        vec!["read".into(), "write".into(), "delete".into()],
+        GrantedActions::Specific(vec!["read".into(), "write".into(), "delete".into()]),
         None,
         None,
     )
-    .await;
+    .await
+    .unwrap();
 
     let mut requested = std::collections::HashSet::new();
     requested.insert("write".into());
@@ -1503,11 +1504,11 @@ async fn child_lease_inherits_subset_of_parent() {
         .await;
     assert_eq!(child_leases.len(), 1);
 
-    let actions = &child_leases[0].granted_actions;
-    assert!(actions.contains(&"write".to_string()));
-    assert!(actions.contains(&"delete".to_string()));
+    let ga = &child_leases[0].granted_actions;
+    assert!(ga.covers("write"));
+    assert!(ga.covers("delete"));
     assert!(
-        !actions.contains(&"admin".to_string()),
+        !ga.covers("admin"),
         "Child cannot have actions parent doesn't have"
     );
 }
@@ -1519,19 +1520,24 @@ async fn expired_parent_yields_no_child_leases() {
     let parent = ThreadId::new();
     let child = ThreadId::new();
 
-    mgr.grant(
-        parent,
-        "tools",
-        vec!["read".into()],
-        Some(chrono::Duration::seconds(-10)), // already expired
-        None,
-    )
-    .await;
+    // Grant a valid lease, then revoke it so it appears invalid to
+    // derive_child_leases. (Negative durations are now rejected by grant.)
+    let lease = mgr
+        .grant(
+            parent,
+            "tools",
+            GrantedActions::Specific(vec!["read".into()]),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    mgr.revoke(lease.id, "test: simulating expired").await;
 
     let child_leases = mgr.derive_child_leases(parent, child, None).await;
     assert!(
         child_leases.is_empty(),
-        "Expired parent should yield no child leases"
+        "Revoked parent should yield no child leases"
     );
 }
 
@@ -1543,8 +1549,10 @@ async fn wildcard_parent_lease_gives_requested_subset_not_wildcard() {
     let parent = ThreadId::new();
     let child = ThreadId::new();
 
-    // Wildcard parent: granted_actions=[] means "all actions"
-    mgr.grant(parent, "tools", vec![], None, None).await;
+    // Wildcard parent: granted_actions=All means "all actions"
+    mgr.grant(parent, "tools", GrantedActions::All, None, None)
+        .await
+        .unwrap();
 
     let mut requested = std::collections::HashSet::new();
     requested.insert("read".into());
@@ -1555,15 +1563,16 @@ async fn wildcard_parent_lease_gives_requested_subset_not_wildcard() {
         .await;
     assert_eq!(child_leases.len(), 1);
 
-    let actions = &child_leases[0].granted_actions;
-    // Child should get ["read", "write"], NOT [] (wildcard)
+    let ga = &child_leases[0].granted_actions;
+    // Child should get Specific(["read", "write"]), NOT All (wildcard)
+    let actions = ga.actions();
     assert_eq!(
         actions.len(),
         2,
         "Child of wildcard parent should get exactly the requested actions, not wildcard. Got: {actions:?}"
     );
-    assert!(actions.contains(&"read".to_string()));
-    assert!(actions.contains(&"write".to_string()));
+    assert!(ga.covers("read"));
+    assert!(ga.covers("write"));
 }
 
 // ── Tests: LeaseGate integration ─────────────────────────────
@@ -1614,8 +1623,15 @@ async fn lease_gate_allows_with_valid_lease() {
 
     let mgr = Arc::new(LeaseManager::new());
     let tid = ThreadId::new();
-    mgr.grant(tid, "tools", vec!["shell".into()], None, None)
-        .await;
+    mgr.grant(
+        tid,
+        "tools",
+        GrantedActions::Specific(vec!["shell".into()]),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
 
     let gate = LeaseGate::new(Arc::clone(&mgr));
     let ad = ActionDef {

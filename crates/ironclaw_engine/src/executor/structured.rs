@@ -268,37 +268,36 @@ pub async fn execute_action_calls(
         if let Some((result, event)) = slot {
             // Record the first gate pause as the batch interrupt but still
             // collect all other results.
-            if first_interrupt.is_none() {
-                if let EventKind::ApprovalRequested {
+            if first_interrupt.is_none()
+                && let EventKind::ApprovalRequested {
                     ref action_name,
                     ref call_id,
                     ..
                 } = event
-                    && result.output.get("status").and_then(|v| v.as_str()) == Some("gate_paused")
-                {
-                    let gate_name = result
-                        .output
-                        .get("gate")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("unknown")
-                        .to_string();
-                    let call = &calls[idx];
-                    first_interrupt = Some(ThreadOutcome::GatePaused {
-                        gate_name,
-                        action_name: action_name.clone(),
-                        call_id: call_id.clone(),
-                        parameters: call.parameters.clone(),
-                        resume_kind: serde_json::from_value(
-                            result.output.get("resume_kind").cloned().unwrap_or_else(
-                                || serde_json::json!({"Approval":{"allow_always":false}}),
-                            ),
-                        )
-                        .unwrap_or(crate::gate::ResumeKind::Approval {
-                            allow_always: false,
-                        }),
-                        resume_output: result.output.get("resume_output").cloned(),
-                    });
-                }
+                && result.output.get("status").and_then(|v| v.as_str()) == Some("gate_paused")
+            {
+                let gate_name = result
+                    .output
+                    .get("gate")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown")
+                    .to_string();
+                let call = &calls[idx];
+                first_interrupt = Some(ThreadOutcome::GatePaused {
+                    gate_name,
+                    action_name: action_name.clone(),
+                    call_id: call_id.clone(),
+                    parameters: call.parameters.clone(),
+                    resume_kind: serde_json::from_value(
+                        result.output.get("resume_kind").cloned().unwrap_or_else(
+                            || serde_json::json!({"Approval":{"allow_always":false}}),
+                        ),
+                    )
+                    .unwrap_or(crate::gate::ResumeKind::Approval {
+                        allow_always: false,
+                    }),
+                    resume_output: result.output.get("resume_output").cloned(),
+                });
             }
             results.push(result);
             events.push(event);
@@ -399,7 +398,7 @@ fn interrupted_call_needs_refund(result: &Result<ActionResult, EngineError>) -> 
 mod tests {
     use super::*;
     use crate::traits::effect::ThreadExecutionContext;
-    use crate::types::capability::{ActionDef, CapabilityLease, EffectType};
+    use crate::types::capability::{ActionDef, CapabilityLease, EffectType, GrantedActions};
     use crate::types::project::ProjectId;
     use crate::types::step::StepId;
     use crate::types::thread::{Thread, ThreadConfig, ThreadType};
@@ -499,7 +498,10 @@ mod tests {
         let policy = Arc::new(PolicyEngine::new());
         let ctx = make_exec_context(&thread);
 
-        leases.grant(thread.id, "search", vec![], None, None).await;
+        leases
+            .grant(thread.id, "search", GrantedActions::All, None, None)
+            .await
+            .unwrap();
 
         let calls = vec![ActionCall {
             id: "call_r2o5mqBgdNUlH8KzskncUGaX".into(),
@@ -553,7 +555,10 @@ mod tests {
         let policy = Arc::new(PolicyEngine::new());
         let ctx = make_exec_context(&thread);
 
-        leases.grant(thread.id, "exec", vec![], None, None).await;
+        leases
+            .grant(thread.id, "exec", GrantedActions::All, None, None)
+            .await
+            .unwrap();
 
         let calls = vec![ActionCall {
             id: "call_abc123def".into(),
@@ -648,7 +653,10 @@ mod tests {
         let policy = Arc::new(PolicyEngine::new());
         let ctx = make_exec_context(&thread);
 
-        leases.grant(thread.id, "cap", vec![], None, None).await;
+        leases
+            .grant(thread.id, "cap", GrantedActions::All, None, None)
+            .await
+            .unwrap();
 
         let calls = vec![
             ActionCall {
@@ -702,7 +710,10 @@ mod tests {
         let policy = Arc::new(PolicyEngine::new());
         let ctx = make_exec_context(&thread);
 
-        leases.grant(thread.id, "tools", vec![], None, None).await;
+        leases
+            .grant(thread.id, "tools", GrantedActions::All, None, None)
+            .await
+            .unwrap();
 
         let calls = vec![ActionCall {
             id: "call_auth_1".into(),
@@ -790,7 +801,10 @@ mod tests {
         let policy = Arc::new(PolicyEngine::new());
         let ctx = make_exec_context(&thread);
 
-        leases.grant(thread.id, "tools", vec![], None, None).await;
+        leases
+            .grant(thread.id, "tools", GrantedActions::All, None, None)
+            .await
+            .unwrap();
 
         let calls = vec![
             ActionCall {
@@ -869,7 +883,10 @@ mod tests {
         let policy = Arc::new(PolicyEngine::new());
         let ctx = make_exec_context(&thread);
 
-        leases.grant(thread.id, "tools", vec![], None, None).await;
+        leases
+            .grant(thread.id, "tools", GrantedActions::All, None, None)
+            .await
+            .unwrap();
 
         let calls = vec![
             ActionCall {
@@ -925,7 +942,10 @@ mod tests {
         let policy = Arc::new(PolicyEngine::new());
         let ctx = make_exec_context(&thread);
 
-        leases.grant(thread.id, "cap", vec![], None, None).await;
+        leases
+            .grant(thread.id, "cap", GrantedActions::All, None, None)
+            .await
+            .unwrap();
 
         let calls = vec![ActionCall {
             id: "aB3xK9mZq".into(), // Mistral-compatible 9-char ID
@@ -968,7 +988,10 @@ mod tests {
         let policy = Arc::new(PolicyEngine::new());
         let ctx = make_exec_context(&thread);
 
-        leases.grant(thread.id, "cap", vec![], None, None).await;
+        leases
+            .grant(thread.id, "cap", GrantedActions::All, None, None)
+            .await
+            .unwrap();
 
         // Mistral format: exactly 9 alphanumeric chars
         let mistral_id = "xK3mR9bZq";

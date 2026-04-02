@@ -26,8 +26,8 @@ pub mod types;
 // ── Re-exports: types ───────────────────────────────────────
 
 pub use types::capability::{
-    ActionDef, Capability, CapabilityLease, EffectType, LeaseId, PolicyCondition, PolicyEffect,
-    PolicyRule,
+    ActionDef, Capability, CapabilityLease, EffectType, GrantedActions, LeaseId, PolicyCondition,
+    PolicyEffect, PolicyRule,
 };
 pub use types::error::{CapabilityError, EngineError, StepError, ThreadError};
 pub use types::event::{EventId, EventKind, ThreadEvent};
