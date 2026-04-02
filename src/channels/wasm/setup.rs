@@ -18,8 +18,9 @@ use crate::extensions::ExtensionManager;
 use crate::pairing::PairingStore;
 use crate::secrets::SecretsStore;
 
-/// Return true if a channel name is reserved and must not be claimed by a
-/// dynamically loaded WASM module.
+/// Return true if a channel name is *always* reserved (unconditionally)
+/// and must not be claimed by a dynamically loaded WASM module, regardless
+/// of install provenance. This corresponds to the `AlwaysReserved` policy.
 pub fn is_reserved_wasm_channel_name(name: &str) -> bool {
     matches!(
         reserved_wasm_channel_name_policy(name),
