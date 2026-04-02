@@ -366,6 +366,7 @@ impl Database for LibSqlBackend {
                 "routines",
                 "settings",
                 "agent_jobs",
+                "api_tokens",
             ];
             for table in &tables {
                 conn.execute(

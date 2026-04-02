@@ -83,6 +83,7 @@ impl Database for PgBackend {
             "routines",
             "settings",
             "agent_jobs",
+            "api_tokens",
         ];
         for table in &tables {
             tx.execute(
@@ -1127,7 +1128,8 @@ impl ChannelPairingStore for PgBackend {
                  WHERE UPPER(code) = UPPER($1)
                    AND channel = $2
                    AND approved_at IS NULL
-                   AND expires_at > NOW()",
+                   AND expires_at > NOW()
+                 FOR UPDATE",
                 &[&code, &channel],
             )
             .await

@@ -191,10 +191,13 @@ impl SignalChannel {
         })
     }
 
-    /// Check if sender is allowed via config allow_from OR pairing store (DB-backed).
-    fn is_sender_allowed_with_pairing(&self, sender: &str) -> bool {
+    /// Resolve the sender's identity via config allow_from or pairing store.
+    /// Returns `Ok(Some(owner_id))` if paired, `Ok(None)` if allowed via config
+    /// (use sender as user_id), or `Err(())` if the sender is not admitted.
+    fn resolve_sender_identity(&self, sender: &str) -> Result<Option<String>, ()> {
+        // Config allow_from — backward compat, use sender as user_id.
         if self.is_sender_allowed(sender) {
-            return true;
+            return Ok(None);
         }
         let store = Arc::clone(&self.pairing_store);
         let sender_owned = sender.to_string();
@@ -207,7 +210,11 @@ impl SignalChannel {
                     store.resolve_identity("signal", &sender_owned).await
                 })
             });
-        result.ok().flatten().is_some()
+        match result {
+            Ok(Some(identity)) => Ok(Some(identity.owner_id.to_string())),
+            Ok(None) => Err(()),
+            Err(_) => Err(()),
+        }
     }
 
     /// Handle pairing request for unapproved sender.
@@ -723,7 +730,10 @@ impl SignalChannel {
                     None
                 }
             })?;
-        let sender = Self::sender(envelope)?;
+        let mut sender = Self::sender(envelope)?;
+        // raw_sender preserves the original phone number for reply routing
+        // even when sender is overwritten with resolved owner_id.
+        let raw_sender = sender.clone();
 
         // Log sender info including UUID if available
         tracing::debug!(
@@ -790,21 +800,28 @@ impl SignalChannel {
             }
         } else {
             // DM message - apply DM policy
+            // resolved_user_id: owner_id if paired, sender if allowed via config/open
+            let resolved_user_id: String;
             match self.config.dm_policy.as_str() {
-                "open" => {}
+                "open" => {
+                    resolved_user_id = sender.clone();
+                }
                 "pairing" => {
-                    // Pairing policy: check allow_from + pairing store
-                    if !self.is_sender_allowed_with_pairing(&sender) {
-                        // Handle pairing request - this will create a request and send reply if new
-                        match self.handle_pairing_request(&sender, envelope.source_name.as_deref())
-                        {
-                            Ok(_) => {
-                                // Pairing request processed (new or existing), drop the message
-                                return None;
-                            }
-                            Err(()) => {
-                                // Error processing pairing, drop message
-                                return None;
+                    // Pairing policy: resolve identity via allow_from + pairing store
+                    match self.resolve_sender_identity(&sender) {
+                        Ok(Some(owner_id)) => {
+                            resolved_user_id = owner_id;
+                        }
+                        Ok(None) => {
+                            // Allowed via config allow_from — use sender as user_id
+                            resolved_user_id = sender.clone();
+                        }
+                        Err(()) => {
+                            // Not admitted — handle pairing request
+                            match self
+                                .handle_pairing_request(&sender, envelope.source_name.as_deref())
+                            {
+                                Ok(_) | Err(()) => return None,
                             }
                         }
                     }
@@ -815,12 +832,19 @@ impl SignalChannel {
                         tracing::debug!(sender = %sender, "Signal: sender not in allow_from, dropping");
                         return None;
                     }
+                    resolved_user_id = sender.clone();
                 }
-                _ => {}
+                _ => {
+                    resolved_user_id = sender.clone();
+                }
             }
+
+            // Replace sender with resolved user_id for downstream message construction.
+            // raw_sender (set at the top) preserves the phone number for reply routing.
+            sender = resolved_user_id;
         }
 
-        let target = Self::reply_target(data_msg, &sender);
+        let target = Self::reply_target(data_msg, &raw_sender);
 
         let timestamp = data_msg
             .timestamp
@@ -838,13 +862,15 @@ impl SignalChannel {
         // Build metadata with signal-specific routing info.
         let sender_uuid = envelope.source_uuid.as_deref();
         let metadata = serde_json::json!({
-            "signal_sender": &sender,
+            "signal_sender": &raw_sender,
             "signal_sender_uuid": sender_uuid,
             "signal_target": &target,
             "signal_timestamp": timestamp,
         });
 
-        let mut msg = IncomingMessage::new("signal", &sender, text).with_metadata(metadata);
+        let mut msg = IncomingMessage::new("signal", &sender, text)
+            .with_sender_id(&raw_sender)
+            .with_metadata(metadata);
 
         // Use sourceName as display name if available.
         if let Some(ref name) = envelope.source_name
@@ -865,7 +891,7 @@ impl SignalChannel {
             msg = msg.with_thread(uuid.clone());
         } else {
             // For regular DMs, generate a deterministic UUID from the phone number
-            msg = msg.with_thread(Self::thread_id_from_identifier(&sender));
+            msg = msg.with_thread(Self::thread_id_from_identifier(&raw_sender));
         }
 
         Some((msg, target))

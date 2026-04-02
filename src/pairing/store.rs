@@ -58,6 +58,15 @@ impl PairingStore {
             return Ok(Some(identity));
         }
         let Some(ref db) = self.db else {
+            use std::sync::atomic::{AtomicBool, Ordering};
+            static WARNED: AtomicBool = AtomicBool::new(false);
+            if !WARNED.swap(true, Ordering::Relaxed) {
+                tracing::warn!(
+                    "PairingStore running in noop mode (no database): pairing-based channel \
+                     admission is unavailable. Configure a database or use allow_from in \
+                     channel config."
+                );
+            }
             return Ok(None);
         };
         let identity = db.resolve_channel_identity(channel, external_id).await?;
