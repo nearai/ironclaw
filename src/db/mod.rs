@@ -346,6 +346,27 @@ pub struct ApiTokenRecord {
     pub revoked_at: Option<DateTime<Utc>>,
 }
 
+// ==================== User identity record types ====================
+
+/// A linked external identity from an OAuth/social login provider.
+#[derive(Debug, Clone)]
+pub struct UserIdentityRecord {
+    pub id: Uuid,
+    pub user_id: String,
+    /// Provider name (e.g. `google`, `github`, `apple`, `near`, `email`).
+    pub provider: String,
+    /// Provider-specific unique user identifier (Google `sub`, GitHub user ID, etc.).
+    pub provider_user_id: String,
+    pub email: Option<String>,
+    pub email_verified: bool,
+    pub display_name: Option<String>,
+    pub avatar_url: Option<String>,
+    /// Raw JSON profile payload from the provider for debugging/auditing.
+    pub raw_profile: serde_json::Value,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
 // ==================== Sub-traits ====================
 //
 // Each sub-trait groups related persistence methods. The `Database` supertrait
@@ -367,6 +388,14 @@ pub trait ConversationStore: Send + Sync {
         role: &str,
         content: &str,
     ) -> Result<Uuid, DatabaseError>;
+    /// Insert a message only if the conversation has zero messages.
+    /// Returns `Ok(true)` if the message was inserted, `Ok(false)` if skipped.
+    async fn add_conversation_message_if_empty(
+        &self,
+        conversation_id: Uuid,
+        role: &str,
+        content: &str,
+    ) -> Result<bool, DatabaseError>;
     async fn ensure_conversation(
         &self,
         id: Uuid,
@@ -1006,6 +1035,48 @@ pub struct UserSummaryStats {
     pub last_active_at: Option<DateTime<Utc>>,
 }
 
+/// Persistence for linked external identities (OAuth/social login providers).
+#[async_trait]
+pub trait IdentityStore: Send + Sync {
+    /// Find a user identity by provider and provider-specific user ID.
+    async fn get_identity_by_provider(
+        &self,
+        provider: &str,
+        provider_user_id: &str,
+    ) -> Result<Option<UserIdentityRecord>, DatabaseError>;
+
+    /// Find all identities linked to a user.
+    async fn list_identities_for_user(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<UserIdentityRecord>, DatabaseError>;
+
+    /// Create a new identity link.
+    async fn create_identity(&self, identity: &UserIdentityRecord) -> Result<(), DatabaseError>;
+
+    /// Update display_name and avatar_url on an existing identity (e.g. on re-login).
+    async fn update_identity_profile(
+        &self,
+        provider: &str,
+        provider_user_id: &str,
+        display_name: Option<&str>,
+        avatar_url: Option<&str>,
+    ) -> Result<(), DatabaseError>;
+
+    /// Find identities with a given verified email (for automatic account linking).
+    async fn find_identity_by_verified_email(
+        &self,
+        email: &str,
+    ) -> Result<Option<UserIdentityRecord>, DatabaseError>;
+
+    /// Create a new user and link an identity atomically.
+    async fn create_user_with_identity(
+        &self,
+        user: &UserRecord,
+        identity: &UserIdentityRecord,
+    ) -> Result<(), DatabaseError>;
+}
+
 /// Backend-agnostic database supertrait.
 ///
 /// Combines all sub-traits into one. Existing `Arc<dyn Database>` consumers
@@ -1020,6 +1091,7 @@ pub trait Database:
     + SettingsStore
     + WorkspaceStore
     + UserStore
+    + IdentityStore
     + Send
     + Sync
 {

@@ -177,6 +177,7 @@ hyper-util = { version = "0.1", features = ["server", "tokio", "http1", "http2"]
 http-body-util = "0.1"
 bytes = "1"
 base64 = "0.22.1"
+cookie = "0.18"
 jsonwebtoken = "9"
 mime_guess = "2.0.5"
 clap_complete = "4.5.0"
@@ -186,6 +187,7 @@ lru = "0.16.3"
 html-to-markdown-rs = { version = "2.3", optional = true }
 readabilityrs = { version = "0.1.2", optional = true }
 ed25519-dalek = { version = "2.2.0", features = ["std"] }
+bs58 = "0.5"
 hex = "0.4.3"
 
 # OpenClaw import (feature gated)

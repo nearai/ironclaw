@@ -788,6 +788,28 @@ CREATE INDEX IF NOT EXISTS idx_api_tokens_hash ON api_tokens(token_hash);
 "#,
     ),
     (
+        15,
+        "user_identities",
+        r#"
+CREATE TABLE IF NOT EXISTS user_identities (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    provider TEXT NOT NULL,
+    provider_user_id TEXT NOT NULL,
+    email TEXT,
+    email_verified INTEGER NOT NULL DEFAULT 0,
+    display_name TEXT,
+    avatar_url TEXT,
+    raw_profile TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    UNIQUE (provider, provider_user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_user_identities_user ON user_identities(user_id);
+CREATE INDEX IF NOT EXISTS idx_user_identities_email ON user_identities(email) WHERE email IS NOT NULL;
+"#,
+    ),
+    (
         16,
         "conversation_source_channel",
         // Add source_channel to conversations for cross-channel approval authorization.

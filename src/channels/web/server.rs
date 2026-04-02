@@ -26,6 +26,8 @@ use tower_http::cors::{AllowHeaders, CorsLayer};
 use tower_http::set_header::SetResponseHeaderLayer;
 use uuid::Uuid;
 
+use axum::http::HeaderMap;
+
 use crate::agent::SessionManager;
 use crate::bootstrap::ironclaw_base_dir;
 use crate::channels::IncomingMessage;
@@ -88,6 +90,29 @@ fn redact_oauth_state_for_logs(state: &str) -> String {
         let _ = write!(&mut short_hash, "{byte:02x}");
     }
     format!("sha256:{short_hash}:len={}", state.len())
+}
+
+pub(crate) fn rate_limit_key_from_headers(headers: &HeaderMap) -> String {
+    // Try X-Forwarded-For first (reverse proxy), then X-Real-IP.
+    let xff = headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .into_iter()
+        .flat_map(|s| s.split(','))
+        .map(str::trim)
+        .find_map(|candidate| candidate.parse::<std::net::IpAddr>().ok())
+        .map(|ip| ip.to_string());
+
+    if let Some(ip) = xff {
+        return ip;
+    }
+
+    headers
+        .get("x-real-ip")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.trim().parse::<std::net::IpAddr>().ok())
+        .map(|ip| ip.to_string())
+        .unwrap_or_else(|| "unknown".to_string())
 }
 
 /// Simple sliding-window rate limiter.
@@ -170,15 +195,21 @@ pub struct ActiveConfigSnapshot {
 ///
 /// Prevents one user from exhausting the rate limit for all users in multi-tenant mode.
 pub struct PerUserRateLimiter {
-    limiters: std::sync::RwLock<std::collections::HashMap<String, RateLimiter>>,
+    limiters: std::sync::Mutex<lru::LruCache<String, RateLimiter>>,
     max_requests: u64,
     window_secs: u64,
 }
 
 impl PerUserRateLimiter {
+    // SAFETY: 2048 is non-zero, so the unwrap in `new()` is infallible.
+    const MAX_KEYS: std::num::NonZeroUsize = match std::num::NonZeroUsize::new(2048) {
+        Some(v) => v,
+        None => unreachable!(),
+    };
+
     pub fn new(max_requests: u64, window_secs: u64) -> Self {
         Self {
-            limiters: std::sync::RwLock::new(std::collections::HashMap::new()),
+            limiters: std::sync::Mutex::new(lru::LruCache::new(Self::MAX_KEYS)),
             max_requests,
             window_secs,
         }
@@ -186,32 +217,16 @@ impl PerUserRateLimiter {
 
     /// Try to consume one request for the given user. Returns `true` if allowed.
     pub fn check(&self, user_id: &str) -> bool {
-        // Fast path: check existing limiter under read lock.
-        // On lock poisoning (another thread panicked while holding the lock),
-        // allow the request rather than crashing the server.
-        {
-            let map = match self.limiters.read() {
-                Ok(m) => m,
-                Err(e) => {
-                    tracing::warn!("PerUserRateLimiter read lock poisoned; recovering");
-                    e.into_inner()
-                }
-            };
-            if let Some(limiter) = map.get(user_id) {
-                return limiter.check();
-            }
-        }
-        // Slow path: create limiter under write lock.
-        let mut map = match self.limiters.write() {
+        let mut map = match self.limiters.lock() {
             Ok(m) => m,
             Err(e) => {
-                tracing::warn!("PerUserRateLimiter write lock poisoned; recovering");
+                tracing::warn!("PerUserRateLimiter lock poisoned; recovering");
                 e.into_inner()
             }
         };
-        let limiter = map
-            .entry(user_id.to_string())
-            .or_insert_with(|| RateLimiter::new(self.max_requests, self.window_secs));
+        let limiter = map.get_or_insert_mut(user_id.to_string(), || {
+            RateLimiter::new(self.max_requests, self.window_secs)
+        });
         limiter.check()
     }
 }
@@ -383,8 +398,8 @@ pub struct GatewayState {
     pub scheduler: Option<crate::tools::builtin::SchedulerSlot>,
     /// Per-user rate limiter for chat endpoints (30 messages per 60 seconds per user).
     pub chat_rate_limiter: PerUserRateLimiter,
-    /// Rate limiter for OAuth callback endpoints (10 requests per 60 seconds).
-    pub oauth_rate_limiter: RateLimiter,
+    /// Per-IP rate limiter for OAuth/auth endpoints (20 requests per 60 seconds per IP).
+    pub oauth_rate_limiter: PerUserRateLimiter,
     /// Rate limiter for webhook trigger endpoints (10 requests per 60 seconds).
     pub webhook_rate_limiter: RateLimiter,
     /// Registry catalog entries for the available extensions API.
@@ -402,6 +417,31 @@ pub struct GatewayState {
     pub secrets_store: Option<Arc<dyn crate::secrets::SecretsStore + Send + Sync>>,
     /// DB auth cache for invalidation on security-critical actions.
     pub db_auth: Option<Arc<crate::channels::web::auth::DbAuthenticator>>,
+    /// OAuth providers for social login (None when OAuth is disabled).
+    pub oauth_providers: Option<
+        Arc<
+            std::collections::HashMap<
+                String,
+                Arc<dyn crate::channels::web::oauth::providers::OAuthProvider>,
+            >,
+        >,
+    >,
+    /// In-memory store for pending OAuth flows (CSRF + PKCE state).
+    pub oauth_state_store: Option<Arc<crate::channels::web::oauth::state_store::OAuthStateStore>>,
+    /// Base URL for constructing OAuth callback URLs.
+    pub oauth_base_url: Option<String>,
+    /// Email domains allowed for OAuth/OIDC login. Empty means allow all.
+    pub oauth_allowed_domains: Vec<String>,
+    /// NEAR wallet auth nonce store (None when NEAR auth is disabled).
+    pub near_nonce_store: Option<Arc<crate::channels::web::oauth::near::NearNonceStore>>,
+    /// NEAR RPC endpoint URL for access key verification.
+    pub near_rpc_url: Option<String>,
+    /// NEAR network name (mainnet/testnet) for the frontend wallet connector.
+    pub near_network: Option<String>,
+    /// Shutdown signal for OAuth/NEAR sweep background tasks.
+    /// When this sender is dropped, the sweep loops exit gracefully.
+    #[allow(dead_code)]
+    pub oauth_sweep_shutdown: Option<tokio::sync::watch::Sender<()>>,
 }
 
 /// Start the gateway HTTP server.
@@ -443,6 +483,33 @@ pub async fn start_server(
         .route(
             "/api/webhooks/u/{user_id}/{path}",
             post(crate::channels::web::handlers::webhooks::webhook_trigger_user_scoped_handler),
+        )
+        // OAuth social login routes (public, no auth required)
+        .route(
+            "/auth/providers",
+            get(crate::channels::web::handlers::auth::providers_handler),
+        )
+        .route(
+            "/auth/login/{provider}",
+            get(crate::channels::web::handlers::auth::login_handler),
+        )
+        .route(
+            "/auth/callback/{provider}",
+            get(crate::channels::web::handlers::auth::callback_handler)
+                .post(crate::channels::web::handlers::auth::callback_post_handler),
+        )
+        .route(
+            "/auth/logout",
+            post(crate::channels::web::handlers::auth::logout_handler),
+        )
+        // NEAR wallet auth (challenge-response, not OAuth redirect)
+        .route(
+            "/auth/near/challenge",
+            get(crate::channels::web::handlers::auth::near_challenge_handler),
+        )
+        .route(
+            "/auth/near/verify",
+            post(crate::channels::web::handlers::auth::near_verify_handler),
         );
 
     // Protected routes (require auth)
@@ -708,15 +775,16 @@ pub async fn start_server(
             header::HeaderName::from_static("content-security-policy"),
             header::HeaderValue::from_static(
                 "default-src 'self'; \
-                 script-src 'self' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com; \
+                 script-src 'self' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://esm.sh; \
                  style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; \
-                 font-src https://fonts.gstatic.com; \
-                 connect-src 'self'; \
-                 img-src 'self' data:; \
+                 font-src https://fonts.gstatic.com data:; \
+                 connect-src 'self' https://esm.sh https://rpc.mainnet.near.org https://rpc.testnet.near.org; \
+                 img-src 'self' data: blob: https://*.googleusercontent.com https://avatars.githubusercontent.com; \
+                 frame-src https://accounts.google.com https://appleid.apple.com; \
                  object-src 'none'; \
                  frame-ancestors 'none'; \
                  base-uri 'self'; \
-                 form-action 'self'",
+                 form-action 'self' https://accounts.google.com https://github.com https://appleid.apple.com",
             ),
         ))
         .with_state(state.clone());
@@ -1225,10 +1293,12 @@ async fn relay_events_handler(
 /// Query params: `provider`, `team_id`.
 async fn slack_relay_oauth_callback_handler(
     State(state): State<Arc<GatewayState>>,
+    headers: HeaderMap,
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
     // Rate limit
-    if !state.oauth_rate_limiter.check() {
+    let ip = rate_limit_key_from_headers(&headers);
+    if !state.oauth_rate_limiter.check(&ip) {
         return axum::response::Html(
             "<html><body style='font-family: system-ui; text-align: center; padding: 60px;'>\
              <h2>Too Many Requests</h2>\
@@ -1973,6 +2043,20 @@ async fn chat_threads_handler(
             .get_or_create_assistant_conversation(&user.user_id, "gateway")
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+        // Seed the bootstrap greeting if this is a brand-new assistant thread.
+        // Use add_conversation_message_if_empty to avoid duplicates on concurrent requests.
+        static GREETING: &str = include_str!("../../workspace/seeds/GREETING.md");
+        if let Err(e) = store
+            .add_conversation_message_if_empty(assistant_id, "assistant", GREETING)
+            .await
+        {
+            tracing::warn!(
+                user_id = %user.user_id,
+                error = %e,
+                "Failed to seed assistant greeting"
+            );
+        }
 
         match store
             .list_conversations_all_channels(&user.user_id, 50)
@@ -3044,7 +3128,7 @@ mod tests {
             skill_catalog: None,
             scheduler: None,
             chat_rate_limiter: PerUserRateLimiter::new(30, 60),
-            oauth_rate_limiter: RateLimiter::new(10, 60),
+            oauth_rate_limiter: PerUserRateLimiter::new(20, 60),
             webhook_rate_limiter: RateLimiter::new(10, 60),
             registry_entries: vec![],
             cost_guard: None,
@@ -3053,6 +3137,14 @@ mod tests {
             active_config: ActiveConfigSnapshot::default(),
             secrets_store: None,
             db_auth: None,
+            oauth_providers: None,
+            oauth_state_store: None,
+            oauth_base_url: None,
+            oauth_allowed_domains: Vec::new(),
+            near_nonce_store: None,
+            near_rpc_url: None,
+            near_network: None,
+            oauth_sweep_shutdown: None,
         })
     }
 
@@ -3439,9 +3531,9 @@ mod tests {
         );
         assert!(
             csp_str.contains(
-                "script-src 'self' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com"
+                "script-src 'self' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://esm.sh"
             ),
-            "CSP must allow both marked and DOMPurify script CDNs"
+            "CSP must allow the explicit script CDNs without unsafe-inline"
         );
         assert!(
             csp_str.contains("object-src 'none'"),
