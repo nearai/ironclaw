@@ -848,14 +848,22 @@ async fn validate_oidc_jwt(oidc: &OidcState, jwt: &str) -> Result<String, OidcEr
     let mut validation = Validation::new(resolved_alg);
     validation.insecure_disable_signature_validation();
 
+    // Build the set of required claims. `exp` is required by default.
+    // When issuer/audience are configured, require their presence in the
+    // JWT — not just mismatch rejection — to prevent tokens that omit
+    // these claims entirely from passing validation.
+    let mut required = vec!["exp".to_string()];
     if let Some(ref iss) = oidc.config.issuer {
         validation.set_issuer(&[iss]);
+        required.push("iss".to_string());
     }
     if let Some(ref aud) = oidc.config.audience {
         validation.set_audience(&[aud]);
+        required.push("aud".to_string());
     } else {
         validation.validate_aud = false;
     }
+    validation.set_required_spec_claims(&required);
 
     let data = jsonwebtoken::decode::<serde_json::Value>(&normalized, &key, &validation)
         .map_err(|e| OidcError::InvalidClaims(format!("{e}")))?;
@@ -2243,14 +2251,12 @@ mod tests {
         assert!(result.is_err(), "wrong issuer should be rejected");
     }
 
-    /// Issuer configured but JWT omits `iss` entirely.
+    /// Issuer configured but JWT omits `iss` entirely → rejected.
     ///
-    /// Note: `jsonwebtoken` v9 only validates `iss` when present; a missing
-    /// `iss` claim passes validation. This test documents that behavior.
-    /// If we decide to enforce presence, add an explicit check in
-    /// `validate_oidc_jwt` after claim extraction.
+    /// We add `iss` to `required_spec_claims` when configured, so a JWT
+    /// missing the claim entirely is now rejected (not just mismatches).
     #[tokio::test]
-    async fn test_oidc_issuer_configured_but_missing_in_jwt_passes() {
+    async fn test_oidc_issuer_configured_but_missing_in_jwt_rejected() {
         let mut config = test_oidc_config();
         config.issuer = Some("https://idp.example.com".to_string());
         let oidc = test_oidc_state_with_config(config).await;
@@ -2259,10 +2265,9 @@ mod tests {
             Some(OIDC_KID),
         );
         let result = validate_oidc_jwt(&oidc, &jwt).await;
-        // jsonwebtoken allows missing iss — only rejects mismatches.
         assert!(
-            result.is_ok(),
-            "missing iss is not rejected by jsonwebtoken: {result:?}"
+            result.is_err(),
+            "missing iss should be rejected when issuer is configured"
         );
     }
 
@@ -2302,14 +2307,12 @@ mod tests {
         assert!(result.is_err(), "wrong audience should be rejected");
     }
 
-    /// Audience configured but JWT omits `aud` entirely.
+    /// Audience configured but JWT omits `aud` entirely → rejected.
     ///
-    /// Note: `jsonwebtoken` v9 only validates `aud` when present; a missing
-    /// `aud` claim passes validation even with `set_audience` called. This
-    /// test documents that behavior. If we need to enforce `aud` presence,
-    /// add an explicit check in `validate_oidc_jwt` after claim extraction.
+    /// We add `aud` to `required_spec_claims` when configured, so a JWT
+    /// missing the claim entirely is now rejected (not just mismatches).
     #[tokio::test]
-    async fn test_oidc_audience_configured_but_missing_in_jwt_passes() {
+    async fn test_oidc_audience_configured_but_missing_in_jwt_rejected() {
         let mut config = test_oidc_config();
         config.audience = Some("my-client-id".to_string());
         let oidc = test_oidc_state_with_config(config).await;
@@ -2318,10 +2321,9 @@ mod tests {
             Some(OIDC_KID),
         );
         let result = validate_oidc_jwt(&oidc, &jwt).await;
-        // jsonwebtoken allows missing aud — only rejects mismatches.
         assert!(
-            result.is_ok(),
-            "missing aud is not rejected by jsonwebtoken: {result:?}"
+            result.is_err(),
+            "missing aud should be rejected when audience is configured"
         );
     }
 
