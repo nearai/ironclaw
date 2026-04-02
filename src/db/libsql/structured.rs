@@ -219,6 +219,9 @@ impl StructuredStore for LibSqlBackend {
     ) -> Result<(), DatabaseError> {
         CollectionSchema::validate_name(&schema.collection)
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        schema
+            .validate_source_scope()
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
         let schema_json = serde_json::to_string(schema)
             .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
@@ -397,50 +400,112 @@ impl StructuredStore for LibSqlBackend {
         record_id: Uuid,
         updates: serde_json::Value,
     ) -> Result<(), DatabaseError> {
-        // Fetch existing record to get its collection and current data.
-        let existing = self.get_record(user_id, record_id).await?;
-        let schema = self
-            .get_collection_schema(user_id, &existing.collection)
-            .await?;
+        let conn = self.connect().await?;
 
-        // Validate the partial update.
-        let validated_updates = schema
-            .validate_partial(&updates)
-            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        conn.execute("BEGIN", ())
+            .await
+            .map_err(|e| DatabaseError::Query(format!("update_record BEGIN: {e}")))?;
 
-        // Merge updates into existing data.
-        let mut merged = existing.data.clone();
-        if let (Some(base), Some(patch)) = (merged.as_object_mut(), validated_updates.as_object()) {
-            for (k, v) in patch {
-                base.insert(k.clone(), v.clone());
+        let result = async {
+            // Fetch existing record within the transaction.
+            let mut rows = conn
+                .query(
+                    r#"
+                    SELECT id, user_id, collection, data, created_at, updated_at
+                    FROM structured_records
+                    WHERE id = ?1 AND user_id = ?2
+                    "#,
+                    libsql::params![record_id.to_string(), user_id],
+                )
+                .await
+                .map_err(|e| DatabaseError::Query(format!("update_record select: {e}")))?;
+
+            let row = rows
+                .next()
+                .await
+                .map_err(|e| DatabaseError::Query(format!("update_record next: {e}")))?
+                .ok_or_else(|| DatabaseError::NotFound {
+                    entity: "record".to_string(),
+                    id: record_id.to_string(),
+                })?;
+            let existing = row_to_record(&row)?;
+
+            // Fetch schema within the transaction.
+            let mut schema_rows = conn
+                .query(
+                    "SELECT schema FROM structured_schemas WHERE user_id = ?1 AND collection = ?2",
+                    libsql::params![user_id, existing.collection.as_str()],
+                )
+                .await
+                .map_err(|e| DatabaseError::Query(format!("update_record schema: {e}")))?;
+
+            let schema_row = schema_rows
+                .next()
+                .await
+                .map_err(|e| DatabaseError::Query(format!("update_record schema next: {e}")))?
+                .ok_or_else(|| DatabaseError::NotFound {
+                    entity: "collection".to_string(),
+                    id: existing.collection.clone(),
+                })?;
+            let schema_str = get_text(&schema_row, 0);
+            let schema: CollectionSchema = serde_json::from_str(&schema_str)
+                .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
+
+            // Validate the partial update.
+            let validated_updates = schema
+                .validate_partial(&updates)
+                .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+            // Merge updates into existing data.
+            let mut merged = existing.data.clone();
+            if let (Some(base), Some(patch)) =
+                (merged.as_object_mut(), validated_updates.as_object())
+            {
+                for (k, v) in patch {
+                    base.insert(k.clone(), v.clone());
+                }
+            }
+
+            let now = chrono::Utc::now();
+            let now_str = fmt_ts(&now);
+            let merged_str = serde_json::to_string(&merged)
+                .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
+
+            let n = conn
+                .execute(
+                    r#"
+                    UPDATE structured_records
+                    SET data = ?1, updated_at = ?2
+                    WHERE id = ?3 AND user_id = ?4
+                    "#,
+                    libsql::params![merged_str, now_str, record_id.to_string(), user_id],
+                )
+                .await
+                .map_err(|e| DatabaseError::Query(format!("update_record: {e}")))?;
+
+            if n == 0 {
+                return Err(DatabaseError::NotFound {
+                    entity: "record".to_string(),
+                    id: record_id.to_string(),
+                });
+            }
+
+            Ok(())
+        }
+        .await;
+
+        match result {
+            Ok(()) => {
+                conn.execute("COMMIT", ())
+                    .await
+                    .map_err(|e| DatabaseError::Query(format!("update_record COMMIT: {e}")))?;
+                Ok(())
+            }
+            Err(e) => {
+                let _ = conn.execute("ROLLBACK", ()).await;
+                Err(e)
             }
         }
-
-        let now = chrono::Utc::now();
-        let now_str = fmt_ts(&now);
-        let merged_str = serde_json::to_string(&merged)
-            .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
-
-        let conn = self.connect().await?;
-        let n = conn
-            .execute(
-                r#"
-                UPDATE structured_records
-                SET data = ?1, updated_at = ?2
-                WHERE id = ?3 AND user_id = ?4
-                "#,
-                libsql::params![merged_str, now_str, record_id.to_string(), user_id],
-            )
-            .await
-            .map_err(|e| DatabaseError::Query(format!("update_record: {e}")))?;
-
-        if n == 0 {
-            return Err(DatabaseError::NotFound {
-                entity: "record".to_string(),
-                id: record_id.to_string(),
-            });
-        }
-        Ok(())
     }
 
     async fn delete_record(&self, user_id: &str, record_id: Uuid) -> Result<(), DatabaseError> {

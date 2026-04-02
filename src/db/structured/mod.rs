@@ -254,10 +254,18 @@ pub fn append_history(
 
     if let Some(history) = data.get_mut("_history").and_then(|h| h.as_array_mut()) {
         history.push(entry);
+        // Cap history to prevent unbounded growth.
+        if history.len() > MAX_HISTORY_ENTRIES {
+            let start = history.len() - MAX_HISTORY_ENTRIES;
+            *history = history.split_off(start);
+        }
     } else {
         data["_history"] = serde_json::json!([entry]);
     }
 }
+
+/// Maximum number of history entries kept per record.
+const MAX_HISTORY_ENTRIES: usize = 100;
 
 // ==================== Name Validation ====================
 
@@ -310,6 +318,17 @@ impl CollectionSchema {
     /// start with an underscore, must not be empty.
     pub fn validate_name(name: &str) -> Result<(), ValidationError> {
         validate_identifier(name, "collection name")
+    }
+
+    /// Validate `source_scope` if present.
+    ///
+    /// Applies the same rules as collection names: alphanumeric + underscore,
+    /// 1-64 characters, must not start with an underscore.
+    pub fn validate_source_scope(&self) -> Result<(), ValidationError> {
+        if let Some(ref scope) = self.source_scope {
+            validate_identifier(scope, "source_scope")?;
+        }
+        Ok(())
     }
 
     /// Validate that all field default values match their declared types.

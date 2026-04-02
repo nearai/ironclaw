@@ -1306,10 +1306,10 @@ async fn query_nonexistent_collection() {
         .await;
 
     // Either returns empty results or an error — both are acceptable.
-    match result {
-        Ok(records) => assert!(records.is_empty(), "expected no records"),
-        Err(_) => {} // Error is fine — means collection not found
+    if let Ok(records) = result {
+        assert!(records.is_empty(), "expected no records");
     }
+    // Error is fine — means collection not found
 }
 
 #[tokio::test]
@@ -1577,6 +1577,215 @@ async fn query_with_multiple_filters() {
         .map(|r| r.data["hours"].as_f64().expect("hours"))
         .collect();
     assert_eq!(hours_vals, vec![8.5, 9.0]);
+}
+
+// ==================== IsNull / IsNotNull Filter Tests ====================
+
+#[tokio::test]
+async fn query_is_null_filter() {
+    let (db, _dir) = setup().await;
+    let user = "test_user";
+
+    db.register_collection(user, &nanny_schema())
+        .await
+        .expect("register nanny_shifts");
+
+    // Insert a record WITH notes
+    db.insert_record(
+        user,
+        "nanny_shifts",
+        json!({
+            "date": "2026-03-01",
+            "start_time": "2026-03-01T09:00:00Z",
+            "notes": "Morning shift"
+        }),
+    )
+    .await
+    .expect("insert with notes");
+
+    // Insert a record WITHOUT notes
+    db.insert_record(
+        user,
+        "nanny_shifts",
+        json!({
+            "date": "2026-03-02",
+            "start_time": "2026-03-02T09:00:00Z"
+        }),
+    )
+    .await
+    .expect("insert without notes");
+
+    // Query for records where notes IS NULL
+    let results = db
+        .query_records(
+            user,
+            "nanny_shifts",
+            &[Filter {
+                field: "notes".to_string(),
+                op: FilterOp::IsNull,
+                value: json!(null),
+            }],
+            None,
+            100,
+        )
+        .await
+        .expect("query is_null");
+
+    assert_eq!(results.len(), 1, "should find 1 record where notes is null");
+    assert_eq!(results[0].data["date"], "2026-03-02");
+}
+
+#[tokio::test]
+async fn query_is_not_null_filter() {
+    let (db, _dir) = setup().await;
+    let user = "test_user";
+
+    db.register_collection(user, &nanny_schema())
+        .await
+        .expect("register nanny_shifts");
+
+    // Insert a record WITH notes
+    db.insert_record(
+        user,
+        "nanny_shifts",
+        json!({
+            "date": "2026-03-01",
+            "start_time": "2026-03-01T09:00:00Z",
+            "notes": "Morning shift"
+        }),
+    )
+    .await
+    .expect("insert with notes");
+
+    // Insert a record WITHOUT notes
+    db.insert_record(
+        user,
+        "nanny_shifts",
+        json!({
+            "date": "2026-03-02",
+            "start_time": "2026-03-02T09:00:00Z"
+        }),
+    )
+    .await
+    .expect("insert without notes");
+
+    // Query for records where notes IS NOT NULL
+    let results = db
+        .query_records(
+            user,
+            "nanny_shifts",
+            &[Filter {
+                field: "notes".to_string(),
+                op: FilterOp::IsNotNull,
+                value: json!(null),
+            }],
+            None,
+            100,
+        )
+        .await
+        .expect("query is_not_null");
+
+    assert_eq!(
+        results.len(),
+        1,
+        "should find 1 record where notes is not null"
+    );
+    assert_eq!(results[0].data["notes"], "Morning shift");
+}
+
+// ==================== Between Filter Test ====================
+
+#[tokio::test]
+async fn query_between_filter() {
+    let (db, _dir) = setup().await;
+    let user = "test_user";
+
+    db.register_collection(user, &nanny_schema())
+        .await
+        .expect("register nanny_shifts");
+
+    for hours in [5.0, 7.0, 8.0, 9.0, 11.0] {
+        db.insert_record(
+            user,
+            "nanny_shifts",
+            json!({
+                "date": "2026-03-01",
+                "start_time": "2026-03-01T09:00:00Z",
+                "hours": hours,
+            }),
+        )
+        .await
+        .expect("insert record");
+    }
+
+    // Query hours BETWEEN 7 AND 9
+    let results = db
+        .query_records(
+            user,
+            "nanny_shifts",
+            &[Filter {
+                field: "hours".to_string(),
+                op: FilterOp::Between,
+                value: json!([7, 9]),
+            }],
+            Some("hours"),
+            100,
+        )
+        .await
+        .expect("query between");
+
+    assert_eq!(results.len(), 3, "should find 3 records with hours 7..9");
+    let hours_vals: Vec<f64> = results
+        .iter()
+        .map(|r| r.data["hours"].as_f64().unwrap())
+        .collect();
+    assert_eq!(hours_vals, vec![7.0, 8.0, 9.0]);
+}
+
+// ==================== In Filter Test ====================
+
+#[tokio::test]
+async fn query_in_filter() {
+    let (db, _dir) = setup().await;
+    let user = "test_user";
+
+    db.register_collection(user, &grocery_schema())
+        .await
+        .expect("register grocery_items");
+
+    for (name, cat) in [("milk", "dairy"), ("bread", "pantry"), ("steak", "meat")] {
+        db.insert_record(
+            user,
+            "grocery_items",
+            json!({"name": name, "category": cat}),
+        )
+        .await
+        .expect("insert record");
+    }
+
+    // Query category IN ["dairy", "meat"]
+    let results = db
+        .query_records(
+            user,
+            "grocery_items",
+            &[Filter {
+                field: "category".to_string(),
+                op: FilterOp::In,
+                value: json!(["dairy", "meat"]),
+            }],
+            None,
+            100,
+        )
+        .await
+        .expect("query in");
+
+    assert_eq!(results.len(), 2, "should find 2 records with dairy or meat");
+    let names: Vec<&str> = results
+        .iter()
+        .map(|r| r.data["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"milk"));
+    assert!(names.contains(&"steak"));
 }
 
 // Boot-scan tests are in src/tools/registry.rs (unit tests) since ToolRegistry is private.

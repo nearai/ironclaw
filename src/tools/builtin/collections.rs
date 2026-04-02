@@ -838,6 +838,7 @@ async fn write_collection_discovery_doc(
 
 /// Unregister old per-collection tools, generate new ones from the schema,
 /// register them, and regenerate skills. Used by both register and alter tools.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn refresh_collection_tools(
     schema: &CollectionSchema,
     db: &Arc<dyn Database>,
@@ -872,16 +873,27 @@ pub(crate) async fn refresh_collection_tools(
     // Generate per-collection skill for future session discovery (best-effort)
     if let Some(skills_dir) = skills_dir {
         generate_collection_skill(schema, skills_dir);
-        let _ = skill_registry; // suppress unused warning
-
-        tracing::info!(
-            "Generated per-collection skill for {}",
-            schema.collection
-        );
 
         // Update the router skill
         if let Ok(schemas) = db.list_collections(user_id).await {
             generate_router_skill(&schemas, skills_dir);
+        }
+
+        // Hot-reload skills into the registry so they're available immediately
+        // (not just on next restart).
+        if let Some(sr) = skill_registry {
+            if let Ok(mut registry) = sr.write() {
+                let loaded = futures::executor::block_on(registry.reload());
+                tracing::info!(
+                    "Reloaded skills after collection registration ({})",
+                    loaded.len()
+                );
+            }
+        } else {
+            tracing::info!(
+                "Generated per-collection skill: {}/SKILL.md (no registry to hot-reload)",
+                schema.collection
+            );
         }
     }
 
@@ -1158,8 +1170,11 @@ impl Tool for CollectionRegisterTool {
         let start = std::time::Instant::now();
 
         // Parse the schema from parameters
-        let schema: CollectionSchema = serde_json::from_value(params.clone())
+        let mut schema: CollectionSchema = serde_json::from_value(params.clone())
             .map_err(|e| ToolError::InvalidParameters(format!("Invalid collection schema: {e}")))?;
+
+        // Only trusted seeding paths can set source_scope
+        schema.source_scope = None;
 
         // Validate name
         CollectionSchema::validate_name(&schema.collection)
@@ -1309,11 +1324,11 @@ impl Tool for CollectionDropTool {
             .await
             .map_err(|e| ToolError::ExecutionFailed(format!("Failed to drop collection: {e}")))?;
 
-        // Unregister per-collection tools
-        let tool_suffixes = ["_add", "_update", "_delete", "_query", "_summary"];
+        // Unregister per-collection tools using owner-prefixed format
+        let tool_suffixes = ["add", "update", "delete", "query", "summary"];
         let mut removed = Vec::new();
         for suffix in &tool_suffixes {
-            let tool_name = format!("{collection}{suffix}");
+            let tool_name = format!("{}_{collection}_{suffix}", ctx.user_id);
             if self.registry.unregister(&tool_name).await.is_some() {
                 removed.push(tool_name);
             }

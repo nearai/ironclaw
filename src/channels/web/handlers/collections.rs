@@ -529,8 +529,11 @@ pub async fn collections_delete_handler(
 pub async fn collections_register_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
-    Json(schema): Json<CollectionSchema>,
+    Json(mut schema): Json<CollectionSchema>,
 ) -> impl IntoResponse {
+    // Only trusted seeding paths can set source_scope
+    schema.source_scope = None;
+
     let db = match &state.store {
         Some(db) => Arc::clone(db),
         None => {

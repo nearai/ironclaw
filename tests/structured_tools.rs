@@ -567,3 +567,71 @@ async fn tool_definitions_for_user_filters_by_owner() {
     assert_eq!(andrew_defs.len(), builtin_count + 5);
     assert_eq!(grace_defs.len(), builtin_count + 5);
 }
+
+// ==================== Drop Tool ====================
+
+#[tokio::test]
+async fn drop_tool_removes_tools_from_registry() {
+    use ironclaw::tools::builtin::collections::CollectionDropTool;
+
+    let (db, _dir) = setup().await;
+    let schema = grocery_schema();
+    let ctx = test_ctx("andrew");
+
+    // Register the collection in the database
+    db.register_collection("andrew", &schema)
+        .await
+        .expect("register schema");
+
+    // Create a registry and register collection tools
+    let registry = Arc::new(ToolRegistry::new());
+    let tools = generate_collection_tools(&schema, Arc::clone(&db), None, "andrew");
+    for tool in &tools {
+        registry.register(Arc::clone(tool)).await;
+    }
+
+    // Verify tools are registered
+    assert!(
+        registry.has("andrew_grocery_items_add").await,
+        "add tool should be registered"
+    );
+    assert!(
+        registry.has("andrew_grocery_items_query").await,
+        "query tool should be registered"
+    );
+
+    // Create and execute the drop tool
+    let drop_tool = CollectionDropTool::new(Arc::clone(&db), Arc::clone(&registry));
+    let result = drop_tool
+        .execute(json!({ "collection": "grocery_items" }), &ctx)
+        .await
+        .expect("drop should succeed");
+
+    assert_eq!(result.result["status"], "dropped");
+
+    // Verify all 5 per-collection tools are removed
+    assert!(
+        !registry.has("andrew_grocery_items_add").await,
+        "add tool should be removed"
+    );
+    assert!(
+        !registry.has("andrew_grocery_items_update").await,
+        "update tool should be removed"
+    );
+    assert!(
+        !registry.has("andrew_grocery_items_delete").await,
+        "delete tool should be removed"
+    );
+    assert!(
+        !registry.has("andrew_grocery_items_query").await,
+        "query tool should be removed"
+    );
+    assert!(
+        !registry.has("andrew_grocery_items_summary").await,
+        "summary tool should be removed"
+    );
+
+    // The tools_removed list should contain all 5
+    let removed = result.result["tools_removed"].as_array().unwrap();
+    assert_eq!(removed.len(), 5, "should have removed 5 tools");
+}

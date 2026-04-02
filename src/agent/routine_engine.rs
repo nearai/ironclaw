@@ -1846,7 +1846,7 @@ async fn execute_lightweight_with_tools(
             // Tool-enabled iteration
             let tool_defs = ctx
                 .tools
-                .tool_definitions()
+                .tool_definitions_for_user(&routine.user_id)
                 .await
                 .into_iter()
                 .filter(|tool| allowed_tools.contains(&tool.name))

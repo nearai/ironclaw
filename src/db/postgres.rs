@@ -1379,6 +1379,9 @@ impl StructuredStore for PgBackend {
     ) -> Result<(), DatabaseError> {
         CollectionSchema::validate_name(&schema.collection)
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        schema
+            .validate_source_scope()
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
         let schema_json = serde_json::to_value(schema)
             .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
@@ -1518,11 +1521,43 @@ impl StructuredStore for PgBackend {
         record_id: Uuid,
         updates: serde_json::Value,
     ) -> Result<(), DatabaseError> {
-        // Fetch existing record to get its collection and current data.
-        let existing = self.get_record(user_id, record_id).await?;
-        let schema = self
-            .get_collection_schema(user_id, &existing.collection)
+        let mut conn = self.store.conn().await?;
+        let tx = conn.transaction().await?;
+
+        // Lock the record row to prevent concurrent modification.
+        let rows = tx
+            .query(
+                r#"
+                SELECT id, user_id, collection, data, created_at, updated_at
+                FROM structured_records
+                WHERE id = $1 AND user_id = $2
+                FOR UPDATE
+                "#,
+                &[&record_id, &user_id],
+            )
             .await?;
+
+        let row = rows.first().ok_or_else(|| DatabaseError::NotFound {
+            entity: "record".to_string(),
+            id: record_id.to_string(),
+        })?;
+        let existing = pg_row_to_record(row)?;
+
+        // Fetch schema (read-only, doesn't need locking).
+        let schema_rows = tx
+            .query(
+                "SELECT schema FROM structured_schemas WHERE user_id = $1 AND collection = $2",
+                &[&user_id, &existing.collection],
+            )
+            .await?;
+
+        let schema_row = schema_rows.first().ok_or_else(|| DatabaseError::NotFound {
+            entity: "collection".to_string(),
+            id: existing.collection.clone(),
+        })?;
+        let schema: structured::CollectionSchema =
+            serde_json::from_value(schema_row.get::<_, serde_json::Value>("schema"))
+                .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
 
         // Validate the partial update.
         let validated_updates = schema
@@ -1537,8 +1572,7 @@ impl StructuredStore for PgBackend {
             }
         }
 
-        let conn = self.store.conn().await?;
-        let n = conn
+        let n = tx
             .execute(
                 r#"
                 UPDATE structured_records
@@ -1555,6 +1589,8 @@ impl StructuredStore for PgBackend {
                 id: record_id.to_string(),
             });
         }
+
+        tx.commit().await?;
         Ok(())
     }
 

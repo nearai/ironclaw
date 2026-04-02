@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
 
+use chrono::Datelike;
+
 use crate::db::structured::{
     AlterOperation, Alteration, CollectionSchema, FieldDef, FieldType, ValidationError,
     append_history, init_history, is_system_field, validate_field_name,
@@ -1410,4 +1412,119 @@ fn json_to_text_conversions() {
     assert_eq!(json_to_text(&serde_json::json!(true)), "true");
     assert_eq!(json_to_text(&serde_json::json!(false)), "false");
     assert_eq!(json_to_text(&serde_json::json!(null)), "");
+}
+
+// ==================== try_parse_natural_date ====================
+
+#[test]
+fn natural_date_today() {
+    let result = super::try_parse_natural_date("today");
+    assert_eq!(result, Some(chrono::Local::now().date_naive()));
+}
+
+#[test]
+fn natural_date_tomorrow() {
+    let result = super::try_parse_natural_date("tomorrow");
+    let expected = chrono::Local::now().date_naive() + chrono::Duration::days(1);
+    assert_eq!(result, Some(expected));
+}
+
+#[test]
+fn natural_date_yesterday() {
+    let result = super::try_parse_natural_date("yesterday");
+    let expected = chrono::Local::now().date_naive() - chrono::Duration::days(1);
+    assert_eq!(result, Some(expected));
+}
+
+#[test]
+fn natural_date_weekday() {
+    // "monday" should return a date that is a Monday
+    let result = super::try_parse_natural_date("monday");
+    assert!(result.is_some());
+    assert_eq!(
+        result.unwrap().weekday(),
+        chrono::Weekday::Mon,
+        "should return a Monday"
+    );
+    // The returned date should be in the future (next occurrence)
+    let today = chrono::Local::now().date_naive();
+    assert!(
+        result.unwrap() > today || today.weekday() == chrono::Weekday::Mon,
+        "should be today or in the future"
+    );
+}
+
+#[test]
+fn natural_date_invalid_returns_none() {
+    assert_eq!(super::try_parse_natural_date("not a date"), None);
+    assert_eq!(super::try_parse_natural_date(""), None);
+    assert_eq!(super::try_parse_natural_date("xyz123"), None);
+}
+
+// ==================== append_history cap ====================
+
+#[test]
+fn append_history_caps_at_max_entries() {
+    let mut data = serde_json::json!({});
+    // Create a history with MAX_HISTORY_ENTRIES entries
+    let mut history = Vec::new();
+    for i in 0..super::MAX_HISTORY_ENTRIES {
+        history.push(serde_json::json!({
+            "op": "update",
+            "time": format!("2026-01-01T00:00:{:02}Z", i % 60),
+            "source": "test",
+            "fields": {"x": i},
+        }));
+    }
+    data["_history"] = serde_json::Value::Array(history);
+
+    // Append one more — should trigger truncation
+    append_history(
+        &mut data,
+        &serde_json::json!({"x": 999}),
+        "test",
+    );
+
+    let history = data["_history"].as_array().unwrap();
+    assert_eq!(history.len(), super::MAX_HISTORY_ENTRIES);
+    // The newest entry should be the one we just appended
+    let last = history.last().unwrap();
+    assert_eq!(last["fields"]["x"], 999);
+    // The oldest entry should be the second original one (first was dropped)
+    assert_eq!(history[0]["fields"]["x"], 1);
+}
+
+// ==================== validate_source_scope ====================
+
+#[test]
+fn validate_source_scope_accepts_valid() {
+    let schema = CollectionSchema {
+        collection: "test".to_string(),
+        description: None,
+        fields: BTreeMap::new(),
+        source_scope: Some("andrew".to_string()),
+    };
+    assert!(schema.validate_source_scope().is_ok());
+}
+
+#[test]
+fn validate_source_scope_rejects_invalid() {
+    let schema = CollectionSchema {
+        collection: "test".to_string(),
+        description: None,
+        fields: BTreeMap::new(),
+        source_scope: Some("../etc/passwd".to_string()),
+    };
+    assert!(schema.validate_source_scope().is_err());
+}
+
+#[test]
+fn validate_source_scope_allows_none() {
+    let schema = CollectionSchema {
+        collection: "test".to_string(),
+        description: None,
+        fields: BTreeMap::new(),
+        source_scope: None,
+    };
+    assert!(schema.validate_source_scope().is_ok());
 }
