@@ -142,6 +142,21 @@ secrecy = { version = "0.10", features = ["serde"] }
 url = "2"
 urlencoding = "2"
 
+# Matrix SDK (optional — used for the native Matrix channel event loop and E2EE).
+# The `sqlite` feature provides a persistent state + crypto store backed by SQLite.
+# `e2e-encryption` is added separately in the matrix-e2ee feature below.
+#
+# NOTE: vodozemac (the Olm/Megolm crypto library used by matrix-sdk) has an
+# unpatched high-severity vulnerability as of 2026-02-17 (identity-element DH
+# accepted in the 3DH handshake, allowing a participant with an all-zero public
+# key to produce a predictable shared secret). Track:
+#   https://github.com/matrix-org/vodozemac/issues
+# Upgrade vodozemac / matrix-sdk-crypto as soon as a patch ships.
+matrix-sdk = { version = "0.16", optional = true, default-features = false, features = [
+    "rustls-tls",
+    "sqlite",
+] }
+
 # Open URLs in browser
 open = "5"
 
@@ -229,7 +244,7 @@ tempfile = "3"
 insta = { version = "1.46.3", features = ["yaml"] }
 
 [features]
-default = ["postgres", "libsql", "html-to-markdown", "tui"]
+default = ["postgres", "libsql", "html-to-markdown", "tui", "matrix-sdk-channel"]
 postgres = [
     "dep:deadpool-postgres",
     "dep:tokio-postgres",
@@ -254,6 +269,11 @@ html-to-markdown = ["dep:html-to-markdown-rs", "dep:readabilityrs"]
 bedrock = ["dep:aws-config", "dep:aws-sdk-bedrockruntime", "dep:aws-smithy-types"]
 tui = ["dep:ironclaw_tui"]
 import = ["dep:json5", "libsql"]
+# matrix-sdk-channel: use the matrix-sdk event loop for the native Matrix
+# channel instead of the raw reqwest poll loop. Required for E2EE (step 2).
+# Enabled by default; disable with --no-default-features if you want the
+# minimal reqwest-only build.
+matrix-sdk-channel = ["dep:matrix-sdk"]
 
 [[test]]
 name = "e2e_thread_scheduling"

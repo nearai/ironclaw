@@ -33,7 +33,7 @@ use crate::llm::{SessionConfig, SessionManager};
 use crate::secrets::{SecretsCrypto, SecretsStore};
 use crate::settings::{KeySource, Settings};
 use crate::setup::channels::{
-    SecretsContext, setup_http, setup_signal, setup_tunnel, setup_wasm_channel,
+    SecretsContext, setup_http, setup_matrix, setup_signal, setup_tunnel, setup_wasm_channel,
 };
 use crate::setup::prompts::{
     confirm, input, optional_input, print_banner, print_error, print_header, print_info,
@@ -44,6 +44,7 @@ use crate::setup::prompts::{
 // const CHANNEL_INDEX_CLI: usize = 0;
 const CHANNEL_INDEX_HTTP: usize = 1;
 const CHANNEL_INDEX_SIGNAL: usize = 2;
+const CHANNEL_INDEX_MATRIX: usize = 3;
 const QUICK_PROFILE_LOCAL: &str = "local";
 const QUICK_PROFILE_LOCAL_SANDBOX: &str = "local-sandbox";
 
@@ -2631,6 +2632,10 @@ impl SetupWizard {
                 self.settings.channels.http_enabled,
             ),
             ("Signal".to_string(), self.settings.channels.signal_enabled),
+            (
+                "Matrix".to_string(),
+                self.settings.channels.matrix_homeserver.is_some(),
+            ),
         ];
 
         let non_wasm_count = options.len();
@@ -2704,8 +2709,9 @@ impl SetupWizard {
         }
 
         // Determine if we need secrets context
-        let needs_secrets =
-            selected.contains(&CHANNEL_INDEX_HTTP) || !selected_wasm_channels.is_empty();
+        let needs_secrets = selected.contains(&CHANNEL_INDEX_HTTP)
+            || selected.contains(&CHANNEL_INDEX_MATRIX)
+            || !selected_wasm_channels.is_empty();
         let secrets = if needs_secrets {
             match self.init_secrets_context().await {
                 Ok(ctx) => Some(ctx),
@@ -2756,6 +2762,47 @@ impl SetupWizard {
             self.settings.channels.signal_dm_policy = None;
             self.settings.channels.signal_group_policy = None;
             self.settings.channels.signal_group_allow_from = None;
+        }
+
+        // Matrix channel
+        if selected.contains(&CHANNEL_INDEX_MATRIX) {
+            println!();
+            if let Some(ref ctx) = secrets {
+                let result = setup_matrix(
+                    ctx,
+                    crate::setup::channels::ExistingMatrixSettings {
+                        homeserver: self.settings.channels.matrix_homeserver.as_deref(),
+                        username: self.settings.channels.matrix_username.as_deref(),
+                        allow_from: self.settings.channels.matrix_allow_from.as_deref(),
+                        dm_policy: self.settings.channels.matrix_dm_policy.as_deref(),
+                        owner_id: self.settings.channels.matrix_owner_id.as_deref(),
+                        display_name: self.settings.channels.matrix_display_name.as_deref(),
+                    },
+                ).await?;
+                if result.enabled {
+                    self.settings.channels.matrix_homeserver = Some(result.homeserver);
+                    self.settings.channels.matrix_username = Some(result.username);
+                    self.settings.channels.matrix_allow_from =
+                        if result.allow_from.is_empty() { None } else { Some(result.allow_from) };
+                    self.settings.channels.matrix_dm_policy = Some(result.dm_policy);
+                    self.settings.channels.matrix_owner_id = result.owner_id;
+                    self.settings.channels.matrix_poll_interval_secs = result.poll_interval_secs;
+                    self.settings.channels.matrix_auto_join = Some(result.auto_join);
+                    self.settings.channels.matrix_display_name = result.display_name;
+                }
+            } else {
+                print_info("Matrix channel requires secrets DB. Set MATRIX_HOMESERVER and");
+                print_info("MATRIX_ACCESS_TOKEN environment variables to enable.");
+            }
+        } else {
+            self.settings.channels.matrix_homeserver = None;
+            self.settings.channels.matrix_username = None;
+            self.settings.channels.matrix_allow_from = None;
+            self.settings.channels.matrix_dm_policy = None;
+            self.settings.channels.matrix_owner_id = None;
+            self.settings.channels.matrix_poll_interval_secs = None;
+            self.settings.channels.matrix_auto_join = None;
+            self.settings.channels.matrix_display_name = None;
         }
 
         let discovered_by_name: HashMap<String, ChannelCapabilitiesFile> =
@@ -3807,15 +3854,26 @@ async fn install_missing_bundled_channels(
     Ok(installed)
 }
 
+/// Channel names handled natively — excluded from the WASM channel list
+/// to avoid showing duplicates when a built-in option already exists.
+const NATIVE_CHANNEL_NAMES: &[&str] = &["matrix"];
+
 /// Build channel options from discovered channels + bundled + registry catalog.
 ///
 /// Returns a deduplicated, sorted list of channel names available for selection.
+/// Excludes channels that are already handled natively (e.g. "matrix").
 fn build_channel_options(discovered: &[(String, ChannelCapabilitiesFile)]) -> Vec<String> {
-    let mut names: Vec<String> = discovered.iter().map(|(name, _)| name.clone()).collect();
+    let mut names: Vec<String> = discovered
+        .iter()
+        .map(|(name, _)| name.clone())
+        .filter(|name| !NATIVE_CHANNEL_NAMES.contains(&name.as_str()))
+        .collect();
 
     // Add bundled channels
     for bundled in available_channel_names().iter().copied() {
-        if !names.iter().any(|name| name == bundled) {
+        if !names.iter().any(|name| name == bundled)
+            && !NATIVE_CHANNEL_NAMES.contains(&bundled)
+        {
             names.push(bundled.to_string());
         }
     }
@@ -3823,7 +3881,9 @@ fn build_channel_options(discovered: &[(String, ChannelCapabilitiesFile)]) -> Ve
     // Add registry channels
     if let Some(catalog) = load_registry_catalog() {
         for manifest in catalog.list(Some(crate::registry::manifest::ManifestKind::Channel), None) {
-            if !names.iter().any(|n| n == &manifest.name) {
+            if !names.iter().any(|n| n == &manifest.name)
+                && !NATIVE_CHANNEL_NAMES.contains(&manifest.name.as_str())
+            {
                 names.push(manifest.name.clone());
             }
         }

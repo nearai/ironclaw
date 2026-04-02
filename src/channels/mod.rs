@@ -36,6 +36,7 @@ mod repl;
 mod signal;
 #[cfg(feature = "tui")]
 pub mod tui;
+mod matrix;
 pub mod wasm;
 pub mod web;
 mod webhook_server;
@@ -55,5 +56,6 @@ pub use http::{HttpChannel, HttpChannelState};
 pub use manager::ChannelManager;
 pub use repl::ReplChannel;
 pub use signal::SignalChannel;
+pub use matrix::MatrixChannel;
 pub use web::GatewayChannel;
 pub use webhook_server::{WebhookServer, WebhookServerConfig};
