@@ -713,6 +713,94 @@ pub trait WorkspaceStore: Send + Sync {
         config: &SearchConfig,
     ) -> Result<Vec<SearchResult>, WorkspaceError>;
 
+    // ==================== Metadata ====================
+    //
+    // **Trust boundary:** methods in this section accept bare document/version
+    // UUIDs without a `user_id` guard. They trust the caller (`Workspace`) to
+    // have obtained the UUID through a user-scoped query (e.g.
+    // `get_document_by_path` or `get_or_create_document_by_path`). Do NOT call
+    // these with an unverified UUID from external input.
+
+    /// Update the metadata JSON field on a document (full replacement).
+    ///
+    /// # Trust
+    /// Caller must have verified ownership of `id` via a user-scoped lookup.
+    async fn update_document_metadata(
+        &self,
+        id: Uuid,
+        metadata: &serde_json::Value,
+    ) -> Result<(), WorkspaceError>;
+
+    /// Find all `.config` documents in the workspace.
+    ///
+    /// Returns documents whose path ends with `/.config` or equals `.config`.
+    /// Used by the hygiene system to discover metadata-driven cleanup targets.
+    async fn find_config_documents(
+        &self,
+        user_id: &str,
+        agent_id: Option<Uuid>,
+    ) -> Result<Vec<MemoryDocument>, WorkspaceError>;
+
+    // ==================== Versioning ====================
+    //
+    // **Trust boundary:** same as metadata — these accept bare `document_id`
+    // UUIDs and trust the caller to have verified ownership first.
+
+    /// Save the current content of a document as a new version.
+    ///
+    /// Returns the new version number (1-based, monotonically increasing).
+    ///
+    /// # Trust
+    /// Caller must have verified ownership of `document_id`.
+    async fn save_version(
+        &self,
+        document_id: Uuid,
+        content: &str,
+        content_hash: &str,
+        changed_by: Option<&str>,
+    ) -> Result<i32, WorkspaceError>;
+
+    /// Get a specific version of a document.
+    ///
+    /// # Trust
+    /// Caller must have verified ownership of `document_id`.
+    async fn get_version(
+        &self,
+        document_id: Uuid,
+        version: i32,
+    ) -> Result<crate::workspace::DocumentVersion, WorkspaceError>;
+
+    /// List versions of a document (newest first).
+    ///
+    /// # Trust
+    /// Caller must have verified ownership of `document_id`.
+    async fn list_versions(
+        &self,
+        document_id: Uuid,
+        limit: i64,
+    ) -> Result<Vec<crate::workspace::VersionSummary>, WorkspaceError>;
+
+    /// Get the latest version number for a document, or `None` if no versions exist.
+    ///
+    /// # Trust
+    /// Caller must have verified ownership of `document_id`.
+    async fn get_latest_version_number(
+        &self,
+        document_id: Uuid,
+    ) -> Result<Option<i32>, WorkspaceError>;
+
+    /// Delete old versions, keeping only the most recent `keep_count`.
+    ///
+    /// Returns the number of versions deleted.
+    ///
+    /// # Trust
+    /// Caller must have verified ownership of `document_id`.
+    async fn prune_versions(
+        &self,
+        document_id: Uuid,
+        keep_count: i32,
+    ) -> Result<u64, WorkspaceError>;
+
     // ==================== Multi-scope read methods ====================
     //
     // Default implementations loop over user_ids calling single-scope methods,
