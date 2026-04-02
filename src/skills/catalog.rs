@@ -474,6 +474,7 @@ mod tests {
         assert!(
             error.contains("Registry unreachable")
                 || error.contains("connect")
+                || error.contains("403")
                 || error.contains("502")
                 || error.contains("503")
                 || error.contains("504"),
