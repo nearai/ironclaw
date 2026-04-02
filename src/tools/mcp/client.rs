@@ -13,7 +13,7 @@ use tokio::sync::RwLock;
 use crate::context::JobContext;
 use crate::secrets::SecretsStore;
 use crate::tools::mcp::auth::refresh_access_token;
-use crate::tools::mcp::config::McpServerConfig;
+use crate::tools::mcp::config::{ApprovalMode, McpServerConfig};
 use crate::tools::mcp::http_transport::HttpMcpTransport;
 use crate::tools::mcp::protocol::{
     CallToolResult, InitializeResult, ListToolsResult, McpRequest, McpResponse, McpTool,
@@ -59,9 +59,10 @@ pub struct McpClient {
     custom_headers: HashMap<String, String>,
 
     /// Ensures the MCP initialize handshake runs exactly once.
-    /// Uses `OnceCell` to serialize concurrent callers so only one
-    /// actually sends the request; subsequent calls return immediately.
     initialized: tokio::sync::OnceCell<InitializeResult>,
+
+    /// Per-server approval override (extracted from config for fast access).
+    approval_mode: ApprovalMode,
 }
 
 impl McpClient {
@@ -85,6 +86,7 @@ impl McpClient {
             server_config: None,
             custom_headers: HashMap::new(),
             initialized: tokio::sync::OnceCell::new(),
+            approval_mode: ApprovalMode::Auto,
         }
     }
 
@@ -108,6 +110,7 @@ impl McpClient {
             server_config: None,
             custom_headers: HashMap::new(),
             initialized: tokio::sync::OnceCell::new(),
+            approval_mode: ApprovalMode::Auto,
         }
     }
 
@@ -137,6 +140,7 @@ impl McpClient {
             config.name.clone(),
         ));
 
+        let approval_mode = config.approval_mode;
         Ok(Self {
             transport,
             server_url: config.url.clone(),
@@ -149,6 +153,7 @@ impl McpClient {
             custom_headers: config.headers.clone(),
             initialized: tokio::sync::OnceCell::new(),
             server_config: Some(config),
+            approval_mode,
         })
     }
 
@@ -167,6 +172,7 @@ impl McpClient {
         );
 
         let custom_headers = config.headers.clone();
+        let approval_mode = config.approval_mode;
 
         Self {
             transport,
@@ -180,6 +186,7 @@ impl McpClient {
             server_config: Some(config),
             custom_headers,
             initialized: tokio::sync::OnceCell::new(),
+            approval_mode,
         }
     }
 
@@ -203,6 +210,10 @@ impl McpClient {
             .as_ref()
             .map(|c| c.headers.clone())
             .unwrap_or_default();
+        let approval_mode = server_config
+            .as_ref()
+            .map(|c| c.approval_mode)
+            .unwrap_or_default();
 
         Self {
             transport,
@@ -216,6 +227,7 @@ impl McpClient {
             server_config,
             custom_headers,
             initialized: tokio::sync::OnceCell::new(),
+            approval_mode,
         }
     }
 
@@ -230,6 +242,17 @@ impl McpClient {
     pub fn with_session_manager(mut self, session_manager: Arc<McpSessionManager>) -> Self {
         self.session_manager = Some(session_manager);
         self
+    }
+
+    /// Set the per-server approval mode override.
+    pub fn with_approval_mode(mut self, mode: ApprovalMode) -> Self {
+        self.approval_mode = mode;
+        self
+    }
+
+    /// Get the per-server approval mode.
+    pub fn approval_mode(&self) -> ApprovalMode {
+        self.approval_mode
     }
 
     /// Get the server name.
@@ -600,6 +623,7 @@ impl Clone for McpClient {
             server_config: self.server_config.clone(),
             custom_headers: self.custom_headers.clone(),
             initialized: tokio::sync::OnceCell::new(),
+            approval_mode: self.approval_mode,
         }
     }
 }
@@ -662,11 +686,10 @@ impl Tool for McpToolWrapper {
     }
 
     fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
-        if self.tool.requires_approval() {
-            ApprovalRequirement::UnlessAutoApproved
-        } else {
-            ApprovalRequirement::Never
-        }
+        // Server-level approval_mode overrides per-tool annotations.
+        self.client
+            .approval_mode()
+            .to_requirement(self.tool.requires_approval())
     }
 }
 
@@ -720,6 +743,65 @@ mod tests {
         assert_eq!(client.server_url(), "http://localhost:8080");
         assert!(client.session_manager.is_none());
         assert!(client.secrets.is_none());
+    }
+
+    #[test]
+    fn test_client_approval_mode_default() {
+        let client = McpClient::new("http://localhost:8080");
+        assert_eq!(client.approval_mode(), ApprovalMode::Auto);
+    }
+
+    #[test]
+    fn test_client_with_approval_mode() {
+        let client = McpClient::new_with_name("k8s-rw", "http://localhost:8080")
+            .with_approval_mode(ApprovalMode::Always);
+        assert_eq!(client.approval_mode(), ApprovalMode::Always);
+    }
+
+    #[test]
+    fn test_tool_wrapper_approval_with_server_override() {
+        use crate::tools::mcp::protocol::McpToolAnnotations;
+
+        // Tool without destructive_hint, but server requires approval for all tools
+        let client = McpClient::new_with_name("k8s-rw", "http://localhost:8080")
+            .with_approval_mode(ApprovalMode::Always);
+        let tool = McpTool {
+            name: "kubectl_get_pods".to_string(),
+            description: "Get pods".to_string(),
+            input_schema: serde_json::json!({"type": "object"}),
+            annotations: None,
+        };
+        let wrapper = McpToolWrapper {
+            tool,
+            prefixed_name: "k8s_rw_kubectl_get_pods".to_string(),
+            client: Arc::new(client),
+        };
+        assert_eq!(
+            wrapper.requires_approval(&serde_json::json!({})),
+            ApprovalRequirement::Always,
+        );
+
+        // Tool with destructive_hint, but server says "never approve"
+        let client = McpClient::new_with_name("k8s-trusted", "http://localhost:8080")
+            .with_approval_mode(ApprovalMode::Never);
+        let tool = McpTool {
+            name: "kubectl_delete_pod".to_string(),
+            description: "Delete a pod".to_string(),
+            input_schema: serde_json::json!({"type": "object"}),
+            annotations: Some(McpToolAnnotations {
+                destructive_hint: true,
+                ..Default::default()
+            }),
+        };
+        let wrapper = McpToolWrapper {
+            tool,
+            prefixed_name: "k8s_trusted_kubectl_delete_pod".to_string(),
+            client: Arc::new(client),
+        };
+        assert_eq!(
+            wrapper.requires_approval(&serde_json::json!({})),
+            ApprovalRequirement::Never,
+        );
     }
 
     #[test]
