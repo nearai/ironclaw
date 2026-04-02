@@ -84,12 +84,14 @@ pub fn should_reject_wasm_channel_name(
         ReservedWasmChannelNamePolicy::AlwaysReserved => true,
         ReservedWasmChannelNamePolicy::ReservedUnlessTrustedInstall => {
             // Only allow reserved names when install provenance is explicitly trusted.
-            // Treat missing/unknown source (None) as untrusted so local/dynamic modules
-            // cannot claim reserved aliases by omitting provenance.
-            !matches!(
-                install_source,
-                Some(ChannelInstallSource::Bundled) | Some(ChannelInstallSource::Registry)
-            )
+            // Treat missing/unknown source (None) as legacy/unknown and allow it for
+            // backwards compatibility with installs that predate `install_source`.
+            match install_source {
+                None => false,
+                Some(ChannelInstallSource::Bundled)
+                | Some(ChannelInstallSource::Registry) => false,
+                Some(_) => true,
+            }
         }
         ReservedWasmChannelNamePolicy::NotReserved => false,
     }
