@@ -646,14 +646,18 @@ async fn stamp_channel_install_source(
     source: ChannelInstallSource,
 ) -> Result<(), RegistryError> {
     let raw = fs::read(path).await.map_err(RegistryError::Io)?;
-    let mut caps = ChannelCapabilitiesFile::from_bytes(&raw).map_err(|e| RegistryError::ManifestRead {
-        path: path.to_path_buf(),
-        reason: format!("invalid channel capabilities JSON: {}", e),
+    let mut caps = ChannelCapabilitiesFile::from_bytes(&raw).map_err(|e| {
+        RegistryError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("invalid channel capabilities JSON: {}", e),
+        ))
     })?;
     caps.install_source = Some(source);
-    let rewritten = serde_json::to_vec_pretty(&caps).map_err(|e| RegistryError::ManifestRead {
-        path: path.to_path_buf(),
-        reason: format!("failed to serialize channel capabilities JSON: {}", e),
+    let rewritten = serde_json::to_vec_pretty(&caps).map_err(|e| {
+        RegistryError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("failed to serialize channel capabilities JSON: {}", e),
+        ))
     })?;
     fs::write(path, rewritten).await.map_err(RegistryError::Io)?;
     Ok(())
