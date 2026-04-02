@@ -251,6 +251,28 @@ impl ToolRegistry {
         defs
     }
 
+    /// Get tool definitions filtered by user ownership.
+    ///
+    /// Returns all built-in tools (those with `owner_user_id() == None`) plus
+    /// per-user tools whose owner matches the given `user_id`. This prevents
+    /// collection tools belonging to one user from appearing in another user's
+    /// tool list.
+    pub async fn tool_definitions_for_user(&self, user_id: &str) -> Vec<ToolDefinition> {
+        let mut defs: Vec<ToolDefinition> = self
+            .tools
+            .read()
+            .await
+            .values()
+            .filter(|tool| match tool.owner_user_id() {
+                None => true,
+                Some(owner) => owner == user_id,
+            })
+            .map(Self::tool_definition)
+            .collect();
+        defs.sort_unstable_by(|a, b| a.name.cmp(&b.name));
+        defs
+    }
+
     /// Get tool definitions for specific tools.
     pub async fn tool_definitions_for(&self, names: &[&str]) -> Vec<ToolDefinition> {
         let tools = self.tools.read().await;

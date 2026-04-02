@@ -393,6 +393,16 @@ pub trait Tool: Send + Sync {
         None
     }
 
+    /// The user who owns this tool, if it's user-scoped.
+    ///
+    /// Returns `None` for built-in tools (visible to all users).
+    /// Returns `Some(user_id)` for per-user tools like collection CRUD tools.
+    /// The dispatcher filters tool definitions by the current user's ID,
+    /// excluding tools owned by other users.
+    fn owner_user_id(&self) -> Option<&str> {
+        None
+    }
+
     /// Full parameter schema for discovery and coercion purposes.
     ///
     /// Unlike `parameters_schema()` (which may be permissive to keep the tools

@@ -1619,6 +1619,7 @@ pub struct CollectionAddTool {
     schema: CollectionSchema,
     db: Arc<dyn Database>,
     collection_write_tx: Option<broadcast::Sender<CollectionWriteEvent>>,
+    owner_user_id: String,
 }
 
 impl CollectionAddTool {
@@ -1643,6 +1644,7 @@ impl CollectionAddTool {
             schema,
             db,
             collection_write_tx,
+            owner_user_id: owner_user_id.to_string(),
         }
     }
 
@@ -1660,6 +1662,10 @@ impl Tool for CollectionAddTool {
 
     fn description(&self) -> &str {
         &self.tool_description
+    }
+
+    fn owner_user_id(&self) -> Option<&str> {
+        Some(&self.owner_user_id)
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -1754,6 +1760,7 @@ pub struct CollectionUpdateTool {
     tool_description: String,
     schema: CollectionSchema,
     db: Arc<dyn Database>,
+    owner_user_id: String,
 }
 
 impl CollectionUpdateTool {
@@ -1769,6 +1776,7 @@ impl CollectionUpdateTool {
             tool_description,
             schema,
             db,
+            owner_user_id: owner_user_id.to_string(),
         }
     }
 
@@ -1785,6 +1793,10 @@ impl Tool for CollectionUpdateTool {
 
     fn description(&self) -> &str {
         &self.tool_description
+    }
+
+    fn owner_user_id(&self) -> Option<&str> {
+        Some(&self.owner_user_id)
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -1888,6 +1900,7 @@ pub struct CollectionDeleteTool {
     tool_description: String,
     schema: CollectionSchema,
     db: Arc<dyn Database>,
+    owner_user_id: String,
 }
 
 impl CollectionDeleteTool {
@@ -1903,6 +1916,7 @@ impl CollectionDeleteTool {
             tool_description,
             schema,
             db,
+            owner_user_id: owner_user_id.to_string(),
         }
     }
 
@@ -1919,6 +1933,10 @@ impl Tool for CollectionDeleteTool {
 
     fn description(&self) -> &str {
         &self.tool_description
+    }
+
+    fn owner_user_id(&self) -> Option<&str> {
+        Some(&self.owner_user_id)
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -1975,6 +1993,7 @@ pub struct CollectionQueryTool {
     tool_description: String,
     schema: CollectionSchema,
     db: Arc<dyn Database>,
+    owner_user_id: String,
 }
 
 impl CollectionQueryTool {
@@ -1993,6 +2012,7 @@ impl CollectionQueryTool {
             tool_description,
             schema,
             db,
+            owner_user_id: owner_user_id.to_string(),
         }
     }
 
@@ -2009,6 +2029,10 @@ impl Tool for CollectionQueryTool {
 
     fn description(&self) -> &str {
         &self.tool_description
+    }
+
+    fn owner_user_id(&self) -> Option<&str> {
+        Some(&self.owner_user_id)
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -2186,6 +2210,7 @@ pub struct CollectionSummaryTool {
     tool_description: String,
     schema: CollectionSchema,
     db: Arc<dyn Database>,
+    owner_user_id: String,
 }
 
 impl CollectionSummaryTool {
@@ -2203,6 +2228,7 @@ impl CollectionSummaryTool {
             tool_description,
             schema,
             db,
+            owner_user_id: owner_user_id.to_string(),
         }
     }
 
@@ -2219,6 +2245,10 @@ impl Tool for CollectionSummaryTool {
 
     fn description(&self) -> &str {
         &self.tool_description
+    }
+
+    fn owner_user_id(&self) -> Option<&str> {
+        Some(&self.owner_user_id)
     }
 
     fn parameters_schema(&self) -> serde_json::Value {

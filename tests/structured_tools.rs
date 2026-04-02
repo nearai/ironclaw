@@ -12,7 +12,7 @@ use ironclaw::context::JobContext;
 use ironclaw::db::Database;
 use ironclaw::db::libsql::LibSqlBackend;
 use ironclaw::db::structured::CollectionSchema;
-use ironclaw::tools::Tool;
+use ironclaw::tools::{Tool, ToolRegistry};
 use ironclaw::tools::builtin::collections::{
     CollectionAddTool, CollectionDeleteTool, CollectionQueryTool, CollectionSummaryTool,
     CollectionUpdateTool, generate_collection_tools,
@@ -492,4 +492,78 @@ async fn tool_names_dont_collide_across_users() {
         "andrew tools should all start with andrew_: {andrew_names:?}");
     assert!(grace_names.iter().all(|n| n.starts_with("grace_")),
         "grace tools should all start with grace_: {grace_names:?}");
+}
+
+// ==================== Per-user tool filtering ====================
+
+#[tokio::test]
+async fn tool_definitions_for_user_filters_by_owner() {
+    let (db, _dir) = setup().await;
+    let nanny = nanny_schema();
+    let grocery = grocery_schema();
+
+    // Register schemas for both users so tools can execute (not tested here,
+    // but schemas need to be valid for tool construction).
+    db.register_collection("andrew", &nanny).await.expect("register nanny for andrew");
+    db.register_collection("grace", &grocery).await.expect("register grocery for grace");
+
+    // Generate collection tools for two different users
+    let andrew_tools = generate_collection_tools(&nanny, Arc::clone(&db), None, "andrew");
+    let grace_tools = generate_collection_tools(&grocery, Arc::clone(&db), None, "grace");
+
+    // Put them all in one shared registry (simulates multi-tenant IronClaw)
+    let registry = ToolRegistry::new();
+    for tool in andrew_tools {
+        registry.register(tool).await;
+    }
+    for tool in grace_tools {
+        registry.register(tool).await;
+    }
+
+    // Also register a built-in tool (no owner) to verify it appears for everyone
+    registry.register_builtin_tools();
+
+    let total = registry.tool_definitions().await;
+    let andrew_defs = registry.tool_definitions_for_user("andrew").await;
+    let grace_defs = registry.tool_definitions_for_user("grace").await;
+
+    // Both users should see the built-in tools
+    let builtin_count = total.iter().filter(|d| {
+        !d.name.starts_with("andrew_") && !d.name.starts_with("grace_")
+    }).count();
+    assert!(builtin_count > 0, "should have built-in tools");
+
+    let andrew_builtin = andrew_defs.iter().filter(|d| {
+        !d.name.starts_with("andrew_") && !d.name.starts_with("grace_")
+    }).count();
+    assert_eq!(andrew_builtin, builtin_count, "andrew should see all built-in tools");
+
+    let grace_builtin = grace_defs.iter().filter(|d| {
+        !d.name.starts_with("andrew_") && !d.name.starts_with("grace_")
+    }).count();
+    assert_eq!(grace_builtin, builtin_count, "grace should see all built-in tools");
+
+    // Andrew should see his 5 collection tools but NOT grace's
+    let andrew_collection: Vec<&str> = andrew_defs.iter()
+        .filter(|d| d.name.starts_with("andrew_"))
+        .map(|d| d.name.as_str())
+        .collect();
+    assert_eq!(andrew_collection.len(), 5, "andrew should have 5 collection tools");
+    assert!(andrew_defs.iter().all(|d| !d.name.starts_with("grace_")),
+        "andrew should NOT see any grace_ tools");
+
+    // Grace should see her 5 collection tools but NOT andrew's
+    let grace_collection: Vec<&str> = grace_defs.iter()
+        .filter(|d| d.name.starts_with("grace_"))
+        .map(|d| d.name.as_str())
+        .collect();
+    assert_eq!(grace_collection.len(), 5, "grace should have 5 collection tools");
+    assert!(grace_defs.iter().all(|d| !d.name.starts_with("andrew_")),
+        "grace should NOT see any andrew_ tools");
+
+    // Total should include everything
+    assert_eq!(total.len(), builtin_count + 10,
+        "total should include all built-ins + 5 andrew + 5 grace tools");
+    assert_eq!(andrew_defs.len(), builtin_count + 5);
+    assert_eq!(grace_defs.len(), builtin_count + 5);
 }

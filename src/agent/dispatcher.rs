@@ -173,7 +173,7 @@ impl Agent {
 
         // Build system prompts once for this turn. Two variants: with tools
         // (normal iterations) and without (force_text final iteration).
-        let initial_tool_defs = self.tools().tool_definitions().await;
+        let initial_tool_defs = self.tools().tool_definitions_for_user(&message.user_id).await;
         let initial_tool_defs = if !active_skills.is_empty() {
             crate::skills::attenuate_tools(&initial_tool_defs, &active_skills).tools
         } else {
@@ -325,8 +325,10 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
 
         let force_text = iteration >= self.force_text_at;
 
-        // Refresh tool definitions each iteration so newly built tools become visible
-        let tool_defs = self.agent.tools().tool_definitions().await;
+        // Refresh tool definitions each iteration so newly built tools become visible.
+        // Filter by user_id so per-user tools (e.g. collection CRUD) only appear
+        // for their owner.
+        let tool_defs = self.agent.tools().tool_definitions_for_user(&self.message.user_id).await;
 
         // Apply trust-based tool attenuation if skills are active.
         let tool_defs = if !self.active_skills.is_empty() {
