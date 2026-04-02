@@ -83,7 +83,15 @@ Schema alteration supports adding/removing fields and enum values. Existing reco
 
 ### Tools
 
-Each collection gets one tool named `{user}_{collection}` with an `operation` enum (query, add, update, delete, summary) plus typed parameters. Tool names include the owner prefix; the dispatcher filters per-user via `tool_definitions_for_user()`.
+Each collection gets one tool named `{user}_{collection}` with parameters:
+
+- `operation` (required enum: query, add, update, delete, summary)
+- `data` (object — validated against the collection's field schema)
+- `record_id` (string — for update/delete)
+- `filters` (object — field → {op, value}, supports eq/neq/gt/gte/lt/lte/is_null/is_not_null)
+- `field`, `agg_operation`, `group_by` (for summary aggregations)
+
+Tool names include the owner prefix; the dispatcher filters per-user via `tool_definitions_for_user()`.
 
 When a collection is registered, a SKILL.md is auto-generated with activation keywords from the schema. Keyword/regex matching injects the skill into the system prompt when relevant. On restart, existing schemas are loaded and tools registered before the first conversation.
 
@@ -120,4 +128,4 @@ Each collection adds 1 tool. 20 collections = 20 tools, ~300 extra tokens with c
 
 ## Compatibility
 
-Additive only. V16 migration adds new tables. `owner_user_id()` added to Tool trait with default `None`. Set `COLLECTION_TOOL_MODE=unified` to enable unified mode (recommended).
+Additive only. No existing tables modified, no existing tool behavior changed, no changes to memory documents. V16 migration adds two new tables (`structured_schemas`, `structured_records`). `owner_user_id()` added to Tool trait with default `None` — existing tools unaffected. Both backends implemented and tested at parity. Set `COLLECTION_TOOL_MODE=unified` to enable (recommended).
