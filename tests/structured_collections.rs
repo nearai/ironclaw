@@ -11,6 +11,7 @@
 use std::collections::BTreeMap;
 
 use serde_json::json;
+use uuid::Uuid;
 
 use ironclaw::db::Database;
 use ironclaw::db::libsql::LibSqlBackend;
@@ -938,6 +939,644 @@ async fn scoped_collection_history_tracking() {
     // The record should have the item field
     assert_eq!(records[0].data["item"], "test history");
     assert_eq!(records[0].id, id);
+}
+
+// ==================== Filter Operators ====================
+
+#[tokio::test]
+async fn filter_lt() {
+    let (db, _dir) = setup().await;
+    let user = "test_user";
+
+    db.register_collection(user, &nanny_schema())
+        .await
+        .expect("register nanny_shifts");
+
+    let shifts = [
+        ("2026-02-23", 6.0),
+        ("2026-02-24", 8.0),
+        ("2026-02-25", 9.5),
+        ("2026-02-26", 10.0),
+    ];
+
+    for (date, hours) in &shifts {
+        db.insert_record(
+            user,
+            "nanny_shifts",
+            json!({
+                "date": date,
+                "start_time": format!("{date}T09:00:00+00:00"),
+                "hours": hours,
+            }),
+        )
+        .await
+        .expect("insert shift");
+    }
+
+    // hours < 8 should return only 6.0
+    let results = db
+        .query_records(
+            user,
+            "nanny_shifts",
+            &[Filter {
+                field: "hours".to_string(),
+                op: FilterOp::Lt,
+                value: json!(8),
+            }],
+            None,
+            100,
+        )
+        .await
+        .expect("query hours < 8");
+
+    assert_eq!(results.len(), 1);
+    let hours = results[0].data["hours"].as_f64().expect("hours");
+    assert!((hours - 6.0).abs() < 0.001, "expected 6.0, got {hours}");
+}
+
+#[tokio::test]
+async fn filter_lte() {
+    let (db, _dir) = setup().await;
+    let user = "test_user";
+
+    db.register_collection(user, &nanny_schema())
+        .await
+        .expect("register nanny_shifts");
+
+    let shifts = [
+        ("2026-02-23", 6.0),
+        ("2026-02-24", 8.0),
+        ("2026-02-25", 9.5),
+        ("2026-02-26", 10.0),
+    ];
+
+    for (date, hours) in &shifts {
+        db.insert_record(
+            user,
+            "nanny_shifts",
+            json!({
+                "date": date,
+                "start_time": format!("{date}T09:00:00+00:00"),
+                "hours": hours,
+            }),
+        )
+        .await
+        .expect("insert shift");
+    }
+
+    // hours <= 8 should return 6.0 and 8.0
+    let results = db
+        .query_records(
+            user,
+            "nanny_shifts",
+            &[Filter {
+                field: "hours".to_string(),
+                op: FilterOp::Lte,
+                value: json!(8),
+            }],
+            Some("hours"),
+            100,
+        )
+        .await
+        .expect("query hours <= 8");
+
+    assert_eq!(results.len(), 2);
+    let hours_vals: Vec<f64> = results
+        .iter()
+        .map(|r| r.data["hours"].as_f64().expect("hours"))
+        .collect();
+    assert_eq!(hours_vals, vec![6.0, 8.0]);
+}
+
+#[tokio::test]
+async fn filter_gte() {
+    let (db, _dir) = setup().await;
+    let user = "test_user";
+
+    db.register_collection(user, &nanny_schema())
+        .await
+        .expect("register nanny_shifts");
+
+    let shifts = [
+        ("2026-02-23", 6.0),
+        ("2026-02-24", 8.0),
+        ("2026-02-25", 9.5),
+        ("2026-02-26", 10.0),
+    ];
+
+    for (date, hours) in &shifts {
+        db.insert_record(
+            user,
+            "nanny_shifts",
+            json!({
+                "date": date,
+                "start_time": format!("{date}T09:00:00+00:00"),
+                "hours": hours,
+            }),
+        )
+        .await
+        .expect("insert shift");
+    }
+
+    // hours >= 9.5 should return 9.5 and 10.0
+    let results = db
+        .query_records(
+            user,
+            "nanny_shifts",
+            &[Filter {
+                field: "hours".to_string(),
+                op: FilterOp::Gte,
+                value: json!(9.5),
+            }],
+            Some("hours"),
+            100,
+        )
+        .await
+        .expect("query hours >= 9.5");
+
+    assert_eq!(results.len(), 2);
+    let hours_vals: Vec<f64> = results
+        .iter()
+        .map(|r| r.data["hours"].as_f64().expect("hours"))
+        .collect();
+    assert_eq!(hours_vals, vec![9.5, 10.0]);
+}
+
+#[tokio::test]
+async fn filter_neq() {
+    let (db, _dir) = setup().await;
+    let user = "test_user";
+
+    db.register_collection(user, &grocery_schema())
+        .await
+        .expect("register grocery_items");
+
+    db.insert_record(
+        user,
+        "grocery_items",
+        json!({"name": "Bananas", "category": "produce"}),
+    )
+    .await
+    .expect("insert bananas");
+
+    db.insert_record(
+        user,
+        "grocery_items",
+        json!({"name": "Milk", "category": "dairy"}),
+    )
+    .await
+    .expect("insert milk");
+
+    db.insert_record(
+        user,
+        "grocery_items",
+        json!({"name": "Steak", "category": "meat"}),
+    )
+    .await
+    .expect("insert steak");
+
+    // category != "produce" should return Milk and Steak
+    let results = db
+        .query_records(
+            user,
+            "grocery_items",
+            &[Filter {
+                field: "category".to_string(),
+                op: FilterOp::Neq,
+                value: json!("produce"),
+            }],
+            Some("name"),
+            100,
+        )
+        .await
+        .expect("query category != produce");
+
+    assert_eq!(results.len(), 2);
+    let names: Vec<&str> = results
+        .iter()
+        .map(|r| r.data["name"].as_str().expect("name"))
+        .collect();
+    assert!(names.contains(&"Milk"));
+    assert!(names.contains(&"Steak"));
+    assert!(!names.contains(&"Bananas"));
+}
+
+// ==================== Aggregation: Avg, Min, Max ====================
+
+#[tokio::test]
+async fn aggregate_avg() {
+    let (db, _dir) = setup().await;
+    let user = "test_user";
+
+    db.register_collection(user, &nanny_schema())
+        .await
+        .expect("register nanny_shifts");
+
+    let hours_values = [8.0, 7.0, 9.0, 6.0, 10.0];
+    for (i, hours) in hours_values.iter().enumerate() {
+        let date = format!("2026-02-{:02}", 20 + i);
+        db.insert_record(
+            user,
+            "nanny_shifts",
+            json!({
+                "date": date,
+                "start_time": format!("{date}T09:00:00+00:00"),
+                "hours": hours,
+            }),
+        )
+        .await
+        .expect("insert shift");
+    }
+
+    let result = db
+        .aggregate(
+            user,
+            "nanny_shifts",
+            &Aggregation {
+                operation: AggOp::Avg,
+                field: Some("hours".to_string()),
+                group_by: None,
+                filters: vec![],
+            },
+        )
+        .await
+        .expect("aggregate avg");
+
+    let avg = result.as_f64().expect("avg should be a number");
+    // (8 + 7 + 9 + 6 + 10) / 5 = 8.0
+    assert!((avg - 8.0).abs() < 0.001, "expected avg ~8.0, got {avg}");
+}
+
+#[tokio::test]
+async fn aggregate_min() {
+    let (db, _dir) = setup().await;
+    let user = "test_user";
+
+    db.register_collection(user, &nanny_schema())
+        .await
+        .expect("register nanny_shifts");
+
+    let hours_values = [8.0, 7.5, 9.0, 6.0, 8.5];
+    for (i, hours) in hours_values.iter().enumerate() {
+        let date = format!("2026-02-{:02}", 20 + i);
+        db.insert_record(
+            user,
+            "nanny_shifts",
+            json!({
+                "date": date,
+                "start_time": format!("{date}T09:00:00+00:00"),
+                "hours": hours,
+            }),
+        )
+        .await
+        .expect("insert shift");
+    }
+
+    let result = db
+        .aggregate(
+            user,
+            "nanny_shifts",
+            &Aggregation {
+                operation: AggOp::Min,
+                field: Some("hours".to_string()),
+                group_by: None,
+                filters: vec![],
+            },
+        )
+        .await
+        .expect("aggregate min");
+
+    let min = result.as_f64().expect("min should be a number");
+    assert!((min - 6.0).abs() < 0.001, "expected min ~6.0, got {min}");
+}
+
+#[tokio::test]
+async fn aggregate_max() {
+    let (db, _dir) = setup().await;
+    let user = "test_user";
+
+    db.register_collection(user, &nanny_schema())
+        .await
+        .expect("register nanny_shifts");
+
+    let hours_values = [8.0, 7.5, 9.0, 6.0, 8.5];
+    for (i, hours) in hours_values.iter().enumerate() {
+        let date = format!("2026-02-{:02}", 20 + i);
+        db.insert_record(
+            user,
+            "nanny_shifts",
+            json!({
+                "date": date,
+                "start_time": format!("{date}T09:00:00+00:00"),
+                "hours": hours,
+            }),
+        )
+        .await
+        .expect("insert shift");
+    }
+
+    let result = db
+        .aggregate(
+            user,
+            "nanny_shifts",
+            &Aggregation {
+                operation: AggOp::Max,
+                field: Some("hours".to_string()),
+                group_by: None,
+                filters: vec![],
+            },
+        )
+        .await
+        .expect("aggregate max");
+
+    let max = result.as_f64().expect("max should be a number");
+    assert!((max - 9.0).abs() < 0.001, "expected max ~9.0, got {max}");
+}
+
+// ==================== Non-Existent Resource Handling ====================
+
+#[tokio::test]
+async fn query_nonexistent_collection() {
+    let (db, _dir) = setup().await;
+    let user = "test_user";
+
+    // Query a collection that was never registered. Should return empty or error, not panic.
+    let result = db
+        .query_records(user, "nonexistent_collection", &[], None, 100)
+        .await;
+
+    // Either returns empty results or an error — both are acceptable.
+    match result {
+        Ok(records) => assert!(records.is_empty(), "expected no records"),
+        Err(_) => {} // Error is fine — means collection not found
+    }
+}
+
+#[tokio::test]
+async fn get_nonexistent_record() {
+    let (db, _dir) = setup().await;
+    let user = "test_user";
+
+    db.register_collection(user, &nanny_schema())
+        .await
+        .expect("register nanny_shifts");
+
+    let fake_id = Uuid::new_v4();
+    let result = db.get_record(user, fake_id).await;
+    assert!(
+        result.is_err(),
+        "getting a non-existent record should return an error"
+    );
+}
+
+#[tokio::test]
+async fn update_nonexistent_record() {
+    let (db, _dir) = setup().await;
+    let user = "test_user";
+
+    db.register_collection(user, &nanny_schema())
+        .await
+        .expect("register nanny_shifts");
+
+    let fake_id = Uuid::new_v4();
+    let result = db
+        .update_record(user, fake_id, json!({"hours": 5}))
+        .await;
+    assert!(
+        result.is_err(),
+        "updating a non-existent record should return an error"
+    );
+}
+
+#[tokio::test]
+async fn delete_nonexistent_record() {
+    let (db, _dir) = setup().await;
+    let user = "test_user";
+
+    db.register_collection(user, &nanny_schema())
+        .await
+        .expect("register nanny_shifts");
+
+    let fake_id = Uuid::new_v4();
+    let result = db.delete_record(user, fake_id).await;
+    assert!(
+        result.is_err(),
+        "deleting a non-existent record should return an error"
+    );
+}
+
+// ==================== Limit ====================
+
+#[tokio::test]
+async fn query_with_limit() {
+    let (db, _dir) = setup().await;
+    let user = "test_user";
+
+    db.register_collection(user, &grocery_schema())
+        .await
+        .expect("register grocery_items");
+
+    // Insert 10 records.
+    for i in 0..10 {
+        db.insert_record(
+            user,
+            "grocery_items",
+            json!({
+                "name": format!("Item_{:02}", i),
+                "category": "pantry",
+                "quantity": i,
+            }),
+        )
+        .await
+        .expect("insert item");
+    }
+
+    // Query all — should get 10.
+    let all = db
+        .query_records(user, "grocery_items", &[], Some("quantity"), 100)
+        .await
+        .expect("query all");
+    assert_eq!(all.len(), 10);
+
+    // Query with limit=3 — should get exactly 3.
+    let limited = db
+        .query_records(user, "grocery_items", &[], Some("quantity"), 3)
+        .await
+        .expect("query limit=3");
+    assert_eq!(limited.len(), 3);
+
+    // Query with limit=1 — should get exactly 1.
+    let one = db
+        .query_records(user, "grocery_items", &[], Some("quantity"), 1)
+        .await
+        .expect("query limit=1");
+    assert_eq!(one.len(), 1);
+}
+
+// ==================== Aggregation on Empty Collection ====================
+
+#[tokio::test]
+async fn aggregate_sum_empty_collection() {
+    let (db, _dir) = setup().await;
+    let user = "test_user";
+
+    db.register_collection(user, &nanny_schema())
+        .await
+        .expect("register nanny_shifts");
+
+    // Sum on empty collection — should return 0 or null, not error.
+    let result = db
+        .aggregate(
+            user,
+            "nanny_shifts",
+            &Aggregation {
+                operation: AggOp::Sum,
+                field: Some("hours".to_string()),
+                group_by: None,
+                filters: vec![],
+            },
+        )
+        .await
+        .expect("aggregate sum on empty");
+
+    // SQL SUM of no rows returns NULL. Accept 0, 0.0, or null.
+    let is_zero_or_null = result.is_null()
+        || result.as_f64().map(|v| v.abs() < 0.001).unwrap_or(false)
+        || result.as_i64().map(|v| v == 0).unwrap_or(false);
+    assert!(
+        is_zero_or_null,
+        "expected 0 or null for sum of empty collection, got {result}"
+    );
+}
+
+#[tokio::test]
+async fn aggregate_count_empty_collection() {
+    let (db, _dir) = setup().await;
+    let user = "test_user";
+
+    db.register_collection(user, &nanny_schema())
+        .await
+        .expect("register nanny_shifts");
+
+    // Count on empty collection — should return 0.
+    let result = db
+        .aggregate(
+            user,
+            "nanny_shifts",
+            &Aggregation {
+                operation: AggOp::Count,
+                field: None,
+                group_by: None,
+                filters: vec![],
+            },
+        )
+        .await
+        .expect("aggregate count on empty");
+
+    let count = result.as_i64().unwrap_or(-1);
+    assert_eq!(count, 0, "expected count 0 for empty collection");
+}
+
+#[tokio::test]
+async fn aggregate_avg_empty_collection() {
+    let (db, _dir) = setup().await;
+    let user = "test_user";
+
+    db.register_collection(user, &nanny_schema())
+        .await
+        .expect("register nanny_shifts");
+
+    // Avg on empty collection — SQL AVG of no rows returns NULL.
+    let result = db
+        .aggregate(
+            user,
+            "nanny_shifts",
+            &Aggregation {
+                operation: AggOp::Avg,
+                field: Some("hours".to_string()),
+                group_by: None,
+                filters: vec![],
+            },
+        )
+        .await
+        .expect("aggregate avg on empty");
+
+    // Accept null or 0.
+    let acceptable = result.is_null()
+        || result.as_f64().map(|v| v.abs() < 0.001).unwrap_or(false);
+    assert!(
+        acceptable,
+        "expected null or 0 for avg of empty collection, got {result}"
+    );
+}
+
+// ==================== Multiple Filters Combined ====================
+
+#[tokio::test]
+async fn query_with_multiple_filters() {
+    let (db, _dir) = setup().await;
+    let user = "test_user";
+
+    db.register_collection(user, &nanny_schema())
+        .await
+        .expect("register nanny_shifts");
+
+    let shifts = [
+        ("2026-03-10", 6.0),
+        ("2026-03-10", 8.5),
+        ("2026-03-10", 9.0),
+        ("2026-03-11", 7.0),
+        ("2026-03-11", 10.0),
+    ];
+
+    for (date, hours) in &shifts {
+        db.insert_record(
+            user,
+            "nanny_shifts",
+            json!({
+                "date": date,
+                "start_time": format!("{date}T09:00:00+00:00"),
+                "hours": hours,
+            }),
+        )
+        .await
+        .expect("insert shift");
+    }
+
+    // Filter: hours > 7 AND date = "2026-03-10"
+    // Should match 8.5 and 9.0 (the two March 10 shifts with hours > 7).
+    let results = db
+        .query_records(
+            user,
+            "nanny_shifts",
+            &[
+                Filter {
+                    field: "hours".to_string(),
+                    op: FilterOp::Gt,
+                    value: json!(7),
+                },
+                Filter {
+                    field: "date".to_string(),
+                    op: FilterOp::Eq,
+                    value: json!("2026-03-10"),
+                },
+            ],
+            Some("hours"),
+            100,
+        )
+        .await
+        .expect("query with multiple filters");
+
+    assert_eq!(
+        results.len(),
+        2,
+        "expected 2 results for hours > 7 AND date = 2026-03-10"
+    );
+    let hours_vals: Vec<f64> = results
+        .iter()
+        .map(|r| r.data["hours"].as_f64().expect("hours"))
+        .collect();
+    assert_eq!(hours_vals, vec![8.5, 9.0]);
 }
 
 // Boot-scan tests are in src/tools/registry.rs (unit tests) since ToolRegistry is private.
