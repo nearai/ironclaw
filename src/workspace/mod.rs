@@ -1014,8 +1014,14 @@ impl Workspace {
             .get_or_create_document_by_path(&self.user_id, self.agent_id, &path)
             .await?;
 
-        // Short-circuit: skip versioning, update, and reindex if content is unchanged.
+        // Short-circuit when content is unchanged: skip versioning and update,
+        // but still reindex so metadata-driven flags (e.g. skip_indexing toggled
+        // via the memory_write metadata param) take effect immediately.
         if doc.content == content {
+            let metadata = self.resolve_metadata(&path).await;
+            let _ = self
+                .reindex_document_with_metadata(doc.id, Some(&metadata))
+                .await;
             return Ok(doc);
         }
 

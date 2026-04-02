@@ -369,9 +369,11 @@ impl Tool for MemoryWriteTool {
             && layer.is_none()
         {
             let doc = if is_patch_mode {
-                // read() returns an error if the doc doesn't exist — that's fine,
+                // read_primary() ensures we target the same scope that patch()
+                // operates on, avoiding cross-scope metadata mutation in
+                // multi-scope mode. Returns an error if the doc doesn't exist —
                 // the patch call below will produce a clear "not found" error.
-                workspace.read(&resolved_path).await.ok()
+                workspace.read_primary(&resolved_path).await.ok()
             } else {
                 Some(
                     workspace
